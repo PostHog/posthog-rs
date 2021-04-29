@@ -7,7 +7,8 @@ Please see the main [PostHog docs](https://posthog.com/docs).
 # Quickstart
 
 Add `posthog-rs` to your `Cargo.toml`.
-```bash
+
+```toml
 [dependencies]
 posthog_rs = "0.1.0"
 ```
@@ -20,9 +21,9 @@ props.insert("key1".to_string(), "value1".to_string());
 props.insert("key2".to_string(), "value2".to_string());
 
 let event = Event {
-event: "test".to_string(),
-properties: Properties { distinct_id: "1234".to_string(), props },
-timestamp: Some(Utc::now().naive_utc()),
+    event: "test".to_string(),
+    properties: Properties { distinct_id: "1234".to_string(), props },
+    timestamp: Some(Utc::now().naive_utc()),
 };
 
 let res = client.capture(event).unwrap();
