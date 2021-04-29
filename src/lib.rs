@@ -83,15 +83,15 @@ impl InnerEvent {
 
 
 pub struct Event {
-    event: String,
-    properties: Properties,
-    timestamp: Option<NaiveDateTime>,
+    pub event: String,
+    pub properties: Properties,
+    pub timestamp: Option<NaiveDateTime>,
 }
 
 #[derive(Serialize)]
 pub struct Properties {
-    distinct_id: String,
-    props: HashMap<String, String>,
+    pub distinct_id: String,
+    pub props: HashMap<String, String>,
 }
 
 
