@@ -3,16 +3,18 @@ use chrono::{NaiveDateTime};
 use reqwest::blocking::Client as HttpClient;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Serialize};
-
+use std::time::Duration;
 
 extern crate serde_json;
 
 const API_ENDPOINT: &str = "https://app.posthog.com/capture/";
+const TIMEOUT: &Duration = &Duration::from_millis(800); // This should be specified by the user
 
 pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
+    let client = HttpClient::builder().timeout(Some(TIMEOUT.clone())).build().unwrap(); // Unwrap here is as safe as `HttpClient::new`
     Client {
         options: options.into(),
-        client: HttpClient::new(),
+        client,
     }
 }
 
@@ -65,7 +67,6 @@ struct InnerEvent {
     api_key: String,
     event: String,
     properties: Properties,
-    //#[serde(serialize_with = "serialize_timestamp", skip_serializing_if = "Option::is_none")]
     timestamp: Option<NaiveDateTime>,
 }
 
@@ -112,7 +113,6 @@ pub mod tests {
             properties: Properties { distinct_id: "1234".to_string(), props },
             timestamp: Some(Utc::now().naive_utc()),
         };
-
-        let res = client.capture(event).unwrap();
+        client.capture(event).unwrap();
     }
 }
