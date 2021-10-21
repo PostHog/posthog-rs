@@ -10,23 +10,17 @@ Add `posthog-rs` to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-posthog_rs = "0.1.0"
+posthog_rs = "0.2.0"
 ```
 
 ```rust
-let client = posthog_rs::client(env!("POSTHOG_API_KEY"));
+let client = crate::client(env!("POSTHOG_API_KEY"));
 
-let mut props = HashMap::new();
-props.insert("key1".to_string(), "value1".to_string());
-props.insert("key2".to_string(), "value2".to_string());
+let mut event = Event::new("test", "1234");
+event.insert_prop("key1", "value1").unwrap();
+event.insert_prop("key2", vec!["a", "b"]).unwrap();
 
-let event = Event {
-    event: "test".to_string(),
-    properties: Properties { distinct_id: "1234".to_string(), props },
-    timestamp: Some(Utc::now().naive_utc()),
-};
-
-let res = client.capture(event).unwrap();
+client.capture(event).unwrap();
 
 ```
 
