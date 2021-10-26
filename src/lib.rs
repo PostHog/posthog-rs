@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use chrono::{NaiveDateTime};
 use reqwest::blocking::Client as HttpClient;
 use reqwest::header::CONTENT_TYPE;
@@ -16,6 +17,19 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         options: options.into(),
         client,
     }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Connection(msg) => write!(f, "Connection Error: {}", msg),
+            Error::Serialization(msg) => write!(f, "Serialization Error: {}", msg)
+        }
+    }
+}
+
+impl std::error::Error for Error {
+
 }
 
 #[derive(Debug)]
