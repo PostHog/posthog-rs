@@ -97,13 +97,14 @@ impl InnerEvent {
 }
 
 
+#[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Event {
     event: String,
     properties: Properties,
     timestamp: Option<NaiveDateTime>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Properties {
     distinct_id: String,
     props: HashMap<String, serde_json::Value>,
