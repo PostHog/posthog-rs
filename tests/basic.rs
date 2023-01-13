@@ -1,9 +1,9 @@
-use super::*;
-use chrono::Utc;
+use posthog_rs::Event;
+use std::collections::HashMap;
 
 #[test]
 fn get_client() {
-    let client = crate::client(env!("POSTHOG_API_KEY"));
+    let client = posthog_rs::client(env!("POSTHOG_API_KEY"));
 
     let mut child_map = HashMap::new();
     child_map.insert("child_key1", "child_value1");
