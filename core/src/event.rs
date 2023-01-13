@@ -39,6 +39,7 @@ pub struct Event {
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Properties {
     distinct_id: String,
+    #[serde(flatten)]
     props: HashMap<String, serde_json::Value>,
 }
 
