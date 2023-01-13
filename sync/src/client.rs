@@ -1,9 +1,9 @@
+use posthog_core::event::{Event, InnerEvent};
 use reqwest::blocking::Client as HttpClient;
 use reqwest::header::CONTENT_TYPE;
 
 use crate::client_options::ClientOptions;
 use crate::error::Error;
-use crate::event::{Event, InnerEvent};
 
 pub struct Client {
     options: ClientOptions,
@@ -30,7 +30,7 @@ impl Client {
             .header(CONTENT_TYPE, "application/json")
             .body(serde_json::to_string(&inner_event).expect("unwrap here is safe"))
             .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(|source| Error::Connection { source })?;
         Ok(())
     }
 

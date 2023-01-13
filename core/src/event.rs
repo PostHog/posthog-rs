@@ -6,7 +6,7 @@ use crate::error::Error;
 
 // This exists so that the client doesn't have to specify the API key over and over
 #[derive(Serialize)]
-pub(crate) struct InnerEvent {
+pub struct InnerEvent {
     api_key: String,
     event: String,
     properties: Properties,
@@ -14,7 +14,7 @@ pub(crate) struct InnerEvent {
 }
 
 impl InnerEvent {
-    pub(crate) fn new(event: Event, api_key: String) -> Self {
+    pub fn new(event: Event, api_key: String) -> Self {
         Self {
             api_key,
             event: event.event,
@@ -62,7 +62,7 @@ impl Event {
         prop: P,
     ) -> Result<(), Error> {
         let as_json =
-            serde_json::to_value(prop).map_err(|e| Error::Serialization(e.to_string()))?;
+            serde_json::to_value(prop).map_err(|source| Error::Serialization { source })?;
         let _ = self.properties.props.insert(key.into(), as_json);
         Ok(())
     }

@@ -1,0 +1,13 @@
+[package]
+name = "posthog-core"
+license = "MIT"
+version = "0.1.0"
+description = "An unofficial Rust client for Posthog (https://posthog.com/)."
+repository = "https://github.com/openquery-io/posthog-rs"
+edition = "2021"
+
+[dependencies]
+chrono = {version = "0.4.19", features = ["serde"] }
+serde = { version = "1.0.125", features = ["derive"] }
+serde_json = "1.0.64"
+thiserror = "1.0.38"
