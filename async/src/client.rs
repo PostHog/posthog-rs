@@ -1,4 +1,4 @@
-use posthog_core::event::{Event, InnerEvent};
+use posthog_core::event::{Event, InnerEvent, InnerEventBatch};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::Client as HttpClient;
 
@@ -36,10 +36,15 @@ impl Client {
     }
 
     pub async fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
-        // TODO: Use batch endpoint
-        for event in events {
-            self.capture(event).await?;
-        }
+        let inner_event = InnerEventBatch::new(events, self.options.api_key.clone());
+        let _res = self
+            .http_client
+            .post(self.options.api_endpoint.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .body(serde_json::to_string(&inner_event).expect("unwrap here is safe"))
+            .send()
+            .await
+            .map_err(|source| Error::Connection { source })?;
         Ok(())
     }
 }

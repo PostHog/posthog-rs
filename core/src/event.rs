@@ -4,23 +4,28 @@ use std::collections::HashMap;
 
 use crate::error::Error;
 
-// This exists so that the client doesn't have to specify the API key over and over
 #[derive(Serialize)]
 pub struct InnerEvent {
     api_key: String,
-    event: String,
-    properties: Properties,
-    timestamp: Option<NaiveDateTime>,
+    #[serde(flatten)]
+    event: Event,
 }
 
 impl InnerEvent {
     pub fn new(event: Event, api_key: String) -> Self {
-        Self {
-            api_key,
-            event: event.event,
-            properties: event.properties,
-            timestamp: event.timestamp,
-        }
+        Self { api_key, event }
+    }
+}
+
+#[derive(Serialize)]
+pub struct InnerEventBatch {
+    api_key: String,
+    batch: Vec<Event>,
+}
+
+impl InnerEventBatch {
+    pub fn new(batch: Vec<Event>, api_key: String) -> Self {
+        Self { api_key, batch }
     }
 }
 
