@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::client::Client;
 
-const API_ENDPOINT: &str = "https://app.posthog.com/";
+const API_ENDPOINT: &str = "https://app.posthog.com";
 const TIMEOUT: Duration = Duration::from_millis(800); // This should be specified by the user
 
 pub struct ClientOptions {
