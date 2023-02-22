@@ -1,53 +1,54 @@
-use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
-use chrono::{NaiveDateTime};
+use chrono::NaiveDateTime;
 use reqwest::blocking::Client as HttpClient;
-use reqwest::header::CONTENT_TYPE;
-use serde::{Serialize};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use serde::Serialize;
+use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
-extern crate serde_json;
+pub mod event;
+pub mod feature_flags;
 
-const API_ENDPOINT: &str = "https://app.posthog.com/capture/";
-const TIMEOUT: &Duration = &Duration::from_millis(800); // This should be specified by the user
-
-pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
-    let client = HttpClient::builder().timeout(Some(TIMEOUT.clone())).build().unwrap(); // Unwrap here is as safe as `HttpClient::new`
-    Client {
-        options: options.into(),
-        client,
-    }
-}
+const API_ENDPOINT: &str = "https://app.posthog.com";
+const TIMEOUT: Duration = Duration::from_millis(800);
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Connection(msg) => write!(f, "Connection Error: {}", msg),
-            Error::Serialization(msg) => write!(f, "Serialization Error: {}", msg)
+            Error::Serialization(msg) => write!(f, "Serialization Error: {}", msg),
         }
     }
 }
 
-impl std::error::Error for Error {
-
-}
+impl std::error::Error for Error {}
 
 #[derive(Debug)]
 pub enum Error {
     Connection(String),
-    Serialization(String)
+    Serialization(String),
 }
 
 pub struct ClientOptions {
-    api_endpoint: String,
-    api_key: String,
+    pub api_endpoint: String,
+    pub api_key: String,
+    pub timeout: Duration,
+}
+
+impl Default for ClientOptions {
+    fn default() -> Self {
+        Self {
+            api_endpoint: API_ENDPOINT.to_string(),
+            api_key: String::default(),
+            timeout: TIMEOUT,
+        }
+    }
 }
 
 impl From<&str> for ClientOptions {
     fn from(api_key: &str) -> Self {
         ClientOptions {
-            api_endpoint: API_ENDPOINT.to_string(),
             api_key: api_key.to_string(),
+            ..Default::default()
         }
     }
 }
@@ -58,9 +59,20 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn capture(&self, event: Event) -> Result<(), Error> {
+    pub fn new(options: ClientOptions) -> Self {
+        let client = HttpClient::builder()
+            .timeout(Some(options.timeout))
+            .build()
+            .unwrap(); // Unwrap here is as safe as `HttpClient::new`
+
+        Self { options, client }
+    }
+
+    pub fn capture(&self, event: event::Event) -> Result<(), Error> {
         let inner_event = InnerEvent::new(event, self.options.api_key.clone());
-        let _res = self.client.post(self.options.api_endpoint.clone())
+        let _res = self
+            .client
+            .post(format!("{}/capture/", self.options.api_endpoint.clone()))
             .header(CONTENT_TYPE, "application/json")
             .body(serde_json::to_string(&inner_event).expect("unwrap here is safe"))
             .send()
@@ -68,11 +80,32 @@ impl Client {
         Ok(())
     }
 
-    pub fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
+    pub fn capture_batch(&self, events: Vec<event::Event>) -> Result<(), Error> {
         for event in events {
             self.capture(event)?;
         }
         Ok(())
+    }
+
+    pub fn list_feature_flags(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<feature_flags::FeatureFlag>, Error> {
+        let res = self
+            .client
+            .get(format!(
+                "{}/api/projects/{project_id}/feature_flags/",
+                self.options.api_endpoint.clone()
+            ))
+            .header(CONTENT_TYPE, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {}", self.options.api_key))
+            .send()
+            .map_err(|e| Error::Connection(e.to_string()))?;
+        let response: feature_flags::FeatureFlagResponse = res
+            .json::<feature_flags::FeatureFlagResponse>()
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+        // TODO: if the response is paginated we should fetch the other pages
+        Ok(response.results)
     }
 }
 
@@ -81,12 +114,12 @@ impl Client {
 struct InnerEvent {
     api_key: String,
     event: String,
-    properties: Properties,
+    properties: event::Properties,
     timestamp: Option<NaiveDateTime>,
 }
 
 impl InnerEvent {
-    fn new(event: Event, api_key: String) -> Self {
+    fn new(event: event::Event, api_key: String) -> Self {
         Self {
             api_key,
             event: event.event,
