@@ -1,28 +1,13 @@
-use crate::Error;
+use crate::errors::Error;
+use crate::properties::Properties;
 use chrono::NaiveDateTime;
 use serde::Serialize;
-use std::collections::HashMap;
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Event {
     pub event: String,
     pub properties: Properties,
     pub timestamp: Option<NaiveDateTime>,
-}
-
-#[derive(Serialize, Debug, PartialEq, Eq)]
-pub struct Properties {
-    pub distinct_id: String,
-    pub props: HashMap<String, serde_json::Value>,
-}
-
-impl Properties {
-    fn new<S: Into<String>>(distinct_id: S) -> Self {
-        Self {
-            distinct_id: distinct_id.into(),
-            props: Default::default(),
-        }
-    }
 }
 
 impl Event {
