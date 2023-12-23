@@ -31,16 +31,18 @@ impl InnerEventBatch {
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Event {
-    event: String,
-    properties: Properties,
-    timestamp: Option<NaiveDateTime>,
+    pub(crate) event: String,
+    pub(crate) properties: Properties,
+    pub(crate) timestamp: Option<NaiveDateTime>,
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Properties {
-    distinct_id: String,
+    pub(crate) distinct_id: String,
+    #[serde(rename = "$groups", skip_serializing_if = "Option::is_none")]
+    pub(crate) groups: Option<HashMap<String, String>>,
     #[serde(flatten)]
-    props: HashMap<String, serde_json::Value>,
+    pub(crate) props: HashMap<String, serde_json::Value>,
 }
 
 impl Properties {
@@ -48,6 +50,7 @@ impl Properties {
         Self {
             distinct_id: distinct_id.into(),
             props: Default::default(),
+            groups: None,
         }
     }
 }
@@ -71,5 +74,14 @@ impl Event {
             serde_json::to_value(prop).map_err(|source| Error::Serialization { source })?;
         let _ = self.properties.props.insert(key.into(), as_json);
         Ok(())
+    }
+
+    pub fn insert_group<K: Into<String>, P: Into<String>>(
+        &mut self,
+        group_type: K,
+        group_key: P,
+    ) -> () {
+        let groups = self.properties.groups.get_or_insert_with(HashMap::new);
+        groups.insert(group_type.into(), group_key.into());
     }
 }

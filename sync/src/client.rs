@@ -1,4 +1,5 @@
 use posthog_core::event::{Event, InnerEvent, InnerEventBatch};
+use posthog_core::group_identify::GroupIdentify;
 use reqwest::{blocking::Client as HttpClient, Method};
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -53,6 +54,17 @@ impl Client {
     pub fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
         let inner_event_batch = InnerEventBatch::new(events, self.options.api_key.clone());
         self.send_request::<_, _, serde_json::Value>(Method::POST, "/batch/", &inner_event_batch)?;
+        Ok(())
+    }
+
+    pub fn group_identify(&self, identify: GroupIdentify) -> Result<(), Error> {
+        let inner_event = InnerEvent::new(
+            identify
+                .try_into()
+                .map_err(|source| Error::PostHogCore { source })?,
+            self.options.api_key.clone(),
+        );
+        self.send_request::<_, _, serde_json::Value>(Method::POST, "/capture/", &inner_event)?;
         Ok(())
     }
 }

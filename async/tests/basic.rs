@@ -1,4 +1,4 @@
-use async_posthog::Event;
+use async_posthog::{Event, GroupIdentify};
 use std::collections::HashMap;
 
 fn build_client() -> async_posthog::Client {
@@ -16,6 +16,8 @@ async fn capture() {
     event.insert_prop("key1", "value1").unwrap();
     event.insert_prop("key2", vec!["a", "b"]).unwrap();
     event.insert_prop("key3", child_map).unwrap();
+
+    event.insert_group("company", "company_key");
 
     client.capture(event).await.unwrap();
 }
@@ -39,4 +41,14 @@ async fn capture_batch() {
         .collect::<Vec<_>>();
 
     client.capture_batch(events).await.unwrap();
+}
+
+#[tokio::test]
+async fn group_identify() {
+    let client = build_client();
+
+    let mut event = GroupIdentify::new("organisation", "some_id");
+    event.insert_prop("status", "active").unwrap();
+
+    client.group_identify(event).await.unwrap();
 }
