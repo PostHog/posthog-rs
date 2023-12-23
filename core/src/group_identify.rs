@@ -25,6 +25,19 @@ impl GroupIdentify {
         }
     }
 
+    pub fn with_timestamp<S: Into<String>>(
+        group_type: S,
+        group_id: S,
+        timestamp: NaiveDateTime,
+    ) -> Self {
+        Self {
+            group_type: group_type.into(),
+            group_key: group_id.into(),
+            group_properties: None,
+            timestamp: Some(timestamp),
+        }
+    }
+
     pub fn insert_prop<K: Into<String>, P: Serialize>(
         &mut self,
         key: K,
