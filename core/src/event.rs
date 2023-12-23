@@ -64,6 +64,18 @@ impl Event {
         }
     }
 
+    pub fn with_timestamp<S: Into<String>>(
+        event: S,
+        distinct_id: S,
+        timestamp: NaiveDateTime,
+    ) -> Self {
+        Self {
+            event: event.into(),
+            properties: Properties::new(distinct_id),
+            timestamp: Some(timestamp),
+        }
+    }
+
     /// Errors if `prop` fails to serialize
     pub fn insert_prop<K: Into<String>, P: Serialize>(
         &mut self,
