@@ -10,7 +10,8 @@ Add `posthog-rs` to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-posthog-rs = "0.2.0"
+posthog-rs = "0.2.0" # for sync client
+async-posthog = "0.2.0" # for async client
 ```
 
 ## Events
