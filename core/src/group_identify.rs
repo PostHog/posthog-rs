@@ -45,12 +45,16 @@ impl GroupIdentify {
     ) -> Result<(), Error> {
         let as_json =
             serde_json::to_value(prop).map_err(|source| Error::Serialization { source })?;
-        let _ = self
-            .group_properties
-            .as_mut()
-            .unwrap()
-            .props
-            .insert(key.into(), as_json);
+        let key = key.into();
+
+        let group_properties = self.group_properties.get_or_insert_with(|| Properties {
+            distinct_id: self.group_key.clone(),
+            props: HashMap::new(),
+            groups: None,
+        });
+
+        group_properties.props.insert(key, as_json);
+
         Ok(())
     }
 }
