@@ -8,7 +8,7 @@ use std::time::Duration;
 
 extern crate serde_json;
 
-const API_ENDPOINT: &str = "https://app.posthog.com/capture/";
+const API_ENDPOINT: &str = "https://us.i.posthog.com/capture/";
 const TIMEOUT: &Duration = &Duration::from_millis(800); // This should be specified by the user
 
 pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
