@@ -13,7 +13,7 @@ const TIMEOUT: &Duration = &Duration::from_millis(800); // This should be specif
 
 pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let client = HttpClient::builder()
-        .timeout(Some(TIMEOUT.clone()))
+        .timeout(Some(*TIMEOUT))
         .build()
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
     Client {
