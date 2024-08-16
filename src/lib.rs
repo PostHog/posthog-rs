@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
-use chrono::{NaiveDateTime};
+use chrono::NaiveDateTime;
 use reqwest::blocking::Client as HttpClient;
 use reqwest::header::CONTENT_TYPE;
-use serde::{Serialize};
+use serde::Serialize;
+use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
 extern crate serde_json;
@@ -12,7 +12,10 @@ const API_ENDPOINT: &str = "https://us.i.posthog.com/capture/";
 const TIMEOUT: &Duration = &Duration::from_millis(800); // This should be specified by the user
 
 pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
-    let client = HttpClient::builder().timeout(Some(TIMEOUT.clone())).build().unwrap(); // Unwrap here is as safe as `HttpClient::new`
+    let client = HttpClient::builder()
+        .timeout(Some(TIMEOUT.clone()))
+        .build()
+        .unwrap(); // Unwrap here is as safe as `HttpClient::new`
     Client {
         options: options.into(),
         client,
@@ -23,19 +26,17 @@ impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Connection(msg) => write!(f, "Connection Error: {}", msg),
-            Error::Serialization(msg) => write!(f, "Serialization Error: {}", msg)
+            Error::Serialization(msg) => write!(f, "Serialization Error: {}", msg),
         }
     }
 }
 
-impl std::error::Error for Error {
-
-}
+impl std::error::Error for Error {}
 
 #[derive(Debug)]
 pub enum Error {
     Connection(String),
-    Serialization(String)
+    Serialization(String),
 }
 
 pub struct ClientOptions {
@@ -60,7 +61,9 @@ pub struct Client {
 impl Client {
     pub fn capture(&self, event: Event) -> Result<(), Error> {
         let inner_event = InnerEvent::new(event, self.options.api_key.clone());
-        let _res = self.client.post(self.options.api_endpoint.clone())
+        let _res = self
+            .client
+            .post(self.options.api_endpoint.clone())
             .header(CONTENT_TYPE, "application/json")
             .body(serde_json::to_string(&inner_event).expect("unwrap here is safe"))
             .send()
@@ -96,7 +99,6 @@ impl InnerEvent {
     }
 }
 
-
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Event {
     event: String,
@@ -114,7 +116,7 @@ impl Properties {
     fn new<S: Into<String>>(distinct_id: S) -> Self {
         Self {
             distinct_id: distinct_id.into(),
-            props: Default::default()
+            props: Default::default(),
         }
     }
 }
@@ -124,23 +126,27 @@ impl Event {
         Self {
             event: event.into(),
             properties: Properties::new(distinct_id),
-            timestamp: None
+            timestamp: None,
         }
     }
 
     /// Errors if `prop` fails to serialize
-    pub fn insert_prop<K: Into<String>, P: Serialize>(&mut self, key: K, prop: P) -> Result<(), Error> {
-        let as_json = serde_json::to_value(prop).map_err(|e| Error::Serialization(e.to_string()))?;
+    pub fn insert_prop<K: Into<String>, P: Serialize>(
+        &mut self,
+        key: K,
+        prop: P,
+    ) -> Result<(), Error> {
+        let as_json =
+            serde_json::to_value(prop).map_err(|e| Error::Serialization(e.to_string()))?;
         let _ = self.properties.props.insert(key.into(), as_json);
         Ok(())
     }
 }
 
-
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use chrono::{Utc};
+    use chrono::Utc;
 
     #[test]
     fn get_client() {
@@ -148,7 +154,6 @@ pub mod tests {
 
         let mut child_map = HashMap::new();
         child_map.insert("child_key1", "child_value1");
-
 
         let mut event = Event::new("test", "1234");
         event.insert_prop("key1", "value1").unwrap();
