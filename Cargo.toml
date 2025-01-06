@@ -14,4 +14,4 @@ reqwest = { version = "0.11.3", default-features = false, features = ["blocking"
 serde = { version = "1.0.125", features = ["derive"] }
 chrono = {version = "0.4.19", features = ["serde"] }
 serde_json = "1.0.64"
-semver = "1.0"
+semver = "1.0.24"
