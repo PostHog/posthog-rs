@@ -192,7 +192,7 @@ pub mod tests {
     #[test]
     fn inner_event_adds_lib_properties_correctly() {
         // Arrange
-        let mut event = Event::new("test_event", "1234");
+        let mut event = Event::new("unit test event", "1234");
         event.insert_prop("key1", "value1").unwrap();
         let api_key = "test_api_key".to_string();
 
@@ -218,7 +218,7 @@ pub mod tests {
         let mut child_map = HashMap::new();
         child_map.insert("child_key1", "child_value1");
 
-        let mut event = Event::new("test", "1234");
+        let mut event = Event::new("e2e test event", "1234");
         event.insert_prop("key1", "value1").unwrap();
         event.insert_prop("key2", vec!["a", "b"]).unwrap();
         event.insert_prop("key3", child_map).unwrap();
