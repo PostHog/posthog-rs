@@ -1,11 +1,11 @@
 use chrono::NaiveDateTime;
 use reqwest::blocking::Client as HttpClient;
 use reqwest::header::CONTENT_TYPE;
+use semver::Version;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
-use semver::Version;
 
 extern crate serde_json;
 
@@ -188,6 +188,24 @@ mod test_setup {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn inner_event_adds_lib_properties_correctly() {
+        // Arrange
+        let mut event = Event::new("test_event", "1234");
+        event.insert_prop("key1", "value1").unwrap();
+        let api_key = "test_api_key".to_string();
+
+        // Act
+        let inner_event = InnerEvent::new(event, api_key);
+
+        // Assert
+        let props = &inner_event.properties.props;
+        assert_eq!(
+            props.get("$lib_name"),
+            Some(&serde_json::Value::String("posthog-rs".to_string()))
+        );
+    }
 
     #[cfg(feature = "e2e-test")]
     #[test]
