@@ -174,13 +174,28 @@ impl Event {
 }
 
 #[cfg(test)]
+mod test_setup {
+    use ctor::ctor;
+    use dotenv::dotenv;
+
+    #[ctor]
+    fn load_dotenv() {
+        dotenv().ok(); // Load the .env file
+        println!("Loaded .env for tests");
+    }
+}
+
+#[cfg(test)]
 pub mod tests {
     use super::*;
-    use chrono::Utc;
 
+    #[cfg(feature = "e2e-test")]
     #[test]
     fn get_client() {
-        let client = crate::client(env!("POSTHOG_API_KEY"));
+        use std::collections::HashMap;
+
+        let api_key = std::env::var("POSTHOG_RS_E2E_TEST_API_KEY").unwrap();
+        let client = crate::client(api_key.as_str());
 
         let mut child_map = HashMap::new();
         child_map.insert("child_key1", "child_value1");
