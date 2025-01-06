@@ -189,6 +189,8 @@ mod test_setup {
 pub mod tests {
     use super::*;
 
+    // see https://us.posthog.com/project/115809/ for the e2e project
+
     #[test]
     fn inner_event_adds_lib_properties_correctly() {
         // Arrange
