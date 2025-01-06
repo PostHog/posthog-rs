@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
+use semver::Version;
 
 extern crate serde_json;
 
@@ -90,10 +91,39 @@ struct InnerEvent {
 
 impl InnerEvent {
     fn new(event: Event, api_key: String) -> Self {
+        let mut properties = event.properties;
+
+        // Add $lib_name and $lib_version to the properties
+        properties.props.insert(
+            "$lib_name".into(),
+            serde_json::Value::String("posthog-rs".into()),
+        );
+
+        let version_str = env!("CARGO_PKG_VERSION");
+        properties.props.insert(
+            "$lib_version".into(),
+            serde_json::Value::String(version_str.into()),
+        );
+
+        if let Ok(version) = version_str.parse::<Version>() {
+            properties.props.insert(
+                "$lib_version__major".into(),
+                serde_json::Value::Number(version.major.into()),
+            );
+            properties.props.insert(
+                "$lib_version__minor".into(),
+                serde_json::Value::Number(version.minor.into()),
+            );
+            properties.props.insert(
+                "$lib_version__patch".into(),
+                serde_json::Value::Number(version.patch.into()),
+            );
+        }
+
         Self {
             api_key,
             event: event.event,
-            properties: event.properties,
+            properties,
             timestamp: event.timestamp,
         }
     }
