@@ -1,7 +1,6 @@
 name: Test PR
 
-on:
-  pull_request
+on: [pull_request]
 
 jobs:
   test:
@@ -28,7 +27,9 @@ jobs:
       run: cargo test --verbose
 
     - name: E2E test
-      run: cargo test --features e2e-test --no-default-features
+      run: cargo test --verbose --features e2e-test --no-default-features
+      env:
+        POSTHOG_RS_E2E_TEST_API_KEY: "${{ secrets.POSTHOG_RS_E2E_TEST_API_KEY }}"
 
     - name: Check formatting
       run: cargo fmt -- --check
