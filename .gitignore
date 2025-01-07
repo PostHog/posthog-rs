@@ -2,3 +2,4 @@
 *.iml
 .idea/
 Cargo.lock
+.env

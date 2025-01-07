@@ -1,0 +1,38 @@
+name: Test PR
+
+on: [pull_request]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Rust
+      run: |
+        rustup update stable
+        rustup default stable
+        rustup component add rustfmt clippy
+
+    - name: Print Rust version
+      run: rustc --version
+
+    - name: Build
+      run: cargo build --verbose
+
+    - name: Unit test
+      run: cargo test --verbose
+
+    - name: E2E test
+      run: cargo test --verbose --features e2e-test --no-default-features
+      env:
+        POSTHOG_RS_E2E_TEST_API_KEY: "${{ secrets.POSTHOG_RS_E2E_TEST_API_KEY }}"
+
+    - name: Check formatting
+      run: cargo fmt -- --check
+
+    - name: Clippy
+      run: cargo clippy -- -D warnings
