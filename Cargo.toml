@@ -1,7 +1,7 @@
 [package]
 name = "posthog-rs"
 license = "MIT"
-version = "0.2.3"
+version = "0.2.4"
 authors = ["christos <christos@openquery.io>"]
 description = "An unofficial Rust client for Posthog (https://posthog.com/)."
 repository = "https://github.com/openquery-io/posthog-rs"
