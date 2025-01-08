@@ -55,6 +55,7 @@ jobs:
                   BUMP_MAJOR_PRESENT: ${{ contains(github.event.pull_request.labels.*.name, 'bump major') }}
 
             - name: Update version in cargo.toml
+              id: versions
               if: steps.bump-type.outputs.bump-type != 'null'
               run: |
                   OLD_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "posthog-rs") | .version')
@@ -62,6 +63,7 @@ jobs:
                   NEW_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "posthog-rs") | .version')
                   echo "old-version=$OLD_VERSION" >> "$GITHUB_OUTPUT"
                   echo "new-version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+                  echo "Upgraded from $OLD_VERSION to $NEW_VERSION"
 
             - name: Update CHANGELOG.md
               run: |
