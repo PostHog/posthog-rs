@@ -1,5 +1,4 @@
 /target
 *.iml
 .idea/
-Cargo.lock
 .env
