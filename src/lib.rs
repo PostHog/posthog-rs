@@ -1,6 +1,10 @@
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+
 use chrono::NaiveDateTime;
-use reqwest::blocking::Client as HttpClient;
+#[cfg(feature = "blocking")]
+use reqwest::blocking::Client as BlockingHttpClient;
 use reqwest::header::CONTENT_TYPE;
+use reqwest::Client as AsyncHttpClient;
 use semver::Version;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -13,13 +17,20 @@ const API_ENDPOINT: &str = "https://us.i.posthog.com/capture/";
 const TIMEOUT: &Duration = &Duration::from_millis(800); // This should be specified by the user
 
 pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
-    let client = HttpClient::builder()
+    #[cfg(feature = "blocking")]
+    let blocking_client = BlockingHttpClient::builder()
         .timeout(Some(*TIMEOUT))
+        .build()
+        .unwrap(); // Unwrap here is as safe as `HttpClient::new`
+    let async_client = AsyncHttpClient::builder()
+        .timeout(*TIMEOUT)
         .build()
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
     Client {
         options: options.into(),
-        client,
+        #[cfg(feature = "blocking")]
+        blocking_client,
+        async_client,
     }
 }
 
@@ -56,14 +67,17 @@ impl From<&str> for ClientOptions {
 
 pub struct Client {
     options: ClientOptions,
-    client: HttpClient,
+    #[cfg(feature = "blocking")]
+    blocking_client: BlockingHttpClient,
+    async_client: AsyncHttpClient,
 }
 
 impl Client {
+    #[cfg(feature = "blocking")]
     pub fn capture(&self, event: Event) -> Result<(), Error> {
         let inner_event = InnerEvent::new(event, self.options.api_key.clone());
         let _res = self
-            .client
+            .blocking_client
             .post(self.options.api_endpoint.clone())
             .header(CONTENT_TYPE, "application/json")
             .body(serde_json::to_string(&inner_event).expect("unwrap here is safe"))
@@ -72,9 +86,33 @@ impl Client {
         Ok(())
     }
 
-    pub fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
+    pub async fn async_capture(&self, event: Event) -> Result<(), Error> {
+        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
+        let _res = self
+            .async_client
+            .post(self.options.api_endpoint.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .body(serde_json::to_string(&inner_event).expect("unwrap here is safe"))
+            .send()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
+        Ok(())
+    }
+
+    #[cfg(feature = "blocking")]
+    pub fn capture_batch(&self, events: impl Iterator<Item = Event>) -> Result<(), Error> {
         for event in events {
             self.capture(event)?;
+        }
+        Ok(())
+    }
+
+    pub async fn async_capture_batch(
+        &self,
+        events: impl Iterator<Item = Event>,
+    ) -> Result<(), Error> {
+        for event in events {
+            self.async_capture(event).await?;
         }
         Ok(())
     }
