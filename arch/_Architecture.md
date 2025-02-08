@@ -286,3 +286,57 @@ This comprehensive architecture provides a solid foundation for a robust and eff
 - [ ] [Subscriptions](./Subscriptions.md)
 - [ ] [Surveys](./Surveys.md)
 - [ ] [Trends](./Trends.md)
+
+## Additional Notes
+We want to make this api as extensible as possible, for that we need to make it as generic as possible. Therefore the base api client will only contain the basic functionality needed to make api requests and handle errors / retries.
+
+And we are going to provide extensions (AKA, groups of api endpoints) through Extension Traits.
+
+Example:
+```rust
+// Main file
+pub struct PostHogClient {
+    client: reqwest::Client,
+    api_key: String,
+    base_url: String,
+}
+
+impl PostHogClient {
+    pub fn new(client: reqwest::Client, api_key: String, base_url: String) -> Self {
+        Self { client, api_key, base_url }
+    }
+
+    pub (crate) async fn _do_api_request(....) -> Result<serde_json::Value, PostHogError> { ... }
+    pub (crate) async fn api_request(....) -> Result<serde_json::Value, PostHogError> { ... }
+}
+
+// User API Endpoints
+#[cfg(feature = "users")]
+pub trait UsersEndpoints {
+    async fn me(&self) -> Result<serde_json::Value, PostHogError>;
+    async fn authenticate(&self) -> Result<serde_json::Value, PostHogError>;
+    async fn other(&self) -> Result<serde_json::Value, PostHogError>;
+}
+
+pub trait UsersAuthenticateRequest { ... }
+pub trait UsersAuthenticateResponse { ... }
+
+impl UsersEndpoints for PostHogClient {
+    async fn me(&self) -> Result<serde_json::Value, PostHogError>;
+    async fn authenticate(&self, req: UsersAuthenticateRequest) -> Result<UsersAuthenticateResponse, PostHogError>;
+    async fn other(&self) -> Result<serde_json::Value, PostHogError>;
+}
+
+```
+
+Then the user will be able to use it like this:
+```rust
+use posthog::{PostHogClient, UsersEndpoints, UsersAuthenticateRequest, UsersAuthenticateResponse};
+
+fn main() {
+    let client = PostHogClient::new(...);
+    let me = client.me().await.unwrap();
+    let user: UsersAuthenticateResponse = client.authenticate(UsersAuthenticateRequest{....}).await.unwrap();
+    let other = client.other().await.unwrap();
+}
+```
