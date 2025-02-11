@@ -98,3 +98,26 @@ impl InnerEvent {
         }
     }
 }
+
+#[cfg(test)]
+pub mod tests {
+    use crate::{event::InnerEvent, Event};
+
+    #[test]
+    fn inner_event_adds_lib_properties_correctly() {
+        // Arrange
+        let mut event = Event::new("unit test event", "1234");
+        event.insert_prop("key1", "value1").unwrap();
+        let api_key = "test_api_key".to_string();
+
+        // Act
+        let inner_event = InnerEvent::new(event, api_key);
+
+        // Assert
+        let props = &inner_event.properties.props;
+        assert_eq!(
+            props.get("$lib_name"),
+            Some(&serde_json::Value::String("posthog-rs".to_string()))
+        );
+    }
+}

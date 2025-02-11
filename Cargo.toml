@@ -25,4 +25,3 @@ ctor = "0.1.26"
 
 [features]
 e2e-test = []
-async = []

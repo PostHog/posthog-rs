@@ -1,15 +1,12 @@
-use reqwest::header::CONTENT_TYPE;
+use reqwest::{blocking::Client as HttpClient, header::CONTENT_TYPE};
 
-use crate::{event::InnerEvent, Error, Event, API_ENDPOINT, TIMEOUT};
+use crate::{event::InnerEvent, Error, Event, TIMEOUT};
+
+use super::ClientOptions;
 
 pub struct Client {
     options: ClientOptions,
     client: HttpClient,
-}
-
-pub struct ClientOptions {
-    api_endpoint: String,
-    api_key: String,
 }
 
 impl Client {
@@ -30,15 +27,6 @@ impl Client {
             self.capture(event)?;
         }
         Ok(())
-    }
-}
-
-impl From<&str> for ClientOptions {
-    fn from(api_key: &str) -> Self {
-        ClientOptions {
-            api_endpoint: API_ENDPOINT.to_string(),
-            api_key: api_key.to_string(),
-        }
     }
 }
 
