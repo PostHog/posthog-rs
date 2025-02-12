@@ -26,4 +26,10 @@ pub enum PostHogError {
     JsonError(#[from] serde_json::Error),
     #[error("API returned error status: {0}: {1}")]
     ResponseError(StatusCode, PostHogApiError),
+
+    // ! feature flags errors
+    #[error("Feature flag not found: {0}")]
+    FeatureFlagNotFound(String),
+    #[error("Feature flag not enabled: {0}")]
+    FeatureFlagNotEnabled(String),
 }

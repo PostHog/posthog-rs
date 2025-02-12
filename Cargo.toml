@@ -21,15 +21,19 @@ async-trait = "0.1.86"
 anyhow = "1.0.95"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+base64 = "0.22.1"
 
 [dev-dependencies]
+mockito = "1.6.1"
 dotenvy = "0.15.0"
 
 [features]
-default = ["capture"]
+default = ["sdk"]
 
-sdk = ["capture"]
-api = ["capture"]
+sdk = ["capture", "decide"]
+api = ["capture", "decide"]
 
 e2e-test = []
+
 capture = []
+decide = []
