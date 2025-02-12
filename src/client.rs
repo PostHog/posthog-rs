@@ -6,7 +6,6 @@ use reqwest::{
     header::{self, HeaderMap},
     Client, Method, StatusCode,
 };
-use serde::Serialize;
 use serde_json::Value;
 use tracing::debug;
 
@@ -21,10 +20,9 @@ use tracing::debug;
 /// * `public_key` - The PostHog public key used for client-side features
 /// * `base_url` - The base URL of the PostHog API
 pub struct PostHogClient {
-    client: Client,
-    api_key: String,
-    public_key: String,
-    base_url: String,
+    pub client: Client,
+    pub public_key: String,
+    pub base_url: String,
 }
 
 impl PostHogClient {
@@ -62,7 +60,6 @@ impl PostHogClient {
 
         Ok(Self {
             client,
-            api_key,
             public_key,
             base_url,
         })
@@ -75,17 +72,15 @@ impl PostHogClient {
     /// 
     /// # Arguments
     /// * `client` - A pre-configured reqwest Client instance
-    /// * `api_key` - The PostHog API key for authentication
     /// * `public_key` - The PostHog public key for client-side features
     /// * `base_url` - The base URL of the PostHog API
     /// 
     /// # Returns
     /// Returns a configured PostHogClient instance
-    pub fn with_client(client: Client, api_key: String, public_key: String, base_url: String) -> Self {
+    pub fn with_client(client: Client, public_key: String, base_url: String) -> Self {
         Self {
             client,
-            api_key,
-            base_url,    
+            base_url,
             public_key
         }
     }
@@ -114,7 +109,7 @@ impl PostHogClient {
     /// * `ResponseError` - If the API returns an error status code
     pub(crate) async fn api_request(
         &self,
-        method: &str,
+        method: Method,
         path: &str,
         body: Option<Value>,
         requires_public_key: bool,
@@ -125,7 +120,7 @@ impl PostHogClient {
 
         let mut request = self
             .client
-            .request(Method::from_bytes(method.as_bytes()).unwrap(), &url)
+            .request(method, &url)
             // .header("Authorization", format!("Bearer {}", self.api_key))
             // .header("Content-Type", "application/json")
             ;
@@ -144,6 +139,7 @@ impl PostHogClient {
         if !status.is_success() {
             let res = response.bytes().await.map_err(PostHogError::RequestError)?;
             let res = serde_json::from_slice(&res.to_vec()).map_err(PostHogError::JsonError)?;
+            debug!("Response {}:\n{:?}", status, res);
             return Err(PostHogError::ResponseError(status, res));
         }
 

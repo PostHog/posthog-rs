@@ -4,3 +4,4 @@ pub mod error;
 pub mod models;
 
 pub use client::PostHogClient;
+pub use error::PostHogError;

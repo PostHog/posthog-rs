@@ -1,23 +1,51 @@
 use crate::error::PostHogError;
 use crate::PostHogClient;
-use async_trait::async_trait;
+use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[async_trait]
-pub trait CaptureEndpoints {
-    async fn capture(&self, req: Value) -> Result<CaptureResponse, PostHogError>;
-}
-
+/// Response from the /capture/ endpoint.
+/// 
+/// Contains the status of the capture operation and any associated message.
+/// A successful capture typically returns status 1.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CaptureResponse {
     pub status: i32,
 }
 
-#[async_trait]
-impl CaptureEndpoints for PostHogClient {
-    async fn capture(&self, req: Value) -> Result<CaptureResponse, PostHogError> {
-        let res = self.api_request("POST", "/capture/", Some(req), true).await?;
+impl PostHogClient {
+    /// Captures an event in PostHog.
+    /// 
+    /// This method sends event data to PostHog's /capture/ endpoint. The event data can include
+    /// user identification, properties, and other metadata.
+    /// 
+    /// # Arguments
+    /// * `req` - A JSON Value containing the event data to capture
+    /// 
+    /// # Returns
+    /// Returns a Result containing the CaptureResponse or an error
+    /// 
+    /// # Example
+    /// ```rust
+    /// # async fn example() -> anyhow::Result<()> {
+    /// use serde_json::json;
+    /// 
+    /// let event = json!({
+    ///     "event": "user.signed_up",
+    ///     "distinct_id": "user-123",
+    ///     "properties": {
+    ///         "plan": "premium",
+    ///         "source": "website"
+    ///     }
+    /// });
+    /// 
+    /// let response = client.capture(event).await?;
+    /// assert_eq!(response.status, 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn capture(&self, req: Value) -> Result<CaptureResponse, PostHogError> {
+        let res = self.api_request(Method::POST, "/capture/", Some(req), true).await?;
 
         let res = serde_json::from_value(res.1).map_err(PostHogError::JsonError)?;
 
@@ -35,10 +63,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_capture() -> anyhow::Result<()> {
-        tracing_subscriber::fmt()
+        let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             .compact()
-            .init();
+            .try_init();
         dotenvy::dotenv()?;
         let api_key = std::env::var("POSTHOG_API_KEY").unwrap();
         let public_key = std::env::var("POSTHOG_PUBLIC_KEY").unwrap();
