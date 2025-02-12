@@ -25,5 +25,5 @@ pub enum PostHogError {
     #[error("JSON serialization failed: {0}")]
     JsonError(#[from] serde_json::Error),
     #[error("API returned error status: {0}: {1}")]
-    ApiError(StatusCode, PostHogApiError),
+    ResponseError(StatusCode, PostHogApiError),
 }
