@@ -1,6 +1,6 @@
 use std::iter::FromIterator;
+use super::error::PostHogSDKError;
 
-use crate::error::PostHogError;
 use anyhow::Context;
 use reqwest::{
     header::{self, HeaderMap},
@@ -19,13 +19,13 @@ use tracing::debug;
 /// * `api_key` - The PostHog API key used for authentication
 /// * `public_key` - The PostHog public key used for client-side features
 /// * `base_url` - The base URL of the PostHog API
-pub struct PostHogClient {
+pub struct PostHogSDKClient {
     pub client: Client,
     pub public_key: String,
     pub base_url: String,
 }
 
-impl PostHogClient {
+impl PostHogSDKClient {
     /// Creates a new PostHog client with default configuration.
     /// 
     /// # Arguments
@@ -113,7 +113,7 @@ impl PostHogClient {
         path: &str,
         body: Option<Value>,
         requires_public_key: bool,
-    ) -> Result<(StatusCode, serde_json::Value), PostHogError> {
+    ) -> Result<(StatusCode, serde_json::Value), PostHogSDKError> {
 
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         debug!("Sending {} request to {}", method, url);
@@ -133,19 +133,19 @@ impl PostHogClient {
             request = request.json(&body);
         }
 
-        let response = request.send().await.map_err(PostHogError::RequestError)?;
+        let response = request.send().await.map_err(PostHogSDKError::RequestError)?;
         let status = response.status();
 
         if !status.is_success() {
-            let res = response.bytes().await.map_err(PostHogError::RequestError)?;
-            let res = serde_json::from_slice(&res.to_vec()).map_err(PostHogError::JsonError)?;
+            let res = response.bytes().await.map_err(PostHogSDKError::RequestError)?;
+            let res = serde_json::from_slice(&res.to_vec()).map_err(PostHogSDKError::JsonError)?;
             debug!("Response {}:\n{:?}", status, res);
-            return Err(PostHogError::ResponseError(status, res));
+            return Err(PostHogSDKError::ResponseError(status, res));
         }
 
-        let response = response.bytes().await.map_err(PostHogError::RequestError)?;
+        let response = response.bytes().await.map_err(PostHogSDKError::RequestError)?;
 
-        let res = serde_json::from_slice(&response.to_vec()).map_err(PostHogError::JsonError)?;
+        let res = serde_json::from_slice(&response.to_vec()).map_err(PostHogSDKError::JsonError)?;
 
         Ok((status, res))
     }

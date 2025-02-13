@@ -19,7 +19,7 @@ impl Display for PostHogApiError {
 }
 
 #[derive(Error, Debug)]
-pub enum PostHogError {
+pub enum PostHogSDKError {
     #[error("Request failed: {0}")]
     RequestError(#[from] reqwest::Error),
     #[error("JSON serialization failed: {0}")]
