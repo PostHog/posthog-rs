@@ -1,11 +1,10 @@
-use base64::{engine::general_purpose::URL_SAFE as base64, Engine};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use tracing::debug;
 
-use crate::{PostHogClient, PostHogError};
+use super::{PostHogSDKClient, PostHogSDKError};
 
 /// Builder for constructing requests to the /decide/ endpoint.
 /// 
@@ -106,7 +105,7 @@ pub struct DecideResponse {
     pub feature_flag_payloads: HashMap<String, String>,
 }
 
-impl PostHogClient {
+impl PostHogSDKClient {
     /// Fetches feature flag states for a given user from the /decide/ endpoint.
     ///
     /// # Arguments
@@ -166,7 +165,7 @@ impl PostHogClient {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn decide(&self, mut request: Value) -> Result<DecideResponse, PostHogError> {
+    pub async fn decide(&self, mut request: Value) -> Result<DecideResponse, PostHogSDKError> {
         debug!("Decide Endpoint called");
         // Serialize the request data
         request["api_key"] = self.public_key.clone().into();
@@ -184,7 +183,7 @@ impl PostHogClient {
 
         debug!("Got Response: {:#?}", response);
         // Deserialize the response
-        let response = serde_json::from_value(response).map_err(PostHogError::JsonError)?;
+        let response = serde_json::from_value(response).map_err(PostHogSDKError::JsonError)?;
 
         debug!("Returning response");
         Ok(response)
@@ -215,11 +214,11 @@ impl PostHogClient {
         &self,
         request: Value,
         key: String,
-    ) -> Result<bool, PostHogError> {
+    ) -> Result<bool, PostHogSDKError> {
         let res = self.decide(request).await?;
 
         let Some(feature_flag) = res.feature_flags.get(&key) else {
-            return Err(PostHogError::FeatureFlagNotFound(key));
+            return Err(PostHogSDKError::FeatureFlagNotFound(key));
         };
 
         Ok(feature_flag == &Value::Bool(true))
@@ -248,14 +247,14 @@ impl PostHogClient {
         &self,
         request: Value,
         key: String,
-    ) -> Result<(String, Value), PostHogError> {
+    ) -> Result<(String, Value), PostHogSDKError> {
         let res = self.decide(request).await?;
 
         let payload = res
             .feature_flags
             .get(&key)
             .cloned()
-            .ok_or(PostHogError::FeatureFlagNotFound(key.clone()))?;
+            .ok_or(PostHogSDKError::FeatureFlagNotFound(key.clone()))?;
 
         Ok((key, payload))
     }
@@ -285,24 +284,24 @@ impl PostHogClient {
         &self,
         request: Value,
         key: String,
-    ) -> Result<String, PostHogError> {
+    ) -> Result<String, PostHogSDKError> {
         let res = self.decide(request).await?;
 
         let enabled = res
             .feature_flags
             .get(&key)
             .cloned()
-            .ok_or(PostHogError::FeatureFlagNotFound(key.clone()))?;
+            .ok_or(PostHogSDKError::FeatureFlagNotFound(key.clone()))?;
 
         if enabled == Value::Bool(false) {
-            return Err(PostHogError::FeatureFlagNotEnabled(key.clone()));
+            return Err(PostHogSDKError::FeatureFlagNotEnabled(key.clone()));
         }
 
         let payload = res
             .feature_flag_payloads
             .get(&key)
             .cloned()
-            .ok_or(PostHogError::FeatureFlagNotFound(key.clone()))?;
+            .ok_or(PostHogSDKError::FeatureFlagNotFound(key.clone()))?;
 
         Ok(payload)
     }
@@ -314,7 +313,7 @@ mod tests {
     use serde_json::json;
     use std::{collections::HashMap, iter::FromIterator};
 
-    fn client() -> PostHogClient {
+    fn client() -> PostHogSDKClient {
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             .compact()
@@ -326,7 +325,7 @@ mod tests {
         let api_key = std::env::var("POSTHOG_API_KEY").unwrap();
         let public_key = std::env::var("POSTHOG_PUBLIC_KEY").unwrap();
 
-        let client = PostHogClient::new(api_key, public_key, endpoint).unwrap();
+        let client = PostHogSDKClient::new(api_key, public_key, endpoint).unwrap();
 
         client
     }
@@ -417,7 +416,7 @@ mod tests {
         let result = client
             .get_feature_flag_enabled(request.clone(), "non-existent".to_string())
             .await;
-        assert!(matches!(result, Err(PostHogError::FeatureFlagNotFound(_))));
+        assert!(matches!(result, Err(PostHogSDKError::FeatureFlagNotFound(_))));
     }
 
     #[tokio::test]
@@ -437,7 +436,7 @@ mod tests {
         let result = client
             .get_feature_flag_multi_variant(request.clone(), "non-existent".to_string())
             .await;
-        assert!(matches!(result, Err(PostHogError::FeatureFlagNotFound(_))));
+        assert!(matches!(result, Err(PostHogSDKError::FeatureFlagNotFound(_))));
     }
 
     #[tokio::test]
@@ -466,13 +465,13 @@ mod tests {
         let result = client
             .get_feature_flag_payload(request.clone(), "non-existent".to_string())
             .await;
-        assert!(matches!(result, Err(PostHogError::FeatureFlagNotFound(_))));
+        assert!(matches!(result, Err(PostHogSDKError::FeatureFlagNotFound(_))));
 
         // Test disabled flag
         let request = DecideRequestBuilder::new("test-user-with-disabled-flag".to_string()).build();
         let result = client
             .get_feature_flag_payload(request, "disabled-flag".to_string())
             .await;
-        assert!(matches!(result, Err(PostHogError::FeatureFlagNotFound(_))));
+        assert!(matches!(result, Err(PostHogSDKError::FeatureFlagNotFound(_))));
     }
 }

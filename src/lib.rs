@@ -1,7 +1,5 @@
-pub mod api;
-pub mod client;
-pub mod error;
-pub mod models;
+#[cfg(feature = "sdk")]
+pub mod sdk;
 
-pub use client::PostHogClient;
-pub use error::PostHogError;
+#[cfg(feature = "api")]
+pub mod api;

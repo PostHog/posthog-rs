@@ -1,5 +1,5 @@
-use crate::error::PostHogError;
-use crate::PostHogClient;
+use super::error::PostHogSDKError;
+use super::client::PostHogSDKClient;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,7 +13,7 @@ pub struct CaptureResponse {
     pub status: i32,
 }
 
-impl PostHogClient {
+impl PostHogSDKClient {
     /// Captures an event in PostHog.
     /// 
     /// This method sends event data to PostHog's /capture/ endpoint. The event data can include
@@ -44,10 +44,10 @@ impl PostHogClient {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn capture(&self, req: Value) -> Result<CaptureResponse, PostHogError> {
+    pub async fn capture(&self, req: Value) -> Result<CaptureResponse, PostHogSDKError> {
         let res = self.api_request(Method::POST, "/capture/", Some(req), true).await?;
 
-        let res = serde_json::from_value(res.1).map_err(PostHogError::JsonError)?;
+        let res = serde_json::from_value(res.1).map_err(PostHogSDKError::JsonError)?;
 
         Ok(res)
     }
@@ -57,7 +57,7 @@ impl PostHogClient {
 mod tests {
     use serde_json::json;
 
-    use crate::models::event::EventBuilder;
+    use crate::sdk::models::event::EventBuilder;
 
     use super::*;
 
@@ -72,7 +72,7 @@ mod tests {
         let public_key = std::env::var("POSTHOG_PUBLIC_KEY").unwrap();
         let base_url = std::env::var("POSTHOG_BASE_URL").unwrap();
 
-        let client = PostHogClient::new(api_key, public_key, base_url)?;
+        let client = PostHogSDKClient::new(api_key, public_key, base_url)?;
 
         let req = EventBuilder::new("test")
             .distinct_id("user123".to_string())
