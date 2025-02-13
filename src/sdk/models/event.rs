@@ -78,94 +78,96 @@ impl EventBuilder {
         self.properties["$groups"] = groups;
         self
     }
-}
 
-/// Identify, Refer to https://posthog.com/docs/api/capture#identify
-pub fn build_identify_event(distinct_id: String, values: Value) -> Value {
-    EventBuilder::new("$identify")
-        .properties(values)
-        .distinct_id(distinct_id)
-        .timestamp_now()
-        .build()
-}
+    // ! Special Events
 
-/// Pageview, Refer to https://posthog.com/docs/api/capture#pageview
-pub fn build_pageview_event(
-    distinct_id: String,
-    url: String,
-    values: impl Into<Option<Value>>,
-) -> Value {
-    let mut values = match values.into() {
-        Some(values) => values,
-        None => json!({}),
-    };
-    values["$current_url"] = url.into();
+    /// Identify, Refer to https://posthog.com/docs/api/capture#identify
+    pub fn identify_event(distinct_id: String, values: Value) -> Value {
+        EventBuilder::new("$identify")
+            .properties(values)
+            .distinct_id(distinct_id)
+            .timestamp_now()
+            .build()
+    }
 
-    EventBuilder::new("$pageview")
-        .properties(values)
-        .distinct_id(distinct_id)
-        .timestamp_now()
-        .build()
-}
+    /// Pageview, Refer to https://posthog.com/docs/api/capture#pageview
+    pub fn pageview_event(
+        distinct_id: String,
+        url: String,
+        values: impl Into<Option<Value>>,
+    ) -> Value {
+        let mut values = match values.into() {
+            Some(values) => values,
+            None => json!({}),
+        };
+        values["$current_url"] = url.into();
 
-/// Screen view, Refer to https://posthog.com/docs/api/capture#screen
-pub fn build_screen_view_event(
-    distinct_id: String,
-    name: String,
-    values: impl Into<Option<Value>>,
-) -> Value {
-    let mut values = match values.into() {
-        Some(values) => values,
-        None => json!({}),
-    };
-    values["$screen_name"] = name.into();
+        EventBuilder::new("$pageview")
+            .properties(values)
+            .distinct_id(distinct_id)
+            .timestamp_now()
+            .build()
+    }
 
-    EventBuilder::new("$screen")
-        .properties(values)
-        .distinct_id(distinct_id)
-        .timestamp_now()
-        .build()
-}
+    /// Screen view, Refer to https://posthog.com/docs/api/capture#screen
+    pub fn screen_view_event(
+        distinct_id: String,
+        name: String,
+        values: impl Into<Option<Value>>,
+    ) -> Value {
+        let mut values = match values.into() {
+            Some(values) => values,
+            None => json!({}),
+        };
+        values["$screen_name"] = name.into();
 
-/// Survey, Refer to https://posthog.com/docs/api/capture#survey
-pub fn build_survey_event(
-    distinct_id: String,
-    survey_id: String,
-    survey_response: String,
-    values: impl Into<Option<Value>>,
-) -> Value {
-    let mut values = match values.into() {
-        Some(values) => values,
-        None => json!({}),
-    };
+        EventBuilder::new("$screen")
+            .properties(values)
+            .distinct_id(distinct_id)
+            .timestamp_now()
+            .build()
+    }
 
-    values["$survey_id"] = survey_id.into();
-    values["$survey_response"] = survey_response.into();
+    /// Survey, Refer to https://posthog.com/docs/api/capture#survey
+    pub fn survey_event(
+        distinct_id: String,
+        survey_id: String,
+        survey_response: String,
+        values: impl Into<Option<Value>>,
+    ) -> Value {
+        let mut values = match values.into() {
+            Some(values) => values,
+            None => json!({}),
+        };
 
-    EventBuilder::new("$survey")
-        .distinct_id(distinct_id)
-        .properties(values)
-        .timestamp_now()
-        .build()
-}
+        values["$survey_id"] = survey_id.into();
+        values["$survey_response"] = survey_response.into();
 
-/// Feature Flag Called
-pub fn build_feature_flag_called_event(
-    distinct_id: String,
-    feature_flag: String,
-    feature_flag_response: String,
-    values: impl Into<Option<Value>>,
-) -> Value {
-    let mut values = match values.into() {
-        Some(values) => values,
-        None => json!({}),
-    };
-    values["$feature_flag"] = feature_flag.into();
-    values["$feature_flag_response"] = feature_flag_response.into();
+        EventBuilder::new("$survey")
+            .distinct_id(distinct_id)
+            .properties(values)
+            .timestamp_now()
+            .build()
+    }
 
-    EventBuilder::new("$feature_flag_called")
-        .distinct_id(distinct_id)
-        .properties(values)
-        .timestamp_now()
-        .build()
+    /// Feature Flag Called
+    pub fn feature_flag_called_event(
+        distinct_id: String,
+        feature_flag: String,
+        feature_flag_response: String,
+        values: impl Into<Option<Value>>,
+    ) -> Value {
+        let mut values = match values.into() {
+            Some(values) => values,
+            None => json!({}),
+        };
+        values["$feature_flag"] = feature_flag.into();
+        values["$feature_flag_response"] = feature_flag_response.into();
+
+        EventBuilder::new("$feature_flag_called")
+            .distinct_id(distinct_id)
+            .properties(values)
+            .timestamp_now()
+            .build()
+    }
 }

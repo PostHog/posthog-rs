@@ -15,6 +15,7 @@ use super::{PostHogSDKClient, PostHogSDKError};
 /// ```rust
 /// use std::collections::HashMap;
 /// use serde_json::json;
+/// use posthog_rs::sdk::decide::DecideRequestBuilder;
 /// 
 /// let request = DecideRequestBuilder::new("user-123".to_string())
 ///     .with_groups([("company".to_string(), json!("acme-corp"))].into())
@@ -75,10 +76,11 @@ impl DecideRequestBuilder {
 /// Response from the /decide/ endpoint containing feature flag states and configurations.
 /// 
 /// This struct contains all feature flag related data including:
-/// - Feature flag states (boolean or multi-variant)
-/// - Feature flag payloads (additional configuration data)
-/// - Toolbar configuration
-/// - Error states
+/// - Feature flag states (boolean or multi-variant) in the `feature_flags` field
+/// - Feature flag payloads (additional configuration data) in the `feature_flag_payloads` field
+/// - Toolbar configuration for the PostHog toolbar in the `toolbar_params` field
+/// - Configuration settings in the `config` field
+/// - Error state indicator in the `errors_while_computing_flags` field
 /// 
 /// # Example Response Structure
 /// ```json
@@ -90,7 +92,10 @@ impl DecideRequestBuilder {
 ///     "featureFlagPayloads": {
 ///         "awesome-multivariant": "{\"hello\": \"world\"}",
 ///         "config-example": "{\"version\": \"1\", \"example\": \"hello\"}"
-///     }
+///     },
+///     "config": {},
+///     "toolbarParams": {},
+///     "errorsWhileComputingFlags": false
 /// }
 /// ```
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,37 +112,11 @@ pub struct DecideResponse {
 
 impl PostHogSDKClient {
     /// Fetches feature flag states for a given user from the /decide/ endpoint.
-    ///
-    /// # Arguments
-    /// * `request` - The decide request containing user and group information
-    ///
-    /// # Returns
-    /// Returns a Result containing the DecideResponse or an error
-    ///
-    /// # Example
-    /// ```rust
-    /// use std::collections::HashMap;
-    /// use posthog_rs::api::decide::{DecideRequestBuilder, DecideResponse};
-    ///
-    /// # async fn example() -> anyhow::Result<()> {
-    /// let client = posthog_rs::PostHogClient::new(
-    ///     "your-api-key".to_string(),
-    ///     "your-public-key".to_string(),
-    ///     "https://app.posthog.com".to_string(),
-    /// )?;
-    ///
-    /// let request = DecideRequestBuilder::new("user123".to_string())
-    ///     .build();
-    ///
-    /// let response = client.decide(request).await?;
-    /// println!("Feature flags: {:?}", response.feature_flags);
-    /// # Ok(())
-    /// # }
-    /// ```
-    /// Fetches feature flag states for a given user from the /decide/ endpoint.
     /// 
     /// This method evaluates feature flags based on the provided request data and returns
     /// the current state of all flags for the user, including any associated payloads.
+    /// The response includes boolean flags, multi-variant flags, and their associated
+    /// configuration payloads.
     /// 
     /// # Arguments
     /// * `request` - A JSON Value containing the decide request data, typically created using `DecideRequestBuilder`
@@ -148,10 +127,10 @@ impl PostHogSDKClient {
     /// # Example
     /// ```rust
     /// use std::collections::HashMap;
-    /// use posthog_rs::api::decide::{DecideRequestBuilder, DecideResponse};
+    /// use posthog_rs::sdk::decide::{DecideRequestBuilder, DecideResponse};
     /// 
     /// # async fn example() -> anyhow::Result<()> {
-    /// let client = posthog_rs::PostHogClient::new(
+    /// let client = posthog_rs::sdk::PostHogSDKClient::new(
     ///     "your-api-key".to_string(),
     ///     "your-public-key".to_string(),
     ///     "https://app.posthog.com".to_string(),
@@ -204,7 +183,14 @@ impl PostHogSDKClient {
     /// 
     /// # Example
     /// ```rust
+    /// use posthog_rs::sdk::decide::DecideRequestBuilder;
     /// # async fn example() -> anyhow::Result<()> {
+    /// let client = posthog_rs::sdk::PostHogSDKClient::new(
+    ///     "your-api-key".to_string(),
+    ///     "your-public-key".to_string(),
+    ///     "https://app.posthog.com".to_string(),
+    /// )?;
+    ///
     /// let request = DecideRequestBuilder::new("user123".to_string()).build();
     /// let is_enabled = client.get_feature_flag_enabled(request, "my-feature".to_string()).await?;
     /// # Ok(())
@@ -226,17 +212,29 @@ impl PostHogSDKClient {
 
     /// Gets the variant value for a multi-variant feature flag.
     /// 
+    /// Multi-variant feature flags can return different values for different users based on
+    /// the flag's rollout rules. This method fetches the specific variant assigned to the user.
+    /// Common use cases include A/B testing, gradual rollouts, or serving different configurations
+    /// to different user segments.
+    /// 
     /// # Arguments
     /// * `request` - The decide request data
     /// * `key` - The feature flag key to check
     /// 
     /// # Returns
-    /// * `Ok((key, value))` - The flag key and its variant value
+    /// * `Ok((key, value))` - The flag key and its variant value (e.g., "var1", "var2")
     /// * `Err(PostHogError::FeatureFlagNotFound)` - If the flag doesn't exist
     /// 
     /// # Example
     /// ```rust
+    /// use posthog_rs::sdk::decide::DecideRequestBuilder;
     /// # async fn example() -> anyhow::Result<()> {
+    /// let client = posthog_rs::sdk::PostHogSDKClient::new(
+    ///     "your-api-key".to_string(),
+    ///     "your-public-key".to_string(),
+    ///     "https://app.posthog.com".to_string(),
+    /// )?;
+    /// 
     /// let request = DecideRequestBuilder::new("user123".to_string()).build();
     /// let (key, variant) = client.get_feature_flag_multi_variant(request, "awesome-multivariant".to_string()).await?;
     /// // variant might be "var1", "var2", etc.
@@ -273,6 +271,13 @@ impl PostHogSDKClient {
     /// # Example
     /// ```rust
     /// # async fn example() -> anyhow::Result<()> {
+    /// use posthog_rs::sdk::decide::DecideRequestBuilder;
+    /// let client = posthog_rs::sdk::PostHogSDKClient::new(
+    ///     "your-api-key".to_string(),
+    ///     "your-public-key".to_string(),
+    ///     "https://app.posthog.com".to_string(),
+    /// )?;
+    ///
     /// let request = DecideRequestBuilder::new("user123".to_string()).build();
     /// let payload = client.get_feature_flag_payload(request, "config-example".to_string()).await?;
     /// let payload_json: serde_json::Value = serde_json::from_str(&payload)?;
