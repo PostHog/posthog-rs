@@ -5,14 +5,17 @@ impl Display for Error {
         match self {
             Error::Connection(msg) => write!(f, "Connection Error: {}", msg),
             Error::Serialization(msg) => write!(f, "Serialization Error: {}", msg),
+            Error::AlreadyInitialized => write!(f, "Client already initialized"),
+            Error::NotInitialized => write!(f, "Client not initialized"),
         }
     }
 }
 
-impl std::error::Error for Error {}
-
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Connection(String),
     Serialization(String),
+    AlreadyInitialized,
+    NotInitialized,
 }
