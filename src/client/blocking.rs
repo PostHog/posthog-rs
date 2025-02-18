@@ -54,8 +54,5 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         .timeout(Duration::from_secs(options.request_timeout_seconds))
         .build()
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
-    Client {
-        options: options.into(),
-        client,
-    }
+    Client { options, client }
 }
