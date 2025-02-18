@@ -19,4 +19,6 @@ pub use event::Event;
 
 // We expose a global capture function as a convenience, that uses a global client
 pub use global::capture;
+pub use global::disable as disable_global;
 pub use global::init_global_client as init_global;
+pub use global::is_disabled as global_is_disabled;
