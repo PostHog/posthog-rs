@@ -93,7 +93,7 @@ impl InnerEvent {
 
         // Add $lib_name and $lib_version to the properties
         properties.insert(
-            "$lib_name".into(),
+            "$lib".into(),
             serde_json::Value::String("posthog-rs".into()),
         );
 
@@ -159,19 +159,8 @@ pub mod tests {
         // Assert
         let props = &inner_event.properties;
         assert_eq!(
-            props.get("$lib_name"),
+            props.get("$lib"),
             Some(&serde_json::Value::String("posthog-rs".to_string()))
         );
-    }
-
-    #[test]
-    fn event_structure_is_correct() {
-        let mut event = Event::new("unit test event", "1234");
-        event.insert_prop("key1", "value1").unwrap();
-        let api_key = "test_api_key".to_string();
-        let inner_event = InnerEvent::new(event, api_key);
-        let payload = serde_json::to_string(&inner_event).unwrap();
-
-        println!("{}", payload);
     }
 }
