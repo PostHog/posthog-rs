@@ -19,7 +19,7 @@ pub struct Event {
 
 impl Event {
     /// Capture a new identified event. Unless you have a distinct ID you can
-    /// associate with a customer, you probably want to use `new_anon` instead.
+    /// associate with a user, you probably want to use `new_anon` instead.
     pub fn new<S: Into<String>>(event: S, distinct_id: S) -> Self {
         Self {
             event: event.into(),
