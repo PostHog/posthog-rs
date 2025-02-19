@@ -45,6 +45,8 @@ impl Event {
         res
     }
 
+    /// Add a property to the event
+    ///
     /// Errors if `prop` fails to serialize
     pub fn insert_prop<K: Into<String>, P: Serialize>(
         &mut self,
@@ -58,7 +60,8 @@ impl Event {
     }
 
     /// Capture this as a group event. See https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events
-    /// Note that group events cannot be personless.
+    /// Note that group events cannot be personless, and will be automatically upgraded to include person profile processing if
+    /// they were anonymous. This might lead to "empty" person profiles being created.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
         // You cannot disable person profile processing for groups
         self.insert_prop("$process_person_profile", true)
