@@ -96,7 +96,9 @@ mod tests {
                 "query": "select `distinct_id` from person_distinct_ids"
             }));
         
-        let response = client.query("126371", request).await;
+        let project_id = std::env::var("POSTHOG_PROJECT_ID").unwrap();
+
+        let response = client.query(&project_id, request).await;
         println!("{:#?}", response);
         
         assert!(response.is_ok());
