@@ -1,5 +1,5 @@
 use super::client::PostHogSDKClient;
-use super::error::PostHogSDKError;
+use super::PostHogApiError;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -61,18 +61,18 @@ impl PostHogSDKClient {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn capture(&self, mut req: Value) -> Result<CaptureResponse, PostHogSDKError> {
+    pub async fn capture(&self, mut req: Value) -> Result<CaptureResponse, PostHogApiError> {
         req["api_key"] = self.public_key.clone().into();
         let (status, res) = self
             .api_request(Method::POST, "/capture/", Some(req), true)
             .await?;
 
         if !status.is_success() {
-            let res = serde_json::from_value(res).map_err(PostHogSDKError::JsonError)?;
-            return Err(PostHogSDKError::ResponseError(status, res));
+            let res = serde_json::from_value(res)?;
+            return Err(PostHogApiError::ResponseError(status, res));
         }
 
-        let res = serde_json::from_value(res).map_err(PostHogSDKError::JsonError)?;
+        let res = serde_json::from_value(res)?;
 
         Ok(res)
     }
@@ -122,7 +122,7 @@ impl PostHogSDKClient {
         &self,
         historical_migration: bool,
         events: Vec<Value>,
-    ) -> Result<CaptureBatchResponse, PostHogSDKError> {
+    ) -> Result<CaptureBatchResponse, PostHogApiError> {
         let req = json!({
             "api_key": self.public_key.clone(),
             "historical_migration": historical_migration,
@@ -134,11 +134,11 @@ impl PostHogSDKClient {
             .await?;
 
         if !status.is_success() {
-            let res = serde_json::from_value(res).map_err(PostHogSDKError::JsonError)?;
-            return Err(PostHogSDKError::ResponseError(status, res));
+            let res = serde_json::from_value(res)?;
+            return Err(PostHogApiError::ResponseError(status, res));
         }
 
-        let res = serde_json::from_value(res).map_err(PostHogSDKError::JsonError)?;
+        let res = serde_json::from_value(res)?;
 
         Ok(res)
     }

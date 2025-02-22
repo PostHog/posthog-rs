@@ -1,5 +1,5 @@
 use std::iter::FromIterator;
-use super::error::PostHogSDKError;
+use super::PostHogApiError;
 
 use anyhow::Context;
 use reqwest::{
@@ -113,7 +113,7 @@ impl PostHogSDKClient {
         path: &str,
         body: Option<Value>,
         requires_public_key: bool,
-    ) -> Result<(StatusCode, serde_json::Value), PostHogSDKError> {
+    ) -> Result<(StatusCode, serde_json::Value), PostHogApiError> {
 
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         debug!("Sending {} request to {}", method, url);
@@ -133,19 +133,19 @@ impl PostHogSDKClient {
             request = request.json(&body);
         }
 
-        let response = request.send().await.map_err(PostHogSDKError::RequestError)?;
+        let response = request.send().await?;
         let status = response.status();
 
         if !status.is_success() {
-            let res = response.bytes().await.map_err(PostHogSDKError::RequestError)?;
-            let res = serde_json::from_slice(&res.to_vec()).map_err(PostHogSDKError::JsonError)?;
+            let res = response.bytes().await?;
+            let res = serde_json::from_slice(&res.to_vec())?;
             debug!("Response {}:\n{:?}", status, res);
-            return Err(PostHogSDKError::ResponseError(status, res));
+            return Err(PostHogApiError::ResponseError(status, res));
         }
 
-        let response = response.bytes().await.map_err(PostHogSDKError::RequestError)?;
+        let response = response.bytes().await?;
 
-        let res = serde_json::from_slice(&response.to_vec()).map_err(PostHogSDKError::JsonError)?;
+        let res = serde_json::from_slice(&response.to_vec())?;
 
         Ok((status, res))
     }

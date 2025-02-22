@@ -48,11 +48,10 @@ impl PostHogServiceActor {
         }
 
         // todo: make sure api request isn't over 20 mb as per https://posthog.com/docs/api/capture#batch-events
-        
         self.client.capture_batch(false, batch).await.map_err(|e| {
             eprintln!("Error sending batch capture: {}", e);
             e
-        });
+        })?;
 
         Ok(())
     }
