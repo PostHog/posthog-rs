@@ -2,7 +2,7 @@ use reqwest::{Method, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 
-use crate::api::error::PostHogSDKError;
+use super::PostHogApiError;
 
 const RATE_LIMIT_WAIT_TIME: Duration = Duration::from_secs(5);
 const MAX_RETRIES: u32 = 3;
@@ -14,12 +14,26 @@ pub struct PostHogAPIClient {
 }
 
 impl PostHogAPIClient {
-    pub fn new(api_key: String, base_url: Option<String>) -> Self {
-        Self {
-            client: reqwest::Client::new(),
+    pub fn new(api_key: String, base_url: impl Into<Option<String>>) -> Result<Self, PostHogApiError> {
+        let base_url = base_url.into().unwrap_or_else(|| "https://us.posthog.com".to_string());
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .default_headers({
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {}", api_key).parse().unwrap(),
+                );
+                headers
+            })
+            .build()?;
+
+        Ok(Self {
+            client,
             api_key,
-            base_url: base_url.unwrap_or_else(|| "https://app.posthog.com".to_string()),
-        }
+            base_url,
+        })
     }
 
     /// Makes an API request with automatic rate limit handling and retries
@@ -28,7 +42,7 @@ impl PostHogAPIClient {
         method: Method,
         endpoint: &str,
         body: Option<&T>,
-    ) -> Result<R, PostHogSDKError>
+    ) -> Result<R, PostHogApiError>
     where
         T: Serialize + ?Sized,
         R: DeserializeOwned,
@@ -59,7 +73,7 @@ impl PostHogAPIClient {
                 StatusCode::TOO_MANY_REQUESTS => {
                     if retries >= MAX_RETRIES {
                         let error = response.json().await?;
-                        return Err(PostHogSDKError::ResponseError(status, error));
+                        return Err(PostHogApiError::ResponseError(status, error));
                     }
                     // Get retry-after header if available, otherwise use default wait time
                     let wait_time = response
@@ -77,7 +91,7 @@ impl PostHogAPIClient {
                 // Other error cases
                 _ => {
                     let error = response.json().await?;
-                    return Err(PostHogSDKError::ResponseError(status, error));
+                    return Err(PostHogApiError::ResponseError(status, error));
                 }
             }
         }
@@ -89,7 +103,7 @@ impl PostHogAPIClient {
         method: Method,
         endpoint: &str,
         body: Option<&T>,
-    ) -> Result<(), PostHogSDKError>
+    ) -> Result<(), PostHogApiError>
     where
         T: Serialize + ?Sized,
     {
@@ -117,7 +131,7 @@ impl PostHogAPIClient {
                 StatusCode::TOO_MANY_REQUESTS => {
                     if retries >= MAX_RETRIES {
                         let error = response.json().await?;
-                        return Err(PostHogSDKError::ResponseError(status, error));
+                        return Err(PostHogApiError::ResponseError(status, error));
                     }
                     // Get retry-after header if available, otherwise use default wait time
                     let wait_time = response
@@ -135,7 +149,7 @@ impl PostHogAPIClient {
                 // Other error cases
                 _ => {
                     let error = response.json().await?;
-                    return Err(PostHogSDKError::ResponseError(status, error));
+                    return Err(PostHogApiError::ResponseError(status, error));
                 }
             }
         }

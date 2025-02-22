@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::client::PostHogAPIClient;
-use crate::api::error::PostHogSDKError;
+use super::PostHogApiError;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueryRequest {
@@ -27,26 +27,56 @@ pub struct QueryResponse {
 
 impl PostHogAPIClient {
     /// Execute a query against the PostHog Query API
-    pub async fn query(&self, project_id: &str, request: QueryRequest) -> Result<QueryResponse, PostHogSDKError> {
+    pub async fn query(&self, project_id: &str, request: QueryRequest) -> Result<QueryResponse, PostHogApiError> {
         let endpoint = format!("/api/projects/{}/query", project_id);
         self.api_request(Method::POST, &endpoint, Some(&request)).await
     }
 
     /// Get the status or result of a previously executed query
-    pub async fn get_query_status(&self, project_id: &str, query_id: &str) -> Result<QueryResponse, PostHogSDKError> {
+    pub async fn get_query_status(&self, project_id: &str, query_id: &str) -> Result<QueryResponse, PostHogApiError> {
         let endpoint = format!("/api/projects/{}/query/{}", project_id, query_id);
         self.api_request(Method::GET, &endpoint, None::<&()>).await
     }
 
     /// Cancel an ongoing query
-    pub async fn cancel_query(&self, project_id: &str, query_id: &str) -> Result<(), PostHogSDKError> {
+    pub async fn cancel_query(&self, project_id: &str, query_id: &str) -> Result<(), PostHogApiError> {
         let endpoint = format!("/api/projects/{}/query/{}", project_id, query_id);
         self.api_request_no_response_content(Method::DELETE, &endpoint, None::<&()>).await
     }
 
     /// Check authorization for executing asynchronous queries
-    pub async fn check_async_query_auth(&self, project_id: &str) -> Result<(), PostHogSDKError> {
+    pub async fn check_async_query_auth(&self, project_id: &str) -> Result<(), PostHogApiError> {
         let endpoint = format!("/api/projects/{}/query/check_auth_for_async", project_id);
         self.api_request_no_response_content(Method::POST, &endpoint, None::<&()>).await
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn client() -> PostHogAPIClient {
+        dotenvy::dotenv().unwrap();
+
+        let api_key = std::env::var("POSTHOG_API_KEY").unwrap();
+        let base_url = std::env::var("POSTHOG_API_URL").unwrap();
+
+        PostHogAPIClient::new(api_key, base_url).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_query() {
+        let client = client();
+        let request = QueryRequest {
+            query: json!({"query": "select `distinct_id` from person_distinct_ids"}),
+            async_: None,
+            filters_override: None,
+            refresh: None,
+        };
+        let response = client.query("test-project", request).await;
+        assert!(response.is_ok());
     }
 }
