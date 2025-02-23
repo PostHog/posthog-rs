@@ -6,12 +6,13 @@ static GLOBAL_CLIENT: OnceLock<Client> = OnceLock::new();
 static GLOBAL_DISABLE: OnceLock<bool> = OnceLock::new();
 
 #[cfg(feature = "async-client")]
-pub async fn init_global_client<C: Into<ClientOptions>>(options: C) -> Result<(), Error> {
+pub fn init_global_client<C: Into<ClientOptions>>(options: C) -> Result<(), Error> {
     if is_disabled() {
         return Ok(());
     }
 
-    let client = client(options).await;
+    let client = client(options);
+
     GLOBAL_CLIENT
         .set(client)
         .map_err(|_| Error::AlreadyInitialized)
