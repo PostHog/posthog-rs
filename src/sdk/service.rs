@@ -1,22 +1,24 @@
+use crate::sdk::PostHogSDKClient;
+use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
-use serde_json::Value;
 use tracing::debug;
-use crate::sdk::PostHogSDKClient;
 
 /// Messages that can be sent to the PostHog service actor.
-/// 
+///
 /// This enum represents the different types of messages that can be processed by the PostHog service:
 /// - `Exit`: Signals the service to shut down gracefully
 /// - `Capture`: Contains event data to be sent to PostHog
+/// - `CaptureMultiple`: Contains a vector of events to be sent to PostHog
 #[derive(Debug)]
 pub enum PostHogServiceMessage {
     Exit,
     Capture(Value),
+    CaptureMultiple(Vec<Value>),
 }
 
 /// An actor that manages batching and sending events to PostHog.
-/// 
+///
 /// The service actor maintains a queue of events and periodically sends them in batches to PostHog.
 /// It can be configured with custom batch sizes and intervals, and supports historical data migration.
 pub struct PostHogServiceActor {
@@ -26,6 +28,9 @@ pub struct PostHogServiceActor {
     batch_size: usize,
     historical_migration: bool,
     duration: Duration,
+
+    #[cfg(test)]
+    pub error_count: usize,
 }
 
 impl PostHogServiceActor {
@@ -46,6 +51,8 @@ impl PostHogServiceActor {
             batch_size: 1_000,
             duration: Duration::from_secs(5),
             historical_migration: false,
+            #[cfg(test)]
+            error_count: 0,
         }
     }
 
@@ -95,7 +102,7 @@ impl PostHogServiceActor {
     pub async fn start(mut self) -> Sender<PostHogServiceMessage> {
         let (sender, new_receiver) = mpsc::channel(1_000);
         self.receiver = Some(new_receiver);
-        
+
         tokio::spawn(async move {
             self.run().await;
         });
@@ -114,7 +121,7 @@ impl PostHogServiceActor {
     ///
     /// # Returns
     /// Returns Ok(()) on success, or an error if the batch send fails
-    async fn send_batch(&self, mut batch: Vec<Value>) -> anyhow::Result<()> {
+    async fn send_batch(&mut self, mut batch: Vec<Value>) -> anyhow::Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -122,11 +129,19 @@ impl PostHogServiceActor {
         while !batch.is_empty() {
             let current_batch = batch.drain(0..self.batch_size).collect::<Vec<_>>();
             debug!("Sending batch: {}", current_batch.len());
-            
-            self.client.capture_batch(self.historical_migration, current_batch).await.map_err(|e| {
-                eprintln!("Error sending batch capture: {}", e);
-                e
-            })?;
+
+            self.client
+                .capture_batch(self.historical_migration, current_batch)
+                .await
+                .map_err(|e| {
+                    eprintln!("Error sending batch capture: {}", e);
+                    #[cfg(test)]
+                    {
+                        self.error_count += 1;
+                    }
+
+                    e
+                })?;
         }
 
         Ok(())
@@ -150,7 +165,7 @@ impl PostHogServiceActor {
                     if !self.captures.is_empty() {
                         // Clone the captures for sending and clear the vector
                         let batch = std::mem::take(&mut self.captures);
-                        
+
                         // Send batch to PostHog
                         if let Err(e) = self.send_batch(batch.clone()).await {
                             eprintln!("Error sending batch capture: {}", e);
@@ -173,10 +188,34 @@ impl PostHogServiceActor {
                         Some(PostHogServiceMessage::Capture(event)) => {
                             self.captures.push(event);
                         }
+                        Some(PostHogServiceMessage::CaptureMultiple(events)) => {
+                            self.captures.extend(events);
+                        }
                         None => break, // Channel Closed
                     }
                 }
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service() -> PostHogServiceActor {
+        let public_key = std::env::var("POSTHOG_PUBLIC_KEY").unwrap();
+        let base_url = std::env::var("POSTHOG_BASE_URL").unwrap();
+
+        let client = PostHogSDKClient::new(public_key, base_url).unwrap();
+
+        super::PostHogServiceActor::new(client)
+    }
+
+    #[tokio::test]
+    async fn test_capture_batch() {}
+
+    #[tokio::test]
+    async fn test_capture_batch_too_large() {}
+
 }

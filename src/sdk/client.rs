@@ -39,14 +39,8 @@ impl PostHogSDKClient {
     /// # Errors
     /// * If the API key is invalid for header creation
     /// * If the HTTP client creation fails
-    pub fn new(api_key: String, public_key: String, base_url: String) -> anyhow::Result<Self> {
+    pub fn new(public_key: String, base_url: String) -> anyhow::Result<Self> {
         let headers = HeaderMap::from_iter([
-            (
-                reqwest::header::AUTHORIZATION,
-                header::HeaderValue::from_str(format!("Bearer {api_key}").as_str()).context(
-                    format!("Failed to create authorization header: Bearer {api_key}"),
-                )?,
-            ),
             (
                 reqwest::header::CONTENT_TYPE,
                 header::HeaderValue::from_static("application/json"),
@@ -130,6 +124,11 @@ impl PostHogSDKClient {
                 body["api_key"] = self.public_key.clone().into();
             }
 
+            // Encode body to JSON then compress it
+            let body = serde_json::to_vec(&body).context("Failed to serialize body")?;
+
+
+            request.body();
             request = request.json(&body);
         }
 
