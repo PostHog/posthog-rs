@@ -11,7 +11,7 @@ pub struct Client {
     client: HttpClient,
 }
 
-pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
+pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let options = options.into();
     let client = HttpClient::builder()
         .timeout(Duration::from_secs(options.request_timeout_seconds))
