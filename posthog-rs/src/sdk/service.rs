@@ -121,14 +121,16 @@ impl PostHogServiceActor {
     ///
     /// # Returns
     /// Returns Ok(()) on success, or an error if the batch send fails
-    async fn send_batch(&mut self, mut batch: Vec<Value>) -> anyhow::Result<()> {
+    pub async fn send_batch(&mut self, mut batch: Vec<Value>) -> anyhow::Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
 
         while !batch.is_empty() {
-            let current_batch = batch.drain(0..self.batch_size).collect::<Vec<_>>();
-            debug!("Sending batch: {}", current_batch.len());
+            let batch_size = batch.len().min(self.batch_size);
+            debug!("Inner batch: ({} items)", batch_size);
+
+            let current_batch = batch.drain(0..batch_size).collect::<Vec<_>>();
 
             self.client
                 .capture_batch(self.historical_migration, current_batch)
@@ -163,6 +165,7 @@ impl PostHogServiceActor {
             tokio::select! {
                 _ = interval.tick() => {
                     if !self.captures.is_empty() {
+                        debug!("Sending Batch: {}", self.captures.len());
                         // Clone the captures for sending and clear the vector
                         let batch = std::mem::take(&mut self.captures);
 
@@ -201,9 +204,14 @@ impl PostHogServiceActor {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    use crate::sdk::models::event::EventBuilder;
+
     use super::*;
 
     fn service() -> PostHogServiceActor {
+        dotenvy::dotenv().ok();
         let public_key = std::env::var("POSTHOG_PUBLIC_KEY").unwrap();
         let base_url = std::env::var("POSTHOG_BASE_URL").unwrap();
 
@@ -213,9 +221,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_capture_batch() {}
+    async fn test_capture_batch() -> anyhow::Result<()> {
+        let items = (0..1000)
+            .into_iter()
+            .map(|i| {
+                EventBuilder::new("capture_multiple")
+                    .distinct_id(format!("u_{}", i))
+                    .timestamp_now()
+                    .properties(json!({ "key_idx": i }))
+                    .build()
+            })
+            .collect::<Vec<_>>();
+
+        let mut instance = service()
+            .with_batch_size(500)
+            .with_duration(Duration::from_secs(1));
+
+        instance
+            .send_batch(items)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(instance.error_count, 0);
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_capture_batch_too_large() {}
-
 }

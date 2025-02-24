@@ -159,11 +159,10 @@ mod tests {
             .compact()
             .try_init();
         dotenvy::dotenv()?;
-        let api_key = std::env::var("POSTHOG_API_KEY").unwrap();
         let public_key = std::env::var("POSTHOG_PUBLIC_KEY").unwrap();
         let base_url = std::env::var("POSTHOG_BASE_URL").unwrap();
 
-        let client = PostHogSDKClient::new(api_key, public_key, base_url)?;
+        let client = PostHogSDKClient::new(public_key, base_url)?;
 
         let req = EventBuilder::new("test")
             .distinct_id("user123".to_string())
@@ -183,17 +182,17 @@ mod tests {
             .compact()
             .try_init();
         dotenvy::dotenv()?;
-        let api_key = std::env::var("POSTHOG_API_KEY").unwrap();
         let public_key = std::env::var("POSTHOG_PUBLIC_KEY").unwrap();
         let base_url = std::env::var("POSTHOG_BASE_URL").unwrap();
 
-        let client = PostHogSDKClient::new(api_key, public_key, base_url)?;
+        let client = PostHogSDKClient::new(public_key, base_url)?;
         let req = EventBuilder::new("test")
             .distinct_id("user123".to_string())
             .properties(json!({"key": "value"}))
             .timestamp_now()
             .build();
         let res = client.capture_batch(false, vec![req.clone(), req]).await;
+        println!("{:?}", res);
         assert!(res.is_ok());
 
         assert_eq!(res.unwrap().status, "Ok".to_string());

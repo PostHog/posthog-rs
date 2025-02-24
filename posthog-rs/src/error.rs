@@ -27,6 +27,9 @@ pub enum PostHogApiError {
     #[error("API returned error status: {0}: {1}")]
     ResponseError(StatusCode, PostHogServerError),
     
+    #[error("Request compression failed: {0}")]
+    RequestCompressionError(#[from] std::io::Error),
+
     // ! Feature flag specific errors
     #[error("Feature flag not found: {0}")]
     FeatureFlagNotFound(String),

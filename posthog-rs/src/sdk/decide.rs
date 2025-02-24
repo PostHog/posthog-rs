@@ -327,10 +327,9 @@ mod tests {
         dotenvy::dotenv().ok();
 
         let endpoint = std::env::var("POSTHOG_BASE_URL").unwrap();
-        let api_key = std::env::var("POSTHOG_API_KEY").unwrap();
         let public_key = std::env::var("POSTHOG_PUBLIC_KEY").unwrap();
 
-        let client = PostHogSDKClient::new(api_key, public_key, endpoint).unwrap();
+        let client = PostHogSDKClient::new(public_key, endpoint).unwrap();
 
         client
     }
