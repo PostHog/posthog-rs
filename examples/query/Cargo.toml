@@ -1,0 +1,13 @@
+[package]
+name = "query"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.96"
+dotenvy = "0.15.7"
+posthog-rs = { path = "../../posthog-rs" }
+serde_json = "1.0.139"
+tokio = { version = "1.43.0", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
