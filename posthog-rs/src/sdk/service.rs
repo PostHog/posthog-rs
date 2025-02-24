@@ -4,6 +4,8 @@ use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
 use tracing::debug;
 
+pub type PostHogServiceSender = Sender<PostHogServiceMessage>;
+
 /// Messages that can be sent to the PostHog service actor.
 ///
 /// This enum represents the different types of messages that can be processed by the PostHog service:
@@ -99,7 +101,7 @@ impl PostHogServiceActor {
     ///
     /// # Returns
     /// Returns a channel sender that can be used to send messages to the service
-    pub async fn start(mut self) -> Sender<PostHogServiceMessage> {
+    pub async fn start(mut self) -> PostHogServiceSender {
         let (sender, new_receiver) = mpsc::channel(1_000);
         self.receiver = Some(new_receiver);
 
@@ -167,7 +169,7 @@ impl PostHogServiceActor {
                     if !self.captures.is_empty() {
                         debug!("Sending Batch: {}", self.captures.len());
                         // Clone the captures for sending and clear the vector
-                        let batch = std::mem::take(&mut self.captures);
+                        let batch = self.captures.drain(..).collect::<Vec<_>>();
 
                         // Send batch to PostHog
                         if let Err(e) = self.send_batch(batch.clone()).await {
@@ -200,7 +202,25 @@ impl PostHogServiceActor {
             }
         }
     }
+
+    pub async fn close(&mut self) -> anyhow::Result<()> {
+        let batch = self.captures.drain(..).collect::<Vec<_>>();
+
+        self.send_batch(batch).await?;
+
+        Ok(())
+    }
 }
+
+// impl Drop for PostHogServiceActor {
+//     fn drop(&mut self) {
+//         tracing::debug!("Stopping PostHog Service Actor");
+//         // ensure the service has time to process any remaining events
+//         tokio::task::spawn_local(self.close());
+//         thread::sleep(Duration::from_secs(8));
+//         tracing::debug!("Stopped PostHog Service Actor");
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -237,10 +257,7 @@ mod tests {
             .with_batch_size(500)
             .with_duration(Duration::from_secs(1));
 
-        instance
-            .send_batch(items)
-            .await
-            .unwrap();
+        instance.send_batch(items).await.unwrap();
 
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert_eq!(instance.error_count, 0);
