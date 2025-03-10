@@ -90,14 +90,15 @@ Check out our [examples directory](./examples) for complete working examples:
 
 Currently, the SDK supports:
 - Event capture with the PostHog Service Actor
+- Public API client (decide and capture endpoints)
+    - Feature Flags
+    - Annotations
+    - Persons and Groups
 - Query API for data analysis
 
 We plan to expand coverage to include:
-- Feature Flags
-- Annotations
-- Persons and Groups
-- Projects and Organizations
-- And more!
+- all the other posthog apis
+    - I write the client for the apis that I'm using in my projects, so If you need something, open a feature request in the issues tab or comment on one of the existing ones :)
 
 ## Contributing
 
