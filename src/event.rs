@@ -9,12 +9,12 @@ use crate::Error;
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Event {
-    event: String,
+    pub event: String,
     #[serde(rename = "$distinct_id")]
-    distinct_id: String,
-    properties: HashMap<String, serde_json::Value>,
-    groups: HashMap<String, String>,
-    timestamp: Option<NaiveDateTime>,
+    pub distinct_id: String,
+    pub properties: HashMap<String, serde_json::Value>,
+    pub groups: HashMap<String, String>,
+    pub timestamp: Option<NaiveDateTime>,
 }
 
 impl Event {
