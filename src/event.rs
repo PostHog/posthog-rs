@@ -7,6 +7,10 @@ use uuid::Uuid;
 
 use crate::Error;
 
+/// An [`Event`] represents an interaction a user has with your app or
+/// website. Examples include button clicks, pageviews, query completions, and signups.
+/// See the [PostHog documentation](https://posthog.com/docs/data/events)
+/// for a detailed explanation of PostHog Events.
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Event {
     event: String,
@@ -18,8 +22,8 @@ pub struct Event {
 }
 
 impl Event {
-    /// Capture a new identified event. Unless you have a distinct ID you can
-    /// associate with a user, you probably want to use `new_anon` instead.
+    /// Capture a new identified [`Event`]. Unless you have a distinct ID you can
+    /// associate with a user, you probably want to use [`new_anon`] instead.
     pub fn new<S: Into<String>>(event: S, distinct_id: S) -> Self {
         Self {
             event: event.into(),
