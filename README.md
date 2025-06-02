@@ -10,7 +10,7 @@ Add `posthog-rs` to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-posthog-rs = "0.3.5"
+posthog-rs = "0.3.6"
 ```
 
 ```rust
@@ -22,4 +22,3 @@ event.insert_prop("key2", vec!["a", "b"]).unwrap();
 
 client.capture(event).unwrap();
 ```
-
