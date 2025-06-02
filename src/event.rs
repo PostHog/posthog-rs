@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
 use semver::Version;
 use serde::Serialize;
 use uuid::Uuid;
@@ -71,6 +71,20 @@ impl Event {
         self.insert_prop("$process_person_profile", true)
             .expect("bools are safe for serde");
         self.groups.insert(group_name.into(), group_id.into());
+    }
+
+    /// Set the event timestamp, for events that happened in the past.
+    pub fn set_timestamp<Tz>(&mut self, timestamp: DateTime<Tz>) -> Result<(), Error>
+    where
+        Tz: TimeZone,
+    {
+        if timestamp > Utc::now() + Duration::seconds(1) {
+            return Err(Error::InvalidTimestamp(String::from(
+                "Events cannot occur in the future",
+            )));
+        }
+        self.timestamp = Some(timestamp.naive_utc());
+        Ok(())
     }
 }
 
@@ -166,5 +180,36 @@ pub mod tests {
             props.get("$lib"),
             Some(&serde_json::Value::String("posthog-rs".to_string()))
         );
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::Duration;
+
+    use chrono::{DateTime, Utc};
+
+    use super::Event;
+
+    #[test]
+    fn test_timestamp_is_correctly_set() {
+        let mut event = Event::new_anon("test");
+        let ts = DateTime::parse_from_rfc3339("2023-01-01T10:00:00+03:00").unwrap();
+        event
+            .set_timestamp(ts.clone())
+            .expect("Date is not in the future");
+        let expected = DateTime::parse_from_rfc3339("2023-01-01T07:00:00Z").unwrap();
+        assert_eq!(event.timestamp.unwrap(), expected.naive_utc())
+    }
+
+    #[test]
+    fn test_timestamp_is_correctly_set_with_future_date() {
+        let mut event = Event::new_anon("test");
+        let ts = Utc::now() + Duration::from_secs(60);
+        event
+            .set_timestamp(ts.clone())
+            .expect_err("Date is in the future, should be rejected");
+
+        assert!(event.timestamp.is_none())
     }
 }
