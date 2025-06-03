@@ -74,6 +74,8 @@ impl Event {
     }
 
     /// Set the event timestamp, for events that happened in the past.
+    ///
+    /// Errors if the timestamp is in the future.
     pub fn set_timestamp<Tz>(&mut self, timestamp: DateTime<Tz>) -> Result<(), Error>
     where
         Tz: TimeZone,
