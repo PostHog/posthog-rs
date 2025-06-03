@@ -7,6 +7,7 @@ impl Display for Error {
             Error::Serialization(msg) => write!(f, "Serialization Error: {}", msg),
             Error::AlreadyInitialized => write!(f, "Client already initialized"),
             Error::NotInitialized => write!(f, "Client not initialized"),
+            Error::InvalidTimestamp(msg) => write!(f, "Invalid Timestamp: {}", msg),
         }
     }
 }
@@ -18,4 +19,5 @@ pub enum Error {
     Serialization(String),
     AlreadyInitialized,
     NotInitialized,
+    InvalidTimestamp(String),
 }
