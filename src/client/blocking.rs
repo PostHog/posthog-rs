@@ -86,8 +86,10 @@ mod tests {
 
     #[test]
     fn test_client_without_api_key_is_disabled() {
-        let options = ClientOptionsBuilder::default().build().unwrap();
+        let options = ClientOptions::default();
+
         let client = client(options);
+
         assert!(client.is_disabled());
     }
 
@@ -97,30 +99,32 @@ mod tests {
             .api_key(Some("test_key".to_string()))
             .build()
             .unwrap();
+
         let client = client(options);
+
         assert!(!client.is_disabled());
     }
 
     #[test]
     fn test_disabled_client_capture_returns_ok() {
-        let options = ClientOptionsBuilder::default().build().unwrap();
-        let client = client(options);
-
+        let client = client(ClientOptions::default());
         let event = Event::new("test_event", "user_123");
+
         let result = client.capture(event);
+
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_disabled_client_capture_batch_returns_ok() {
-        let options = ClientOptionsBuilder::default().build().unwrap();
-        let client = client(options);
-
+        let client = client(ClientOptions::default());
         let events = vec![
             Event::new("test_event1", "user_123"),
             Event::new("test_event2", "user_456"),
         ];
+
         let result = client.capture_batch(events);
+
         assert!(result.is_ok());
     }
 }

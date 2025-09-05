@@ -26,6 +26,14 @@ pub struct ClientOptions {
     request_timeout_seconds: u64,
 }
 
+impl Default for ClientOptions {
+    fn default() -> Self {
+        ClientOptionsBuilder::default()
+            .build()
+            .expect("Default ClientOptions should always build successfully")
+    }
+}
+
 impl From<&str> for ClientOptions {
     fn from(api_key: &str) -> Self {
         ClientOptionsBuilder::default()
