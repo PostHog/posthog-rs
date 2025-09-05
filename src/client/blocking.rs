@@ -23,9 +23,20 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
 }
 
 impl Client {
+    /// Returns true if this client is disabled (has no API key).
+    pub fn is_disabled(&self) -> bool {
+        self.options.api_key.is_none()
+    }
+
     /// Capture the provided event, sending it to PostHog.
+    /// If the client is disabled (no API key), this method returns Ok(()) without sending anything.
     pub fn capture(&self, event: Event) -> Result<(), Error> {
-        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
+        if self.is_disabled() {
+            return Ok(());
+        }
+
+        let api_key = self.options.api_key.as_ref().unwrap();
+        let inner_event = InnerEvent::new(event, api_key.clone());
 
         let payload =
             serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -42,10 +53,16 @@ impl Client {
 
     /// Capture a collection of events with a single request. This function may be
     /// more performant than capturing a list of events individually.
+    /// If the client is disabled (no API key), this method returns Ok(()) without sending anything.
     pub fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
+        if self.is_disabled() {
+            return Ok(());
+        }
+
+        let api_key = self.options.api_key.as_ref().unwrap();
         let events: Vec<_> = events
             .into_iter()
-            .map(|event| InnerEvent::new(event, self.options.api_key.clone()))
+            .map(|event| InnerEvent::new(event, api_key.clone()))
             .collect();
 
         let payload =
@@ -59,5 +76,51 @@ impl Client {
             .map_err(|e| Error::Connection(e.to_string()))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ClientOptionsBuilder, Event};
+
+    #[test]
+    fn test_client_without_api_key_is_disabled() {
+        let options = ClientOptionsBuilder::default().build().unwrap();
+        let client = client(options);
+        assert!(client.is_disabled());
+    }
+
+    #[test]
+    fn test_client_with_api_key_is_enabled() {
+        let options = ClientOptionsBuilder::default()
+            .api_key(Some("test_key".to_string()))
+            .build()
+            .unwrap();
+        let client = client(options);
+        assert!(!client.is_disabled());
+    }
+
+    #[test]
+    fn test_disabled_client_capture_returns_ok() {
+        let options = ClientOptionsBuilder::default().build().unwrap();
+        let client = client(options);
+
+        let event = Event::new("test_event", "user_123");
+        let result = client.capture(event);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_disabled_client_capture_batch_returns_ok() {
+        let options = ClientOptionsBuilder::default().build().unwrap();
+        let client = client(options);
+
+        let events = vec![
+            Event::new("test_event1", "user_123"),
+            Event::new("test_event2", "user_456"),
+        ];
+        let result = client.capture_batch(events);
+        assert!(result.is_ok());
     }
 }

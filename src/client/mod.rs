@@ -19,7 +19,8 @@ pub use async_client::Client;
 pub struct ClientOptions {
     #[builder(default = "API_ENDPOINT.to_string()")]
     api_endpoint: String,
-    api_key: String,
+    #[builder(default = "None")]
+    api_key: Option<String>,
 
     #[builder(default = "30")]
     request_timeout_seconds: u64,
@@ -28,7 +29,7 @@ pub struct ClientOptions {
 impl From<&str> for ClientOptions {
     fn from(api_key: &str) -> Self {
         ClientOptionsBuilder::default()
-            .api_key(api_key.to_string())
+            .api_key(Some(api_key.to_string()))
             .build()
             .expect("We always set the API key, so this is infallible")
     }
