@@ -15,7 +15,9 @@ pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
 
 // Endpoints
-pub use endpoints::{EndpointManager, Endpoint, DEFAULT_HOST, US_INGESTION_ENDPOINT, EU_INGESTION_ENDPOINT};
+pub use endpoints::{
+    Endpoint, EndpointManager, DEFAULT_HOST, EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT,
+};
 
 // Error
 pub use error::Error;
@@ -25,18 +27,14 @@ pub use event::Event;
 
 // Feature Flags
 pub use feature_flags::{
-    FeatureFlag, FeatureFlagsResponse, FlagValue,
-    FeatureFlagFilters, FeatureFlagCondition, Property,
-    MultivariateFilter, MultivariateVariant,
-    match_feature_flag, InconclusiveMatchError,
-    FlagDetail, FlagReason, FlagMetadata,
+    match_feature_flag, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters,
+    FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagReason, FlagValue, InconclusiveMatchError,
+    MultivariateFilter, MultivariateVariant, Property,
 };
 
 // Local Evaluation
 pub use local_evaluation::{
-    FlagCache, FlagPoller,
-    LocalEvaluationConfig, LocalEvaluator,
-    LocalEvaluationResponse, Cohort,
+    Cohort, FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator,
 };
 
 #[cfg(feature = "async-client")]

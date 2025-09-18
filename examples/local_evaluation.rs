@@ -1,18 +1,17 @@
 /// Local Evaluation Performance Demo
-/// 
+///
 /// Shows 100-1000x faster flag evaluation by caching definitions locally.
-/// 
+///
 /// Setup:
 ///   export POSTHOG_API_TOKEN=phc_your_project_key
 ///   export POSTHOG_PERSONAL_API_TOKEN=phx_your_personal_key
 ///   cargo run --example local_evaluation --features async-client
 ///
 /// Get personal key at: https://app.posthog.com/me/settings
-
 use posthog_rs::ClientOptionsBuilder;
+use serde_json::json;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use serde_json::json;
 
 #[cfg(feature = "async-client")]
 #[tokio::main]
@@ -52,7 +51,7 @@ async fn main() {
             .poll_interval_seconds(30) // Poll for updates every 30 seconds
             .build()
             .unwrap();
-        
+
         posthog_rs::client(options).await
     };
 
@@ -62,7 +61,7 @@ async fn main() {
             .api_key(api_key)
             .build()
             .unwrap();
-        
+
         posthog_rs::client(options).await
     };
 
@@ -78,40 +77,48 @@ async fn main() {
 
     // Performance comparison
     println!("\n=== Performance Comparison ===");
-    
+
     // Test API evaluation speed
     println!("\n1. API Evaluation (10 requests):");
     let start = Instant::now();
     for i in 0..10 {
-        let _ = api_client.get_feature_flag(
-            "using-feature-flags".to_string(),
-            format!("{}-{}", user_id, i),
-            None,
-            Some(properties.clone()),
-            None,
-        ).await;
+        let _ = api_client
+            .get_feature_flag(
+                "using-feature-flags".to_string(),
+                format!("{}-{}", user_id, i),
+                None,
+                Some(properties.clone()),
+                None,
+            )
+            .await;
     }
     let api_duration = start.elapsed();
-    println!("   Time: {:?} total, {:?} per request", 
-             api_duration, 
-             api_duration / 10);
+    println!(
+        "   Time: {:?} total, {:?} per request",
+        api_duration,
+        api_duration / 10
+    );
 
     // Test local evaluation speed
     println!("\n2. Local Evaluation (10 requests):");
     let start = Instant::now();
     for i in 0..10 {
-        let _ = local_client.get_feature_flag(
-            "using-feature-flags".to_string(),
-            format!("{}-{}", user_id, i),
-            None,
-            Some(properties.clone()),
-            None,
-        ).await;
+        let _ = local_client
+            .get_feature_flag(
+                "using-feature-flags".to_string(),
+                format!("{}-{}", user_id, i),
+                None,
+                Some(properties.clone()),
+                None,
+            )
+            .await;
     }
     let local_duration = start.elapsed();
-    println!("   Time: {:?} total, {:?} per request", 
-             local_duration,
-             local_duration / 10);
+    println!(
+        "   Time: {:?} total, {:?} per request",
+        local_duration,
+        local_duration / 10
+    );
 
     // Show speedup
     let speedup = api_duration.as_micros() as f64 / local_duration.as_micros().max(1) as f64;
@@ -119,18 +126,16 @@ async fn main() {
 
     // Demonstrate batch evaluation
     println!("\n=== Batch Evaluation Demo ===");
-    
+
     let start = Instant::now();
-    match local_client.get_feature_flags(
-        user_id.to_string(),
-        None,
-        Some(properties),
-        None,
-    ).await {
+    match local_client
+        .get_feature_flags(user_id.to_string(), None, Some(properties), None)
+        .await
+    {
         Ok((flags, _)) => {
             let duration = start.elapsed();
             println!("Evaluated {} flags in {:?}", flags.len(), duration);
-            
+
             // Show some flag values
             println!("\nSample flags:");
             for (key, value) in flags.iter().take(5) {

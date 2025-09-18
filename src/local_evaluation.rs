@@ -1,9 +1,9 @@
+use crate::feature_flags::{match_feature_flag, FeatureFlag, FlagValue, InconclusiveMatchError};
+use crate::Error;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
-use crate::feature_flags::{FeatureFlag, FlagValue, match_feature_flag, InconclusiveMatchError};
-use crate::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalEvaluationResponse {
@@ -92,7 +92,7 @@ impl FlagPoller {
             .timeout(config.request_timeout)
             .build()
             .unwrap();
-        
+
         Self {
             config,
             cache,
@@ -112,46 +112,55 @@ impl FlagPoller {
         let config = self.config.clone();
         let cache = self.cache.clone();
         let stop_signal = self.stop_signal.clone();
-        
+
         let handle = std::thread::spawn(move || {
             let client = reqwest::blocking::Client::builder()
                 .timeout(config.request_timeout)
                 .build()
                 .unwrap();
-                
+
             loop {
                 std::thread::sleep(config.poll_interval);
-                
+
                 if *stop_signal.read().unwrap() {
                     break;
                 }
-                
+
                 let url = format!(
                     "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
                     config.api_host.trim_end_matches('/'),
                     config.project_api_key
                 );
-                
+
                 match client
                     .get(&url)
-                    .header("Authorization", format!("Bearer {}", config.personal_api_key))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", config.personal_api_key),
+                    )
                     .send()
                 {
                     Ok(response) => {
                         if response.status().is_success() {
                             match response.json::<LocalEvaluationResponse>() {
                                 Ok(data) => cache.update(data),
-                                Err(e) => eprintln!("[FEATURE FLAGS] Failed to parse flag response: {}", e),
+                                Err(e) => eprintln!(
+                                    "[FEATURE FLAGS] Failed to parse flag response: {}",
+                                    e
+                                ),
                             }
                         } else {
-                            eprintln!("[FEATURE FLAGS] Failed to fetch flags: HTTP {}", response.status());
+                            eprintln!(
+                                "[FEATURE FLAGS] Failed to fetch flags: HTTP {}",
+                                response.status()
+                            );
                         }
                     }
                     Err(e) => eprintln!("[FEATURE FLAGS] Failed to fetch flags: {}", e),
                 }
             }
         });
-        
+
         self.thread_handle = Some(handle);
     }
 
@@ -162,20 +171,25 @@ impl FlagPoller {
             self.config.api_host.trim_end_matches('/'),
             self.config.project_api_key
         );
-        
-        let response = self.client
+
+        let response = self
+            .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.config.personal_api_key))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.personal_api_key),
+            )
             .send()
             .map_err(|e| Error::Connection(e.to_string()))?;
-            
+
         if !response.status().is_success() {
             return Err(Error::Connection(format!("HTTP {}", response.status())));
         }
-        
-        let data = response.json::<LocalEvaluationResponse>()
+
+        let data = response
+            .json::<LocalEvaluationResponse>()
             .map_err(|e| Error::Serialization(e.to_string()))?;
-            
+
         self.cache.update(data);
         Ok(())
     }
@@ -213,7 +227,7 @@ impl AsyncFlagPoller {
             .timeout(config.request_timeout)
             .build()
             .unwrap();
-        
+
         Self {
             config,
             cache,
@@ -234,7 +248,7 @@ impl AsyncFlagPoller {
             }
             *is_running = true;
         }
-        
+
         // Initial load
         if let Err(e) = self.load_flags().await {
             eprintln!("[FEATURE FLAGS] Failed to load initial flags: {}", e);
@@ -245,25 +259,24 @@ impl AsyncFlagPoller {
         let stop_signal = self.stop_signal.clone();
         let is_running = self.is_running.clone();
         let client = self.client.clone();
-        
+
         let task = tokio::spawn(async move {
-                
             let mut interval = tokio::time::interval(config.poll_interval);
             interval.tick().await; // Skip the first immediate tick
-            
+
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         if *stop_signal.read().await {
                             break;
                         }
-                        
+
                         let url = format!(
                             "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
                             config.api_host.trim_end_matches('/'),
                             config.project_api_key
                         );
-                        
+
                         match client
                             .get(&url)
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
@@ -285,11 +298,11 @@ impl AsyncFlagPoller {
                     }
                 }
             }
-            
+
             // Clear running flag when task exits
             *is_running.write().await = false;
         });
-        
+
         self.task_handle = Some(task);
     }
 
@@ -300,22 +313,27 @@ impl AsyncFlagPoller {
             self.config.api_host.trim_end_matches('/'),
             self.config.project_api_key
         );
-        
-        let response = self.client
+
+        let response = self
+            .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.config.personal_api_key))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.personal_api_key),
+            )
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
-            
+
         if !response.status().is_success() {
             return Err(Error::Connection(format!("HTTP {}", response.status())));
         }
-        
-        let data = response.json::<LocalEvaluationResponse>()
+
+        let data = response
+            .json::<LocalEvaluationResponse>()
             .await
             .map_err(|e| Error::Serialization(e.to_string()))?;
-            
+
         self.cache.update(data);
         Ok(())
     }
@@ -328,7 +346,7 @@ impl AsyncFlagPoller {
         }
         *self.is_running.write().await = false;
     }
-    
+
     /// Check if the poller is running
     pub async fn is_running(&self) -> bool {
         *self.is_running.read().await
@@ -375,12 +393,12 @@ impl LocalEvaluator {
         person_properties: &HashMap<String, serde_json::Value>,
     ) -> HashMap<String, Result<FlagValue, InconclusiveMatchError>> {
         let mut results = HashMap::new();
-        
+
         for flag in self.cache.get_all_flags() {
             let result = match_feature_flag(&flag, distinct_id, person_properties);
             results.insert(flag.key.clone(), result);
         }
-        
+
         results
     }
 }

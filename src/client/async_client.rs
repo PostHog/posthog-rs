@@ -4,10 +4,10 @@ use std::time::Duration;
 use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
 use serde_json::json;
 
-use crate::{event::InnerEvent, Error, Event};
 use crate::endpoints::{Endpoint, EndpointManager};
-use crate::feature_flags::{FeatureFlagsResponse, FlagValue, match_feature_flag, FeatureFlag};
-use crate::local_evaluation::{FlagCache, AsyncFlagPoller, LocalEvaluationConfig, LocalEvaluator};
+use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
+use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
+use crate::{event::InnerEvent, Error, Event};
 
 use super::ClientOptions;
 
@@ -28,11 +28,11 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         .timeout(Duration::from_secs(options.request_timeout_seconds))
         .build()
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
-    
+
     let (local_evaluator, flag_poller) = if options.enable_local_evaluation {
         if let Some(ref personal_key) = options.personal_api_key {
             let cache = FlagCache::new();
-            
+
             let config = LocalEvaluationConfig {
                 personal_api_key: personal_key.clone(),
                 project_api_key: options.api_key.clone(),
@@ -40,10 +40,10 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
                 poll_interval: Duration::from_secs(options.poll_interval_seconds),
                 request_timeout: Duration::from_secs(options.request_timeout_seconds),
             };
-            
+
             let mut poller = AsyncFlagPoller::new(config, cache.clone());
             poller.start().await;
-            
+
             (Some(LocalEvaluator::new(cache)), Some(poller))
         } else {
             eprintln!("[FEATURE FLAGS] Local evaluation enabled but personal_api_key not set");
@@ -52,8 +52,13 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
     } else {
         (None, None)
     };
-    
-    Client { options, client, local_evaluator, _flag_poller: flag_poller }
+
+    Client {
+        options,
+        client,
+        local_evaluator,
+        _flag_poller: flag_poller,
+    }
 }
 
 impl Client {
@@ -62,7 +67,7 @@ impl Client {
         if self.options.is_disabled() {
             return Ok(());
         }
-        
+
         let inner_event = InnerEvent::new(event, self.options.api_key.clone());
 
         let payload =
@@ -73,22 +78,23 @@ impl Client {
             let separator = if url.contains('?') { "&" } else { "?" };
             url.push_str(&format!("{}disable_geoip=1", separator));
         }
-        
-        let request = self.client
+
+        let request = self
+            .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json");
-        
+
         // Apply gzip compression if enabled
         let request = if self.options.gzip {
             // Note: reqwest will automatically compress the body when gzip feature is enabled
             // and Content-Encoding header is set
-            request.header("Content-Encoding", "gzip")
-                .body(payload)
+            request.header("Content-Encoding", "gzip").body(payload)
         } else {
             request.body(payload)
         };
-        
-        request.send()
+
+        request
+            .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
@@ -101,7 +107,7 @@ impl Client {
         if self.options.is_disabled() {
             return Ok(());
         }
-        
+
         let events: Vec<_> = events
             .into_iter()
             .map(|event| InnerEvent::new(event, self.options.api_key.clone()))
@@ -115,22 +121,23 @@ impl Client {
             let separator = if url.contains('?') { "&" } else { "?" };
             url.push_str(&format!("{}disable_geoip=1", separator));
         }
-        
-        let request = self.client
+
+        let request = self
+            .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json");
-        
+
         // Apply gzip compression if enabled
         let request = if self.options.gzip {
             // Note: reqwest will automatically compress the body when gzip feature is enabled
             // and Content-Encoding header is set
-            request.header("Content-Encoding", "gzip")
-                .body(payload)
+            request.header("Content-Encoding", "gzip").body(payload)
         } else {
             request.body(payload)
         };
-        
-        request.send()
+
+        request
+            .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
@@ -144,51 +151,65 @@ impl Client {
         groups: Option<HashMap<String, String>>,
         person_properties: Option<HashMap<String, serde_json::Value>>,
         group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
-    ) -> Result<(HashMap<String, FlagValue>, HashMap<String, serde_json::Value>), Error> {
+    ) -> Result<
+        (
+            HashMap<String, FlagValue>,
+            HashMap<String, serde_json::Value>,
+        ),
+        Error,
+    > {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
-        
+
         let mut payload = json!({
             "api_key": self.options.api_key,
             "distinct_id": distinct_id.into(),
         });
-        
+
         if let Some(groups) = groups {
             payload["groups"] = json!(groups);
         }
-        
+
         if let Some(person_properties) = person_properties {
             payload["person_properties"] = json!(person_properties);
         }
-        
+
         if let Some(group_properties) = group_properties {
             payload["group_properties"] = json!(group_properties);
         }
-        
+
         // Add geoip disable parameter if configured
         if self.options.disable_geoip {
             payload["disable_geoip"] = json!(true);
         }
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .json(&payload)
-            .timeout(Duration::from_secs(self.options.feature_flags_request_timeout_seconds))
+            .timeout(Duration::from_secs(
+                self.options.feature_flags_request_timeout_seconds,
+            ))
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
-            
+
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::Connection(format!("API request failed with status {}: {}", status, text)));
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Error::Connection(format!(
+                "API request failed with status {}: {}",
+                status, text
+            )));
         }
-        
-        let flags_response = response
-            .json::<FeatureFlagsResponse>()
-            .await
-            .map_err(|e| Error::Serialization(format!("Failed to parse feature flags response: {}", e)))?;
-        
+
+        let flags_response = response.json::<FeatureFlagsResponse>().await.map_err(|e| {
+            Error::Serialization(format!("Failed to parse feature flags response: {}", e))
+        })?;
+
         Ok(flags_response.normalize())
     }
 
@@ -203,7 +224,7 @@ impl Client {
     ) -> Result<Option<FlagValue>, Error> {
         let key_str = key.into();
         let distinct_id_str = distinct_id.into();
-        
+
         // Try local evaluation first if available
         if let Some(ref evaluator) = self.local_evaluator {
             let props = person_properties.clone().unwrap_or_default();
@@ -211,15 +232,17 @@ impl Client {
                 Ok(Some(value)) => return Ok(Some(value)),
                 Ok(None) => {
                     // Flag not found locally, fall through to API
-                },
+                }
                 Err(_) => {
                     // Inconclusive match, fall through to API
                 }
             }
         }
-        
+
         // Fall back to API
-        let (feature_flags, _payloads) = self.get_feature_flags(distinct_id_str, groups, person_properties, group_properties).await?;
+        let (feature_flags, _payloads) = self
+            .get_feature_flags(distinct_id_str, groups, person_properties, group_properties)
+            .await?;
         Ok(feature_flags.get(&key_str).cloned())
     }
 
@@ -232,7 +255,15 @@ impl Client {
         person_properties: Option<HashMap<String, serde_json::Value>>,
         group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
     ) -> Result<bool, Error> {
-        let flag_value = self.get_feature_flag(key.into(), distinct_id.into(), groups, person_properties, group_properties).await?;
+        let flag_value = self
+            .get_feature_flag(
+                key.into(),
+                distinct_id.into(),
+                groups,
+                person_properties,
+                group_properties,
+            )
+            .await?;
         Ok(match flag_value {
             Some(FlagValue::Boolean(b)) => b,
             Some(FlagValue::String(_)) => true, // Variants are considered enabled
@@ -248,35 +279,38 @@ impl Client {
     ) -> Result<Option<serde_json::Value>, Error> {
         let key_str = key.into();
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
-        
+
         let mut payload = json!({
             "api_key": self.options.api_key,
             "distinct_id": distinct_id.into(),
         });
-        
+
         // Add geoip disable parameter if configured
         if self.options.disable_geoip {
             payload["disable_geoip"] = json!(true);
         }
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .json(&payload)
-            .timeout(Duration::from_secs(self.options.feature_flags_request_timeout_seconds))
+            .timeout(Duration::from_secs(
+                self.options.feature_flags_request_timeout_seconds,
+            ))
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
-            
+
         if !response.status().is_success() {
             return Ok(None);
         }
-        
+
         let flags_response: FeatureFlagsResponse = response
             .json()
             .await
             .map_err(|e| Error::Serialization(format!("Failed to parse response: {}", e)))?;
-            
+
         let (_flags, payloads) = flags_response.normalize();
         Ok(payloads.get(&key_str).cloned())
     }

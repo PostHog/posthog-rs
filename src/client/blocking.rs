@@ -6,8 +6,8 @@ use serde_json::json;
 
 use crate::endpoints::{Endpoint, EndpointManager};
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
-use crate::{event::InnerEvent, Error, Event};
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
+use crate::{event::InnerEvent, Error, Event};
 
 use super::ClientOptions;
 
@@ -28,11 +28,11 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         .timeout(Duration::from_secs(options.request_timeout_seconds))
         .build()
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
-    
+
     let (local_evaluator, flag_poller) = if options.enable_local_evaluation {
         if let Some(ref personal_key) = options.personal_api_key {
             let cache = FlagCache::new();
-            
+
             let config = LocalEvaluationConfig {
                 personal_api_key: personal_key.clone(),
                 project_api_key: options.api_key.clone(),
@@ -40,10 +40,10 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
                 poll_interval: Duration::from_secs(options.poll_interval_seconds),
                 request_timeout: Duration::from_secs(options.request_timeout_seconds),
             };
-            
+
             let mut poller = FlagPoller::new(config, cache.clone());
             poller.start();
-            
+
             (Some(LocalEvaluator::new(cache)), Some(poller))
         } else {
             eprintln!("[FEATURE FLAGS] Local evaluation enabled but personal_api_key not set");
@@ -52,8 +52,13 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
     } else {
         (None, None)
     };
-    
-    Client { options, client, local_evaluator, _flag_poller: flag_poller }
+
+    Client {
+        options,
+        client,
+        local_evaluator,
+        _flag_poller: flag_poller,
+    }
 }
 
 impl Client {
@@ -62,7 +67,7 @@ impl Client {
         if self.options.is_disabled() {
             return Ok(());
         }
-        
+
         let inner_event = InnerEvent::new(event, self.options.api_key.clone());
 
         let payload =
@@ -85,7 +90,7 @@ impl Client {
         if self.options.is_disabled() {
             return Ok(());
         }
-        
+
         let events: Vec<_> = events
             .into_iter()
             .map(|event| InnerEvent::new(event, self.options.api_key.clone()))
@@ -112,7 +117,13 @@ impl Client {
         groups: Option<HashMap<String, String>>,
         person_properties: Option<HashMap<String, serde_json::Value>>,
         group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
-    ) -> Result<(HashMap<String, FlagValue>, HashMap<String, serde_json::Value>), Error> {
+    ) -> Result<
+        (
+            HashMap<String, FlagValue>,
+            HashMap<String, serde_json::Value>,
+        ),
+        Error,
+    > {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
         let mut payload = json!({
@@ -154,7 +165,7 @@ impl Client {
         let flags_response = response.json::<FeatureFlagsResponse>().map_err(|e| {
             Error::Serialization(format!("Failed to parse feature flags response: {}", e))
         })?;
-        
+
         Ok(flags_response.normalize())
     }
 
@@ -174,13 +185,13 @@ impl Client {
                 Ok(Some(value)) => return Ok(Some(value)),
                 Ok(None) => {
                     // Flag not found locally, fall through to API
-                },
+                }
                 Err(_) => {
                     // Inconclusive match, fall through to API
                 }
             }
         }
-        
+
         // Fall back to API
         let (feature_flags, _payloads) =
             self.get_feature_flags(distinct_id, groups, person_properties, group_properties)?;
