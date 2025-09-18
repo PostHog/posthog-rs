@@ -93,16 +93,13 @@ pub fn span_to_event(data: RigSpan<'_>) -> Result<Event, Error> {
 // Observers that apps can call from Rig hooks/callbacks
 
 #[cfg(feature = "async-client")]
-pub struct AsyncRigPosthogObserver<C> {
-    client: C,
+pub struct AsyncRigPosthogObserver {
+    client: crate::client::Client,
 }
 
 #[cfg(feature = "async-client")]
-impl<C> AsyncRigPosthogObserver<C>
-where
-    C: crate::client::Client,
-{
-    pub fn new(client: C) -> Self { Self { client } }
+impl AsyncRigPosthogObserver {
+    pub fn new(client: crate::client::Client) -> Self { Self { client } }
 
     pub async fn on_generation(&self, gen: RigGeneration<'_>) -> Result<(), Error> {
         let event = generation_to_event(gen)?;
@@ -121,16 +118,13 @@ where
 }
 
 #[cfg(not(feature = "async-client"))]
-pub struct RigPosthogObserver<C> {
-    client: C,
+pub struct RigPosthogObserver {
+    client: crate::client::Client,
 }
 
 #[cfg(not(feature = "async-client"))]
-impl<C> RigPosthogObserver<C>
-where
-    C: crate::client::Client,
-{
-    pub fn new(client: C) -> Self { Self { client } }
+impl RigPosthogObserver {
+    pub fn new(client: crate::client::Client) -> Self { Self { client } }
 
     pub fn on_generation(&self, gen: RigGeneration<'_>) -> Result<(), Error> {
         let event = generation_to_event(gen)?;
