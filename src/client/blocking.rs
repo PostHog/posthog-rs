@@ -6,6 +6,7 @@ use serde_json::json;
 
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::{event::InnerEvent, Error, Event};
+use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
 
 use super::ClientOptions;
 
@@ -13,6 +14,8 @@ use super::ClientOptions;
 pub struct Client {
     options: ClientOptions,
     client: HttpClient,
+    local_evaluator: Option<LocalEvaluator>,
+    _flag_poller: Option<FlagPoller>,
 }
 
 /// This function constructs a new client using the options provided.
@@ -22,7 +25,42 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         .timeout(Duration::from_secs(options.request_timeout_seconds))
         .build()
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
-    Client { options, client }
+    
+    let (local_evaluator, flag_poller) = if options.enable_local_evaluation {
+        if let Some(ref personal_key) = options.personal_api_key {
+            let cache = FlagCache::new();
+            
+            // Extract the base host URL properly
+            let host = if let Some(pos) = options.api_endpoint.find("/i/v0/e/") {
+                options.api_endpoint[..pos].to_string()
+            } else if let Some(pos) = options.api_endpoint.find("/flags/") {
+                options.api_endpoint[..pos].to_string()
+            } else {
+                // Assume the endpoint is already the base URL
+                options.api_endpoint.trim_end_matches('/').to_string()
+            };
+            
+            let config = LocalEvaluationConfig {
+                personal_api_key: personal_key.clone(),
+                project_api_key: options.api_key.clone(),
+                api_host: host,
+                poll_interval: Duration::from_secs(options.poll_interval_seconds),
+                request_timeout: Duration::from_secs(options.request_timeout_seconds),
+            };
+            
+            let mut poller = FlagPoller::new(config, cache.clone());
+            poller.start();
+            
+            (Some(LocalEvaluator::new(cache)), Some(poller))
+        } else {
+            eprintln!("[FEATURE FLAGS] Local evaluation enabled but personal_api_key not set");
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+    
+    Client { options, client, local_evaluator, _flag_poller: flag_poller }
 }
 
 impl Client {
@@ -71,11 +109,11 @@ impl Client {
         groups: Option<HashMap<String, String>>,
         person_properties: Option<HashMap<String, serde_json::Value>>,
         group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
-    ) -> Result<FeatureFlagsResponse, Error> {
-        let decide_endpoint = self
+    ) -> Result<(HashMap<String, FlagValue>, HashMap<String, serde_json::Value>), Error> {
+        let flags_endpoint = self
             .options
             .api_endpoint
-            .replace("/i/v0/e/", "/decide/?v=3");
+            .replace("/i/v0/e/", "/flags/?v=2");
 
         let mut payload = json!({
             "api_key": self.options.api_key,
@@ -96,7 +134,7 @@ impl Client {
 
         let response = self
             .client
-            .post(&decide_endpoint)
+            .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .json(&payload)
             .send()
@@ -113,9 +151,11 @@ impl Client {
             )));
         }
 
-        response.json::<FeatureFlagsResponse>().map_err(|e| {
+        let flags_response = response.json::<FeatureFlagsResponse>().map_err(|e| {
             Error::Serialization(format!("Failed to parse feature flags response: {}", e))
-        })
+        })?;
+        
+        Ok(flags_response.normalize())
     }
 
     /// Get a specific feature flag value for a user
@@ -127,9 +167,24 @@ impl Client {
         person_properties: Option<HashMap<String, serde_json::Value>>,
         group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
     ) -> Result<Option<FlagValue>, Error> {
-        let response =
+        // Try local evaluation first if available
+        if let Some(ref evaluator) = self.local_evaluator {
+            let props = person_properties.clone().unwrap_or_default();
+            match evaluator.evaluate_flag(&key, &distinct_id, &props) {
+                Ok(Some(value)) => return Ok(Some(value)),
+                Ok(None) => {
+                    // Flag not found locally, fall through to API
+                },
+                Err(_) => {
+                    // Inconclusive match, fall through to API
+                }
+            }
+        }
+        
+        // Fall back to API
+        let (feature_flags, _payloads) =
             self.get_feature_flags(distinct_id, groups, person_properties, group_properties)?;
-        Ok(response.feature_flags.get(&key).cloned())
+        Ok(feature_flags.get(&key).cloned())
     }
 
     /// Check if a feature flag is enabled for a user  
@@ -162,10 +217,10 @@ impl Client {
         distinct_id: D,
     ) -> Result<Option<serde_json::Value>, Error> {
         let key_str = key.into();
-        let decide_endpoint = self
+        let flags_endpoint = self
             .options
             .api_endpoint
-            .replace("/i/v0/e/", "/decide/?v=3");
+            .replace("/i/v0/e/", "/flags/?v=2");
 
         let payload = json!({
             "api_key": self.options.api_key,
@@ -174,7 +229,7 @@ impl Client {
 
         let response = self
             .client
-            .post(&decide_endpoint)
+            .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .json(&payload)
             .send()
@@ -188,7 +243,8 @@ impl Client {
             .json()
             .map_err(|e| Error::Serialization(format!("Failed to parse response: {}", e)))?;
 
-        Ok(flags_response.feature_flag_payloads.get(&key_str).cloned())
+        let (_flags, payloads) = flags_response.normalize();
+        Ok(payloads.get(&key_str).cloned())
     }
 
     /// Evaluate a feature flag locally (requires feature flags to be loaded)

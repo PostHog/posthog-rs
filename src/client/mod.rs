@@ -15,7 +15,7 @@ pub use async_client::client;
 #[cfg(feature = "async-client")]
 pub use async_client::Client;
 
-#[derive(Builder)]
+#[derive(Builder, Clone)]
 pub struct ClientOptions {
     #[builder(default = "API_ENDPOINT.to_string()")]
     api_endpoint: String,
@@ -23,6 +23,18 @@ pub struct ClientOptions {
 
     #[builder(default = "30")]
     request_timeout_seconds: u64,
+    
+    /// Personal API key for fetching flag definitions (required for local evaluation)
+    #[builder(setter(into, strip_option), default)]
+    personal_api_key: Option<String>,
+    
+    /// Enable local evaluation of feature flags
+    #[builder(default = "false")]
+    enable_local_evaluation: bool,
+    
+    /// Interval for polling flag definitions (in seconds)
+    #[builder(default = "30")]
+    poll_interval_seconds: u64,
 }
 
 impl From<&str> for ClientOptions {

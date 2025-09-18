@@ -3,6 +3,7 @@ mod error;
 mod event;
 mod feature_flags;
 mod global;
+mod local_evaluation;
 
 const API_ENDPOINT: &str = "https://us.i.posthog.com/i/v0/e/";
 
@@ -25,7 +26,15 @@ pub use feature_flags::{
     FeatureFlag, FeatureFlagsResponse, FlagValue,
     FeatureFlagFilters, FeatureFlagCondition, Property,
     MultivariateFilter, MultivariateVariant,
-    match_feature_flag,
+    match_feature_flag, InconclusiveMatchError,
+    FlagDetail, FlagReason, FlagMetadata,
+};
+
+// Local Evaluation
+pub use local_evaluation::{
+    FlagCache, FlagPoller, AsyncFlagPoller,
+    LocalEvaluationConfig, LocalEvaluator,
+    LocalEvaluationResponse, Cohort,
 };
 
 // We expose a global capture function as a convenience, that uses a global client

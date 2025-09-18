@@ -33,10 +33,10 @@ fn test_get_all_feature_flags() {
         }
     });
 
-    let decide_mock = server.mock(|when, then| {
+    let flags_mock = server.mock(|when, then| {
         when.method(POST)
-            .path("/decide/")
-            .query_param("v", "3")
+            .path("/flags/")
+            .query_param("v", "2")
             .json_body(json!({
                 "api_key": "test_api_key",
                 "distinct_id": "test-user"
@@ -51,32 +51,32 @@ fn test_get_all_feature_flags() {
     let result = client.get_feature_flags("test-user".to_string(), None, None, None);
 
     assert!(result.is_ok());
-    let response = result.unwrap();
+    let (feature_flags, payloads) = result.unwrap();
 
     assert_eq!(
-        response.feature_flags.get("test-flag"),
+        feature_flags.get("test-flag"),
         Some(&FlagValue::Boolean(true))
     );
     assert_eq!(
-        response.feature_flags.get("disabled-flag"),
+        feature_flags.get("disabled-flag"),
         Some(&FlagValue::Boolean(false))
     );
     assert_eq!(
-        response.feature_flags.get("variant-flag"),
+        feature_flags.get("variant-flag"),
         Some(&FlagValue::String("control".to_string()))
     );
 
-    assert!(response.feature_flag_payloads.contains_key("variant-flag"));
+    assert!(payloads.contains_key("variant-flag"));
 
-    decide_mock.assert();
+    flags_mock.assert();
 }
 
 #[test]
 fn test_is_feature_enabled() {
     let server = MockServer::start();
 
-    let decide_mock = server.mock(|when, then| {
-        when.method(POST).path("/decide/").query_param("v", "3");
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
             "featureFlags": {
                 "enabled-flag": true,
@@ -110,7 +110,7 @@ fn test_is_feature_enabled() {
     assert!(disabled_result.is_ok());
     assert_eq!(disabled_result.unwrap(), false);
 
-    decide_mock.assert_hits(2);
+    flags_mock.assert_hits(2);
 }
 
 #[test]
@@ -123,10 +123,10 @@ fn test_get_feature_flag_with_properties() {
         "plan": "premium"
     });
 
-    let decide_mock = server.mock(|when, then| {
+    let flags_mock = server.mock(|when, then| {
         when.method(POST)
-            .path("/decide/")
-            .query_param("v", "3")
+            .path("/flags/")
+            .query_param("v", "2")
             .json_body(json!({
                 "api_key": "test_api_key",
                 "distinct_id": "test-user",
@@ -158,15 +158,15 @@ fn test_get_feature_flag_with_properties() {
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
 
-    decide_mock.assert();
+    flags_mock.assert();
 }
 
 #[test]
 fn test_multivariate_flag() {
     let server = MockServer::start();
 
-    let decide_mock = server.mock(|when, then| {
-        when.method(POST).path("/decide/").query_param("v", "3");
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
             "featureFlags": {
                 "experiment": "variant-b"
@@ -202,7 +202,7 @@ fn test_multivariate_flag() {
     assert!(enabled_result.is_ok());
     assert_eq!(enabled_result.unwrap(), true);
 
-    decide_mock.assert_hits(2);
+    flags_mock.assert_hits(2);
 }
 
 #[test]
@@ -210,7 +210,7 @@ fn test_api_error_handling() {
     let server = MockServer::start();
 
     let error_mock = server.mock(|when, then| {
-        when.method(POST).path("/decide/").query_param("v", "3");
+        when.method(POST).path("/flags/").query_param("v", "2");
         then.status(500).body("Internal Server Error");
     });
 

@@ -80,14 +80,88 @@ pub struct MultivariateVariant {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeatureFlagsResponse {
-    #[serde(rename = "featureFlags")]
-    pub feature_flags: HashMap<String, FlagValue>,
-    #[serde(rename = "featureFlagPayloads")]
+#[serde(untagged)]
+pub enum FeatureFlagsResponse {
+    // v2 API format (/flags/?v=2)
+    V2 {
+        flags: HashMap<String, FlagDetail>,
+        #[serde(rename = "errorsWhileComputingFlags")]
+        #[serde(default)]
+        errors_while_computing_flags: bool,
+    },
+    // Legacy format (old decide endpoint)
+    Legacy {
+        #[serde(rename = "featureFlags")]
+        feature_flags: HashMap<String, FlagValue>,
+        #[serde(rename = "featureFlagPayloads")]
+        #[serde(default)]
+        feature_flag_payloads: HashMap<String, serde_json::Value>,
+        #[serde(default)]
+        errors: Option<Vec<String>>,
+    },
+}
+
+impl FeatureFlagsResponse {
+    /// Convert the response to a normalized format
+    pub fn normalize(self) -> (HashMap<String, FlagValue>, HashMap<String, serde_json::Value>) {
+        match self {
+            FeatureFlagsResponse::V2 { flags, .. } => {
+                let mut feature_flags = HashMap::new();
+                let mut payloads = HashMap::new();
+                
+                for (key, detail) in flags {
+                    if detail.enabled {
+                        if let Some(variant) = detail.variant {
+                            feature_flags.insert(key.clone(), FlagValue::String(variant));
+                        } else {
+                            feature_flags.insert(key.clone(), FlagValue::Boolean(true));
+                        }
+                    } else {
+                        feature_flags.insert(key.clone(), FlagValue::Boolean(false));
+                    }
+                    
+                    if let Some(metadata) = detail.metadata {
+                        if let Some(payload) = metadata.payload {
+                            payloads.insert(key, payload);
+                        }
+                    }
+                }
+                
+                (feature_flags, payloads)
+            },
+            FeatureFlagsResponse::Legacy { feature_flags, feature_flag_payloads, .. } => {
+                (feature_flags, feature_flag_payloads)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlagDetail {
+    pub key: String,
+    pub enabled: bool,
+    pub variant: Option<String>,
     #[serde(default)]
-    pub feature_flag_payloads: HashMap<String, serde_json::Value>,
+    pub reason: Option<FlagReason>,
     #[serde(default)]
-    pub errors: Option<Vec<String>>,
+    pub metadata: Option<FlagMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlagReason {
+    pub code: String,
+    #[serde(default)]
+    pub condition_index: Option<usize>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlagMetadata {
+    pub id: u64,
+    pub version: u32,
+    pub description: Option<String>,
+    pub payload: Option<serde_json::Value>,
 }
 
 
@@ -430,5 +504,184 @@ mod tests {
             },
             _ => panic!("Expected string variant"),
         }
+    }
+    
+    #[test]
+    fn test_inactive_flag() {
+        let flag = FeatureFlag {
+            key: "inactive-flag".to_string(),
+            active: false,
+            filters: FeatureFlagFilters {
+                groups: vec![
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(100.0),
+                        variant: None,
+                    }
+                ],
+                multivariate: None,
+                payloads: HashMap::new(),
+            },
+        };
+        
+        let properties = HashMap::new();
+        let result = match_feature_flag(&flag, "user-123", &properties).unwrap();
+        assert_eq!(result, FlagValue::Boolean(false));
+    }
+    
+    #[test]
+    fn test_rollout_percentage() {
+        let flag = FeatureFlag {
+            key: "rollout-flag".to_string(),
+            active: true,
+            filters: FeatureFlagFilters {
+                groups: vec![
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(30.0), // 30% rollout
+                        variant: None,
+                    }
+                ],
+                multivariate: None,
+                payloads: HashMap::new(),
+            },
+        };
+        
+        let properties = HashMap::new();
+        
+        // Test with multiple users to ensure distribution
+        let mut enabled_count = 0;
+        for i in 0..1000 {
+            let result = match_feature_flag(&flag, &format!("user-{}", i), &properties).unwrap();
+            if result == FlagValue::Boolean(true) {
+                enabled_count += 1;
+            }
+        }
+        
+        // Should be roughly 30% enabled (allow for some variance)
+        assert!(enabled_count > 250 && enabled_count < 350);
+    }
+    
+    #[test]
+    fn test_regex_operator() {
+        let prop = Property {
+            key: "email".to_string(),
+            value: json!(".*@company\\.com$"),
+            operator: "regex".to_string(),
+            property_type: None,
+        };
+        
+        let mut properties = HashMap::new();
+        properties.insert("email".to_string(), json!("user@company.com"));
+        assert!(match_property(&prop, &properties).unwrap());
+        
+        properties.insert("email".to_string(), json!("user@example.com"));
+        assert!(!match_property(&prop, &properties).unwrap());
+    }
+    
+    #[test]
+    fn test_icontains_operator() {
+        let prop = Property {
+            key: "name".to_string(),
+            value: json!("ADMIN"),
+            operator: "icontains".to_string(),
+            property_type: None,
+        };
+        
+        let mut properties = HashMap::new();
+        properties.insert("name".to_string(), json!("admin_user"));
+        assert!(match_property(&prop, &properties).unwrap());
+        
+        properties.insert("name".to_string(), json!("regular_user"));
+        assert!(!match_property(&prop, &properties).unwrap());
+    }
+    
+    #[test]
+    fn test_numeric_operators() {
+        // Greater than
+        let prop_gt = Property {
+            key: "age".to_string(),
+            value: json!(18),
+            operator: "gt".to_string(),
+            property_type: None,
+        };
+        
+        let mut properties = HashMap::new();
+        properties.insert("age".to_string(), json!(25));
+        assert!(match_property(&prop_gt, &properties).unwrap());
+        
+        properties.insert("age".to_string(), json!(15));
+        assert!(!match_property(&prop_gt, &properties).unwrap());
+        
+        // Less than or equal
+        let prop_lte = Property {
+            key: "score".to_string(),
+            value: json!(100),
+            operator: "lte".to_string(),
+            property_type: None,
+        };
+        
+        properties.insert("score".to_string(), json!(100));
+        assert!(match_property(&prop_lte, &properties).unwrap());
+        
+        properties.insert("score".to_string(), json!(101));
+        assert!(!match_property(&prop_lte, &properties).unwrap());
+    }
+    
+    #[test]
+    fn test_is_set_operator() {
+        let prop = Property {
+            key: "email".to_string(),
+            value: json!(true),
+            operator: "is_set".to_string(),
+            property_type: None,
+        };
+        
+        let mut properties = HashMap::new();
+        properties.insert("email".to_string(), json!("test@example.com"));
+        assert!(match_property(&prop, &properties).unwrap());
+        
+        properties.remove("email");
+        assert!(!match_property(&prop, &properties).unwrap());
+    }
+    
+    #[test]
+    fn test_is_not_set_operator() {
+        let prop = Property {
+            key: "phone".to_string(),
+            value: json!(true),
+            operator: "is_not_set".to_string(),
+            property_type: None,
+        };
+        
+        let mut properties = HashMap::new();
+        assert!(match_property(&prop, &properties).unwrap());
+        
+        properties.insert("phone".to_string(), json!("+1234567890"));
+        assert!(!match_property(&prop, &properties).unwrap());
+    }
+    
+    #[test]
+    fn test_empty_groups() {
+        let flag = FeatureFlag {
+            key: "empty-groups".to_string(),
+            active: true,
+            filters: FeatureFlagFilters {
+                groups: vec![],
+                multivariate: None,
+                payloads: HashMap::new(),
+            },
+        };
+        
+        let properties = HashMap::new();
+        let result = match_feature_flag(&flag, "user-123", &properties).unwrap();
+        assert_eq!(result, FlagValue::Boolean(false));
+    }
+    
+    #[test]
+    fn test_hash_scale_constant() {
+        // Verify the constant is exactly 15 F's (not 16)
+        assert_eq!(LONG_SCALE, 0xFFFFFFFFFFFFFFFu64 as f64);
+        assert_ne!(LONG_SCALE, 0xFFFFFFFFFFFFFFFFu64 as f64);
     }
 }
