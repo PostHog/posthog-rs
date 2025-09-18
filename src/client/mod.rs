@@ -1,6 +1,5 @@
 use crate::endpoints::EndpointManager;
 use derive_builder::Builder;
-use std::collections::HashMap;
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
@@ -56,30 +55,6 @@ pub struct ClientOptions {
     /// Feature flags request timeout in seconds
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
-
-    /// Maximum number of events to batch before sending (reserved for future use)
-    #[builder(default = "100")]
-    flush_at: usize,
-
-    /// Maximum time to wait before sending a batch in seconds (reserved for future use)
-    #[builder(default = "10")]
-    flush_interval_seconds: u64,
-
-    /// Maximum number of retries for failed requests (reserved for future use)
-    #[builder(default = "3")]
-    max_retries: u32,
-
-    /// Additional properties to include with all events (reserved for future use)
-    #[builder(setter(into, strip_option), default)]
-    super_properties: Option<HashMap<String, serde_json::Value>>,
-
-    /// Enable debug logging (reserved for future use)
-    #[builder(default = "false")]
-    debug: bool,
-
-    /// Maximum queue size for events - async only (reserved for future use)
-    #[builder(default = "10000")]
-    max_queue_size: usize,
 
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(None)")]
