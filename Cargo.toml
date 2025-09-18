@@ -28,3 +28,4 @@ ctor = "0.1.26"
 default = ["async-client"]
 e2e-test = []
 async-client = []
+rig-integration = []

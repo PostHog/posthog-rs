@@ -93,3 +93,33 @@ let gen = posthog_rs::GenerationBuilder::new()
     .input_privacy(PrivacyMode::Redacted) // will send "[REDACTED]" in $ai_input
     .build_event()?;
 ```
+
+## Rig integration (optional)
+
+Enable the `rig-integration` feature and map Rig events to PostHog:
+
+```toml
+[dependencies]
+posthog-rs = { version = "0.3.7", features = ["rig-integration"] }
+```
+
+```rust
+use posthog_rs::integrations::rig::{generation_to_event, RigGeneration};
+
+let rig_gen = RigGeneration {
+    distinct_id: "user_123",
+    provider: Some("google"),
+    model: Some("gemini-2.0-pro"),
+    input: Some(serde_json::json!({"messages": []})),
+    output: None,
+    latency_ms: Some(250),
+    input_tokens: Some(100),
+    output_tokens: Some(50),
+    total_tokens: Some(150),
+    request_id: Some("req_1"),
+    trace_id: Some("trace_1"),
+};
+
+let event = generation_to_event(rig_gen)?;
+client.capture(event)?;
+```

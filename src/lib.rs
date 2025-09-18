@@ -2,6 +2,7 @@ mod client;
 mod error;
 mod event;
 mod llm;
+mod integrations;
 mod global;
 
 const API_ENDPOINT: &str = "https://us.i.posthog.com/i/v0/e/";
@@ -25,6 +26,9 @@ pub use llm::generation::GenerationBuilder;
 pub use llm::trace::{TraceBuilder, SpanBuilder};
 pub use llm::embedding::EmbeddingBuilder;
 pub use llm::privacy::PrivacyMode;
+
+// Integrations
+pub use integrations::rig::*;
 
 // We expose a global capture function as a convenience, that uses a global client
 pub use global::capture;
