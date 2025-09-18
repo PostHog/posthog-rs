@@ -22,6 +22,9 @@ pub use event::Event;
 
 // LLM Analytics
 pub use llm::generation::GenerationBuilder;
+pub use llm::trace::{TraceBuilder, SpanBuilder};
+pub use llm::embedding::EmbeddingBuilder;
+pub use llm::privacy::PrivacyMode;
 
 // We expose a global capture function as a convenience, that uses a global client
 pub use global::capture;

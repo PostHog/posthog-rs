@@ -47,3 +47,49 @@ client.capture_generation(gen).await?;
 ```
 
 This sends a `$ai_generation` event with properties such as `$ai_provider`, `$ai_model`, `$ai_input`, `$ai_output`, `$ai_input_tokens`, `$ai_output_tokens`, `$ai_total_tokens`, `$ai_latency_ms`, and `$ai_total_cost_usd`.
+
+### Traces and Spans
+
+```rust
+let trace = posthog_rs::TraceBuilder::new()
+    .distinct_id("user_123")
+    .trace_id("trace_1")
+    .name("chat_session")
+    .start_timer()
+    .finish()?; // builds `$ai_trace`
+
+let span = posthog_rs::SpanBuilder::new()
+    .distinct_id("user_123")
+    .trace_id("trace_1")
+    .span_id("span_1")
+    .parent_span_id("root")
+    .name("gemini.generate")
+    .start_timer()
+    .finish()?; // builds `$ai_span`
+```
+
+### Embeddings
+
+```rust
+let embedding = posthog_rs::EmbeddingBuilder::new()
+    .distinct_id("user_123")
+    .provider("google")
+    .model("text-embedding-004")
+    .vector_dims(768)
+    .vector_count(1)
+    .input_tokens(42)
+    .start_timer()
+    .finish()?; // builds `$ai_embedding`
+```
+
+### Privacy Modes
+
+```rust
+use posthog_rs::PrivacyMode;
+
+let gen = posthog_rs::GenerationBuilder::new()
+    .distinct_id("user_123")
+    .input(serde_json::json!({"secret":"text"}))?
+    .input_privacy(PrivacyMode::Redacted) // will send "[REDACTED]" in $ai_input
+    .build_event()?;
+```

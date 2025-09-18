@@ -25,7 +25,7 @@ fn get_client() {
 
 #[test]
 fn generation_builder_builds_event() {
-    use posthog_rs::GenerationBuilder;
+    use posthog_rs::{GenerationBuilder, PrivacyMode, TraceBuilder, SpanBuilder, EmbeddingBuilder};
 
     let gen = GenerationBuilder::new()
         .distinct_id("user_123")
@@ -47,4 +47,24 @@ fn generation_builder_builds_event() {
 
     // Serialize event to ensure it can be sent
     let _ = serde_json::to_string(&event).unwrap();
+
+    // privacy redaction
+    let redacted = GenerationBuilder::new()
+        .distinct_id("u")
+        .input(serde_json::json!({"secret":"s"})).unwrap()
+        .input_privacy(PrivacyMode::Redacted)
+        .build_event()
+        .unwrap();
+    let s = serde_json::to_string(&redacted).unwrap();
+    assert!(s.contains("[REDACTED]"));
+
+    // trace/span
+    let trace = TraceBuilder::new().distinct_id("u").trace_id("t").name("overall").latency_ms(10).build_event().unwrap();
+    let span = SpanBuilder::new().distinct_id("u").trace_id("t").span_id("s1").parent_span_id("p").name("call").latency_ms(5).build_event().unwrap();
+    let _ = serde_json::to_string(&trace).unwrap();
+    let _ = serde_json::to_string(&span).unwrap();
+
+    // embedding
+    let emb = EmbeddingBuilder::new().distinct_id("u").provider("google").model("text-embedding-004").vector_dims(768).vector_count(1).input_tokens(42).latency_ms(3).build_event().unwrap();
+    let _ = serde_json::to_string(&emb).unwrap();
 }

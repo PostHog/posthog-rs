@@ -3,6 +3,7 @@ use std::{collections::HashMap, time::Instant};
 use serde::Serialize;
 
 use crate::{Error, Event};
+use super::privacy::{PrivacyMode, apply_privacy_to_value};
 
 // Core event name for LLM generations used by PostHog SDKs
 const EVENT_NAME: &str = "$ai_generation";
@@ -49,10 +50,12 @@ pub struct GenerationBuilder {
     error_code: Option<String>,
     error_message: Option<String>,
     metadata: Option<serde_json::Value>,
+    input_privacy: PrivacyMode,
+    output_privacy: PrivacyMode,
 }
 
 impl GenerationBuilder {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self { Self { input_privacy: PrivacyMode::Full, output_privacy: PrivacyMode::Full, ..Default::default() } }
 
     pub fn distinct_id<S: Into<String>>(mut self, id: S) -> Self { self.distinct_id = Some(id.into()); self }
     pub fn model<S: Into<String>>(mut self, m: S) -> Self { self.model = Some(m.into()); self }
@@ -73,6 +76,8 @@ impl GenerationBuilder {
     pub fn error_code<S: Into<String>>(mut self, code: S) -> Self { self.error_code = Some(code.into()); self }
     pub fn error_message<S: Into<String>>(mut self, msg: S) -> Self { self.error_message = Some(msg.into()); self }
     pub fn metadata<T: Serialize>(mut self, v: T) -> Result<Self, Error> { self.metadata = Some(to_json(v)?); Ok(self) }
+    pub fn input_privacy(mut self, mode: PrivacyMode) -> Self { self.input_privacy = mode; self }
+    pub fn output_privacy(mut self, mode: PrivacyMode) -> Self { self.output_privacy = mode; self }
 
     /// Populate token counts from Google Gemini usage metadata
     pub fn gemini_usage(mut self, prompt_tokens: u64, candidates_tokens: u64, total_tokens: u64) -> Self {
@@ -91,8 +96,10 @@ impl GenerationBuilder {
         let mut props: HashMap<String, serde_json::Value> = HashMap::new();
 
         if let Some(model) = self.model { props.insert(K_MODEL.into(), model.into()); }
-        if let Some(input) = self.input { props.insert(K_INPUT.into(), input); }
-        if let Some(output) = self.output { props.insert(K_OUTPUT.into(), output); }
+        let input = apply_privacy_to_value(self.input, self.input_privacy);
+        if let Some(input) = input { props.insert(K_INPUT.into(), input); }
+        let output = apply_privacy_to_value(self.output, self.output_privacy);
+        if let Some(output) = output { props.insert(K_OUTPUT.into(), output); }
         if let Some(prompt_id) = self.prompt_id { props.insert(K_PROMPT_ID.into(), prompt_id.into()); }
         if let Some(provider) = self.provider { props.insert(K_PROVIDER.into(), provider.into()); }
         if let Some(temperature) = self.temperature { props.insert(K_TEMPERATURE.into(), serde_json::json!(temperature)); }
