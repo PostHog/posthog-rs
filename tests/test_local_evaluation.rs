@@ -1,12 +1,10 @@
-use httpmock::prelude::*;
 use posthog_rs::{
-    ClientOptionsBuilder, FlagCache, LocalEvaluator,
+    FlagCache, LocalEvaluator,
     LocalEvaluationResponse, FeatureFlag, FeatureFlagFilters, FeatureFlagCondition,
     Property, FlagValue,
 };
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Duration;
 
 #[test]
 fn test_local_evaluation_basic() {

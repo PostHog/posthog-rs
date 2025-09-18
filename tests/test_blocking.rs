@@ -1,7 +1,7 @@
 #![cfg(not(feature = "async-client"))]
 
 use httpmock::prelude::*;
-use posthog_rs::{ClientOptionsBuilder, FlagValue};
+use posthog_rs::FlagValue;
 use serde_json::json;
 use std::collections::HashMap;
 

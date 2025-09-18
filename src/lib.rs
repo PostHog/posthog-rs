@@ -34,10 +34,13 @@ pub use feature_flags::{
 
 // Local Evaluation
 pub use local_evaluation::{
-    FlagCache, FlagPoller, AsyncFlagPoller,
+    FlagCache, FlagPoller,
     LocalEvaluationConfig, LocalEvaluator,
     LocalEvaluationResponse, Cohort,
 };
+
+#[cfg(feature = "async-client")]
+pub use local_evaluation::AsyncFlagPoller;
 
 // We expose a global capture function as a convenience, that uses a global client
 pub use global::capture;
