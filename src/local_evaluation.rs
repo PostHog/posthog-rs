@@ -150,9 +150,9 @@ impl FlagPoller {
                         if response.status().is_success() {
                             match response.json::<LocalEvaluationResponse>() {
                                 Ok(data) => cache.update(data),
-                                Err(e) => eprintln!(
-                                    "[FEATURE FLAGS] Failed to parse flag response: {e}"
-                                ),
+                                Err(e) => {
+                                    eprintln!("[FEATURE FLAGS] Failed to parse flag response: {e}")
+                                }
                             }
                         } else {
                             eprintln!(
