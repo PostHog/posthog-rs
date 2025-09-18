@@ -9,6 +9,10 @@
 ///
 /// Get personal key at: https://app.posthog.com/me/settings
 
+use posthog_rs::ClientOptionsBuilder;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use serde_json::json;
 
 #[cfg(feature = "async-client")]
 #[tokio::main]

@@ -6,6 +6,9 @@
 ///   export POSTHOG_API_TOKEN=phc_your_key
 ///   cargo run --example feature_flags --features async-client
 
+use posthog_rs::FlagValue;
+use std::collections::HashMap;
+use serde_json::json;
 
 #[cfg(feature = "async-client")]
 #[tokio::main]

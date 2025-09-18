@@ -4,6 +4,8 @@
 ///
 /// Run with: cargo run --example advanced_config --features async-client
 
+use posthog_rs::{ClientOptionsBuilder, EU_INGESTION_ENDPOINT};
+
 #[cfg(feature = "async-client")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
