@@ -90,3 +90,61 @@ pub fn span_to_event(data: RigSpan<'_>) -> Result<Event, Error> {
     b.build_event()
 }
 
+// Observers that apps can call from Rig hooks/callbacks
+
+#[cfg(feature = "async-client")]
+pub struct AsyncRigPosthogObserver<C> {
+    client: C,
+}
+
+#[cfg(feature = "async-client")]
+impl<C> AsyncRigPosthogObserver<C>
+where
+    C: crate::client::Client,
+{
+    pub fn new(client: C) -> Self { Self { client } }
+
+    pub async fn on_generation(&self, gen: RigGeneration<'_>) -> Result<(), Error> {
+        let event = generation_to_event(gen)?;
+        self.client.capture(event).await
+    }
+
+    pub async fn on_embedding(&self, emb: RigEmbedding<'_>) -> Result<(), Error> {
+        let event = embedding_to_event(emb)?;
+        self.client.capture(event).await
+    }
+
+    pub async fn on_span(&self, span: RigSpan<'_>) -> Result<(), Error> {
+        let event = span_to_event(span)?;
+        self.client.capture(event).await
+    }
+}
+
+#[cfg(not(feature = "async-client"))]
+pub struct RigPosthogObserver<C> {
+    client: C,
+}
+
+#[cfg(not(feature = "async-client"))]
+impl<C> RigPosthogObserver<C>
+where
+    C: crate::client::Client,
+{
+    pub fn new(client: C) -> Self { Self { client } }
+
+    pub fn on_generation(&self, gen: RigGeneration<'_>) -> Result<(), Error> {
+        let event = generation_to_event(gen)?;
+        self.client.capture(event)
+    }
+
+    pub fn on_embedding(&self, emb: RigEmbedding<'_>) -> Result<(), Error> {
+        let event = embedding_to_event(emb)?;
+        self.client.capture(event)
+    }
+
+    pub fn on_span(&self, span: RigSpan<'_>) -> Result<(), Error> {
+        let event = span_to_event(span)?;
+        self.client.capture(event)
+    }
+}
+

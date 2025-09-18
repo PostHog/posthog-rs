@@ -123,3 +123,20 @@ let rig_gen = RigGeneration {
 let event = generation_to_event(rig_gen)?;
 client.capture(event)?;
 ```
+
+Observer pattern (when Rig exposes hooks):
+
+```rust
+// blocking
+use posthog_rs::RigPosthogObserver;
+let observer = RigPosthogObserver::new(client);
+// inside your Rig callback
+observer.on_generation(rig_gen)?;
+
+// async
+use posthog_rs::AsyncRigPosthogObserver;
+let observer = AsyncRigPosthogObserver::new(client);
+observer.on_generation(rig_gen).await?;
+```
+
+Note: If Rig does not yet provide hook traits to subscribe to lifecycle events, call the observer methods from your own instrumentation around Rig requests. If Rig introduces official hooks, this crate can implement a dedicated listener integrating automatically.

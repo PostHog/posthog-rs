@@ -28,6 +28,7 @@ pub use llm::embedding::EmbeddingBuilder;
 pub use llm::privacy::PrivacyMode;
 
 // Integrations
+#[cfg(feature = "rig-integration")]
 pub use integrations::rig::*;
 
 // We expose a global capture function as a convenience, that uses a global client
