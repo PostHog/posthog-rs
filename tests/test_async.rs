@@ -1,7 +1,7 @@
 #![cfg(feature = "async-client")]
 
 use httpmock::prelude::*;
-use posthog_rs::{ClientOptionsBuilder, FlagValue};
+use posthog_rs::FlagValue;
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -343,13 +343,7 @@ async fn test_empty_distinct_id() {
     let client = create_test_client(server.base_url()).await;
 
     let result = client
-        .get_feature_flag(
-            "test-flag".to_string(),
-            "".to_string(),
-            None,
-            None,
-            None,
-        )
+        .get_feature_flag("test-flag".to_string(), "".to_string(), None, None, None)
         .await;
 
     assert!(result.is_ok());

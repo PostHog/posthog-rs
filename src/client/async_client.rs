@@ -68,12 +68,27 @@ impl Client {
         let payload =
             serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
 
-        let url = self.options.endpoints().build_url(Endpoint::Capture);
-        self.client
+        let mut url = self.options.endpoints().build_url(Endpoint::Capture);
+        if self.options.disable_geoip {
+            let separator = if url.contains('?') { "&" } else { "?" };
+            url.push_str(&format!("{}disable_geoip=1", separator));
+        }
+        
+        let request = self.client
             .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload)
-            .send()
+            .header(CONTENT_TYPE, "application/json");
+        
+        // Apply gzip compression if enabled
+        let request = if self.options.gzip {
+            // Note: reqwest will automatically compress the body when gzip feature is enabled
+            // and Content-Encoding header is set
+            request.header("Content-Encoding", "gzip")
+                .body(payload)
+        } else {
+            request.body(payload)
+        };
+        
+        request.send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
@@ -95,12 +110,27 @@ impl Client {
         let payload =
             serde_json::to_string(&events).map_err(|e| Error::Serialization(e.to_string()))?;
 
-        let url = self.options.endpoints().build_url(Endpoint::Capture);
-        self.client
+        let mut url = self.options.endpoints().build_url(Endpoint::Capture);
+        if self.options.disable_geoip {
+            let separator = if url.contains('?') { "&" } else { "?" };
+            url.push_str(&format!("{}disable_geoip=1", separator));
+        }
+        
+        let request = self.client
             .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload)
-            .send()
+            .header(CONTENT_TYPE, "application/json");
+        
+        // Apply gzip compression if enabled
+        let request = if self.options.gzip {
+            // Note: reqwest will automatically compress the body when gzip feature is enabled
+            // and Content-Encoding header is set
+            request.header("Content-Encoding", "gzip")
+                .body(payload)
+        } else {
+            request.body(payload)
+        };
+        
+        request.send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
@@ -134,10 +164,16 @@ impl Client {
             payload["group_properties"] = json!(group_properties);
         }
         
+        // Add geoip disable parameter if configured
+        if self.options.disable_geoip {
+            payload["disable_geoip"] = json!(true);
+        }
+        
         let response = self.client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .json(&payload)
+            .timeout(Duration::from_secs(self.options.feature_flags_request_timeout_seconds))
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
@@ -213,15 +249,21 @@ impl Client {
         let key_str = key.into();
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
         
-        let payload = json!({
+        let mut payload = json!({
             "api_key": self.options.api_key,
             "distinct_id": distinct_id.into(),
         });
+        
+        // Add geoip disable parameter if configured
+        if self.options.disable_geoip {
+            payload["disable_geoip"] = json!(true);
+        }
         
         let response = self.client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .json(&payload)
+            .timeout(Duration::from_secs(self.options.feature_flags_request_timeout_seconds))
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
