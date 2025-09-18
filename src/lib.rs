@@ -1,6 +1,7 @@
 mod client;
 mod error;
 mod event;
+mod llm;
 mod global;
 
 const API_ENDPOINT: &str = "https://us.i.posthog.com/i/v0/e/";
@@ -18,6 +19,9 @@ pub use error::Error;
 
 // Event
 pub use event::Event;
+
+// LLM Analytics
+pub use llm::generation::GenerationBuilder;
 
 // We expose a global capture function as a convenience, that uses a global client
 pub use global::capture;

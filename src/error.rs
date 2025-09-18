@@ -8,6 +8,7 @@ impl Display for Error {
             Error::AlreadyInitialized => write!(f, "Client already initialized"),
             Error::NotInitialized => write!(f, "Client not initialized"),
             Error::InvalidTimestamp(msg) => write!(f, "Invalid Timestamp: {}", msg),
+            Error::InvalidGeneration(msg) => write!(f, "Invalid Generation: {}", msg),
         }
     }
 }
@@ -20,4 +21,5 @@ pub enum Error {
     AlreadyInitialized,
     NotInitialized,
     InvalidTimestamp(String),
+    InvalidGeneration(String),
 }

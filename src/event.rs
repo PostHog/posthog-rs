@@ -34,6 +34,21 @@ impl Event {
         }
     }
 
+    /// Construct a new event from a raw properties map.
+    pub fn from_properties<S: Into<String>>(
+        event: S,
+        distinct_id: S,
+        properties: HashMap<String, serde_json::Value>,
+    ) -> Self {
+        Self {
+            event: event.into(),
+            distinct_id: distinct_id.into(),
+            properties,
+            groups: HashMap::new(),
+            timestamp: None,
+        }
+    }
+
     /// Capture a new anonymous event.
     /// See https://posthog.com/docs/data/anonymous-vs-identified-events#how-to-capture-anonymous-events
     pub fn new_anon<S: Into<String>>(event: S) -> Self {

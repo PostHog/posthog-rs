@@ -3,6 +3,7 @@ use std::time::Duration;
 use reqwest::{blocking::Client as HttpClient, header::CONTENT_TYPE};
 
 use crate::{event::InnerEvent, Error, Event};
+use crate::llm::generation::GenerationBuilder;
 
 use super::ClientOptions;
 
@@ -59,5 +60,11 @@ impl Client {
             .map_err(|e| Error::Connection(e.to_string()))?;
 
         Ok(())
+    }
+
+    /// Convenience helper to capture a single AI generation event built with GenerationBuilder
+    pub fn capture_generation(&self, generation: GenerationBuilder) -> Result<(), Error> {
+        let event: Event = generation.build_event()?;
+        self.capture(event)
     }
 }
