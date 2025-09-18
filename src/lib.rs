@@ -1,6 +1,7 @@
 mod client;
 mod error;
 mod event;
+mod feature_flags;
 mod global;
 
 const API_ENDPOINT: &str = "https://us.i.posthog.com/i/v0/e/";
@@ -18,6 +19,14 @@ pub use error::Error;
 
 // Event
 pub use event::Event;
+
+// Feature Flags
+pub use feature_flags::{
+    FeatureFlag, FeatureFlagsResponse, FlagValue,
+    FeatureFlagFilters, FeatureFlagCondition, Property,
+    MultivariateFilter, MultivariateVariant,
+    match_feature_flag,
+};
 
 // We expose a global capture function as a convenience, that uses a global client
 pub use global::capture;
