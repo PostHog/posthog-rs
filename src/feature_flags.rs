@@ -174,11 +174,11 @@ pub struct FlagMetadata {
 const LONG_SCALE: f64 = 0xFFFFFFFFFFFFFFFu64 as f64; // Must be exactly 15 F's to match Python SDK
 
 pub fn hash_key(key: &str, distinct_id: &str, salt: &str) -> f64 {
-    let hash_key = format!("{}.{}{}", key, distinct_id, salt);
+    let hash_key = format!("{key}.{distinct_id}{salt}");
     let mut hasher = Sha1::new();
     hasher.update(hash_key.as_bytes());
     let result = hasher.finalize();
-    let hex_str = format!("{:x}", result);
+    let hex_str = format!("{result:x}");
     let hash_val = u64::from_str_radix(&hex_str[..15], 16).unwrap_or(0);
     hash_val as f64 / LONG_SCALE
 }

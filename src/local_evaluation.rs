@@ -29,6 +29,12 @@ pub struct FlagCache {
     cohorts: Arc<RwLock<HashMap<String, Cohort>>>,
 }
 
+impl Default for FlagCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FlagCache {
     pub fn new() -> Self {
         Self {
@@ -106,7 +112,7 @@ impl FlagPoller {
     pub fn start(&mut self) {
         // Initial load
         if let Err(e) = self.load_flags() {
-            eprintln!("Failed to load initial flags: {}", e);
+            eprintln!("Failed to load initial flags: {e}");
         }
 
         let config = self.config.clone();
@@ -145,8 +151,7 @@ impl FlagPoller {
                             match response.json::<LocalEvaluationResponse>() {
                                 Ok(data) => cache.update(data),
                                 Err(e) => eprintln!(
-                                    "[FEATURE FLAGS] Failed to parse flag response: {}",
-                                    e
+                                    "[FEATURE FLAGS] Failed to parse flag response: {e}"
                                 ),
                             }
                         } else {
@@ -156,7 +161,7 @@ impl FlagPoller {
                             );
                         }
                     }
-                    Err(e) => eprintln!("[FEATURE FLAGS] Failed to fetch flags: {}", e),
+                    Err(e) => eprintln!("[FEATURE FLAGS] Failed to fetch flags: {e}"),
                 }
             }
         });
@@ -251,7 +256,7 @@ impl AsyncFlagPoller {
 
         // Initial load
         if let Err(e) = self.load_flags().await {
-            eprintln!("[FEATURE FLAGS] Failed to load initial flags: {}", e);
+            eprintln!("[FEATURE FLAGS] Failed to load initial flags: {e}");
         }
 
         let config = self.config.clone();
@@ -287,13 +292,13 @@ impl AsyncFlagPoller {
                                 if response.status().is_success() {
                                     match response.json::<LocalEvaluationResponse>().await {
                                         Ok(data) => cache.update(data),
-                                        Err(e) => eprintln!("[FEATURE FLAGS] Failed to parse flag response: {}", e),
+                                        Err(e) => eprintln!("[FEATURE FLAGS] Failed to parse flag response: {e}"),
                                     }
                                 } else {
                                     eprintln!("[FEATURE FLAGS] Failed to fetch flags: HTTP {}", response.status());
                                 }
                             }
-                            Err(e) => eprintln!("[FEATURE FLAGS] Failed to fetch flags: {}", e),
+                            Err(e) => eprintln!("[FEATURE FLAGS] Failed to fetch flags: {e}"),
                         }
                     }
                 }

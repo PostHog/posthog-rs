@@ -76,7 +76,7 @@ impl Client {
         let mut url = self.options.endpoints().build_url(Endpoint::Capture);
         if self.options.disable_geoip {
             let separator = if url.contains('?') { "&" } else { "?" };
-            url.push_str(&format!("{}disable_geoip=1", separator));
+            url.push_str(&format!("{separator}disable_geoip=1"));
         }
 
         let request = self
@@ -119,7 +119,7 @@ impl Client {
         let mut url = self.options.endpoints().build_url(Endpoint::Capture);
         if self.options.disable_geoip {
             let separator = if url.contains('?') { "&" } else { "?" };
-            url.push_str(&format!("{}disable_geoip=1", separator));
+            url.push_str(&format!("{separator}disable_geoip=1"));
         }
 
         let request = self
@@ -201,13 +201,12 @@ impl Client {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(Error::Connection(format!(
-                "API request failed with status {}: {}",
-                status, text
+                "API request failed with status {status}: {text}"
             )));
         }
 
         let flags_response = response.json::<FeatureFlagsResponse>().await.map_err(|e| {
-            Error::Serialization(format!("Failed to parse feature flags response: {}", e))
+            Error::Serialization(format!("Failed to parse feature flags response: {e}"))
         })?;
 
         Ok(flags_response.normalize())
@@ -309,7 +308,7 @@ impl Client {
         let flags_response: FeatureFlagsResponse = response
             .json()
             .await
-            .map_err(|e| Error::Serialization(format!("Failed to parse response: {}", e)))?;
+            .map_err(|e| Error::Serialization(format!("Failed to parse response: {e}")))?;
 
         let (_flags, payloads) = flags_response.normalize();
         Ok(payloads.get(&key_str).cloned())
