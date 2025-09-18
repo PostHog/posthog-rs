@@ -3,9 +3,7 @@
 /// Shows different ways to configure the PostHog Rust SDK for various use cases.
 ///
 /// Run with: cargo run --example advanced_config --features async-client
-use posthog_rs::{ClientOptionsBuilder, Event, EU_INGESTION_ENDPOINT};
-use serde_json::json;
-use std::collections::HashMap;
+use posthog_rs::{ClientOptionsBuilder, EU_INGESTION_ENDPOINT};
 
 #[cfg(feature = "async-client")]
 #[tokio::main]
@@ -51,35 +49,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _perf = posthog_rs::client(performance_config).await;
     println!("   → Evaluates flags locally (100x faster)\n");
-
-    // 6. DEVELOPMENT: Debugging and testing
-    println!("6. Development/debug configuration:");
-    let debug_config = ClientOptionsBuilder::default()
-        .api_key("phc_test_key".to_string())
-        .disabled(true) // Disable actual sending (for testing)
-        .disable_geoip(true) // Skip geoip lookup
-        .build()?;
-
-    let debug_client = posthog_rs::client(debug_config).await;
-    println!("   → Safe for development (tracking disabled)\n");
-
-    // 7. SHARED CONTEXT: Super properties on all events
-    println!("7. Adding context to all events:");
-    let mut context = HashMap::new();
-    context.insert("app_version".to_string(), json!("2.0.0"));
-    context.insert("environment".to_string(), json!("staging"));
-    context.insert("server_region".to_string(), json!("us-west-2"));
-
-    let context_config = ClientOptionsBuilder::default()
-        .api_key("phc_test_key".to_string())
-        .build()?;
-
-    let _context_client = posthog_rs::client(context_config).await;
-    println!("   → Automatically includes version, env, region on all events\n");
-
-    // Example event (won't actually send with test keys)
-    let event = Event::new("config_example_completed", "demo-user");
-    let _ = debug_client.capture(event).await; // This won't send (disabled=true)
 
     println!("✅ Configuration examples complete!");
     println!("\nTip: Check out 'feature_flags' example for flag usage");
