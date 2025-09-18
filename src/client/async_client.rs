@@ -5,6 +5,7 @@ use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
 use serde_json::json;
 
 use crate::{event::InnerEvent, Error, Event};
+use crate::endpoints::{Endpoint, EndpointManager};
 use crate::feature_flags::{FeatureFlagsResponse, FlagValue, match_feature_flag, FeatureFlag};
 use crate::local_evaluation::{FlagCache, AsyncFlagPoller, LocalEvaluationConfig, LocalEvaluator};
 
@@ -20,7 +21,9 @@ pub struct Client {
 
 /// This function constructs a new client using the options provided.
 pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
-    let options = options.into();
+    let mut options = options.into();
+    // Ensure endpoint_manager is properly initialized based on the host
+    options.endpoint_manager = EndpointManager::new(options.host.clone());
     let client = HttpClient::builder()
         .timeout(Duration::from_secs(options.request_timeout_seconds))
         .build()
@@ -30,20 +33,10 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         if let Some(ref personal_key) = options.personal_api_key {
             let cache = FlagCache::new();
             
-            // Extract the base host URL properly
-            let host = if let Some(pos) = options.api_endpoint.find("/i/v0/e/") {
-                options.api_endpoint[..pos].to_string()
-            } else if let Some(pos) = options.api_endpoint.find("/flags/") {
-                options.api_endpoint[..pos].to_string()
-            } else {
-                // Assume the endpoint is already the base URL
-                options.api_endpoint.trim_end_matches('/').to_string()
-            };
-            
             let config = LocalEvaluationConfig {
                 personal_api_key: personal_key.clone(),
                 project_api_key: options.api_key.clone(),
-                api_host: host,
+                api_host: options.endpoints().api_host(),
                 poll_interval: Duration::from_secs(options.poll_interval_seconds),
                 request_timeout: Duration::from_secs(options.request_timeout_seconds),
             };
@@ -66,13 +59,18 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 impl Client {
     /// Capture the provided event, sending it to PostHog.
     pub async fn capture(&self, event: Event) -> Result<(), Error> {
+        if self.options.is_disabled() {
+            return Ok(());
+        }
+        
         let inner_event = InnerEvent::new(event, self.options.api_key.clone());
 
         let payload =
             serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
 
+        let url = self.options.endpoints().build_url(Endpoint::Capture);
         self.client
-            .post(&self.options.api_endpoint)
+            .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
@@ -85,6 +83,10 @@ impl Client {
     /// Capture a collection of events with a single request. This function may be
     /// more performant than capturing a list of events individually.
     pub async fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
+        if self.options.is_disabled() {
+            return Ok(());
+        }
+        
         let events: Vec<_> = events
             .into_iter()
             .map(|event| InnerEvent::new(event, self.options.api_key.clone()))
@@ -93,8 +95,9 @@ impl Client {
         let payload =
             serde_json::to_string(&events).map_err(|e| Error::Serialization(e.to_string()))?;
 
+        let url = self.options.endpoints().build_url(Endpoint::Capture);
         self.client
-            .post(&self.options.api_endpoint)
+            .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
@@ -112,7 +115,7 @@ impl Client {
         person_properties: Option<HashMap<String, serde_json::Value>>,
         group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
     ) -> Result<(HashMap<String, FlagValue>, HashMap<String, serde_json::Value>), Error> {
-        let flags_endpoint = self.options.api_endpoint.replace("/i/v0/e/", "/flags/?v=2");
+        let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
         
         let mut payload = json!({
             "api_key": self.options.api_key,
@@ -208,7 +211,7 @@ impl Client {
         distinct_id: D,
     ) -> Result<Option<serde_json::Value>, Error> {
         let key_str = key.into();
-        let flags_endpoint = self.options.api_endpoint.replace("/i/v0/e/", "/flags/?v=2");
+        let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
         
         let payload = json!({
             "api_key": self.options.api_key,

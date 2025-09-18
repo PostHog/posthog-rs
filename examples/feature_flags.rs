@@ -175,7 +175,7 @@ async fn create_demo_client() -> posthog_rs::Client {
     // In demo mode, create a client that will fail gracefully
     // In a real app, you might want to use a mock server or local evaluation
     let options = ClientOptionsBuilder::default()
-        .api_endpoint("https://demo.posthog.com".to_string())
+        .host("https://demo.posthog.com")
         .api_key("demo_key".to_string())
         .build()
         .unwrap();

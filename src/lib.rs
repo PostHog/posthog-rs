@@ -1,11 +1,10 @@
 mod client;
+mod endpoints;
 mod error;
 mod event;
 mod feature_flags;
 mod global;
 mod local_evaluation;
-
-const API_ENDPOINT: &str = "https://us.i.posthog.com/i/v0/e/";
 
 // Public interface - any change to this is breaking!
 // Client
@@ -14,6 +13,9 @@ pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
+
+// Endpoints
+pub use endpoints::{EndpointManager, Endpoint, DEFAULT_HOST, US_INGESTION_ENDPOINT, EU_INGESTION_ENDPOINT};
 
 // Error
 pub use error::Error;

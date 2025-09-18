@@ -6,12 +6,8 @@ use serde_json::json;
 use std::collections::HashMap;
 
 fn create_test_client(base_url: String) -> posthog_rs::Client {
-    let options = ClientOptionsBuilder::default()
-        .api_endpoint(format!("{}/i/v0/e/", base_url))
-        .api_key("test_api_key".to_string())
-        .build()
-        .unwrap();
-
+    // Use the From implementation to ensure endpoint_manager is set up correctly
+    let options: posthog_rs::ClientOptions = (("test_api_key", base_url.as_str())).into();
     posthog_rs::client(options)
 }
 
