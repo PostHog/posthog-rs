@@ -1,17 +1,13 @@
-/// Local Evaluation Example
+/// Local Evaluation Performance Demo
 /// 
-/// Demonstrates high-performance local feature flag evaluation.
-/// Local evaluation:
-/// - Fetches all flag definitions once at startup  
-/// - Polls for updates periodically in the background
-/// - Evaluates flags locally without API calls (100-1000x faster)
+/// Shows 100-1000x faster flag evaluation by caching definitions locally.
 /// 
-/// Requirements:
-///   export POSTHOG_API_TOKEN=your_project_api_key
-///   export POSTHOG_PERSONAL_API_TOKEN=your_personal_api_key
+/// Setup:
+///   export POSTHOG_API_TOKEN=phc_your_project_key
+///   export POSTHOG_PERSONAL_API_TOKEN=phx_your_personal_key
 ///   cargo run --example local_evaluation --features async-client
 ///
-/// Personal API keys can be created at: https://app.posthog.com/me/settings
+/// Get personal key at: https://app.posthog.com/me/settings
 
 use posthog_rs::ClientOptionsBuilder;
 use std::collections::HashMap;

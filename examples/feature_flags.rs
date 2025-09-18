@@ -1,19 +1,12 @@
 /// Feature Flags Example
 /// 
-/// Demonstrates how to use feature flags with the PostHog Rust SDK.
-/// This example shows:
-/// - Boolean feature flags (on/off)
-/// - Multivariate flags (A/B testing with variants)
-/// - Feature flag payloads
-/// - Using person properties for targeting
+/// Shows all feature flag patterns: boolean flags, A/B tests, payloads, and targeting.
 /// 
-/// To run with real PostHog:
-///   export POSTHOG_API_TOKEN=your_api_key
+/// Run with real API:
+///   export POSTHOG_API_TOKEN=phc_your_key
 ///   cargo run --example feature_flags --features async-client
-///
-/// Without an API key, it will use mock data for demonstration.
 
-use posthog_rs::{ClientOptionsBuilder, FlagValue};
+use posthog_rs::FlagValue;
 use std::collections::HashMap;
 use serde_json::json;
 
@@ -33,11 +26,7 @@ async fn main() {
     let client = if is_demo {
         create_demo_client().await
     } else {
-        let options = ClientOptionsBuilder::default()
-            .api_key(api_key)
-            .build()
-            .unwrap();
-        posthog_rs::client(options).await
+        posthog_rs::client(api_key.as_str()).await
     };
 
     // Example 1: Simple boolean flag check
@@ -172,20 +161,8 @@ async fn main() {
 
 #[cfg(feature = "async-client")]
 async fn create_demo_client() -> posthog_rs::Client {
-    // In demo mode, create a client that will fail gracefully
-    // In a real app, you might want to use a mock server or local evaluation
-    let options = ClientOptionsBuilder::default()
-        .host("https://demo.posthog.com")
-        .api_key("demo_key".to_string())
-        .build()
-        .unwrap();
-    
-    let client = posthog_rs::client(options).await;
-    
-    // Note: API calls will fail in demo mode, but the example structure is shown
-    println!("Note: Running in demo mode. API calls will fail but the code structure is demonstrated.\n");
-    
-    client
+    println!("Note: Running in demo mode. API calls will fail but code structure is shown.\n");
+    posthog_rs::client(("demo_key", "https://demo.posthog.com")).await
 }
 
 #[cfg(not(feature = "async-client"))]
