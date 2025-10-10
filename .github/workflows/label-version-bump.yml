@@ -20,7 +20,7 @@ jobs:
               uses: actions/checkout@v4
               with:
                   ref: ${{ github.event.pull_request.base.ref }}
-                  token: ${{ secrets.POSTHOG_BOT_GITHUB_TOKEN }}
+                  token: ${{ secrets.POSTHOG_BOT_PAT }}
                   fetch-depth: 0
 
             - uses: pnpm/action-setup@v4
@@ -79,4 +79,4 @@ jobs:
               with:
                   branch: ${{ github.event.pull_request.base.ref }}
                   message: "chore: Bump version to ${{ steps.versions.outputs.new-version }}"
-                  github_token: ${{ secrets.POSTHOG_BOT_GITHUB_TOKEN }}
+                  github_token: ${{ secrets.POSTHOG_BOT_PAT }}
