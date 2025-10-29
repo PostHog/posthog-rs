@@ -43,9 +43,9 @@ async fn main() {
     {
         Ok(enabled) => {
             if enabled {
-                println!("✅ New dashboard is enabled for {}", user_id);
+                println!("✅ New dashboard is enabled for user");
             } else {
-                println!("❌ New dashboard is disabled for {}", user_id);
+                println!("❌ New dashboard is disabled for user");
             }
         }
         Err(e) => println!("Error checking flag: {}", e),
@@ -65,7 +65,7 @@ async fn main() {
         .await
     {
         Ok(Some(FlagValue::String(variant))) => {
-            println!("User {} gets checkout variant: {}", user_id, variant);
+            println!("User gets checkout variant: {}", variant);
             match variant.as_str() {
                 "control" => println!("  → Show original checkout flow"),
                 "variant-a" => println!("  → Show streamlined checkout"),
@@ -123,7 +123,7 @@ async fn main() {
         .await
     {
         Ok((flags, payloads)) => {
-            println!("All flags for {}:", user_id);
+            println!("All flags for user");
             for (flag_key, flag_value) in flags {
                 match flag_value {
                     FlagValue::Boolean(b) => println!("  {}: {}", flag_key, b),

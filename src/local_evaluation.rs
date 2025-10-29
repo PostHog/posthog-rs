@@ -76,7 +76,11 @@ impl FlagCache {
 /// Configuration for local evaluation
 #[derive(Clone)]
 pub struct LocalEvaluationConfig {
+    /// Personal API key for authentication (sensitive - transmitted via Authorization header only)
     pub personal_api_key: String,
+    /// Project API key for project identification (public - safe to include in URLs)
+    /// Note: PostHog project API keys (phc_*) are designed to be public and used in client-side code.
+    /// See: https://posthog.com/questions/api-key-security
     pub project_api_key: String,
     pub api_host: String,
     pub poll_interval: Duration,
@@ -132,6 +136,7 @@ impl FlagPoller {
                     break;
                 }
 
+                // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
                 let url = format!(
                     "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
                     config.api_host.trim_end_matches('/'),
@@ -171,6 +176,7 @@ impl FlagPoller {
 
     /// Load flags synchronously
     pub fn load_flags(&self) -> Result<(), Error> {
+        // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
         let url = format!(
             "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
             self.config.api_host.trim_end_matches('/'),
@@ -276,6 +282,7 @@ impl AsyncFlagPoller {
                             break;
                         }
 
+                        // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
                         let url = format!(
                             "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
                             config.api_host.trim_end_matches('/'),
@@ -313,6 +320,7 @@ impl AsyncFlagPoller {
 
     /// Load flags asynchronously
     pub async fn load_flags(&self) -> Result<(), Error> {
+        // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
         let url = format!(
             "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
             self.config.api_host.trim_end_matches('/'),
