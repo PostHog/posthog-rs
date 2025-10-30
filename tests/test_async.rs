@@ -53,7 +53,7 @@ async fn test_get_all_feature_flags() {
         eprintln!("Mock server URL: {}", server.base_url());
     }
     assert!(result.is_ok());
-    let (feature_flags, payloads) = result.unwrap();
+    let (feature_flags, payloads, _request_id, _flag_details) = result.unwrap();
 
     assert_eq!(
         feature_flags.get("test-flag"),
@@ -419,4 +419,238 @@ async fn test_malformed_response() {
     assert!(result.unwrap_err().to_string().contains("expected"));
 
     malformed_mock.assert();
+}
+
+// Feature Flag Event Tests
+
+#[tokio::test]
+async fn test_feature_flag_event_captured() {
+    // Test that $feature_flag_called event is captured when calling get_feature_flag
+    let server = MockServer::start();
+
+    // Mock the flags endpoint
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "test-flag": true
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    // Mock the capture endpoint to verify event is sent
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called"
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url()).await;
+
+    let result = client
+        .get_feature_flag("test-flag", "test-user", None, None, None)
+        .await;
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    flags_mock.assert();
+    capture_mock.assert();
+}
+
+#[tokio::test]
+async fn test_feature_flag_event_deduplication() {
+    // Test that calling same flag for same user doesn't send duplicate events
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "test-flag": true
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/");
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url()).await;
+
+    // First call - should capture event
+    client
+        .get_feature_flag("test-flag", "test-user", None, None, None)
+        .await
+        .ok();
+
+    // Second call - should NOT capture event (deduplication)
+    client
+        .get_feature_flag("test-flag", "test-user", None, None, None)
+        .await
+        .ok();
+
+    flags_mock.assert_hits(2);
+    capture_mock.assert_hits(1); // Only 1 event captured, not 2
+}
+
+#[tokio::test]
+async fn test_feature_flag_event_different_user() {
+    // Test that calling same flag for different user captures new event
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "test-flag": true
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called"
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url()).await;
+
+    // Call for user1 - should capture event
+    client
+        .get_feature_flag("test-flag", "user1", None, None, None)
+        .await
+        .ok();
+
+    // Call for user2 - should capture event (different user)
+    client
+        .get_feature_flag("test-flag", "user2", None, None, None)
+        .await
+        .ok();
+
+    flags_mock.assert_hits(2);
+    capture_mock.assert_hits(2); // 2 events captured for different users
+}
+
+#[tokio::test]
+async fn test_feature_flag_event_send_false() {
+    // Test that send_feature_flag_events=false disables event capture
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "test-flag": true
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/capture/");
+        then.status(200);
+    });
+
+    // Create client with send_feature_flag_events disabled
+    let options = posthog_rs::ClientOptionsBuilder::default()
+        .api_key("test_api_key".to_string())
+        .host(server.base_url())
+        .send_feature_flag_events(false)
+        .build()
+        .unwrap();
+
+    let client = posthog_rs::client(options).await;
+
+    let result = client
+        .get_feature_flag("test-flag", "test-user", None, None, None)
+        .await;
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    flags_mock.assert();
+    capture_mock.assert_hits(0); // No event captured when disabled
+}
+
+#[tokio::test]
+async fn test_feature_flag_event_with_variant() {
+    // Test that multivariate flag variant is captured in event
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "variant-flag": "control"
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/");
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url()).await;
+
+    let result = client
+        .get_feature_flag("variant-flag", "test-user", None, None, None)
+        .await;
+
+    assert!(result.is_ok());
+    assert_eq!(
+        result.unwrap(),
+        Some(FlagValue::String("control".to_string()))
+    );
+    flags_mock.assert();
+    capture_mock.assert();
+}
+
+#[tokio::test]
+async fn test_is_feature_enabled_captures_event() {
+    // Test that is_feature_enabled also captures events
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "enabled-flag": true
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called"
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url()).await;
+
+    let result = client
+        .is_feature_enabled("enabled-flag", "test-user", None, None, None)
+        .await;
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
+    flags_mock.assert();
+    capture_mock.assert();
 }

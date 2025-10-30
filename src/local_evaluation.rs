@@ -80,7 +80,7 @@ pub struct LocalEvaluationConfig {
     pub personal_api_key: String,
     /// Project API key for project identification (public - safe to include in URLs)
     /// Note: PostHog project API keys (phc_*) are designed to be public and used in client-side code.
-    /// See: https://posthog.com/questions/api-key-security
+    /// See: <https://posthog.com/questions/api-key-security>
     pub project_api_key: String,
     pub api_host: String,
     pub poll_interval: Duration,

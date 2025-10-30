@@ -56,6 +56,10 @@ pub struct ClientOptions {
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
 
+    /// Enable automatic $feature_flag_called events (default: true)
+    #[builder(default = "true")]
+    pub send_feature_flag_events: bool,
+
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(None)")]
     endpoint_manager: EndpointManager,

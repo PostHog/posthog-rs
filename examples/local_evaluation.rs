@@ -132,7 +132,7 @@ async fn main() {
         .get_feature_flags(user_id.to_string(), None, Some(properties), None)
         .await
     {
-        Ok((flags, _)) => {
+        Ok((flags, _, _, _)) => {
             let duration = start.elapsed();
             println!("Evaluated {} flags in {:?}", flags.len(), duration);
 

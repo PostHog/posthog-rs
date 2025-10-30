@@ -88,6 +88,9 @@ pub enum FeatureFlagsResponse {
         #[serde(rename = "errorsWhileComputingFlags")]
         #[serde(default)]
         errors_while_computing_flags: bool,
+        #[serde(rename = "requestId")]
+        #[serde(default)]
+        request_id: Option<String>,
     },
     // Legacy format (old decide endpoint)
     Legacy {
@@ -98,21 +101,30 @@ pub enum FeatureFlagsResponse {
         feature_flag_payloads: HashMap<String, serde_json::Value>,
         #[serde(default)]
         errors: Option<Vec<String>>,
+        #[serde(rename = "requestId")]
+        #[serde(default)]
+        request_id: Option<String>,
     },
 }
 
 impl FeatureFlagsResponse {
     /// Convert the response to a normalized format
+    /// Returns: (flags, payloads, request_id, flag_details)
     pub fn normalize(
         self,
     ) -> (
         HashMap<String, FlagValue>,
         HashMap<String, serde_json::Value>,
+        Option<String>,
+        HashMap<String, FlagDetail>,
     ) {
         match self {
-            FeatureFlagsResponse::V2 { flags, .. } => {
+            FeatureFlagsResponse::V2 {
+                flags, request_id, ..
+            } => {
                 let mut feature_flags = HashMap::new();
                 let mut payloads = HashMap::new();
+                let flag_details = flags.clone(); // Keep full details for metadata
 
                 for (key, detail) in flags {
                     if detail.enabled {
@@ -132,13 +144,22 @@ impl FeatureFlagsResponse {
                     }
                 }
 
-                (feature_flags, payloads)
+                (feature_flags, payloads, request_id, flag_details)
             }
             FeatureFlagsResponse::Legacy {
                 feature_flags,
                 feature_flag_payloads,
+                request_id,
                 ..
-            } => (feature_flags, feature_flag_payloads),
+            } => {
+                // Legacy format doesn't have FlagDetail, return empty
+                (
+                    feature_flags,
+                    feature_flag_payloads,
+                    request_id,
+                    HashMap::new(),
+                )
+            }
         }
     }
 }
@@ -171,7 +192,7 @@ pub struct FlagMetadata {
     pub payload: Option<serde_json::Value>,
 }
 
-const LONG_SCALE: f64 = 0xFFFFFFFFFFFFFFFu64 as f64; // Must be exactly 15 F's to match Python SDK
+const LONG_SCALE: f64 = 0xFFFFFFFFFFFFFFFu64 as f64; // Must be exactly 15 F's for hash compatibility
 
 pub fn hash_key(key: &str, distinct_id: &str, salt: &str) -> f64 {
     let hash_key = format!("{key}.{distinct_id}{salt}");

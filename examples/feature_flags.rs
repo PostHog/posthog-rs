@@ -5,8 +5,12 @@
 /// Run with real API:
 ///   export POSTHOG_API_TOKEN=phc_your_key
 ///   cargo run --example feature_flags --features async-client
+
+#[cfg(feature = "async-client")]
 use posthog_rs::FlagValue;
+#[cfg(feature = "async-client")]
 use serde_json::json;
+#[cfg(feature = "async-client")]
 use std::collections::HashMap;
 
 #[cfg(feature = "async-client")]
@@ -122,7 +126,7 @@ async fn main() {
         .get_feature_flags(user_id.to_string(), None, Some(properties), None)
         .await
     {
-        Ok((flags, payloads)) => {
+        Ok((flags, payloads, _request_id, _flag_details)) => {
             println!("All flags for user");
             for (flag_key, flag_value) in flags {
                 match flag_value {

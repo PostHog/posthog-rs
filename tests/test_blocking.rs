@@ -47,7 +47,7 @@ fn test_get_all_feature_flags() {
     let result = client.get_feature_flags("test-user".to_string(), None, None, None);
 
     assert!(result.is_ok());
-    let (feature_flags, payloads) = result.unwrap();
+    let (feature_flags, payloads, _request_id, _flag_details) = result.unwrap();
 
     assert_eq!(
         feature_flags.get("test-flag"),
@@ -219,4 +219,281 @@ fn test_api_error_handling() {
     assert!(error.to_string().contains("500"));
 
     error_mock.assert();
+}
+
+// Feature Flag Event Tests
+
+#[test]
+fn test_feature_flag_event_captured() {
+    // Test that $feature_flag_called event is captured when calling get_feature_flag
+    let server = MockServer::start();
+
+    // Mock the flags endpoint
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "test-flag": true
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    // Mock the capture endpoint to verify event is sent
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called",
+                "properties": {
+                    "$feature_flag": "test-flag",
+                    "$feature_flag_response": true
+                }
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let result = client.get_feature_flag(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    flags_mock.assert();
+    capture_mock.assert();
+}
+
+#[test]
+fn test_feature_flag_event_deduplication() {
+    // Test that calling same flag for same user doesn't send duplicate events
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "test-flag": true
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called"
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    // First call - should capture event
+    let _ = client.get_feature_flag(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    // Second call - should NOT capture event (deduplication)
+    let _ = client.get_feature_flag(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    flags_mock.assert_hits(2);
+    capture_mock.assert_hits(1); // Only 1 event captured, not 2
+}
+
+#[test]
+fn test_feature_flag_event_different_user() {
+    // Test that calling same flag for different user captures new event
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "test-flag": true
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called",
+                "properties": {
+                    "$feature_flag": "test-flag",
+                    "$feature_flag_response": true
+                }
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    // Call for user1 - should capture event
+    let _ = client.get_feature_flag(
+        "test-flag".to_string(),
+        "user1".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    // Call for user2 - should capture event (different user)
+    let _ = client.get_feature_flag(
+        "test-flag".to_string(),
+        "user2".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    flags_mock.assert_hits(2);
+    capture_mock.assert_hits(2); // 2 events captured for different users
+}
+
+#[test]
+fn test_feature_flag_event_send_false() {
+    // Test that send_feature_flag_events=false disables event capture
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "test-flag": true
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/capture/");
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    // Call with send_feature_flag_events=false - should NOT capture event
+    let _ = client.get_feature_flag_with_options(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+        false, // send_feature_flag_events
+    );
+
+    flags_mock.assert();
+    capture_mock.assert_hits(0); // No event captured
+}
+
+#[test]
+fn test_feature_flag_event_with_variant() {
+    // Test that multivariate flags capture the variant value correctly
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "test-flag": "variant-b"
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called",
+                "properties": {
+                    "$feature_flag": "test-flag",
+                    "$feature_flag_response": "variant-b",
+                    "$feature/test-flag": "variant-b"
+                }
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let result = client.get_feature_flag(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(
+        result.unwrap(),
+        Some(FlagValue::String("variant-b".to_string()))
+    );
+    flags_mock.assert();
+    capture_mock.assert();
+}
+
+#[test]
+fn test_is_feature_enabled_captures_event() {
+    // Test that is_feature_enabled also captures $feature_flag_called event
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {
+                "test-flag": true
+            },
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called"
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let result = client.is_feature_enabled(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
+    flags_mock.assert();
+    capture_mock.assert();
 }
