@@ -112,17 +112,24 @@ impl TransportError {
 impl From<reqwest::Error> for TransportError {
     fn from(err: reqwest::Error) -> Self {
         if err.is_timeout() {
-            TransportError::Timeout(Duration::from_secs(30))
-        } else if err.is_connect() {
-            if let Some(url) = err.url() {
-                TransportError::DnsResolution(url.host_str().unwrap_or("unknown").to_string())
-            } else {
-                TransportError::NetworkUnreachable
-            }
-        } else if let Some(status) = err.status() {
-            TransportError::HttpError(status.as_u16(), err.to_string())
-        } else if err.to_string().contains("tls") || err.to_string().contains("ssl") {
-            TransportError::TlsError(err.to_string())
+            return TransportError::Timeout(Duration::from_secs(30));
+        }
+
+        if err.is_connect() {
+            return err
+                .url()
+                .and_then(|u| u.host_str())
+                .map(|host| TransportError::DnsResolution(host.to_string()))
+                .unwrap_or(TransportError::NetworkUnreachable);
+        }
+
+        if let Some(status) = err.status() {
+            return TransportError::HttpError(status.as_u16(), err.to_string());
+        }
+
+        let err_str = err.to_string();
+        if err_str.contains("tls") || err_str.contains("ssl") {
+            TransportError::TlsError(err_str)
         } else {
             TransportError::NetworkUnreachable
         }
