@@ -1,5 +1,4 @@
-// CI runs: cargo test --features e2e-test --no-default-features
-#[cfg(all(feature = "e2e-test", not(feature = "async-client")))]
+#[cfg(feature = "e2e-test")]
 #[test]
 fn get_client() {
     use dotenv::dotenv;

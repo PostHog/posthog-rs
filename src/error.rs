@@ -2,9 +2,6 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Main error type for the PostHog Rust SDK.
-///
-/// This enum is non-exhaustive to discourage matching on specific error variants.
-/// Instead, use the provided methods like `is_retryable()` to determine how to handle errors.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -50,20 +47,7 @@ pub enum Error {
 }
 
 impl Error {
-    /// Returns true if this error is potentially recoverable via retry.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use posthog_rs::{Error, TransportError};
-    /// use std::time::Duration;
-    ///
-    /// let err = Error::Transport(TransportError::Timeout(Duration::from_secs(30)));
-    /// assert!(err.is_retryable());
-    ///
-    /// let err = Error::Validation(posthog_rs::ValidationError::InvalidTimestamp("future".to_string()));
-    /// assert!(!err.is_retryable());
-    /// ```
+    /// Returns true if this error can be retried.
     pub fn is_retryable(&self) -> bool {
         match self {
             Error::Transport(e) => e.is_retryable(),
@@ -71,33 +55,7 @@ impl Error {
         }
     }
 
-    /// Returns true if this error is due to invalid client usage or configuration.
-    ///
-    /// Client errors indicate a problem with how the SDK is being used (validation
-    /// errors, missing configuration, 4xx HTTP errors) rather than transient network
-    /// issues. These errors typically require fixing the code rather than retrying.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use posthog_rs::{Error, ValidationError, InitializationError, TransportError};
-    ///
-    /// // Validation errors are client errors
-    /// let err = Error::Validation(ValidationError::InvalidTimestamp("future".to_string()));
-    /// assert!(err.is_client_error());
-    ///
-    /// // Initialization errors are client errors
-    /// let err = Error::Initialization(InitializationError::MissingApiKey);
-    /// assert!(err.is_client_error());
-    ///
-    /// // 4xx HTTP errors are client errors
-    /// let err = Error::Transport(TransportError::HttpError(400, "Bad Request".to_string()));
-    /// assert!(err.is_client_error());
-    ///
-    /// // 5xx errors are NOT client errors
-    /// let err = Error::Transport(TransportError::HttpError(500, "Server Error".to_string()));
-    /// assert!(!err.is_client_error());
-    /// ```
+    /// Returns true if this error is due to invalid usage (4xx, validation, or config errors).
     pub fn is_client_error(&self) -> bool {
         match self {
             Error::Validation(_) | Error::Initialization(_) => true,
@@ -107,9 +65,7 @@ impl Error {
     }
 }
 
-/// Errors related to network transport and HTTP communication.
-///
-/// Non-exhaustive to allow adding new error types without breaking changes.
+/// Network transport and HTTP errors.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TransportError {
@@ -135,13 +91,7 @@ pub enum TransportError {
 }
 
 impl TransportError {
-    /// Returns true if this error is potentially recoverable via retry.
-    ///
-    /// Retryable errors include:
-    /// - Timeouts
-    /// - Network unreachable
-    /// - HTTP 5xx errors (server errors)
-    /// - HTTP 429 (rate limiting)
+    /// Returns true if this error can be retried (timeouts, 5xx, 429).
     pub fn is_retryable(&self) -> bool {
         match self {
             TransportError::Timeout(_) => true,
@@ -154,13 +104,11 @@ impl TransportError {
         }
     }
 
-    // Internal helper for Error::is_client_error()
     fn is_client_error(&self) -> bool {
         matches!(self, TransportError::HttpError(400..=499, _))
     }
 }
 
-/// Convert from reqwest::Error to TransportError
 impl From<reqwest::Error> for TransportError {
     fn from(err: reqwest::Error) -> Self {
         if err.is_timeout() {
@@ -181,10 +129,7 @@ impl From<reqwest::Error> for TransportError {
     }
 }
 
-/// Errors related to event validation and data integrity.
-///
-/// These errors should be raised eagerly when users construct events,
-/// rather than during serialization. If an event is valid, it must be serializable.
+/// Event validation and data integrity errors.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ValidationError {
@@ -217,7 +162,7 @@ pub enum ValidationError {
     SerializationFailed(String),
 }
 
-/// Errors related to client initialization and configuration.
+/// Client initialization and configuration errors.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum InitializationError {
