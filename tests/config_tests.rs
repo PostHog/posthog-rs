@@ -3,7 +3,7 @@ use posthog_rs::{ClientOptions, ClientOptionsBuilder, Error};
 #[test]
 fn test_client_options_builder_default_endpoint() {
     let options = ClientOptionsBuilder::new()
-        .api_key("test_key".to_string())
+        .api_key("test_key")
         .build()
         .unwrap();
 
@@ -20,8 +20,8 @@ fn test_client_options_builder_default_endpoint() {
 #[test]
 fn test_client_options_builder_with_hostname() {
     let options = ClientOptionsBuilder::new()
-        .api_key("test_key".to_string())
-        .api_endpoint("https://eu.posthog.com".to_string())
+        .api_key("test_key")
+        .api_endpoint("https://eu.posthog.com")
         .build()
         .unwrap();
 
@@ -39,8 +39,8 @@ fn test_client_options_builder_with_hostname() {
 fn test_client_options_builder_with_full_endpoint_single() {
     // Backward compatibility: accept full endpoint and strip path
     let options = ClientOptionsBuilder::new()
-        .api_key("test_key".to_string())
-        .api_endpoint("https://us.i.posthog.com/i/v0/e/".to_string())
+        .api_key("test_key")
+        .api_endpoint("https://us.i.posthog.com/i/v0/e/")
         .build()
         .unwrap();
 
@@ -58,8 +58,8 @@ fn test_client_options_builder_with_full_endpoint_single() {
 fn test_client_options_builder_with_full_endpoint_batch() {
     // Backward compatibility: accept batch endpoint and strip path
     let options = ClientOptionsBuilder::new()
-        .api_key("test_key".to_string())
-        .api_endpoint("https://us.i.posthog.com/batch/".to_string())
+        .api_key("test_key")
+        .api_endpoint("https://us.i.posthog.com/batch/")
         .build()
         .unwrap();
 
@@ -76,8 +76,8 @@ fn test_client_options_builder_with_full_endpoint_batch() {
 #[test]
 fn test_client_options_builder_with_port() {
     let options = ClientOptionsBuilder::new()
-        .api_key("test_key".to_string())
-        .api_endpoint("http://localhost:8000".to_string())
+        .api_key("test_key")
+        .api_endpoint("http://localhost:8000")
         .build()
         .unwrap();
 
@@ -94,8 +94,8 @@ fn test_client_options_builder_with_port() {
 #[test]
 fn test_client_options_builder_with_trailing_slash() {
     let options = ClientOptionsBuilder::new()
-        .api_key("test_key".to_string())
-        .api_endpoint("https://eu.posthog.com/".to_string())
+        .api_key("test_key")
+        .api_endpoint("https://eu.posthog.com/")
         .build()
         .unwrap();
 
@@ -112,8 +112,8 @@ fn test_client_options_builder_with_trailing_slash() {
 #[test]
 fn test_client_options_builder_invalid_endpoint_no_scheme() {
     let result = ClientOptionsBuilder::new()
-        .api_key("test_key".to_string())
-        .api_endpoint("posthog.com".to_string())
+        .api_key("test_key")
+        .api_endpoint("posthog.com")
         .build();
 
     assert!(result.is_err());
@@ -128,8 +128,8 @@ fn test_client_options_builder_invalid_endpoint_no_scheme() {
 #[test]
 fn test_client_options_builder_invalid_endpoint_malformed() {
     let result = ClientOptionsBuilder::new()
-        .api_key("test_key".to_string())
-        .api_endpoint("not a url".to_string())
+        .api_key("test_key")
+        .api_endpoint("not a url")
         .build();
 
     assert!(result.is_err());
@@ -168,7 +168,7 @@ fn test_client_options_from_str() {
 #[test]
 fn test_client_options_custom_timeout() {
     let options = ClientOptionsBuilder::new()
-        .api_key("test_key".to_string())
+        .api_key("test_key")
         .request_timeout_seconds(60)
         .build()
         .unwrap();

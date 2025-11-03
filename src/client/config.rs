@@ -58,8 +58,8 @@ impl ClientOptionsBuilder {
     }
 
     /// Set the API key (required)
-    pub fn api_key(mut self, api_key: String) -> Self {
-        self.api_key = Some(api_key);
+    pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key = Some(api_key.into());
         self
     }
 
@@ -69,8 +69,8 @@ impl ClientOptionsBuilder {
     ///
     /// The SDK will automatically append the appropriate paths (/i/v0/e/ or /batch/)
     /// based on the operation being performed.
-    pub fn api_endpoint(mut self, endpoint: String) -> Self {
-        self.api_endpoint = Some(endpoint);
+    pub fn api_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.api_endpoint = Some(endpoint.into());
         self
     }
 
