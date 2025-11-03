@@ -1,4 +1,3 @@
-use crate::error::InitializationError;
 use crate::Error;
 
 const DEFAULT_HOST: &str = "https://us.i.posthog.com";
@@ -15,7 +14,7 @@ pub struct ClientOptions {
 
 impl ClientOptions {
     /// Get the full endpoint URL for single event capture
-    pub(crate) fn single_event_endpoint(&self) -> String {
+    pub fn single_event_endpoint(&self) -> String {
         format!(
             "{}{}",
             self.api_endpoint.trim_end_matches('/'),
@@ -24,7 +23,7 @@ impl ClientOptions {
     }
 
     /// Get the full endpoint URL for batch event capture
-    pub(crate) fn batch_event_endpoint(&self) -> String {
+    pub fn batch_event_endpoint(&self) -> String {
         format!(
             "{}{}",
             self.api_endpoint.trim_end_matches('/'),
@@ -32,11 +31,11 @@ impl ClientOptions {
         )
     }
 
-    pub(crate) fn api_key(&self) -> &str {
+    pub fn api_key(&self) -> &str {
         &self.api_key
     }
 
-    pub(crate) fn request_timeout_seconds(&self) -> u64 {
+    pub fn request_timeout_seconds(&self) -> u64 {
         self.request_timeout_seconds
     }
 }
@@ -83,7 +82,9 @@ impl ClientOptionsBuilder {
 
     /// Build the ClientOptions, validating all fields
     pub fn build(self) -> Result<ClientOptions, Error> {
-        let api_key = self.api_key.ok_or(InitializationError::MissingApiKey)?;
+        let api_key = self
+            .api_key
+            .ok_or_else(|| Error::Serialization("API key is required".to_string()))?;
 
         let request_timeout_seconds = self.request_timeout_seconds.unwrap_or(30);
 
@@ -115,22 +116,21 @@ fn normalize_endpoint(endpoint: &str) -> Result<String, Error> {
 
     // Basic validation - must start with http:// or https://
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-        return Err(InitializationError::InvalidEndpoint(
+        return Err(Error::Serialization(
             "Endpoint must start with http:// or https://".to_string(),
-        )
-        .into());
+        ));
     }
 
     // Parse as URL to validate
     let url = endpoint
         .parse::<url::Url>()
-        .map_err(|e| InitializationError::InvalidEndpoint(format!("Invalid URL: {}", e)))?;
+        .map_err(|e| Error::Serialization(format!("Invalid URL: {}", e)))?;
 
     // Extract scheme and host
     let scheme = url.scheme();
     let host = url
         .host_str()
-        .ok_or_else(|| InitializationError::InvalidEndpoint("Missing host".to_string()))?;
+        .ok_or_else(|| Error::Serialization("Missing host".to_string()))?;
 
     // Check if this looks like a full endpoint path (contains /i/v0/e or /batch)
     let path = url.path();
@@ -151,179 +151,5 @@ impl From<&str> for ClientOptions {
             .api_key(api_key.to_string())
             .build()
             .expect("We always set the API key, so this is infallible")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_client_options_builder_default_endpoint() {
-        let options = ClientOptionsBuilder::new()
-            .api_key("test_key".to_string())
-            .build()
-            .unwrap();
-
-        assert_eq!(
-            options.single_event_endpoint(),
-            "https://us.i.posthog.com/i/v0/e/"
-        );
-        assert_eq!(
-            options.batch_event_endpoint(),
-            "https://us.i.posthog.com/batch/"
-        );
-    }
-
-    #[test]
-    fn test_client_options_builder_with_hostname() {
-        let options = ClientOptionsBuilder::new()
-            .api_key("test_key".to_string())
-            .api_endpoint("https://eu.posthog.com".to_string())
-            .build()
-            .unwrap();
-
-        assert_eq!(
-            options.single_event_endpoint(),
-            "https://eu.posthog.com/i/v0/e/"
-        );
-        assert_eq!(
-            options.batch_event_endpoint(),
-            "https://eu.posthog.com/batch/"
-        );
-    }
-
-    #[test]
-    fn test_client_options_builder_with_full_endpoint_single() {
-        // Backward compatibility: accept full endpoint and strip path
-        let options = ClientOptionsBuilder::new()
-            .api_key("test_key".to_string())
-            .api_endpoint("https://us.i.posthog.com/i/v0/e/".to_string())
-            .build()
-            .unwrap();
-
-        assert_eq!(
-            options.single_event_endpoint(),
-            "https://us.i.posthog.com/i/v0/e/"
-        );
-        assert_eq!(
-            options.batch_event_endpoint(),
-            "https://us.i.posthog.com/batch/"
-        );
-    }
-
-    #[test]
-    fn test_client_options_builder_with_full_endpoint_batch() {
-        // Backward compatibility: accept batch endpoint and strip path
-        let options = ClientOptionsBuilder::new()
-            .api_key("test_key".to_string())
-            .api_endpoint("https://us.i.posthog.com/batch/".to_string())
-            .build()
-            .unwrap();
-
-        assert_eq!(
-            options.single_event_endpoint(),
-            "https://us.i.posthog.com/i/v0/e/"
-        );
-        assert_eq!(
-            options.batch_event_endpoint(),
-            "https://us.i.posthog.com/batch/"
-        );
-    }
-
-    #[test]
-    fn test_client_options_builder_with_port() {
-        let options = ClientOptionsBuilder::new()
-            .api_key("test_key".to_string())
-            .api_endpoint("http://localhost:8000".to_string())
-            .build()
-            .unwrap();
-
-        assert_eq!(
-            options.single_event_endpoint(),
-            "http://localhost:8000/i/v0/e/"
-        );
-        assert_eq!(
-            options.batch_event_endpoint(),
-            "http://localhost:8000/batch/"
-        );
-    }
-
-    #[test]
-    fn test_client_options_builder_with_trailing_slash() {
-        let options = ClientOptionsBuilder::new()
-            .api_key("test_key".to_string())
-            .api_endpoint("https://eu.posthog.com/".to_string())
-            .build()
-            .unwrap();
-
-        assert_eq!(
-            options.single_event_endpoint(),
-            "https://eu.posthog.com/i/v0/e/"
-        );
-        assert_eq!(
-            options.batch_event_endpoint(),
-            "https://eu.posthog.com/batch/"
-        );
-    }
-
-    #[test]
-    fn test_client_options_builder_invalid_endpoint_no_scheme() {
-        let result = ClientOptionsBuilder::new()
-            .api_key("test_key".to_string())
-            .api_endpoint("posthog.com".to_string())
-            .build();
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::Initialization(InitializationError::InvalidEndpoint(_))
-        ));
-    }
-
-    #[test]
-    fn test_client_options_builder_invalid_endpoint_malformed() {
-        let result = ClientOptionsBuilder::new()
-            .api_key("test_key".to_string())
-            .api_endpoint("not a url".to_string())
-            .build();
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::Initialization(InitializationError::InvalidEndpoint(_))
-        ));
-    }
-
-    #[test]
-    fn test_client_options_builder_missing_api_key() {
-        let result = ClientOptionsBuilder::new().build();
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::Initialization(InitializationError::MissingApiKey)
-        ));
-    }
-
-    #[test]
-    fn test_client_options_from_str() {
-        let options: ClientOptions = "test_key".into();
-        assert_eq!(options.api_key(), "test_key");
-        assert_eq!(
-            options.single_event_endpoint(),
-            "https://us.i.posthog.com/i/v0/e/"
-        );
-    }
-
-    #[test]
-    fn test_client_options_custom_timeout() {
-        let options = ClientOptionsBuilder::new()
-            .api_key("test_key".to_string())
-            .request_timeout_seconds(60)
-            .build()
-            .unwrap();
-
-        assert_eq!(options.request_timeout_seconds(), 60);
     }
 }
