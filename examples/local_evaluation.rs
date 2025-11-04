@@ -49,6 +49,8 @@ async fn main() {
             .personal_api_key(personal_key)
             .enable_local_evaluation(true)
             .poll_interval_seconds(30) // Poll for updates every 30 seconds
+            // TODO: implement proper batching like (mpsc::channel) to enable with performance
+            .send_feature_flag_events(false)
             .build()
             .unwrap();
 

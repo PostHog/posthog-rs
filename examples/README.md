@@ -42,7 +42,7 @@ cargo run --example local_evaluation --features async-client
 **Demonstrates:**
 - Creating two clients for comparison: one with local evaluation, one without
 - Performance benchmarking: 10 API requests vs 10 local evaluation requests
-- Real-time speedup calculation showing 10x improvement
+- Real-time speedup calculation showing 100x-1000x improvement
 - Automatic background polling for flag definition updates (configurable with `poll_interval_seconds`)
 - Batch flag evaluation performance with `get_feature_flags`
 - Using `ClientOptionsBuilder` with `enable_local_evaluation(true)` and `personal_api_key`
