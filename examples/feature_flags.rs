@@ -1,6 +1,6 @@
 /// Feature Flags Example
 ///
-/// Shows all feature flag patterns: boolean flags, A/B tests, payloads, and targeting.
+/// Shows all feature flag patterns: boolean flags, A/B tests, payloads, targeting, and B2B groups.
 ///
 /// Run with real API:
 ///   export POSTHOG_API_TOKEN=phc_your_key
@@ -119,8 +119,60 @@ async fn main() {
         Err(e) => println!("Error: {}", e),
     }
 
-    // Example 4: Getting all flags at once
-    println!("\n=== Example 4: Batch Flag Evaluation ===");
+    // Example 4: Groups (B2B) - Organization-Level Features
+    println!("\n=== Example 4: Groups (B2B) - Organization-Level Features ===");
+
+    // Set up groups: mapping of group type to group key
+    let mut groups = HashMap::new();
+    groups.insert("company".to_string(), "company_id_123".to_string());
+    groups.insert("team".to_string(), "team_design".to_string());
+
+    // Set up group properties: nested HashMap with group type -> properties
+    let mut group_properties = HashMap::new();
+
+    // Company properties
+    let mut company_props = HashMap::new();
+    company_props.insert("name".to_string(), json!("Acme Corp"));
+    company_props.insert("plan".to_string(), json!("enterprise"));
+    company_props.insert("employees".to_string(), json!(250));
+    company_props.insert("industry".to_string(), json!("technology"));
+    group_properties.insert("company".to_string(), company_props);
+
+    // Team properties
+    let mut team_props = HashMap::new();
+    team_props.insert("name".to_string(), json!("Design Team"));
+    team_props.insert("size".to_string(), json!(12));
+    group_properties.insert("team".to_string(), team_props);
+
+    match client
+        .get_feature_flag(
+            "enterprise-analytics".to_string(),
+            user_id.to_string(),
+            Some(groups.clone()),
+            None, // person_properties
+            Some(group_properties.clone()),
+        )
+        .await
+    {
+        Ok(Some(FlagValue::Boolean(true))) => {
+            println!("✅ Enterprise analytics enabled for company");
+            println!("   → Company: Acme Corp (250 employees)");
+            println!("   → Team: Design Team (12 members)");
+        }
+        Ok(Some(FlagValue::Boolean(false))) => {
+            println!("❌ Enterprise analytics disabled for this company");
+        }
+        Ok(Some(FlagValue::String(variant))) => {
+            println!("Enterprise analytics variant: {}", variant);
+        }
+        Ok(None) => {
+            println!("Enterprise analytics flag not found");
+        }
+        Err(e) => println!("Error: {}", e),
+    }
+
+    // Example 5: Getting all flags at once
+    println!("\n=== Example 5: Batch Flag Evaluation ===");
 
     match client
         .get_feature_flags(user_id.to_string(), None, Some(properties), None)
@@ -145,8 +197,8 @@ async fn main() {
         Err(e) => println!("Error getting all flags: {}", e),
     }
 
-    // Example 5: Feature flag with payload
-    println!("\n=== Example 5: Feature Flag Payload ===");
+    // Example 6: Feature flag with payload
+    println!("\n=== Example 6: Feature Flag Payload ===");
 
     match client
         .get_feature_flag_payload("onboarding-config".to_string(), user_id.to_string())
