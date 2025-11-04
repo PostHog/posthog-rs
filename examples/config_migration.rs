@@ -1,9 +1,15 @@
 ///  Run this example (blocking/sync client only):
 ///  cargo run --example config_migration --no-default-features
-///  To test the example make sure the application in `sync` mode. Go to Cargo.toml --> [features] and disable default = ["async-client"] --> default = [] to test sync example.
-use posthog_rs::{ClientOptionsBuilder, Event};
 
+#[cfg(feature = "async-client")]
 fn main() {
+    eprintln!("ERROR: This example only works with the blocking/sync client.");
+    eprintln!("Run with: cargo run --example config_migration --no-default-features");
+}
+
+#[cfg(not(feature = "async-client"))]
+fn main() {
+    use posthog_rs::{ClientOptionsBuilder, Event};
     //--------------------------------
     // BEFORE MIGRATION
     //--------------------------------
