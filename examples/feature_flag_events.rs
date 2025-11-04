@@ -8,10 +8,9 @@
 ///   cargo run --example feature_flag_events --features async-client
 ///
 /// Then check your PostHog dashboard for `$feature_flag_called` events!
-use posthog_rs::{ClientOptionsBuilder, Event};
+use posthog_rs::ClientOptionsBuilder;
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Duration;
 
 #[cfg(feature = "async-client")]
 #[tokio::main]
@@ -36,16 +35,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let options = ClientOptionsBuilder::default()
             .api_key(api_key.clone())
             .send_feature_flag_events(true) // This is the default
-            .build()?;
-
-        posthog_rs::client(options).await
-    };
-
-    // Create client with feature flag events DISABLED (for comparison)
-    let client_without_events = {
-        let options = ClientOptionsBuilder::default()
-            .api_key(api_key)
-            .send_feature_flag_events(false) // Disable automatic events
             .build()?;
 
         posthog_rs::client(options).await

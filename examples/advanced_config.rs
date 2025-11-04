@@ -8,7 +8,6 @@ use posthog_rs::{ClientOptionsBuilder, EU_INGESTION_ENDPOINT};
 #[cfg(feature = "async-client")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
     let api_key = match std::env::var("POSTHOG_API_TOKEN") {
         Ok(key) => key,
         Err(_) => {
@@ -18,7 +17,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     };
-
 
     let personal_key = match std::env::var("POSTHOG_PERSONAL_API_TOKEN") {
         Ok(key) => key,
