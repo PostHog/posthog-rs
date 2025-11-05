@@ -134,3 +134,48 @@ if let Some(data) = payload {
     println!("Payload: {}", data);
 }
 ```
+
+### Local Evaluation (High Performance)
+
+For significantly faster flag evaluation, enable local evaluation to cache flag definitions locally:
+
+```rust
+use posthog_rs::ClientOptionsBuilder;
+
+let options = ClientOptionsBuilder::default()
+    .api_key("phc_your_project_key")
+    .personal_api_key("phx_your_personal_key") // Required for local evaluation
+    .enable_local_evaluation(true)
+    .poll_interval_seconds(30) // Update cache every 30s
+    .build()
+    .unwrap();
+
+let client = posthog_rs::client(options);
+
+// Flag evaluations now happen locally (no API calls needed)
+let enabled = client.is_feature_enabled(
+    "new-feature".to_string(),
+    "user-123".to_string(),
+    None, None, None
+).unwrap();
+```
+
+**Performance:** Local evaluation is 100-1000x faster than API evaluation (~119µs vs ~125ms per request).
+
+Get your personal API key at: https://app.posthog.com/me/settings
+
+### Automatic Event Tracking
+
+The SDK automatically captures `$feature_flag_called` events when you evaluate feature flags. These events include:
+- Feature flag key and response value
+- Deduplication per user + flag + value combination
+- Rich metadata (payloads, versions, request IDs)
+
+To disable automatic events globally:
+```rust
+let options = ClientOptionsBuilder::default()
+    .api_key("phc_your_key")
+    .send_feature_flag_events(false)
+    .build()
+    .unwrap();
+```
