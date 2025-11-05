@@ -22,19 +22,6 @@ event.insert_prop("key1", "value1").unwrap();
 event.insert_prop("key2", vec!["a", "b"]).unwrap();
 
 client.capture(event).unwrap();
-
-// Check feature flags
-let is_enabled = client.is_feature_enabled(
-    "new-feature".to_string(),
-    "user-123".to_string(),
-    None,
-    None,
-    None,
-).unwrap();
-
-if is_enabled {
-    println!("Feature is enabled!");
-}
 ```
 
 ## Feature Flags
@@ -44,11 +31,16 @@ The SDK now supports PostHog feature flags, allowing you to control feature roll
 ### Basic Usage
 
 ```rust
-use posthog_rs::{client, ClientOptions, FlagValue};
+use posthog_rs::{ClientOptionsBuilder, FlagValue};
 use std::collections::HashMap;
 use serde_json::json;
 
-let client = client(ClientOptions::from("your-api-key"));
+let options = ClientOptionsBuilder::default()
+    .api_key("phc_your_project_key")
+    .build()
+    .unwrap();
+
+let client = posthog_rs::client(options);
 
 // Check if a feature is enabled
 let is_enabled = client.is_feature_enabled(
