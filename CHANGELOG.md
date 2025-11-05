@@ -1,14 +1,16 @@
-## 0.3.0 - 2025-11-05
+## 0.4.0 - 2025-11-05
 
 ### Minor Changes
 
-Refactored error handling to use structured error types (`TransportError`, `ValidationError`, `InitializationError`) instead of generic strings. Errors now include structured data (timeouts, status codes, batch sizes) that can be pattern matched.
+ - Refactored error handling to use structured error types (`TransportError`, `ValidationError`, `InitializationError`) with structured data (timeouts, status codes, batch sizes) that can be pattern matched
+    - Existing errors will continue to work with deprecation warnings. 
 
-New helper methods:
-- `is_retryable()` - identifies transient errors (timeouts, 5xx, 429)  
-- `is_client_error()` - identifies 4xx errors
+ - New helper methods:
+    - `is_retryable()` - identifies transient errors (timeouts, 5xx, 429)  
+    - `is_client_error()` - identifies 4xx errors
 
-Existing code will continue to work with deprecation warnings
+ - Added dependency: `thiserror`
+    - reduces error handling boilerplate and improves error messages
 
 ## 0.2.6 - 2025-01-08
 
