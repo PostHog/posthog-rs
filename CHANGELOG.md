@@ -9,8 +9,8 @@
     - `is_retryable()` - identifies transient errors (timeouts, 5xx, 429)  
     - `is_client_error()` - identifies 4xx errors
 
- - Added dependency: `thiserror`
-    - reduces error handling boilerplate and improves error messages
+#### New Dependencies:
+ - Added `thiserror` to reduce writing manual error handling boilerplate
 
 ## 0.2.6 - 2025-01-08
 
