@@ -2,7 +2,7 @@
 
 ### Minor Changes
 
- - Refactored error handling to use structured error types (`TransportError`, `ValidationError`, `InitializationError`) with structured data (timeouts, status codes, batch sizes) that can be pattern matched
+ - Refactored error handling to use organized error types (`TransportError`, `ValidationError`, `InitializationError`) with structured data (timeouts, status codes, batch sizes) that can be pattern matched
     - Existing errors will continue to work with deprecation warnings. 
 
  - New helper methods:
