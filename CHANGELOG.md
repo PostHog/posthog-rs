@@ -1,6 +1,6 @@
 ## 0.6.0 - 2025-11-05
 
-### Patch Changes
+### Minor Changes
 
 Configuration system now accepts base URLs instead of full endpoint URLs
 - Provide just the hostname (e.g., `https://eu.posthog.com`)
