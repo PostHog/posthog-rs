@@ -31,7 +31,7 @@ impl Client {
             serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
 
         self.client
-            .post(&self.options.single_event_endpoint())
+            .post(self.options.single_event_endpoint())
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
@@ -53,7 +53,7 @@ impl Client {
             serde_json::to_string(&events).map_err(|e| Error::Serialization(e.to_string()))?;
 
         self.client
-            .post(&self.options.batch_event_endpoint())
+            .post(self.options.batch_event_endpoint())
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
