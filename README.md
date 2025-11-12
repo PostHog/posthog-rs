@@ -25,7 +25,7 @@ client.capture(event).unwrap();
 
 ## Error Handling
 
-The SDK provides type-safe error handling with semantic categories:
+The SDK provides error handling with semantic categories:
 
 ```rust
 use posthog_rs::{Error, TransportError, ValidationError};
