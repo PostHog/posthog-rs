@@ -59,4 +59,4 @@ match client.capture(event).await {
 - `is_retryable()`: Returns `true` for transient errors (timeouts, 5xx, 429)
 - `is_client_error()`: Returns `true` for 4xx HTTP errors
 
-See [`examples/error_classification.rs`](examples/error_classification.rs) for comprehensive error handling patterns
+See [`examples/error_classification.rs`](examples/error_classification.rs) for comprehensive error handling patterns.
