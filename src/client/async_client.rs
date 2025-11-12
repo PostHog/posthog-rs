@@ -37,7 +37,7 @@ impl Client {
             .body(payload)
             .send()
             .await
-            .map_err(|e| TransportError::from(e))?;
+            .map_err(TransportError::from)?;
 
         Ok(())
     }
@@ -59,7 +59,7 @@ impl Client {
             .body(payload)
             .send()
             .await
-            .map_err(|e| TransportError::from(e))?;
+            .map_err(TransportError::from)?;
 
         Ok(())
     }
