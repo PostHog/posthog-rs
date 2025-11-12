@@ -65,7 +65,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("   Event properties include:");
             println!("   - $feature_flag: 'new-dashboard'");
             println!("   - $feature_flag_response: {}", enabled);
-            println!("   - distinct_id: '{}'", user_id);
         }
         Err(e) => println!("❌ Error: {}", e),
     }
