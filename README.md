@@ -1,6 +1,6 @@
 # PostHog Rust
 
-Please see the main [PostHog docs](https://posthog.com/docs).
+Please see the main [PostHog docs](https://posthog.com/docs)
 
 **This crate is under development**
 
