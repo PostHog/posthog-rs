@@ -11,7 +11,7 @@ use crate::Error;
 /// website. Examples include button clicks, pageviews, query completions, and signups.
 /// See the [PostHog documentation](https://posthog.com/docs/data/events)
 /// for a detailed explanation of PostHog Events.
-#[derive(Serialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Debug, PartialEq, Eq, Clone)]
 pub struct Event {
     event: String,
     #[serde(rename = "$distinct_id")]
