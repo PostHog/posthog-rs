@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
 
+use crate::error::{TransportError, ValidationError};
 use crate::{event::InnerEvent, Error, Event};
 
 use super::ClientOptions;
@@ -27,8 +28,8 @@ impl Client {
     pub async fn capture(&self, event: Event) -> Result<(), Error> {
         let inner_event = InnerEvent::new(event, self.options.api_key().to_string());
 
-        let payload =
-            serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
+        let payload = serde_json::to_string(&inner_event)
+            .map_err(|e| ValidationError::SerializationFailed(e.to_string()))?;
 
         self.client
             .post(self.options.single_event_endpoint())
@@ -36,7 +37,7 @@ impl Client {
             .body(payload)
             .send()
             .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(TransportError::from)?;
 
         Ok(())
     }
@@ -49,8 +50,8 @@ impl Client {
             .map(|event| InnerEvent::new(event, self.options.api_key().to_string()))
             .collect();
 
-        let payload =
-            serde_json::to_string(&events).map_err(|e| Error::Serialization(e.to_string()))?;
+        let payload = serde_json::to_string(&events)
+            .map_err(|e| ValidationError::SerializationFailed(e.to_string()))?;
 
         self.client
             .post(self.options.batch_event_endpoint())
@@ -58,7 +59,7 @@ impl Client {
             .body(payload)
             .send()
             .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(TransportError::from)?;
 
         Ok(())
     }
