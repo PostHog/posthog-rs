@@ -82,6 +82,7 @@ impl ClientOptionsBuilder {
 
     /// Build the ClientOptions, validating all fields
     pub fn build(self) -> Result<ClientOptions, Error> {
+        #[allow(deprecated)]
         let api_key = self
             .api_key
             .ok_or_else(|| Error::Serialization("API key is required".to_string()))?;
@@ -116,18 +117,21 @@ fn normalize_endpoint(endpoint: &str) -> Result<String, Error> {
 
     // Basic validation - must start with http:// or https://
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        #[allow(deprecated)]
         return Err(Error::Serialization(
             "Endpoint must start with http:// or https://".to_string(),
         ));
     }
 
     // Parse as URL to validate
+    #[allow(deprecated)]
     let url = endpoint
         .parse::<url::Url>()
         .map_err(|e| Error::Serialization(format!("Invalid URL: {}", e)))?;
 
     // Extract scheme and host
     let scheme = url.scheme();
+    #[allow(deprecated)]
     let host = url
         .host_str()
         .ok_or_else(|| Error::Serialization("Missing host".to_string()))?;
