@@ -16,15 +16,26 @@ fn test_get_all_feature_flags() {
     let server = MockServer::start();
 
     let mock_response = json!({
-        "featureFlags": {
-            "test-flag": true,
-            "disabled-flag": false,
-            "variant-flag": "control"
-        },
-        "featureFlagPayloads": {
+        "flags": {
+            "test-flag": {
+                "key": "test-flag",
+                "enabled": true,
+                "variant": null
+            },
+            "disabled-flag": {
+                "key": "disabled-flag",
+                "enabled": false,
+                "variant": null
+            },
             "variant-flag": {
-                "color": "blue",
-                "size": "large"
+                "key": "variant-flag",
+                "enabled": true,
+                "variant": "control",
+                "metadata": {
+                    "id": 1,
+                    "version": 1,
+                    "payload": "{\"color\": \"blue\", \"size\": \"large\"}"
+                }
             }
         }
     });
@@ -74,11 +85,18 @@ fn test_is_feature_enabled() {
     let flags_mock = server.mock(|when, then| {
         when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
-            "featureFlags": {
-                "enabled-flag": true,
-                "disabled-flag": false
-            },
-            "featureFlagPayloads": {}
+            "flags": {
+                "enabled-flag": {
+                    "key": "enabled-flag",
+                    "enabled": true,
+                    "variant": null
+                },
+                "disabled-flag": {
+                    "key": "disabled-flag",
+                    "enabled": false,
+                    "variant": null
+                }
+            }
         }));
     });
 
@@ -129,10 +147,13 @@ fn test_get_feature_flag_with_properties() {
                 "person_properties": person_properties
             }));
         then.status(200).json_body(json!({
-            "featureFlags": {
-                "premium-feature": true
-            },
-            "featureFlagPayloads": {}
+            "flags": {
+                "premium-feature": {
+                    "key": "premium-feature",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
         }));
     });
 
@@ -164,10 +185,13 @@ fn test_multivariate_flag() {
     let flags_mock = server.mock(|when, then| {
         when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
-            "featureFlags": {
-                "experiment": "variant-b"
-            },
-            "featureFlagPayloads": {}
+            "flags": {
+                "experiment": {
+                    "key": "experiment",
+                    "enabled": true,
+                    "variant": "variant-b"
+                }
+            }
         }));
     });
 
@@ -232,10 +256,13 @@ fn test_feature_flag_event_captured() {
     let flags_mock = server.mock(|when, then| {
         when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
-            "featureFlags": {
-                "test-flag": true
-            },
-            "featureFlagPayloads": {}
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
         }));
     });
 
@@ -278,10 +305,13 @@ fn test_feature_flag_event_deduplication() {
     let flags_mock = server.mock(|when, then| {
         when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
-            "featureFlags": {
-                "test-flag": true
-            },
-            "featureFlagPayloads": {}
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
         }));
     });
 
@@ -327,10 +357,13 @@ fn test_feature_flag_event_different_user() {
     let flags_mock = server.mock(|when, then| {
         when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
-            "featureFlags": {
-                "test-flag": true
-            },
-            "featureFlagPayloads": {}
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
         }));
     });
 
@@ -380,10 +413,13 @@ fn test_feature_flag_event_send_false() {
     let flags_mock = server.mock(|when, then| {
         when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
-            "featureFlags": {
-                "test-flag": true
-            },
-            "featureFlagPayloads": {}
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
         }));
     });
 
@@ -416,10 +452,13 @@ fn test_feature_flag_event_with_variant() {
     let flags_mock = server.mock(|when, then| {
         when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
-            "featureFlags": {
-                "test-flag": "variant-b"
-            },
-            "featureFlagPayloads": {}
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": "variant-b"
+                }
+            }
         }));
     });
 
@@ -465,10 +504,13 @@ fn test_is_feature_enabled_captures_event() {
     let flags_mock = server.mock(|when, then| {
         when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
-            "featureFlags": {
-                "test-flag": true
-            },
-            "featureFlagPayloads": {}
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
         }));
     });
 

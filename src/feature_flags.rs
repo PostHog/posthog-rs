@@ -80,31 +80,14 @@ pub struct MultivariateVariant {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum FeatureFlagsResponse {
-    // v2 API format (/flags/?v=2)
-    V2 {
-        flags: HashMap<String, FlagDetail>,
-        #[serde(rename = "errorsWhileComputingFlags")]
-        #[serde(default)]
-        errors_while_computing_flags: bool,
-        #[serde(rename = "requestId")]
-        #[serde(default)]
-        request_id: Option<String>,
-    },
-    // Legacy format (old decide endpoint)
-    Legacy {
-        #[serde(rename = "featureFlags")]
-        feature_flags: HashMap<String, FlagValue>,
-        #[serde(rename = "featureFlagPayloads")]
-        #[serde(default)]
-        feature_flag_payloads: HashMap<String, serde_json::Value>,
-        #[serde(default)]
-        errors: Option<Vec<String>>,
-        #[serde(rename = "requestId")]
-        #[serde(default)]
-        request_id: Option<String>,
-    },
+pub struct FeatureFlagsResponse {
+    pub flags: HashMap<String, FlagDetail>,
+    #[serde(rename = "errorsWhileComputingFlags")]
+    #[serde(default)]
+    pub errors_while_computing_flags: bool,
+    #[serde(rename = "requestId")]
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 impl FeatureFlagsResponse {
@@ -118,49 +101,29 @@ impl FeatureFlagsResponse {
         Option<String>,
         HashMap<String, FlagDetail>,
     ) {
-        match self {
-            FeatureFlagsResponse::V2 {
-                flags, request_id, ..
-            } => {
-                let mut feature_flags = HashMap::new();
-                let mut payloads = HashMap::new();
-                let flag_details = flags.clone(); // Keep full details for metadata
+        let mut feature_flags = HashMap::new();
+        let mut payloads = HashMap::new();
+        let flag_details = self.flags.clone(); // Keep full details for metadata
 
-                for (key, detail) in flags {
-                    if detail.enabled {
-                        if let Some(variant) = detail.variant {
-                            feature_flags.insert(key.clone(), FlagValue::String(variant));
-                        } else {
-                            feature_flags.insert(key.clone(), FlagValue::Boolean(true));
-                        }
-                    } else {
-                        feature_flags.insert(key.clone(), FlagValue::Boolean(false));
-                    }
-
-                    if let Some(metadata) = detail.metadata {
-                        if let Some(payload) = metadata.payload {
-                            payloads.insert(key, payload);
-                        }
-                    }
+        for (key, detail) in self.flags {
+            if detail.enabled {
+                if let Some(variant) = detail.variant {
+                    feature_flags.insert(key.clone(), FlagValue::String(variant));
+                } else {
+                    feature_flags.insert(key.clone(), FlagValue::Boolean(true));
                 }
-
-                (feature_flags, payloads, request_id, flag_details)
+            } else {
+                feature_flags.insert(key.clone(), FlagValue::Boolean(false));
             }
-            FeatureFlagsResponse::Legacy {
-                feature_flags,
-                feature_flag_payloads,
-                request_id,
-                ..
-            } => {
-                // Legacy format doesn't have FlagDetail, return empty
-                (
-                    feature_flags,
-                    feature_flag_payloads,
-                    request_id,
-                    HashMap::new(),
-                )
+
+            if let Some(metadata) = detail.metadata {
+                if let Some(payload) = metadata.payload {
+                    payloads.insert(key, payload);
+                }
             }
         }
+
+        (feature_flags, payloads, self.request_id, flag_details)
     }
 }
 
