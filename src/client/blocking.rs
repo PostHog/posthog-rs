@@ -17,7 +17,7 @@ pub struct Client {
 pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let options = options.into();
     let client = HttpClient::builder()
-        .timeout(Duration::from_secs(options.request_timeout_seconds))
+        .timeout(Duration::from_secs(options.request_timeout_seconds()))
         .build()
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
     Client { options, client }
@@ -26,13 +26,13 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
 impl Client {
     /// Capture the provided event, sending it to PostHog.
     pub fn capture(&self, event: Event) -> Result<(), Error> {
-        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
+        let inner_event = InnerEvent::new(event, self.options.api_key().to_string());
 
         let payload = serde_json::to_string(&inner_event)
             .map_err(|e| ValidationError::SerializationFailed(e.to_string()))?;
 
         self.client
-            .post(&self.options.api_endpoint)
+            .post(self.options.single_event_endpoint())
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
@@ -46,14 +46,14 @@ impl Client {
     pub fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
         let events: Vec<_> = events
             .into_iter()
-            .map(|event| InnerEvent::new(event, self.options.api_key.clone()))
+            .map(|event| InnerEvent::new(event, self.options.api_key().to_string()))
             .collect();
 
         let payload = serde_json::to_string(&events)
             .map_err(|e| ValidationError::SerializationFailed(e.to_string()))?;
 
         self.client
-            .post(&self.options.api_endpoint)
+            .post(self.options.batch_event_endpoint())
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
