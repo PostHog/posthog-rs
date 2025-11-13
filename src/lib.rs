@@ -15,6 +15,9 @@ pub use client::ClientOptionsBuilderError;
 
 // Error
 pub use error::Error;
+pub use error::InitializationError;
+pub use error::TransportError;
+pub use error::ValidationError;
 
 // Event
 pub use event::Event;
