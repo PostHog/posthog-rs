@@ -1,10 +1,15 @@
-use httpmock::prelude::*;
 use posthog_rs::{
-    ClientOptionsBuilder, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache,
-    FlagValue, LocalEvaluationResponse, LocalEvaluator, Property,
+    FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache, FlagValue,
+    LocalEvaluationResponse, LocalEvaluator, Property,
 };
 use serde_json::json;
 use std::collections::HashMap;
+
+#[cfg(feature = "async-client")]
+use httpmock::prelude::*;
+#[cfg(feature = "async-client")]
+use posthog_rs::ClientOptionsBuilder;
+#[cfg(feature = "async-client")]
 use std::time::Duration;
 
 #[test]

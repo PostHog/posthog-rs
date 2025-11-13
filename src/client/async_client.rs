@@ -285,7 +285,7 @@ impl Client {
 
             reported
                 .entry(distinct_id.to_string())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(feature_flag_reported_key);
         }
     }

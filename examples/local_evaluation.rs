@@ -8,9 +8,13 @@
 ///   cargo run --example local_evaluation --features async-client
 ///
 /// Get personal key at: https://app.posthog.com/me/settings
+#[cfg(feature = "async-client")]
 use posthog_rs::ClientOptionsBuilder;
+#[cfg(feature = "async-client")]
 use serde_json::json;
+#[cfg(feature = "async-client")]
 use std::collections::HashMap;
+#[cfg(feature = "async-client")]
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "async-client")]

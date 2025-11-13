@@ -3,6 +3,7 @@
 /// Shows different ways to configure the PostHog Rust SDK for various use cases.
 ///
 /// Run with: cargo run --example advanced_config --features async-client
+#[cfg(feature = "async-client")]
 use posthog_rs::{ClientOptionsBuilder, EU_INGESTION_ENDPOINT};
 
 #[cfg(feature = "async-client")]
