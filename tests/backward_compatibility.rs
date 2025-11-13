@@ -4,7 +4,6 @@
 /// - Error retry logic (which errors can be retried)
 /// - Error classification (client vs infrastructure errors)
 /// - Backward compatibility (deprecated variants still work)
-
 #[cfg(test)]
 mod backward_compatibility_tests {
     use posthog_rs::*;

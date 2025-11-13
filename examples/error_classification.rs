@@ -2,7 +2,6 @@
 ///
 ///  Run this example (blocking/sync client only):
 ///  cargo run --example error_classification --no-default-features
-
 #[cfg(feature = "async-client")]
 fn main() {
     eprintln!("ERROR: This example only works with the blocking/sync client.");

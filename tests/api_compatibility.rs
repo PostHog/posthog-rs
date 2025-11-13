@@ -1,6 +1,5 @@
 /// API stability tests
 /// These tests will fail to compile if we make breaking changes to the public API.
-
 #[cfg(test)]
 mod api_compatibility_tests {
     use posthog_rs::*;
