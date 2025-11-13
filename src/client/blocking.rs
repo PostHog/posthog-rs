@@ -50,7 +50,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
                 request_timeout: Duration::from_secs(options.request_timeout_seconds),
             };
 
-            let mut poller = FlagPoller::new(config, cache.clone());
+            let poller = FlagPoller::new(config, cache.clone());
             poller.start();
 
             (Some(LocalEvaluator::new(cache)), Some(poller))

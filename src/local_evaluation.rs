@@ -2,7 +2,8 @@ use crate::feature_flags::{match_feature_flag, FeatureFlag, FlagValue, Inconclus
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,8 +93,8 @@ pub struct FlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
     client: reqwest::blocking::Client,
-    stop_signal: Arc<RwLock<bool>>,
-    thread_handle: Option<std::thread::JoinHandle<()>>,
+    stop_signal: Arc<AtomicBool>,
+    thread_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 impl FlagPoller {
@@ -107,13 +108,13 @@ impl FlagPoller {
             config,
             cache,
             client,
-            stop_signal: Arc::new(RwLock::new(false)),
-            thread_handle: None,
+            stop_signal: Arc::new(AtomicBool::new(false)),
+            thread_handle: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Start the polling thread
-    pub fn start(&mut self) {
+    pub fn start(&self) {
         // Initial load
         if let Err(e) = self.load_flags() {
             eprintln!("Failed to load initial flags: {e}");
@@ -132,7 +133,7 @@ impl FlagPoller {
             loop {
                 std::thread::sleep(config.poll_interval);
 
-                if *stop_signal.read().unwrap() {
+                if stop_signal.load(Ordering::Relaxed) {
                     break;
                 }
 
@@ -171,7 +172,7 @@ impl FlagPoller {
             }
         });
 
-        self.thread_handle = Some(handle);
+        *self.thread_handle.lock().unwrap() = Some(handle);
     }
 
     /// Load flags synchronously
@@ -206,9 +207,9 @@ impl FlagPoller {
     }
 
     /// Stop the polling thread
-    pub fn stop(&mut self) {
-        *self.stop_signal.write().unwrap() = true;
-        if let Some(handle) = self.thread_handle.take() {
+    pub fn stop(&self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.thread_handle.lock().unwrap().take() {
             handle.join().ok();
         }
     }
@@ -226,9 +227,9 @@ pub struct AsyncFlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
     client: reqwest::Client,
-    stop_signal: Arc<tokio::sync::RwLock<bool>>,
-    task_handle: Option<tokio::task::JoinHandle<()>>,
-    is_running: Arc<tokio::sync::RwLock<bool>>,
+    stop_signal: Arc<AtomicBool>,
+    task_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    is_running: Arc<AtomicBool>,
 }
 
 #[cfg(feature = "async-client")]
@@ -243,21 +244,17 @@ impl AsyncFlagPoller {
             config,
             cache,
             client,
-            stop_signal: Arc::new(tokio::sync::RwLock::new(false)),
-            task_handle: None,
-            is_running: Arc::new(tokio::sync::RwLock::new(false)),
+            stop_signal: Arc::new(AtomicBool::new(false)),
+            task_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            is_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Start the polling task
-    pub async fn start(&mut self) {
+    pub async fn start(&self) {
         // Check if already running
-        {
-            let mut is_running = self.is_running.write().await;
-            if *is_running {
-                return; // Already running
-            }
-            *is_running = true;
+        if self.is_running.swap(true, Ordering::Relaxed) {
+            return; // Already running
         }
 
         // Initial load
@@ -278,7 +275,7 @@ impl AsyncFlagPoller {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if *stop_signal.read().await {
+                        if stop_signal.load(Ordering::Relaxed) {
                             break;
                         }
 
@@ -312,10 +309,10 @@ impl AsyncFlagPoller {
             }
 
             // Clear running flag when task exits
-            *is_running.write().await = false;
+            is_running.store(false, Ordering::Relaxed);
         });
 
-        self.task_handle = Some(task);
+        *self.task_handle.lock().await = Some(task);
     }
 
     /// Load flags asynchronously
@@ -352,26 +349,31 @@ impl AsyncFlagPoller {
     }
 
     /// Stop the polling task
-    pub async fn stop(&mut self) {
-        *self.stop_signal.write().await = true;
-        if let Some(handle) = self.task_handle.take() {
+    pub async fn stop(&self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.task_handle.lock().await.take() {
             handle.abort();
         }
-        *self.is_running.write().await = false;
+        self.is_running.store(false, Ordering::Relaxed);
     }
 
     /// Check if the poller is running
-    pub async fn is_running(&self) -> bool {
-        *self.is_running.read().await
+    pub fn is_running(&self) -> bool {
+        self.is_running.load(Ordering::Relaxed)
     }
 }
 
 #[cfg(feature = "async-client")]
 impl Drop for AsyncFlagPoller {
     fn drop(&mut self) {
+        // Set stop signal
+        self.stop_signal.store(true, Ordering::Relaxed);
+
         // Abort the task if still running
-        if let Some(handle) = self.task_handle.take() {
-            handle.abort();
+        if let Ok(mut guard) = self.task_handle.try_lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
         }
     }
 }
