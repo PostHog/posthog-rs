@@ -180,8 +180,7 @@ impl Client {
         // Format: "{key}_::null::" for None, "{key}_{value}" otherwise
         let feature_flag_reported_key = match flag_response {
             None => format!("{}_::null::", flag_key),
-            Some(FlagValue::Boolean(b)) => format!("{}_{}", flag_key, b),
-            Some(FlagValue::String(s)) => format!("{}_{}", flag_key, s),
+            Some(flag_value) => format!("{}_{}", flag_key, flag_value),
         };
 
         // Check if already reported for deduplication
@@ -199,27 +198,18 @@ impl Client {
         let mut event = Event::new("$feature_flag_called", distinct_id);
 
         // Add required properties
-        let flag_response_json = match flag_response {
-            None => json!(null),
-            Some(FlagValue::Boolean(b)) => json!(b),
-            Some(FlagValue::String(s)) => json!(s),
-        };
-
         event.insert_prop("$feature_flag", flag_key).ok();
         event
-            .insert_prop("$feature_flag_response", flag_response_json)
+            .insert_prop("$feature_flag_response", flag_response)
             .ok();
         event
             .insert_prop("locally_evaluated", locally_evaluated)
             .ok();
 
         // Add $feature/{key} property
-        let feature_key = format!("$feature/{}", flag_key);
-        match flag_response {
-            None => event.insert_prop(feature_key, json!(null)).ok(),
-            Some(FlagValue::Boolean(b)) => event.insert_prop(feature_key, b).ok(),
-            Some(FlagValue::String(s)) => event.insert_prop(feature_key, s).ok(),
-        };
+        event
+            .insert_prop(format!("$feature/{}", flag_key), flag_response)
+            .ok();
 
         // Add optional properties
         if let Some(p) = payload {

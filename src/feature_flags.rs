@@ -28,6 +28,15 @@ impl Default for FlagValue {
     }
 }
 
+impl std::fmt::Display for FlagValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FlagValue::Boolean(b) => write!(f, "{}", b),
+            FlagValue::String(s) => write!(f, "{}", s),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureFlag {
     pub key: String,
