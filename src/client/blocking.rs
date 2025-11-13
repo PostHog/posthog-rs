@@ -36,7 +36,7 @@ impl Client {
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
-            .map_err(|e| TransportError::from(e))?;
+            .map_err(TransportError::from)?;
 
         Ok(())
     }
@@ -57,7 +57,7 @@ impl Client {
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
-            .map_err(|e| TransportError::from(e))?;
+            .map_err(TransportError::from)?;
 
         Ok(())
     }
