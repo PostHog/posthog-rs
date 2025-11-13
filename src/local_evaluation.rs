@@ -3,11 +3,13 @@ use crate::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+#[cfg(not(feature = "async-client"))]
+use std::sync::Mutex;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalEvaluationResponse {
+pub(crate) struct LocalEvaluationResponse {
     pub flags: Vec<FeatureFlag>,
     #[serde(default)]
     pub group_type_mapping: HashMap<String, String>,
@@ -16,7 +18,7 @@ pub struct LocalEvaluationResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Cohort {
+pub(crate) struct Cohort {
     pub id: String,
     pub name: String,
     pub properties: serde_json::Value,
@@ -24,7 +26,7 @@ pub struct Cohort {
 
 /// Manages locally cached feature flags for evaluation
 #[derive(Clone)]
-pub struct FlagCache {
+pub(crate) struct FlagCache {
     flags: Arc<RwLock<HashMap<String, FeatureFlag>>>,
     group_type_mapping: Arc<RwLock<HashMap<String, String>>>,
     cohorts: Arc<RwLock<HashMap<String, Cohort>>>,
@@ -63,11 +65,8 @@ impl FlagCache {
         self.flags.read().unwrap().get(key).cloned()
     }
 
-    pub fn get_all_flags(&self) -> Vec<FeatureFlag> {
-        self.flags.read().unwrap().values().cloned().collect()
-    }
-
-    pub fn clear(&self) {
+    #[cfg(test)] // only for tests uses
+    fn clear(&self) {
         self.flags.write().unwrap().clear();
         self.group_type_mapping.write().unwrap().clear();
         self.cohorts.write().unwrap().clear();
@@ -76,7 +75,7 @@ impl FlagCache {
 
 /// Configuration for local evaluation
 #[derive(Clone)]
-pub struct LocalEvaluationConfig {
+pub(crate) struct LocalEvaluationConfig {
     /// Personal API key for authentication (sensitive - transmitted via Authorization header only)
     pub personal_api_key: String,
     /// Project API key for project identification (public - safe to include in URLs)
@@ -89,7 +88,8 @@ pub struct LocalEvaluationConfig {
 }
 
 /// Manages polling for feature flag definitions
-pub struct FlagPoller {
+#[cfg(not(feature = "async-client"))]
+pub(crate) struct FlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
     client: reqwest::blocking::Client,
@@ -97,8 +97,9 @@ pub struct FlagPoller {
     thread_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
+#[cfg(not(feature = "async-client"))]
 impl FlagPoller {
-    pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
+    fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(config.request_timeout)
             .build()
@@ -114,7 +115,7 @@ impl FlagPoller {
     }
 
     /// Start the polling thread
-    pub fn start(&self) {
+    fn start(&self) {
         // Initial load
         if let Err(e) = self.load_flags() {
             eprintln!("Failed to load initial flags: {e}");
@@ -176,7 +177,7 @@ impl FlagPoller {
     }
 
     /// Load flags synchronously
-    pub fn load_flags(&self) -> Result<(), Error> {
+    fn load_flags(&self) -> Result<(), Error> {
         // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
         let url = format!(
             "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
@@ -207,7 +208,7 @@ impl FlagPoller {
     }
 
     /// Stop the polling thread
-    pub fn stop(&self) {
+    fn stop(&self) {
         self.stop_signal.store(true, Ordering::Relaxed);
         if let Some(handle) = self.thread_handle.lock().unwrap().take() {
             handle.join().ok();
@@ -215,6 +216,7 @@ impl FlagPoller {
     }
 }
 
+#[cfg(not(feature = "async-client"))]
 impl Drop for FlagPoller {
     fn drop(&mut self) {
         self.stop();
@@ -223,7 +225,7 @@ impl Drop for FlagPoller {
 
 /// Async version of the flag poller
 #[cfg(feature = "async-client")]
-pub struct AsyncFlagPoller {
+pub(crate) struct AsyncFlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
     client: reqwest::Client,
@@ -347,20 +349,6 @@ impl AsyncFlagPoller {
         self.cache.update(data);
         Ok(())
     }
-
-    /// Stop the polling task
-    pub async fn stop(&self) {
-        self.stop_signal.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.task_handle.lock().await.take() {
-            handle.abort();
-        }
-        self.is_running.store(false, Ordering::Relaxed);
-    }
-
-    /// Check if the poller is running
-    pub fn is_running(&self) -> bool {
-        self.is_running.load(Ordering::Relaxed)
-    }
 }
 
 #[cfg(feature = "async-client")]
@@ -379,7 +367,7 @@ impl Drop for AsyncFlagPoller {
 }
 
 /// Evaluator for locally cached flags
-pub struct LocalEvaluator {
+pub(crate) struct LocalEvaluator {
     cache: FlagCache,
 }
 
@@ -400,20 +388,154 @@ impl LocalEvaluator {
             None => Ok(None),
         }
     }
+}
 
-    /// Get all flags and evaluate them
-    pub fn evaluate_all_flags(
-        &self,
-        distinct_id: &str,
-        person_properties: &HashMap<String, serde_json::Value>,
-    ) -> HashMap<String, Result<FlagValue, InconclusiveMatchError>> {
-        let mut results = HashMap::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feature_flags::{FeatureFlagCondition, FeatureFlagFilters, Property};
+    use serde_json::json;
 
-        for flag in self.cache.get_all_flags() {
-            let result = match_feature_flag(&flag, distinct_id, person_properties);
-            results.insert(flag.key.clone(), result);
-        }
+    #[test]
+    fn test_local_evaluation_basic() {
+        // Create a cache and evaluator
+        let cache = FlagCache::new();
+        let evaluator = LocalEvaluator::new(cache.clone());
 
-        results
+        // Create a simple flag
+        let flag = FeatureFlag {
+            key: "test-flag".to_string(),
+            active: true,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+            },
+        };
+
+        // Update cache with the flag
+        let response = LocalEvaluationResponse {
+            flags: vec![flag],
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+        };
+        cache.update(response);
+
+        // Test evaluation
+        let properties = HashMap::new();
+        let result = evaluator.evaluate_flag("test-flag", "user-123", &properties);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    }
+
+    #[test]
+    fn test_local_evaluation_with_properties() {
+        let cache = FlagCache::new();
+        let evaluator = LocalEvaluator::new(cache.clone());
+
+        // Create a flag with property conditions
+        let flag = FeatureFlag {
+            key: "premium-feature".to_string(),
+            active: true,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![Property {
+                        key: "plan".to_string(),
+                        value: json!("premium"),
+                        operator: "exact".to_string(),
+                        property_type: None,
+                    }],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+            },
+        };
+
+        // Update cache
+        let response = LocalEvaluationResponse {
+            flags: vec![flag],
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+        };
+        cache.update(response);
+
+        // Test with matching properties
+        let mut properties = HashMap::new();
+        properties.insert("plan".to_string(), json!("premium"));
+
+        let result = evaluator.evaluate_flag("premium-feature", "user-123", &properties);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+
+        // Test with non-matching properties
+        let mut properties = HashMap::new();
+        properties.insert("plan".to_string(), json!("free"));
+
+        let result = evaluator.evaluate_flag("premium-feature", "user-456", &properties);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(FlagValue::Boolean(false)));
+    }
+
+    #[test]
+    fn test_local_evaluation_missing_flag() {
+        let cache = FlagCache::new();
+        let evaluator = LocalEvaluator::new(cache);
+
+        let properties = HashMap::new();
+        let result = evaluator.evaluate_flag("non-existent", "user-123", &properties);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn test_cache_operations() {
+        let cache = FlagCache::new();
+
+        // Create multiple flags
+        let flags = vec![
+            FeatureFlag {
+                key: "flag1".to_string(),
+                active: true,
+                filters: FeatureFlagFilters {
+                    groups: vec![],
+                    multivariate: None,
+                    payloads: HashMap::new(),
+                },
+            },
+            FeatureFlag {
+                key: "flag2".to_string(),
+                active: true,
+                filters: FeatureFlagFilters {
+                    groups: vec![],
+                    multivariate: None,
+                    payloads: HashMap::new(),
+                },
+            },
+        ];
+
+        let response = LocalEvaluationResponse {
+            flags: flags.clone(),
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+        };
+
+        cache.update(response);
+
+        // Test get_flag
+        assert!(cache.get_flag("flag1").is_some());
+        assert!(cache.get_flag("flag2").is_some());
+        assert!(cache.get_flag("flag3").is_none());
+
+        // Test clear
+        cache.clear();
+        assert!(cache.get_flag("flag1").is_none());
     }
 }

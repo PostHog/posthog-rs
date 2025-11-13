@@ -26,19 +26,7 @@ pub use error::Error;
 pub use event::Event;
 
 // Feature Flags
-pub use feature_flags::{
-    match_feature_flag, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters,
-    FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagReason, FlagValue, InconclusiveMatchError,
-    MultivariateFilter, MultivariateVariant, Property,
-};
-
-// Local Evaluation
-pub use local_evaluation::{
-    Cohort, FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator,
-};
-
-#[cfg(feature = "async-client")]
-pub use local_evaluation::AsyncFlagPoller;
+pub use feature_flags::{FeatureFlag, FlagDetail, FlagMetadata, FlagReason, FlagValue};
 
 // We expose a global capture function as a convenience, that uses a global client
 pub use global::capture;

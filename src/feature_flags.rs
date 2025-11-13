@@ -10,7 +10,7 @@ pub enum FlagValue {
 }
 
 #[derive(Debug)]
-pub struct InconclusiveMatchError {
+pub(crate) struct InconclusiveMatchError {
     pub message: String,
 }
 
@@ -33,11 +33,11 @@ pub struct FeatureFlag {
     pub key: String,
     pub active: bool,
     #[serde(default)]
-    pub filters: FeatureFlagFilters,
+    pub(crate) filters: FeatureFlagFilters,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FeatureFlagFilters {
+pub(crate) struct FeatureFlagFilters {
     #[serde(default)]
     pub groups: Vec<FeatureFlagCondition>,
     #[serde(default)]
@@ -47,7 +47,7 @@ pub struct FeatureFlagFilters {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeatureFlagCondition {
+pub(crate) struct FeatureFlagCondition {
     #[serde(default)]
     pub properties: Vec<Property>,
     pub rollout_percentage: Option<f64>,
@@ -55,7 +55,7 @@ pub struct FeatureFlagCondition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Property {
+pub(crate) struct Property {
     pub key: String,
     pub value: serde_json::Value,
     #[serde(default = "default_operator")]
@@ -69,18 +69,18 @@ fn default_operator() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MultivariateFilter {
+pub(crate) struct MultivariateFilter {
     pub variants: Vec<MultivariateVariant>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultivariateVariant {
+pub(crate) struct MultivariateVariant {
     pub key: String,
     pub rollout_percentage: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeatureFlagsResponse {
+pub(crate) struct FeatureFlagsResponse {
     pub flags: HashMap<String, FlagDetail>,
     #[serde(rename = "errorsWhileComputingFlags")]
     #[serde(default)]
@@ -182,7 +182,7 @@ pub fn get_matching_variant(flag: &FeatureFlag, distinct_id: &str) -> Option<Str
     None
 }
 
-pub fn match_feature_flag(
+pub(crate) fn match_feature_flag(
     flag: &FeatureFlag,
     distinct_id: &str,
     properties: &HashMap<String, serde_json::Value>,
