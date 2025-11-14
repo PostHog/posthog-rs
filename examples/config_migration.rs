@@ -23,7 +23,7 @@ fn main() {
         .build()
         .unwrap();
 
-    println!("Single event: https://eu.posthog.com/i/v0/e/");
+    println!("Single event: {}", options.single_event_endpoint());
 
     let client = posthog_rs::client(options);
 
@@ -37,7 +37,7 @@ fn main() {
         .build()
         .unwrap();
 
-    println!("Batch event: https://eu.posthog.com/batch/");
+    println!("Batch event: {}", options.batch_event_endpoint());
 
     let client = posthog_rs::client(options);
 

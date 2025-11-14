@@ -193,12 +193,17 @@ impl FlagPoller {
                 format!("Bearer {}", self.config.personal_api_key),
             )
             .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(|e| {
+                #[allow(deprecated)]
+                Error::Connection(e.to_string())
+            })?;
 
         if !response.status().is_success() {
+            #[allow(deprecated)]
             return Err(Error::Connection(format!("HTTP {}", response.status())));
         }
 
+        #[allow(deprecated)]
         let data = response
             .json::<LocalEvaluationResponse>()
             .map_err(|e| Error::Serialization(e.to_string()))?;
@@ -335,12 +340,17 @@ impl AsyncFlagPoller {
             )
             .send()
             .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(|e| {
+                #[allow(deprecated)]
+                Error::Connection(e.to_string())
+            })?;
 
         if !response.status().is_success() {
+            #[allow(deprecated)]
             return Err(Error::Connection(format!("HTTP {}", response.status())));
         }
 
+        #[allow(deprecated)]
         let data = response
             .json::<LocalEvaluationResponse>()
             .await

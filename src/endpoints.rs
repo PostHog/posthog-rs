@@ -1,3 +1,4 @@
+use crate::Error;
 use std::fmt;
 
 /// US ingestion endpoint
@@ -37,6 +38,45 @@ impl fmt::Display for Endpoint {
     }
 }
 
+/// Normalize an endpoint to a base URL.
+/// Accepts both hostnames (https://us.posthog.com) and full endpoints (https://us.i.posthog.com/i/v0/e/)
+pub fn normalize_endpoint(endpoint: &str) -> Result<String, Error> {
+    let endpoint = endpoint.trim();
+
+    // Basic validation - must start with http:// or https://
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        #[allow(deprecated)]
+        return Err(Error::Serialization(
+            "Endpoint must start with http:// or https://".to_string(),
+        ));
+    }
+
+    // Parse as URL to validate
+    #[allow(deprecated)]
+    let url = endpoint
+        .parse::<url::Url>()
+        .map_err(|e| Error::Serialization(format!("Invalid URL: {}", e)))?;
+
+    // Extract scheme and host
+    let scheme = url.scheme();
+    #[allow(deprecated)]
+    let host = url
+        .host_str()
+        .ok_or_else(|| Error::Serialization("Missing host".to_string()))?;
+
+    // Check if this looks like a full endpoint path (contains /i/v0/e or /batch)
+    let path = url.path();
+    if path.contains("/i/v0/e") || path.contains("/batch") {
+        // Strip the path, keep only scheme://host:port
+        let port = url.port().map(|p| format!(":{}", p)).unwrap_or_default();
+        Ok(format!("{}://{}{}", scheme, host, port))
+    } else {
+        // Already a base URL, just reconstruct it cleanly
+        let port = url.port().map(|p| format!(":{}", p)).unwrap_or_default();
+        Ok(format!("{}://{}{}", scheme, host, port))
+    }
+}
+
 /// Manages PostHog API endpoints and host configuration
 #[derive(Debug, Clone)]
 pub struct EndpointManager {
@@ -47,8 +87,13 @@ pub struct EndpointManager {
 impl EndpointManager {
     /// Create a new endpoint manager with the given host
     pub fn new(host: Option<String>) -> Self {
-        let raw_host = host.clone().unwrap_or_else(|| DEFAULT_HOST.to_string());
-        let base_host = Self::determine_server_host(host);
+        // Normalize the host if provided (strips paths from full endpoint URLs)
+        let normalized_host = host.and_then(|h| normalize_endpoint(&h).ok());
+
+        let raw_host = normalized_host
+            .clone()
+            .unwrap_or_else(|| DEFAULT_HOST.to_string());
+        let base_host = Self::determine_server_host(normalized_host);
 
         Self {
             base_host,
@@ -57,7 +102,6 @@ impl EndpointManager {
     }
 
     /// Determine the actual server host based on the provided host
-    /// Similar to posthog-python's determine_server_host function
     pub fn determine_server_host(host: Option<String>) -> String {
         let host_or_default = host.unwrap_or_else(|| DEFAULT_HOST.to_string());
         let trimmed_host = host_or_default.trim_end_matches('/');
@@ -116,6 +160,16 @@ impl EndpointManager {
     /// Get the base host for API operations (without the path)
     pub fn api_host(&self) -> String {
         self.base_host.trim_end_matches('/').to_string()
+    }
+
+    /// Get the single event capture endpoint URL
+    pub fn single_event_endpoint(&self) -> String {
+        self.build_url(Endpoint::Capture)
+    }
+
+    /// Get the batch event capture endpoint URL (legacy, uses same endpoint as single)
+    pub fn batch_event_endpoint(&self) -> String {
+        self.build_custom_url("/batch/")
     }
 }
 

@@ -25,13 +25,14 @@ fn test_client_options_builder_with_hostname() {
         .build()
         .unwrap();
 
+    // EU PostHog Cloud redirects to EU ingestion endpoint
     assert_eq!(
         options.single_event_endpoint(),
-        "https://eu.posthog.com/i/v0/e/"
+        "https://eu.i.posthog.com/i/v0/e/"
     );
     assert_eq!(
         options.batch_event_endpoint(),
-        "https://eu.posthog.com/batch/"
+        "https://eu.i.posthog.com/batch/"
     );
 }
 
@@ -101,11 +102,11 @@ fn test_client_options_builder_with_trailing_slash() {
 
     assert_eq!(
         options.single_event_endpoint(),
-        "https://eu.posthog.com/i/v0/e/"
+        "https://eu.i.posthog.com/i/v0/e/"
     );
     assert_eq!(
         options.batch_event_endpoint(),
-        "https://eu.posthog.com/batch/"
+        "https://eu.i.posthog.com/batch/"
     );
 }
 
@@ -118,6 +119,7 @@ fn test_client_options_builder_invalid_endpoint_no_scheme() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
+        #[allow(deprecated)]
         Error::Serialization(msg) => {
             assert!(msg.contains("Endpoint must start with http://"));
         }
@@ -134,6 +136,7 @@ fn test_client_options_builder_invalid_endpoint_malformed() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
+        #[allow(deprecated)]
         Error::Serialization(msg) => {
             // Should contain error about scheme or being invalid
             assert!(msg.contains("http://") || msg.contains("https://"));
@@ -148,6 +151,7 @@ fn test_client_options_builder_missing_api_key() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
+        #[allow(deprecated)]
         Error::Serialization(msg) => {
             assert!(msg.contains("API key"));
         }
@@ -158,7 +162,7 @@ fn test_client_options_builder_missing_api_key() {
 #[test]
 fn test_client_options_from_str() {
     let options: ClientOptions = "test_key".into();
-    assert_eq!(options.api_key(), "test_key");
+    assert_eq!(options.api_key, "test_key");
     assert_eq!(
         options.single_event_endpoint(),
         "https://us.i.posthog.com/i/v0/e/"
@@ -173,5 +177,5 @@ fn test_client_options_custom_timeout() {
         .build()
         .unwrap();
 
-    assert_eq!(options.request_timeout_seconds(), 60);
+    assert_eq!(options.request_timeout_seconds, 60);
 }
