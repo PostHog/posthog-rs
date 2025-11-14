@@ -145,9 +145,8 @@ impl FlagPoller {
                     config.project_api_key
                 );
 
-                // lgtm[rust/cleartext-transmission]
                 match client
-                    .get(&url)
+                    .get(&url) // lgtm[rust/cleartext-transmission]
                     .header(
                         "Authorization",
                         format!("Bearer {}", config.personal_api_key),
@@ -186,10 +185,9 @@ impl FlagPoller {
             self.config.project_api_key
         );
 
-        // lgtm[rust/cleartext-transmission]
         let response = self
             .client
-            .get(&url)
+            .get(&url) // lgtm[rust/cleartext-transmission]
             .header(
                 "Authorization",
                 format!("Bearer {}", self.config.personal_api_key),
@@ -290,9 +288,8 @@ impl AsyncFlagPoller {
                             config.project_api_key
                         );
 
-                        // lgtm[rust/cleartext-transmission]
                         match client
-                            .get(&url)
+                            .get(&url) // lgtm[rust/cleartext-transmission]
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
                             .send()
                             .await
@@ -329,10 +326,9 @@ impl AsyncFlagPoller {
             self.config.project_api_key
         );
 
-        // lgtm[rust/cleartext-transmission]
         let response = self
             .client
-            .get(&url)
+            .get(&url) // lgtm[rust/cleartext-transmission]
             .header(
                 "Authorization",
                 format!("Bearer {}", self.config.personal_api_key),
