@@ -12,7 +12,6 @@ pub use client::client;
 pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
-pub use client::ClientOptionsBuilderError;
 
 // Endpoints
 pub use endpoints::{
@@ -21,6 +20,9 @@ pub use endpoints::{
 
 // Error
 pub use error::Error;
+pub use error::InitializationError;
+pub use error::TransportError;
+pub use error::ValidationError;
 
 // Event
 pub use event::Event;

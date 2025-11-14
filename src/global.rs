@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
 
+use crate::error::InitializationError;
 use crate::{client, Client, ClientOptions, Error, Event};
 
 static GLOBAL_CLIENT: OnceLock<Client> = OnceLock::new();
@@ -19,7 +20,7 @@ pub async fn init_global_client<C: Into<ClientOptions>>(options: C) -> Result<()
     let client = client(options).await;
     GLOBAL_CLIENT
         .set(client)
-        .map_err(|_| Error::AlreadyInitialized)
+        .map_err(|_| InitializationError::AlreadyInitialized.into())
 }
 
 /// [`init_global_client`] will initialize a globally available client singleton. This singleton
@@ -36,7 +37,7 @@ pub fn init_global_client<C: Into<ClientOptions>>(options: C) -> Result<(), Erro
     let client = client(options);
     GLOBAL_CLIENT
         .set(client)
-        .map_err(|_| Error::AlreadyInitialized)
+        .map_err(|_| InitializationError::AlreadyInitialized.into())
 }
 
 /// [`disable`] prevents the global client from being initialized.
@@ -55,13 +56,17 @@ pub fn is_disabled() -> bool {
 /// Capture the provided event, sending it to PostHog using the global client.
 #[cfg(feature = "async-client")]
 pub async fn capture(event: Event) -> Result<(), Error> {
-    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    let client = GLOBAL_CLIENT
+        .get()
+        .ok_or(InitializationError::NotInitialized)?;
     client.capture(event).await
 }
 
 /// Capture the provided event, sending it to PostHog using the global client.
 #[cfg(not(feature = "async-client"))]
 pub fn capture(event: Event) -> Result<(), Error> {
-    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    let client = GLOBAL_CLIENT
+        .get()
+        .ok_or(InitializationError::NotInitialized)?;
     client.capture(event)
 }

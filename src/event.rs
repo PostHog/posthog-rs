@@ -5,6 +5,7 @@ use semver::Version;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::error::ValidationError;
 use crate::Error;
 
 /// An [`Event`] represents an interaction a user has with your app or
@@ -57,8 +58,8 @@ impl Event {
         key: K,
         prop: P,
     ) -> Result<(), Error> {
-        let as_json =
-            serde_json::to_value(prop).map_err(|e| Error::Serialization(e.to_string()))?;
+        let as_json = serde_json::to_value(prop)
+            .map_err(|e| ValidationError::SerializationFailed(e.to_string()))?;
         let _ = self.properties.insert(key.into(), as_json);
         Ok(())
     }
@@ -81,9 +82,10 @@ impl Event {
         Tz: TimeZone,
     {
         if timestamp > Utc::now() + Duration::seconds(1) {
-            return Err(Error::InvalidTimestamp(String::from(
+            return Err(ValidationError::InvalidTimestamp(String::from(
                 "Events cannot occur in the future",
-            )));
+            ))
+            .into());
         }
         self.timestamp = Some(timestamp.naive_utc());
         Ok(())
