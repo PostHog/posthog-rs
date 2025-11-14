@@ -17,7 +17,6 @@ use super::ClientOptions;
 /// Maximum number of distinct IDs to track for feature flag deduplication
 const MAX_DICT_SIZE: usize = 50_000;
 
-
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
     options: ClientOptions,
