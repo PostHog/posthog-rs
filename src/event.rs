@@ -24,7 +24,7 @@ pub struct Event {
 
 impl Event {
     /// Capture a new identified [`Event`]. Unless you have a distinct ID you can
-    /// associate with a user, you probably want to use [`new_anon`] instead.
+    /// associate with a user, you probably want to use [`Event::new_anon`] instead.
     pub fn new<S: Into<String>>(event: S, distinct_id: S) -> Self {
         Self {
             event: event.into(),
@@ -36,7 +36,7 @@ impl Event {
     }
 
     /// Capture a new anonymous event.
-    /// See https://posthog.com/docs/data/anonymous-vs-identified-events#how-to-capture-anonymous-events
+    /// See <https://posthog.com/docs/data/anonymous-vs-identified-events#how-to-capture-anonymous-events>
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
         let mut res = Self {
             event: event.into(),
@@ -64,7 +64,7 @@ impl Event {
         Ok(())
     }
 
-    /// Capture this as a group event. See https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events
+    /// Capture this as a group event. See <https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events>
     /// Note that group events cannot be personless, and will be automatically upgraded to include person profile processing if
     /// they were anonymous. This might lead to "empty" person profiles being created.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
