@@ -146,7 +146,7 @@ impl FlagPoller {
                 );
 
                 match client
-                    .get(&url) // lgtm[rust/cleartext-transmission]
+                    .get(&url) // CODEQL_IGNORE
                     .header(
                         "Authorization",
                         format!("Bearer {}", config.personal_api_key),
@@ -187,7 +187,7 @@ impl FlagPoller {
 
         let response = self
             .client
-            .get(&url) // lgtm[rust/cleartext-transmission]
+            .get(&url) // CODEQL_IGNORE
             .header(
                 "Authorization",
                 format!("Bearer {}", self.config.personal_api_key),
@@ -289,7 +289,7 @@ impl AsyncFlagPoller {
                         );
 
                         match client
-                            .get(&url) // lgtm[rust/cleartext-transmission]
+                            .get(&url) // CODEQL_IGNORE
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
                             .send()
                             .await
@@ -328,7 +328,7 @@ impl AsyncFlagPoller {
 
         let response = self
             .client
-            .get(&url) // lgtm[rust/cleartext-transmission]
+            .get(&url) // CODEQL_IGNORE
             .header(
                 "Authorization",
                 format!("Bearer {}", self.config.personal_api_key),
