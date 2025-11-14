@@ -56,7 +56,7 @@ async fn test_get_all_feature_flags() {
     let client = create_test_client(server.base_url()).await;
 
     let result = client
-        .get_feature_flags("test-user".to_string(), None, None, None)
+        .get_all_flags_and_payloads("test-user".to_string(), None, None, None)
         .await;
 
     if let Err(e) = &result {
@@ -64,7 +64,7 @@ async fn test_get_all_feature_flags() {
         eprintln!("Mock server URL: {}", server.base_url());
     }
     assert!(result.is_ok());
-    let (feature_flags, payloads, _request_id, _flag_details) = result.unwrap();
+    let (feature_flags, payloads) = result.unwrap();
 
     assert_eq!(
         feature_flags.get("test-flag"),

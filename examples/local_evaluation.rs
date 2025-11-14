@@ -135,10 +135,10 @@ async fn main() {
 
     let start = Instant::now();
     match local_client
-        .get_feature_flags(user_id.to_string(), None, Some(properties), None)
+        .get_all_flags(user_id.to_string(), None, Some(properties), None)
         .await
     {
-        Ok((flags, _, _, _)) => {
+        Ok(flags) => {
             let duration = start.elapsed();
             println!("Evaluated {} flags in {:?}", flags.len(), duration);
 

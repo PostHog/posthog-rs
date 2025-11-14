@@ -17,6 +17,7 @@ use super::ClientOptions;
 /// Maximum number of distinct IDs to track for feature flag deduplication
 const MAX_DICT_SIZE: usize = 50_000;
 
+
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
     options: ClientOptions,
@@ -164,6 +165,7 @@ impl Client {
     /// Internal method to capture $feature_flag_called events.
     ///
     /// Handles deduplication and event construction inline.
+    #[allow(clippy::too_many_arguments)]
     async fn capture_feature_flag_called(
         &self,
         distinct_id: &str,
@@ -287,15 +289,7 @@ impl Client {
         groups: Option<HashMap<String, String>>,
         person_properties: Option<HashMap<String, serde_json::Value>>,
         group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
-    ) -> Result<
-        (
-            HashMap<String, FlagValue>,
-            HashMap<String, serde_json::Value>,
-            Option<String>,
-            HashMap<String, FlagDetail>,
-        ),
-        Error,
-    > {
+    ) -> Result<FeatureFlagsResponse, Error> {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
         let mut payload = json!({
@@ -347,7 +341,7 @@ impl Client {
             Error::Serialization(format!("Failed to parse feature flags response: {e}"))
         })?;
 
-        Ok(flags_response.normalize())
+        Ok(flags_response)
     }
 
     /// Get a specific feature flag value with control over event capture
@@ -400,11 +394,12 @@ impl Client {
                 )
                 .await
             {
-                Ok((feature_flags, payloads, req_id, flag_details)) => {
-                    flag_value = feature_flags.get(&key).cloned();
-                    payload = payloads.get(&key).cloned();
-                    request_id = req_id;
-                    flag_details_map = flag_details;
+                Ok(response) => {
+                    // Use helper methods to get flag value and payload
+                    flag_value = response.get_flag_value(&key);
+                    payload = response.get_flag_payload(&key);
+                    request_id = response.request_id;
+                    flag_details_map = response.flags;
                 }
                 Err(e) => {
                     eprintln!(
@@ -527,8 +522,41 @@ impl Client {
             .await
             .map_err(|e| Error::Serialization(format!("Failed to parse response: {e}")))?;
 
-        let (_flags, payloads, _request_id, _flag_details) = flags_response.normalize();
-        Ok(payloads.get(&key_str).cloned())
+        Ok(flags_response.get_flag_payload(&key_str))
+    }
+
+    /// Get all feature flags as a HashMap
+    pub async fn get_all_flags(
+        &self,
+        distinct_id: String,
+        groups: Option<HashMap<String, String>>,
+        person_properties: Option<HashMap<String, serde_json::Value>>,
+        group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
+    ) -> Result<HashMap<String, FlagValue>, Error> {
+        let response = self
+            .get_feature_flags(distinct_id, groups, person_properties, group_properties)
+            .await?;
+        Ok(response.to_flag_values())
+    }
+
+    /// Get all feature flags and payloads
+    pub async fn get_all_flags_and_payloads(
+        &self,
+        distinct_id: String,
+        groups: Option<HashMap<String, String>>,
+        person_properties: Option<HashMap<String, serde_json::Value>>,
+        group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
+    ) -> Result<
+        (
+            HashMap<String, FlagValue>,
+            HashMap<String, serde_json::Value>,
+        ),
+        Error,
+    > {
+        let response = self
+            .get_feature_flags(distinct_id, groups, person_properties, group_properties)
+            .await?;
+        Ok((response.to_flag_values(), response.to_flag_payloads()))
     }
 
     /// Evaluate a feature flag locally (requires feature flags to be loaded)

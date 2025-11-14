@@ -89,7 +89,7 @@ pub(crate) struct MultivariateVariant {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct FeatureFlagsResponse {
+pub struct FeatureFlagsResponse {
     pub flags: HashMap<String, FlagDetail>,
     #[serde(rename = "errorsWhileComputingFlags")]
     #[serde(default)]
@@ -100,39 +100,30 @@ pub(crate) struct FeatureFlagsResponse {
 }
 
 impl FeatureFlagsResponse {
-    /// Convert the response to a normalized format
-    /// Returns: (flags, payloads, request_id, flag_details)
-    pub fn normalize(
-        self,
-    ) -> (
-        HashMap<String, FlagValue>,
-        HashMap<String, serde_json::Value>,
-        Option<String>,
-        HashMap<String, FlagDetail>,
-    ) {
-        let mut feature_flags = HashMap::new();
-        let mut payloads = HashMap::new();
-        let flag_details = self.flags.clone(); // Keep full details for metadata
+    /// Get the flag value for a specific flag key
+    pub fn get_flag_value(&self, key: &str) -> Option<FlagValue> {
+        self.flags.get(key).map(|d| d.to_flag_value())
+    }
 
-        for (key, detail) in self.flags {
-            if detail.enabled {
-                if let Some(variant) = detail.variant {
-                    feature_flags.insert(key.clone(), FlagValue::String(variant));
-                } else {
-                    feature_flags.insert(key.clone(), FlagValue::Boolean(true));
-                }
-            } else {
-                feature_flags.insert(key.clone(), FlagValue::Boolean(false));
-            }
+    /// Get the payload for a specific flag key
+    pub fn get_flag_payload(&self, key: &str) -> Option<serde_json::Value> {
+        self.flags.get(key).and_then(|d| d.payload())
+    }
 
-            if let Some(metadata) = detail.metadata {
-                if let Some(payload) = metadata.payload {
-                    payloads.insert(key, payload);
-                }
-            }
-        }
+    /// Get all flag values as a HashMap
+    pub fn to_flag_values(&self) -> HashMap<String, FlagValue> {
+        self.flags
+            .iter()
+            .map(|(key, detail)| (key.clone(), detail.to_flag_value()))
+            .collect()
+    }
 
-        (feature_flags, payloads, self.request_id, flag_details)
+    /// Get all flag payloads as a HashMap
+    pub fn to_flag_payloads(&self) -> HashMap<String, serde_json::Value> {
+        self.flags
+            .iter()
+            .filter_map(|(key, detail)| detail.payload().map(|p| (key.clone(), p)))
+            .collect()
     }
 }
 
@@ -145,6 +136,26 @@ pub struct FlagDetail {
     pub reason: Option<FlagReason>,
     #[serde(default)]
     pub metadata: Option<FlagMetadata>,
+}
+
+impl FlagDetail {
+    /// Convert FlagDetail to FlagValue
+    pub fn to_flag_value(&self) -> FlagValue {
+        if self.enabled {
+            if let Some(ref variant) = self.variant {
+                FlagValue::String(variant.clone())
+            } else {
+                FlagValue::Boolean(true)
+            }
+        } else {
+            FlagValue::Boolean(false)
+        }
+    }
+
+    /// Get the payload from metadata if present
+    pub fn payload(&self) -> Option<serde_json::Value> {
+        self.metadata.as_ref().and_then(|m| m.payload.clone())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

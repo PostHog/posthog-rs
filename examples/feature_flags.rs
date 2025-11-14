@@ -175,10 +175,10 @@ async fn main() {
     println!("\n=== Example 5: Batch Flag Evaluation ===");
 
     match client
-        .get_feature_flags(user_id.to_string(), None, Some(properties), None)
+        .get_all_flags_and_payloads(user_id.to_string(), None, Some(properties), None)
         .await
     {
-        Ok((flags, payloads, _request_id, _flag_details)) => {
+        Ok((flags, payloads)) => {
             println!("All flags for user");
             for (flag_key, flag_value) in flags {
                 match flag_value {

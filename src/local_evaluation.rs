@@ -99,7 +99,7 @@ pub(crate) struct FlagPoller {
 
 #[cfg(not(feature = "async-client"))]
 impl FlagPoller {
-    fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
+    pub(crate) fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(config.request_timeout)
             .build()
@@ -115,7 +115,7 @@ impl FlagPoller {
     }
 
     /// Start the polling thread
-    fn start(&self) {
+    pub(crate) fn start(&self) {
         // Initial load
         if let Err(e) = self.load_flags() {
             eprintln!("Failed to load initial flags: {e}");
