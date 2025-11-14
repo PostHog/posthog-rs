@@ -1,6 +1,6 @@
 # PostHog Rust SDK Examples
 
-This directory contains example applications demonstrating how to use the PostHog Rust SDK.
+This directory contains example applications demonstrating how to use the PostHog Rust SDK
 
 ## Available Examples
 
