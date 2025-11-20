@@ -23,6 +23,7 @@ pub struct Client {
     options: ClientOptions,
     client: HttpClient,
     local_evaluator: Option<LocalEvaluator>,
+    #[allow(dead_code)]
     flag_poller: Option<AsyncFlagPoller>,
     /// Tracks which feature flags have been called for deduplication.
     /// Maps distinct_id -> set of feature flag keys that have been reported.
@@ -54,7 +55,6 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
             (Some(LocalEvaluator::new(cache)), Some(poller))
         } else {
-            eprintln!("[FEATURE FLAGS] Local evaluation enabled but personal_api_key not set");
             (None, None)
         }
     } else {
@@ -248,12 +248,7 @@ impl Client {
         }
 
         // Capture the event (ignore errors to not break user code)
-        if let Err(e) = self.capture(event).await {
-            eprintln!(
-                "[FEATURE FLAGS] Failed to capture $feature_flag_called event: {}",
-                e
-            );
-        }
+        let _ = self.capture(event).await;
 
         // Mark as reported (even if capture failed to avoid retry storms)
         {
@@ -369,11 +364,7 @@ impl Client {
                 Ok(None) => {
                     // Flag not found locally, fall through to API
                 }
-                Err(e) => {
-                    eprintln!(
-                        "[FEATURE FLAGS] Local evaluation inconclusive: {}",
-                        e.message
-                    );
+                Err(_e) => {
                     // Inconclusive match, fall through to API
                 }
             }
@@ -397,11 +388,7 @@ impl Client {
                     request_id = response.request_id;
                     flag_details_map = response.flags;
                 }
-                Err(e) => {
-                    eprintln!(
-                        "[FEATURE FLAGS] Failed to get feature flags from API: {}",
-                        e
-                    );
+                Err(_e) => {
                     // Return None on error (graceful degradation)
                     flag_value = None;
                 }

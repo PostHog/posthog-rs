@@ -118,10 +118,8 @@ impl FlagPoller {
 
     /// Start the polling thread
     pub(crate) fn start(&self) {
-        // Initial load
-        if let Err(e) = self.load_flags() {
-            eprintln!("Failed to load initial flags: {e}");
-        }
+        // Initial load (silently ignore errors)
+        let _ = self.load_flags();
 
         let config = self.config.clone();
         let cache = self.cache.clone();
@@ -158,20 +156,12 @@ impl FlagPoller {
                 {
                     Ok(response) => {
                         if response.status().is_success() {
-                            match response.json::<LocalEvaluationResponse>() {
-                                Ok(data) => cache.update(data),
-                                Err(e) => {
-                                    eprintln!("[FEATURE FLAGS] Failed to parse flag response: {e}")
-                                }
+                            if let Ok(data) = response.json::<LocalEvaluationResponse>() {
+                                cache.update(data);
                             }
-                        } else {
-                            eprintln!(
-                                "[FEATURE FLAGS] Failed to fetch flags: HTTP {}",
-                                response.status()
-                            );
                         }
                     }
-                    Err(e) => eprintln!("[FEATURE FLAGS] Failed to fetch flags: {e}"),
+                    Err(_e) => {}
                 }
             }
         });
@@ -267,10 +257,8 @@ impl AsyncFlagPoller {
             return; // Already running
         }
 
-        // Initial load
-        if let Err(e) = self.load_flags().await {
-            eprintln!("[FEATURE FLAGS] Failed to load initial flags: {e}");
-        }
+        // Initial load (silently ignore errors)
+        let _ = self.load_flags().await;
 
         let config = self.config.clone();
         let cache = self.cache.clone();
@@ -305,15 +293,12 @@ impl AsyncFlagPoller {
                         {
                             Ok(response) => {
                                 if response.status().is_success() {
-                                    match response.json::<LocalEvaluationResponse>().await {
-                                        Ok(data) => cache.update(data),
-                                        Err(e) => eprintln!("[FEATURE FLAGS] Failed to parse flag response: {e}"),
+                                    if let Ok(data) = response.json::<LocalEvaluationResponse>().await {
+                                        cache.update(data);
                                     }
-                                } else {
-                                    eprintln!("[FEATURE FLAGS] Failed to fetch flags: HTTP {}", response.status());
                                 }
                             }
-                            Err(e) => eprintln!("[FEATURE FLAGS] Failed to fetch flags: {e}"),
+                            Err(_e) => {},
                         }
                     }
                 }
