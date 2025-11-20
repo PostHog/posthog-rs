@@ -32,6 +32,14 @@ pub enum Error {
     #[error("Invalid timestamp: {0}")]
     InvalidTimestamp(String),
 
+    #[deprecated(since = "0.4.0", note = "Use Error::Initialization instead")]
+    #[error("Uninitialized field: {0}")]
+    UninitializedField(&'static str),
+
+    #[deprecated(since = "0.4.0", note = "Use Error::Validation instead")]
+    #[error("Validation error: {0}")]
+    ValidationError(String),
+
     // New error categories
     /// Transport-layer errors (network, HTTP, etc.)
     #[error(transparent)]

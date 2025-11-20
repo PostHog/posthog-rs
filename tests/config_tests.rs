@@ -152,10 +152,10 @@ fn test_client_options_builder_missing_api_key() {
     assert!(result.is_err());
     match result.unwrap_err() {
         #[allow(deprecated)]
-        Error::Serialization(msg) => {
-            assert!(msg.contains("API key"));
+        Error::UninitializedField(field) => {
+            assert_eq!(field, "api_key");
         }
-        _ => panic!("Expected Serialization error"),
+        _ => panic!("Expected UninitializedField error"),
     }
 }
 

@@ -162,9 +162,7 @@ impl ClientOptionsBuilder {
     /// Build the ClientOptions, validating all fields
     pub fn build(self) -> Result<ClientOptions, Error> {
         #[allow(deprecated)]
-        let api_key = self
-            .api_key
-            .ok_or_else(|| Error::Serialization("API key is required".to_string()))?;
+        let api_key = self.api_key.ok_or(Error::UninitializedField("api_key"))?;
 
         let request_timeout_seconds = self.request_timeout_seconds.unwrap_or(30);
 
