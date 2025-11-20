@@ -5,7 +5,7 @@ use std::time::Duration;
 use reqwest::{blocking::Client as HttpClient, header::CONTENT_TYPE};
 use serde_json::json;
 
-use crate::endpoints::{Endpoint, EndpointManager};
+use crate::endpoints::Endpoint;
 use crate::error::{TransportError, ValidationError};
 use crate::feature_flags::{
     match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagDetail, FlagValue,
@@ -31,9 +31,7 @@ pub struct Client {
 
 /// This function constructs a new client using the options provided.
 pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
-    let mut options = options.into();
-    // Ensure endpoint_manager is properly initialized based on the host
-    options.endpoint_manager = EndpointManager::new(options.host.clone());
+    let options = options.into();
     let client = HttpClient::builder()
         .timeout(Duration::from_secs(options.request_timeout_seconds))
         .build()

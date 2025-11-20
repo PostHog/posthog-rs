@@ -21,6 +21,8 @@ pub use error::Error;
 pub use error::InitializationError;
 pub use error::TransportError;
 pub use error::ValidationError;
+// for backward compatibility
+pub use error::Error as ClientOptionsBuilderError;
 
 // Event
 pub use event::Event;
