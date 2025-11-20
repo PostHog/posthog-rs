@@ -201,7 +201,7 @@ impl Client {
         disable_geoip: Option<bool>,
         request_id: Option<String>,
         flag_details: Option<&FlagDetail>,
-    ) {
+    ) -> Result<(), Error> {
         // Create the reported key for deduplication
         // Format: "{key}_::null::" for None, "{key}_{value}" otherwise
         let feature_flag_reported_key = match flag_response {
@@ -215,7 +215,7 @@ impl Client {
             if let Some(flags) = reported.get(distinct_id) {
                 if flags.contains(&feature_flag_reported_key) {
                     // Already reported, skip
-                    return;
+                    return Ok(());
                 }
             }
         }
@@ -224,27 +224,21 @@ impl Client {
         let mut event = Event::new("$feature_flag_called", distinct_id);
 
         // Add required properties
-        event.insert_prop("$feature_flag", flag_key).ok();
-        event
-            .insert_prop("$feature_flag_response", &flag_response)
-            .ok();
-        event
-            .insert_prop("locally_evaluated", locally_evaluated)
-            .ok();
+        event.insert_prop("$feature_flag", flag_key)?;
+        event.insert_prop("$feature_flag_response", &flag_response)?;
+        event.insert_prop("locally_evaluated", locally_evaluated)?;
 
         // Add $feature/{key} property
-        event
-            .insert_prop(format!("$feature/{}", flag_key), &flag_response)
-            .ok();
+        event.insert_prop(format!("$feature/{}", flag_key), &flag_response)?;
 
         // Add optional properties
         if let Some(p) = payload {
-            event.insert_prop("$feature_flag_payload", p).ok();
+            event.insert_prop("$feature_flag_payload", p)?;
         }
 
         // Add request_id if provided
         if let Some(req_id) = request_id {
-            event.insert_prop("$feature_flag_request_id", req_id).ok();
+            event.insert_prop("$feature_flag_request_id", req_id)?;
         }
 
         // Add flag_details metadata if provided
@@ -252,16 +246,14 @@ impl Client {
             // Add reason
             if let Some(reason) = &details.reason {
                 if let Some(desc) = &reason.description {
-                    event.insert_prop("$feature_flag_reason", desc.clone()).ok();
+                    event.insert_prop("$feature_flag_reason", desc.clone())?;
                 }
             }
 
             // Add metadata (version and id)
             if let Some(metadata) = &details.metadata {
-                event
-                    .insert_prop("$feature_flag_version", metadata.version)
-                    .ok();
-                event.insert_prop("$feature_flag_id", metadata.id).ok();
+                event.insert_prop("$feature_flag_version", metadata.version)?;
+                event.insert_prop("$feature_flag_id", metadata.id)?;
             }
         }
 
@@ -275,12 +267,12 @@ impl Client {
         // Add disable_geoip if provided
         if let Some(disable_geo) = disable_geoip {
             if disable_geo {
-                event.insert_prop("$geoip_disable", true).ok();
+                event.insert_prop("$geoip_disable", true)?;
             }
         }
 
-        // Capture the event (ignore errors to not break user code)
-        let _ = self.capture(event);
+        // Capture the event
+        self.capture(event)?;
 
         // Mark as reported (even if capture failed to avoid retry storms)
         {
@@ -299,6 +291,8 @@ impl Client {
                 .or_insert_with(HashSet::new)
                 .insert(feature_flag_reported_key);
         }
+
+        Ok(())
     }
 
     /// Get a specific feature flag value for a user
@@ -382,7 +376,7 @@ impl Client {
 
         // Capture $feature_flag_called event if enabled
         if self.options.send_feature_flag_events && send_feature_flag_events {
-            self.capture_feature_flag_called(
+            let _ = self.capture_feature_flag_called(
                 &distinct_id,
                 &key,
                 flag_value.as_ref(),
