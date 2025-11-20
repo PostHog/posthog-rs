@@ -4,7 +4,6 @@ use crate::Error;
 /// Configuration options for the PostHog client.
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
-    pub(crate) host: Option<String>,
     pub(crate) api_key: String,
     pub(crate) request_timeout_seconds: u64,
 
@@ -180,7 +179,6 @@ impl ClientOptionsBuilder {
         let endpoint_manager = EndpointManager::new(endpoint_to_use);
 
         Ok(ClientOptions {
-            host: self.host,
             api_key,
             request_timeout_seconds,
             personal_api_key: self.personal_api_key,
@@ -380,10 +378,10 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             #[allow(deprecated)]
-            Error::Serialization(msg) => {
-                assert!(msg.contains("API key"));
+            Error::UninitializedField(field) => {
+                assert_eq!(field, "api_key");
             }
-            _ => panic!("Expected Serialization error"),
+            _ => panic!("Expected UninitializedField error"),
         }
     }
 }
