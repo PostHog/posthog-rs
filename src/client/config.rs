@@ -1,38 +1,40 @@
-use crate::endpoints::{normalize_endpoint, EndpointManager, DEFAULT_HOST};
+use crate::endpoints::{normalize_endpoint, EndpointManager};
 use crate::Error;
 
 /// Configuration options for the PostHog client.
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
-    pub api_endpoint: String,
-    pub host: Option<String>,
-    pub api_key: String,
-    pub request_timeout_seconds: u64,
+    pub(crate) host: Option<String>,
+    pub(crate) api_key: String,
+    pub(crate) request_timeout_seconds: u64,
 
     // Feature flags related fields
-    pub personal_api_key: Option<String>,
-    pub enable_local_evaluation: bool,
-    pub poll_interval_seconds: u64,
-    pub feature_flags_request_timeout_seconds: u64,
-    pub send_feature_flag_events: bool,
+    pub(crate) personal_api_key: Option<String>,
+    pub(crate) enable_local_evaluation: bool,
+    pub(crate) poll_interval_seconds: u64,
+    pub(crate) feature_flags_request_timeout_seconds: u64,
+    pub(crate) send_feature_flag_events: bool,
 
     // Other configuration
-    pub gzip: bool,
-    pub disabled: bool,
-    pub disable_geoip: bool,
+    pub(crate) gzip: bool,
+    pub(crate) disabled: bool,
+    pub(crate) disable_geoip: bool,
 
     // Endpoint management
-    pub endpoint_manager: EndpointManager,
+    pub(crate) endpoint_manager: EndpointManager,
 }
 
 impl ClientOptions {
     /// Get the full endpoint URL for single event capture
-    pub fn single_event_endpoint(&self) -> String {
-        self.endpoint_manager.single_event_endpoint()
+    #[cfg(test)]
+    pub(crate) fn single_event_endpoint(&self) -> String {
+        use crate::endpoints::Endpoint;
+        self.endpoint_manager.build_url(Endpoint::Capture)
     }
 
     /// Get the full endpoint URL for batch event capture
-    pub fn batch_event_endpoint(&self) -> String {
+    #[cfg(test)]
+    pub(crate) fn batch_event_endpoint(&self) -> String {
         self.endpoint_manager.batch_event_endpoint()
     }
 
@@ -42,7 +44,7 @@ impl ClientOptions {
     }
 
     /// Check if the client is disabled
-    pub fn is_disabled(&self) -> bool {
+    pub(crate) fn is_disabled(&self) -> bool {
         self.disabled
     }
 }
@@ -171,18 +173,15 @@ impl ClientOptionsBuilder {
         // Process the endpoint with correct priority: api_endpoint > host
         let endpoint_to_use = self.api_endpoint.or(self.host.clone());
 
-        // Normalize and store for backward compatibility
-        let api_endpoint = if let Some(endpoint) = &endpoint_to_use {
-            normalize_endpoint(endpoint)?
-        } else {
-            DEFAULT_HOST.to_string()
-        };
+        // Validate the endpoint if provided
+        if let Some(ref endpoint) = endpoint_to_use {
+            normalize_endpoint(endpoint)?;
+        }
 
         // Initialize endpoint manager with the prioritized endpoint
         let endpoint_manager = EndpointManager::new(endpoint_to_use);
 
         Ok(ClientOptions {
-            api_endpoint,
             host: self.host,
             api_key,
             request_timeout_seconds,
@@ -224,5 +223,169 @@ impl From<(&str, &str)> for ClientOptions {
             .host(host.to_string())
             .build()
             .expect("We always set the API key, so this is infallible")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_client_options_builder_default_endpoint() {
+        let options = ClientOptionsBuilder::new()
+            .api_key("test_key")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            options.single_event_endpoint(),
+            "https://us.i.posthog.com/i/v0/e/"
+        );
+        assert_eq!(
+            options.batch_event_endpoint(),
+            "https://us.i.posthog.com/batch/"
+        );
+    }
+
+    #[test]
+    fn test_client_options_builder_with_hostname() {
+        let options = ClientOptionsBuilder::new()
+            .api_key("test_key")
+            .api_endpoint("https://eu.posthog.com")
+            .build()
+            .unwrap();
+
+        // EU PostHog Cloud redirects to EU ingestion endpoint
+        assert_eq!(
+            options.single_event_endpoint(),
+            "https://eu.i.posthog.com/i/v0/e/"
+        );
+        assert_eq!(
+            options.batch_event_endpoint(),
+            "https://eu.i.posthog.com/batch/"
+        );
+    }
+
+    #[test]
+    fn test_client_options_builder_with_full_endpoint_single() {
+        // Backward compatibility: accept full endpoint and strip path
+        let options = ClientOptionsBuilder::new()
+            .api_key("test_key")
+            .api_endpoint("https://us.i.posthog.com/i/v0/e/")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            options.single_event_endpoint(),
+            "https://us.i.posthog.com/i/v0/e/"
+        );
+        assert_eq!(
+            options.batch_event_endpoint(),
+            "https://us.i.posthog.com/batch/"
+        );
+    }
+
+    #[test]
+    fn test_client_options_builder_with_full_endpoint_batch() {
+        // Backward compatibility: accept batch endpoint and strip path
+        let options = ClientOptionsBuilder::new()
+            .api_key("test_key")
+            .api_endpoint("https://us.i.posthog.com/batch/")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            options.single_event_endpoint(),
+            "https://us.i.posthog.com/i/v0/e/"
+        );
+        assert_eq!(
+            options.batch_event_endpoint(),
+            "https://us.i.posthog.com/batch/"
+        );
+    }
+
+    #[test]
+    fn test_client_options_builder_with_port() {
+        let options = ClientOptionsBuilder::new()
+            .api_key("test_key")
+            .api_endpoint("http://localhost:8000")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            options.single_event_endpoint(),
+            "http://localhost:8000/i/v0/e/"
+        );
+        assert_eq!(
+            options.batch_event_endpoint(),
+            "http://localhost:8000/batch/"
+        );
+    }
+
+    #[test]
+    fn test_client_options_builder_with_trailing_slash() {
+        let options = ClientOptionsBuilder::new()
+            .api_key("test_key")
+            .api_endpoint("https://eu.posthog.com/")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            options.single_event_endpoint(),
+            "https://eu.i.posthog.com/i/v0/e/"
+        );
+        assert_eq!(
+            options.batch_event_endpoint(),
+            "https://eu.i.posthog.com/batch/"
+        );
+    }
+
+    #[test]
+    fn test_client_options_builder_invalid_endpoint_no_scheme() {
+        let result = ClientOptionsBuilder::new()
+            .api_key("test_key")
+            .api_endpoint("posthog.com")
+            .build();
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            #[allow(deprecated)]
+            Error::Serialization(msg) => {
+                assert!(msg.contains("Endpoint must start with http://"));
+            }
+            _ => panic!("Expected Serialization error"),
+        }
+    }
+
+    #[test]
+    fn test_client_options_builder_invalid_endpoint_malformed() {
+        let result = ClientOptionsBuilder::new()
+            .api_key("test_key")
+            .api_endpoint("not a url")
+            .build();
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            #[allow(deprecated)]
+            Error::Serialization(msg) => {
+                // Should contain error about scheme or being invalid
+                assert!(msg.contains("http://") || msg.contains("https://"));
+            }
+            _ => panic!("Expected Serialization error"),
+        }
+    }
+
+    #[test]
+    fn test_client_options_builder_missing_api_key() {
+        let result = ClientOptionsBuilder::new().build();
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            #[allow(deprecated)]
+            Error::Serialization(msg) => {
+                assert!(msg.contains("API key"));
+            }
+            _ => panic!("Expected Serialization error"),
+        }
     }
 }

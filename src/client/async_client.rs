@@ -342,7 +342,7 @@ impl Client {
     }
 
     /// Get a specific feature flag value with control over event capture
-    pub async fn get_feature_flag_with_options<K: Into<String>, D: Into<String>>(
+    pub(crate) async fn get_feature_flag_with_options<K: Into<String>, D: Into<String>>(
         &self,
         key: K,
         distinct_id: D,
@@ -480,7 +480,8 @@ impl Client {
     }
 
     /// Get a feature flag payload for a user
-    pub async fn get_feature_flag_payload<K: Into<String>, D: Into<String>>(
+    #[allow(dead_code)]
+    pub(crate) async fn get_feature_flag_payload<K: Into<String>, D: Into<String>>(
         &self,
         key: K,
         distinct_id: D,

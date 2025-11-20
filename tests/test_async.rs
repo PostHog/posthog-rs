@@ -293,11 +293,12 @@ async fn test_get_feature_flag_payload() {
     let client = create_test_client(server.base_url()).await;
 
     let result = client
-        .get_feature_flag_payload("onboarding-flow".to_string(), "test-user".to_string())
+        .get_all_flags_and_payloads("test-user".to_string(), None, None, None)
         .await;
 
     assert!(result.is_ok());
-    let payload = result.unwrap();
+    let (_flags, payloads) = result.unwrap();
+    let payload = payloads.get("onboarding-flow");
     assert!(payload.is_some());
 
     let payload_value = payload.unwrap();

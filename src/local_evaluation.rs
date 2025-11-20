@@ -1,3 +1,4 @@
+use crate::endpoints::Endpoint;
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FlagValue, InconclusiveMatchError};
 use crate::Error;
 use serde::{Deserialize, Serialize};
@@ -140,8 +141,9 @@ impl FlagPoller {
 
                 // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
                 let url = format!(
-                    "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
+                    "{}{}?token={}&send_cohorts",
                     config.api_host.trim_end_matches('/'),
+                    Endpoint::LocalEvaluation.path(),
                     config.project_api_key
                 );
 
@@ -180,8 +182,9 @@ impl FlagPoller {
     fn load_flags(&self) -> Result<(), Error> {
         // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
         let url = format!(
-            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
+            "{}{}?token={}&send_cohorts",
             self.config.api_host.trim_end_matches('/'),
+            Endpoint::LocalEvaluation.path(),
             self.config.project_api_key
         );
 
@@ -288,8 +291,9 @@ impl AsyncFlagPoller {
 
                         // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
                         let url = format!(
-                            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
+                            "{}{}?token={}&send_cohorts",
                             config.api_host.trim_end_matches('/'),
+                            Endpoint::LocalEvaluation.path(),
                             config.project_api_key
                         );
 
@@ -326,8 +330,9 @@ impl AsyncFlagPoller {
     pub async fn load_flags(&self) -> Result<(), Error> {
         // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
         let url = format!(
-            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
+            "{}{}?token={}&send_cohorts",
             self.config.api_host.trim_end_matches('/'),
+            Endpoint::LocalEvaluation.path(),
             self.config.project_api_key
         );
 
