@@ -39,24 +39,27 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
 
     let (local_evaluator, flag_poller) = if options.enable_local_evaluation {
-        if let Some(ref personal_key) = options.personal_api_key {
-            let cache = FlagCache::new();
+        // Safe to unwrap: validation in ClientOptions::build() ensures personal_api_key
+        // is always Some when enable_local_evaluation is true
+        let personal_key = options
+            .personal_api_key
+            .as_ref()
+            .expect("personal_api_key must be present when enable_local_evaluation is true");
 
-            let config = LocalEvaluationConfig {
-                personal_api_key: personal_key.clone(),
-                project_api_key: options.api_key.clone(),
-                api_host: options.endpoints().api_host(),
-                poll_interval: Duration::from_secs(options.poll_interval_seconds),
-                request_timeout: Duration::from_secs(options.request_timeout_seconds),
-            };
+        let cache = FlagCache::new();
 
-            let poller = FlagPoller::new(config, cache.clone());
-            poller.start();
+        let config = LocalEvaluationConfig {
+            personal_api_key: personal_key.clone(),
+            project_api_key: options.api_key.clone(),
+            api_host: options.endpoints().api_host(),
+            poll_interval: Duration::from_secs(options.poll_interval_seconds),
+            request_timeout: Duration::from_secs(options.request_timeout_seconds),
+        };
 
-            (Some(LocalEvaluator::new(cache)), Some(poller))
-        } else {
-            (None, None)
-        }
+        let poller = FlagPoller::new(config, cache.clone());
+        poller.start();
+
+        (Some(LocalEvaluator::new(cache)), Some(poller))
     } else {
         (None, None)
     };

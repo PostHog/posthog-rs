@@ -200,4 +200,8 @@ pub enum InitializationError {
     /// Global client is not initialized
     #[error("Global client is not initialized")]
     NotInitialized,
+
+    /// Personal API key is required when local evaluation is enabled
+    #[error("Personal API key is required when enable_local_evaluation is true")]
+    MissingPersonalApiKey,
 }

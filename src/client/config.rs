@@ -165,6 +165,12 @@ impl ClientOptionsBuilder {
     pub fn build(self) -> Result<ClientOptions, Error> {
         let api_key = self.api_key.ok_or(InitializationError::MissingApiKey)?;
 
+        // Validate that personal_api_key is provided when local evaluation is enabled
+        let enable_local_evaluation = self.enable_local_evaluation.unwrap_or(false);
+        if enable_local_evaluation && self.personal_api_key.is_none() {
+            return Err(InitializationError::MissingPersonalApiKey.into());
+        }
+
         let request_timeout_seconds = self.request_timeout_seconds.unwrap_or(30);
 
         // Process the endpoint with correct priority: api_endpoint > host
@@ -182,7 +188,7 @@ impl ClientOptionsBuilder {
             api_key,
             request_timeout_seconds,
             personal_api_key: self.personal_api_key,
-            enable_local_evaluation: self.enable_local_evaluation.unwrap_or(false),
+            enable_local_evaluation,
             poll_interval_seconds: self.poll_interval_seconds.unwrap_or(30),
             feature_flags_request_timeout_seconds: self
                 .feature_flags_request_timeout_seconds
@@ -380,5 +386,35 @@ mod tests {
             }
             _ => panic!("Expected MissingApiKey error"),
         }
+    }
+
+    #[test]
+    fn test_client_options_builder_local_evaluation_without_personal_key() {
+        let result = ClientOptionsBuilder::new()
+            .api_key("test_key")
+            .enable_local_evaluation(true)
+            .build();
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::Initialization(InitializationError::MissingPersonalApiKey) => {
+                // Correct error type
+            }
+            _ => panic!("Expected MissingPersonalApiKey error"),
+        }
+    }
+
+    #[test]
+    fn test_client_options_builder_local_evaluation_with_personal_key() {
+        let result = ClientOptionsBuilder::new()
+            .api_key("test_key")
+            .personal_api_key("personal_key")
+            .enable_local_evaluation(true)
+            .build();
+
+        assert!(result.is_ok());
+        let options = result.unwrap();
+        assert!(options.enable_local_evaluation);
+        assert_eq!(options.personal_api_key, Some("personal_key".to_string()));
     }
 }
