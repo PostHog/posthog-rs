@@ -1,4 +1,5 @@
 use crate::endpoints::Endpoint;
+use crate::error::{TransportError, ValidationError};
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FlagValue, InconclusiveMatchError};
 use crate::Error;
 use serde::{Deserialize, Serialize};
@@ -196,20 +197,19 @@ impl FlagPoller {
                 format!("Bearer {}", self.config.personal_api_key),
             )
             .send()
-            .map_err(|e| {
-                #[allow(deprecated)]
-                Error::Connection(e.to_string())
-            })?;
+            .map_err(TransportError::from)?;
 
         if !response.status().is_success() {
-            #[allow(deprecated)]
-            return Err(Error::Connection(format!("HTTP {}", response.status())));
+            return Err(TransportError::HttpError(
+                response.status().as_u16(),
+                format!("HTTP {}", response.status()),
+            )
+            .into());
         }
 
-        #[allow(deprecated)]
         let data = response
             .json::<LocalEvaluationResponse>()
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+            .map_err(|e| ValidationError::SerializationFailed(e.to_string()))?;
 
         self.cache.update(data);
         Ok(())
@@ -345,21 +345,20 @@ impl AsyncFlagPoller {
             )
             .send()
             .await
-            .map_err(|e| {
-                #[allow(deprecated)]
-                Error::Connection(e.to_string())
-            })?;
+            .map_err(TransportError::from)?;
 
         if !response.status().is_success() {
-            #[allow(deprecated)]
-            return Err(Error::Connection(format!("HTTP {}", response.status())));
+            return Err(TransportError::HttpError(
+                response.status().as_u16(),
+                format!("HTTP {}", response.status()),
+            )
+            .into());
         }
 
-        #[allow(deprecated)]
         let data = response
             .json::<LocalEvaluationResponse>()
             .await
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+            .map_err(|e| ValidationError::SerializationFailed(e.to_string()))?;
 
         self.cache.update(data);
         Ok(())

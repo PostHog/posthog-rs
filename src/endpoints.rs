@@ -1,3 +1,4 @@
+use crate::error::InitializationError;
 use crate::Error;
 use std::fmt;
 
@@ -45,24 +46,22 @@ pub(crate) fn normalize_endpoint(endpoint: &str) -> Result<String, Error> {
 
     // Basic validation - must start with http:// or https://
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-        #[allow(deprecated)]
-        return Err(Error::Serialization(
+        return Err(InitializationError::InvalidEndpoint(
             "Endpoint must start with http:// or https://".to_string(),
-        ));
+        )
+        .into());
     }
 
     // Parse as URL to validate
-    #[allow(deprecated)]
     let url = endpoint
         .parse::<url::Url>()
-        .map_err(|e| Error::Serialization(format!("Invalid URL: {}", e)))?;
+        .map_err(|e| InitializationError::InvalidEndpoint(format!("Invalid URL: {}", e)))?;
 
     // Extract scheme and host
     let scheme = url.scheme();
-    #[allow(deprecated)]
     let host = url
         .host_str()
-        .ok_or_else(|| Error::Serialization("Missing host".to_string()))?;
+        .ok_or_else(|| InitializationError::InvalidEndpoint("Missing host".to_string()))?;
 
     // Check if this looks like a full endpoint path (contains /i/v0/e or /batch)
     let path = url.path();

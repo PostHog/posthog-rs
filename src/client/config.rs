@@ -1,4 +1,5 @@
 use crate::endpoints::{normalize_endpoint, EndpointManager};
+use crate::error::InitializationError;
 use crate::Error;
 
 /// Configuration options for the PostHog client.
@@ -162,8 +163,7 @@ impl ClientOptionsBuilder {
 
     /// Build the ClientOptions, validating all fields
     pub fn build(self) -> Result<ClientOptions, Error> {
-        #[allow(deprecated)]
-        let api_key = self.api_key.ok_or(Error::UninitializedField("api_key"))?;
+        let api_key = self.api_key.ok_or(InitializationError::MissingApiKey)?;
 
         let request_timeout_seconds = self.request_timeout_seconds.unwrap_or(30);
 
@@ -345,11 +345,10 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            #[allow(deprecated)]
-            Error::Serialization(msg) => {
+            Error::Initialization(InitializationError::InvalidEndpoint(msg)) => {
                 assert!(msg.contains("Endpoint must start with http://"));
             }
-            _ => panic!("Expected Serialization error"),
+            _ => panic!("Expected InvalidEndpoint error"),
         }
     }
 
@@ -362,12 +361,11 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            #[allow(deprecated)]
-            Error::Serialization(msg) => {
+            Error::Initialization(InitializationError::InvalidEndpoint(msg)) => {
                 // Should contain error about scheme or being invalid
                 assert!(msg.contains("http://") || msg.contains("https://"));
             }
-            _ => panic!("Expected Serialization error"),
+            _ => panic!("Expected InvalidEndpoint error"),
         }
     }
 
@@ -377,11 +375,10 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            #[allow(deprecated)]
-            Error::UninitializedField(field) => {
-                assert_eq!(field, "api_key");
+            Error::Initialization(InitializationError::MissingApiKey) => {
+                // Correct error type
             }
-            _ => panic!("Expected UninitializedField error"),
+            _ => panic!("Expected MissingApiKey error"),
         }
     }
 }

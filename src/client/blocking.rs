@@ -153,30 +153,31 @@ impl Client {
             payload["group_properties"] = json!(group_properties);
         }
 
-        #[allow(deprecated)]
         let response = self
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .json(&payload)
             .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(TransportError::from)?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response
                 .text()
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            #[allow(deprecated)]
-            return Err(Error::Connection(format!(
-                "API request failed with status {}: {}",
-                status, text
-            )));
+            return Err(TransportError::HttpError(
+                status.as_u16(),
+                format!("API request failed with status {}: {}", status, text),
+            )
+            .into());
         }
 
-        #[allow(deprecated)]
         let flags_response = response.json::<FeatureFlagsResponse>().map_err(|e| {
-            Error::Serialization(format!("Failed to parse feature flags response: {}", e))
+            ValidationError::SerializationFailed(format!(
+                "Failed to parse feature flags response: {}",
+                e
+            ))
         })?;
 
         Ok(flags_response)
@@ -447,23 +448,21 @@ impl Client {
             "distinct_id": distinct_id.into(),
         });
 
-        #[allow(deprecated)]
         let response = self
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .json(&payload)
             .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(TransportError::from)?;
 
         if !response.status().is_success() {
             return Ok(None);
         }
 
-        #[allow(deprecated)]
-        let flags_response: FeatureFlagsResponse = response
-            .json()
-            .map_err(|e| Error::Serialization(format!("Failed to parse response: {}", e)))?;
+        let flags_response: FeatureFlagsResponse = response.json().map_err(|e| {
+            ValidationError::SerializationFailed(format!("Failed to parse response: {}", e))
+        })?;
 
         Ok(flags_response.get_flag_payload(&key_str))
     }
@@ -507,8 +506,7 @@ impl Client {
         distinct_id: &str,
         person_properties: &HashMap<String, serde_json::Value>,
     ) -> Result<FlagValue, Error> {
-        #[allow(deprecated)]
         match_feature_flag(flag, distinct_id, person_properties)
-            .map_err(|e| Error::Connection(e.message))
+            .map_err(|e| ValidationError::SerializationFailed(e.message).into())
     }
 }
