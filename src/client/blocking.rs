@@ -23,7 +23,8 @@ pub struct Client {
     options: ClientOptions,
     client: HttpClient,
     local_evaluator: Option<LocalEvaluator>,
-    _flag_poller: Option<FlagPoller>,
+    #[allow(dead_code)]
+    flag_poller: Option<FlagPoller>,
     /// Tracks which feature flags have been called for deduplication.
     /// Maps distinct_id -> set of feature flag keys that have been reported.
     distinct_ids_feature_flags_reported: Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -64,7 +65,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         options,
         client,
         local_evaluator,
-        _flag_poller: flag_poller,
+        flag_poller,
         distinct_ids_feature_flags_reported: Arc::new(RwLock::new(HashMap::new())),
     }
 }
