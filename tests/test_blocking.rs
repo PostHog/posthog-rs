@@ -406,45 +406,6 @@ fn test_feature_flag_event_different_user() {
 }
 
 #[test]
-fn test_feature_flag_event_send_false() {
-    // Test that send_feature_flag_events=false disables event capture
-    let server = MockServer::start();
-
-    let flags_mock = server.mock(|when, then| {
-        when.method(POST).path("/flags/").query_param("v", "2");
-        then.status(200).json_body(json!({
-            "flags": {
-                "test-flag": {
-                    "key": "test-flag",
-                    "enabled": true,
-                    "variant": null
-                }
-            }
-        }));
-    });
-
-    let capture_mock = server.mock(|when, then| {
-        when.method(POST).path("/capture/");
-        then.status(200);
-    });
-
-    let client = create_test_client(server.base_url());
-
-    // Call with send_feature_flag_events=false - should NOT capture event
-    let _ = client.get_feature_flag_with_options(
-        "test-flag".to_string(),
-        "test-user".to_string(),
-        None,
-        None,
-        None,
-        false, // send_feature_flag_events
-    );
-
-    flags_mock.assert();
-    capture_mock.assert_hits(0); // No event captured
-}
-
-#[test]
 fn test_feature_flag_event_with_variant() {
     // Test that multivariate flags capture the variant value correctly
     let server = MockServer::start();

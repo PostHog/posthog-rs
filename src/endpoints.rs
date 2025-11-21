@@ -1,3 +1,4 @@
+use crate::error::InitializationError;
 use crate::Error;
 use std::fmt;
 
@@ -12,7 +13,7 @@ pub const DEFAULT_HOST: &str = US_INGESTION_ENDPOINT;
 
 /// API endpoints for different operations
 #[derive(Debug, Clone)]
-pub enum Endpoint {
+pub(crate) enum Endpoint {
     /// Event capture endpoint
     Capture,
     /// Feature flags endpoint
@@ -27,7 +28,7 @@ impl Endpoint {
         match self {
             Endpoint::Capture => "/i/v0/e/",
             Endpoint::Flags => "/flags/?v=2",
-            Endpoint::LocalEvaluation => "/api/feature_flag/local_evaluation/?send_cohorts",
+            Endpoint::LocalEvaluation => "/api/feature_flag/local_evaluation/",
         }
     }
 }
@@ -40,29 +41,27 @@ impl fmt::Display for Endpoint {
 
 /// Normalize an endpoint to a base URL.
 /// Accepts both hostnames (https://us.posthog.com) and full endpoints (https://us.i.posthog.com/i/v0/e/)
-pub fn normalize_endpoint(endpoint: &str) -> Result<String, Error> {
+pub(crate) fn normalize_endpoint(endpoint: &str) -> Result<String, Error> {
     let endpoint = endpoint.trim();
 
     // Basic validation - must start with http:// or https://
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-        #[allow(deprecated)]
-        return Err(Error::Serialization(
+        return Err(InitializationError::InvalidEndpoint(
             "Endpoint must start with http:// or https://".to_string(),
-        ));
+        )
+        .into());
     }
 
     // Parse as URL to validate
-    #[allow(deprecated)]
     let url = endpoint
         .parse::<url::Url>()
-        .map_err(|e| Error::Serialization(format!("Invalid URL: {}", e)))?;
+        .map_err(|e| InitializationError::InvalidEndpoint(format!("Invalid URL: {}", e)))?;
 
     // Extract scheme and host
     let scheme = url.scheme();
-    #[allow(deprecated)]
     let host = url
         .host_str()
-        .ok_or_else(|| Error::Serialization("Missing host".to_string()))?;
+        .ok_or_else(|| InitializationError::InvalidEndpoint("Missing host".to_string()))?;
 
     // Check if this looks like a full endpoint path (contains /i/v0/e or /batch)
     let path = url.path();
@@ -79,9 +78,8 @@ pub fn normalize_endpoint(endpoint: &str) -> Result<String, Error> {
 
 /// Manages PostHog API endpoints and host configuration
 #[derive(Debug, Clone)]
-pub struct EndpointManager {
+pub(crate) struct EndpointManager {
     base_host: String,
-    raw_host: String,
 }
 
 impl EndpointManager {
@@ -90,15 +88,9 @@ impl EndpointManager {
         // Normalize the host if provided (strips paths from full endpoint URLs)
         let normalized_host = host.and_then(|h| normalize_endpoint(&h).ok());
 
-        let raw_host = normalized_host
-            .clone()
-            .unwrap_or_else(|| DEFAULT_HOST.to_string());
         let base_host = Self::determine_server_host(normalized_host);
 
-        Self {
-            base_host,
-            raw_host,
-        }
+        Self { base_host }
     }
 
     /// Determine the actual server host based on the provided host
@@ -113,16 +105,6 @@ impl EndpointManager {
             "https://eu.posthog.com" => EU_INGESTION_ENDPOINT.to_string(),
             _ => host_or_default,
         }
-    }
-
-    /// Get the base host URL (for constructing endpoints)
-    pub fn base_host(&self) -> &str {
-        &self.base_host
-    }
-
-    /// Get the raw host (as provided by the user, used for session replay URLs)
-    pub fn raw_host(&self) -> &str {
-        &self.raw_host
     }
 
     /// Build a full URL for a given endpoint
@@ -148,23 +130,9 @@ impl EndpointManager {
         )
     }
 
-    /// Build the local evaluation URL with a token
-    pub fn build_local_eval_url(&self, token: &str) -> String {
-        format!(
-            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
-            self.base_host.trim_end_matches('/'),
-            token
-        )
-    }
-
     /// Get the base host for API operations (without the path)
     pub fn api_host(&self) -> String {
         self.base_host.trim_end_matches('/').to_string()
-    }
-
-    /// Get the single event capture endpoint URL
-    pub fn single_event_endpoint(&self) -> String {
-        self.build_url(Endpoint::Capture)
     }
 
     /// Get the batch event capture endpoint URL (legacy, uses same endpoint as single)

@@ -14,9 +14,7 @@ pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 
 // Endpoints
-pub use endpoints::{
-    Endpoint, EndpointManager, DEFAULT_HOST, EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT,
-};
+pub use endpoints::{DEFAULT_HOST, EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT};
 
 // Error
 pub use error::Error;

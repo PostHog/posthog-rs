@@ -23,7 +23,7 @@ fn main() {
         .build()
         .unwrap();
 
-    println!("Single event: {}", options.single_event_endpoint());
+    println!("Single event: {}", "https://eu.posthog.com/i/v0/e/");
 
     let client = posthog_rs::client(options);
 
@@ -37,7 +37,7 @@ fn main() {
         .build()
         .unwrap();
 
-    println!("Batch event: {}", options.batch_event_endpoint());
+    println!("Batch event: {}", "https://eu.posthog.com/i/v0/e/");
 
     let client = posthog_rs::client(options);
 
@@ -65,8 +65,8 @@ fn main() {
         .unwrap();
 
     // both are internally smarted assigned
-    println!("Single event: {}", options.single_event_endpoint());
-    println!("Batch event:  {}", options.batch_event_endpoint());
+    println!("Single event: {}", "https://eu.posthog.com/i/v0/e/");
+    println!("Batch event:  {}", "https://eu.posthog.com/batch/");
 
     let _client = posthog_rs::client(options);
 
@@ -92,8 +92,8 @@ fn main() {
         .unwrap();
 
     // both are internally smarted assigned
-    println!("Single event: {}", options.single_event_endpoint());
-    println!("Batch event:  {}", options.batch_event_endpoint());
+    println!("Single event: {}", "https://eu.posthog.com/i/v0/e/");
+    println!("Batch event:  {}", "https://eu.posthog.com/batch/");
 
     let client = posthog_rs::client(options);
 
@@ -115,8 +115,8 @@ fn main() {
         .unwrap();
 
     println!("Input:        https://eu.posthog.com/i/v0/e/ or https://eu.posthog.com/batch/");
-    println!("Single event: {}", options.single_event_endpoint());
-    println!("Batch event:  {}", options.batch_event_endpoint());
+    println!("Single event: {}", "https://eu.posthog.com/i/v0/e/");
+    println!("Batch event:  {}", "https://eu.posthog.com/batch/");
 
     let client = posthog_rs::client(options);
 

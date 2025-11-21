@@ -23,7 +23,8 @@ pub struct Client {
     options: ClientOptions,
     client: HttpClient,
     local_evaluator: Option<LocalEvaluator>,
-    _flag_poller: Option<AsyncFlagPoller>,
+    #[allow(dead_code)]
+    flag_poller: Option<AsyncFlagPoller>,
     /// Tracks which feature flags have been called for deduplication.
     /// Maps distinct_id -> set of feature flag keys that have been reported.
     distinct_ids_feature_flags_reported: Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -38,25 +39,27 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
 
     let (local_evaluator, flag_poller) = if options.enable_local_evaluation {
-        if let Some(ref personal_key) = options.personal_api_key {
-            let cache = FlagCache::new();
+        // Safe to unwrap: validation in ClientOptions::build() ensures personal_api_key
+        // is always Some when enable_local_evaluation is true
+        let personal_key = options
+            .personal_api_key
+            .as_ref()
+            .expect("personal_api_key must be present when enable_local_evaluation is true");
 
-            let config = LocalEvaluationConfig {
-                personal_api_key: personal_key.clone(),
-                project_api_key: options.api_key.clone(),
-                api_host: options.endpoints().api_host(),
-                poll_interval: Duration::from_secs(options.poll_interval_seconds),
-                request_timeout: Duration::from_secs(options.request_timeout_seconds),
-            };
+        let cache = FlagCache::new();
 
-            let poller = AsyncFlagPoller::new(config, cache.clone());
-            poller.start().await;
+        let config = LocalEvaluationConfig {
+            personal_api_key: personal_key.clone(),
+            project_api_key: options.api_key.clone(),
+            api_host: options.endpoints().api_host(),
+            poll_interval: Duration::from_secs(options.poll_interval_seconds),
+            request_timeout: Duration::from_secs(options.request_timeout_seconds),
+        };
 
-            (Some(LocalEvaluator::new(cache)), Some(poller))
-        } else {
-            eprintln!("[FEATURE FLAGS] Local evaluation enabled but personal_api_key not set");
-            (None, None)
-        }
+        let poller = AsyncFlagPoller::new(config, cache.clone());
+        poller.start().await;
+
+        (Some(LocalEvaluator::new(cache)), Some(poller))
     } else {
         (None, None)
     };
@@ -65,7 +68,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         options,
         client,
         local_evaluator,
-        _flag_poller: flag_poller,
+        flag_poller,
         distinct_ids_feature_flags_reported: Arc::new(RwLock::new(HashMap::new())),
     }
 }
@@ -169,7 +172,7 @@ impl Client {
         disable_geoip: Option<bool>,
         request_id: Option<String>,
         flag_details: Option<&FlagDetail>,
-    ) {
+    ) -> Result<(), Error> {
         // Create the reported key for deduplication
         // Format: "{key}_::null::" for None, "{key}_{value}" otherwise
         let feature_flag_reported_key = match flag_response {
@@ -183,7 +186,7 @@ impl Client {
             if let Some(flags) = reported.get(distinct_id) {
                 if flags.contains(&feature_flag_reported_key) {
                     // Already reported, skip
-                    return;
+                    return Ok(());
                 }
             }
         }
@@ -192,27 +195,21 @@ impl Client {
         let mut event = Event::new("$feature_flag_called", distinct_id);
 
         // Add required properties
-        event.insert_prop("$feature_flag", flag_key).ok();
-        event
-            .insert_prop("$feature_flag_response", flag_response)
-            .ok();
-        event
-            .insert_prop("locally_evaluated", locally_evaluated)
-            .ok();
+        event.insert_prop("$feature_flag", flag_key)?;
+        event.insert_prop("$feature_flag_response", flag_response)?;
+        event.insert_prop("locally_evaluated", locally_evaluated)?;
 
         // Add $feature/{key} property
-        event
-            .insert_prop(format!("$feature/{}", flag_key), flag_response)
-            .ok();
+        event.insert_prop(format!("$feature/{}", flag_key), flag_response)?;
 
         // Add optional properties
         if let Some(p) = payload {
-            event.insert_prop("$feature_flag_payload", p).ok();
+            event.insert_prop("$feature_flag_payload", p)?;
         }
 
         // Add request_id if provided
         if let Some(req_id) = request_id {
-            event.insert_prop("$feature_flag_request_id", req_id).ok();
+            event.insert_prop("$feature_flag_request_id", req_id)?;
         }
 
         // Add flag_details metadata if provided
@@ -220,16 +217,14 @@ impl Client {
             // Add reason
             if let Some(reason) = &details.reason {
                 if let Some(desc) = &reason.description {
-                    event.insert_prop("$feature_flag_reason", desc.clone()).ok();
+                    event.insert_prop("$feature_flag_reason", desc.clone())?;
                 }
             }
 
             // Add metadata (version and id)
             if let Some(metadata) = &details.metadata {
-                event
-                    .insert_prop("$feature_flag_version", metadata.version)
-                    .ok();
-                event.insert_prop("$feature_flag_id", metadata.id).ok();
+                event.insert_prop("$feature_flag_version", metadata.version)?;
+                event.insert_prop("$feature_flag_id", metadata.id)?;
             }
         }
 
@@ -243,17 +238,12 @@ impl Client {
         // Set disable_geoip on event if provided
         if let Some(disable_geo) = disable_geoip {
             if disable_geo {
-                event.insert_prop("$geoip_disable", true).ok();
+                event.insert_prop("$geoip_disable", true)?;
             }
         }
 
-        // Capture the event (ignore errors to not break user code)
-        if let Err(e) = self.capture(event).await {
-            eprintln!(
-                "[FEATURE FLAGS] Failed to capture $feature_flag_called event: {}",
-                e
-            );
-        }
+        // Capture the event
+        self.capture(event).await?;
 
         // Mark as reported (even if capture failed to avoid retry storms)
         {
@@ -272,6 +262,8 @@ impl Client {
                 .or_default()
                 .insert(feature_flag_reported_key);
         }
+
+        Ok(())
     }
 
     /// Get all feature flags for a user
@@ -306,7 +298,6 @@ impl Client {
             payload["disable_geoip"] = json!(true);
         }
 
-        #[allow(deprecated)]
         let response = self
             .client
             .post(&flags_endpoint)
@@ -317,7 +308,7 @@ impl Client {
             ))
             .send()
             .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(TransportError::from)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -325,22 +316,24 @@ impl Client {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            #[allow(deprecated)]
-            return Err(Error::Connection(format!(
-                "API request failed with status {status}: {text}"
-            )));
+            return Err(TransportError::HttpError(
+                status.as_u16(),
+                format!("API request failed with status {status}: {text}"),
+            )
+            .into());
         }
 
-        #[allow(deprecated)]
         let flags_response = response.json::<FeatureFlagsResponse>().await.map_err(|e| {
-            Error::Serialization(format!("Failed to parse feature flags response: {e}"))
+            ValidationError::SerializationFailed(format!(
+                "Failed to parse feature flags response: {e}"
+            ))
         })?;
 
         Ok(flags_response)
     }
 
     /// Get a specific feature flag value with control over event capture
-    pub async fn get_feature_flag_with_options<K: Into<String>, D: Into<String>>(
+    pub(crate) async fn get_feature_flag_with_options<K: Into<String>, D: Into<String>>(
         &self,
         key: K,
         distinct_id: D,
@@ -368,11 +361,7 @@ impl Client {
                 Ok(None) => {
                     // Flag not found locally, fall through to API
                 }
-                Err(e) => {
-                    eprintln!(
-                        "[FEATURE FLAGS] Local evaluation inconclusive: {}",
-                        e.message
-                    );
+                Err(_e) => {
                     // Inconclusive match, fall through to API
                 }
             }
@@ -396,11 +385,7 @@ impl Client {
                     request_id = response.request_id;
                     flag_details_map = response.flags;
                 }
-                Err(e) => {
-                    eprintln!(
-                        "[FEATURE FLAGS] Failed to get feature flags from API: {}",
-                        e
-                    );
+                Err(_e) => {
                     // Return None on error (graceful degradation)
                     flag_value = None;
                 }
@@ -409,18 +394,19 @@ impl Client {
 
         // Capture $feature_flag_called event if enabled
         if self.options.send_feature_flag_events && send_feature_flag_events {
-            self.capture_feature_flag_called(
-                &distinct_id,
-                &key,
-                flag_value.as_ref(),
-                payload,
-                locally_evaluated,
-                groups,
-                None, // disable_geoip - not yet supported
-                request_id,
-                flag_details_map.get(&key),
-            )
-            .await;
+            let _ = self
+                .capture_feature_flag_called(
+                    &distinct_id,
+                    &key,
+                    flag_value.as_ref(),
+                    payload,
+                    locally_evaluated,
+                    groups,
+                    None, // disable_geoip - not yet supported
+                    request_id,
+                    flag_details_map.get(&key),
+                )
+                .await;
         }
 
         Ok(flag_value)
@@ -478,7 +464,8 @@ impl Client {
     }
 
     /// Get a feature flag payload for a user
-    pub async fn get_feature_flag_payload<K: Into<String>, D: Into<String>>(
+    #[allow(dead_code)]
+    pub(crate) async fn get_feature_flag_payload<K: Into<String>, D: Into<String>>(
         &self,
         key: K,
         distinct_id: D,
@@ -496,7 +483,6 @@ impl Client {
             payload["disable_geoip"] = json!(true);
         }
 
-        #[allow(deprecated)]
         let response = self
             .client
             .post(&flags_endpoint)
@@ -507,17 +493,15 @@ impl Client {
             ))
             .send()
             .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(TransportError::from)?;
 
         if !response.status().is_success() {
             return Ok(None);
         }
 
-        #[allow(deprecated)]
-        let flags_response: FeatureFlagsResponse = response
-            .json()
-            .await
-            .map_err(|e| Error::Serialization(format!("Failed to parse response: {e}")))?;
+        let flags_response: FeatureFlagsResponse = response.json().await.map_err(|e| {
+            ValidationError::SerializationFailed(format!("Failed to parse response: {e}"))
+        })?;
 
         Ok(flags_response.get_flag_payload(&key_str))
     }
@@ -563,8 +547,7 @@ impl Client {
         distinct_id: &str,
         person_properties: &HashMap<String, serde_json::Value>,
     ) -> Result<FlagValue, Error> {
-        #[allow(deprecated)]
         match_feature_flag(flag, distinct_id, person_properties)
-            .map_err(|e| Error::Connection(e.message))
+            .map_err(|e| ValidationError::SerializationFailed(e.message).into())
     }
 }

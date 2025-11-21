@@ -201,22 +201,23 @@ async fn main() {
     println!("\n=== Example 6: Feature Flag Payload ===");
 
     match client
-        .get_feature_flag_payload("onboarding-config".to_string(), user_id.to_string())
+        .get_all_flags_and_payloads(user_id.to_string(), None, None, None)
         .await
     {
-        Ok(Some(payload)) => {
-            println!("Onboarding configuration payload:");
-            println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        Ok((_flags, payloads)) => {
+            if let Some(payload) = payloads.get("onboarding-config") {
+                println!("Onboarding configuration payload:");
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
 
-            // Use payload data
-            if let Some(steps) = payload.get("steps").and_then(|v| v.as_array()) {
-                println!("\nOnboarding steps: {} steps total", steps.len());
+                // Use payload data
+                if let Some(steps) = payload.get("steps").and_then(|v| v.as_array()) {
+                    println!("\nOnboarding steps: {} steps total", steps.len());
+                }
+            } else {
+                println!("No payload for onboarding-config flag");
             }
         }
-        Ok(None) => {
-            println!("No payload for onboarding-config flag");
-        }
-        Err(e) => println!("Error getting payload: {}", e),
+        Err(e) => println!("Error getting payloads: {}", e),
     }
 }
 

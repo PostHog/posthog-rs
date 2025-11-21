@@ -1,3 +1,5 @@
+use crate::endpoints::Endpoint;
+use crate::error::{TransportError, ValidationError};
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FlagValue, InconclusiveMatchError};
 use crate::Error;
 use serde::{Deserialize, Serialize};
@@ -116,10 +118,8 @@ impl FlagPoller {
 
     /// Start the polling thread
     pub(crate) fn start(&self) {
-        // Initial load
-        if let Err(e) = self.load_flags() {
-            eprintln!("Failed to load initial flags: {e}");
-        }
+        // Initial load (silently ignore errors)
+        let _ = self.load_flags();
 
         let config = self.config.clone();
         let cache = self.cache.clone();
@@ -140,8 +140,9 @@ impl FlagPoller {
 
                 // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
                 let url = format!(
-                    "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
+                    "{}{}?token={}&send_cohorts",
                     config.api_host.trim_end_matches('/'),
+                    Endpoint::LocalEvaluation.path(),
                     config.project_api_key
                 );
 
@@ -155,20 +156,12 @@ impl FlagPoller {
                 {
                     Ok(response) => {
                         if response.status().is_success() {
-                            match response.json::<LocalEvaluationResponse>() {
-                                Ok(data) => cache.update(data),
-                                Err(e) => {
-                                    eprintln!("[FEATURE FLAGS] Failed to parse flag response: {e}")
-                                }
+                            if let Ok(data) = response.json::<LocalEvaluationResponse>() {
+                                cache.update(data);
                             }
-                        } else {
-                            eprintln!(
-                                "[FEATURE FLAGS] Failed to fetch flags: HTTP {}",
-                                response.status()
-                            );
                         }
                     }
-                    Err(e) => eprintln!("[FEATURE FLAGS] Failed to fetch flags: {e}"),
+                    Err(_e) => {}
                 }
             }
         });
@@ -180,8 +173,9 @@ impl FlagPoller {
     fn load_flags(&self) -> Result<(), Error> {
         // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
         let url = format!(
-            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
+            "{}{}?token={}&send_cohorts",
             self.config.api_host.trim_end_matches('/'),
+            Endpoint::LocalEvaluation.path(),
             self.config.project_api_key
         );
 
@@ -193,20 +187,19 @@ impl FlagPoller {
                 format!("Bearer {}", self.config.personal_api_key),
             )
             .send()
-            .map_err(|e| {
-                #[allow(deprecated)]
-                Error::Connection(e.to_string())
-            })?;
+            .map_err(TransportError::from)?;
 
         if !response.status().is_success() {
-            #[allow(deprecated)]
-            return Err(Error::Connection(format!("HTTP {}", response.status())));
+            return Err(TransportError::HttpError(
+                response.status().as_u16(),
+                format!("HTTP {}", response.status()),
+            )
+            .into());
         }
 
-        #[allow(deprecated)]
         let data = response
             .json::<LocalEvaluationResponse>()
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+            .map_err(|e| ValidationError::SerializationFailed(e.to_string()))?;
 
         self.cache.update(data);
         Ok(())
@@ -264,10 +257,8 @@ impl AsyncFlagPoller {
             return; // Already running
         }
 
-        // Initial load
-        if let Err(e) = self.load_flags().await {
-            eprintln!("[FEATURE FLAGS] Failed to load initial flags: {e}");
-        }
+        // Initial load (silently ignore errors)
+        let _ = self.load_flags().await;
 
         let config = self.config.clone();
         let cache = self.cache.clone();
@@ -288,8 +279,9 @@ impl AsyncFlagPoller {
 
                         // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
                         let url = format!(
-                            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
+                            "{}{}?token={}&send_cohorts",
                             config.api_host.trim_end_matches('/'),
+                            Endpoint::LocalEvaluation.path(),
                             config.project_api_key
                         );
 
@@ -301,15 +293,12 @@ impl AsyncFlagPoller {
                         {
                             Ok(response) => {
                                 if response.status().is_success() {
-                                    match response.json::<LocalEvaluationResponse>().await {
-                                        Ok(data) => cache.update(data),
-                                        Err(e) => eprintln!("[FEATURE FLAGS] Failed to parse flag response: {e}"),
+                                    if let Ok(data) = response.json::<LocalEvaluationResponse>().await {
+                                        cache.update(data);
                                     }
-                                } else {
-                                    eprintln!("[FEATURE FLAGS] Failed to fetch flags: HTTP {}", response.status());
                                 }
                             }
-                            Err(e) => eprintln!("[FEATURE FLAGS] Failed to fetch flags: {e}"),
+                            Err(_e) => {},
                         }
                     }
                 }
@@ -326,8 +315,9 @@ impl AsyncFlagPoller {
     pub async fn load_flags(&self) -> Result<(), Error> {
         // Note: project_api_key (phc_*) is public and safe in URLs - see `LocalEvaluationConfig ` struct docs
         let url = format!(
-            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
+            "{}{}?token={}&send_cohorts",
             self.config.api_host.trim_end_matches('/'),
+            Endpoint::LocalEvaluation.path(),
             self.config.project_api_key
         );
 
@@ -340,21 +330,20 @@ impl AsyncFlagPoller {
             )
             .send()
             .await
-            .map_err(|e| {
-                #[allow(deprecated)]
-                Error::Connection(e.to_string())
-            })?;
+            .map_err(TransportError::from)?;
 
         if !response.status().is_success() {
-            #[allow(deprecated)]
-            return Err(Error::Connection(format!("HTTP {}", response.status())));
+            return Err(TransportError::HttpError(
+                response.status().as_u16(),
+                format!("HTTP {}", response.status()),
+            )
+            .into());
         }
 
-        #[allow(deprecated)]
         let data = response
             .json::<LocalEvaluationResponse>()
             .await
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+            .map_err(|e| ValidationError::SerializationFailed(e.to_string()))?;
 
         self.cache.update(data);
         Ok(())
