@@ -22,3 +22,13 @@ event.insert_prop("key2", vec!["a", "b"]).unwrap();
 
 client.capture(event).unwrap();
 ```
+
+## Publishing
+
+This crate is automatically published to crates.io when a PR is merged to `main` with the `publish` label. The publish workflow:
+
+To publish a new version:
+1. Update the version in `Cargo.toml`
+2. Create a PR with your changes
+3. Add the `publish` label to the PR
+4. Merge the PR to trigger automatic publishing
