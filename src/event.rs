@@ -5,6 +5,7 @@ use semver::Version;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::error::ValidationError;
 use crate::Error;
 
 /// An [`Event`] represents an interaction a user has with your app or
@@ -23,7 +24,7 @@ pub struct Event {
 
 impl Event {
     /// Capture a new identified [`Event`]. Unless you have a distinct ID you can
-    /// associate with a user, you probably want to use [`new_anon`] instead.
+    /// associate with a user, you probably want to use [`Event::new_anon`] instead.
     pub fn new<S: Into<String>>(event: S, distinct_id: S) -> Self {
         Self {
             event: event.into(),
@@ -35,7 +36,7 @@ impl Event {
     }
 
     /// Capture a new anonymous event.
-    /// See https://posthog.com/docs/data/anonymous-vs-identified-events#how-to-capture-anonymous-events
+    /// See <https://posthog.com/docs/data/anonymous-vs-identified-events#how-to-capture-anonymous-events>
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
         let mut res = Self {
             event: event.into(),
@@ -57,13 +58,13 @@ impl Event {
         key: K,
         prop: P,
     ) -> Result<(), Error> {
-        let as_json =
-            serde_json::to_value(prop).map_err(|e| Error::Serialization(e.to_string()))?;
+        let as_json = serde_json::to_value(prop)
+            .map_err(|e| ValidationError::SerializationFailed(e.to_string()))?;
         let _ = self.properties.insert(key.into(), as_json);
         Ok(())
     }
 
-    /// Capture this as a group event. See https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events
+    /// Capture this as a group event. See <https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events>
     /// Note that group events cannot be personless, and will be automatically upgraded to include person profile processing if
     /// they were anonymous. This might lead to "empty" person profiles being created.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
@@ -81,9 +82,10 @@ impl Event {
         Tz: TimeZone,
     {
         if timestamp > Utc::now() + Duration::seconds(1) {
-            return Err(Error::InvalidTimestamp(String::from(
+            return Err(ValidationError::InvalidTimestamp(String::from(
                 "Events cannot occur in the future",
-            )));
+            ))
+            .into());
         }
         self.timestamp = Some(timestamp.naive_utc());
         Ok(())

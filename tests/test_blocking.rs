@@ -1,0 +1,502 @@
+#![cfg(not(feature = "async-client"))]
+
+use httpmock::prelude::*;
+use posthog_rs::FlagValue;
+use serde_json::json;
+use std::collections::HashMap;
+
+fn create_test_client(base_url: String) -> posthog_rs::Client {
+    // Use the From implementation to ensure endpoint_manager is set up correctly
+    let options: posthog_rs::ClientOptions = (("test_api_key", base_url.as_str())).into();
+    posthog_rs::client(options)
+}
+
+#[test]
+fn test_get_all_feature_flags() {
+    let server = MockServer::start();
+
+    let mock_response = json!({
+        "flags": {
+            "test-flag": {
+                "key": "test-flag",
+                "enabled": true,
+                "variant": null
+            },
+            "disabled-flag": {
+                "key": "disabled-flag",
+                "enabled": false,
+                "variant": null
+            },
+            "variant-flag": {
+                "key": "variant-flag",
+                "enabled": true,
+                "variant": "control",
+                "metadata": {
+                    "id": 1,
+                    "version": 1,
+                    "payload": "{\"color\": \"blue\", \"size\": \"large\"}"
+                }
+            }
+        }
+    });
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/flags/")
+            .query_param("v", "2")
+            .json_body(json!({
+                "api_key": "test_api_key",
+                "distinct_id": "test-user"
+            }));
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(mock_response);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let result = client.get_all_flags_and_payloads("test-user".to_string(), None, None, None);
+
+    assert!(result.is_ok());
+    let (feature_flags, payloads) = result.unwrap();
+
+    assert_eq!(
+        feature_flags.get("test-flag"),
+        Some(&FlagValue::Boolean(true))
+    );
+    assert_eq!(
+        feature_flags.get("disabled-flag"),
+        Some(&FlagValue::Boolean(false))
+    );
+    assert_eq!(
+        feature_flags.get("variant-flag"),
+        Some(&FlagValue::String("control".to_string()))
+    );
+
+    assert!(payloads.contains_key("variant-flag"));
+
+    flags_mock.assert();
+}
+
+#[test]
+fn test_is_feature_enabled() {
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "flags": {
+                "enabled-flag": {
+                    "key": "enabled-flag",
+                    "enabled": true,
+                    "variant": null
+                },
+                "disabled-flag": {
+                    "key": "disabled-flag",
+                    "enabled": false,
+                    "variant": null
+                }
+            }
+        }));
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let enabled_result = client.is_feature_enabled(
+        "enabled-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    assert!(enabled_result.is_ok());
+    assert_eq!(enabled_result.unwrap(), true);
+
+    let disabled_result = client.is_feature_enabled(
+        "disabled-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    assert!(disabled_result.is_ok());
+    assert_eq!(disabled_result.unwrap(), false);
+
+    flags_mock.assert_hits(2);
+}
+
+#[test]
+fn test_get_feature_flag_with_properties() {
+    let server = MockServer::start();
+
+    let person_properties = json!({
+        "country": "US",
+        "age": 25,
+        "plan": "premium"
+    });
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/flags/")
+            .query_param("v", "2")
+            .json_body(json!({
+                "api_key": "test_api_key",
+                "distinct_id": "test-user",
+                "person_properties": person_properties
+            }));
+        then.status(200).json_body(json!({
+            "flags": {
+                "premium-feature": {
+                    "key": "premium-feature",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
+        }));
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let mut props = HashMap::new();
+    props.insert("country".to_string(), json!("US"));
+    props.insert("age".to_string(), json!(25));
+    props.insert("plan".to_string(), json!("premium"));
+
+    let result = client.get_feature_flag(
+        "premium-feature".to_string(),
+        "test-user".to_string(),
+        None,
+        Some(props),
+        None,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+
+    flags_mock.assert();
+}
+
+#[test]
+fn test_multivariate_flag() {
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "flags": {
+                "experiment": {
+                    "key": "experiment",
+                    "enabled": true,
+                    "variant": "variant-b"
+                }
+            }
+        }));
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let result = client.get_feature_flag(
+        "experiment".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(
+        result.unwrap(),
+        Some(FlagValue::String("variant-b".to_string()))
+    );
+
+    let enabled_result = client.is_feature_enabled(
+        "experiment".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    assert!(enabled_result.is_ok());
+    assert_eq!(enabled_result.unwrap(), true);
+
+    flags_mock.assert_hits(2);
+}
+
+#[test]
+fn test_api_error_handling() {
+    let server = MockServer::start();
+
+    let error_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(500).body("Internal Server Error");
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let result = client.get_feature_flags("test-user".to_string(), None, None, None);
+
+    assert!(result.is_err());
+    let error = result.unwrap_err();
+    assert!(error.to_string().contains("500"));
+
+    error_mock.assert();
+}
+
+// Feature Flag Event Tests
+
+#[test]
+fn test_feature_flag_event_captured() {
+    // Test that $feature_flag_called event is captured when calling get_feature_flag
+    let server = MockServer::start();
+
+    // Mock the flags endpoint
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
+        }));
+    });
+
+    // Mock the capture endpoint to verify event is sent
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called",
+                "properties": {
+                    "$feature_flag": "test-flag",
+                    "$feature_flag_response": true
+                }
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let result = client.get_feature_flag(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    flags_mock.assert();
+    capture_mock.assert();
+}
+
+#[test]
+fn test_feature_flag_event_deduplication() {
+    // Test that calling same flag for same user doesn't send duplicate events
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called"
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    // First call - should capture event
+    let _ = client.get_feature_flag(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    // Second call - should NOT capture event (deduplication)
+    let _ = client.get_feature_flag(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    flags_mock.assert_hits(2);
+    capture_mock.assert_hits(1); // Only 1 event captured, not 2
+}
+
+#[test]
+fn test_feature_flag_event_different_user() {
+    // Test that calling same flag for different user captures new event
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called",
+                "properties": {
+                    "$feature_flag": "test-flag",
+                    "$feature_flag_response": true
+                }
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    // Call for user1 - should capture event
+    let _ = client.get_feature_flag(
+        "test-flag".to_string(),
+        "user1".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    // Call for user2 - should capture event (different user)
+    let _ = client.get_feature_flag(
+        "test-flag".to_string(),
+        "user2".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    flags_mock.assert_hits(2);
+    capture_mock.assert_hits(2); // 2 events captured for different users
+}
+
+#[test]
+fn test_feature_flag_event_with_variant() {
+    // Test that multivariate flags capture the variant value correctly
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": "variant-b"
+                }
+            }
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called",
+                "properties": {
+                    "$feature_flag": "test-flag",
+                    "$feature_flag_response": "variant-b",
+                    "$feature/test-flag": "variant-b"
+                }
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let result = client.get_feature_flag(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(
+        result.unwrap(),
+        Some(FlagValue::String("variant-b".to_string()))
+    );
+    flags_mock.assert();
+    capture_mock.assert();
+}
+
+#[test]
+fn test_is_feature_enabled_captures_event() {
+    // Test that is_feature_enabled also captures $feature_flag_called event
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "flags": {
+                "test-flag": {
+                    "key": "test-flag",
+                    "enabled": true,
+                    "variant": null
+                }
+            }
+        }));
+    });
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/").json_body_partial(
+            json!({
+                "event": "$feature_flag_called"
+            })
+            .to_string(),
+        );
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let result = client.is_feature_enabled(
+        "test-flag".to_string(),
+        "test-user".to_string(),
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
+    flags_mock.assert();
+    capture_mock.assert();
+}
