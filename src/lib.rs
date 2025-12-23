@@ -3,8 +3,6 @@ mod error;
 mod event;
 mod global;
 
-const API_ENDPOINT: &str = "https://us.i.posthog.com/i/v0/e/";
-
 // Public interface - any change to this is breaking!
 // Client
 pub use client::client;
@@ -12,6 +10,7 @@ pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
+pub use client::Host;
 
 // Error
 pub use error::Error;
