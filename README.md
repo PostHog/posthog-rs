@@ -22,3 +22,7 @@ event.insert_prop("key2", vec!["a", "b"]).unwrap();
 
 client.capture(event).unwrap();
 ```
+
+# Acknowledgements
+
+Thanks to [@christos-h](https://github.com/christos-h) for building the initial version of this project.
