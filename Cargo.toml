@@ -10,7 +10,6 @@ rust-version = "1.78.0"
 
 [dependencies]
 reqwest = { version = "0.11.3", default-features = false, features = [
-    "rustls-tls",
     "blocking",
     "json",
     "gzip",
@@ -41,6 +40,8 @@ futures = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-default = ["async-client"]
+default = ["async-client", "rustls-tls"]
 e2e-test = []
 async-client = ["tokio"]
+native-tls = ["reqwest/native-tls"]
+rustls-tls = ["reqwest/rustls-tls"]
