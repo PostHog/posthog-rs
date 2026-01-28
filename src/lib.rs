@@ -1,9 +1,10 @@
 mod client;
+mod endpoints;
 mod error;
 mod event;
+mod feature_flags;
 mod global;
-
-const API_ENDPOINT: &str = "https://us.i.posthog.com/i/v0/e/";
+mod local_evaluation;
 
 // Public interface - any change to this is breaking!
 // Client
@@ -13,11 +14,31 @@ pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
 
+// Endpoints
+pub use endpoints::{
+    Endpoint, EndpointManager, DEFAULT_HOST, EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT,
+};
+
 // Error
 pub use error::Error;
 
 // Event
 pub use event::Event;
+
+// Feature Flags
+pub use feature_flags::{
+    match_feature_flag, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters,
+    FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagReason, FlagValue, InconclusiveMatchError,
+    MultivariateFilter, MultivariateVariant, Property,
+};
+
+// Local Evaluation
+pub use local_evaluation::{
+    Cohort, FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator,
+};
+
+#[cfg(feature = "async-client")]
+pub use local_evaluation::AsyncFlagPoller;
 
 // We expose a global capture function as a convenience, that uses a global client
 pub use global::capture;
