@@ -65,10 +65,15 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 impl Client {
     /// Capture the provided event, sending it to PostHog.
     #[instrument(skip(self, event), level = "debug")]
-    pub async fn capture(&self, event: Event) -> Result<(), Error> {
+    pub async fn capture(&self, mut event: Event) -> Result<(), Error> {
         if self.options.is_disabled() {
             trace!("Client is disabled, skipping capture");
             return Ok(());
+        }
+
+        // Add geoip disable property if configured
+        if self.options.disable_geoip {
+            event.insert_prop("$geoip_disable", true).ok();
         }
 
         let inner_event = InnerEvent::new(event, self.options.api_key.clone());
@@ -76,27 +81,12 @@ impl Client {
         let payload =
             serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
 
-        let mut url = self.options.endpoints().build_url(Endpoint::Capture);
-        if self.options.disable_geoip {
-            let separator = if url.contains('?') { "&" } else { "?" };
-            url.push_str(&format!("{separator}disable_geoip=1"));
-        }
+        let url = self.options.endpoints().build_url(Endpoint::Capture);
 
-        let request = self
-            .client
+        self.client
             .post(&url)
-            .header(CONTENT_TYPE, "application/json");
-
-        // Apply gzip compression if enabled
-        let request = if self.options.gzip {
-            // Note: reqwest will automatically compress the body when gzip feature is enabled
-            // and Content-Encoding header is set
-            request.header("Content-Encoding", "gzip").body(payload)
-        } else {
-            request.body(payload)
-        };
-
-        request
+            .header(CONTENT_TYPE, "application/json")
+            .body(payload)
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
@@ -111,35 +101,27 @@ impl Client {
             return Ok(());
         }
 
+        let disable_geoip = self.options.disable_geoip;
         let events: Vec<_> = events
             .into_iter()
-            .map(|event| InnerEvent::new(event, self.options.api_key.clone()))
+            .map(|mut event| {
+                // Add geoip disable property if configured
+                if disable_geoip {
+                    event.insert_prop("$geoip_disable", true).ok();
+                }
+                InnerEvent::new(event, self.options.api_key.clone())
+            })
             .collect();
 
         let payload =
             serde_json::to_string(&events).map_err(|e| Error::Serialization(e.to_string()))?;
 
-        let mut url = self.options.endpoints().build_url(Endpoint::Capture);
-        if self.options.disable_geoip {
-            let separator = if url.contains('?') { "&" } else { "?" };
-            url.push_str(&format!("{separator}disable_geoip=1"));
-        }
+        let url = self.options.endpoints().build_url(Endpoint::Capture);
 
-        let request = self
-            .client
+        self.client
             .post(&url)
-            .header(CONTENT_TYPE, "application/json");
-
-        // Apply gzip compression if enabled
-        let request = if self.options.gzip {
-            // Note: reqwest will automatically compress the body when gzip feature is enabled
-            // and Content-Encoding header is set
-            request.header("Content-Encoding", "gzip").body(payload)
-        } else {
-            request.body(payload)
-        };
-
-        request
+            .header(CONTENT_TYPE, "application/json")
+            .body(payload)
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
@@ -330,6 +312,6 @@ impl Client {
         person_properties: &HashMap<String, serde_json::Value>,
     ) -> Result<FlagValue, Error> {
         match_feature_flag(flag, distinct_id, person_properties)
-            .map_err(|e| Error::Connection(e.message))
+            .map_err(|e| Error::InconclusiveMatch(e.message))
     }
 }

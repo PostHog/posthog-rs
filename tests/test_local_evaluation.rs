@@ -187,8 +187,7 @@ async fn test_local_evaluation_with_mock_server() {
         .get_feature_flag("feature-b", "user-123", None, Some(properties), None)
         .await;
 
-    assert!(result.is_ok());
-    // The actual result depends on whether the mock was hit and processed
+    assert!(result.unwrap() == Some(FlagValue::Boolean(true)));
 
     eval_mock.assert();
 }

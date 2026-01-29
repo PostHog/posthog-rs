@@ -111,12 +111,12 @@ let flag = client.get_feature_flag(
 
 ```rust
 // Get all feature flags for a user
-let response = client.get_feature_flags(
+let (feature_flags, _payloads) = client.get_feature_flags(
     "user-id".to_string(),
     None, None, None
 ).unwrap();
 
-for (key, value) in response.feature_flags {
+for (key, value) in feature_flags {
     println!("Flag {}: {:?}", key, value);
 }
 ```

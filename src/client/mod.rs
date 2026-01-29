@@ -40,10 +40,6 @@ pub struct ClientOptions {
     #[builder(default = "30")]
     poll_interval_seconds: u64,
 
-    /// Enable gzip compression for requests
-    #[builder(default = "false")]
-    gzip: bool,
-
     /// Disable tracking (useful for development)
     #[builder(default = "false")]
     disabled: bool,

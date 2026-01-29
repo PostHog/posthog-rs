@@ -53,7 +53,7 @@ Shows:
 - Basic client setup (US region)
 - EU region configuration (GDPR compliance)
 - Self-hosted instance configuration
-- Production settings with gzip compression
+- Production settings with timeouts and geoip configuration
 - High-performance local evaluation setup
 
 ## Key Concepts

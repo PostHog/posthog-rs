@@ -67,7 +67,7 @@ impl EndpointManager {
                 US_INGESTION_ENDPOINT.to_string()
             }
             "https://eu.posthog.com" => EU_INGESTION_ENDPOINT.to_string(),
-            _ => host_or_default,
+            _ => trimmed_host.to_string(),
         }
     }
 

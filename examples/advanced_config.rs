@@ -30,8 +30,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let production_config = ClientOptionsBuilder::default()
         .api_key("phc_production_key".to_string())
         .host("https://eu.posthog.com") // Auto-detects and uses EU ingestion
-        .gzip(true) // Compress requests
         .request_timeout_seconds(30) // 30s timeout
+        .disable_geoip(true) // Disable automatic geoip enrichment
         .build()?;
 
     let _prod = posthog_rs::client(production_config).await;

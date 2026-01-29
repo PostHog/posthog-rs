@@ -8,6 +8,7 @@ impl Display for Error {
             Error::AlreadyInitialized => write!(f, "Client already initialized"),
             Error::NotInitialized => write!(f, "Client not initialized"),
             Error::InvalidTimestamp(msg) => write!(f, "Invalid Timestamp: {msg}"),
+            Error::InconclusiveMatch(msg) => write!(f, "Inconclusive Match: {msg}"),
         }
     }
 }
@@ -20,4 +21,6 @@ pub enum Error {
     AlreadyInitialized,
     NotInitialized,
     InvalidTimestamp(String),
+    /// Flag evaluation was inconclusive (e.g., missing required properties, unknown operator)
+    InconclusiveMatch(String),
 }

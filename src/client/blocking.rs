@@ -65,10 +65,15 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
 impl Client {
     /// Capture the provided event, sending it to PostHog.
     #[instrument(skip(self, event), level = "debug")]
-    pub fn capture(&self, event: Event) -> Result<(), Error> {
+    pub fn capture(&self, mut event: Event) -> Result<(), Error> {
         if self.options.is_disabled() {
             trace!("Client is disabled, skipping capture");
             return Ok(());
+        }
+
+        // Add geoip disable property if configured
+        if self.options.disable_geoip {
+            event.insert_prop("$geoip_disable", true).ok();
         }
 
         let inner_event = InnerEvent::new(event, self.options.api_key.clone());
@@ -96,9 +101,16 @@ impl Client {
             return Ok(());
         }
 
+        let disable_geoip = self.options.disable_geoip;
         let events: Vec<_> = events
             .into_iter()
-            .map(|event| InnerEvent::new(event, self.options.api_key.clone()))
+            .map(|mut event| {
+                // Add geoip disable property if configured
+                if disable_geoip {
+                    event.insert_prop("$geoip_disable", true).ok();
+                }
+                InnerEvent::new(event, self.options.api_key.clone())
+            })
             .collect();
 
         let payload =
@@ -116,9 +128,9 @@ impl Client {
     }
 
     /// Get all feature flags for a user
-    pub fn get_feature_flags(
+    pub fn get_feature_flags<S: Into<String>>(
         &self,
-        distinct_id: String,
+        distinct_id: S,
         groups: Option<HashMap<String, String>>,
         person_properties: Option<HashMap<String, serde_json::Value>>,
         group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
@@ -133,7 +145,7 @@ impl Client {
 
         let mut payload = json!({
             "api_key": self.options.api_key,
-            "distinct_id": distinct_id,
+            "distinct_id": distinct_id.into(),
         });
 
         if let Some(groups) = groups {
@@ -148,11 +160,19 @@ impl Client {
             payload["group_properties"] = json!(group_properties);
         }
 
+        // Add geoip disable parameter if configured
+        if self.options.disable_geoip {
+            payload["disable_geoip"] = json!(true);
+        }
+
         let response = self
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .json(&payload)
+            .timeout(Duration::from_secs(
+                self.options.feature_flags_request_timeout_seconds,
+            ))
             .send()
             .map_err(|e| Error::Connection(e.to_string()))?;
 
@@ -162,13 +182,12 @@ impl Client {
                 .text()
                 .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(Error::Connection(format!(
-                "API request failed with status {}: {}",
-                status, text
+                "API request failed with status {status}: {text}"
             )));
         }
 
         let flags_response = response.json::<FeatureFlagsResponse>().map_err(|e| {
-            Error::Serialization(format!("Failed to parse feature flags response: {}", e))
+            Error::Serialization(format!("Failed to parse feature flags response: {e}"))
         })?;
 
         Ok(flags_response.normalize())
@@ -176,50 +195,53 @@ impl Client {
 
     /// Get a specific feature flag value for a user
     #[instrument(skip_all, level = "debug")]
-    pub fn get_feature_flag(
+    pub fn get_feature_flag<K: Into<String>, D: Into<String>>(
         &self,
-        key: String,
-        distinct_id: String,
+        key: K,
+        distinct_id: D,
         groups: Option<HashMap<String, String>>,
         person_properties: Option<HashMap<String, serde_json::Value>>,
         group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
     ) -> Result<Option<FlagValue>, Error> {
+        let key_str = key.into();
+        let distinct_id_str = distinct_id.into();
+
         // Try local evaluation first if available
         if let Some(ref evaluator) = self.local_evaluator {
             let props = person_properties.clone().unwrap_or_default();
-            match evaluator.evaluate_flag(&key, &distinct_id, &props) {
+            match evaluator.evaluate_flag(&key_str, &distinct_id_str, &props) {
                 Ok(Some(value)) => {
-                    debug!(flag = %key, ?value, "Flag evaluated locally");
+                    debug!(flag = %key_str, ?value, "Flag evaluated locally");
                     return Ok(Some(value));
                 }
                 Ok(None) => {
-                    debug!(flag = %key, "Flag not found locally, falling back to API");
+                    debug!(flag = %key_str, "Flag not found locally, falling back to API");
                 }
                 Err(e) => {
-                    debug!(flag = %key, error = %e.message, "Inconclusive local evaluation, falling back to API");
+                    debug!(flag = %key_str, error = %e.message, "Inconclusive local evaluation, falling back to API");
                 }
             }
         }
 
         // Fall back to API
-        trace!(flag = %key, "Fetching flag from API");
+        trace!(flag = %key_str, "Fetching flag from API");
         let (feature_flags, _payloads) =
-            self.get_feature_flags(distinct_id, groups, person_properties, group_properties)?;
-        Ok(feature_flags.get(&key).cloned())
+            self.get_feature_flags(distinct_id_str, groups, person_properties, group_properties)?;
+        Ok(feature_flags.get(&key_str).cloned())
     }
 
     /// Check if a feature flag is enabled for a user
-    pub fn is_feature_enabled(
+    pub fn is_feature_enabled<K: Into<String>, D: Into<String>>(
         &self,
-        key: String,
-        distinct_id: String,
+        key: K,
+        distinct_id: D,
         groups: Option<HashMap<String, String>>,
         person_properties: Option<HashMap<String, serde_json::Value>>,
         group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
     ) -> Result<bool, Error> {
         let flag_value = self.get_feature_flag(
-            key.into(),
-            distinct_id.into(),
+            key,
+            distinct_id,
             groups,
             person_properties,
             group_properties,
@@ -240,16 +262,24 @@ impl Client {
         let key_str = key.into();
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
-        let payload = json!({
+        let mut payload = json!({
             "api_key": self.options.api_key,
             "distinct_id": distinct_id.into(),
         });
+
+        // Add geoip disable parameter if configured
+        if self.options.disable_geoip {
+            payload["disable_geoip"] = json!(true);
+        }
 
         let response = self
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .json(&payload)
+            .timeout(Duration::from_secs(
+                self.options.feature_flags_request_timeout_seconds,
+            ))
             .send()
             .map_err(|e| Error::Connection(e.to_string()))?;
 
@@ -259,7 +289,7 @@ impl Client {
 
         let flags_response: FeatureFlagsResponse = response
             .json()
-            .map_err(|e| Error::Serialization(format!("Failed to parse response: {}", e)))?;
+            .map_err(|e| Error::Serialization(format!("Failed to parse response: {e}")))?;
 
         let (_flags, payloads) = flags_response.normalize();
         Ok(payloads.get(&key_str).cloned())
@@ -273,6 +303,6 @@ impl Client {
         person_properties: &HashMap<String, serde_json::Value>,
     ) -> Result<FlagValue, Error> {
         match_feature_flag(flag, distinct_id, person_properties)
-            .map_err(|e| Error::Connection(e.message))
+            .map_err(|e| Error::InconclusiveMatch(e.message))
     }
 }
