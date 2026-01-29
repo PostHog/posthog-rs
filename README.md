@@ -135,6 +135,59 @@ if let Some(data) = payload {
 }
 ```
 
+### Error Handling
+
+In production code, handle errors properly instead of using `.unwrap()`:
+
+```rust
+use posthog_rs::{client, Error, FlagValue};
+
+let client = client("your-api-key");
+
+// Pattern 1: Match on the error type
+match client.get_feature_flag("my-flag", "user-123", None, None, None) {
+    Ok(Some(FlagValue::Boolean(true))) => {
+        // Flag is enabled
+        enable_feature();
+    }
+    Ok(Some(FlagValue::String(variant))) => {
+        // Multivariate flag - use the variant
+        use_variant(&variant);
+    }
+    Ok(Some(FlagValue::Boolean(false))) | Ok(None) => {
+        // Flag is disabled or doesn't exist
+        use_default_behavior();
+    }
+    Err(Error::Connection(e)) => {
+        // Network error - maybe use cached value or default
+        eprintln!("Failed to fetch flag: {}", e);
+        use_default_behavior();
+    }
+    Err(Error::InconclusiveMatch(reason)) => {
+        // Local evaluation couldn't determine flag value
+        // (missing properties, unknown cohort, etc.)
+        eprintln!("Inconclusive evaluation: {}", reason);
+        use_default_behavior();
+    }
+    Err(e) => {
+        // Other errors
+        eprintln!("Unexpected error: {}", e);
+        use_default_behavior();
+    }
+}
+
+// Pattern 2: Use unwrap_or for simple defaults
+let is_enabled = client
+    .is_feature_enabled("my-flag", "user-123", None, None, None)
+    .unwrap_or(false);  // Default to disabled on error
+
+// Pattern 3: Propagate errors with ?
+fn check_feature(client: &posthog_rs::Client, user_id: &str) -> Result<bool, Error> {
+    let flag = client.is_feature_enabled("premium-feature", user_id, None, None, None)?;
+    Ok(flag)
+}
+```
+
 ## Observability
 
 The SDK uses [tracing](https://docs.rs/tracing) for structured logging. To see logs, add a tracing subscriber to your application:
