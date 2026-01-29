@@ -144,9 +144,8 @@ impl FlagPoller {
                 }
 
                 let url = format!(
-                    "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
-                    config.api_host.trim_end_matches('/'),
-                    config.project_api_key
+                    "{}/api/feature_flag/local_evaluation/?send_cohorts",
+                    config.api_host.trim_end_matches('/')
                 );
 
                 match client
@@ -155,6 +154,7 @@ impl FlagPoller {
                         "Authorization",
                         format!("Bearer {}", config.personal_api_key),
                     )
+                    .header("X-PostHog-Project-Api-Key", &config.project_api_key)
                     .send()
                 {
                     Ok(response) => {
@@ -186,9 +186,8 @@ impl FlagPoller {
     #[instrument(skip(self), level = "debug")]
     pub fn load_flags(&self) -> Result<(), Error> {
         let url = format!(
-            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
-            self.config.api_host.trim_end_matches('/'),
-            self.config.project_api_key
+            "{}/api/feature_flag/local_evaluation/?send_cohorts",
+            self.config.api_host.trim_end_matches('/')
         );
 
         let response = self
@@ -198,6 +197,7 @@ impl FlagPoller {
                 "Authorization",
                 format!("Bearer {}", self.config.personal_api_key),
             )
+            .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
             .send()
             .map_err(|e| {
                 error!(error = %e, "Connection error loading flags");
@@ -306,14 +306,14 @@ impl AsyncFlagPoller {
                         }
 
                         let url = format!(
-                            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
-                            config.api_host.trim_end_matches('/'),
-                            config.project_api_key
+                            "{}/api/feature_flag/local_evaluation/?send_cohorts",
+                            config.api_host.trim_end_matches('/')
                         );
 
                         match client
                             .get(&url)
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
+                            .header("X-PostHog-Project-Api-Key", &config.project_api_key)
                             .send()
                             .await
                         {
@@ -351,9 +351,8 @@ impl AsyncFlagPoller {
     #[instrument(skip(self), level = "debug")]
     pub async fn load_flags(&self) -> Result<(), Error> {
         let url = format!(
-            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
-            self.config.api_host.trim_end_matches('/'),
-            self.config.project_api_key
+            "{}/api/feature_flag/local_evaluation/?send_cohorts",
+            self.config.api_host.trim_end_matches('/')
         );
 
         let response = self
@@ -363,6 +362,7 @@ impl AsyncFlagPoller {
                 "Authorization",
                 format!("Bearer {}", self.config.personal_api_key),
             )
+            .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
             .send()
             .await
             .map_err(|e| {

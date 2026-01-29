@@ -159,7 +159,7 @@ async fn test_local_evaluation_with_mock_server() {
         when.method(GET)
             .path("/api/feature_flag/local_evaluation/")
             .header("Authorization", "Bearer test_personal_key")
-            .query_param("token", "test_project_key")
+            .header("X-PostHog-Project-Api-Key", "test_project_key")
             .query_param("send_cohorts", "");
         then.status(200).json_body(mock_flags);
     });
