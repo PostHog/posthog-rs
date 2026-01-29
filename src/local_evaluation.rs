@@ -1,4 +1,7 @@
-use crate::feature_flags::{match_feature_flag, FeatureFlag, FlagValue, InconclusiveMatchError};
+use crate::feature_flags::{
+    match_feature_flag, match_feature_flag_with_context, CohortDefinition, EvaluationContext,
+    FeatureFlag, FlagValue, InconclusiveMatchError,
+};
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -69,6 +72,37 @@ impl FlagCache {
 
     pub fn get_all_flags(&self) -> Vec<FeatureFlag> {
         self.flags.read().unwrap().values().cloned().collect()
+    }
+
+    pub fn get_cohort(&self, id: &str) -> Option<Cohort> {
+        self.cohorts.read().unwrap().get(id).cloned()
+    }
+
+    pub fn get_all_cohorts(&self) -> HashMap<String, Cohort> {
+        self.cohorts.read().unwrap().clone()
+    }
+
+    /// Get all cohorts as CohortDefinitions for evaluation context
+    pub fn get_cohort_definitions(&self) -> HashMap<String, CohortDefinition> {
+        self.cohorts
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    CohortDefinition {
+                        id: v.id.clone(),
+                        properties: v.properties.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Get all flags as a HashMap for evaluation context
+    pub fn get_flags_map(&self) -> HashMap<String, FeatureFlag> {
+        self.flags.read().unwrap().clone()
     }
 
     pub fn clear(&self) {
@@ -425,7 +459,8 @@ impl LocalEvaluator {
         Self { cache }
     }
 
-    /// Evaluate a feature flag locally
+    /// Evaluate a feature flag locally with full context support
+    /// This supports cohort membership checks and flag dependency evaluation
     #[instrument(skip(self, person_properties), level = "trace")]
     pub fn evaluate_flag(
         &self,
@@ -435,7 +470,18 @@ impl LocalEvaluator {
     ) -> Result<Option<FlagValue>, InconclusiveMatchError> {
         match self.cache.get_flag(key) {
             Some(flag) => {
-                let result = match_feature_flag(&flag, distinct_id, person_properties);
+                // Build evaluation context with cohorts and flags for dependency resolution
+                let cohorts = self.cache.get_cohort_definitions();
+                let flags = self.cache.get_flags_map();
+
+                let ctx = EvaluationContext {
+                    cohorts: &cohorts,
+                    flags: &flags,
+                    distinct_id,
+                };
+
+                let result =
+                    match_feature_flag_with_context(&flag, distinct_id, person_properties, &ctx);
                 trace!(key, ?result, "Local flag evaluation");
                 result.map(Some)
             }
@@ -446,7 +492,29 @@ impl LocalEvaluator {
         }
     }
 
-    /// Get all flags and evaluate them
+    /// Evaluate a feature flag locally (simple version without cohort/flag dependency support)
+    /// Use this when you know the flag doesn't have cohort or flag dependency conditions
+    #[instrument(skip(self, person_properties), level = "trace")]
+    pub fn evaluate_flag_simple(
+        &self,
+        key: &str,
+        distinct_id: &str,
+        person_properties: &HashMap<String, serde_json::Value>,
+    ) -> Result<Option<FlagValue>, InconclusiveMatchError> {
+        match self.cache.get_flag(key) {
+            Some(flag) => {
+                let result = match_feature_flag(&flag, distinct_id, person_properties);
+                trace!(key, ?result, "Local flag evaluation (simple)");
+                result.map(Some)
+            }
+            None => {
+                trace!(key, "Flag not found in local cache");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Get all flags and evaluate them with full context support
     #[instrument(skip(self, person_properties), level = "debug")]
     pub fn evaluate_all_flags(
         &self,
@@ -455,8 +523,19 @@ impl LocalEvaluator {
     ) -> HashMap<String, Result<FlagValue, InconclusiveMatchError>> {
         let mut results = HashMap::new();
 
+        // Build evaluation context once for all flags
+        let cohorts = self.cache.get_cohort_definitions();
+        let flags = self.cache.get_flags_map();
+
+        let ctx = EvaluationContext {
+            cohorts: &cohorts,
+            flags: &flags,
+            distinct_id,
+        };
+
         for flag in self.cache.get_all_flags() {
-            let result = match_feature_flag(&flag, distinct_id, person_properties);
+            let result =
+                match_feature_flag_with_context(&flag, distinct_id, person_properties, &ctx);
             results.insert(flag.key.clone(), result);
         }
 

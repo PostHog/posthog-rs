@@ -208,8 +208,9 @@ impl Client {
 
         // Try local evaluation first if available
         if let Some(ref evaluator) = self.local_evaluator {
-            let props = person_properties.clone().unwrap_or_default();
-            match evaluator.evaluate_flag(&key_str, &distinct_id_str, &props) {
+            let empty = HashMap::new();
+            let props = person_properties.as_ref().unwrap_or(&empty);
+            match evaluator.evaluate_flag(&key_str, &distinct_id_str, props) {
                 Ok(Some(value)) => {
                     debug!(flag = %key_str, ?value, "Flag evaluated locally");
                     return Ok(Some(value));
