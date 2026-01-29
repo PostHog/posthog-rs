@@ -1,0 +1,26 @@
+# CodeQL configuration for PostHog Rust SDK
+#
+# This configuration suppresses false positives that are expected behavior
+# for an analytics SDK:
+# - Project API keys are PUBLIC keys designed to be transmitted
+# - Example code intentionally shows user IDs for demonstration purposes
+
+name: "PostHog SDK CodeQL Config"
+
+# Paths to exclude from analysis
+paths-ignore:
+  # Examples are demonstration code, not production code
+  - examples/**
+
+# Query filters to exclude false positives
+query-filters:
+  # The PostHog project API key (token) is a PUBLIC key, not a secret.
+  # It's designed to be included in client-side code and transmitted to the API.
+  # This is different from the personal API key which IS kept secret.
+  - exclude:
+      id: rust/cleartext-transmission
+
+  # Logging user IDs is expected behavior for an analytics SDK.
+  # The SDK's purpose is to track user events.
+  - exclude:
+      id: rust/cleartext-logging
