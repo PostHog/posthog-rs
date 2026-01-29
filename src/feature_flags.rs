@@ -234,23 +234,32 @@ pub struct MultivariateVariant {
     pub rollout_percentage: f64,
 }
 
+/// Response from the PostHog feature flags API.
+///
+/// Supports both the v2 API format (with detailed flag information) and the
+/// legacy format (simple flag values and payloads).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FeatureFlagsResponse {
-    // v2 API format (/flags/?v=2)
+    /// v2 API format from `/flags/?v=2` endpoint
     V2 {
+        /// Map of flag keys to their detailed evaluation results
         flags: HashMap<String, FlagDetail>,
+        /// Whether any errors occurred during flag computation
         #[serde(rename = "errorsWhileComputingFlags")]
         #[serde(default)]
         errors_while_computing_flags: bool,
     },
-    // Legacy format (old decide endpoint)
+    /// Legacy format from older decide endpoint
     Legacy {
+        /// Map of flag keys to their values
         #[serde(rename = "featureFlags")]
         feature_flags: HashMap<String, FlagValue>,
+        /// Map of flag keys to their JSON payloads
         #[serde(rename = "featureFlagPayloads")]
         #[serde(default)]
         feature_flag_payloads: HashMap<String, serde_json::Value>,
+        /// Any errors that occurred during evaluation
         #[serde(default)]
         errors: Option<Vec<String>>,
     },
@@ -346,6 +355,11 @@ pub struct FlagMetadata {
 
 const LONG_SCALE: f64 = 0xFFFFFFFFFFFFFFFu64 as f64; // Must be exactly 15 F's to match Python SDK
 
+/// Compute a deterministic hash value for feature flag bucketing.
+///
+/// Uses SHA-1 to generate a consistent hash in the range [0, 1) for the given
+/// key, distinct_id, and salt combination. This ensures users get consistent
+/// flag values across requests.
 pub fn hash_key(key: &str, distinct_id: &str, salt: &str) -> f64 {
     let hash_key = format!("{key}.{distinct_id}{salt}");
     let mut hasher = Sha1::new();
@@ -356,6 +370,11 @@ pub fn hash_key(key: &str, distinct_id: &str, salt: &str) -> f64 {
     hash_val as f64 / LONG_SCALE
 }
 
+/// Determine which variant a user should see for a multivariate flag.
+///
+/// Uses consistent hashing to assign users to variants based on their
+/// rollout percentages. Returns `None` if the flag has no variants or
+/// the user doesn't fall into any variant bucket.
 pub fn get_matching_variant(flag: &FeatureFlag, distinct_id: &str) -> Option<String> {
     let hash_value = hash_key(&flag.key, distinct_id, VARIANT_HASH_SALT);
     let variants = flag.filters.multivariate.as_ref()?.variants.as_slice();
