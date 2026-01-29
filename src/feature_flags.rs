@@ -9,6 +9,11 @@ use std::sync::{Mutex, OnceLock};
 /// Global cache for compiled regexes to avoid recompilation on every flag evaluation
 static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<Regex>>>> = OnceLock::new();
 
+/// Salt used for rollout percentage hashing. Intentionally empty to match PostHog's
+/// consistent hashing algorithm across all SDKs. This ensures the same user gets
+/// the same rollout decision regardless of which SDK evaluates the flag.
+const ROLLOUT_HASH_SALT: &str = "";
+
 fn get_cached_regex(pattern: &str) -> Option<Regex> {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache_guard = cache.lock().unwrap();
@@ -369,7 +374,7 @@ fn is_condition_match(
 
     // If all properties match (or no properties), check rollout percentage
     if let Some(rollout_percentage) = condition.rollout_percentage {
-        let hash_value = hash_key(&flag.key, distinct_id, "");
+        let hash_value = hash_key(&flag.key, distinct_id, ROLLOUT_HASH_SALT);
         if hash_value > (rollout_percentage / 100.0) {
             return Ok(false);
         }
@@ -454,7 +459,7 @@ fn is_condition_match_with_context(
 
     // If all properties match (or no properties), check rollout percentage
     if let Some(rollout_percentage) = condition.rollout_percentage {
-        let hash_value = hash_key(&flag.key, distinct_id, "");
+        let hash_value = hash_key(&flag.key, distinct_id, ROLLOUT_HASH_SALT);
         if hash_value > (rollout_percentage / 100.0) {
             return Ok(false);
         }
