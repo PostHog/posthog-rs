@@ -10,23 +10,41 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, trace, warn};
 
+/// Response from the PostHog local evaluation API.
+///
+/// Contains feature flag definitions, group type mappings, and cohort definitions
+/// that can be cached locally for flag evaluation without server round-trips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalEvaluationResponse {
+    /// List of feature flag definitions
     pub flags: Vec<FeatureFlag>,
+    /// Mapping from group type keys to their display names
     #[serde(default)]
     pub group_type_mapping: HashMap<String, String>,
+    /// Cohort definitions for evaluating cohort membership
     #[serde(default)]
     pub cohorts: HashMap<String, Cohort>,
 }
 
+/// A cohort definition for local evaluation.
+///
+/// Cohorts are groups of users defined by property filters, used for
+/// targeting feature flags to specific user segments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cohort {
+    /// Unique identifier for this cohort
     pub id: String,
+    /// Human-readable name of the cohort
     pub name: String,
+    /// Property filters that define cohort membership
     pub properties: serde_json::Value,
 }
 
-/// Manages locally cached feature flags for evaluation
+/// Thread-safe cache for feature flag definitions.
+///
+/// Stores feature flags, group type mappings, and cohort definitions that have
+/// been fetched from the PostHog API. The cache is shared between the poller
+/// (which updates it) and the evaluator (which reads from it).
 #[derive(Clone)]
 pub struct FlagCache {
     flags: Arc<RwLock<HashMap<String, FeatureFlag>>>,
@@ -112,17 +130,29 @@ impl FlagCache {
     }
 }
 
-/// Configuration for local evaluation
+/// Configuration for local flag evaluation.
+///
+/// Specifies the credentials and settings needed to fetch feature flag
+/// definitions from the PostHog API for local evaluation.
 #[derive(Clone)]
 pub struct LocalEvaluationConfig {
+    /// Personal API key for authentication (found in PostHog project settings)
     pub personal_api_key: String,
+    /// Project API key to identify which project's flags to fetch
     pub project_api_key: String,
+    /// PostHog API host URL (e.g., "https://us.posthog.com")
     pub api_host: String,
+    /// How often to poll for updated flag definitions
     pub poll_interval: Duration,
+    /// Timeout for API requests
     pub request_timeout: Duration,
 }
 
-/// Manages polling for feature flag definitions
+/// Synchronous poller for feature flag definitions.
+///
+/// Runs a background thread that periodically fetches flag definitions from
+/// the PostHog API and updates the shared cache. Use this for blocking/sync
+/// applications. For async applications, use [`AsyncFlagPoller`] instead.
 pub struct FlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
@@ -270,7 +300,11 @@ impl Drop for FlagPoller {
     }
 }
 
-/// Async version of the flag poller
+/// Asynchronous poller for feature flag definitions.
+///
+/// Runs a tokio task that periodically fetches flag definitions from the
+/// PostHog API and updates the shared cache. Use this for async applications.
+/// For blocking/sync applications, use [`FlagPoller`] instead.
 #[cfg(feature = "async-client")]
 pub struct AsyncFlagPoller {
     config: LocalEvaluationConfig,
@@ -449,7 +483,11 @@ impl Drop for AsyncFlagPoller {
     }
 }
 
-/// Evaluator for locally cached flags
+/// Evaluates feature flags using locally cached definitions.
+///
+/// The evaluator reads from a [`FlagCache`] to determine flag values without
+/// making network requests. Supports cohort membership checks and flag
+/// dependencies through the evaluation context.
 #[derive(Clone)]
 pub struct LocalEvaluator {
     cache: FlagCache,
