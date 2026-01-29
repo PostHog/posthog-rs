@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tracing::{debug, error, info, instrument, trace, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalEvaluationResponse {
@@ -45,6 +46,7 @@ impl FlagCache {
     }
 
     pub fn update(&self, response: LocalEvaluationResponse) {
+        let flag_count = response.flags.len();
         let mut flags = self.flags.write().unwrap();
         flags.clear();
         for flag in response.flags {
@@ -56,6 +58,8 @@ impl FlagCache {
 
         let mut cohorts = self.cohorts.write().unwrap();
         *cohorts = response.cohorts;
+
+        debug!(flag_count, "Updated flag cache");
     }
 
     pub fn get_flag(&self, key: &str) -> Option<FeatureFlag> {
@@ -110,8 +114,16 @@ impl FlagPoller {
 
     /// Start the polling thread
     pub fn start(&mut self) {
-        // Initial load - errors are silently ignored since we'll retry on poll
-        let _ = self.load_flags();
+        info!(
+            poll_interval_secs = self.config.poll_interval.as_secs(),
+            "Starting feature flag poller"
+        );
+
+        // Initial load
+        match self.load_flags() {
+            Ok(()) => info!("Initial flag definitions loaded successfully"),
+            Err(e) => warn!(error = %e, "Failed to load initial flags, will retry on next poll"),
+        }
 
         let config = self.config.clone();
         let cache = self.cache.clone();
@@ -127,6 +139,7 @@ impl FlagPoller {
                 std::thread::sleep(config.poll_interval);
 
                 if *stop_signal.read().unwrap() {
+                    debug!("Flag poller received stop signal");
                     break;
                 }
 
@@ -136,7 +149,7 @@ impl FlagPoller {
                     config.project_api_key
                 );
 
-                if let Ok(response) = client
+                match client
                     .get(&url)
                     .header(
                         "Authorization",
@@ -144,10 +157,23 @@ impl FlagPoller {
                     )
                     .send()
                 {
-                    if response.status().is_success() {
-                        if let Ok(data) = response.json::<LocalEvaluationResponse>() {
-                            cache.update(data);
+                    Ok(response) => {
+                        if response.status().is_success() {
+                            match response.json::<LocalEvaluationResponse>() {
+                                Ok(data) => {
+                                    trace!("Successfully fetched flag definitions");
+                                    cache.update(data);
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to parse flag response");
+                                }
+                            }
+                        } else {
+                            warn!(status = %response.status(), "Failed to fetch flags");
                         }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to fetch flags");
                     }
                 }
             }
@@ -157,6 +183,7 @@ impl FlagPoller {
     }
 
     /// Load flags synchronously
+    #[instrument(skip(self), level = "debug")]
     pub fn load_flags(&self) -> Result<(), Error> {
         let url = format!(
             "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
@@ -172,15 +199,21 @@ impl FlagPoller {
                 format!("Bearer {}", self.config.personal_api_key),
             )
             .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(|e| {
+                error!(error = %e, "Connection error loading flags");
+                Error::Connection(e.to_string())
+            })?;
 
         if !response.status().is_success() {
-            return Err(Error::Connection(format!("HTTP {}", response.status())));
+            let status = response.status();
+            error!(status = %status, "HTTP error loading flags");
+            return Err(Error::Connection(format!("HTTP {}", status)));
         }
 
-        let data = response
-            .json::<LocalEvaluationResponse>()
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let data = response.json::<LocalEvaluationResponse>().map_err(|e| {
+            error!(error = %e, "Failed to parse flag response");
+            Error::Serialization(e.to_string())
+        })?;
 
         self.cache.update(data);
         Ok(())
@@ -188,6 +221,7 @@ impl FlagPoller {
 
     /// Stop the polling thread
     pub fn stop(&mut self) {
+        debug!("Stopping flag poller");
         *self.stop_signal.write().unwrap() = true;
         if let Some(handle) = self.thread_handle.take() {
             handle.join().ok();
@@ -236,13 +270,22 @@ impl AsyncFlagPoller {
         {
             let mut is_running = self.is_running.write().await;
             if *is_running {
-                return; // Already running
+                debug!("Flag poller already running, skipping start");
+                return;
             }
             *is_running = true;
         }
 
-        // Initial load - errors are silently ignored since we'll retry on poll
-        let _ = self.load_flags().await;
+        info!(
+            poll_interval_secs = self.config.poll_interval.as_secs(),
+            "Starting async feature flag poller"
+        );
+
+        // Initial load
+        match self.load_flags().await {
+            Ok(()) => info!("Initial flag definitions loaded successfully"),
+            Err(e) => warn!(error = %e, "Failed to load initial flags, will retry on next poll"),
+        }
 
         let config = self.config.clone();
         let cache = self.cache.clone();
@@ -258,6 +301,7 @@ impl AsyncFlagPoller {
                 tokio::select! {
                     _ = interval.tick() => {
                         if *stop_signal.read().await {
+                            debug!("Async flag poller received stop signal");
                             break;
                         }
 
@@ -267,16 +311,29 @@ impl AsyncFlagPoller {
                             config.project_api_key
                         );
 
-                        if let Ok(response) = client
+                        match client
                             .get(&url)
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
                             .send()
                             .await
                         {
-                            if response.status().is_success() {
-                                if let Ok(data) = response.json::<LocalEvaluationResponse>().await {
-                                    cache.update(data);
+                            Ok(response) => {
+                                if response.status().is_success() {
+                                    match response.json::<LocalEvaluationResponse>().await {
+                                        Ok(data) => {
+                                            trace!("Successfully fetched flag definitions");
+                                            cache.update(data);
+                                        }
+                                        Err(e) => {
+                                            warn!(error = %e, "Failed to parse flag response");
+                                        }
+                                    }
+                                } else {
+                                    warn!(status = %response.status(), "Failed to fetch flags");
                                 }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to fetch flags");
                             }
                         }
                     }
@@ -291,6 +348,7 @@ impl AsyncFlagPoller {
     }
 
     /// Load flags asynchronously
+    #[instrument(skip(self), level = "debug")]
     pub async fn load_flags(&self) -> Result<(), Error> {
         let url = format!(
             "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
@@ -307,16 +365,24 @@ impl AsyncFlagPoller {
             )
             .send()
             .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(|e| {
+                error!(error = %e, "Connection error loading flags");
+                Error::Connection(e.to_string())
+            })?;
 
         if !response.status().is_success() {
-            return Err(Error::Connection(format!("HTTP {}", response.status())));
+            let status = response.status();
+            error!(status = %status, "HTTP error loading flags");
+            return Err(Error::Connection(format!("HTTP {}", status)));
         }
 
         let data = response
             .json::<LocalEvaluationResponse>()
             .await
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+            .map_err(|e| {
+                error!(error = %e, "Failed to parse flag response");
+                Error::Serialization(e.to_string())
+            })?;
 
         self.cache.update(data);
         Ok(())
@@ -324,6 +390,7 @@ impl AsyncFlagPoller {
 
     /// Stop the polling task
     pub async fn stop(&mut self) {
+        debug!("Stopping async flag poller");
         *self.stop_signal.write().await = true;
         if let Some(handle) = self.task_handle.take() {
             handle.abort();
@@ -358,6 +425,7 @@ impl LocalEvaluator {
     }
 
     /// Evaluate a feature flag locally
+    #[instrument(skip(self, person_properties), level = "trace")]
     pub fn evaluate_flag(
         &self,
         key: &str,
@@ -365,12 +433,20 @@ impl LocalEvaluator {
         person_properties: &HashMap<String, serde_json::Value>,
     ) -> Result<Option<FlagValue>, InconclusiveMatchError> {
         match self.cache.get_flag(key) {
-            Some(flag) => match_feature_flag(&flag, distinct_id, person_properties).map(Some),
-            None => Ok(None),
+            Some(flag) => {
+                let result = match_feature_flag(&flag, distinct_id, person_properties);
+                trace!(key, ?result, "Local flag evaluation");
+                result.map(Some)
+            }
+            None => {
+                trace!(key, "Flag not found in local cache");
+                Ok(None)
+            }
         }
     }
 
     /// Get all flags and evaluate them
+    #[instrument(skip(self, person_properties), level = "debug")]
     pub fn evaluate_all_flags(
         &self,
         distinct_id: &str,
@@ -383,6 +459,7 @@ impl LocalEvaluator {
             results.insert(flag.key.clone(), result);
         }
 
+        debug!(flag_count = results.len(), "Evaluated all local flags");
         results
     }
 }

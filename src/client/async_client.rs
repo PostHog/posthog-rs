@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
 use serde_json::json;
+use tracing::{debug, instrument, trace, warn};
 
 use crate::endpoints::{Endpoint, EndpointManager};
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
@@ -46,7 +47,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
             (Some(LocalEvaluator::new(cache)), Some(poller))
         } else {
-            // Local evaluation enabled but personal_api_key not set - silently disable
+            warn!("Local evaluation enabled but personal_api_key not set, falling back to API evaluation");
             (None, None)
         }
     } else {
@@ -63,8 +64,10 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
 impl Client {
     /// Capture the provided event, sending it to PostHog.
+    #[instrument(skip(self, event), level = "debug")]
     pub async fn capture(&self, event: Event) -> Result<(), Error> {
         if self.options.is_disabled() {
+            trace!("Client is disabled, skipping capture");
             return Ok(());
         }
 
@@ -213,6 +216,7 @@ impl Client {
     }
 
     /// Get a specific feature flag value for a user
+    #[instrument(skip_all, level = "debug")]
     pub async fn get_feature_flag<K: Into<String>, D: Into<String>>(
         &self,
         key: K,
@@ -228,17 +232,21 @@ impl Client {
         if let Some(ref evaluator) = self.local_evaluator {
             let props = person_properties.clone().unwrap_or_default();
             match evaluator.evaluate_flag(&key_str, &distinct_id_str, &props) {
-                Ok(Some(value)) => return Ok(Some(value)),
-                Ok(None) => {
-                    // Flag not found locally, fall through to API
+                Ok(Some(value)) => {
+                    debug!(flag = %key_str, ?value, "Flag evaluated locally");
+                    return Ok(Some(value));
                 }
-                Err(_) => {
-                    // Inconclusive match, fall through to API
+                Ok(None) => {
+                    debug!(flag = %key_str, "Flag not found locally, falling back to API");
+                }
+                Err(e) => {
+                    debug!(flag = %key_str, error = %e.message, "Inconclusive local evaluation, falling back to API");
                 }
             }
         }
 
         // Fall back to API
+        trace!(flag = %key_str, "Fetching flag from API");
         let (feature_flags, _payloads) = self
             .get_feature_flags(distinct_id_str, groups, person_properties, group_properties)
             .await?;

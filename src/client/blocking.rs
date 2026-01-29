@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use reqwest::{blocking::Client as HttpClient, header::CONTENT_TYPE};
 use serde_json::json;
+use tracing::{debug, instrument, trace, warn};
 
 use crate::endpoints::{Endpoint, EndpointManager};
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
@@ -46,7 +47,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
             (Some(LocalEvaluator::new(cache)), Some(poller))
         } else {
-            // Local evaluation enabled but personal_api_key not set - silently disable
+            warn!("Local evaluation enabled but personal_api_key not set, falling back to API evaluation");
             (None, None)
         }
     } else {
@@ -63,8 +64,10 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
 impl Client {
     /// Capture the provided event, sending it to PostHog.
+    #[instrument(skip(self, event), level = "debug")]
     pub fn capture(&self, event: Event) -> Result<(), Error> {
         if self.options.is_disabled() {
+            trace!("Client is disabled, skipping capture");
             return Ok(());
         }
 
@@ -86,8 +89,10 @@ impl Client {
 
     /// Capture a collection of events with a single request. This function may be
     /// more performant than capturing a list of events individually.
+    #[instrument(skip(self, events), fields(event_count = events.len()), level = "debug")]
     pub fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
         if self.options.is_disabled() {
+            trace!("Client is disabled, skipping batch capture");
             return Ok(());
         }
 
@@ -170,6 +175,7 @@ impl Client {
     }
 
     /// Get a specific feature flag value for a user
+    #[instrument(skip_all, level = "debug")]
     pub fn get_feature_flag(
         &self,
         key: String,
@@ -182,23 +188,27 @@ impl Client {
         if let Some(ref evaluator) = self.local_evaluator {
             let props = person_properties.clone().unwrap_or_default();
             match evaluator.evaluate_flag(&key, &distinct_id, &props) {
-                Ok(Some(value)) => return Ok(Some(value)),
-                Ok(None) => {
-                    // Flag not found locally, fall through to API
+                Ok(Some(value)) => {
+                    debug!(flag = %key, ?value, "Flag evaluated locally");
+                    return Ok(Some(value));
                 }
-                Err(_) => {
-                    // Inconclusive match, fall through to API
+                Ok(None) => {
+                    debug!(flag = %key, "Flag not found locally, falling back to API");
+                }
+                Err(e) => {
+                    debug!(flag = %key, error = %e.message, "Inconclusive local evaluation, falling back to API");
                 }
             }
         }
 
         // Fall back to API
+        trace!(flag = %key, "Fetching flag from API");
         let (feature_flags, _payloads) =
             self.get_feature_flags(distinct_id, groups, person_properties, group_properties)?;
         Ok(feature_flags.get(&key).cloned())
     }
 
-    /// Check if a feature flag is enabled for a user  
+    /// Check if a feature flag is enabled for a user
     pub fn is_feature_enabled(
         &self,
         key: String,

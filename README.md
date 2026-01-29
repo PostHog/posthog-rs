@@ -135,6 +135,39 @@ if let Some(data) = payload {
 }
 ```
 
+## Observability
+
+The SDK uses [tracing](https://docs.rs/tracing) for structured logging. To see logs, add a tracing subscriber to your application:
+
+```rust
+use tracing_subscriber::{fmt, EnvFilter};
+
+// Initialize tracing (e.g., in main.rs)
+tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+```
+
+Then set the `RUST_LOG` environment variable to control log levels:
+
+```bash
+# See all posthog logs
+RUST_LOG=posthog_rs=debug cargo run
+
+# See only warnings and errors
+RUST_LOG=posthog_rs=warn cargo run
+
+# See trace-level logs for flag evaluation
+RUST_LOG=posthog_rs=trace cargo run
+```
+
+Log levels:
+- `error`: Connection failures, HTTP errors
+- `warn`: Configuration issues, failed flag fetches
+- `info`: Client initialization, poller start/stop
+- `debug`: Flag evaluation results, API fallback decisions
+- `trace`: Detailed cache updates, individual flag lookups
+
 # Acknowledgements
 
 Thanks to [@christos-h](https://github.com/christos-h) for building the initial version of this project.
