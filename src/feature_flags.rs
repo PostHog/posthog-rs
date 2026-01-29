@@ -14,6 +14,10 @@ static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<Regex>>>> = OnceLock::
 /// the same rollout decision regardless of which SDK evaluates the flag.
 const ROLLOUT_HASH_SALT: &str = "";
 
+/// Salt used for multivariate variant selection. Uses "variant" to ensure consistent
+/// variant assignment across all PostHog SDKs for the same user/flag combination.
+const VARIANT_HASH_SALT: &str = "variant";
+
 fn get_cached_regex(pattern: &str) -> Option<Regex> {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache_guard = cache.lock().unwrap();
@@ -288,7 +292,7 @@ pub fn hash_key(key: &str, distinct_id: &str, salt: &str) -> f64 {
 }
 
 pub fn get_matching_variant(flag: &FeatureFlag, distinct_id: &str) -> Option<String> {
-    let hash_value = hash_key(&flag.key, distinct_id, "variant");
+    let hash_value = hash_key(&flag.key, distinct_id, VARIANT_HASH_SALT);
     let variants = flag.filters.multivariate.as_ref()?.variants.as_slice();
 
     let mut value_min = 0.0;
