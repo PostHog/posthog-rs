@@ -306,6 +306,7 @@ pub fn get_matching_variant(flag: &FeatureFlag, distinct_id: &str) -> Option<Str
     None
 }
 
+#[must_use = "feature flag evaluation result should be used"]
 pub fn match_feature_flag(
     flag: &FeatureFlag,
     distinct_id: &str,
@@ -389,6 +390,7 @@ fn is_condition_match(
 
 /// Match a feature flag with full context (cohorts, other flags)
 /// This version supports cohort membership checks and flag dependency checks
+#[must_use = "feature flag evaluation result should be used"]
 pub fn match_feature_flag_with_context(
     flag: &FeatureFlag,
     distinct_id: &str,
@@ -598,7 +600,8 @@ fn match_flag_dependency_property(
 /// Returns the DateTime<Utc> that the relative date represents
 fn parse_relative_date(value: &str) -> Option<DateTime<Utc>> {
     let value = value.trim();
-    if !value.starts_with('-') {
+    // Need at least 3 chars: "-", digit(s), and unit (e.g., "-7d")
+    if value.len() < 3 || !value.starts_with('-') {
         return None;
     }
 

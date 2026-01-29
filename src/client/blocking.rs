@@ -128,6 +128,7 @@ impl Client {
     }
 
     /// Get all feature flags for a user
+    #[must_use = "feature flags result should be used"]
     pub fn get_feature_flags<S: Into<String>>(
         &self,
         distinct_id: S,
@@ -194,6 +195,7 @@ impl Client {
     }
 
     /// Get a specific feature flag value for a user
+    #[must_use = "feature flag result should be used"]
     #[instrument(skip_all, level = "debug")]
     pub fn get_feature_flag<K: Into<String>, D: Into<String>>(
         &self,
@@ -232,6 +234,7 @@ impl Client {
     }
 
     /// Check if a feature flag is enabled for a user
+    #[must_use = "feature flag enabled check result should be used"]
     pub fn is_feature_enabled<K: Into<String>, D: Into<String>>(
         &self,
         key: K,
@@ -255,6 +258,7 @@ impl Client {
     }
 
     /// Get a feature flag payload for a user
+    #[must_use = "feature flag payload result should be used"]
     pub fn get_feature_flag_payload<K: Into<String>, D: Into<String>>(
         &self,
         key: K,
