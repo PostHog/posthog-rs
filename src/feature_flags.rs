@@ -20,7 +20,8 @@ const VARIANT_HASH_SALT: &str = "variant";
 
 fn get_cached_regex(pattern: &str) -> Option<Regex> {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache_guard = cache.lock().unwrap();
+    // Use ok() to gracefully handle poisoned mutex (e.g., if a previous thread panicked)
+    let mut cache_guard = cache.lock().ok()?;
 
     if let Some(cached) = cache_guard.get(pattern) {
         return cached.clone();
@@ -1590,5 +1591,76 @@ mod tests {
         let result = match_property_with_context(&prop, &properties, &ctx);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("Flag"));
+    }
+
+    // ==================== Date parsing edge case tests ====================
+
+    #[test]
+    fn test_parse_relative_date_edge_cases() {
+        // These test the internal parse_relative_date function indirectly via match_property
+        let prop = Property {
+            key: "date".to_string(),
+            value: json!("placeholder"),
+            operator: "is_date_before".to_string(),
+            property_type: None,
+        };
+
+        let mut properties = HashMap::new();
+        properties.insert("date".to_string(), json!("2024-01-01"));
+
+        // Empty string as target date should fail
+        let empty_prop = Property {
+            value: json!(""),
+            ..prop.clone()
+        };
+        assert!(match_property(&empty_prop, &properties).is_err());
+
+        // Single dash should fail
+        let dash_prop = Property {
+            value: json!("-"),
+            ..prop.clone()
+        };
+        assert!(match_property(&dash_prop, &properties).is_err());
+
+        // Missing unit (just "-7") should fail
+        let no_unit_prop = Property {
+            value: json!("-7"),
+            ..prop.clone()
+        };
+        assert!(match_property(&no_unit_prop, &properties).is_err());
+
+        // Missing number (just "-d") should fail
+        let no_number_prop = Property {
+            value: json!("-d"),
+            ..prop.clone()
+        };
+        assert!(match_property(&no_number_prop, &properties).is_err());
+
+        // Invalid unit should fail
+        let invalid_unit_prop = Property {
+            value: json!("-7x"),
+            ..prop.clone()
+        };
+        assert!(match_property(&invalid_unit_prop, &properties).is_err());
+    }
+
+    #[test]
+    fn test_parse_relative_date_large_values() {
+        // Very large relative dates should work
+        let prop = Property {
+            key: "created_at".to_string(),
+            value: json!("-1000d"), // ~2.7 years ago
+            operator: "is_date_before".to_string(),
+            property_type: None,
+        };
+
+        let mut properties = HashMap::new();
+        // Date 5 years ago should be before -1000d
+        let five_years_ago = chrono::Utc::now() - chrono::Duration::days(1825);
+        properties.insert(
+            "created_at".to_string(),
+            json!(five_years_ago.format("%Y-%m-%d").to_string()),
+        );
+        assert!(match_property(&prop, &properties).unwrap());
     }
 }

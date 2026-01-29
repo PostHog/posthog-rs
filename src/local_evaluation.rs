@@ -450,6 +450,7 @@ impl Drop for AsyncFlagPoller {
 }
 
 /// Evaluator for locally cached flags
+#[derive(Clone)]
 pub struct LocalEvaluator {
     cache: FlagCache,
 }
