@@ -32,15 +32,29 @@ fn get_cached_regex(pattern: &str) -> Option<Regex> {
     compiled
 }
 
+/// The value of a feature flag evaluation.
+///
+/// Feature flags can return either a boolean (enabled/disabled) or a string
+/// (for multivariate flags where users are assigned to different variants).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum FlagValue {
+    /// Flag is either enabled (true) or disabled (false)
     Boolean(bool),
+    /// Flag returns a specific variant key (e.g., "control", "test", "variant-a")
     String(String),
 }
 
+/// Error returned when a feature flag cannot be evaluated locally.
+///
+/// This typically occurs when:
+/// - Required person/group properties are missing
+/// - A cohort referenced by the flag is not in the local cache
+/// - A dependent flag is not available locally
+/// - An unknown operator is encountered
 #[derive(Debug)]
 pub struct InconclusiveMatchError {
+    /// Human-readable description of why evaluation was inconclusive
     pub message: String,
 }
 
@@ -66,38 +80,65 @@ impl Default for FlagValue {
     }
 }
 
+/// A feature flag definition from PostHog.
+///
+/// Contains all the information needed to evaluate whether a flag should be
+/// enabled for a given user, including targeting rules and rollout percentages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureFlag {
+    /// Unique identifier for the flag (e.g., "new-checkout-flow")
     pub key: String,
+    /// Whether the flag is currently active. Inactive flags always return false.
     pub active: bool,
+    /// Targeting rules and rollout configuration
     #[serde(default)]
     pub filters: FeatureFlagFilters,
 }
 
+/// Targeting rules and configuration for a feature flag.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FeatureFlagFilters {
+    /// List of condition groups (evaluated with OR logic between groups)
     #[serde(default)]
     pub groups: Vec<FeatureFlagCondition>,
+    /// Multivariate configuration for A/B tests with multiple variants
     #[serde(default)]
     pub multivariate: Option<MultivariateFilter>,
+    /// JSON payloads associated with flag variants
     #[serde(default)]
     pub payloads: HashMap<String, serde_json::Value>,
 }
 
+/// A single condition group within a feature flag's targeting rules.
+///
+/// All properties within a condition must match (AND logic), and the user
+/// must fall within the rollout percentage to be included.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureFlagCondition {
+    /// Property filters that must all match (AND logic)
     #[serde(default)]
     pub properties: Vec<Property>,
+    /// Percentage of matching users who should see this flag (0-100)
     pub rollout_percentage: Option<f64>,
+    /// Specific variant to serve for this condition (for variant overrides)
     pub variant: Option<String>,
 }
 
+/// A property filter used in feature flag targeting.
+///
+/// Supports various operators for matching user properties against expected values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Property {
+    /// The property key to match (e.g., "email", "country", "$feature/other-flag")
     pub key: String,
+    /// The value to compare against
     pub value: serde_json::Value,
+    /// Comparison operator: "exact", "is_not", "icontains", "not_icontains",
+    /// "regex", "not_regex", "gt", "gte", "lt", "lte", "is_set", "is_not_set",
+    /// "is_date_before", "is_date_after"
     #[serde(default = "default_operator")]
     pub operator: String,
+    /// Property type, e.g., "cohort" for cohort membership checks
     #[serde(rename = "type")]
     pub property_type: Option<String>,
 }
@@ -177,14 +218,19 @@ pub struct EvaluationContext<'a> {
     pub distinct_id: &'a str,
 }
 
+/// Configuration for multivariate (A/B/n) feature flags.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MultivariateFilter {
+    /// List of variants with their rollout percentages
     pub variants: Vec<MultivariateVariant>,
 }
 
+/// A single variant in a multivariate feature flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultivariateVariant {
+    /// Unique key for this variant (e.g., "control", "test", "variant-a")
     pub key: String,
+    /// Percentage of users who should see this variant (0-100)
     pub rollout_percentage: f64,
 }
 
