@@ -298,31 +298,49 @@ impl FeatureFlagsResponse {
     }
 }
 
+/// Detailed information about a feature flag evaluation result.
+///
+/// Returned by the `/decide` endpoint with extended information about
+/// why a flag evaluated to a particular value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlagDetail {
+    /// The feature flag key
     pub key: String,
+    /// Whether the flag is enabled for this user
     pub enabled: bool,
+    /// The variant key if this is a multivariate flag
     pub variant: Option<String>,
+    /// Reason explaining why the flag evaluated to this value
     #[serde(default)]
     pub reason: Option<FlagReason>,
+    /// Additional metadata about the flag
     #[serde(default)]
     pub metadata: Option<FlagMetadata>,
 }
 
+/// Explains why a feature flag evaluated to a particular value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlagReason {
+    /// Reason code (e.g., "condition_match", "out_of_rollout_bound")
     pub code: String,
+    /// Index of the condition that matched (if applicable)
     #[serde(default)]
     pub condition_index: Option<usize>,
+    /// Human-readable description of the reason
     #[serde(default)]
     pub description: Option<String>,
 }
 
+/// Metadata about a feature flag from the PostHog server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlagMetadata {
+    /// Unique identifier for this flag
     pub id: u64,
+    /// Version number of the flag definition
     pub version: u32,
+    /// Optional description of what this flag controls
     pub description: Option<String>,
+    /// Optional JSON payload associated with the flag
     pub payload: Option<serde_json::Value>,
 }
 
