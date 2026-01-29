@@ -197,9 +197,7 @@ mod test {
     fn test_timestamp_is_correctly_set() {
         let mut event = Event::new_anon("test");
         let ts = DateTime::parse_from_rfc3339("2023-01-01T10:00:00+03:00").unwrap();
-        event
-            .set_timestamp(ts.clone())
-            .expect("Date is not in the future");
+        event.set_timestamp(ts).expect("Date is not in the future");
         let expected = DateTime::parse_from_rfc3339("2023-01-01T07:00:00Z").unwrap();
         assert_eq!(event.timestamp.unwrap(), expected.naive_utc())
     }
@@ -209,7 +207,7 @@ mod test {
         let mut event = Event::new_anon("test");
         let ts = Utc::now() + Duration::from_secs(60);
         event
-            .set_timestamp(ts.clone())
+            .set_timestamp(ts)
             .expect_err("Date is in the future, should be rejected");
 
         assert!(event.timestamp.is_none())
