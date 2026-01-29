@@ -2,6 +2,7 @@ use crate::feature_flags::{match_feature_flag, FeatureFlag, FlagValue, Inconclus
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -92,7 +93,7 @@ pub struct FlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
     client: reqwest::blocking::Client,
-    stop_signal: Arc<RwLock<bool>>,
+    stop_signal: Arc<AtomicBool>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -107,7 +108,7 @@ impl FlagPoller {
             config,
             cache,
             client,
-            stop_signal: Arc::new(RwLock::new(false)),
+            stop_signal: Arc::new(AtomicBool::new(false)),
             thread_handle: None,
         }
     }
@@ -138,7 +139,7 @@ impl FlagPoller {
             loop {
                 std::thread::sleep(config.poll_interval);
 
-                if *stop_signal.read().unwrap() {
+                if stop_signal.load(Ordering::Relaxed) {
                     debug!("Flag poller received stop signal");
                     break;
                 }
@@ -222,7 +223,7 @@ impl FlagPoller {
     /// Stop the polling thread
     pub fn stop(&mut self) {
         debug!("Stopping flag poller");
-        *self.stop_signal.write().unwrap() = true;
+        self.stop_signal.store(true, Ordering::Relaxed);
         if let Some(handle) = self.thread_handle.take() {
             handle.join().ok();
         }
@@ -241,7 +242,7 @@ pub struct AsyncFlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
     client: reqwest::Client,
-    stop_signal: Arc<tokio::sync::RwLock<bool>>,
+    stop_signal: Arc<AtomicBool>,
     task_handle: Option<tokio::task::JoinHandle<()>>,
     is_running: Arc<tokio::sync::RwLock<bool>>,
 }
@@ -258,7 +259,7 @@ impl AsyncFlagPoller {
             config,
             cache,
             client,
-            stop_signal: Arc::new(tokio::sync::RwLock::new(false)),
+            stop_signal: Arc::new(AtomicBool::new(false)),
             task_handle: None,
             is_running: Arc::new(tokio::sync::RwLock::new(false)),
         }
@@ -300,7 +301,7 @@ impl AsyncFlagPoller {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if *stop_signal.read().await {
+                        if stop_signal.load(Ordering::Relaxed) {
                             debug!("Async flag poller received stop signal");
                             break;
                         }
@@ -391,7 +392,7 @@ impl AsyncFlagPoller {
     /// Stop the polling task
     pub async fn stop(&mut self) {
         debug!("Stopping async flag poller");
-        *self.stop_signal.write().await = true;
+        self.stop_signal.store(true, Ordering::Relaxed);
         if let Some(handle) = self.task_handle.take() {
             handle.abort();
         }

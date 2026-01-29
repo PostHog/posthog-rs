@@ -1,6 +1,25 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::{Mutex, OnceLock};
+
+/// Global cache for compiled regexes to avoid recompilation on every flag evaluation
+static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<Regex>>>> = OnceLock::new();
+
+fn get_cached_regex(pattern: &str) -> Option<Regex> {
+    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache_guard = cache.lock().unwrap();
+
+    if let Some(cached) = cache_guard.get(pattern) {
+        return cached.clone();
+    }
+
+    let compiled = Regex::new(pattern).ok();
+    cache_guard.insert(pattern.to_string(), compiled.clone());
+    compiled
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -21,6 +40,14 @@ impl InconclusiveMatchError {
         }
     }
 }
+
+impl fmt::Display for InconclusiveMatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for InconclusiveMatchError {}
 
 impl Default for FlagValue {
     fn default() -> Self {
@@ -344,18 +371,16 @@ fn match_property(
         "regex" => {
             let prop_str = value_to_string(value);
             let regex_str = value_to_string(&property.value);
-            match regex::Regex::new(&regex_str) {
-                Ok(re) => re.is_match(&prop_str),
-                Err(_) => false,
-            }
+            get_cached_regex(&regex_str)
+                .map(|re| re.is_match(&prop_str))
+                .unwrap_or(false)
         }
         "not_regex" => {
             let prop_str = value_to_string(value);
             let regex_str = value_to_string(&property.value);
-            match regex::Regex::new(&regex_str) {
-                Ok(re) => !re.is_match(&prop_str),
-                Err(_) => true,
-            }
+            get_cached_regex(&regex_str)
+                .map(|re| !re.is_match(&prop_str))
+                .unwrap_or(true)
         }
         "gt" | "gte" | "lt" | "lte" => compare_numeric(&property.operator, &property.value, value),
         _ => false,
