@@ -1,8 +1,14 @@
 # PostHog Rust
 
-Please see the main [PostHog docs](https://posthog.com/docs).
+The official Rust SDK for [PostHog](https://posthog.com). See the [PostHog docs](https://posthog.com/docs) for more information.
 
-**This crate is under development**
+## Features
+
+- **Event capture** - Send events to PostHog for product analytics
+- **Feature flags** - Evaluate feature flags with local or remote evaluation
+- **A/B testing** - Support for multivariate flags and experiments
+- **Group analytics** - Track events and flags for B2B use cases
+- **Async and sync clients** - Choose based on your runtime
 
 # Quickstart
 
