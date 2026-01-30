@@ -13,13 +13,19 @@ impl Display for Error {
     }
 }
 
+/// Errors that can occur when using the PostHog client.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// Network or HTTP error when communicating with PostHog API
     Connection(String),
+    /// Error serializing or deserializing JSON data
     Serialization(String),
+    /// Global client was already initialized via `init_global`
     AlreadyInitialized,
+    /// Global client was not initialized before use
     NotInitialized,
+    /// Timestamp could not be parsed or is invalid
     InvalidTimestamp(String),
     /// Flag evaluation was inconclusive (e.g., missing required properties, unknown operator)
     InconclusiveMatch(String),

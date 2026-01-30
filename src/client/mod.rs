@@ -15,6 +15,22 @@ pub use async_client::client;
 #[cfg(feature = "async-client")]
 pub use async_client::Client;
 
+/// Configuration options for the PostHog client.
+///
+/// Use [`ClientOptionsBuilder`] to construct options with custom settings,
+/// or create directly from an API key using `ClientOptions::from("your-api-key")`.
+///
+/// # Example
+///
+/// ```ignore
+/// use posthog_rs::ClientOptionsBuilder;
+///
+/// let options = ClientOptionsBuilder::default()
+///     .api_key("your-api-key".to_string())
+///     .host("https://eu.posthog.com")
+///     .build()
+///     .unwrap();
+/// ```
 #[derive(Builder, Clone)]
 pub struct ClientOptions {
     /// Host URL for the PostHog API (defaults to US ingestion endpoint)

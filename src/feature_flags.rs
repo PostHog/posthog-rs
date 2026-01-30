@@ -20,7 +20,16 @@ const VARIANT_HASH_SALT: &str = "variant";
 
 fn get_cached_regex(pattern: &str) -> Option<Regex> {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache_guard = cache.lock().unwrap();
+    let mut cache_guard = match cache.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!(
+                pattern,
+                "Regex cache mutex poisoned, treating as cache miss"
+            );
+            return None;
+        }
+    };
 
     if let Some(cached) = cache_guard.get(pattern) {
         return cached.clone();
@@ -31,15 +40,29 @@ fn get_cached_regex(pattern: &str) -> Option<Regex> {
     compiled
 }
 
+/// The value of a feature flag evaluation.
+///
+/// Feature flags can return either a boolean (enabled/disabled) or a string
+/// (for multivariate flags where users are assigned to different variants).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum FlagValue {
+    /// Flag is either enabled (true) or disabled (false)
     Boolean(bool),
+    /// Flag returns a specific variant key (e.g., "control", "test", "variant-a")
     String(String),
 }
 
+/// Error returned when a feature flag cannot be evaluated locally.
+///
+/// This typically occurs when:
+/// - Required person/group properties are missing
+/// - A cohort referenced by the flag is not in the local cache
+/// - A dependent flag is not available locally
+/// - An unknown operator is encountered
 #[derive(Debug)]
 pub struct InconclusiveMatchError {
+    /// Human-readable description of why evaluation was inconclusive
     pub message: String,
 }
 
@@ -65,38 +88,65 @@ impl Default for FlagValue {
     }
 }
 
+/// A feature flag definition from PostHog.
+///
+/// Contains all the information needed to evaluate whether a flag should be
+/// enabled for a given user, including targeting rules and rollout percentages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureFlag {
+    /// Unique identifier for the flag (e.g., "new-checkout-flow")
     pub key: String,
+    /// Whether the flag is currently active. Inactive flags always return false.
     pub active: bool,
+    /// Targeting rules and rollout configuration
     #[serde(default)]
     pub filters: FeatureFlagFilters,
 }
 
+/// Targeting rules and configuration for a feature flag.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FeatureFlagFilters {
+    /// List of condition groups (evaluated with OR logic between groups)
     #[serde(default)]
     pub groups: Vec<FeatureFlagCondition>,
+    /// Multivariate configuration for A/B tests with multiple variants
     #[serde(default)]
     pub multivariate: Option<MultivariateFilter>,
+    /// JSON payloads associated with flag variants
     #[serde(default)]
     pub payloads: HashMap<String, serde_json::Value>,
 }
 
+/// A single condition group within a feature flag's targeting rules.
+///
+/// All properties within a condition must match (AND logic), and the user
+/// must fall within the rollout percentage to be included.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureFlagCondition {
+    /// Property filters that must all match (AND logic)
     #[serde(default)]
     pub properties: Vec<Property>,
+    /// Percentage of matching users who should see this flag (0-100)
     pub rollout_percentage: Option<f64>,
+    /// Specific variant to serve for this condition (for variant overrides)
     pub variant: Option<String>,
 }
 
+/// A property filter used in feature flag targeting.
+///
+/// Supports various operators for matching user properties against expected values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Property {
+    /// The property key to match (e.g., "email", "country", "$feature/other-flag")
     pub key: String,
+    /// The value to compare against
     pub value: serde_json::Value,
+    /// Comparison operator: "exact", "is_not", "icontains", "not_icontains",
+    /// "regex", "not_regex", "gt", "gte", "lt", "lte", "is_set", "is_not_set",
+    /// "is_date_before", "is_date_after"
     #[serde(default = "default_operator")]
     pub operator: String,
+    /// Property type, e.g., "cohort" for cohort membership checks
     #[serde(rename = "type")]
     pub property_type: Option<String>,
 }
@@ -176,34 +226,48 @@ pub struct EvaluationContext<'a> {
     pub distinct_id: &'a str,
 }
 
+/// Configuration for multivariate (A/B/n) feature flags.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MultivariateFilter {
+    /// List of variants with their rollout percentages
     pub variants: Vec<MultivariateVariant>,
 }
 
+/// A single variant in a multivariate feature flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultivariateVariant {
+    /// Unique key for this variant (e.g., "control", "test", "variant-a")
     pub key: String,
+    /// Percentage of users who should see this variant (0-100)
     pub rollout_percentage: f64,
 }
 
+/// Response from the PostHog feature flags API.
+///
+/// Supports both the v2 API format (with detailed flag information) and the
+/// legacy format (simple flag values and payloads).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FeatureFlagsResponse {
-    // v2 API format (/flags/?v=2)
+    /// v2 API format from `/flags/?v=2` endpoint
     V2 {
+        /// Map of flag keys to their detailed evaluation results
         flags: HashMap<String, FlagDetail>,
+        /// Whether any errors occurred during flag computation
         #[serde(rename = "errorsWhileComputingFlags")]
         #[serde(default)]
         errors_while_computing_flags: bool,
     },
-    // Legacy format (old decide endpoint)
+    /// Legacy format from older decide endpoint
     Legacy {
+        /// Map of flag keys to their values
         #[serde(rename = "featureFlags")]
         feature_flags: HashMap<String, FlagValue>,
+        /// Map of flag keys to their JSON payloads
         #[serde(rename = "featureFlagPayloads")]
         #[serde(default)]
         feature_flag_payloads: HashMap<String, serde_json::Value>,
+        /// Any errors that occurred during evaluation
         #[serde(default)]
         errors: Option<Vec<String>>,
     },
@@ -251,36 +315,59 @@ impl FeatureFlagsResponse {
     }
 }
 
+/// Detailed information about a feature flag evaluation result.
+///
+/// Returned by the `/decide` endpoint with extended information about
+/// why a flag evaluated to a particular value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlagDetail {
+    /// The feature flag key
     pub key: String,
+    /// Whether the flag is enabled for this user
     pub enabled: bool,
+    /// The variant key if this is a multivariate flag
     pub variant: Option<String>,
+    /// Reason explaining why the flag evaluated to this value
     #[serde(default)]
     pub reason: Option<FlagReason>,
+    /// Additional metadata about the flag
     #[serde(default)]
     pub metadata: Option<FlagMetadata>,
 }
 
+/// Explains why a feature flag evaluated to a particular value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlagReason {
+    /// Reason code (e.g., "condition_match", "out_of_rollout_bound")
     pub code: String,
+    /// Index of the condition that matched (if applicable)
     #[serde(default)]
     pub condition_index: Option<usize>,
+    /// Human-readable description of the reason
     #[serde(default)]
     pub description: Option<String>,
 }
 
+/// Metadata about a feature flag from the PostHog server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlagMetadata {
+    /// Unique identifier for this flag
     pub id: u64,
+    /// Version number of the flag definition
     pub version: u32,
+    /// Optional description of what this flag controls
     pub description: Option<String>,
+    /// Optional JSON payload associated with the flag
     pub payload: Option<serde_json::Value>,
 }
 
 const LONG_SCALE: f64 = 0xFFFFFFFFFFFFFFFu64 as f64; // Must be exactly 15 F's to match Python SDK
 
+/// Compute a deterministic hash value for feature flag bucketing.
+///
+/// Uses SHA-1 to generate a consistent hash in the range [0, 1) for the given
+/// key, distinct_id, and salt combination. This ensures users get consistent
+/// flag values across requests.
 pub fn hash_key(key: &str, distinct_id: &str, salt: &str) -> f64 {
     let hash_key = format!("{key}.{distinct_id}{salt}");
     let mut hasher = Sha1::new();
@@ -291,6 +378,11 @@ pub fn hash_key(key: &str, distinct_id: &str, salt: &str) -> f64 {
     hash_val as f64 / LONG_SCALE
 }
 
+/// Determine which variant a user should see for a multivariate flag.
+///
+/// Uses consistent hashing to assign users to variants based on their
+/// rollout percentages. Returns `None` if the flag has no variants or
+/// the user doesn't fall into any variant bucket.
 pub fn get_matching_variant(flag: &FeatureFlag, distinct_id: &str) -> Option<String> {
     let hash_value = hash_key(&flag.key, distinct_id, VARIANT_HASH_SALT);
     let variants = flag.filters.multivariate.as_ref()?.variants.as_slice();
@@ -1590,5 +1682,153 @@ mod tests {
         let result = match_property_with_context(&prop, &properties, &ctx);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("Flag"));
+    }
+
+    // ==================== Date parsing edge case tests ====================
+
+    #[test]
+    fn test_parse_relative_date_edge_cases() {
+        // These test the internal parse_relative_date function indirectly via match_property
+        let prop = Property {
+            key: "date".to_string(),
+            value: json!("placeholder"),
+            operator: "is_date_before".to_string(),
+            property_type: None,
+        };
+
+        let mut properties = HashMap::new();
+        properties.insert("date".to_string(), json!("2024-01-01"));
+
+        // Empty string as target date should fail
+        let empty_prop = Property {
+            value: json!(""),
+            ..prop.clone()
+        };
+        assert!(match_property(&empty_prop, &properties).is_err());
+
+        // Single dash should fail
+        let dash_prop = Property {
+            value: json!("-"),
+            ..prop.clone()
+        };
+        assert!(match_property(&dash_prop, &properties).is_err());
+
+        // Missing unit (just "-7") should fail
+        let no_unit_prop = Property {
+            value: json!("-7"),
+            ..prop.clone()
+        };
+        assert!(match_property(&no_unit_prop, &properties).is_err());
+
+        // Missing number (just "-d") should fail
+        let no_number_prop = Property {
+            value: json!("-d"),
+            ..prop.clone()
+        };
+        assert!(match_property(&no_number_prop, &properties).is_err());
+
+        // Invalid unit should fail
+        let invalid_unit_prop = Property {
+            value: json!("-7x"),
+            ..prop.clone()
+        };
+        assert!(match_property(&invalid_unit_prop, &properties).is_err());
+    }
+
+    #[test]
+    fn test_parse_relative_date_large_values() {
+        // Very large relative dates should work
+        let prop = Property {
+            key: "created_at".to_string(),
+            value: json!("-1000d"), // ~2.7 years ago
+            operator: "is_date_before".to_string(),
+            property_type: None,
+        };
+
+        let mut properties = HashMap::new();
+        // Date 5 years ago should be before -1000d
+        let five_years_ago = chrono::Utc::now() - chrono::Duration::days(1825);
+        properties.insert(
+            "created_at".to_string(),
+            json!(five_years_ago.format("%Y-%m-%d").to_string()),
+        );
+        assert!(match_property(&prop, &properties).unwrap());
+    }
+
+    // ==================== Tests for invalid regex patterns ====================
+
+    #[test]
+    fn test_regex_with_invalid_pattern_returns_false() {
+        // Invalid regex pattern (unclosed group)
+        let prop = Property {
+            key: "email".to_string(),
+            value: json!("(unclosed"),
+            operator: "regex".to_string(),
+            property_type: None,
+        };
+
+        let mut properties = HashMap::new();
+        properties.insert("email".to_string(), json!("test@example.com"));
+
+        // Invalid regex should return false (not match)
+        assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    #[test]
+    fn test_not_regex_with_invalid_pattern_returns_true() {
+        // Invalid regex pattern (unclosed group)
+        let prop = Property {
+            key: "email".to_string(),
+            value: json!("(unclosed"),
+            operator: "not_regex".to_string(),
+            property_type: None,
+        };
+
+        let mut properties = HashMap::new();
+        properties.insert("email".to_string(), json!("test@example.com"));
+
+        // Invalid regex with not_regex should return true (no match means "not matching")
+        assert!(match_property(&prop, &properties).unwrap());
+    }
+
+    #[test]
+    fn test_regex_with_various_invalid_patterns() {
+        let invalid_patterns = vec![
+            "(unclosed", // Unclosed group
+            "[unclosed", // Unclosed bracket
+            "*invalid",  // Invalid quantifier at start
+            "(?P<bad",   // Unclosed named group
+            r"\",        // Trailing backslash
+        ];
+
+        for pattern in invalid_patterns {
+            let prop = Property {
+                key: "value".to_string(),
+                value: json!(pattern),
+                operator: "regex".to_string(),
+                property_type: None,
+            };
+
+            let mut properties = HashMap::new();
+            properties.insert("value".to_string(), json!("test"));
+
+            // All invalid patterns should return false for regex
+            assert!(
+                !match_property(&prop, &properties).unwrap(),
+                "Invalid pattern '{}' should return false for regex",
+                pattern
+            );
+
+            // And true for not_regex
+            let not_regex_prop = Property {
+                operator: "not_regex".to_string(),
+                ..prop
+            };
+            assert!(
+                match_property(&not_regex_prop, &properties).unwrap(),
+                "Invalid pattern '{}' should return true for not_regex",
+                pattern
+            );
+        }
     }
 }
