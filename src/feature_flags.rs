@@ -20,8 +20,16 @@ const VARIANT_HASH_SALT: &str = "variant";
 
 fn get_cached_regex(pattern: &str) -> Option<Regex> {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    // Use ok() to gracefully handle poisoned mutex (e.g., if a previous thread panicked)
-    let mut cache_guard = cache.lock().ok()?;
+    let mut cache_guard = match cache.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!(
+                pattern,
+                "Regex cache mutex poisoned, treating as cache miss"
+            );
+            return None;
+        }
+    };
 
     if let Some(cached) = cache_guard.get(pattern) {
         return cached.clone();
@@ -1745,5 +1753,82 @@ mod tests {
             json!(five_years_ago.format("%Y-%m-%d").to_string()),
         );
         assert!(match_property(&prop, &properties).unwrap());
+    }
+
+    // ==================== Tests for invalid regex patterns ====================
+
+    #[test]
+    fn test_regex_with_invalid_pattern_returns_false() {
+        // Invalid regex pattern (unclosed group)
+        let prop = Property {
+            key: "email".to_string(),
+            value: json!("(unclosed"),
+            operator: "regex".to_string(),
+            property_type: None,
+        };
+
+        let mut properties = HashMap::new();
+        properties.insert("email".to_string(), json!("test@example.com"));
+
+        // Invalid regex should return false (not match)
+        assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    #[test]
+    fn test_not_regex_with_invalid_pattern_returns_true() {
+        // Invalid regex pattern (unclosed group)
+        let prop = Property {
+            key: "email".to_string(),
+            value: json!("(unclosed"),
+            operator: "not_regex".to_string(),
+            property_type: None,
+        };
+
+        let mut properties = HashMap::new();
+        properties.insert("email".to_string(), json!("test@example.com"));
+
+        // Invalid regex with not_regex should return true (no match means "not matching")
+        assert!(match_property(&prop, &properties).unwrap());
+    }
+
+    #[test]
+    fn test_regex_with_various_invalid_patterns() {
+        let invalid_patterns = vec![
+            "(unclosed", // Unclosed group
+            "[unclosed", // Unclosed bracket
+            "*invalid",  // Invalid quantifier at start
+            "(?P<bad",   // Unclosed named group
+            r"\",        // Trailing backslash
+        ];
+
+        for pattern in invalid_patterns {
+            let prop = Property {
+                key: "value".to_string(),
+                value: json!(pattern),
+                operator: "regex".to_string(),
+                property_type: None,
+            };
+
+            let mut properties = HashMap::new();
+            properties.insert("value".to_string(), json!("test"));
+
+            // All invalid patterns should return false for regex
+            assert!(
+                !match_property(&prop, &properties).unwrap(),
+                "Invalid pattern '{}' should return false for regex",
+                pattern
+            );
+
+            // And true for not_regex
+            let not_regex_prop = Property {
+                operator: "not_regex".to_string(),
+                ..prop
+            };
+            assert!(
+                match_property(&not_regex_prop, &properties).unwrap(),
+                "Invalid pattern '{}' should return true for not_regex",
+                pattern
+            );
+        }
     }
 }
