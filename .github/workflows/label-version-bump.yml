@@ -14,6 +14,7 @@ jobs:
                 contains(github.event.pull_request.labels.*.name, 'bump patch')
                 || contains(github.event.pull_request.labels.*.name, 'bump minor')
                 || contains(github.event.pull_request.labels.*.name, 'bump major')
+                || contains(github.event.pull_request.labels.*.name, 'release')
             )
         steps:
             - name: Get app token
@@ -63,18 +64,23 @@ jobs:
 
             - name: Update version in cargo.toml
               id: versions
-              if: steps.bump-type.outputs.bump-type != 'null'
               env:
                   BUMP_TYPE: ${{ steps.bump-type.outputs.bump-type }}
               run: |
                   OLD_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "posthog-rs") | .version')
-                  cargo set-version --bump "$BUMP_TYPE"
-                  NEW_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "posthog-rs") | .version')
+                  if [[ "$BUMP_TYPE" != 'null' ]]; then
+                      cargo set-version --bump "$BUMP_TYPE"
+                      NEW_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "posthog-rs") | .version')
+                      echo "Upgraded from $OLD_VERSION to $NEW_VERSION"
+                  else
+                      NEW_VERSION=$OLD_VERSION
+                      echo "No version bump, using current version $NEW_VERSION"
+                  fi
                   echo "old-version=$OLD_VERSION" >> "$GITHUB_OUTPUT"
                   echo "new-version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-                  echo "Upgraded from $OLD_VERSION to $NEW_VERSION"
 
             - name: Update CHANGELOG.md
+              if: steps.bump-type.outputs.bump-type != 'null'
               env:
                   NEW_VERSION: ${{ steps.versions.outputs.new-version }}
                   OLD_VERSION: ${{ steps.versions.outputs.old-version }}
@@ -93,3 +99,9 @@ jobs:
                   branch: ${{ github.event.pull_request.base.ref }}
                   message: "chore: Bump version to ${{ steps.versions.outputs.new-version }}"
                   github_token: ${{ steps.app-token.outputs.token }}
+
+            - name: Create and push tag
+              if: contains(github.event.pull_request.labels.*.name, 'release')
+              run: |
+                  git tag "v${{ steps.versions.outputs.new-version }}"
+                  git push origin "v${{ steps.versions.outputs.new-version }}"
