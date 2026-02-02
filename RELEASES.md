@@ -31,7 +31,3 @@ To bump the version without publishing (e.g., for pre-release coordination):
 - `bump major` - Major version bump only
 
 These labels without `release` will update the version and changelog but won't create a tag or publish.
-
-## Trusted Publishing
-
-This repository uses OIDC-based trusted publishing instead of long-lived API tokens. The `release.yml` workflow authenticates directly with crates.io using GitHub's OIDC provider, eliminating the need to manage crates.io API tokens as repository secrets.
