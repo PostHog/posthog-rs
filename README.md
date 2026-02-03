@@ -1,5 +1,8 @@
 # PostHog Rust
 
+[![Crates.io](https://img.shields.io/crates/v/posthog-rs.svg)](https://crates.io/crates/posthog-rs)
+[![Documentation](https://docs.rs/posthog-rs/badge.svg)](https://docs.rs/posthog-rs)
+
 The official Rust SDK for [PostHog](https://posthog.com). See the [PostHog docs](https://posthog.com/docs) for more information.
 
 ## Features
