@@ -1,13 +1,12 @@
 ## 0.4.0 - 2026-02-04
 
+- Add feature flags with local evaluation support (#36)
+- Add group support and anonymous event support (#22)
+- Add global disable function (#20)
+- Add global client functions (#19)
+- Add timestamp setter (#30)
 
+## 0.2.0
 
-## 0.2.6 - 2025-01-08
-
-
-
-## 0.2.5 - 2025-01-08
-
-
-
-##  - 2025-01-08
+- Add generic properties (#1)
+- Derive Debug, PartialEq, and Eq on Event

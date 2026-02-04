@@ -87,7 +87,7 @@ jobs:
                   BASE_COMMIT: ${{ github.event.pull_request.base.ref }}
               run: |
                   CHANGELOG_HEADING="## $NEW_VERSION - $(date --iso-8601)"
-                  CHANGELOG_POINTS="$(git log v$OLD_VERSION..$BASE_COMMIT --pretty=format:%s --grep='^.*[0-9])$' | sed -e 's/^/- /')"
+                  CHANGELOG_POINTS="$(git log v$OLD_VERSION..$BASE_COMMIT --pretty=format:%s --grep='Merge pull request #' | sed -e 's/^/- /')"
                   mv CHANGELOG.md CHANGELOG.old.md
                   echo -e "$CHANGELOG_HEADING\n\n$CHANGELOG_POINTS\n\n$(cat CHANGELOG.old.md)" > CHANGELOG.md
                   rm CHANGELOG.old.md
