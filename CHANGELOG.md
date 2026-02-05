@@ -1,3 +1,7 @@
+## 0.4.1 - 2026-02-05
+
+- Merge pull request #66 from PostHog/dmarticus/debug-autobump-ci
+
 ## 0.4.0 - 2026-02-04
 
 - Add feature flags with local evaluation support (#36)
