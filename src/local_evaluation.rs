@@ -3,7 +3,7 @@ use crate::feature_flags::{
     FeatureFlag, FlagValue, InconclusiveMatchError,
 };
 use crate::Error;
-use reqwest::header::{ETAG, IF_NONE_MATCH};
+use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,6 +11,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, trace, warn};
+
+/// Extract the ETag header value from a response's headers.
+/// Returns None if the header is missing, invalid UTF-8, or empty.
+fn extract_etag(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(ETAG)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
 
 /// Response from the PostHog local evaluation API.
 ///
@@ -235,12 +245,7 @@ impl FlagPoller {
                             debug!("Flag definitions unchanged (304 Not Modified)");
                         } else if response.status().is_success() {
                             // Extract ETag before consuming the response body
-                            let new_etag = response
-                                .headers()
-                                .get(ETAG)
-                                .and_then(|v| v.to_str().ok())
-                                .filter(|s| !s.is_empty())
-                                .map(|s| s.to_string());
+                            let new_etag = extract_etag(response.headers());
 
                             match response.json::<LocalEvaluationResponse>() {
                                 Ok(data) => {
@@ -415,12 +420,7 @@ impl AsyncFlagPoller {
                                     debug!("Flag definitions unchanged (304 Not Modified)");
                                 } else if response.status().is_success() {
                                     // Extract ETag before consuming the response body
-                                    let new_etag = response
-                                        .headers()
-                                        .get(ETAG)
-                                        .and_then(|v| v.to_str().ok())
-                                        .filter(|s| !s.is_empty())
-                                        .map(|s| s.to_string());
+                                    let new_etag = extract_etag(response.headers());
 
                                     match response.json::<LocalEvaluationResponse>().await {
                                         Ok(data) => {
