@@ -1,7 +1,10 @@
 use httpmock::prelude::*;
+#[cfg(feature = "async-client")]
+use posthog_rs::AsyncFlagPoller;
 use posthog_rs::{
     ClientOptionsBuilder, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache,
-    FlagValue, LocalEvaluationResponse, LocalEvaluator, Property,
+    FlagPoller, FlagValue, LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator,
+    Property,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -239,4 +242,459 @@ fn test_cache_operations() {
     cache.clear();
     assert!(cache.get_flag("flag1").is_none());
     assert_eq!(cache.get_all_flags().len(), 0);
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_etag_sent_on_second_poll() {
+    let server = MockServer::start();
+
+    let mock_flags = json!({
+        "flags": [{
+            "key": "test-flag",
+            "active": true,
+            "filters": {
+                "groups": [{"properties": [], "rollout_percentage": 100.0, "variant": null}],
+                "multivariate": null,
+                "payloads": {}
+            }
+        }],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    // Mock for requests WITH If-None-Match header (subsequent polls) -> 304
+    // Registered FIRST but uses matches() to only match when header is present with correct value
+    let etag_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/api/feature_flag/local_evaluation/")
+            .query_param("send_cohorts", "")
+            .matches(|req| {
+                // Match only if If-None-Match header exists with the correct value
+                req.headers.as_ref().is_some_and(|headers| {
+                    headers.iter().any(|(name, value)| {
+                        name.to_lowercase() == "if-none-match" && value == "\"abc123\""
+                    })
+                })
+            });
+        then.status(304);
+    });
+
+    // Mock for requests WITHOUT If-None-Match (initial load + first poll) -> 200 with ETag
+    // Registered SECOND - will be tried first but etag_mock's matches() will fail if no header
+    let no_etag_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/api/feature_flag/local_evaluation/")
+            .query_param("send_cohorts", "");
+        then.status(200)
+            .header("ETag", "\"abc123\"")
+            .json_body(mock_flags.clone());
+    });
+
+    let cache = FlagCache::new();
+    let config = LocalEvaluationConfig {
+        personal_api_key: "test_personal_key".to_string(),
+        project_api_key: "test_project_key".to_string(),
+        api_host: server.base_url(),
+        poll_interval: Duration::from_millis(100),
+        request_timeout: Duration::from_secs(5),
+    };
+
+    let mut poller = AsyncFlagPoller::new(config, cache.clone());
+    poller.start().await;
+
+    // Wait for:
+    // - Initial load (immediate) -> gets 200 with ETag (load_flags doesn't set last_etag)
+    // - First poll tick (after 100ms) -> gets 200, sets last_etag in the polling loop
+    // - Second poll tick (after 200ms) -> sends If-None-Match, gets 304
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    poller.stop().await;
+
+    // Verify requests without If-None-Match were made (initial load + first poll)
+    assert!(
+        no_etag_mock.hits() >= 2,
+        "Should have at least 2 requests without If-None-Match (initial + first poll), got {}",
+        no_etag_mock.hits()
+    );
+
+    // Verify at least one request WITH If-None-Match was made (second+ poll)
+    assert!(
+        etag_mock.hits() >= 1,
+        "Should have at least 1 request with If-None-Match header, got {}",
+        etag_mock.hits()
+    );
+
+    // Verify cache has the flag (preserved after 304)
+    assert!(
+        cache.get_flag("test-flag").is_some(),
+        "Flag should be in cache"
+    );
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_304_preserves_cache() {
+    let server = MockServer::start();
+
+    let mock_flags = json!({
+        "flags": [{
+            "key": "preserved-flag",
+            "active": true,
+            "filters": {
+                "groups": [{"properties": [], "rollout_percentage": 100.0, "variant": null}],
+                "multivariate": null,
+                "payloads": {}
+            }
+        }],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    // Mock for requests WITH If-None-Match -> returns 304
+    // Registered FIRST but uses matches() to only match when header is present with correct value
+    let etag_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/api/feature_flag/local_evaluation/")
+            .query_param("send_cohorts", "")
+            .matches(|req| {
+                // Match only if If-None-Match header exists with the correct value
+                req.headers.as_ref().is_some_and(|headers| {
+                    headers.iter().any(|(name, value)| {
+                        name.to_lowercase() == "if-none-match" && value == "\"v1\""
+                    })
+                })
+            });
+        then.status(304);
+    });
+
+    // Mock for requests WITHOUT If-None-Match -> returns 200 with ETag
+    // Registered SECOND - will be tried first but etag_mock's matches() will fail if no header
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/api/feature_flag/local_evaluation/")
+            .query_param("send_cohorts", "");
+        then.status(200)
+            .header("ETag", "\"v1\"")
+            .json_body(mock_flags);
+    });
+
+    let cache = FlagCache::new();
+    let config = LocalEvaluationConfig {
+        personal_api_key: "test_personal_key".to_string(),
+        project_api_key: "test_project_key".to_string(),
+        api_host: server.base_url(),
+        poll_interval: Duration::from_millis(100),
+        request_timeout: Duration::from_secs(5),
+    };
+
+    let mut poller = AsyncFlagPoller::new(config, cache.clone());
+    poller.start().await;
+
+    // Wait for initial load
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Verify flag is in cache after initial load
+    assert!(
+        cache.get_flag("preserved-flag").is_some(),
+        "Flag should be loaded initially"
+    );
+
+    // Wait for multiple poll cycles (enough for at least one 304 response)
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    poller.stop().await;
+
+    // Verify 304 mock was hit (proves If-None-Match was sent and 304 was received)
+    assert!(
+        etag_mock.hits() >= 1,
+        "Should have received at least one 304 response, got {} hits",
+        etag_mock.hits()
+    );
+
+    // Flag should still be present after 304 response (cache preserved)
+    assert!(
+        cache.get_flag("preserved-flag").is_some(),
+        "Flag should remain in cache after 304 response"
+    );
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_no_etag_from_server() {
+    let server = MockServer::start();
+
+    let mock_flags = json!({
+        "flags": [{
+            "key": "no-etag-flag",
+            "active": true,
+            "filters": {
+                "groups": [{"properties": [], "rollout_percentage": 100.0, "variant": null}],
+                "multivariate": null,
+                "payloads": {}
+            }
+        }],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    // Server returns 200 without ETag header
+    let mock = server.mock(|when, then| {
+        when.method(GET).path("/api/feature_flag/local_evaluation/");
+        then.status(200).json_body(mock_flags);
+    });
+
+    let cache = FlagCache::new();
+    let config = LocalEvaluationConfig {
+        personal_api_key: "test_personal_key".to_string(),
+        project_api_key: "test_project_key".to_string(),
+        api_host: server.base_url(),
+        poll_interval: Duration::from_millis(50),
+        request_timeout: Duration::from_secs(5),
+    };
+
+    let mut poller = AsyncFlagPoller::new(config, cache.clone());
+    poller.start().await;
+
+    // Wait for initial load + a couple poll cycles
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    poller.stop().await;
+
+    // Should have made multiple requests (initial + polls), all without If-None-Match
+    assert!(
+        mock.hits() >= 2,
+        "Should have made multiple requests without ETag"
+    );
+
+    // Cache should have the flag
+    assert!(
+        cache.get_flag("no-etag-flag").is_some(),
+        "Flag should be in cache"
+    );
+}
+
+// Sync FlagPoller tests
+
+#[test]
+fn test_sync_etag_sent_on_second_poll() {
+    let server = MockServer::start();
+
+    let mock_flags = json!({
+        "flags": [{
+            "key": "test-flag",
+            "active": true,
+            "filters": {
+                "groups": [{"properties": [], "rollout_percentage": 100.0, "variant": null}],
+                "multivariate": null,
+                "payloads": {}
+            }
+        }],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    // Mock for requests WITH If-None-Match header (subsequent polls) -> 304
+    let etag_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/api/feature_flag/local_evaluation/")
+            .query_param("send_cohorts", "")
+            .matches(|req| {
+                // Match only if If-None-Match header exists with the correct value
+                req.headers.as_ref().is_some_and(|headers| {
+                    headers.iter().any(|(name, value)| {
+                        name.to_lowercase() == "if-none-match" && value == "\"sync-abc123\""
+                    })
+                })
+            });
+        then.status(304);
+    });
+
+    // Mock for requests WITHOUT If-None-Match -> 200 with ETag
+    let no_etag_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/api/feature_flag/local_evaluation/")
+            .query_param("send_cohorts", "");
+        then.status(200)
+            .header("ETag", "\"sync-abc123\"")
+            .json_body(mock_flags.clone());
+    });
+
+    let cache = FlagCache::new();
+    let config = LocalEvaluationConfig {
+        personal_api_key: "test_personal_key".to_string(),
+        project_api_key: "test_project_key".to_string(),
+        api_host: server.base_url(),
+        poll_interval: Duration::from_millis(100),
+        request_timeout: Duration::from_secs(5),
+    };
+
+    let mut poller = FlagPoller::new(config, cache.clone());
+    poller.start();
+
+    // Wait for:
+    // - Initial load (immediate) -> gets 200 with ETag (load_flags doesn't set last_etag)
+    // - First poll tick (after 100ms) -> gets 200, sets last_etag
+    // - Second poll tick (after 200ms) -> sends If-None-Match, gets 304
+    std::thread::sleep(Duration::from_millis(350));
+
+    poller.stop();
+
+    // Verify requests without If-None-Match were made (initial load + first poll)
+    assert!(
+        no_etag_mock.hits() >= 2,
+        "Should have at least 2 requests without If-None-Match (initial + first poll), got {}",
+        no_etag_mock.hits()
+    );
+
+    // Verify at least one request WITH If-None-Match was made (second+ poll)
+    assert!(
+        etag_mock.hits() >= 1,
+        "Should have at least 1 request with If-None-Match header, got {}",
+        etag_mock.hits()
+    );
+
+    // Verify cache has the flag (preserved after 304)
+    assert!(
+        cache.get_flag("test-flag").is_some(),
+        "Flag should be in cache"
+    );
+}
+
+#[test]
+fn test_sync_304_preserves_cache() {
+    let server = MockServer::start();
+
+    let mock_flags = json!({
+        "flags": [{
+            "key": "preserved-flag",
+            "active": true,
+            "filters": {
+                "groups": [{"properties": [], "rollout_percentage": 100.0, "variant": null}],
+                "multivariate": null,
+                "payloads": {}
+            }
+        }],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    // Mock for requests WITH If-None-Match -> returns 304
+    let etag_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/api/feature_flag/local_evaluation/")
+            .query_param("send_cohorts", "")
+            .matches(|req| {
+                // Match only if If-None-Match header exists with the correct value
+                req.headers.as_ref().is_some_and(|headers| {
+                    headers.iter().any(|(name, value)| {
+                        name.to_lowercase() == "if-none-match" && value == "\"sync-v1\""
+                    })
+                })
+            });
+        then.status(304);
+    });
+
+    // Mock for requests WITHOUT If-None-Match -> returns 200 with ETag
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/api/feature_flag/local_evaluation/")
+            .query_param("send_cohorts", "");
+        then.status(200)
+            .header("ETag", "\"sync-v1\"")
+            .json_body(mock_flags);
+    });
+
+    let cache = FlagCache::new();
+    let config = LocalEvaluationConfig {
+        personal_api_key: "test_personal_key".to_string(),
+        project_api_key: "test_project_key".to_string(),
+        api_host: server.base_url(),
+        poll_interval: Duration::from_millis(100),
+        request_timeout: Duration::from_secs(5),
+    };
+
+    let mut poller = FlagPoller::new(config, cache.clone());
+    poller.start();
+
+    // Wait for initial load
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Verify flag is in cache after initial load
+    assert!(
+        cache.get_flag("preserved-flag").is_some(),
+        "Flag should be loaded initially"
+    );
+
+    // Wait for multiple poll cycles (enough for at least one 304 response)
+    std::thread::sleep(Duration::from_millis(350));
+
+    poller.stop();
+
+    // Verify 304 mock was hit (proves If-None-Match was sent and 304 was received)
+    assert!(
+        etag_mock.hits() >= 1,
+        "Should have received at least one 304 response, got {} hits",
+        etag_mock.hits()
+    );
+
+    // Flag should still be present after 304 response (cache preserved)
+    assert!(
+        cache.get_flag("preserved-flag").is_some(),
+        "Flag should remain in cache after 304 response"
+    );
+}
+
+#[test]
+fn test_sync_no_etag_from_server() {
+    let server = MockServer::start();
+
+    let mock_flags = json!({
+        "flags": [{
+            "key": "no-etag-flag",
+            "active": true,
+            "filters": {
+                "groups": [{"properties": [], "rollout_percentage": 100.0, "variant": null}],
+                "multivariate": null,
+                "payloads": {}
+            }
+        }],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    // Server returns 200 without ETag header
+    let mock = server.mock(|when, then| {
+        when.method(GET).path("/api/feature_flag/local_evaluation/");
+        then.status(200).json_body(mock_flags);
+    });
+
+    let cache = FlagCache::new();
+    let config = LocalEvaluationConfig {
+        personal_api_key: "test_personal_key".to_string(),
+        project_api_key: "test_project_key".to_string(),
+        api_host: server.base_url(),
+        poll_interval: Duration::from_millis(50),
+        request_timeout: Duration::from_secs(5),
+    };
+
+    let mut poller = FlagPoller::new(config, cache.clone());
+    poller.start();
+
+    // Wait for initial load + a couple poll cycles
+    std::thread::sleep(Duration::from_millis(150));
+
+    poller.stop();
+
+    // Should have made multiple requests (initial + polls), all without If-None-Match
+    assert!(
+        mock.hits() >= 2,
+        "Should have made multiple requests without ETag"
+    );
+
+    // Cache should have the flag
+    assert!(
+        cache.get_flag("no-etag-flag").is_some(),
+        "Flag should be in cache"
+    );
 }
