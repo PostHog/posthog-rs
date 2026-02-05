@@ -9,7 +9,7 @@ edition = "2018"
 rust-version = "1.78.0"
 
 [dependencies]
-reqwest = { version = "0.11.3", default-features = false, features = [
+reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "blocking",
     "json",
