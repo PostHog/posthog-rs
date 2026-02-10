@@ -3,12 +3,24 @@ use crate::feature_flags::{
     FeatureFlag, FlagValue, InconclusiveMatchError,
 };
 use crate::Error;
+use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, trace, warn};
+
+/// Extract the ETag header value from a response's headers.
+/// Returns None if the header is missing, invalid UTF-8, or empty.
+fn extract_etag(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(ETAG)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
 
 /// Response from the PostHog local evaluation API.
 ///
@@ -200,6 +212,8 @@ impl FlagPoller {
                 .build()
                 .unwrap();
 
+            let mut last_etag: Option<String> = None;
+
             loop {
                 std::thread::sleep(config.poll_interval);
 
@@ -213,21 +227,31 @@ impl FlagPoller {
                     config.api_host.trim_end_matches('/')
                 );
 
-                match client
+                let mut request = client
                     .get(&url)
                     .header(
                         "Authorization",
                         format!("Bearer {}", config.personal_api_key),
                     )
-                    .header("X-PostHog-Project-Api-Key", &config.project_api_key)
-                    .send()
-                {
+                    .header("X-PostHog-Project-Api-Key", &config.project_api_key);
+
+                if let Some(ref etag) = last_etag {
+                    request = request.header(IF_NONE_MATCH, etag.as_str());
+                }
+
+                match request.send() {
                     Ok(response) => {
-                        if response.status().is_success() {
+                        if response.status() == StatusCode::NOT_MODIFIED {
+                            debug!("Flag definitions unchanged (304 Not Modified)");
+                        } else if response.status().is_success() {
+                            // Extract ETag before consuming the response body
+                            let new_etag = extract_etag(response.headers());
+
                             match response.json::<LocalEvaluationResponse>() {
                                 Ok(data) => {
                                     trace!("Successfully fetched flag definitions");
                                     cache.update(data);
+                                    last_etag = new_etag;
                                 }
                                 Err(e) => {
                                     warn!(error = %e, "Failed to parse flag response");
@@ -366,6 +390,8 @@ impl AsyncFlagPoller {
             let mut interval = tokio::time::interval(config.poll_interval);
             interval.tick().await; // Skip the first immediate tick
 
+            let mut last_etag: Option<String> = None;
+
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -379,19 +405,28 @@ impl AsyncFlagPoller {
                             config.api_host.trim_end_matches('/')
                         );
 
-                        match client
+                        let mut request = client
                             .get(&url)
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
-                            .header("X-PostHog-Project-Api-Key", &config.project_api_key)
-                            .send()
-                            .await
-                        {
+                            .header("X-PostHog-Project-Api-Key", &config.project_api_key);
+
+                        if let Some(ref etag) = last_etag {
+                            request = request.header(IF_NONE_MATCH, etag.as_str());
+                        }
+
+                        match request.send().await {
                             Ok(response) => {
-                                if response.status().is_success() {
+                                if response.status() == StatusCode::NOT_MODIFIED {
+                                    debug!("Flag definitions unchanged (304 Not Modified)");
+                                } else if response.status().is_success() {
+                                    // Extract ETag before consuming the response body
+                                    let new_etag = extract_etag(response.headers());
+
                                     match response.json::<LocalEvaluationResponse>().await {
                                         Ok(data) => {
                                             trace!("Successfully fetched flag definitions");
                                             cache.update(data);
+                                            last_etag = new_etag;
                                         }
                                         Err(e) => {
                                             warn!(error = %e, "Failed to parse flag response");
