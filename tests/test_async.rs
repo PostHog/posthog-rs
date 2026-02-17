@@ -401,7 +401,27 @@ async fn test_groups_parameter() {
 }
 
 #[tokio::test]
-async fn test_capture_batch_historical_sends_to_batch_endpoint() {
+async fn test_capture_batch_sends_to_batch_endpoint() {
+    let server = MockServer::start();
+
+    let batch_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/batch/")
+            .body_contains(r#""historical_migration":false"#);
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url()).await;
+
+    let event = posthog_rs::Event::new("test_event", "user1");
+    let result = client.capture_batch(vec![event], false).await;
+
+    assert!(result.is_ok());
+    batch_mock.assert();
+}
+
+#[tokio::test]
+async fn test_capture_batch_historical_migration() {
     let server = MockServer::start();
 
     let batch_mock = server.mock(|when, then| {
@@ -414,14 +434,14 @@ async fn test_capture_batch_historical_sends_to_batch_endpoint() {
     let client = create_test_client(server.base_url()).await;
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    let result = client.capture_batch_historical(vec![event]).await;
+    let result = client.capture_batch(vec![event], true).await;
 
     assert!(result.is_ok());
     batch_mock.assert();
 }
 
 #[tokio::test]
-async fn test_capture_batch_historical_rate_limit() {
+async fn test_capture_batch_rate_limit() {
     let server = MockServer::start();
 
     let batch_mock = server.mock(|when, then| {
@@ -432,7 +452,7 @@ async fn test_capture_batch_historical_rate_limit() {
     let client = create_test_client(server.base_url()).await;
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    let result = client.capture_batch_historical(vec![event]).await;
+    let result = client.capture_batch(vec![event], true).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -446,7 +466,7 @@ async fn test_capture_batch_historical_rate_limit() {
 }
 
 #[tokio::test]
-async fn test_capture_batch_historical_bad_request() {
+async fn test_capture_batch_bad_request() {
     let server = MockServer::start();
 
     let batch_mock = server.mock(|when, then| {
@@ -457,7 +477,7 @@ async fn test_capture_batch_historical_bad_request() {
     let client = create_test_client(server.base_url()).await;
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    let result = client.capture_batch_historical(vec![event]).await;
+    let result = client.capture_batch(vec![event], false).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();

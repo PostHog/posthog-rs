@@ -222,7 +222,27 @@ fn test_api_error_handling() {
 }
 
 #[test]
-fn test_capture_batch_historical_sends_to_batch_endpoint() {
+fn test_capture_batch_sends_to_batch_endpoint() {
+    let server = MockServer::start();
+
+    let batch_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/batch/")
+            .body_contains(r#""historical_migration":false"#);
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let event = posthog_rs::Event::new("test_event", "user1");
+    let result = client.capture_batch(vec![event], false);
+
+    assert!(result.is_ok());
+    batch_mock.assert();
+}
+
+#[test]
+fn test_capture_batch_historical_migration() {
     let server = MockServer::start();
 
     let batch_mock = server.mock(|when, then| {
@@ -235,14 +255,14 @@ fn test_capture_batch_historical_sends_to_batch_endpoint() {
     let client = create_test_client(server.base_url());
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    let result = client.capture_batch_historical(vec![event]);
+    let result = client.capture_batch(vec![event], true);
 
     assert!(result.is_ok());
     batch_mock.assert();
 }
 
 #[test]
-fn test_capture_batch_historical_rate_limit() {
+fn test_capture_batch_rate_limit() {
     let server = MockServer::start();
 
     let batch_mock = server.mock(|when, then| {
@@ -253,7 +273,7 @@ fn test_capture_batch_historical_rate_limit() {
     let client = create_test_client(server.base_url());
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    let result = client.capture_batch_historical(vec![event]);
+    let result = client.capture_batch(vec![event], true);
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -267,7 +287,7 @@ fn test_capture_batch_historical_rate_limit() {
 }
 
 #[test]
-fn test_capture_batch_historical_bad_request() {
+fn test_capture_batch_bad_request() {
     let server = MockServer::start();
 
     let batch_mock = server.mock(|when, then| {
@@ -278,7 +298,7 @@ fn test_capture_batch_historical_bad_request() {
     let client = create_test_client(server.base_url());
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    let result = client.capture_batch_historical(vec![event]);
+    let result = client.capture_batch(vec![event], false);
 
     assert!(result.is_err());
     let err = result.unwrap_err();

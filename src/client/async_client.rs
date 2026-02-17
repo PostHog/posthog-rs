@@ -109,42 +109,32 @@ impl Client {
         check_response(response).await
     }
 
-    /// Capture a collection of events with a single request. This function may be
-    /// more performant than capturing a list of events individually.
-    pub async fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
+    /// Capture a collection of events with a single request. Events are sent to
+    /// the `/batch/` endpoint. Set `historical_migration` to `true` to route
+    /// events to the historical ingestion topic, bypassing the main pipeline.
+    pub async fn capture_batch(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<(), Error> {
         if self.options.is_disabled() {
             return Ok(());
         }
 
-        let inner_events = self.prepare_inner_events(events);
-        let payload = serde_json::to_string(&inner_events)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
-        let url = self.options.endpoints().build_url(Endpoint::Capture);
+        let disable_geoip = self.options.disable_geoip;
+        let inner_events: Vec<InnerEvent> = events
+            .into_iter()
+            .map(|mut event| {
+                if disable_geoip {
+                    event.insert_prop("$geoip_disable", true).ok();
+                }
+                InnerEvent::new(event, self.options.api_key.clone())
+            })
+            .collect();
 
-        let response = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload)
-            .send()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
-
-        check_response(response).await
-    }
-
-    /// Capture a collection of events as a historical migration. Events are sent
-    /// to the `/batch/` endpoint and routed to the historical ingestion topic,
-    /// bypassing the main ingestion pipeline.
-    pub async fn capture_batch_historical(&self, events: Vec<Event>) -> Result<(), Error> {
-        if self.options.is_disabled() {
-            return Ok(());
-        }
-
-        let inner_events = self.prepare_inner_events(events);
         let batch_request = BatchRequest {
             api_key: self.options.api_key.clone(),
-            historical_migration: true,
+            historical_migration,
             batch: inner_events,
         };
         let payload = serde_json::to_string(&batch_request)
@@ -161,19 +151,6 @@ impl Client {
             .map_err(|e| Error::Connection(e.to_string()))?;
 
         check_response(response).await
-    }
-
-    fn prepare_inner_events(&self, events: Vec<Event>) -> Vec<InnerEvent> {
-        let disable_geoip = self.options.disable_geoip;
-        events
-            .into_iter()
-            .map(|mut event| {
-                if disable_geoip {
-                    event.insert_prop("$geoip_disable", true).ok();
-                }
-                InnerEvent::new(event, self.options.api_key.clone())
-            })
-            .collect()
     }
 
     /// Get all feature flags for a user
