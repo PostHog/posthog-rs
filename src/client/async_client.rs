@@ -6,6 +6,7 @@ use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
 
 use crate::endpoints::{Endpoint, EndpointManager};
+use crate::event::BatchRequest;
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{event::InnerEvent, Error, Event};
@@ -115,21 +116,9 @@ impl Client {
             return Ok(());
         }
 
-        let disable_geoip = self.options.disable_geoip;
-        let events: Vec<_> = events
-            .into_iter()
-            .map(|mut event| {
-                // Add geoip disable property if configured
-                if disable_geoip {
-                    event.insert_prop("$geoip_disable", true).ok();
-                }
-                InnerEvent::new(event, self.options.api_key.clone())
-            })
-            .collect();
-
-        let payload =
-            serde_json::to_string(&events).map_err(|e| Error::Serialization(e.to_string()))?;
-
+        let inner_events = self.prepare_inner_events(events);
+        let payload = serde_json::to_string(&inner_events)
+            .map_err(|e| Error::Serialization(e.to_string()))?;
         let url = self.options.endpoints().build_url(Endpoint::Capture);
 
         let response = self
@@ -142,6 +131,49 @@ impl Client {
             .map_err(|e| Error::Connection(e.to_string()))?;
 
         check_response(response).await
+    }
+
+    /// Capture a collection of events as a historical migration. Events are sent
+    /// to the `/batch/` endpoint and routed to the historical ingestion topic,
+    /// bypassing the main ingestion pipeline.
+    pub async fn capture_batch_historical(&self, events: Vec<Event>) -> Result<(), Error> {
+        if self.options.is_disabled() {
+            return Ok(());
+        }
+
+        let inner_events = self.prepare_inner_events(events);
+        let batch_request = BatchRequest {
+            api_key: self.options.api_key.clone(),
+            historical_migration: true,
+            batch: inner_events,
+        };
+        let payload = serde_json::to_string(&batch_request)
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let url = self.options.endpoints().build_url(Endpoint::Batch);
+
+        let response = self
+            .client
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
+
+        check_response(response).await
+    }
+
+    fn prepare_inner_events(&self, events: Vec<Event>) -> Vec<InnerEvent> {
+        let disable_geoip = self.options.disable_geoip;
+        events
+            .into_iter()
+            .map(|mut event| {
+                if disable_geoip {
+                    event.insert_prop("$geoip_disable", true).ok();
+                }
+                InnerEvent::new(event, self.options.api_key.clone())
+            })
+            .collect()
     }
 
     /// Get all feature flags for a user
