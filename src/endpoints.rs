@@ -14,6 +14,8 @@ pub const DEFAULT_HOST: &str = US_INGESTION_ENDPOINT;
 pub enum Endpoint {
     /// Event capture endpoint
     Capture,
+    /// Batch event capture endpoint
+    Batch,
     /// Feature flags endpoint
     Flags,
     /// Local evaluation endpoint
@@ -25,6 +27,7 @@ impl Endpoint {
     pub fn path(&self) -> &str {
         match self {
             Endpoint::Capture => "/i/v0/e/",
+            Endpoint::Batch => "/batch/",
             Endpoint::Flags => "/flags/?v=2",
             Endpoint::LocalEvaluation => "/api/feature_flag/local_evaluation/?send_cohorts",
         }
