@@ -19,6 +19,7 @@ pub struct Event {
     properties: HashMap<String, serde_json::Value>,
     groups: HashMap<String, String>,
     timestamp: Option<NaiveDateTime>,
+    uuid: Option<Uuid>,
 }
 
 impl Event {
@@ -31,6 +32,7 @@ impl Event {
             properties: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
+            uuid: None,
         }
     }
 
@@ -43,6 +45,7 @@ impl Event {
             properties: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
+            uuid: None,
         };
         res.insert_prop("$process_person_profile", false)
             .expect("bools are safe for serde");
@@ -88,6 +91,12 @@ impl Event {
         self.timestamp = Some(timestamp.naive_utc());
         Ok(())
     }
+
+    /// Set a specific UUID for this event, overriding the server-generated one.
+    /// Useful for deduplication when re-importing historical data.
+    pub fn set_uuid(&mut self, uuid: Uuid) {
+        self.uuid = Some(uuid);
+    }
 }
 
 // This exists so that the client doesn't have to specify the API key over and over
@@ -105,10 +114,7 @@ pub struct InnerEvent {
 
 impl InnerEvent {
     pub fn new(event: Event, api_key: String) -> Self {
-        Self::new_with_uuid(event, api_key, None)
-    }
-
-    pub fn new_with_uuid(event: Event, api_key: String, uuid: Option<Uuid>) -> Self {
+        let uuid = event.uuid;
         let mut properties = event.properties;
 
         // Add $lib_name and $lib_version to the properties
@@ -164,6 +170,8 @@ impl InnerEvent {
 
 #[cfg(test)]
 pub mod tests {
+    use uuid::Uuid;
+
     use crate::{event::InnerEvent, Event};
 
     #[test]
@@ -182,6 +190,28 @@ pub mod tests {
             props.get("$lib"),
             Some(&serde_json::Value::String("posthog-rs".to_string()))
         );
+    }
+
+    #[test]
+    fn inner_event_preserves_uuid_from_event() {
+        let uuid = Uuid::now_v7();
+        let mut event = Event::new("test", "user1");
+        event.set_uuid(uuid);
+
+        let inner = InnerEvent::new(event, "key".to_string());
+        let json = serde_json::to_value(&inner).unwrap();
+
+        assert_eq!(json["uuid"], uuid.to_string());
+    }
+
+    #[test]
+    fn inner_event_omits_uuid_when_not_set() {
+        let event = Event::new("test", "user1");
+
+        let inner = InnerEvent::new(event, "key".to_string());
+        let json = serde_json::to_value(&inner).unwrap();
+
+        assert!(json.get("uuid").is_none());
     }
 }
 
