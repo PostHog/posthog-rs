@@ -12,6 +12,19 @@ use crate::{event::InnerEvent, Error, Event};
 
 use super::ClientOptions;
 
+fn check_response(response: reqwest::blocking::Response) -> Result<(), Error> {
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let body = response
+        .text()
+        .unwrap_or_else(|_| "Unknown error".to_string());
+
+    match Error::from_http_response(status, &headers, body) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
     options: ClientOptions,
@@ -82,14 +95,15 @@ impl Client {
             serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
 
         let url = self.options.endpoints().build_url(Endpoint::Capture);
-        self.client
+        let response = self
+            .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
             .map_err(|e| Error::Connection(e.to_string()))?;
 
-        Ok(())
+        check_response(response)
     }
 
     /// Capture a collection of events with a single request. This function may be
@@ -117,14 +131,15 @@ impl Client {
             serde_json::to_string(&events).map_err(|e| Error::Serialization(e.to_string()))?;
 
         let url = self.options.endpoints().build_url(Endpoint::Capture);
-        self.client
+        let response = self
+            .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
             .map_err(|e| Error::Connection(e.to_string()))?;
 
-        Ok(())
+        check_response(response)
     }
 
     /// Get all feature flags for a user
