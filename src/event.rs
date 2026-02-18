@@ -11,7 +11,7 @@ use crate::Error;
 /// website. Examples include button clicks, pageviews, query completions, and signups.
 /// See the [PostHog documentation](https://posthog.com/docs/data/events)
 /// for a detailed explanation of PostHog Events.
-#[derive(Serialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     event: String,
     #[serde(rename = "$distinct_id")]
@@ -117,31 +117,38 @@ impl InnerEvent {
         let uuid = event.uuid;
         let mut properties = event.properties;
 
-        // Add $lib_name and $lib_version to the properties
-        properties.insert(
-            "$lib".into(),
-            serde_json::Value::String("posthog-rs".into()),
-        );
+        // Set $lib and $lib_version if not already present, so callers
+        // forwarding events from other SDKs can preserve the original values.
+        if !properties.contains_key("$lib") {
+            properties.insert(
+                "$lib".into(),
+                serde_json::Value::String("posthog-rs".into()),
+            );
+        }
 
         let version_str = env!("CARGO_PKG_VERSION");
-        properties.insert(
-            "$lib_version".into(),
-            serde_json::Value::String(version_str.into()),
-        );
+        if !properties.contains_key("$lib_version") {
+            properties.insert(
+                "$lib_version".into(),
+                serde_json::Value::String(version_str.into()),
+            );
+        }
 
-        if let Ok(version) = version_str.parse::<Version>() {
-            properties.insert(
-                "$lib_version__major".into(),
-                serde_json::Value::Number(version.major.into()),
-            );
-            properties.insert(
-                "$lib_version__minor".into(),
-                serde_json::Value::Number(version.minor.into()),
-            );
-            properties.insert(
-                "$lib_version__patch".into(),
-                serde_json::Value::Number(version.patch.into()),
-            );
+        if !properties.contains_key("$lib_version__major") {
+            if let Ok(version) = version_str.parse::<Version>() {
+                properties.insert(
+                    "$lib_version__major".into(),
+                    serde_json::Value::Number(version.major.into()),
+                );
+                properties.insert(
+                    "$lib_version__minor".into(),
+                    serde_json::Value::Number(version.minor.into()),
+                );
+                properties.insert(
+                    "$lib_version__patch".into(),
+                    serde_json::Value::Number(version.patch.into()),
+                );
+            }
         }
 
         if !event.groups.is_empty() {
@@ -212,6 +219,32 @@ pub mod tests {
         let json = serde_json::to_value(&inner).unwrap();
 
         assert!(json.get("uuid").is_none());
+    }
+
+    #[test]
+    fn inner_event_preserves_existing_lib_properties() {
+        let mut event = Event::new("forwarded event", "user1");
+        event.insert_prop("$lib", "posthog-js").unwrap();
+        event.insert_prop("$lib_version", "1.42.0").unwrap();
+        event
+            .insert_prop("$lib_version__major", 1u64)
+            .unwrap();
+
+        let inner = InnerEvent::new(event, "key".to_string());
+        let props = &inner.properties;
+
+        assert_eq!(
+            props.get("$lib"),
+            Some(&serde_json::Value::String("posthog-js".to_string()))
+        );
+        assert_eq!(
+            props.get("$lib_version"),
+            Some(&serde_json::Value::String("1.42.0".to_string()))
+        );
+        assert_eq!(
+            props.get("$lib_version__major"),
+            Some(&serde_json::Value::Number(1u64.into()))
+        );
     }
 }
 
