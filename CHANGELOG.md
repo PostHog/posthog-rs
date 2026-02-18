@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.4.1 — 2026-02-18
+
+### Patch changes
+
+- [c15b195](https://github.com/posthog/posthog-rs/commit/c15b195728be26de67a66d64d04ada7e3b729351) Migrate release process to Sampo for automated versioning, changelogs, and publishing. — Thanks @rafaeelaudibert!
+
 ## 0.4.0 - 2026-02-04
 
 - Add feature flags with local evaluation support (#36)
