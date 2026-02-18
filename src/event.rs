@@ -226,9 +226,7 @@ pub mod tests {
         let mut event = Event::new("forwarded event", "user1");
         event.insert_prop("$lib", "posthog-js").unwrap();
         event.insert_prop("$lib_version", "1.42.0").unwrap();
-        event
-            .insert_prop("$lib_version__major", 1u64)
-            .unwrap();
+        event.insert_prop("$lib_version__major", 1u64).unwrap();
 
         let inner = InnerEvent::new(event, "key".to_string());
         let props = &inner.properties;
