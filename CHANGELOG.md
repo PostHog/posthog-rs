@@ -1,3 +1,11 @@
+# posthog-rs
+
+## 0.4.2 — 2026-02-18
+
+### Patch changes
+
+- [ea87e2a](https://github.com/posthog/posthog-rs/commit/ea87e2af2b51bbb1a412f48b9851f24dae1f6187) Migrate release process to Sampo for automated versioning, changelogs, and publishing. — Thanks @rafaeelaudibert!
+
 ## 0.4.1 - 2026-02-05
 
 - Merge pull request #66 from PostHog/dmarticus/debug-autobump-ci
