@@ -455,10 +455,7 @@ async fn test_capture_batch_rate_limit() {
     let result = client.capture_batch(vec![event], true).await;
 
     assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        posthog_rs::Error::RateLimit
-    ));
+    assert!(matches!(result.unwrap_err(), posthog_rs::Error::RateLimit));
     batch_mock.assert();
 }
 
