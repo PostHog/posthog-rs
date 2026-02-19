@@ -14,12 +14,11 @@ use super::ClientOptions;
 
 fn check_response(response: reqwest::blocking::Response) -> Result<(), Error> {
     let status = response.status().as_u16();
-    let headers = response.headers().clone();
     let body = response
         .text()
         .unwrap_or_else(|_| "Unknown error".to_string());
 
-    match Error::from_http_response(status, &headers, body) {
+    match Error::from_http_response(status, body) {
         Some(err) => Err(err),
         None => Ok(()),
     }
