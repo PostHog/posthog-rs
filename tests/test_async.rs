@@ -446,7 +446,7 @@ async fn test_capture_batch_rate_limit() {
 
     let batch_mock = server.mock(|when, then| {
         when.method(POST).path("/batch/");
-        then.status(429).header("Retry-After", "60");
+        then.status(429);
     });
 
     let client = create_test_client(server.base_url()).await;
@@ -455,13 +455,10 @@ async fn test_capture_batch_rate_limit() {
     let result = client.capture_batch(vec![event], true).await;
 
     assert!(result.is_err());
-    let err = result.unwrap_err();
-    match err {
-        posthog_rs::Error::RateLimit { retry_after } => {
-            assert_eq!(retry_after, Some(std::time::Duration::from_secs(60)));
-        }
-        other => panic!("expected RateLimit, got: {:?}", other),
-    }
+    assert!(matches!(
+        result.unwrap_err(),
+        posthog_rs::Error::RateLimit
+    ));
     batch_mock.assert();
 }
 
