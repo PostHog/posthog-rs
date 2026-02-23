@@ -12,6 +12,19 @@ use crate::{event::InnerEvent, Error, Event};
 
 use super::ClientOptions;
 
+async fn check_response(response: reqwest::Response) -> Result<(), Error> {
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "Unknown error".to_string());
+
+    match Error::from_http_response(status, body) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
     options: ClientOptions,
@@ -83,7 +96,8 @@ impl Client {
 
         let url = self.options.endpoints().build_url(Endpoint::Capture);
 
-        self.client
+        let response = self
+            .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
@@ -91,7 +105,7 @@ impl Client {
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
-        Ok(())
+        check_response(response).await
     }
 
     /// Capture a collection of events with a single request. This function may be
@@ -118,7 +132,8 @@ impl Client {
 
         let url = self.options.endpoints().build_url(Endpoint::Capture);
 
-        self.client
+        let response = self
+            .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
@@ -126,7 +141,7 @@ impl Client {
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
-        Ok(())
+        check_response(response).await
     }
 
     /// Get all feature flags for a user
