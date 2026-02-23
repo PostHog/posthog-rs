@@ -6,6 +6,7 @@ use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
 
 use crate::endpoints::{Endpoint, EndpointManager};
+use crate::event::BatchRequest;
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{event::InnerEvent, Error, Event};
@@ -108,18 +109,22 @@ impl Client {
         check_response(response).await
     }
 
-    /// Capture a collection of events with a single request. This function may be
-    /// more performant than capturing a list of events individually.
-    pub async fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
+    /// Capture a collection of events with a single request. Events are sent to
+    /// the `/batch/` endpoint. Set `historical_migration` to `true` to route
+    /// events to the historical ingestion topic, bypassing the main pipeline.
+    pub async fn capture_batch(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<(), Error> {
         if self.options.is_disabled() {
             return Ok(());
         }
 
         let disable_geoip = self.options.disable_geoip;
-        let events: Vec<_> = events
+        let inner_events: Vec<InnerEvent> = events
             .into_iter()
             .map(|mut event| {
-                // Add geoip disable property if configured
                 if disable_geoip {
                     event.insert_prop("$geoip_disable", true).ok();
                 }
@@ -127,10 +132,14 @@ impl Client {
             })
             .collect();
 
-        let payload =
-            serde_json::to_string(&events).map_err(|e| Error::Serialization(e.to_string()))?;
-
-        let url = self.options.endpoints().build_url(Endpoint::Capture);
+        let batch_request = BatchRequest {
+            api_key: self.options.api_key.clone(),
+            historical_migration,
+            batch: inner_events,
+        };
+        let payload = serde_json::to_string(&batch_request)
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let url = self.options.endpoints().build_url(Endpoint::Batch);
 
         let response = self
             .client

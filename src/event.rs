@@ -99,6 +99,15 @@ impl Event {
     }
 }
 
+/// Wrapper for the `/batch/` endpoint that includes the API key and options
+/// alongside the event array.
+#[derive(Serialize)]
+pub struct BatchRequest {
+    pub api_key: String,
+    pub historical_migration: bool,
+    pub batch: Vec<InnerEvent>,
+}
+
 // This exists so that the client doesn't have to specify the API key over and over
 #[derive(Serialize)]
 pub struct InnerEvent {
