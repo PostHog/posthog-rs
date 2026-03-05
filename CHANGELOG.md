@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.4.3 — 2026-03-05
+
+### Patch changes
+
+- [b1b109d](https://github.com/posthog/posthog-rs/commit/b1b109dcdc52d9a0fd72268a44b3e367e593d8b1) Add semver comparison operators for local feature flag evaluation — Thanks @dmarticus!
+
 ## 0.4.2 — 2026-02-23
 
 ### Patch changes
