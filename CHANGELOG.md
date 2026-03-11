@@ -1,6 +1,24 @@
-## 0.4.1 - 2026-02-05
+# posthog-rs
 
-- Merge pull request #66 from PostHog/dmarticus/debug-autobump-ci
+## 0.4.3 — 2026-03-05
+
+### Patch changes
+
+- [b1b109d](https://github.com/posthog/posthog-rs/commit/b1b109dcdc52d9a0fd72268a44b3e367e593d8b1) Add semver comparison operators for local feature flag evaluation — Thanks @dmarticus!
+
+## 0.4.2 — 2026-02-23
+
+### Patch changes
+
+- [d94ecbb](https://github.com/posthog/posthog-rs/commit/d94ecbb4e6960e775f18f7b81664c18fa35ddc12) Historical batch capture support — Thanks @z0br0wn!
+- [6af1786](https://github.com/posthog/posthog-rs/commit/6af178641092740ac1cca24f08d1a1fc760f2cb1) Add Capture API response handling — Thanks @z0br0wn!
+- [3fdab70](https://github.com/posthog/posthog-rs/commit/3fdab70a3a6b2310ed1f7772cf742b184104bedf) Generate (and allow overrides of) event UUID, allow for properties pass through. — Thanks @z0br0wn!
+
+## 0.4.1 — 2026-02-18
+
+### Patch changes
+
+- [c15b195](https://github.com/posthog/posthog-rs/commit/c15b195728be26de67a66d64d04ada7e3b729351) Migrate release process to Sampo for automated versioning, changelogs, and publishing. — Thanks @rafaeelaudibert!
 
 ## 0.4.0 - 2026-02-04
 

@@ -1,0 +1,19 @@
+# Sampo configuration
+version = 1
+
+[git]
+default_branch = "main"
+short_tags = "posthog-rs"    # Tag with v1.2.3 rather than posthog-rs-v1.2.3
+
+[github]
+repository = "posthog/posthog-rs"
+
+[changelog]
+# Options for release notes generation.
+# show_commit_hash = true (default)
+# show_acknowledgments = true (default)
+
+[packages]
+# Options for package discovery and filtering.
+# ignore_unpublished = false (default)
+# ignore = ["internal-*", "examples/*"]
