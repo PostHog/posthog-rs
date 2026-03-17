@@ -94,7 +94,7 @@ jobs:
           token: ${{ steps.releaser.outputs.token }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.93.1
         with:
           components: cargo
 
