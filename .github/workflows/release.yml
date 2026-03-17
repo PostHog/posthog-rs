@@ -155,7 +155,8 @@ jobs:
         if: steps.check-changes.outputs.committed == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
-        run: gh release create "v${{ steps.sampo-release.outputs.new_version }}" --generate-notes --target main
+          NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
+        run: gh release create "v$NEW_VERSION" --generate-notes --target main
 
       - name: Send failure event to PostHog
         if: ${{ failure() }}
