@@ -140,6 +140,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
 
+      # ghcommit-action commits via the GitHub API, so the local working
+      # tree still has dirty files. Pull to sync, otherwise cargo publish
+      # (called by sampo) fails with "files contain changes not yet committed".
+      - name: Sync local repository
+        if: steps.check-changes.outputs.committed == 'true'
+        run: git pull origin main
+
       - name: Authenticate with crates.io
         if: steps.check-changes.outputs.committed == 'true'
         uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1.0.3
