@@ -141,11 +141,12 @@ jobs:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
 
       # ghcommit-action commits via the GitHub API, so the local working
-      # tree still has dirty files. Pull to sync, otherwise cargo publish
-      # (called by sampo) fails with "files contain changes not yet committed".
+      # tree still has dirty files. Discard them (already committed remotely)
+      # and pull, otherwise cargo publish fails with "files contain changes
+      # not yet committed".
       - name: Sync local repository
         if: steps.check-changes.outputs.committed == 'true'
-        run: git pull origin main
+        run: git checkout -- . && git pull origin main
 
       - name: Authenticate with crates.io
         if: steps.check-changes.outputs.committed == 'true'
