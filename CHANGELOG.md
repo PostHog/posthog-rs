@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.4.5 — 2026-03-19
+
+### Patch changes
+
+- [76d4acd](https://github.com/posthog/posthog-rs/commit/76d4acd9b15c89fd0a0539aed400d694a2222813) Sign commits during release process — Thanks @Piccirello!
+
 ## 0.4.4 — 2026-03-18
 
 ### Patch changes
