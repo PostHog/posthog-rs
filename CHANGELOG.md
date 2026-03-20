@@ -2,15 +2,11 @@
 
 ## 0.4.7 — 2026-03-20
 
+Note: 0.4.4 - 0.4.6 were never released due to a bug in our release process. Commit signing is hard!
+
 ### Patch changes
 
 - [6a04431](https://github.com/posthog/posthog-rs/commit/6a04431ecd66d85360500e15dbc28a19bb349d21) Sign commits during release process — Thanks @marandaneto!
-
-## 0.4.6 — 2026-03-20
-
-### Patch changes
-
-- [8164dfa](https://github.com/posthog/posthog-rs/commit/8164dfaab613db7df3b3d1b3fa4f940866225454) Sign commits during release process — Thanks @Piccirello!
 
 ## 0.4.3 — 2026-03-05
 
