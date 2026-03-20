@@ -153,6 +153,12 @@ jobs:
         uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1.0.3
         id: crates-auth
 
+      - name: Configure git identity
+        if: steps.check-changes.outputs.committed == 'true'
+        run: |
+          git config user.name "posthog-rs-releaser[bot]"
+          git config user.email "posthog-rs-releaser[bot]@users.noreply.github.com"
+
       - name: Publish with Sampo
         if: steps.check-changes.outputs.committed == 'true'
         env:

@@ -6,18 +6,6 @@
 
 - [8164dfa](https://github.com/posthog/posthog-rs/commit/8164dfaab613db7df3b3d1b3fa4f940866225454) Sign commits during release process — Thanks @Piccirello!
 
-## 0.4.5 — 2026-03-19
-
-### Patch changes
-
-- [76d4acd](https://github.com/posthog/posthog-rs/commit/76d4acd9b15c89fd0a0539aed400d694a2222813) Sign commits during release process — Thanks @Piccirello!
-
-## 0.4.4 — 2026-03-18
-
-### Patch changes
-
-- [2c823f8](https://github.com/posthog/posthog-rs/commit/2c823f895198d02939efe6caba34639968cfaadc) Sign commits during release process — Thanks @Piccirello!
-
 ## 0.4.3 — 2026-03-05
 
 ### Patch changes
