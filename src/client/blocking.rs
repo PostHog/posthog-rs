@@ -242,9 +242,17 @@ impl Client {
                     return Ok(Some(value));
                 }
                 Ok(None) => {
+                    if self.options.local_evaluation_only {
+                        debug!(flag = %key_str, "Flag not found locally, skipping remote fallback");
+                        return Ok(None);
+                    }
                     debug!(flag = %key_str, "Flag not found locally, falling back to API");
                 }
                 Err(e) => {
+                    if self.options.local_evaluation_only {
+                        debug!(flag = %key_str, error = %e.message, "Inconclusive local evaluation, skipping remote fallback");
+                        return Ok(None);
+                    }
                     debug!(flag = %key_str, error = %e.message, "Inconclusive local evaluation, falling back to API");
                 }
             }
