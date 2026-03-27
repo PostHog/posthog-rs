@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.5.0 — 2026-03-27
+
+### Minor changes
+
+- [842bb73](https://github.com/posthog/posthog-rs/commit/842bb73c17c9fce63df04d01d93a0c78b91e1a63) Add `local_evaluation_only` option to prevent remote API fallback when local evaluation is inconclusive — Thanks @dmarticus!
+
 ## 0.4.7 — 2026-03-20
 
 Note: 0.4.4 - 0.4.6 were never released due to a bug in our release process. Commit signing is hard!
