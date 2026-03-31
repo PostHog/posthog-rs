@@ -1,6 +1,9 @@
 /target
 *.iml
 .idea/
-Cargo.lock
+# We check in Cargo.lock for CI reproducibility and supply chain security.
+# Cargo verifies package checksums on build.
+# Run `cargo update` to update dependencies explicitly.
+# Cargo.lock
 .env
 .DS_Store
