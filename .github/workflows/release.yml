@@ -94,9 +94,10 @@ jobs:
           token: ${{ steps.releaser.outputs.token }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.93.1
         with:
           components: cargo
+          toolchain: stable
 
       - name: Cache Sampo CLI
         id: cache-sampo
@@ -109,11 +110,6 @@ jobs:
         if: steps.cache-sampo.outputs.cache-hit != 'true'
         run: cargo install sampo
 
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
       - name: Prepare release with Sampo
         id: sampo-release
         env:
@@ -123,42 +119,59 @@ jobs:
           new_version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
-      - name: Commit release changes
-        id: commit-release
-        env:
-          GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
+      - name: Check for changes
+        id: check-changes
         run: |
-          git add -A
-          if git diff --staged --quiet; then
+          if git diff --quiet; then
             echo "No changes to commit"
             echo "committed=false" >> "$GITHUB_OUTPUT"
           else
-            git commit -m "chore: Release v${{ steps.sampo-release.outputs.new_version }}"
-            git push origin main
+            echo "Changes detected"
             echo "committed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Commit release changes
+        if: steps.check-changes.outputs.committed == 'true'
+        uses: planetscale/ghcommit-action@25309d8005ac7c3bcd61d3fe19b69e0fe47dbdde
+        with:
+          commit_message: "chore: Release v${{ steps.sampo-release.outputs.new_version }}"
+          repo: ${{ github.repository }}
+          branch: main
+        env:
+          GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
+
+      # ghcommit-action commits via the GitHub API, so the local working
+      # tree still has dirty files. Discard them (already committed remotely)
+      # and pull, otherwise cargo publish fails with "files contain changes
+      # not yet committed".
+      - name: Sync local repository
+        if: steps.check-changes.outputs.committed == 'true'
+        run: git checkout -- . && git pull origin main
+
       - name: Authenticate with crates.io
-        if: steps.commit-release.outputs.committed == 'true'
-        uses: rust-lang/crates-io-auth-action@v1
+        if: steps.check-changes.outputs.committed == 'true'
+        uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1.0.3
         id: crates-auth
 
+      - name: Configure git identity
+        if: steps.check-changes.outputs.committed == 'true'
+        run: |
+          git config user.name "posthog-rs-releaser[bot]"
+          git config user.email "posthog-rs-releaser[bot]@users.noreply.github.com"
+
       - name: Publish with Sampo
-        if: steps.commit-release.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: sampo publish
 
-      - name: Push tags
-        if: steps.commit-release.outputs.committed == 'true'
-        run: git push origin --tags
-
       - name: Create GitHub Release
-        if: steps.commit-release.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "v${{ steps.sampo-release.outputs.new_version }}" --generate-notes
+          GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
+          NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
+        run: gh release create "v$NEW_VERSION" --generate-notes --target main
 
       - name: Send failure event to PostHog
         if: ${{ failure() }}

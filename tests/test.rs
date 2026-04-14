@@ -3,13 +3,18 @@
 async fn get_client_async() {
     use dotenv::dotenv;
     dotenv().ok(); // Load the .env file
-    println!("Loaded .env for tests");
 
     // see https://us.posthog.com/project/115809/ for the e2e project
     use posthog_rs::Event;
     use std::collections::HashMap;
 
-    let api_key = std::env::var("POSTHOG_RS_E2E_TEST_API_KEY").unwrap();
+    let api_key = match std::env::var("POSTHOG_RS_E2E_TEST_API_KEY") {
+        Ok(key) if !key.is_empty() => key,
+        _ => {
+            eprintln!("Skipping e2e test: POSTHOG_RS_E2E_TEST_API_KEY not set");
+            return;
+        }
+    };
     let client = posthog_rs::client(api_key.as_str()).await;
 
     let mut child_map = HashMap::new();
@@ -28,13 +33,18 @@ async fn get_client_async() {
 fn get_client_blocking() {
     use dotenv::dotenv;
     dotenv().ok(); // Load the .env file
-    println!("Loaded .env for tests");
 
     // see https://us.posthog.com/project/115809/ for the e2e project
     use posthog_rs::Event;
     use std::collections::HashMap;
 
-    let api_key = std::env::var("POSTHOG_RS_E2E_TEST_API_KEY").unwrap();
+    let api_key = match std::env::var("POSTHOG_RS_E2E_TEST_API_KEY") {
+        Ok(key) if !key.is_empty() => key,
+        _ => {
+            eprintln!("Skipping e2e test: POSTHOG_RS_E2E_TEST_API_KEY not set");
+            return;
+        }
+    };
     let client = posthog_rs::client(api_key.as_str());
 
     let mut child_map = HashMap::new();

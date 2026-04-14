@@ -220,3 +220,85 @@ fn test_api_error_handling() {
 
     error_mock.assert();
 }
+
+#[test]
+fn test_capture_batch_sends_to_batch_endpoint() {
+    let server = MockServer::start();
+
+    let batch_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/batch/")
+            .body_contains(r#""historical_migration":false"#);
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let event = posthog_rs::Event::new("test_event", "user1");
+    let result = client.capture_batch(vec![event], false);
+
+    assert!(result.is_ok());
+    batch_mock.assert();
+}
+
+#[test]
+fn test_capture_batch_historical_migration() {
+    let server = MockServer::start();
+
+    let batch_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/batch/")
+            .body_contains(r#""historical_migration":true"#);
+        then.status(200);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let event = posthog_rs::Event::new("test_event", "user1");
+    let result = client.capture_batch(vec![event], true);
+
+    assert!(result.is_ok());
+    batch_mock.assert();
+}
+
+#[test]
+fn test_capture_batch_rate_limit() {
+    let server = MockServer::start();
+
+    let batch_mock = server.mock(|when, then| {
+        when.method(POST).path("/batch/");
+        then.status(429);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let event = posthog_rs::Event::new("test_event", "user1");
+    let result = client.capture_batch(vec![event], true);
+
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), posthog_rs::Error::RateLimit));
+    batch_mock.assert();
+}
+
+#[test]
+fn test_capture_batch_bad_request() {
+    let server = MockServer::start();
+
+    let batch_mock = server.mock(|when, then| {
+        when.method(POST).path("/batch/");
+        then.status(400).body("invalid payload");
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let event = posthog_rs::Event::new("test_event", "user1");
+    let result = client.capture_batch(vec![event], false);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    match err {
+        posthog_rs::Error::BadRequest(msg) => assert_eq!(msg, "invalid payload"),
+        other => panic!("expected BadRequest, got: {:?}", other),
+    }
+    batch_mock.assert();
+}

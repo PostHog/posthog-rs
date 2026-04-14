@@ -68,6 +68,13 @@ pub struct ClientOptions {
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
 
+    /// When true, never fall back to the remote API for flag evaluation. If local
+    /// evaluation is inconclusive (flag not cached or missing properties), the SDK
+    /// returns `Ok(None)` instead of making a network call. Only meaningful when
+    /// `enable_local_evaluation` is also true.
+    #[builder(default = "false")]
+    local_evaluation_only: bool,
+
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(None)")]
     endpoint_manager: EndpointManager,

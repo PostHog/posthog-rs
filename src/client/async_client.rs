@@ -6,11 +6,25 @@ use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
 
 use crate::endpoints::{Endpoint, EndpointManager};
+use crate::event::BatchRequest;
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{event::InnerEvent, Error, Event};
 
 use super::ClientOptions;
+
+async fn check_response(response: reqwest::Response) -> Result<(), Error> {
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "Unknown error".to_string());
+
+    match Error::from_http_response(status, body) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
 
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
@@ -83,7 +97,8 @@ impl Client {
 
         let url = self.options.endpoints().build_url(Endpoint::Capture);
 
-        self.client
+        let response = self
+            .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
@@ -91,21 +106,25 @@ impl Client {
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
-        Ok(())
+        check_response(response).await
     }
 
-    /// Capture a collection of events with a single request. This function may be
-    /// more performant than capturing a list of events individually.
-    pub async fn capture_batch(&self, events: Vec<Event>) -> Result<(), Error> {
+    /// Capture a collection of events with a single request. Events are sent to
+    /// the `/batch/` endpoint. Set `historical_migration` to `true` to route
+    /// events to the historical ingestion topic, bypassing the main pipeline.
+    pub async fn capture_batch(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<(), Error> {
         if self.options.is_disabled() {
             return Ok(());
         }
 
         let disable_geoip = self.options.disable_geoip;
-        let events: Vec<_> = events
+        let inner_events: Vec<InnerEvent> = events
             .into_iter()
             .map(|mut event| {
-                // Add geoip disable property if configured
                 if disable_geoip {
                     event.insert_prop("$geoip_disable", true).ok();
                 }
@@ -113,12 +132,17 @@ impl Client {
             })
             .collect();
 
-        let payload =
-            serde_json::to_string(&events).map_err(|e| Error::Serialization(e.to_string()))?;
+        let batch_request = BatchRequest {
+            api_key: self.options.api_key.clone(),
+            historical_migration,
+            batch: inner_events,
+        };
+        let payload = serde_json::to_string(&batch_request)
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let url = self.options.endpoints().build_url(Endpoint::Batch);
 
-        let url = self.options.endpoints().build_url(Endpoint::Capture);
-
-        self.client
+        let response = self
+            .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
@@ -126,7 +150,7 @@ impl Client {
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
-        Ok(())
+        check_response(response).await
     }
 
     /// Get all feature flags for a user
@@ -222,9 +246,17 @@ impl Client {
                     return Ok(Some(value));
                 }
                 Ok(None) => {
+                    if self.options.local_evaluation_only {
+                        debug!(flag = %key_str, "Flag not found locally, skipping remote fallback");
+                        return Ok(None);
+                    }
                     debug!(flag = %key_str, "Flag not found locally, falling back to API");
                 }
                 Err(e) => {
+                    if self.options.local_evaluation_only {
+                        debug!(flag = %key_str, error = %e.message, "Inconclusive local evaluation, skipping remote fallback");
+                        return Ok(None);
+                    }
                     debug!(flag = %key_str, error = %e.message, "Inconclusive local evaluation, falling back to API");
                 }
             }
