@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.5.1 — 2026-04-14
+
+### Patch changes
+
+- [543ca47](https://github.com/posthog/posthog-rs/commit/543ca47c0d1c1365ca13a1882ea7089851bef19a) Update reqwest from 0.11.3 to 0.13.2 to replace the unmaintained feature "rustls-tls" with "rustls" (RUSTSEC-2025-0134) — Thanks @marandaneto!
+
 ## 0.5.0 — 2026-03-27
 
 ### Minor changes
