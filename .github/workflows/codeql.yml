@@ -20,7 +20,7 @@ jobs:
       matrix:
         include:
           - language: rust
-            build-mode: autobuild
+            build-mode: manual
           - language: actions
             build-mode: none
     steps:
@@ -39,6 +39,10 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           queries: security-and-quality
+
+      - name: Build Rust SDK
+        if: matrix.language == 'rust'
+        run: cargo build --verbose
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
