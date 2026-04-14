@@ -18,6 +18,5 @@
 
 - [ ] Ran `sampo add` to generate a changeset file
 - [ ] Added the `release` label to the PR
-- [ ] A maintainer approved the release after the Slack prompt
 
 <!-- For more details check README.md#releasing -->
