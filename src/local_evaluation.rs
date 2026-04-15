@@ -223,7 +223,7 @@ impl FlagPoller {
                 }
 
                 let url = format!(
-                    "{}/api/feature_flag/local_evaluation/?send_cohorts",
+                    "{}/flags/definitions/?send_cohorts",
                     config.api_host.trim_end_matches('/')
                 );
 
@@ -275,7 +275,7 @@ impl FlagPoller {
     #[instrument(skip(self), level = "debug")]
     pub fn load_flags(&self) -> Result<(), Error> {
         let url = format!(
-            "{}/api/feature_flag/local_evaluation/?send_cohorts",
+            "{}/flags/definitions/?send_cohorts",
             self.config.api_host.trim_end_matches('/')
         );
 
@@ -401,7 +401,7 @@ impl AsyncFlagPoller {
                         }
 
                         let url = format!(
-                            "{}/api/feature_flag/local_evaluation/?send_cohorts",
+                            "{}/flags/definitions/?send_cohorts",
                             config.api_host.trim_end_matches('/')
                         );
 
@@ -455,7 +455,7 @@ impl AsyncFlagPoller {
     #[instrument(skip(self), level = "debug")]
     pub async fn load_flags(&self) -> Result<(), Error> {
         let url = format!(
-            "{}/api/feature_flag/local_evaluation/?send_cohorts",
+            "{}/flags/definitions/?send_cohorts",
             self.config.api_host.trim_end_matches('/')
         );
 

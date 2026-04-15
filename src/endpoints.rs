@@ -29,7 +29,7 @@ impl Endpoint {
             Endpoint::Capture => "/i/v0/e/",
             Endpoint::Batch => "/batch/",
             Endpoint::Flags => "/flags/?v=2",
-            Endpoint::LocalEvaluation => "/api/feature_flag/local_evaluation/?send_cohorts",
+            Endpoint::LocalEvaluation => "/flags/definitions/?send_cohorts",
         }
     }
 }
@@ -110,7 +110,7 @@ impl EndpointManager {
     /// Build the local evaluation URL with a token
     pub fn build_local_eval_url(&self, token: &str) -> String {
         format!(
-            "{}/api/feature_flag/local_evaluation/?token={}&send_cohorts",
+            "{}/flags/definitions/?token={}&send_cohorts",
             self.base_host.trim_end_matches('/'),
             token
         )
