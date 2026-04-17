@@ -232,6 +232,10 @@ Log levels:
 
 For release instructions, see [RELEASING.md](RELEASING.md).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local development and verification commands.
+
 # Acknowledgements
 
 Thanks to [@christos-h](https://github.com/christos-h) for building the initial version of this project.
