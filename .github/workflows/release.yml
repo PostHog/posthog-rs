@@ -171,7 +171,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
-        run: gh release create "v$NEW_VERSION" --generate-notes --target main
+        run: gh release create "$NEW_VERSION" --generate-notes --target main
 
       - name: Send failure event to PostHog
         if: ${{ failure() }}
@@ -184,7 +184,7 @@ jobs:
               "commitSha": "${{ github.sha }}",
               "jobStatus": "${{ job.status }}",
               "ref": "${{ github.ref }}",
-              "version": "v${{ steps.sampo-release.outputs.new_version }}"
+              "version": "${{ steps.sampo-release.outputs.new_version }}"
             }
 
       - name: Notify Slack - Failed
@@ -194,7 +194,7 @@ jobs:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
           thread_ts: ${{ needs.notify-approval-needed.outputs.slack_ts }}
-          message: "❌ Failed to release `posthog-rs@v${{ steps.sampo-release.outputs.new_version }}`! <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>"
+          message: "❌ Failed to release `posthog-rs@${{ steps.sampo-release.outputs.new_version }}`! <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>"
           emoji_reaction: "x"
 
   notify-released:
