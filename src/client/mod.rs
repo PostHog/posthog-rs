@@ -91,10 +91,31 @@ impl ClientOptions {
         self.disabled
     }
 
-    /// Create ClientOptions with properly initialized endpoint_manager
-    fn with_endpoint_manager(mut self) -> Self {
+    fn sanitize(mut self) -> Self {
+        self.api_key = self.api_key.trim().to_string();
+        self.host = self.host.and_then(|host| {
+            let normalized = host.trim().to_string();
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        });
+        self.personal_api_key = self.personal_api_key.and_then(|personal_api_key| {
+            let normalized = personal_api_key.trim().to_string();
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        });
         self.endpoint_manager = EndpointManager::new(self.host.clone());
         self
+    }
+
+    /// Create ClientOptions with properly initialized endpoint_manager
+    fn with_endpoint_manager(self) -> Self {
+        self.sanitize()
     }
 }
 
@@ -117,5 +138,40 @@ impl From<(&str, &str)> for ClientOptions {
             .build()
             .expect("We always set the API key, so this is infallible")
             .with_endpoint_manager()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClientOptionsBuilder;
+    use crate::endpoints::{EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT};
+
+    #[test]
+    fn trims_whitespace_sensitive_options() {
+        let options = ClientOptionsBuilder::default()
+            .api_key(" \n test-api-key\t ".to_string())
+            .host(" \nhttps://eu.posthog.com/\t ")
+            .personal_api_key(" \n\t ")
+            .build()
+            .unwrap()
+            .sanitize();
+
+        assert_eq!(options.api_key, "test-api-key");
+        assert_eq!(options.host.as_deref(), Some("https://eu.posthog.com/"));
+        assert_eq!(options.personal_api_key, None);
+        assert_eq!(options.endpoints().api_host(), EU_INGESTION_ENDPOINT);
+    }
+
+    #[test]
+    fn defaults_blank_host_after_trimming_whitespace() {
+        let options = ClientOptionsBuilder::default()
+            .api_key("test-api-key".to_string())
+            .host(" \n\t ")
+            .build()
+            .unwrap()
+            .sanitize();
+
+        assert_eq!(options.host, None);
+        assert_eq!(options.endpoints().api_host(), US_INGESTION_ENDPOINT);
     }
 }
