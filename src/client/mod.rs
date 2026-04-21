@@ -77,7 +77,7 @@ pub struct ClientOptions {
     local_evaluation_only: bool,
 
     #[builder(setter(skip))]
-    #[builder(default = "EndpointManager::new(None)")]
+    #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
     endpoint_manager: EndpointManager,
 }
 
@@ -116,7 +116,11 @@ impl ClientOptions {
                 Some(normalized)
             }
         });
-        self.endpoint_manager = EndpointManager::new(self.host.clone());
+        self.endpoint_manager = EndpointManager::new(
+            self.host
+                .clone()
+                .expect("host is always normalized in sanitize"),
+        );
         self
     }
 

@@ -48,32 +48,20 @@ pub struct EndpointManager {
 }
 
 impl EndpointManager {
-    /// Create a new endpoint manager with the given host
-    pub fn new(host: Option<String>) -> Self {
-        let raw_host = host
-            .as_deref()
-            .map(str::trim)
-            .filter(|host| !host.is_empty())
-            .unwrap_or(DEFAULT_HOST)
-            .to_string();
-        let base_host = Self::determine_server_host(host);
+    /// Create a new endpoint manager with the given normalized host
+    pub fn new(host: String) -> Self {
+        let base_host = Self::determine_server_host(&host);
 
         Self {
             base_host,
-            raw_host,
+            raw_host: host,
         }
     }
 
-    /// Determine the actual server host based on the provided host
+    /// Determine the actual server host based on the provided normalized host
     /// Similar to posthog-python's determine_server_host function
-    pub fn determine_server_host(host: Option<String>) -> String {
-        let host_or_default = host
-            .as_deref()
-            .map(str::trim)
-            .filter(|host| !host.is_empty())
-            .unwrap_or(DEFAULT_HOST)
-            .to_string();
-        let trimmed_host = host_or_default.trim_end_matches('/');
+    pub fn determine_server_host(host: &str) -> String {
+        let trimmed_host = host.trim_end_matches('/');
 
         match trimmed_host {
             "https://app.posthog.com" | "https://us.posthog.com" => {
@@ -139,46 +127,34 @@ mod tests {
     #[test]
     fn test_determine_server_host() {
         assert_eq!(
-            EndpointManager::determine_server_host(None),
+            EndpointManager::determine_server_host("https://app.posthog.com"),
             US_INGESTION_ENDPOINT
         );
 
         assert_eq!(
-            EndpointManager::determine_server_host(Some("https://app.posthog.com".to_string())),
+            EndpointManager::determine_server_host("https://us.posthog.com"),
             US_INGESTION_ENDPOINT
         );
 
         assert_eq!(
-            EndpointManager::determine_server_host(Some("https://us.posthog.com".to_string())),
-            US_INGESTION_ENDPOINT
-        );
-
-        assert_eq!(
-            EndpointManager::determine_server_host(Some("https://eu.posthog.com".to_string())),
+            EndpointManager::determine_server_host("https://eu.posthog.com"),
             EU_INGESTION_ENDPOINT
         );
 
         assert_eq!(
-            EndpointManager::determine_server_host(Some("https://custom.domain.com".to_string())),
+            EndpointManager::determine_server_host("https://custom.domain.com"),
             "https://custom.domain.com"
         );
 
         assert_eq!(
-            EndpointManager::determine_server_host(Some(
-                " \nhttps://eu.posthog.com/\t ".to_string()
-            )),
+            EndpointManager::determine_server_host("https://eu.posthog.com/"),
             EU_INGESTION_ENDPOINT
-        );
-
-        assert_eq!(
-            EndpointManager::determine_server_host(Some(" \n\t ".to_string())),
-            US_INGESTION_ENDPOINT
         );
     }
 
     #[test]
     fn test_build_url() {
-        let manager = EndpointManager::new(None);
+        let manager = EndpointManager::new(DEFAULT_HOST.to_string());
 
         assert_eq!(
             manager.build_url(Endpoint::Capture),
@@ -193,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_build_custom_url() {
-        let manager = EndpointManager::new(Some("https://custom.com/".to_string()));
+        let manager = EndpointManager::new("https://custom.com/".to_string());
 
         assert_eq!(
             manager.build_custom_url("/api/test"),
