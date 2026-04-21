@@ -160,7 +160,7 @@ async fn test_local_evaluation_with_mock_server() {
 
     let eval_mock = server.mock(|when, then| {
         when.method(GET)
-            .path("/api/feature_flag/local_evaluation/")
+            .path("/flags/definitions/")
             .header("Authorization", "Bearer test_personal_key")
             .header("X-PostHog-Project-Api-Key", "test_project_key")
             .query_param("send_cohorts", "");
@@ -267,7 +267,7 @@ async fn test_etag_sent_on_second_poll() {
     // Registered FIRST but uses matches() to only match when header is present with correct value
     let etag_mock = server.mock(|when, then| {
         when.method(GET)
-            .path("/api/feature_flag/local_evaluation/")
+            .path("/flags/definitions/")
             .query_param("send_cohorts", "")
             .matches(|req| {
                 // Match only if If-None-Match header exists with the correct value
@@ -284,7 +284,7 @@ async fn test_etag_sent_on_second_poll() {
     // Registered SECOND - will be tried first but etag_mock's matches() will fail if no header
     let no_etag_mock = server.mock(|when, then| {
         when.method(GET)
-            .path("/api/feature_flag/local_evaluation/")
+            .path("/flags/definitions/")
             .query_param("send_cohorts", "");
         then.status(200)
             .header("ETag", "\"abc123\"")
@@ -355,7 +355,7 @@ async fn test_304_preserves_cache() {
     // Registered FIRST but uses matches() to only match when header is present with correct value
     let etag_mock = server.mock(|when, then| {
         when.method(GET)
-            .path("/api/feature_flag/local_evaluation/")
+            .path("/flags/definitions/")
             .query_param("send_cohorts", "")
             .matches(|req| {
                 // Match only if If-None-Match header exists with the correct value
@@ -372,7 +372,7 @@ async fn test_304_preserves_cache() {
     // Registered SECOND - will be tried first but etag_mock's matches() will fail if no header
     server.mock(|when, then| {
         when.method(GET)
-            .path("/api/feature_flag/local_evaluation/")
+            .path("/flags/definitions/")
             .query_param("send_cohorts", "");
         then.status(200)
             .header("ETag", "\"v1\"")
@@ -440,7 +440,7 @@ async fn test_no_etag_from_server() {
 
     // Server returns 200 without ETag header
     let mock = server.mock(|when, then| {
-        when.method(GET).path("/api/feature_flag/local_evaluation/");
+        when.method(GET).path("/flags/definitions/");
         then.status(200).json_body(mock_flags);
     });
 
@@ -497,7 +497,7 @@ fn test_sync_etag_sent_on_second_poll() {
     // Mock for requests WITH If-None-Match header (subsequent polls) -> 304
     let etag_mock = server.mock(|when, then| {
         when.method(GET)
-            .path("/api/feature_flag/local_evaluation/")
+            .path("/flags/definitions/")
             .query_param("send_cohorts", "")
             .matches(|req| {
                 // Match only if If-None-Match header exists with the correct value
@@ -513,7 +513,7 @@ fn test_sync_etag_sent_on_second_poll() {
     // Mock for requests WITHOUT If-None-Match -> 200 with ETag
     let no_etag_mock = server.mock(|when, then| {
         when.method(GET)
-            .path("/api/feature_flag/local_evaluation/")
+            .path("/flags/definitions/")
             .query_param("send_cohorts", "");
         then.status(200)
             .header("ETag", "\"sync-abc123\"")
@@ -582,7 +582,7 @@ fn test_sync_304_preserves_cache() {
     // Mock for requests WITH If-None-Match -> returns 304
     let etag_mock = server.mock(|when, then| {
         when.method(GET)
-            .path("/api/feature_flag/local_evaluation/")
+            .path("/flags/definitions/")
             .query_param("send_cohorts", "")
             .matches(|req| {
                 // Match only if If-None-Match header exists with the correct value
@@ -598,7 +598,7 @@ fn test_sync_304_preserves_cache() {
     // Mock for requests WITHOUT If-None-Match -> returns 200 with ETag
     server.mock(|when, then| {
         when.method(GET)
-            .path("/api/feature_flag/local_evaluation/")
+            .path("/flags/definitions/")
             .query_param("send_cohorts", "");
         then.status(200)
             .header("ETag", "\"sync-v1\"")
@@ -665,7 +665,7 @@ fn test_sync_no_etag_from_server() {
 
     // Server returns 200 without ETag header
     let mock = server.mock(|when, then| {
-        when.method(GET).path("/api/feature_flag/local_evaluation/");
+        when.method(GET).path("/flags/definitions/");
         then.status(200).json_body(mock_flags);
     });
 
