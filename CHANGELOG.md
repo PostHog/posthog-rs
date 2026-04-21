@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.5.2 — 2026-04-21
+
+### Patch changes
+
+- [db48ade](https://github.com/posthog/posthog-rs/commit/db48adecb5b6fdaa9544fe15bc002dd3dc06909a) Trim surrounding whitespace from API keys and host config before using them. — Thanks @marandaneto!
+
 ## 0.5.1 — 2026-04-14
 
 ### Patch changes
