@@ -164,7 +164,9 @@ mod tests {
         );
 
         assert_eq!(
-            EndpointManager::determine_server_host(Some(" \nhttps://eu.posthog.com/\t ".to_string())),
+            EndpointManager::determine_server_host(Some(
+                " \nhttps://eu.posthog.com/\t ".to_string()
+            )),
             EU_INGESTION_ENDPOINT
         );
 
