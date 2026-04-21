@@ -1,5 +1,6 @@
 use crate::endpoints::EndpointManager;
 use derive_builder::Builder;
+use tracing::warn;
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
@@ -93,6 +94,9 @@ impl ClientOptions {
 
     fn sanitize(mut self) -> Self {
         self.api_key = self.api_key.trim().to_string();
+        if self.api_key.is_empty() {
+            warn!("api_key is empty after trimming whitespace; check your project API key");
+        }
         self.host = self.host.and_then(|host| {
             let normalized = host.trim().to_string();
             if normalized.is_empty() {

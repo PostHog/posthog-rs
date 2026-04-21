@@ -37,9 +37,6 @@ pub struct Client {
 /// This function constructs a new client using the options provided.
 pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let options = options.into().sanitize();
-    if options.api_key.is_empty() {
-        warn!("api_key is empty after trimming whitespace; check your project API key");
-    }
     let client = HttpClient::builder()
         .timeout(Duration::from_secs(options.request_timeout_seconds))
         .build()
