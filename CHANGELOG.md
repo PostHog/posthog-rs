@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.5.3 — 2026-04-21
+
+### Patch changes
+
+- [c544e14](https://github.com/posthog/posthog-rs/commit/c544e145039ab7b6c9a4843983291d5cf44f7f70) feat(flags): switch local evaluation polling from `/api/feature_flag/local_evaluation` to `/flags/definitions` — Thanks @patricio-posthog!
+
 ## 0.5.2 — 2026-04-21
 
 ### Patch changes
