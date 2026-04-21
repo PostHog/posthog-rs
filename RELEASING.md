@@ -3,6 +3,17 @@
 This repository uses [Sampo](https://github.com/bruits/sampo) for versioning, changelogs, and publishing to crates.io.
 
 1. When making changes, include a changeset: `sampo add`
+   - Prefer letting `sampo add` create the file for you.
+   - If you create or edit a changeset manually, the frontmatter must use this exact package key:
+
+     ```md
+     ---
+     cargo/posthog-rs: patch
+     ---
+     ```
+
+   - Replace `patch` with `minor` or `major` when appropriate.
+
 2. Create a PR with your changes and the changeset file
 3. Add the `release` label and merge to `main`
 4. Approve the release in Slack when prompted — this triggers version bump, crates.io publish, git tag, and GitHub Release
