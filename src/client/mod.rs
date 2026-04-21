@@ -1,4 +1,4 @@
-use crate::endpoints::EndpointManager;
+use crate::endpoints::{EndpointManager, DEFAULT_HOST};
 use derive_builder::Builder;
 use tracing::warn;
 
@@ -97,13 +97,16 @@ impl ClientOptions {
         if self.api_key.is_empty() {
             warn!("api_key is empty after trimming whitespace; check your project API key");
         }
-        self.host = self.host.and_then(|host| {
-            let normalized = host.trim().to_string();
-            if normalized.is_empty() {
-                None
-            } else {
-                Some(normalized)
+        self.host = Some(match self.host {
+            Some(host) => {
+                let normalized = host.trim().to_string();
+                if normalized.is_empty() {
+                    DEFAULT_HOST.to_string()
+                } else {
+                    normalized
+                }
             }
+            None => DEFAULT_HOST.to_string(),
         });
         self.personal_api_key = self.personal_api_key.and_then(|personal_api_key| {
             let normalized = personal_api_key.trim().to_string();
@@ -175,7 +178,7 @@ mod tests {
             .unwrap()
             .sanitize();
 
-        assert_eq!(options.host, None);
+        assert_eq!(options.host.as_deref(), Some(US_INGESTION_ENDPOINT));
         assert_eq!(options.endpoints().api_host(), US_INGESTION_ENDPOINT);
     }
 }
