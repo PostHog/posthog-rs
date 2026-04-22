@@ -175,7 +175,7 @@ jobs:
 
       - name: Send failure event to PostHog
         if: ${{ failure() }}
-        uses: PostHog/posthog-github-action@v0.1
+        uses: PostHog/posthog-github-action@v1
         with:
           posthog-token: "${{ secrets.POSTHOG_PROJECT_API_KEY }}"
           event: "posthog-rs-github-release-workflow-failure"
