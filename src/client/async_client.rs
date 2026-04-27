@@ -108,19 +108,23 @@ impl AsyncFlagEventHost {
         let http_client = self.http_client.clone();
         let url = self.capture_url.clone();
         tokio::spawn(async move {
-            match http_client
+            let response = match http_client
                 .post(&url)
                 .header(CONTENT_TYPE, "application/json")
                 .body(payload)
                 .send()
                 .await
             {
-                Ok(response) => {
-                    if let Err(e) = check_response(response).await {
-                        debug!("$feature_flag_called event rejected by server: {e}");
-                    }
+                Ok(r) => r,
+                Err(send_err) => {
+                    let message = send_err.to_string();
+                    debug!("failed to send $feature_flag_called event: {message}");
+                    return;
                 }
-                Err(e) => debug!("failed to send $feature_flag_called event: {e}"),
+            };
+            if let Err(check_err) = check_response(response).await {
+                let message = check_err.to_string();
+                debug!("$feature_flag_called event rejected by server: {message}");
             }
         });
     }
