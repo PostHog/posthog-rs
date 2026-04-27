@@ -117,10 +117,10 @@ impl AsyncFlagEventHost {
             {
                 Ok(response) => {
                     if let Err(e) = check_response(response).await {
-                        debug!(error = %e, "$feature_flag_called event rejected by server");
+                        debug!("$feature_flag_called event rejected by server: {e}");
                     }
                 }
-                Err(e) => debug!(error = %e, "failed to send $feature_flag_called event"),
+                Err(e) => debug!("failed to send $feature_flag_called event: {e}"),
             }
         });
     }
