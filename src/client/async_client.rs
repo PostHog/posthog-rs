@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
@@ -7,11 +8,21 @@ use tracing::{debug, instrument, trace, warn};
 
 use crate::endpoints::Endpoint;
 use crate::event::BatchRequest;
-use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
+use crate::feature_flag_evaluations::{
+    EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
+    FlagCalledEventParams,
+};
+use crate::feature_flags::{
+    match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagDetail, FlagValue,
+};
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{event::InnerEvent, Error, Event};
 
 use super::ClientOptions;
+
+/// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
+/// dedup cache. On overflow the entire map is reset (matches the JS SDK).
+const MAX_FLAG_CALLED_CACHE_SIZE: usize = 50_000;
 
 async fn check_response(response: reqwest::Response) -> Result<(), Error> {
     let status = response.status().as_u16();
@@ -32,6 +43,129 @@ pub struct Client {
     client: HttpClient,
     local_evaluator: Option<LocalEvaluator>,
     _flag_poller: Option<AsyncFlagPoller>,
+    flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
+}
+
+/// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
+/// `$feature_flag_called` events through a clone of the async [`Client`]'s
+/// HTTP transport. The event ship is fire-and-forget: errors are logged at
+/// `debug` level but do not surface to the caller, matching the JS SDK.
+struct AsyncFlagEventHost {
+    http_client: HttpClient,
+    api_key: String,
+    capture_url: String,
+    disabled: bool,
+    disable_geoip: bool,
+    log_warnings: bool,
+    dedup_cache: Mutex<HashMap<String, HashSet<String>>>,
+}
+
+impl AsyncFlagEventHost {
+    fn from_options(options: &ClientOptions, http_client: HttpClient) -> Self {
+        let capture_url = options.endpoints().build_url(Endpoint::Capture);
+        Self {
+            http_client,
+            api_key: options.api_key.clone(),
+            capture_url,
+            disabled: options.is_disabled(),
+            disable_geoip: options.disable_geoip,
+            log_warnings: options.feature_flags_log_warnings(),
+            dedup_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Returns `true` when the helper has already shipped this
+    /// `(distinct_id, key, response)` combination and the caller should skip.
+    fn already_reported(&self, distinct_id: &str, dedup_key: &str) -> bool {
+        let mut cache = self.dedup_cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(seen) = cache.get(distinct_id) {
+            if seen.contains(dedup_key) {
+                return true;
+            }
+        }
+        if cache.len() >= MAX_FLAG_CALLED_CACHE_SIZE {
+            cache.clear();
+        }
+        cache
+            .entry(distinct_id.to_string())
+            .or_default()
+            .insert(dedup_key.to_string());
+        false
+    }
+
+    fn spawn_ship(&self, event: Event) {
+        if self.disabled {
+            return;
+        }
+        let inner_event = InnerEvent::new(event, self.api_key.clone());
+        let payload = match serde_json::to_string(&inner_event) {
+            Ok(p) => p,
+            Err(e) => {
+                debug!(error = %e, "failed to serialize $feature_flag_called event");
+                return;
+            }
+        };
+        let http_client = self.http_client.clone();
+        let url = self.capture_url.clone();
+        tokio::spawn(async move {
+            match http_client
+                .post(&url)
+                .header(CONTENT_TYPE, "application/json")
+                .body(payload)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    if let Err(e) = check_response(response).await {
+                        debug!(error = %e, "$feature_flag_called event rejected by server");
+                    }
+                }
+                Err(e) => debug!(error = %e, "failed to send $feature_flag_called event"),
+            }
+        });
+    }
+}
+
+impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
+    fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
+        let dedup_key = build_dedup_key(&params.key, params.response.as_ref());
+        if self.already_reported(&params.distinct_id, &dedup_key) {
+            return;
+        }
+
+        let mut event = Event::new(
+            "$feature_flag_called".to_string(),
+            params.distinct_id.clone(),
+        );
+        for (k, v) in params.properties {
+            if event.insert_prop(k, v).is_err() {
+                return;
+            }
+        }
+        for (group_name, group_id) in &params.groups {
+            event.add_group(group_name, group_id);
+        }
+        if params.disable_geoip.unwrap_or(self.disable_geoip) {
+            let _ = event.insert_prop("$geoip_disable", true);
+        }
+        self.spawn_ship(event);
+    }
+
+    fn log_warning(&self, message: &str) {
+        if self.log_warnings {
+            warn!("{message}");
+        }
+    }
+}
+
+fn build_dedup_key(flag_key: &str, response: Option<&FlagValue>) -> String {
+    let response_repr = match response {
+        Some(FlagValue::Boolean(true)) => "true".to_string(),
+        Some(FlagValue::Boolean(false)) => "false".to_string(),
+        Some(FlagValue::String(s)) => s.clone(),
+        None => "::null::".to_string(),
+    };
+    format!("{flag_key}_{response_repr}")
 }
 
 /// This function constructs a new client using the options provided.
@@ -71,6 +205,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         client,
         local_evaluator,
         _flag_poller: flag_poller,
+        flag_event_host: OnceLock::new(),
     }
 }
 
@@ -348,5 +483,225 @@ impl Client {
     ) -> Result<FlagValue, Error> {
         match_feature_flag(flag, distinct_id, person_properties)
             .map_err(|e| Error::InconclusiveMatch(e.message))
+    }
+
+    /// Evaluate every feature flag for `distinct_id` in a single round-trip,
+    /// returning a [`FeatureFlagEvaluations`] snapshot.
+    ///
+    /// Each `is_enabled` / `get_flag` call on the returned snapshot fires a
+    /// dedup-aware `$feature_flag_called` event with full metadata, and the
+    /// snapshot can be passed to [`Event::with_flags`] so a downstream
+    /// [`Client::capture`] inherits `$feature/<key>` and `$active_feature_flags`
+    /// without an extra `/flags` request.
+    ///
+    /// [`Event::with_flags`]: crate::Event::with_flags
+    pub async fn evaluate_flags<S: Into<String>>(
+        &self,
+        distinct_id: S,
+        options: EvaluateFlagsOptions,
+    ) -> Result<FeatureFlagEvaluations, Error> {
+        let distinct_id: String = distinct_id.into();
+        let host = self.flag_event_host();
+
+        if distinct_id.is_empty() || self.options.is_disabled() {
+            return Ok(FeatureFlagEvaluations::empty(host));
+        }
+
+        let mut records: HashMap<String, EvaluatedFlagRecord> = HashMap::new();
+        let mut locally_evaluated_keys: HashSet<String> = HashSet::new();
+
+        if let Some(evaluator) = &self.local_evaluator {
+            let person_props_owned = options.person_properties.clone().unwrap_or_default();
+            let local_results = evaluator.evaluate_all_flags(&distinct_id, &person_props_owned);
+            for (key, result) in local_results {
+                if let Some(filter) = &options.flag_keys {
+                    if !filter.iter().any(|k| k == &key) {
+                        continue;
+                    }
+                }
+                if let Ok(value) = result {
+                    records.insert(key.clone(), local_record(key.clone(), value));
+                    locally_evaluated_keys.insert(key);
+                }
+            }
+        }
+
+        let mut request_id: Option<String> = None;
+
+        if !options.only_evaluate_locally {
+            let response = self.fetch_flag_details(&distinct_id, &options).await?;
+            request_id = response.request_id;
+            for (key, detail) in response.flags {
+                if locally_evaluated_keys.contains(&key) {
+                    continue;
+                }
+                records.insert(key.clone(), remote_record_from_detail(key, detail));
+            }
+        }
+
+        Ok(FeatureFlagEvaluations::new(
+            host,
+            distinct_id,
+            records,
+            options.groups.unwrap_or_default(),
+            options.disable_geoip,
+            request_id,
+            None,
+            None,
+        ))
+    }
+
+    fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {
+        self.flag_event_host
+            .get_or_init(|| {
+                Arc::new(AsyncFlagEventHost::from_options(
+                    &self.options,
+                    self.client.clone(),
+                )) as Arc<dyn FeatureFlagEvaluationsHost>
+            })
+            .clone()
+    }
+
+    async fn fetch_flag_details(
+        &self,
+        distinct_id: &str,
+        options: &EvaluateFlagsOptions,
+    ) -> Result<DetailedFlagsResponse, Error> {
+        let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
+
+        let mut payload = json!({
+            "api_key": self.options.api_key,
+            "distinct_id": distinct_id,
+        });
+        if let Some(groups) = &options.groups {
+            payload["groups"] = json!(groups);
+        }
+        if let Some(person_properties) = &options.person_properties {
+            payload["person_properties"] = json!(person_properties);
+        }
+        if let Some(group_properties) = &options.group_properties {
+            payload["group_properties"] = json!(group_properties);
+        }
+        let effective_disable_geoip = options.disable_geoip.unwrap_or(self.options.disable_geoip);
+        if effective_disable_geoip {
+            payload["disable_geoip"] = json!(true);
+        }
+        if let Some(flag_keys) = &options.flag_keys {
+            payload["flag_keys_to_evaluate"] = json!(flag_keys);
+        }
+
+        let response = self
+            .client
+            .post(&flags_endpoint)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&payload)
+            .timeout(Duration::from_secs(
+                self.options.feature_flags_request_timeout_seconds,
+            ))
+            .send()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Error::Connection(format!(
+                "API request failed with status {status}: {text}"
+            )));
+        }
+
+        let parsed = response.json::<FeatureFlagsResponse>().await.map_err(|e| {
+            Error::Serialization(format!("Failed to parse feature flags response: {e}"))
+        })?;
+        Ok(extract_flag_details(parsed))
+    }
+}
+
+/// Normalised view of a `/flags?v=2` response surfacing the per-flag detail
+/// shape needed by the snapshot path.
+struct DetailedFlagsResponse {
+    flags: HashMap<String, FlagDetail>,
+    request_id: Option<String>,
+}
+
+fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFlagsResponse {
+    match response {
+        FeatureFlagsResponse::V2 {
+            flags, request_id, ..
+        } => DetailedFlagsResponse { flags, request_id },
+        FeatureFlagsResponse::Legacy {
+            feature_flags,
+            feature_flag_payloads,
+            ..
+        } => {
+            let mut flags = HashMap::new();
+            for (key, value) in feature_flags {
+                let (enabled, variant) = match value {
+                    FlagValue::Boolean(b) => (b, None),
+                    FlagValue::String(s) => (true, Some(s)),
+                };
+                let payload = feature_flag_payloads.get(&key).cloned();
+                flags.insert(
+                    key.clone(),
+                    FlagDetail {
+                        key,
+                        enabled,
+                        variant,
+                        reason: None,
+                        metadata: payload.map(|payload| crate::feature_flags::FlagMetadata {
+                            id: 0,
+                            version: 0,
+                            description: None,
+                            payload: Some(payload),
+                        }),
+                    },
+                );
+            }
+            DetailedFlagsResponse {
+                flags,
+                request_id: None,
+            }
+        }
+    }
+}
+
+fn local_record(key: String, value: FlagValue) -> EvaluatedFlagRecord {
+    let (enabled, variant) = match value {
+        FlagValue::Boolean(b) => (b, None),
+        FlagValue::String(s) => (true, Some(s)),
+    };
+    EvaluatedFlagRecord {
+        key,
+        enabled,
+        variant,
+        payload: None,
+        id: None,
+        version: None,
+        reason: Some("Evaluated locally".to_string()),
+        locally_evaluated: true,
+    }
+}
+
+fn remote_record_from_detail(key: String, detail: FlagDetail) -> EvaluatedFlagRecord {
+    let metadata = detail.metadata;
+    let reason = detail
+        .reason
+        .and_then(|r| r.description.or(Some(r.code)))
+        .filter(|s| !s.is_empty());
+    let id = metadata.as_ref().map(|m| m.id);
+    let version = metadata.as_ref().map(|m| m.version);
+    let payload = metadata.and_then(|m| m.payload);
+    EvaluatedFlagRecord {
+        key,
+        enabled: detail.enabled,
+        variant: detail.variant,
+        payload,
+        id,
+        version,
+        reason,
+        locally_evaluated: false,
     }
 }

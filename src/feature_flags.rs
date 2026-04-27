@@ -257,6 +257,12 @@ pub enum FeatureFlagsResponse {
         #[serde(rename = "errorsWhileComputingFlags")]
         #[serde(default)]
         errors_while_computing_flags: bool,
+        /// Unique identifier for this evaluation request, propagated to
+        /// `$feature_flag_called` events as `$feature_flag_request_id`
+        /// for experiment exposure tracking.
+        #[serde(rename = "requestId")]
+        #[serde(default)]
+        request_id: Option<String>,
     },
     /// Legacy format from older decide endpoint
     Legacy {
