@@ -359,9 +359,15 @@ impl Client {
         Ok(flags_response.normalize())
     }
 
-    /// Get a specific feature flag value for a user
+    /// Get a specific feature flag value for a user.
     #[must_use = "feature flag result should be used"]
     #[instrument(skip_all, level = "debug")]
+    #[deprecated(
+        since = "0.6.0",
+        note = "Use Client::evaluate_flags() to fetch a snapshot, then call .get_flag(key) on it. \
+                The snapshot deduplicates $feature_flag_called events and supports attaching \
+                rich metadata to captured events via Event::with_flags()."
+    )]
     pub async fn get_feature_flag<K: Into<String>, D: Into<String>>(
         &self,
         key: K,
@@ -407,8 +413,15 @@ impl Client {
         Ok(feature_flags.get(&key_str).cloned())
     }
 
-    /// Check if a feature flag is enabled for a user
+    /// Check if a feature flag is enabled for a user.
     #[must_use = "feature flag enabled check result should be used"]
+    #[deprecated(
+        since = "0.6.0",
+        note = "Use Client::evaluate_flags() to fetch a snapshot, then call .is_enabled(key) \
+                on it. The snapshot deduplicates $feature_flag_called events and supports \
+                attaching rich metadata to captured events via Event::with_flags()."
+    )]
+    #[allow(deprecated)] // calls deprecated get_feature_flag internally
     pub async fn is_feature_enabled<K: Into<String>, D: Into<String>>(
         &self,
         key: K,
@@ -433,8 +446,15 @@ impl Client {
         })
     }
 
-    /// Get a feature flag payload for a user
+    /// Get a feature flag payload for a user.
     #[must_use = "feature flag payload result should be used"]
+    #[deprecated(
+        since = "0.6.0",
+        note = "Use Client::evaluate_flags() to fetch a snapshot, then call \
+                .get_flag_payload(key) on it. Reading the payload from a snapshot is \
+                event-free, matching this method's behavior, and avoids the per-call \
+                /flags request."
+    )]
     pub async fn get_feature_flag_payload<K: Into<String>, D: Into<String>>(
         &self,
         key: K,
