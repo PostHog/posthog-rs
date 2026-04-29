@@ -531,10 +531,14 @@ impl Client {
         }
 
         let mut request_id: Option<String> = None;
+        let mut errors_while_computing = false;
+        let mut quota_limited = false;
 
         if !options.only_evaluate_locally {
             let response = self.fetch_flag_details(&distinct_id, &options).await?;
             request_id = response.request_id;
+            errors_while_computing = response.errors_while_computing_flags;
+            quota_limited = response.quota_limited;
             for (key, detail) in response.flags {
                 if locally_evaluated_keys.contains(&key) {
                     continue;
@@ -551,7 +555,8 @@ impl Client {
             options.disable_geoip,
             request_id,
             None,
-            None,
+            errors_while_computing,
+            quota_limited,
         ))
     }
 
@@ -629,17 +634,27 @@ impl Client {
 struct DetailedFlagsResponse {
     flags: HashMap<String, FlagDetail>,
     request_id: Option<String>,
+    errors_while_computing_flags: bool,
+    quota_limited: bool,
 }
 
 fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFlagsResponse {
     match response {
         FeatureFlagsResponse::V2 {
-            flags, request_id, ..
-        } => DetailedFlagsResponse { flags, request_id },
+            flags,
+            request_id,
+            errors_while_computing_flags,
+            quota_limited,
+        } => DetailedFlagsResponse {
+            flags,
+            request_id,
+            errors_while_computing_flags,
+            quota_limited,
+        },
         FeatureFlagsResponse::Legacy {
             feature_flags,
             feature_flag_payloads,
-            ..
+            errors,
         } => {
             let mut flags = HashMap::new();
             for (key, value) in feature_flags {
@@ -667,6 +682,8 @@ fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFlagsResponse
             DetailedFlagsResponse {
                 flags,
                 request_id: None,
+                errors_while_computing_flags: errors.is_some_and(|e| !e.is_empty()),
+                quota_limited: false,
             }
         }
     }

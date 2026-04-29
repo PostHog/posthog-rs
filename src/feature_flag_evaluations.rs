@@ -56,9 +56,6 @@ pub trait FeatureFlagEvaluationsHost: Send + Sync {
 }
 
 /// Optional inputs for [`Client::evaluate_flags`](crate::Client::evaluate_flags).
-///
-/// `flag_keys` scopes the underlying `/flags` request and is distinct from
-/// [`FeatureFlagEvaluations::only`], which filters an in-memory snapshot.
 #[derive(Default, Clone, Debug)]
 pub struct EvaluateFlagsOptions {
     pub groups: Option<HashMap<String, String>>,
@@ -66,6 +63,14 @@ pub struct EvaluateFlagsOptions {
     pub group_properties: Option<HashMap<String, HashMap<String, Value>>>,
     pub only_evaluate_locally: bool,
     pub disable_geoip: Option<bool>,
+    /// Optional list of flag keys. When provided, only these flags are
+    /// evaluated — the underlying `/flags` request asks the server for just
+    /// this subset, which makes the response smaller and the request cheaper.
+    /// Use this when you only need a handful of flags out of many.
+    ///
+    /// Distinct from [`FeatureFlagEvaluations::only`]: `flag_keys` trims the
+    /// network call, [`only`](FeatureFlagEvaluations::only) trims which flags
+    /// get attached to a captured event after evaluation.
     pub flag_keys: Option<Vec<String>>,
 }
 
@@ -87,7 +92,8 @@ pub struct FeatureFlagEvaluations {
     disable_geoip: Option<bool>,
     request_id: Option<String>,
     evaluated_at: Option<i64>,
-    flag_definitions_loaded_at: Option<i64>,
+    errors_while_computing: bool,
+    quota_limited: bool,
     accessed: Mutex<HashSet<String>>,
 }
 
@@ -101,7 +107,8 @@ impl FeatureFlagEvaluations {
         disable_geoip: Option<bool>,
         request_id: Option<String>,
         evaluated_at: Option<i64>,
-        flag_definitions_loaded_at: Option<i64>,
+        errors_while_computing: bool,
+        quota_limited: bool,
     ) -> Self {
         Self {
             host,
@@ -111,7 +118,8 @@ impl FeatureFlagEvaluations {
             disable_geoip,
             request_id,
             evaluated_at,
-            flag_definitions_loaded_at,
+            errors_while_computing,
+            quota_limited,
             accessed: Mutex::new(HashSet::new()),
         }
     }
@@ -128,7 +136,8 @@ impl FeatureFlagEvaluations {
             None,
             None,
             None,
-            None,
+            false,
+            false,
         )
     }
 
@@ -171,22 +180,11 @@ impl FeatureFlagEvaluations {
     /// [`is_enabled`](Self::is_enabled) or [`get_flag`](Self::get_flag) before
     /// this call.
     ///
-    /// If nothing has been accessed, logs a warning and falls back to returning
-    /// a clone with all evaluated flags (so the captured event still carries
-    /// flag context). Configure with
-    /// [`ClientOptions::feature_flags_log_warnings`](crate::ClientOptionsBuilder)
-    /// to silence the warning.
+    /// Order-dependent: if nothing has been accessed yet, the returned snapshot
+    /// is empty. Pre-access the flags you want to attach before calling this.
     #[must_use]
     pub fn only_accessed(&self) -> Self {
         let accessed = self.snapshot_accessed();
-        if accessed.is_empty() {
-            self.host.log_warning(
-                "FeatureFlagEvaluations::only_accessed() was called before any flags were \
-                 accessed — attaching all evaluated flags as a fallback. \
-                 See https://posthog.com/docs/feature-flags/server-sdks for details.",
-            );
-            return self.clone_with(self.flags.clone());
-        }
         let filtered = self
             .flags
             .iter()
@@ -255,7 +253,8 @@ impl FeatureFlagEvaluations {
             disable_geoip: self.disable_geoip,
             request_id: self.request_id.clone(),
             evaluated_at: self.evaluated_at,
-            flag_definitions_loaded_at: self.flag_definitions_loaded_at,
+            errors_while_computing: self.errors_while_computing,
+            quota_limited: self.quota_limited,
             accessed: Mutex::new(self.snapshot_accessed()),
         }
     }
@@ -324,17 +323,6 @@ impl FeatureFlagEvaluations {
                     props.insert("$feature_flag_reason".into(), json!(reason));
                 }
             }
-        } else {
-            props.insert("$feature_flag_error".into(), json!("flag_missing"));
-        }
-
-        if locally_evaluated {
-            if let Some(loaded_at) = self.flag_definitions_loaded_at {
-                props.insert(
-                    "$feature_flag_definitions_loaded_at".into(),
-                    json!(loaded_at),
-                );
-            }
         }
 
         if let Some(request_id) = &self.request_id {
@@ -345,6 +333,24 @@ impl FeatureFlagEvaluations {
             if let Some(evaluated_at) = self.evaluated_at {
                 props.insert("$feature_flag_evaluated_at".into(), json!(evaluated_at));
             }
+        }
+
+        // Comma-joined `$feature_flag_error` matching the single-flag path's
+        // granularity: response-level errors (errors-while-computing,
+        // quota-limited) combine with per-flag errors (flag-missing) so
+        // consumers can filter by type.
+        let mut errors: Vec<&str> = Vec::new();
+        if self.errors_while_computing {
+            errors.push("errors_while_computing_flags");
+        }
+        if self.quota_limited {
+            errors.push("quota_limited");
+        }
+        if flag.is_none() {
+            errors.push("flag_missing");
+        }
+        if !errors.is_empty() {
+            props.insert("$feature_flag_error".into(), json!(errors.join(",")));
         }
 
         props
@@ -360,10 +366,8 @@ impl std::fmt::Debug for FeatureFlagEvaluations {
             .field("disable_geoip", &self.disable_geoip)
             .field("request_id", &self.request_id)
             .field("evaluated_at", &self.evaluated_at)
-            .field(
-                "flag_definitions_loaded_at",
-                &self.flag_definitions_loaded_at,
-            )
+            .field("errors_while_computing", &self.errors_while_computing)
+            .field("quota_limited", &self.quota_limited)
             .finish_non_exhaustive()
     }
 }
@@ -443,7 +447,8 @@ mod tests {
             None,
             Some("req-1".into()),
             Some(1700000000),
-            None,
+            false,
+            false,
         )
     }
 
@@ -489,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn locally_evaluated_event_omits_evaluated_at_and_includes_definitions_loaded_at() {
+    fn locally_evaluated_event_omits_evaluated_at_and_carries_locally_evaluated_flag() {
         let host = Arc::new(RecordingHost::default());
         let mut flags = HashMap::new();
         flags.insert(
@@ -507,7 +512,8 @@ mod tests {
             None,
             None,
             Some(1700000000),
-            Some(1699999000),
+            false,
+            false,
         );
         let _ = snap.is_enabled("gamma");
         let captured = host.captured.lock().unwrap();
@@ -517,11 +523,53 @@ mod tests {
             props.get("$feature_flag_reason"),
             Some(&json!("Evaluated locally"))
         );
-        assert_eq!(
-            props.get("$feature_flag_definitions_loaded_at"),
-            Some(&json!(1699999000_i64))
-        );
         assert!(!props.contains_key("$feature_flag_evaluated_at"));
+    }
+
+    #[test]
+    fn errors_while_computing_propagates_to_event() {
+        let host = Arc::new(RecordingHost::default());
+        let mut flags = HashMap::new();
+        flags.insert("alpha".into(), record("alpha", true, Some("test"), false));
+        let snap = FeatureFlagEvaluations::new(
+            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+            "u1".into(),
+            flags,
+            HashMap::new(),
+            None,
+            Some("req-1".into()),
+            Some(1700000000),
+            true,  // errors_while_computing
+            false, // quota_limited
+        );
+        let _ = snap.is_enabled("alpha");
+        let captured = host.captured.lock().unwrap();
+        assert_eq!(
+            captured[0].properties.get("$feature_flag_error"),
+            Some(&json!("errors_while_computing_flags"))
+        );
+    }
+
+    #[test]
+    fn quota_limited_combines_with_flag_missing_in_error_string() {
+        let host = Arc::new(RecordingHost::default());
+        let snap = FeatureFlagEvaluations::new(
+            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+            "u1".into(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            None,
+            None,
+            false,
+            true, // quota_limited
+        );
+        assert!(snap.get_flag("does-not-exist").is_none());
+        let captured = host.captured.lock().unwrap();
+        assert_eq!(
+            captured[0].properties.get("$feature_flag_error"),
+            Some(&json!("quota_limited,flag_missing"))
+        );
     }
 
     #[test]
@@ -540,6 +588,18 @@ mod tests {
     }
 
     #[test]
+    fn missing_flag_with_no_response_errors_emits_no_error_for_present_flag() {
+        let host = Arc::new(RecordingHost::default());
+        let snap = build(
+            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+            "u1",
+        );
+        assert!(snap.is_enabled("alpha"));
+        let captured = host.captured.lock().unwrap();
+        assert!(!captured[0].properties.contains_key("$feature_flag_error"));
+    }
+
+    #[test]
     fn only_accessed_filters_to_accessed_keys() {
         let host = Arc::new(RecordingHost::default());
         let snap = build(
@@ -554,15 +614,15 @@ mod tests {
     }
 
     #[test]
-    fn only_accessed_falls_back_to_all_with_warning_when_empty() {
+    fn only_accessed_returns_empty_when_nothing_accessed() {
         let host = Arc::new(RecordingHost::default());
         let snap = build(
             Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
             "u1",
         );
         let filtered = snap.only_accessed();
-        assert_eq!(filtered.keys().len(), 3);
-        assert_eq!(host.warnings.lock().unwrap().len(), 1);
+        assert!(filtered.keys().is_empty());
+        assert!(host.warnings.lock().unwrap().is_empty());
     }
 
     #[test]
