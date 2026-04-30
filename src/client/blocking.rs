@@ -232,9 +232,20 @@ impl Client {
 
         // Try local evaluation first if available
         if let Some(ref evaluator) = self.local_evaluator {
-            let empty = HashMap::new();
-            let props = person_properties.as_ref().unwrap_or(&empty);
-            match evaluator.evaluate_flag(&key_str, &distinct_id_str, props) {
+            let empty_props = HashMap::new();
+            let empty_groups: HashMap<String, String> = HashMap::new();
+            let empty_group_props: HashMap<String, HashMap<String, serde_json::Value>> =
+                HashMap::new();
+            let props = person_properties.as_ref().unwrap_or(&empty_props);
+            let groups_ref = groups.as_ref().unwrap_or(&empty_groups);
+            let group_props_ref = group_properties.as_ref().unwrap_or(&empty_group_props);
+            match evaluator.evaluate_flag(
+                &key_str,
+                &distinct_id_str,
+                props,
+                groups_ref,
+                group_props_ref,
+            ) {
                 Ok(Some(value)) => {
                     debug!(flag = %key_str, ?value, "Flag evaluated locally");
                     return Ok(Some(value));

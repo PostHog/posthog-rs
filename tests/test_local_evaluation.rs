@@ -25,9 +25,11 @@ fn test_local_evaluation_basic() {
                 properties: vec![],
                 rollout_percentage: Some(100.0),
                 variant: None,
+                aggregation_group_type_index: None,
             }],
             multivariate: None,
             payloads: HashMap::new(),
+            aggregation_group_type_index: None,
         },
     };
 
@@ -41,7 +43,13 @@ fn test_local_evaluation_basic() {
 
     // Test evaluation
     let properties = HashMap::new();
-    let result = evaluator.evaluate_flag("test-flag", "user-123", &properties);
+    let result = evaluator.evaluate_flag(
+        "test-flag",
+        "user-123",
+        &properties,
+        &HashMap::new(),
+        &HashMap::new(),
+    );
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
@@ -66,9 +74,11 @@ fn test_local_evaluation_with_properties() {
                 }],
                 rollout_percentage: Some(100.0),
                 variant: None,
+                aggregation_group_type_index: None,
             }],
             multivariate: None,
             payloads: HashMap::new(),
+            aggregation_group_type_index: None,
         },
     };
 
@@ -84,7 +94,13 @@ fn test_local_evaluation_with_properties() {
     let mut properties = HashMap::new();
     properties.insert("plan".to_string(), json!("premium"));
 
-    let result = evaluator.evaluate_flag("premium-feature", "user-123", &properties);
+    let result = evaluator.evaluate_flag(
+        "premium-feature",
+        "user-123",
+        &properties,
+        &HashMap::new(),
+        &HashMap::new(),
+    );
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
 
@@ -92,7 +108,13 @@ fn test_local_evaluation_with_properties() {
     let mut properties = HashMap::new();
     properties.insert("plan".to_string(), json!("free"));
 
-    let result = evaluator.evaluate_flag("premium-feature", "user-456", &properties);
+    let result = evaluator.evaluate_flag(
+        "premium-feature",
+        "user-456",
+        &properties,
+        &HashMap::new(),
+        &HashMap::new(),
+    );
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), Some(FlagValue::Boolean(false)));
 }
@@ -103,7 +125,13 @@ fn test_local_evaluation_missing_flag() {
     let evaluator = LocalEvaluator::new(cache);
 
     let properties = HashMap::new();
-    let result = evaluator.evaluate_flag("non-existent", "user-123", &properties);
+    let result = evaluator.evaluate_flag(
+        "non-existent",
+        "user-123",
+        &properties,
+        &HashMap::new(),
+        &HashMap::new(),
+    );
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), None);
@@ -208,6 +236,7 @@ fn test_cache_operations() {
                 groups: vec![],
                 multivariate: None,
                 payloads: HashMap::new(),
+                aggregation_group_type_index: None,
             },
         },
         FeatureFlag {
@@ -217,6 +246,7 @@ fn test_cache_operations() {
                 groups: vec![],
                 multivariate: None,
                 payloads: HashMap::new(),
+                aggregation_group_type_index: None,
             },
         },
     ];
@@ -697,4 +727,263 @@ fn test_sync_no_etag_from_server() {
         cache.get_flag("no-etag-flag").is_some(),
         "Flag should be in cache"
     );
+}
+
+// ---- Group-targeted and mixed-targeting tests ----
+
+fn mixed_flag() -> FeatureFlag {
+    FeatureFlag {
+        key: "mixed-flag".to_string(),
+        active: true,
+        filters: FeatureFlagFilters {
+            groups: vec![
+                // Group condition: company plan == enterprise
+                FeatureFlagCondition {
+                    properties: vec![Property {
+                        key: "plan".to_string(),
+                        value: json!("enterprise"),
+                        operator: "exact".to_string(),
+                        property_type: Some("group".to_string()),
+                    }],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: Some(0),
+                },
+                // Person condition: email == test@example.com
+                FeatureFlagCondition {
+                    properties: vec![Property {
+                        key: "email".to_string(),
+                        value: json!("test@example.com"),
+                        operator: "exact".to_string(),
+                        property_type: Some("person".to_string()),
+                    }],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                },
+            ],
+            multivariate: None,
+            payloads: HashMap::new(),
+            aggregation_group_type_index: None, // null = mixed
+        },
+    }
+}
+
+fn only_group_flag() -> FeatureFlag {
+    FeatureFlag {
+        key: "only-group-flag".to_string(),
+        active: true,
+        filters: FeatureFlagFilters {
+            groups: vec![FeatureFlagCondition {
+                properties: vec![Property {
+                    key: "plan".to_string(),
+                    value: json!("enterprise"),
+                    operator: "exact".to_string(),
+                    property_type: Some("group".to_string()),
+                }],
+                rollout_percentage: Some(100.0),
+                variant: None,
+                aggregation_group_type_index: None,
+            }],
+            multivariate: None,
+            payloads: HashMap::new(),
+            // Pure group flag at the flag level
+            aggregation_group_type_index: Some(0),
+        },
+    }
+}
+
+fn cache_with(flag: FeatureFlag) -> FlagCache {
+    let cache = FlagCache::new();
+    let mut group_type_mapping = HashMap::new();
+    group_type_mapping.insert("0".to_string(), "company".to_string());
+    cache.update(LocalEvaluationResponse {
+        flags: vec![flag],
+        group_type_mapping,
+        cohorts: HashMap::new(),
+    });
+    cache
+}
+
+#[test]
+fn test_pure_group_flag_matches_with_group_passed_in() {
+    let evaluator = LocalEvaluator::new(cache_with(only_group_flag()));
+    let mut groups = HashMap::new();
+    groups.insert("company".to_string(), "acme".to_string());
+    let mut group_props = HashMap::new();
+    let mut acme_props = HashMap::new();
+    acme_props.insert("plan".to_string(), json!("enterprise"));
+    group_props.insert("company".to_string(), acme_props);
+
+    let result = evaluator
+        .evaluate_flag(
+            "only-group-flag",
+            "any-distinct-id",
+            &HashMap::new(),
+            &groups,
+            &group_props,
+        )
+        .unwrap();
+    assert_eq!(result, Some(FlagValue::Boolean(true)));
+}
+
+#[test]
+fn test_pure_group_flag_returns_false_when_groups_not_passed() {
+    // Pure group flag with no groups passed in: skip the condition, return false.
+    let evaluator = LocalEvaluator::new(cache_with(only_group_flag()));
+    let result = evaluator
+        .evaluate_flag(
+            "only-group-flag",
+            "any-distinct-id",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(result, Some(FlagValue::Boolean(false)));
+}
+
+#[test]
+fn test_mixed_flag_person_condition_matches_when_no_groups() {
+    let evaluator = LocalEvaluator::new(cache_with(mixed_flag()));
+    let mut person = HashMap::new();
+    person.insert("email".to_string(), json!("test@example.com"));
+
+    let result = evaluator
+        .evaluate_flag(
+            "mixed-flag",
+            "user-1",
+            &person,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(result, Some(FlagValue::Boolean(true)));
+}
+
+#[test]
+fn test_mixed_flag_group_condition_matches_with_group_props() {
+    let evaluator = LocalEvaluator::new(cache_with(mixed_flag()));
+    let mut groups = HashMap::new();
+    groups.insert("company".to_string(), "acme".to_string());
+    let mut group_props = HashMap::new();
+    let mut acme = HashMap::new();
+    acme.insert("plan".to_string(), json!("enterprise"));
+    group_props.insert("company".to_string(), acme);
+    let mut person = HashMap::new();
+    person.insert("email".to_string(), json!("nope@example.com"));
+
+    let result = evaluator
+        .evaluate_flag("mixed-flag", "user-2", &person, &groups, &group_props)
+        .unwrap();
+    assert_eq!(result, Some(FlagValue::Boolean(true)));
+}
+
+#[test]
+fn test_mixed_flag_no_match_when_both_fail() {
+    let evaluator = LocalEvaluator::new(cache_with(mixed_flag()));
+    let mut groups = HashMap::new();
+    groups.insert("company".to_string(), "acme".to_string());
+    let mut group_props = HashMap::new();
+    let mut acme = HashMap::new();
+    acme.insert("plan".to_string(), json!("free"));
+    group_props.insert("company".to_string(), acme);
+    let mut person = HashMap::new();
+    person.insert("email".to_string(), json!("nope@example.com"));
+
+    let result = evaluator
+        .evaluate_flag("mixed-flag", "user-3", &person, &groups, &group_props)
+        .unwrap();
+    assert_eq!(result, Some(FlagValue::Boolean(false)));
+}
+
+#[test]
+fn test_mixed_flag_only_group_condition_no_groups_returns_false() {
+    // Mixed flag with only group conditions and no groups passed: skip, return false.
+    let flag = FeatureFlag {
+        key: "mixed-only-group".to_string(),
+        active: true,
+        filters: FeatureFlagFilters {
+            groups: vec![FeatureFlagCondition {
+                properties: vec![Property {
+                    key: "plan".to_string(),
+                    value: json!("enterprise"),
+                    operator: "exact".to_string(),
+                    property_type: Some("group".to_string()),
+                }],
+                rollout_percentage: Some(100.0),
+                variant: None,
+                aggregation_group_type_index: Some(0),
+            }],
+            multivariate: None,
+            payloads: HashMap::new(),
+            aggregation_group_type_index: None,
+        },
+    };
+    let evaluator = LocalEvaluator::new(cache_with(flag));
+    let result = evaluator
+        .evaluate_flag(
+            "mixed-only-group",
+            "user-1",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(result, Some(FlagValue::Boolean(false)));
+}
+
+#[test]
+fn test_group_condition_uses_group_key_for_bucketing() {
+    // Group condition at 50% rollout. Use two groups whose hash on
+    // ("rollout-flag", group_key) straddles 0.5, with a distinct_id whose hash
+    // is also out-of-bucket. If the matcher regressed to bucketing on
+    // distinct_id, the in-bucket assertion would fail.
+    let flag = FeatureFlag {
+        key: "rollout-flag".to_string(),
+        active: true,
+        filters: FeatureFlagFilters {
+            groups: vec![FeatureFlagCondition {
+                properties: vec![],
+                rollout_percentage: Some(50.0),
+                variant: None,
+                aggregation_group_type_index: None,
+            }],
+            multivariate: None,
+            payloads: HashMap::new(),
+            aggregation_group_type_index: Some(0),
+        },
+    };
+    let evaluator = LocalEvaluator::new(cache_with(flag));
+    let distinct_id = "user-0"; // hash > 0.5 against "rollout-flag"
+
+    // Pre-computed: hash("rollout-flag.company-7") ~ 0.118 → in bucket
+    let mut groups_in = HashMap::new();
+    groups_in.insert("company".to_string(), "company-7".to_string());
+    let mut group_props = HashMap::new();
+    group_props.insert("company".to_string(), HashMap::new());
+    let result = evaluator
+        .evaluate_flag(
+            "rollout-flag",
+            distinct_id,
+            &HashMap::new(),
+            &groups_in,
+            &group_props,
+        )
+        .unwrap();
+    assert_eq!(result, Some(FlagValue::Boolean(true)));
+
+    // Pre-computed: hash("rollout-flag.company-2") ~ 0.803 → out of bucket
+    let mut groups_out = HashMap::new();
+    groups_out.insert("company".to_string(), "company-2".to_string());
+    let result = evaluator
+        .evaluate_flag(
+            "rollout-flag",
+            distinct_id,
+            &HashMap::new(),
+            &groups_out,
+            &group_props,
+        )
+        .unwrap();
+    assert_eq!(result, Some(FlagValue::Boolean(false)));
 }
