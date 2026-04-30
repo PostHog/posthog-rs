@@ -327,6 +327,41 @@ mod blocking {
     }
 
     #[test]
+    fn string_encoded_payload_is_normalized_to_parsed_json() {
+        let server = MockServer::start();
+        // Mirror the API behaviour where `metadata.payload` arrives as a
+        // JSON-encoded string rather than already-parsed JSON.
+        let response = json!({
+            "flags": {
+                "alpha": {
+                    "key": "alpha",
+                    "enabled": true,
+                    "variant": null,
+                    "metadata": {
+                        "id": 1,
+                        "version": 1,
+                        "payload": "{\"color\":\"blue\"}"
+                    }
+                }
+            },
+            "errorsWhileComputingFlags": false,
+            "requestId": "req-x"
+        });
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(response);
+        });
+        let client = create_test_client(server.base_url());
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .unwrap();
+        assert_eq!(
+            snapshot.get_flag_payload("alpha"),
+            Some(json!({"color": "blue"}))
+        );
+    }
+
+    #[test]
     fn disabled_client_returns_empty_snapshot() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {

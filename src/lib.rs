@@ -27,10 +27,7 @@ pub use error::Error;
 pub use event::Event;
 
 // Feature Flags
-pub use feature_flag_evaluations::{
-    EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
-    FlagCalledEventParams,
-};
+pub use feature_flag_evaluations::{EvaluateFlagsOptions, FeatureFlagEvaluations};
 pub use feature_flags::{
     match_feature_flag, match_feature_flag_with_context, match_property_with_context,
     CohortDefinition, EvaluationContext, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters,

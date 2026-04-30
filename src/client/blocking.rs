@@ -55,7 +55,6 @@ struct BlockingFlagEventHost {
     endpoints: EndpointManager,
     disabled: bool,
     disable_geoip: bool,
-    log_warnings: bool,
     dedup_cache: Mutex<HashMap<String, HashSet<String>>>,
 }
 
@@ -67,7 +66,6 @@ impl BlockingFlagEventHost {
             endpoints: options.endpoints().clone(),
             disabled: options.is_disabled(),
             disable_geoip: options.disable_geoip,
-            log_warnings: options.feature_flags_log_warnings(),
             dedup_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -147,9 +145,9 @@ impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
     }
 
     fn log_warning(&self, message: &str) {
-        if self.log_warnings {
-            warn!("{message}");
-        }
+        // Surface filter-helper misuse via tracing — users can silence these
+        // with their tracing-subscriber level filter (e.g. `posthog_rs=error`).
+        warn!("{message}");
     }
 }
 
@@ -527,7 +525,7 @@ impl Client {
                     }
                 }
                 if let Ok(value) = result {
-                    records.insert(key.clone(), local_record(key.clone(), value));
+                    records.insert(key.clone(), local_record(value));
                     locally_evaluated_keys.insert(key);
                 }
             }
@@ -537,16 +535,43 @@ impl Client {
         let mut errors_while_computing = false;
         let mut quota_limited = false;
 
-        if !options.only_evaluate_locally {
-            let response = self.fetch_flag_details(&distinct_id, &options)?;
-            request_id = response.request_id;
-            errors_while_computing = response.errors_while_computing_flags;
-            quota_limited = response.quota_limited;
-            for (key, detail) in response.flags {
-                if locally_evaluated_keys.contains(&key) {
-                    continue;
+        // Skip the remote round-trip when local evaluation has already covered
+        // every requested flag. Without `flag_keys` we have to assume the caller
+        // wants every flag the project has and still hit `/flags` to discover
+        // any not loaded by the poller.
+        let local_covers_request = options
+            .flag_keys
+            .as_ref()
+            .is_some_and(|keys| keys.iter().all(|k| locally_evaluated_keys.contains(k)));
+
+        if !options.only_evaluate_locally && !local_covers_request {
+            // Don't lose successful local evaluations if `/flags` fails — degrade
+            // to a snapshot built from the local results we already have. The
+            // alternative (returning Err) wastes useful data and surprises
+            // callers who would otherwise get partial coverage.
+            match self.fetch_flag_details(&distinct_id, &options) {
+                Ok(response) => {
+                    request_id = response.request_id;
+                    errors_while_computing = response.errors_while_computing_flags;
+                    quota_limited = response.quota_limited;
+                    for (key, detail) in response.flags {
+                        if locally_evaluated_keys.contains(&key) {
+                            continue;
+                        }
+                        records.insert(key, remote_record_from_detail(detail));
+                    }
                 }
-                records.insert(key.clone(), remote_record_from_detail(key, detail));
+                Err(e) => {
+                    if records.is_empty() {
+                        return Err(e);
+                    }
+                    debug!(
+                        error = e.to_string(),
+                        local_count = records.len(),
+                        "/flags fetch failed; returning snapshot from local results only"
+                    );
+                    errors_while_computing = true;
+                }
             }
         }
 
@@ -692,17 +717,15 @@ fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFlagsResponse
     }
 }
 
-fn local_record(key: String, value: FlagValue) -> EvaluatedFlagRecord {
+fn local_record(value: FlagValue) -> EvaluatedFlagRecord {
     let (enabled, variant) = match value {
         FlagValue::Boolean(b) => (b, None),
         FlagValue::String(s) => (true, Some(s)),
     };
     EvaluatedFlagRecord {
-        key,
         enabled,
         variant,
-        // Local definitions do not carry a payload — this could be plumbed
-        // through in a follow-up alongside `flag_definitions_loaded_at`.
+        // Local definitions do not surface a payload through the poller today.
         payload: None,
         id: None,
         version: None,
@@ -711,7 +734,7 @@ fn local_record(key: String, value: FlagValue) -> EvaluatedFlagRecord {
     }
 }
 
-fn remote_record_from_detail(key: String, detail: FlagDetail) -> EvaluatedFlagRecord {
+fn remote_record_from_detail(detail: FlagDetail) -> EvaluatedFlagRecord {
     let metadata = detail.metadata;
     let reason = detail
         .reason
@@ -719,9 +742,8 @@ fn remote_record_from_detail(key: String, detail: FlagDetail) -> EvaluatedFlagRe
         .filter(|s| !s.is_empty());
     let id = metadata.as_ref().map(|m| m.id);
     let version = metadata.as_ref().map(|m| m.version);
-    let payload = metadata.and_then(|m| m.payload);
+    let payload = metadata.and_then(|m| m.payload).map(normalize_payload);
     EvaluatedFlagRecord {
-        key,
         enabled: detail.enabled,
         variant: detail.variant,
         payload,
@@ -729,5 +751,18 @@ fn remote_record_from_detail(key: String, detail: FlagDetail) -> EvaluatedFlagRe
         version,
         reason,
         locally_evaluated: false,
+    }
+}
+
+/// `metadata.payload` from `/flags?v=2` is sometimes a JSON-encoded string
+/// (e.g. `"{\"color\":\"blue\"}"`) rather than already-parsed JSON. Try to
+/// parse a `String` payload as JSON and fall back to the raw string on
+/// failure so users can branch on a uniform [`serde_json::Value`].
+fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
+    match payload {
+        serde_json::Value::String(raw) => {
+            serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))
+        }
+        other => other,
     }
 }

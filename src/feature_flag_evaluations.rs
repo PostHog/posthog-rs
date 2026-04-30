@@ -23,8 +23,7 @@ use crate::feature_flags::FlagValue;
 /// Carries everything needed to emit a fully-detailed `$feature_flag_called`
 /// event without a follow-up network call.
 #[derive(Debug, Clone)]
-pub struct EvaluatedFlagRecord {
-    pub key: String,
+pub(crate) struct EvaluatedFlagRecord {
     pub enabled: bool,
     pub variant: Option<String>,
     pub payload: Option<Value>,
@@ -37,7 +36,7 @@ pub struct EvaluatedFlagRecord {
 /// Parameters dispatched to [`FeatureFlagEvaluationsHost::capture_flag_called_event_if_needed`]
 /// each time a snapshot method records a flag access.
 #[derive(Debug, Clone)]
-pub struct FlagCalledEventParams {
+pub(crate) struct FlagCalledEventParams {
     pub distinct_id: String,
     pub key: String,
     pub response: Option<FlagValue>,
@@ -47,10 +46,9 @@ pub struct FlagCalledEventParams {
 }
 
 /// Dependency-inverted host interface used by [`FeatureFlagEvaluations`] to
-/// emit dedup-aware `$feature_flag_called` events and surface filter-helper
-/// warnings. The client constructs one of these once and shares it across all
-/// snapshots it produces.
-pub trait FeatureFlagEvaluationsHost: Send + Sync {
+/// emit dedup-aware `$feature_flag_called` events. The client constructs one
+/// of these once and shares it across all snapshots it produces.
+pub(crate) trait FeatureFlagEvaluationsHost: Send + Sync {
     fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams);
     fn log_warning(&self, message: &str);
 }
@@ -414,13 +412,12 @@ mod tests {
     }
 
     fn record(
-        key: &str,
+        _key: &str,
         enabled: bool,
         variant: Option<&str>,
         locally_evaluated: bool,
     ) -> EvaluatedFlagRecord {
         EvaluatedFlagRecord {
-            key: key.into(),
             enabled,
             variant: variant.map(str::to_string),
             payload: None,
@@ -547,6 +544,34 @@ mod tests {
         assert_eq!(
             captured[0].properties.get("$feature_flag_error"),
             Some(&json!("errors_while_computing_flags"))
+        );
+    }
+
+    #[test]
+    fn payload_can_be_set_directly() {
+        let mut flags = HashMap::new();
+        flags.insert(
+            "alpha".into(),
+            EvaluatedFlagRecord {
+                payload: Some(json!({"hello": "world"})),
+                ..record("alpha", true, None, false)
+            },
+        );
+        let host = Arc::new(RecordingHost::default());
+        let snap = FeatureFlagEvaluations::new(
+            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+            "u1".into(),
+            flags,
+            HashMap::new(),
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
+        assert_eq!(
+            snap.get_flag_payload("alpha"),
+            Some(json!({"hello": "world"}))
         );
     }
 

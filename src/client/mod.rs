@@ -76,12 +76,6 @@ pub struct ClientOptions {
     #[builder(default = "false")]
     local_evaluation_only: bool,
 
-    /// Whether to emit warnings for misuse of `FeatureFlagEvaluations` filter
-    /// helpers (e.g. calling `only_accessed()` before any access, or `only(...)`
-    /// with unknown keys). Set to `false` to silence these warnings.
-    #[builder(default = "true")]
-    feature_flags_log_warnings: bool,
-
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
     endpoint_manager: EndpointManager,
@@ -96,11 +90,6 @@ impl ClientOptions {
     /// Check if the client is disabled
     pub fn is_disabled(&self) -> bool {
         self.disabled
-    }
-
-    /// Whether `FeatureFlagEvaluations` filter helpers should emit warnings.
-    pub(crate) fn feature_flags_log_warnings(&self) -> bool {
-        self.feature_flags_log_warnings
     }
 
     fn sanitize(mut self) -> Self {
