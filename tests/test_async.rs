@@ -407,6 +407,99 @@ async fn test_groups_parameter() {
 }
 
 #[tokio::test]
+async fn test_client_with_missing_api_key_is_noop() {
+    let server = MockServer::start();
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v0/e/");
+        then.status(200);
+    });
+    let batch_mock = server.mock(|when, then| {
+        when.method(POST).path("/batch/");
+        then.status(200);
+    });
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {},
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let options = posthog_rs::ClientOptionsBuilder::default()
+        .host(server.base_url())
+        .build()
+        .unwrap();
+    assert!(options.is_disabled());
+
+    let client = posthog_rs::client(options).await;
+    let event = posthog_rs::Event::new("test_event", "user1");
+
+    assert!(client.capture(event.clone()).await.is_ok());
+    assert!(client.capture_batch(vec![event], false).await.is_ok());
+
+    let (feature_flags, payloads) = client
+        .get_feature_flags("test-user".to_string(), None, None, None)
+        .await
+        .unwrap();
+    assert!(feature_flags.is_empty());
+    assert!(payloads.is_empty());
+
+    assert_eq!(
+        client
+            .get_feature_flag("test-flag", "test-user", None, None, None)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(!client
+        .is_feature_enabled("test-flag", "test-user", None, None, None)
+        .await
+        .unwrap());
+    assert_eq!(
+        client
+            .get_feature_flag_payload("test-flag", "test-user")
+            .await
+            .unwrap(),
+        None
+    );
+
+    capture_mock.assert_hits(0);
+    batch_mock.assert_hits(0);
+    flags_mock.assert_hits(0);
+}
+
+#[tokio::test]
+async fn test_client_with_whitespace_api_key_is_noop() {
+    let server = MockServer::start();
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {},
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let options = posthog_rs::ClientOptionsBuilder::default()
+        .api_key(" \n\t ".to_string())
+        .host(server.base_url())
+        .build()
+        .unwrap();
+    assert!(options.is_disabled());
+
+    let client = posthog_rs::client(options).await;
+
+    assert!(client
+        .get_feature_flags("test-user".to_string(), None, None, None)
+        .await
+        .unwrap()
+        .0
+        .is_empty());
+    flags_mock.assert_hits(0);
+}
+
+#[tokio::test]
 async fn test_capture_batch_sends_to_batch_endpoint() {
     let server = MockServer::start();
 

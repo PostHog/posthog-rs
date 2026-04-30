@@ -169,7 +169,9 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         .build()
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
 
-    let (local_evaluator, flag_poller) = if options.enable_local_evaluation {
+    let (local_evaluator, flag_poller) = if options.enable_local_evaluation
+        && !options.is_disabled()
+    {
         if let Some(ref personal_key) = options.personal_api_key {
             let cache = FlagCache::new();
 
@@ -293,6 +295,11 @@ impl Client {
         ),
         Error,
     > {
+        if self.options.is_disabled() {
+            trace!("Client is disabled, skipping feature flags request");
+            return Ok((HashMap::new(), HashMap::new()));
+        }
+
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
         let mut payload = json!({
@@ -454,6 +461,11 @@ impl Client {
         key: K,
         distinct_id: D,
     ) -> Result<Option<serde_json::Value>, Error> {
+        if self.options.is_disabled() {
+            trace!("Client is disabled, skipping feature flag payload request");
+            return Ok(None);
+        }
+
         let key_str = key.into();
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
