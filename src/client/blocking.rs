@@ -341,14 +341,32 @@ impl Client {
         Ok(payloads.get(&key_str).cloned())
     }
 
-    /// Evaluate a feature flag locally (requires feature flags to be loaded)
+    /// Evaluate a feature flag locally (requires feature flags to be loaded).
+    ///
+    /// `groups` and `group_properties` are only consulted when the flag (or one
+    /// of its conditions) targets a group; pass empty maps for person flags.
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluate_feature_flag_locally(
         &self,
         flag: &FeatureFlag,
         distinct_id: &str,
         person_properties: &HashMap<String, serde_json::Value>,
+        groups: &HashMap<String, String>,
+        group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     ) -> Result<FlagValue, Error> {
-        match_feature_flag(flag, distinct_id, person_properties)
-            .map_err(|e| Error::InconclusiveMatch(e.message))
+        let group_type_mapping = self
+            .local_evaluator
+            .as_ref()
+            .map(|ev| ev.cache().get_group_type_mapping())
+            .unwrap_or_default();
+        match_feature_flag(
+            flag,
+            distinct_id,
+            person_properties,
+            groups,
+            group_properties,
+            &group_type_mapping,
+        )
+        .map_err(|e| Error::InconclusiveMatch(e.message))
     }
 }
