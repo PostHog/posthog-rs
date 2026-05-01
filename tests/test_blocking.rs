@@ -1,4 +1,10 @@
 #![cfg(not(feature = "async-client"))]
+// These tests exercise the legacy single-flag methods (`get_feature_flag`,
+// `is_feature_enabled`, `get_feature_flag_payload`) that were deprecated in
+// favor of `evaluate_flags()`. We keep the coverage in place during the
+// deprecation window — tests for `evaluate_flags()` live in
+// `tests/test_evaluate_flags.rs`.
+#![allow(deprecated)]
 
 use httpmock::prelude::*;
 use posthog_rs::FlagValue;

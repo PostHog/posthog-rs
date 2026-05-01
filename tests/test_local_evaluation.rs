@@ -1,3 +1,8 @@
+// Some tests in this file exercise the deprecated single-flag methods
+// alongside the local-evaluation cache; tolerate the deprecation warnings
+// during the transition window.
+#![allow(deprecated)]
+
 use httpmock::prelude::*;
 #[cfg(feature = "async-client")]
 use posthog_rs::AsyncFlagPoller;

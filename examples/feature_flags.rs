@@ -1,10 +1,18 @@
-/// Feature Flags Example
-///
-/// Shows all feature flag patterns: boolean flags, A/B tests, payloads, and targeting.
-///
-/// Run with real API:
-///   export POSTHOG_API_TOKEN=phc_your_key
-///   cargo run --example feature_flags --features async-client
+#![allow(deprecated)]
+
+//! Feature Flags Example
+//!
+//! Shows all feature flag patterns: boolean flags, A/B tests, payloads, and targeting.
+//!
+//! Run with real API:
+//!   export POSTHOG_API_TOKEN=phc_your_key
+//!   cargo run --example feature_flags --features async-client
+//!
+//! NOTE: this example uses the legacy `is_feature_enabled` / `get_feature_flag` /
+//! `get_feature_flag_payload` methods, which are deprecated in favor of
+//! `evaluate_flags()`. See `examples/evaluate_flags.rs` for the recommended
+//! snapshot-based pattern.
+
 use posthog_rs::FlagValue;
 use serde_json::json;
 use std::collections::HashMap;

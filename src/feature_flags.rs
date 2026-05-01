@@ -257,6 +257,17 @@ pub enum FeatureFlagsResponse {
         #[serde(rename = "errorsWhileComputingFlags")]
         #[serde(default)]
         errors_while_computing_flags: bool,
+        /// Whether the response was returned without evaluation because the
+        /// project is over its feature-flag quota.
+        #[serde(rename = "quotaLimited")]
+        #[serde(default)]
+        quota_limited: bool,
+        /// Unique identifier for this evaluation request, propagated to
+        /// `$feature_flag_called` events as `$feature_flag_request_id`
+        /// for experiment exposure tracking.
+        #[serde(rename = "requestId")]
+        #[serde(default)]
+        request_id: Option<String>,
     },
     /// Legacy format from older decide endpoint
     Legacy {

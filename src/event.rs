@@ -5,6 +5,7 @@ use semver::Version;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::feature_flag_evaluations::FeatureFlagEvaluations;
 use crate::Error;
 
 /// An [`Event`] represents an interaction a user has with your app or
@@ -96,6 +97,18 @@ impl Event {
     /// deduplication when re-importing historical data.
     pub fn set_uuid(&mut self, uuid: Uuid) {
         self.uuid = uuid;
+    }
+
+    /// Attach the flag state captured by a [`FeatureFlagEvaluations`] snapshot
+    /// to this event. Adds `$feature/<key>` for every evaluated flag plus a
+    /// sorted `$active_feature_flags` list of enabled keys, mirroring what
+    /// `send_feature_flags` would otherwise fetch — but without making an
+    /// extra `/flags` request.
+    pub fn with_flags(&mut self, flags: &FeatureFlagEvaluations) -> &mut Self {
+        for (key, value) in flags.event_properties() {
+            self.properties.insert(key, value);
+        }
+        self
     }
 }
 

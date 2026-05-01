@@ -1,13 +1,20 @@
-/// Local Evaluation Performance Demo
-///
-/// Shows 100-1000x faster flag evaluation by caching definitions locally.
-///
-/// Setup:
-///   export POSTHOG_API_TOKEN=phc_your_project_key
-///   export POSTHOG_PERSONAL_API_TOKEN=phx_your_personal_key
-///   cargo run --example local_evaluation --features async-client
-///
-/// Get personal key at: https://app.posthog.com/me/settings
+#![allow(deprecated)]
+
+//! Local Evaluation Performance Demo
+//!
+//! Shows 100-1000x faster flag evaluation by caching definitions locally.
+//!
+//! Setup:
+//!   export POSTHOG_API_TOKEN=phc_your_project_key
+//!   export POSTHOG_PERSONAL_API_TOKEN=phx_your_personal_key
+//!   cargo run --example local_evaluation --features async-client
+//!
+//! Get personal key at: https://app.posthog.com/me/settings
+//!
+//! NOTE: this example calls deprecated `is_feature_enabled` / `get_feature_flag`
+//! methods. Local evaluation also flows through `evaluate_flags()` — see
+//! `examples/evaluate_flags.rs` for the recommended pattern.
+
 use posthog_rs::ClientOptionsBuilder;
 use serde_json::json;
 use std::collections::HashMap;
