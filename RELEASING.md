@@ -1,26 +1,21 @@
 # Releasing
 
-This repository uses [Sampo](https://github.com/bruits/sampo) for versioning and changelog generation, with GitHub Actions handling publishing.
+This repository uses [Sampo](https://github.com/bruits/sampo) for versioning, changelogs, and publishing to crates.io.
 
-## How to Release
+1. When making changes, include a changeset: `sampo add`
+   - Prefer letting `sampo add` create the file for you.
+   - If you create or edit a changeset manually, the frontmatter must use this exact package key:
 
-1. When making a change that should be released, include a Sampo changeset:
+     ```md
+     ---
+     cargo/posthog-rs: patch
+     ---
+     ```
 
-   ```bash
-   sampo add
-   ```
+   - Replace `patch` with `minor` or `major` when appropriate.
 
-2. Commit the generated `.sampo/changesets/*.md` file with your pull request.
-3. After review, merge the PR to `main`. No GitHub release label is required.
-4. A push to `main` that includes `.sampo/changesets/*.md` changes automatically starts the release workflow.
-5. Approve the release when prompted in Slack / the GitHub `Release` environment.
+2. Create a PR with your changes and the changeset file
+3. Merge to `main` (no release label required)
+4. Approve the release in Slack when prompted — this triggers version bump, crates.io publish, git tag, and GitHub Release
 
-After approval, The workflow runs Sampo, publishes the crate, tags the release, and creates a GitHub Release.
-
-## Manual Trigger
-
-You can also manually trigger the release workflow from the Actions tab with `workflow_dispatch`. Manual runs still require pending Sampo changesets.
-
-## Troubleshooting
-
-If the release workflow reports that no changesets were found, make sure your PR includes at least one releasable `.sampo/changesets/*.md` file.
+You can also trigger a release manually via the workflow's `workflow_dispatch` trigger (still requires pending changesets).
