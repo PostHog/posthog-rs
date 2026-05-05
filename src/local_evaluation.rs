@@ -135,6 +135,11 @@ impl FlagCache {
         self.flags.read().unwrap().clone()
     }
 
+    /// Get the group type mapping (group type index → group type name).
+    pub fn get_group_type_mapping(&self) -> HashMap<String, String> {
+        self.group_type_mapping.read().unwrap().clone()
+    }
+
     pub fn clear(&self) {
         self.flags.write().unwrap().clear();
         self.group_type_mapping.write().unwrap().clear();
@@ -533,29 +538,47 @@ impl LocalEvaluator {
         Self { cache }
     }
 
-    /// Evaluate a feature flag locally with full context support
-    /// This supports cohort membership checks and flag dependency evaluation
-    #[instrument(skip(self, person_properties), level = "trace")]
+    /// Access the underlying flag cache (e.g. to read group type mappings).
+    pub fn cache(&self) -> &FlagCache {
+        &self.cache
+    }
+
+    /// Evaluate a feature flag locally with full context support.
+    ///
+    /// Supports cohort membership checks, flag dependency evaluation, and
+    /// group / mixed-targeting flags. `groups` and `group_properties` are
+    /// only consulted when the flag (or one of its conditions) targets a
+    /// group via `aggregation_group_type_index`; pass empty maps for
+    /// person-targeted flags.
+    #[instrument(
+        skip(self, person_properties, groups, group_properties),
+        level = "trace"
+    )]
     pub fn evaluate_flag(
         &self,
         key: &str,
         distinct_id: &str,
         person_properties: &HashMap<String, serde_json::Value>,
+        groups: &HashMap<String, String>,
+        group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     ) -> Result<Option<FlagValue>, InconclusiveMatchError> {
         match self.cache.get_flag(key) {
             Some(flag) => {
-                // Build evaluation context with cohorts and flags for dependency resolution
+                // Build evaluation context with cohorts, flags, and group info
                 let cohorts = self.cache.get_cohort_definitions();
                 let flags = self.cache.get_flags_map();
+                let group_type_mapping = self.cache.get_group_type_mapping();
 
                 let ctx = EvaluationContext {
                     cohorts: &cohorts,
                     flags: &flags,
                     distinct_id,
+                    groups,
+                    group_properties,
+                    group_type_mapping: &group_type_mapping,
                 };
 
-                let result =
-                    match_feature_flag_with_context(&flag, distinct_id, person_properties, &ctx);
+                let result = match_feature_flag_with_context(&flag, person_properties, &ctx);
                 trace!(key, ?result, "Local flag evaluation");
                 result.map(Some)
             }
@@ -566,18 +589,31 @@ impl LocalEvaluator {
         }
     }
 
-    /// Evaluate a feature flag locally (simple version without cohort/flag dependency support)
-    /// Use this when you know the flag doesn't have cohort or flag dependency conditions
-    #[instrument(skip(self, person_properties), level = "trace")]
+    /// Evaluate a feature flag locally (simple version without cohort/flag dependency support).
+    /// Use this when you know the flag doesn't have cohort or flag dependency conditions.
+    #[instrument(
+        skip(self, person_properties, groups, group_properties),
+        level = "trace"
+    )]
     pub fn evaluate_flag_simple(
         &self,
         key: &str,
         distinct_id: &str,
         person_properties: &HashMap<String, serde_json::Value>,
+        groups: &HashMap<String, String>,
+        group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     ) -> Result<Option<FlagValue>, InconclusiveMatchError> {
         match self.cache.get_flag(key) {
             Some(flag) => {
-                let result = match_feature_flag(&flag, distinct_id, person_properties);
+                let group_type_mapping = self.cache.get_group_type_mapping();
+                let result = match_feature_flag(
+                    &flag,
+                    distinct_id,
+                    person_properties,
+                    groups,
+                    group_properties,
+                    &group_type_mapping,
+                );
                 trace!(key, ?result, "Local flag evaluation (simple)");
                 result.map(Some)
             }
@@ -588,28 +624,36 @@ impl LocalEvaluator {
         }
     }
 
-    /// Get all flags and evaluate them with full context support
-    #[instrument(skip(self, person_properties), level = "debug")]
+    /// Get all flags and evaluate them with full context support.
+    #[instrument(
+        skip(self, person_properties, groups, group_properties),
+        level = "debug"
+    )]
     pub fn evaluate_all_flags(
         &self,
         distinct_id: &str,
         person_properties: &HashMap<String, serde_json::Value>,
+        groups: &HashMap<String, String>,
+        group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     ) -> HashMap<String, Result<FlagValue, InconclusiveMatchError>> {
         let mut results = HashMap::new();
 
         // Build evaluation context once for all flags
         let cohorts = self.cache.get_cohort_definitions();
         let flags = self.cache.get_flags_map();
+        let group_type_mapping = self.cache.get_group_type_mapping();
 
         let ctx = EvaluationContext {
             cohorts: &cohorts,
             flags: &flags,
             distinct_id,
+            groups,
+            group_properties,
+            group_type_mapping: &group_type_mapping,
         };
 
         for flag in self.cache.get_all_flags() {
-            let result =
-                match_feature_flag_with_context(&flag, distinct_id, person_properties, &ctx);
+            let result = match_feature_flag_with_context(&flag, person_properties, &ctx);
             results.insert(flag.key.clone(), result);
         }
 

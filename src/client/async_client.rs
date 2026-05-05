@@ -386,9 +386,20 @@ impl Client {
 
         // Try local evaluation first if available
         if let Some(ref evaluator) = self.local_evaluator {
-            let empty = HashMap::new();
-            let props = person_properties.as_ref().unwrap_or(&empty);
-            match evaluator.evaluate_flag(&key_str, &distinct_id_str, props) {
+            let empty_props = HashMap::new();
+            let empty_groups: HashMap<String, String> = HashMap::new();
+            let empty_group_props: HashMap<String, HashMap<String, serde_json::Value>> =
+                HashMap::new();
+            let props = person_properties.as_ref().unwrap_or(&empty_props);
+            let groups_ref = groups.as_ref().unwrap_or(&empty_groups);
+            let group_props_ref = group_properties.as_ref().unwrap_or(&empty_group_props);
+            match evaluator.evaluate_flag(
+                &key_str,
+                &distinct_id_str,
+                props,
+                groups_ref,
+                group_props_ref,
+            ) {
                 Ok(Some(value)) => {
                     debug!(flag = %key_str, ?value, "Flag evaluated locally");
                     return Ok(Some(value));
@@ -503,15 +514,33 @@ impl Client {
         Ok(payloads.get(&key_str).cloned())
     }
 
-    /// Evaluate a feature flag locally (requires feature flags to be loaded)
+    /// Evaluate a feature flag locally (requires feature flags to be loaded).
+    ///
+    /// `groups` and `group_properties` are only consulted when the flag (or one
+    /// of its conditions) targets a group; pass empty maps for person flags.
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluate_feature_flag_locally(
         &self,
         flag: &FeatureFlag,
         distinct_id: &str,
         person_properties: &HashMap<String, serde_json::Value>,
+        groups: &HashMap<String, String>,
+        group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     ) -> Result<FlagValue, Error> {
-        match_feature_flag(flag, distinct_id, person_properties)
-            .map_err(|e| Error::InconclusiveMatch(e.message))
+        let group_type_mapping = self
+            .local_evaluator
+            .as_ref()
+            .map(|ev| ev.cache().get_group_type_mapping())
+            .unwrap_or_default();
+        match_feature_flag(
+            flag,
+            distinct_id,
+            person_properties,
+            groups,
+            group_properties,
+            &group_type_mapping,
+        )
+        .map_err(|e| Error::InconclusiveMatch(e.message))
     }
 
     /// Evaluate every feature flag for `distinct_id` in a single round-trip,

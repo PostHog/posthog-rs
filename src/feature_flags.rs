@@ -115,6 +115,10 @@ pub struct FeatureFlagFilters {
     /// JSON payloads associated with flag variants
     #[serde(default)]
     pub payloads: HashMap<String, serde_json::Value>,
+    /// Group type index this flag targets at the flag level. `None` means person
+    /// targeting (or mixed, when individual conditions set their own).
+    #[serde(default)]
+    pub aggregation_group_type_index: Option<i32>,
 }
 
 /// A single condition group within a feature flag's targeting rules.
@@ -130,6 +134,11 @@ pub struct FeatureFlagCondition {
     pub rollout_percentage: Option<f64>,
     /// Specific variant to serve for this condition (for variant overrides)
     pub variant: Option<String>,
+    /// Optional per-condition aggregation override used by mixed-targeting flags.
+    /// When set, this condition targets the specified group type instead of the
+    /// flag-level aggregation. `None` means person targeting under a mixed flag.
+    #[serde(default)]
+    pub aggregation_group_type_index: Option<i32>,
 }
 
 /// A property filter used in feature flag targeting.
@@ -219,11 +228,20 @@ impl CohortDefinition {
     }
 }
 
-/// Context for evaluating properties that may depend on cohorts or other flags
+/// Context for evaluating properties that may depend on cohorts or other flags.
+///
+/// `groups`, `group_properties`, and `group_type_mapping` are used to resolve
+/// group-targeted and mixed-targeting flags. A group condition (one whose
+/// `aggregation_group_type_index` is set, either at the flag or condition level)
+/// is bucketed on the group key and matched against group properties looked up
+/// via the group type mapping.
 pub struct EvaluationContext<'a> {
     pub cohorts: &'a HashMap<String, CohortDefinition>,
     pub flags: &'a HashMap<String, FeatureFlag>,
     pub distinct_id: &'a str,
+    pub groups: &'a HashMap<String, String>,
+    pub group_properties: &'a HashMap<String, HashMap<String, serde_json::Value>>,
+    pub group_type_mapping: &'a HashMap<String, String>,
 }
 
 /// Configuration for multivariate (A/B/n) feature flags.
@@ -409,17 +427,78 @@ pub fn get_matching_variant(flag: &FeatureFlag, distinct_id: &str) -> Option<Str
     None
 }
 
+/// Result of resolving a condition's effective bucketing + properties.
+enum ConditionTarget<'a> {
+    /// Use these for bucketing and property matching.
+    Use {
+        bucketing: String,
+        properties: &'a HashMap<String, serde_json::Value>,
+    },
+    /// Skip this condition (group type unknown or required group not passed in).
+    Skip,
+    /// Required group properties not provided — try other conditions, surface
+    /// inconclusive if nothing else matches.
+    Inconclusive,
+}
+
+/// Resolve effective bucketing id and properties for a single condition based on
+/// the (possibly per-condition) aggregation group type index. Pure-person flags
+/// fall through with `distinct_id` and `person_properties`. Group conditions
+/// (either flag-level or per-condition aggregation) require the corresponding
+/// group key and group properties to be present.
+fn resolve_condition_target<'a>(
+    condition: &FeatureFlagCondition,
+    flag_aggregation: Option<i32>,
+    distinct_id: &str,
+    person_properties: &'a HashMap<String, serde_json::Value>,
+    groups: &HashMap<String, String>,
+    group_properties: &'a HashMap<String, HashMap<String, serde_json::Value>>,
+    group_type_mapping: &HashMap<String, String>,
+) -> ConditionTarget<'a> {
+    // Per-condition aggregation falls back to the flag-level value when absent.
+    // The two together drive whether this condition is person- or group-targeted.
+    let effective_aggregation = condition.aggregation_group_type_index.or(flag_aggregation);
+
+    match effective_aggregation {
+        None => ConditionTarget::Use {
+            bucketing: distinct_id.to_string(),
+            properties: person_properties,
+        },
+        Some(idx) => {
+            let key = idx.to_string();
+            let Some(group_type) = group_type_mapping.get(&key) else {
+                return ConditionTarget::Skip;
+            };
+            let Some(group_key) = groups.get(group_type) else {
+                return ConditionTarget::Skip;
+            };
+            let Some(props) = group_properties.get(group_type) else {
+                return ConditionTarget::Inconclusive;
+            };
+            ConditionTarget::Use {
+                bucketing: group_key.clone(),
+                properties: props,
+            }
+        }
+    }
+}
+
 #[must_use = "feature flag evaluation result should be used"]
+#[allow(clippy::too_many_arguments)]
 pub fn match_feature_flag(
     flag: &FeatureFlag,
     distinct_id: &str,
-    properties: &HashMap<String, serde_json::Value>,
+    person_properties: &HashMap<String, serde_json::Value>,
+    groups: &HashMap<String, String>,
+    group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
+    group_type_mapping: &HashMap<String, String>,
 ) -> Result<FlagValue, InconclusiveMatchError> {
     if !flag.active {
         return Ok(FlagValue::Boolean(false));
     }
 
     let conditions = &flag.filters.groups;
+    let flag_aggregation = flag.filters.aggregation_group_type_index;
 
     // Sort conditions to evaluate variant overrides first
     let mut sorted_conditions = conditions.clone();
@@ -428,7 +507,27 @@ pub fn match_feature_flag(
     let mut is_inconclusive = false;
 
     for condition in sorted_conditions {
-        match is_condition_match(flag, distinct_id, &condition, properties) {
+        let (effective_bucketing, effective_properties) = match resolve_condition_target(
+            &condition,
+            flag_aggregation,
+            distinct_id,
+            person_properties,
+            groups,
+            group_properties,
+            group_type_mapping,
+        ) {
+            ConditionTarget::Use {
+                bucketing,
+                properties,
+            } => (bucketing, properties),
+            ConditionTarget::Skip => continue,
+            ConditionTarget::Inconclusive => {
+                is_inconclusive = true;
+                continue;
+            }
+        };
+
+        match is_condition_match(flag, &effective_bucketing, &condition, effective_properties) {
             Ok(true) => {
                 if let Some(variant_override) = &condition.variant {
                     // Check if variant is valid
@@ -446,7 +545,7 @@ pub fn match_feature_flag(
                 }
 
                 // Try to get matching variant or return true
-                if let Some(variant) = get_matching_variant(flag, distinct_id) {
+                if let Some(variant) = get_matching_variant(flag, &effective_bucketing) {
                     return Ok(FlagValue::String(variant));
                 }
                 return Ok(FlagValue::Boolean(true));
@@ -469,7 +568,7 @@ pub fn match_feature_flag(
 
 fn is_condition_match(
     flag: &FeatureFlag,
-    distinct_id: &str,
+    bucketing_id: &str,
     condition: &FeatureFlagCondition,
     properties: &HashMap<String, serde_json::Value>,
 ) -> Result<bool, InconclusiveMatchError> {
@@ -482,7 +581,7 @@ fn is_condition_match(
 
     // If all properties match (or no properties), check rollout percentage
     if let Some(rollout_percentage) = condition.rollout_percentage {
-        let hash_value = hash_key(&flag.key, distinct_id, ROLLOUT_HASH_SALT);
+        let hash_value = hash_key(&flag.key, bucketing_id, ROLLOUT_HASH_SALT);
         if hash_value > (rollout_percentage / 100.0) {
             return Ok(false);
         }
@@ -492,12 +591,15 @@ fn is_condition_match(
 }
 
 /// Match a feature flag with full context (cohorts, other flags)
-/// This version supports cohort membership checks and flag dependency checks
+/// This version supports cohort membership checks and flag dependency checks.
+///
+/// `person_properties` carries person-level property values; group-level
+/// properties are looked up from `ctx.group_properties` when a condition (or
+/// the flag itself) targets a group via `aggregation_group_type_index`.
 #[must_use = "feature flag evaluation result should be used"]
 pub fn match_feature_flag_with_context(
     flag: &FeatureFlag,
-    distinct_id: &str,
-    properties: &HashMap<String, serde_json::Value>,
+    person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<FlagValue, InconclusiveMatchError> {
     if !flag.active {
@@ -505,6 +607,7 @@ pub fn match_feature_flag_with_context(
     }
 
     let conditions = &flag.filters.groups;
+    let flag_aggregation = flag.filters.aggregation_group_type_index;
 
     // Sort conditions to evaluate variant overrides first
     let mut sorted_conditions = conditions.clone();
@@ -513,7 +616,33 @@ pub fn match_feature_flag_with_context(
     let mut is_inconclusive = false;
 
     for condition in sorted_conditions {
-        match is_condition_match_with_context(flag, distinct_id, &condition, properties, ctx) {
+        let (effective_bucketing, effective_properties) = match resolve_condition_target(
+            &condition,
+            flag_aggregation,
+            ctx.distinct_id,
+            person_properties,
+            ctx.groups,
+            ctx.group_properties,
+            ctx.group_type_mapping,
+        ) {
+            ConditionTarget::Use {
+                bucketing,
+                properties,
+            } => (bucketing, properties),
+            ConditionTarget::Skip => continue,
+            ConditionTarget::Inconclusive => {
+                is_inconclusive = true;
+                continue;
+            }
+        };
+
+        match is_condition_match_with_context(
+            flag,
+            &effective_bucketing,
+            &condition,
+            effective_properties,
+            ctx,
+        ) {
             Ok(true) => {
                 if let Some(variant_override) = &condition.variant {
                     // Check if variant is valid
@@ -531,7 +660,7 @@ pub fn match_feature_flag_with_context(
                 }
 
                 // Try to get matching variant or return true
-                if let Some(variant) = get_matching_variant(flag, distinct_id) {
+                if let Some(variant) = get_matching_variant(flag, &effective_bucketing) {
                     return Ok(FlagValue::String(variant));
                 }
                 return Ok(FlagValue::Boolean(true));
@@ -554,7 +683,7 @@ pub fn match_feature_flag_with_context(
 
 fn is_condition_match_with_context(
     flag: &FeatureFlag,
-    distinct_id: &str,
+    bucketing_id: &str,
     condition: &FeatureFlagCondition,
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
@@ -568,7 +697,7 @@ fn is_condition_match_with_context(
 
     // If all properties match (or no properties), check rollout percentage
     if let Some(rollout_percentage) = condition.rollout_percentage {
-        let hash_value = hash_key(&flag.key, distinct_id, ROLLOUT_HASH_SALT);
+        let hash_value = hash_key(&flag.key, bucketing_id, ROLLOUT_HASH_SALT);
         if hash_value > (rollout_percentage / 100.0) {
             return Ok(false);
         }
@@ -660,9 +789,17 @@ fn match_flag_dependency_property(
         InconclusiveMatchError::new(&format!("Flag '{}' not found in local cache", flag_key))
     })?;
 
-    // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues)
+    // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues).
+    // Group context flows through from the outer ctx so dependent group/mixed flags can resolve.
     let empty_props = HashMap::new();
-    let flag_value = match_feature_flag(flag, ctx.distinct_id, &empty_props)?;
+    let flag_value = match_feature_flag(
+        flag,
+        ctx.distinct_id,
+        &empty_props,
+        ctx.groups,
+        ctx.group_properties,
+        ctx.group_type_mapping,
+    )?;
 
     // Compare the flag value with the expected value
     let expected = &property.value;
@@ -1147,14 +1284,24 @@ mod tests {
                     properties: vec![],
                     rollout_percentage: Some(100.0),
                     variant: None,
+                    aggregation_group_type_index: None,
                 }],
                 multivariate: None,
                 payloads: HashMap::new(),
+                aggregation_group_type_index: None,
             },
         };
 
         let properties = HashMap::new();
-        let result = match_feature_flag(&flag, "user-123", &properties).unwrap();
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &properties,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(result, FlagValue::Boolean(true));
     }
 
@@ -1186,6 +1333,7 @@ mod tests {
                     properties: vec![],
                     rollout_percentage: Some(100.0),
                     variant: None,
+                    aggregation_group_type_index: None,
                 }],
                 multivariate: Some(MultivariateFilter {
                     variants: vec![
@@ -1200,11 +1348,20 @@ mod tests {
                     ],
                 }),
                 payloads: HashMap::new(),
+                aggregation_group_type_index: None,
             },
         };
 
         let properties = HashMap::new();
-        let result = match_feature_flag(&flag, "user-123", &properties).unwrap();
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &properties,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
 
         match result {
             FlagValue::String(variant) => {
@@ -1224,14 +1381,24 @@ mod tests {
                     properties: vec![],
                     rollout_percentage: Some(100.0),
                     variant: None,
+                    aggregation_group_type_index: None,
                 }],
                 multivariate: None,
                 payloads: HashMap::new(),
+                aggregation_group_type_index: None,
             },
         };
 
         let properties = HashMap::new();
-        let result = match_feature_flag(&flag, "user-123", &properties).unwrap();
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &properties,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(result, FlagValue::Boolean(false));
     }
 
@@ -1245,9 +1412,11 @@ mod tests {
                     properties: vec![],
                     rollout_percentage: Some(30.0), // 30% rollout
                     variant: None,
+                    aggregation_group_type_index: None,
                 }],
                 multivariate: None,
                 payloads: HashMap::new(),
+                aggregation_group_type_index: None,
             },
         };
 
@@ -1256,7 +1425,15 @@ mod tests {
         // Test with multiple users to ensure distribution
         let mut enabled_count = 0;
         for i in 0..1000 {
-            let result = match_feature_flag(&flag, &format!("user-{}", i), &properties).unwrap();
+            let result = match_feature_flag(
+                &flag,
+                &format!("user-{}", i),
+                &properties,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .unwrap();
             if result == FlagValue::Boolean(true) {
                 enabled_count += 1;
             }
@@ -1374,11 +1551,20 @@ mod tests {
                 groups: vec![],
                 multivariate: None,
                 payloads: HashMap::new(),
+                aggregation_group_type_index: None,
             },
         };
 
         let properties = HashMap::new();
-        let result = match_feature_flag(&flag, "user-123", &properties).unwrap();
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &properties,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(result, FlagValue::Boolean(false));
     }
 
@@ -1674,6 +1860,9 @@ mod tests {
             cohorts: &cohorts,
             flags: &HashMap::new(),
             distinct_id: "user-123",
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
         };
         assert!(match_property_with_context(&prop, &properties, &ctx).unwrap());
 
@@ -1712,6 +1901,9 @@ mod tests {
             cohorts: &cohorts,
             flags: &HashMap::new(),
             distinct_id: "user-123",
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
         };
         // User with status = active should NOT be in the blocked cohort (so not_in returns true)
         assert!(match_property_with_context(&prop, &properties, &ctx).unwrap());
@@ -1737,6 +1929,9 @@ mod tests {
             cohorts: &cohorts,
             flags: &HashMap::new(),
             distinct_id: "user-123",
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
         };
 
         let result = match_property_with_context(&prop, &properties, &ctx);
@@ -1759,9 +1954,11 @@ mod tests {
                         properties: vec![],
                         rollout_percentage: Some(100.0),
                         variant: None,
+                        aggregation_group_type_index: None,
                     }],
                     multivariate: None,
                     payloads: HashMap::new(),
+                    aggregation_group_type_index: None,
                 },
             },
         );
@@ -1779,6 +1976,9 @@ mod tests {
             cohorts: &HashMap::new(),
             flags: &flags,
             distinct_id: "user-123",
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
         };
 
         // The prerequisite flag is enabled for user-123, so this should match
@@ -1797,6 +1997,7 @@ mod tests {
                     groups: vec![],
                     multivariate: None,
                     payloads: HashMap::new(),
+                    aggregation_group_type_index: None,
                 },
             },
         );
@@ -1814,6 +2015,9 @@ mod tests {
             cohorts: &HashMap::new(),
             flags: &flags,
             distinct_id: "user-123",
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
         };
 
         // The flag is disabled, so checking for true should fail
@@ -1833,6 +2037,7 @@ mod tests {
                         properties: vec![],
                         rollout_percentage: Some(100.0),
                         variant: None,
+                        aggregation_group_type_index: None,
                     }],
                     multivariate: Some(MultivariateFilter {
                         variants: vec![
@@ -1847,6 +2052,7 @@ mod tests {
                         ],
                     }),
                     payloads: HashMap::new(),
+                    aggregation_group_type_index: None,
                 },
             },
         );
@@ -1864,6 +2070,9 @@ mod tests {
             cohorts: &HashMap::new(),
             flags: &flags,
             distinct_id: "user-gets-control", // This distinct_id should deterministically get "control"
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
         };
 
         // The result depends on the hash - we just check it doesn't error
@@ -1887,6 +2096,9 @@ mod tests {
             cohorts: &HashMap::new(),
             flags: &flags,
             distinct_id: "user-123",
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
         };
 
         let result = match_property_with_context(&prop, &properties, &ctx);
