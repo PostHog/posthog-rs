@@ -143,6 +143,10 @@ jobs:
         if: steps.check-changes.outputs.committed == 'true'
         run: git checkout -- . && git pull origin main
 
+      - name: Publish dry-run
+        if: steps.check-changes.outputs.committed == 'true'
+        run: cargo publish --workspace --dry-run
+
       - name: Authenticate with crates.io
         if: steps.check-changes.outputs.committed == 'true'
         uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
