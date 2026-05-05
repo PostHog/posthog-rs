@@ -170,7 +170,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
-        run: gh release create "$NEW_VERSION" --generate-notes --target main
+        run: |
+          CHANGELOG_ENTRY=$(awk -v defText="see CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
+          gh release create "$NEW_VERSION" --target main --notes "$CHANGELOG_ENTRY"
 
       - name: Send failure event to PostHog
         if: ${{ failure() }}
