@@ -570,7 +570,14 @@ impl Client {
 
         if let Some(evaluator) = &self.local_evaluator {
             let person_props_owned = options.person_properties.clone().unwrap_or_default();
-            let local_results = evaluator.evaluate_all_flags(&distinct_id, &person_props_owned);
+            let groups_owned = options.groups.clone().unwrap_or_default();
+            let group_props_owned = options.group_properties.clone().unwrap_or_default();
+            let local_results = evaluator.evaluate_all_flags(
+                &distinct_id,
+                &person_props_owned,
+                &groups_owned,
+                &group_props_owned,
+            );
             for (key, result) in local_results {
                 if let Some(filter) = &options.flag_keys {
                     if !filter.iter().any(|k| k == &key) {
