@@ -1,5 +1,13 @@
 # posthog-rs
 
+## 0.7.0 — 2026-05-05
+
+### Minor changes
+
+- [e976393](https://github.com/posthog/posthog-rs/commit/e976393182c5bfe1527cc180e732ce51482c87e0) feat(flags): support group-targeted and mixed-targeting feature flags in local evaluation
+  
+  Adds local evaluation support for pure group flags (where `aggregation_group_type_index` is set at the flag level) and mixed-targeting flags (where individual conditions can override the aggregation per condition). `LocalEvaluator::evaluate_flag`, `evaluate_flag_simple`, and `evaluate_all_flags` now take `groups` and `group_properties` parameters; `match_feature_flag` and `match_feature_flag_with_context` have updated signatures. Backwards-incompatible at the public-API level — see PR description for migration notes. — Thanks @patricio-posthog!
+
 ## 0.6.0 — 2026-05-01
 
 ### Minor changes
