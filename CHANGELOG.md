@@ -1,5 +1,13 @@
 # posthog-rs
 
+## 0.7.1 — 2026-05-21
+
+### Patch changes
+
+- [7cd4efe](https://github.com/posthog/posthog-rs/commit/7cd4efe41a0960d6b30d61d5b26828d1160cc220) fix(flags): reject semver values with leading zeros in local evaluation
+  
+  Per semver 2.0.0 §2, numeric identifiers must not include leading zeros. Values like `1.07.3` are not valid semver and no longer match targeting conditions. Both override values and flag values are validated; invalid inputs surface an `InconclusiveMatchError` so the condition does not match. — Thanks @dmarticus!
+
 ## 0.7.0 — 2026-05-05
 
 ### Minor changes
