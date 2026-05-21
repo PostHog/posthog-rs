@@ -900,7 +900,8 @@ type SemverTuple = (u64, u64, u64);
 /// 4. Split on `.` and parse first 3 components as integers
 /// 5. Default missing components to 0 (e.g., "1.2" → (1, 2, 0), "1" → (1, 0, 0))
 /// 6. Ignore extra components beyond the third (e.g., "1.2.3.4" → (1, 2, 3))
-/// 7. Return None for invalid input (empty string, non-numeric parts, leading dot)
+/// 7. Return None for invalid input (empty string, non-numeric parts, leading dot,
+///    or numeric components with leading zeros per semver 2.0.0 §2)
 fn parse_semver(value: &str) -> Option<SemverTuple> {
     let value = value.trim();
     if value.is_empty() {
@@ -933,11 +934,25 @@ fn parse_semver(value: &str) -> Option<SemverTuple> {
         return None;
     }
 
-    let major: u64 = parts.first().and_then(|s| s.parse().ok())?;
-    let minor: u64 = parts.get(1).map(|s| s.parse().ok()).unwrap_or(Some(0))?;
-    let patch: u64 = parts.get(2).map(|s| s.parse().ok()).unwrap_or(Some(0))?;
+    let major = parse_semver_numeric(parts.first()?)?;
+    let minor = parts.get(1).map_or(Some(0), |s| parse_semver_numeric(s))?;
+    let patch = parts.get(2).map_or(Some(0), |s| parse_semver_numeric(s))?;
 
     Some((major, minor, patch))
+}
+
+/// Parse a single semver numeric identifier.
+///
+/// Per semver 2.0.0 §2, numeric identifiers MUST NOT include leading zeros, so
+/// "07" and "001" are rejected while the literal "0" remains valid.
+fn parse_semver_numeric(part: &str) -> Option<u64> {
+    if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if part.len() > 1 && part.starts_with('0') {
+        return None;
+    }
+    part.parse().ok()
 }
 
 /// Parse a wildcard pattern like "1.*" or "1.2.*" and return (lower_bound, upper_bound)
@@ -962,13 +977,13 @@ fn parse_semver_wildcard(pattern: &str) -> Option<(SemverTuple, SemverTuple)> {
     match parts.as_slice() {
         // "X.*" pattern
         [major_str, "*"] => {
-            let major: u64 = major_str.parse().ok()?;
+            let major = parse_semver_numeric(major_str)?;
             Some(((major, 0, 0), (major + 1, 0, 0)))
         }
         // "X.Y.*" pattern
         [major_str, minor_str, "*"] => {
-            let major: u64 = major_str.parse().ok()?;
-            let minor: u64 = minor_str.parse().ok()?;
+            let major = parse_semver_numeric(major_str)?;
+            let minor = parse_semver_numeric(minor_str)?;
             Some(((major, minor, 0), (major, minor + 1, 0)))
         }
         _ => None,
@@ -2297,9 +2312,18 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_semver_leading_zeros() {
-        assert_eq!(parse_semver("01.02.03"), Some((1, 2, 3)));
-        assert_eq!(parse_semver("001.002.003"), Some((1, 2, 3)));
+    fn test_parse_semver_leading_zeros_rejected() {
+        // Per semver 2.0.0 §2, numeric identifiers must not include leading zeros.
+        assert_eq!(parse_semver("01.02.03"), None);
+        assert_eq!(parse_semver("001.002.003"), None);
+        assert_eq!(parse_semver("1.07.3"), None);
+        assert_eq!(parse_semver("1.2.03"), None);
+        assert_eq!(parse_semver("v01.2.3"), None);
+
+        // Literal "0" components remain valid.
+        assert_eq!(parse_semver("0.1.0"), Some((0, 1, 0)));
+        assert_eq!(parse_semver("1.0.0"), Some((1, 0, 0)));
+        assert_eq!(parse_semver("0.0.0"), Some((0, 0, 0)));
     }
 
     #[test]
@@ -3042,6 +3066,85 @@ mod tests {
                 op,
                 target_val,
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_match_property_semver_rejects_leading_zeros() {
+        // Per semver 2.0.0 §2, numeric identifiers must not include leading zeros.
+        // Both property (override) values and target (flag) values should fail to
+        // parse, surfacing InconclusiveMatchError so the condition does not match.
+
+        let bad_versions = ["1.07.3", "01.02.03", "1.2.03", "v01.2.3", "001.0.0"];
+
+        // Override values are rejected across semver_eq.
+        for bad in bad_versions {
+            let prop = Property {
+                key: "version".to_string(),
+                value: json!("1.2.3"),
+                operator: "semver_eq".to_string(),
+                property_type: None,
+            };
+            let mut properties = HashMap::new();
+            properties.insert("version".to_string(), json!(bad));
+            assert!(
+                match_property(&prop, &properties).is_err(),
+                "override '{}' should be rejected",
+                bad
+            );
+        }
+
+        // Literal "0" components still work for semver_eq.
+        for good in ["0.1.0", "1.0.0", "0.0.0"] {
+            let prop = Property {
+                key: "version".to_string(),
+                value: json!(good),
+                operator: "semver_eq".to_string(),
+                property_type: None,
+            };
+            let mut properties = HashMap::new();
+            properties.insert("version".to_string(), json!(good));
+            assert!(
+                match_property(&prop, &properties).unwrap(),
+                "'{}' should parse and match itself",
+                good
+            );
+        }
+
+        // Flag (target) values are rejected across the remaining operators.
+        let mut properties = HashMap::new();
+        properties.insert("version".to_string(), json!("1.2.3"));
+
+        for op in ["semver_gt", "semver_caret", "semver_tilde"] {
+            for bad in bad_versions {
+                let prop = Property {
+                    key: "version".to_string(),
+                    value: json!(bad),
+                    operator: op.to_string(),
+                    property_type: None,
+                };
+                assert!(
+                    match_property(&prop, &properties).is_err(),
+                    "target '{}' for {} should be rejected",
+                    bad,
+                    op
+                );
+            }
+        }
+
+        // Wildcard patterns with leading-zero numeric components are rejected.
+        for bad_pattern in ["01.*", "1.07.*", "v01.2.*"] {
+            let prop = Property {
+                key: "version".to_string(),
+                value: json!(bad_pattern),
+                operator: "semver_wildcard".to_string(),
+                property_type: None,
+            };
+            assert!(
+                match_property(&prop, &properties).is_err(),
+                "wildcard target '{}' should be rejected",
+                bad_pattern
             );
         }
     }
