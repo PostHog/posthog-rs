@@ -168,6 +168,127 @@ mod blocking {
     }
 
     #[test]
+    fn is_enabled_fires_per_group_context() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST).path("/i/v0/e/");
+            then.status(200);
+        });
+        let client = create_test_client(server.base_url());
+
+        let mut org_a = std::collections::HashMap::new();
+        org_a.insert("organization".to_string(), "org-a".to_string());
+        let mut org_b = std::collections::HashMap::new();
+        org_b.insert("organization".to_string(), "org-b".to_string());
+
+        let snap_a = client
+            .evaluate_flags(
+                "user-1",
+                EvaluateFlagsOptions {
+                    groups: Some(org_a),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let snap_b = client
+            .evaluate_flags(
+                "user-1",
+                EvaluateFlagsOptions {
+                    groups: Some(org_b),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(snap_a.is_enabled("alpha"));
+        assert!(snap_b.is_enabled("alpha"));
+
+        // Same user, same flag, same response but two different group contexts —
+        // both must fire.
+        capture_mock.assert_hits(2);
+    }
+
+    #[test]
+    fn is_enabled_dedupes_across_repeated_calls_under_same_group() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST).path("/i/v0/e/");
+            then.status(200);
+        });
+        let client = create_test_client(server.base_url());
+
+        let mut groups = std::collections::HashMap::new();
+        groups.insert("organization".to_string(), "org-a".to_string());
+
+        let snap = client
+            .evaluate_flags(
+                "user-1",
+                EvaluateFlagsOptions {
+                    groups: Some(groups),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(snap.is_enabled("alpha"));
+        assert!(snap.is_enabled("alpha"));
+        assert!(snap.is_enabled("alpha"));
+
+        capture_mock.assert_hits(1);
+    }
+
+    #[test]
+    fn is_enabled_dedupes_across_group_insertion_order() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST).path("/i/v0/e/");
+            then.status(200);
+        });
+        let client = create_test_client(server.base_url());
+
+        let mut g1 = std::collections::HashMap::new();
+        g1.insert("organization".to_string(), "org-a".to_string());
+        g1.insert("team".to_string(), "red".to_string());
+        let mut g2 = std::collections::HashMap::new();
+        g2.insert("team".to_string(), "red".to_string());
+        g2.insert("organization".to_string(), "org-a".to_string());
+
+        let snap_1 = client
+            .evaluate_flags(
+                "user-1",
+                EvaluateFlagsOptions {
+                    groups: Some(g1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let snap_2 = client
+            .evaluate_flags(
+                "user-1",
+                EvaluateFlagsOptions {
+                    groups: Some(g2),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(snap_1.is_enabled("alpha"));
+        assert!(snap_2.is_enabled("alpha"));
+
+        capture_mock.assert_hits(1);
+    }
+
+    #[test]
     fn flag_keys_forwarded_to_request_body() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
