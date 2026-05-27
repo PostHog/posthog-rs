@@ -172,11 +172,15 @@ fn build_dedup_key(
         sorted.sort_by(|a, b| a.0.cmp(b.0));
         let groups_repr: String = sorted
             .iter()
-            .map(|(k, v)| format!("{k}={v}"))
+            .map(|(k, v)| format!("{}={}", pct(k), pct(v)))
             .collect::<Vec<_>>()
             .join(";");
         format!("{flag_key}_{response_repr}_{groups_repr}")
     }
+}
+
+fn pct(s: &str) -> String {
+    s.replace('%', "%25").replace('=', "%3D").replace(';', "%3B")
 }
 
 /// This function constructs a new client using the options provided.

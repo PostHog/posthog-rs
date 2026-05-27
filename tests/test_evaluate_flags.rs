@@ -167,8 +167,11 @@ mod blocking {
         capture_mock.assert_hits(0);
     }
 
-    #[test]
-    fn is_enabled_fires_per_group_context() {
+    fn assert_group_dedup(
+        g1: std::collections::HashMap<String, String>,
+        g2: std::collections::HashMap<String, String>,
+        expected_hits: usize,
+    ) {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/flags/");
@@ -179,90 +182,6 @@ mod blocking {
             then.status(200);
         });
         let client = create_test_client(server.base_url());
-
-        let mut org_a = std::collections::HashMap::new();
-        org_a.insert("organization".to_string(), "org-a".to_string());
-        let mut org_b = std::collections::HashMap::new();
-        org_b.insert("organization".to_string(), "org-b".to_string());
-
-        let snap_a = client
-            .evaluate_flags(
-                "user-1",
-                EvaluateFlagsOptions {
-                    groups: Some(org_a),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let snap_b = client
-            .evaluate_flags(
-                "user-1",
-                EvaluateFlagsOptions {
-                    groups: Some(org_b),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-        assert!(snap_a.is_enabled("alpha"));
-        assert!(snap_b.is_enabled("alpha"));
-
-        // Same user, same flag, same response but two different group contexts —
-        // both must fire.
-        capture_mock.assert_hits(2);
-    }
-
-    #[test]
-    fn is_enabled_dedupes_across_repeated_calls_under_same_group() {
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST).path("/flags/");
-            then.status(200).json_body(flags_response_fixture());
-        });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
-        let client = create_test_client(server.base_url());
-
-        let mut groups = std::collections::HashMap::new();
-        groups.insert("organization".to_string(), "org-a".to_string());
-
-        let snap = client
-            .evaluate_flags(
-                "user-1",
-                EvaluateFlagsOptions {
-                    groups: Some(groups),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert!(snap.is_enabled("alpha"));
-        assert!(snap.is_enabled("alpha"));
-        assert!(snap.is_enabled("alpha"));
-
-        capture_mock.assert_hits(1);
-    }
-
-    #[test]
-    fn is_enabled_dedupes_across_group_insertion_order() {
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST).path("/flags/");
-            then.status(200).json_body(flags_response_fixture());
-        });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
-        let client = create_test_client(server.base_url());
-
-        let mut g1 = std::collections::HashMap::new();
-        g1.insert("organization".to_string(), "org-a".to_string());
-        g1.insert("team".to_string(), "red".to_string());
-        let mut g2 = std::collections::HashMap::new();
-        g2.insert("team".to_string(), "red".to_string());
-        g2.insert("organization".to_string(), "org-a".to_string());
 
         let snap_1 = client
             .evaluate_flags(
@@ -284,8 +203,71 @@ mod blocking {
             .unwrap();
         assert!(snap_1.is_enabled("alpha"));
         assert!(snap_2.is_enabled("alpha"));
+        capture_mock.assert_hits(expected_hits);
+    }
 
+    fn groups(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn is_enabled_fires_per_group_context() {
+        // Same user, same flag, different group context — both must fire.
+        assert_group_dedup(
+            groups(&[("organization", "org-a")]),
+            groups(&[("organization", "org-b")]),
+            2,
+        );
+    }
+
+    #[test]
+    fn is_enabled_dedupes_across_repeated_calls_under_same_group() {
+        // Calling is_enabled multiple times on the same snapshot fires only once.
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST).path("/i/v0/e/");
+            then.status(200);
+        });
+        let client = create_test_client(server.base_url());
+        let snap = client
+            .evaluate_flags(
+                "user-1",
+                EvaluateFlagsOptions {
+                    groups: Some(groups(&[("organization", "org-a")])),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(snap.is_enabled("alpha"));
+        assert!(snap.is_enabled("alpha"));
+        assert!(snap.is_enabled("alpha"));
         capture_mock.assert_hits(1);
+    }
+
+    #[test]
+    fn is_enabled_dedupes_across_group_insertion_order() {
+        // Same content, different insertion order — only one event.
+        assert_group_dedup(
+            groups(&[("organization", "org-a"), ("team", "red")]),
+            groups(&[("team", "red"), ("organization", "org-a")]),
+            1,
+        );
+    }
+
+    #[test]
+    fn is_enabled_treats_groups_with_separator_chars_as_distinct() {
+        // {"a=b": "c"} and {"a": "b=c"} must produce different dedup keys;
+        // without encoding both serialise to "a=b=c" and the second event
+        // would be incorrectly suppressed.
+        assert_group_dedup(
+            groups(&[("a=b", "c")]),
+            groups(&[("a", "b=c")]),
+            2,
+        );
     }
 
     #[test]
