@@ -207,7 +207,10 @@ mod blocking {
     }
 
     fn groups(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -263,11 +266,7 @@ mod blocking {
         // {"a=b": "c"} and {"a": "b=c"} must produce different dedup keys;
         // without encoding both serialise to "a=b=c" and the second event
         // would be incorrectly suppressed.
-        assert_group_dedup(
-            groups(&[("a=b", "c")]),
-            groups(&[("a", "b=c")]),
-            2,
-        );
+        assert_group_dedup(groups(&[("a=b", "c")]), groups(&[("a", "b=c")]), 2);
     }
 
     #[test]

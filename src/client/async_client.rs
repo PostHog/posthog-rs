@@ -196,7 +196,9 @@ fn build_dedup_key(
 }
 
 fn pct(s: &str) -> String {
-    s.replace('%', "%25").replace('=', "%3D").replace(';', "%3B")
+    s.replace('%', "%25")
+        .replace('=', "%3D")
+        .replace(';', "%3B")
 }
 
 /// This function constructs a new client using the options provided.
