@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.7.3 — 2026-05-28
+
+### Patch changes
+
+- [af5b4da](https://github.com/posthog/posthog-rs/commit/af5b4daa591d1501d5394d5fdceb5f6383e95b43) Include group context in the `$feature_flag_called` dedupe key so group-scoped flags fire a separate event for each group a user is evaluated under, instead of being dedup-ed against the first group context the same `(distinct_id, flag, response)` was seen under. — Thanks @gustavohstrassburger for your first contribution 🎉!
+
 ## 0.7.2 — 2026-05-28
 
 ### Patch changes
