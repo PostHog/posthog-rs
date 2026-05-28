@@ -18,7 +18,7 @@ use crate::feature_flags::{
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{event::InnerEvent, Error, Event};
 
-use super::ClientOptions;
+use super::{CaptureMode, ClientOptions};
 
 /// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
 /// dedup cache. On overflow the entire map is reset (matches the JS SDK).
@@ -288,6 +288,10 @@ impl Client {
             return Ok(());
         }
 
+        if self.options.capture_mode == CaptureMode::V1 {
+            return self.capture_v1(event).await;
+        }
+
         // Add geoip disable property if configured
         if self.options.disable_geoip {
             event.insert_prop("$geoip_disable", true).ok();
@@ -338,6 +342,10 @@ impl Client {
             return Ok(());
         }
 
+        if self.options.capture_mode == CaptureMode::V1 {
+            return self.capture_batch_v1(events).await;
+        }
+
         let disable_geoip = self.options.disable_geoip;
         let is_server = self.options.is_server;
         let inner_events: Vec<InnerEvent> = events
@@ -372,6 +380,20 @@ impl Client {
             .map_err(|e| Error::Connection(e.to_string()))?;
 
         check_response(response).await
+    }
+
+    async fn capture_v1(&self, _event: Event) -> Result<(), Error> {
+        Err(Error::ServerError {
+            status: 500,
+            message: "Capture V1 not yet implemented".to_string(),
+        })
+    }
+
+    async fn capture_batch_v1(&self, _events: Vec<Event>) -> Result<(), Error> {
+        Err(Error::ServerError {
+            status: 500,
+            message: "Capture V1 not yet implemented".to_string(),
+        })
     }
 
     /// Get all remote feature flags and payloads for a user.
