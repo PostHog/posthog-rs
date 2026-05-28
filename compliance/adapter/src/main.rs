@@ -117,10 +117,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
-async fn init(
-    State(state): State<AppState>,
-    Json(req): Json<InitRequest>,
-) -> impl IntoResponse {
+async fn init(State(state): State<AppState>, Json(req): Json<InitRequest>) -> impl IntoResponse {
     let mut s = state.inner.lock().await;
 
     // Reset state
