@@ -137,7 +137,7 @@ impl AsyncFlagEventHost {
 
 impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
     fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
-        let dedup_key = build_dedup_key(&params.key, params.response.as_ref());
+        let dedup_key = build_dedup_key(&params.key, params.response.as_ref(), &params.groups);
         if self.already_reported(&params.distinct_id, &dedup_key) {
             return;
         }
@@ -167,14 +167,38 @@ impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
     }
 }
 
-fn build_dedup_key(flag_key: &str, response: Option<&FlagValue>) -> String {
+fn build_dedup_key(
+    flag_key: &str,
+    response: Option<&FlagValue>,
+    groups: &HashMap<String, String>,
+) -> String {
     let response_repr = match response {
         Some(FlagValue::Boolean(true)) => "true".to_string(),
         Some(FlagValue::Boolean(false)) => "false".to_string(),
         Some(FlagValue::String(s)) => s.clone(),
         None => "::null::".to_string(),
     };
-    format!("{flag_key}_{response_repr}")
+    if groups.is_empty() {
+        format!("{flag_key}_{response_repr}")
+    } else {
+        // Canonicalize so two equal group maps with different insertion orders
+        // produce the same dedup key — necessary for group-scoped flags to fire
+        // exactly once per distinct group context.
+        let mut sorted: Vec<(&String, &String)> = groups.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        let groups_repr: String = sorted
+            .iter()
+            .map(|(k, v)| format!("{}={}", pct(k), pct(v)))
+            .collect::<Vec<_>>()
+            .join(";");
+        format!("{flag_key}_{response_repr}_{groups_repr}")
+    }
+}
+
+fn pct(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace('=', "%3D")
+        .replace(';', "%3B")
 }
 
 /// This function constructs a new client using the options provided.
