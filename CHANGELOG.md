@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.7.2 — 2026-05-28
+
+### Patch changes
+
+- [deb361b](https://github.com/posthog/posthog-rs/commit/deb361b68fe3d8c3196b3171ad553b061df2477c) Disable the client instead of sending requests when the API key is missing or blank. — Thanks @marandaneto!
+
 ## 0.7.1 — 2026-05-21
 
 ### Patch changes
