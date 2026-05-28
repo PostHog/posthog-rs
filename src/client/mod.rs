@@ -126,11 +126,6 @@ impl ClientOptions {
         );
         self
     }
-
-    /// Create ClientOptions with properly initialized endpoint_manager
-    fn with_endpoint_manager(self) -> Self {
-        self.sanitize()
-    }
 }
 
 impl ClientOptionsBuilder {
@@ -150,7 +145,6 @@ impl From<&str> for ClientOptions {
             .api_key(api_key.to_string())
             .build()
             .expect("We always set the API key, so this is infallible")
-            .with_endpoint_manager()
     }
 }
 
@@ -162,7 +156,6 @@ impl From<(&str, &str)> for ClientOptions {
             .host(host.to_string())
             .build()
             .expect("We always set the API key, so this is infallible")
-            .with_endpoint_manager()
     }
 }
 
@@ -178,8 +171,7 @@ mod tests {
             .host(" \nhttps://eu.posthog.com/\t ")
             .personal_api_key(" \n\t ")
             .build()
-            .unwrap()
-            .sanitize();
+            .unwrap();
 
         assert_eq!(options.api_key, "test-api-key");
         assert_eq!(options.host.as_deref(), Some("https://eu.posthog.com/"));
@@ -193,8 +185,7 @@ mod tests {
             .api_key("test-api-key".to_string())
             .host(" \n\t ")
             .build()
-            .unwrap()
-            .sanitize();
+            .unwrap();
 
         assert_eq!(options.host.as_deref(), Some(US_INGESTION_ENDPOINT));
         assert_eq!(options.endpoints().api_host(), US_INGESTION_ENDPOINT);

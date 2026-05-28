@@ -407,7 +407,13 @@ async fn test_groups_parameter() {
 }
 
 #[tokio::test]
-async fn test_client_with_missing_api_key_is_noop() {
+async fn test_client_with_empty_api_key_is_noop() {
+    for api_key in [None, Some(" \n\t ")] {
+        assert_disabled_client_is_noop(api_key).await;
+    }
+}
+
+async fn assert_disabled_client_is_noop(api_key: Option<&str>) {
     let server = MockServer::start();
 
     let capture_mock = server.mock(|when, then| {
@@ -426,10 +432,11 @@ async fn test_client_with_missing_api_key_is_noop() {
         }));
     });
 
-    let options = posthog_rs::ClientOptionsBuilder::default()
-        .host(server.base_url())
-        .build()
-        .unwrap();
+    let mut options_builder = posthog_rs::ClientOptionsBuilder::default();
+    if let Some(api_key) = api_key {
+        options_builder.api_key(api_key.to_string());
+    }
+    let options = options_builder.host(server.base_url()).build().unwrap();
     assert!(options.is_disabled());
 
     let client = posthog_rs::client(options).await;
@@ -466,36 +473,6 @@ async fn test_client_with_missing_api_key_is_noop() {
 
     capture_mock.assert_hits(0);
     batch_mock.assert_hits(0);
-    flags_mock.assert_hits(0);
-}
-
-#[tokio::test]
-async fn test_client_with_whitespace_api_key_is_noop() {
-    let server = MockServer::start();
-
-    let flags_mock = server.mock(|when, then| {
-        when.method(POST).path("/flags/").query_param("v", "2");
-        then.status(200).json_body(json!({
-            "featureFlags": {},
-            "featureFlagPayloads": {}
-        }));
-    });
-
-    let options = posthog_rs::ClientOptionsBuilder::default()
-        .api_key(" \n\t ".to_string())
-        .host(server.base_url())
-        .build()
-        .unwrap();
-    assert!(options.is_disabled());
-
-    let client = posthog_rs::client(options).await;
-
-    assert!(client
-        .get_feature_flags("test-user".to_string(), None, None, None)
-        .await
-        .unwrap()
-        .0
-        .is_empty());
     flags_mock.assert_hits(0);
 }
 
