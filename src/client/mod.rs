@@ -2,6 +2,17 @@ use crate::endpoints::{EndpointManager, DEFAULT_HOST};
 use derive_builder::Builder;
 use tracing::warn;
 
+/// Selects which capture pipeline the client uses.
+///
+/// - `V0` (default): legacy `/batch/` endpoint with `api_key` in body
+/// - `V1`: new `/i/v1/analytics/events/` endpoint with `Authorization: Bearer` header
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CaptureMode {
+    #[default]
+    V0,
+    V1,
+}
+
 #[cfg(not(feature = "async-client"))]
 mod blocking;
 #[cfg(not(feature = "async-client"))]
@@ -75,6 +86,10 @@ pub struct ClientOptions {
     /// `enable_local_evaluation` is also true.
     #[builder(default = "false")]
     local_evaluation_only: bool,
+
+    /// Selects the capture pipeline. Defaults to `V0` (legacy `/batch/`).
+    #[builder(default)]
+    pub(crate) capture_mode: CaptureMode,
 
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
