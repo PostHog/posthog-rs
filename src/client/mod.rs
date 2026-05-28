@@ -33,12 +33,14 @@ pub use async_client::Client;
 ///     .unwrap();
 /// ```
 #[derive(Builder, Clone)]
+#[builder(build_fn(name = "build_unchecked", private))]
 pub struct ClientOptions {
     /// Host URL for the PostHog API (defaults to US ingestion endpoint)
     #[builder(setter(into, strip_option), default)]
     host: Option<String>,
 
-    /// Project API key (required)
+    /// Project API key. If missing or blank, the client is disabled.
+    #[builder(default)]
     api_key: String,
 
     /// Request timeout in seconds
@@ -95,7 +97,8 @@ impl ClientOptions {
     fn sanitize(mut self) -> Self {
         self.api_key = self.api_key.trim().to_string();
         if self.api_key.is_empty() {
-            warn!("api_key is empty after trimming whitespace; check your project API key");
+            warn!("api_key is empty after trimming whitespace; disabling PostHog client");
+            self.disabled = true;
         }
         self.host = Some(match self.host {
             Some(host) => {
@@ -123,10 +126,16 @@ impl ClientOptions {
         );
         self
     }
+}
 
-    /// Create ClientOptions with properly initialized endpoint_manager
-    fn with_endpoint_manager(self) -> Self {
-        self.sanitize()
+impl ClientOptionsBuilder {
+    /// Build sanitized [`ClientOptions`].
+    ///
+    /// Missing or whitespace-only API keys are allowed and disable the client so
+    /// SDK initialization remains infallible while avoiding requests with an
+    /// empty API key.
+    pub fn build(&self) -> Result<ClientOptions, ClientOptionsBuilderError> {
+        Ok(self.build_unchecked()?.sanitize())
     }
 }
 
@@ -136,7 +145,6 @@ impl From<&str> for ClientOptions {
             .api_key(api_key.to_string())
             .build()
             .expect("We always set the API key, so this is infallible")
-            .with_endpoint_manager()
     }
 }
 
@@ -148,7 +156,6 @@ impl From<(&str, &str)> for ClientOptions {
             .host(host.to_string())
             .build()
             .expect("We always set the API key, so this is infallible")
-            .with_endpoint_manager()
     }
 }
 
@@ -164,8 +171,7 @@ mod tests {
             .host(" \nhttps://eu.posthog.com/\t ")
             .personal_api_key(" \n\t ")
             .build()
-            .unwrap()
-            .sanitize();
+            .unwrap();
 
         assert_eq!(options.api_key, "test-api-key");
         assert_eq!(options.host.as_deref(), Some("https://eu.posthog.com/"));
@@ -179,10 +185,28 @@ mod tests {
             .api_key("test-api-key".to_string())
             .host(" \n\t ")
             .build()
-            .unwrap()
-            .sanitize();
+            .unwrap();
 
         assert_eq!(options.host.as_deref(), Some(US_INGESTION_ENDPOINT));
         assert_eq!(options.endpoints().api_host(), US_INGESTION_ENDPOINT);
+    }
+
+    #[test]
+    fn builder_allows_missing_api_key_and_disables_client() {
+        let options = ClientOptionsBuilder::default().build().unwrap();
+
+        assert_eq!(options.api_key, "");
+        assert!(options.is_disabled());
+    }
+
+    #[test]
+    fn builder_disables_client_for_trim_empty_api_key() {
+        let options = ClientOptionsBuilder::default()
+            .api_key(" \n\t ".to_string())
+            .build()
+            .unwrap();
+
+        assert_eq!(options.api_key, "");
+        assert!(options.is_disabled());
     }
 }
