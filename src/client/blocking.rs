@@ -212,7 +212,7 @@ impl Client {
         }
 
         if self.options.capture_mode == CaptureMode::V1 {
-            return self.capture_v1(event);
+            return self.capture_v1(vec![event]);
         }
 
         // Add geoip disable property if configured
@@ -252,7 +252,7 @@ impl Client {
         }
 
         if self.options.capture_mode == CaptureMode::V1 {
-            return self.capture_batch_v1(events);
+            return self.capture_v1(events);
         }
 
         let disable_geoip = self.options.disable_geoip;
@@ -286,14 +286,7 @@ impl Client {
         check_response(response)
     }
 
-    fn capture_v1(&self, _event: Event) -> Result<(), Error> {
-        Err(Error::ServerError {
-            status: 500,
-            message: "Capture V1 not yet implemented".to_string(),
-        })
-    }
-
-    fn capture_batch_v1(&self, _events: Vec<Event>) -> Result<(), Error> {
+    fn capture_v1(&self, _events: Vec<Event>) -> Result<(), Error> {
         Err(Error::ServerError {
             status: 500,
             message: "Capture V1 not yet implemented".to_string(),
