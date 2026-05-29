@@ -215,7 +215,7 @@ impl Client {
         }
         match self.options.capture_mode {
             CaptureMode::V0 => self.capture_v0(event),
-            CaptureMode::V1 => self.capture_v1(vec![event]).map(|_| ()),
+            CaptureMode::V1 => self.capture_v1(vec![event], false).map(|_| ()),
         }
     }
 
@@ -234,7 +234,7 @@ impl Client {
         }
         match self.options.capture_mode {
             CaptureMode::V0 => self.capture_batch_v0(events, historical_migration),
-            CaptureMode::V1 => self.capture_v1(events).map(|_| ()),
+            CaptureMode::V1 => self.capture_v1(events, historical_migration).map(|_| ()),
         }
     }
 
@@ -314,29 +314,42 @@ impl Client {
         request
     }
 
-    fn capture_v1(&self, events: Vec<Event>) -> Result<V1BatchResponse, Error> {
-        use crate::event_v1::{V1BatchRequest, V1ErrorResponse, V1Event, V1EventStatus};
+    fn capture_v1(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<V1BatchResponse, Error> {
+        use crate::event_v1::{V1BatchRequest, V1ErrorResponse};
 
         let request_id = Uuid::now_v7();
+        // `created_at` is the batch creation time; keep it stable across retries.
+        let created_at = Utc::now().to_rfc3339();
         let mut attempt: u32 = 1;
-        let mut pending_events: Vec<Event> = events;
+
+        // Pre-build the wire events exactly once. Rebuilding per attempt would
+        // re-generate timestamps (drifting the value the server keys on) and
+        // re-serialize needlessly; the V1 contract requires identical UUIDs and
+        // timestamps on every retry of the same logical request.
+        let mut pending = self.build_v1_events(&events);
         let mut final_results: HashMap<String, V1EventResult> = HashMap::new();
+        let historical_migration = historical_migration.then_some(true);
 
         let url = self.options.endpoints().build_url(Endpoint::CaptureV1);
 
         loop {
             let batch = V1BatchRequest {
-                created_at: Utc::now().to_rfc3339(),
-                historical_migration: None,
-                batch: pending_events.iter().map(V1Event::from_event).collect(),
+                created_at: created_at.clone(),
+                historical_migration,
+                batch: pending.clone(),
             };
 
             let payload =
-                serde_json::to_string(&batch).map_err(|e| Error::Serialization(e.to_string()))?;
+                serde_json::to_vec(&batch).map_err(|e| Error::Serialization(e.to_string()))?;
 
-            let headers = self.build_v1_headers(&request_id, attempt);
+            let mut headers = self.build_v1_headers(&request_id, attempt);
+            let body = self.maybe_compress(&mut headers, payload);
 
-            let response = self.client.post(&url).headers(headers).body(payload).send();
+            let response = self.client.post(&url).headers(headers).body(body).send();
 
             let response = match response {
                 Ok(resp) => resp,
@@ -381,32 +394,23 @@ impl Client {
                     );
                 }
 
-                let mut retry_events = Vec::new();
-                for event in &pending_events {
-                    let uuid_str = event.uuid().to_string();
-                    if let Some(result) = batch_resp.results.get(&uuid_str) {
-                        match result.result {
-                            V1EventStatus::Retry => {
-                                retry_events.push(event.clone());
-                            }
-                            _ => {
+                let retry_uuids = Self::collect_results(&pending, &batch_resp, &mut final_results);
+
+                if retry_uuids.is_empty() || attempt >= self.options.max_capture_retries {
+                    for v1 in &pending {
+                        let uuid_str = v1.uuid.to_string();
+                        if retry_uuids.contains(&uuid_str) {
+                            if let Some(result) = batch_resp.results.get(&uuid_str) {
                                 final_results.insert(uuid_str, result.clone());
                             }
-                        }
-                    }
-                }
-
-                if retry_events.is_empty() || attempt >= self.options.max_capture_retries {
-                    for event in &retry_events {
-                        let uuid_str = event.uuid().to_string();
-                        if let Some(result) = batch_resp.results.get(&uuid_str) {
-                            final_results.insert(uuid_str, result.clone());
                         }
                     }
                     break;
                 }
 
-                pending_events = retry_events;
+                // Prune everything the server already accounted for (ok / drop /
+                // limited / unknown); only genuine "retry" events are resent.
+                pending.retain(|v1| retry_uuids.contains(&v1.uuid.to_string()));
                 attempt += 1;
                 self.v1_backoff_sleep(attempt, retry_after);
             } else if Self::is_retryable_status(status) {
@@ -503,8 +507,72 @@ impl Client {
         std::thread::sleep(duration);
     }
 
+    /// Build the V1 wire events once, injecting `$geoip_disable` when geoip is
+    /// disabled on the client. Done a single time per logical request so values
+    /// the server keys on (UUID, timestamp) stay stable across retries.
+    fn build_v1_events(&self, events: &[Event]) -> Vec<crate::event_v1::V1Event> {
+        use crate::event_v1::V1Event;
+        let disable_geoip = self.options.disable_geoip;
+        events
+            .iter()
+            .map(|event| {
+                let mut v1 = V1Event::from_event(event);
+                if disable_geoip {
+                    if let serde_json::Value::Object(ref mut map) = v1.properties {
+                        map.insert("$geoip_disable".to_string(), serde_json::Value::Bool(true));
+                    }
+                }
+                v1
+            })
+            .collect()
+    }
+
+    /// Compress the payload in place when `capture_compression` is configured,
+    /// setting the matching `Content-Encoding` header. Falls back to the raw
+    /// payload (no header) when compression is unavailable or fails.
+    fn maybe_compress(
+        &self,
+        headers: &mut reqwest::header::HeaderMap,
+        payload: Vec<u8>,
+    ) -> Vec<u8> {
+        use reqwest::header::HeaderValue;
+        if let Some(algo) = self.options.capture_compression {
+            if let Some((compressed, encoding)) = crate::compression::compress(algo, &payload) {
+                headers.insert("content-encoding", HeaderValue::from_static(encoding));
+                return compressed;
+            }
+        }
+        payload
+    }
+
     fn is_retryable_status(status: u16) -> bool {
         matches!(status, 408 | 500 | 502 | 503 | 504)
+    }
+
+    /// Split a 200 batch response: fold terminal results (ok/drop/limited/
+    /// unknown) into `final_results` and return the set of UUIDs the server
+    /// asked to retry.
+    fn collect_results(
+        pending: &[crate::event_v1::V1Event],
+        batch_resp: &V1BatchResponse,
+        final_results: &mut HashMap<String, V1EventResult>,
+    ) -> HashSet<String> {
+        use crate::event_v1::V1EventStatus;
+        let mut retry_uuids = HashSet::new();
+        for v1 in pending {
+            let uuid_str = v1.uuid.to_string();
+            if let Some(result) = batch_resp.results.get(&uuid_str) {
+                match result.result {
+                    V1EventStatus::Retry => {
+                        retry_uuids.insert(uuid_str);
+                    }
+                    _ => {
+                        final_results.insert(uuid_str, result.clone());
+                    }
+                }
+            }
+        }
+        retry_uuids
     }
 
     fn count_results(resp: &V1BatchResponse) -> HashMap<(String, Option<String>), usize> {

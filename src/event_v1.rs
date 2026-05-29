@@ -26,6 +26,11 @@ impl V1Event {
     pub fn from_event(event: &Event) -> Self {
         let mut properties = event.properties().clone();
 
+        // `process_person_profile` travels in `options`; the server injects the
+        // `$process_person_profile` property from that option. Drop any copy in
+        // properties so the option is the single source of truth (no duplicate).
+        properties.remove("$process_person_profile");
+
         if !event.groups().is_empty() {
             properties.insert(
                 "$groups".into(),
@@ -75,6 +80,11 @@ pub struct V1BatchRequest {
 }
 
 /// Per-event result status returned by the V1 endpoint.
+///
+/// `Unknown` is a forward-compatibility catch-all: if the server introduces a
+/// new per-event result we don't recognize, deserialization still succeeds and
+/// the event is treated as terminal (never retried) rather than failing the
+/// whole batch response parse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum V1EventStatus {
@@ -82,6 +92,8 @@ pub enum V1EventStatus {
     Drop,
     Limited,
     Retry,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Per-event result entry in the V1 response.
@@ -121,8 +133,11 @@ mod tests {
 
         assert_eq!(v1.event, "test_event");
         assert_eq!(v1.distinct_id, "user-1");
-        assert!(v1.options.process_person_profile);
-        assert!(!v1.options.cookieless_mode);
+        // Identified events leave person processing unset so the server applies
+        // its default; opt-in flags are omitted entirely.
+        assert_eq!(v1.options.process_person_profile, None);
+        assert_eq!(v1.options.cookieless_mode, None);
+        assert_eq!(v1.options.disable_skew_correction, None);
         assert!(v1.session_id.is_none());
         assert!(v1.window_id.is_none());
     }
@@ -133,7 +148,43 @@ mod tests {
         let v1 = V1Event::from_event(&event);
 
         assert_eq!(v1.event, "anon_event");
-        assert!(!v1.options.process_person_profile);
+        assert_eq!(v1.options.process_person_profile, Some(false));
+        // The option carries person-processing intent; the property copy must be
+        // stripped so the server does not see a duplicate source.
+        let props = v1.properties.as_object().unwrap();
+        assert!(!props.contains_key("$process_person_profile"));
+    }
+
+    #[test]
+    fn v1_event_options_overrides_serialize_and_unset_are_omitted() {
+        let mut event = Event::new("test_event", "user-1");
+        event.set_options(|opts| {
+            opts.cookieless_mode = Some(true);
+            opts.process_person_profile = Some(false);
+            opts.product_tour_id = Some("tour-42".to_string());
+            // disable_skew_correction intentionally left unset (None).
+        });
+
+        let v1 = V1Event::from_event(&event);
+        let json = serde_json::to_value(&v1).unwrap();
+        let options = json.get("options").unwrap().as_object().unwrap();
+
+        // Overridden values travel on the wire as set.
+        assert_eq!(
+            options.get("cookieless_mode"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            options.get("process_person_profile"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            options.get("product_tour_id"),
+            Some(&serde_json::json!("tour-42"))
+        );
+        // Unset options must be omitted entirely so the server applies its own
+        // defaults rather than the SDK forcing a value.
+        assert!(!options.contains_key("disable_skew_correction"));
     }
 
     #[test]
@@ -161,7 +212,7 @@ mod tests {
         let props = v1.properties.as_object().unwrap();
         let groups = props.get("$groups").unwrap().as_object().unwrap();
         assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
-        assert!(v1.options.process_person_profile);
+        assert_eq!(v1.options.process_person_profile, Some(true));
     }
 
     #[test]
@@ -202,6 +253,23 @@ mod tests {
         assert_eq!(
             resp.results["550e8400-e29b-41d4-a716-446655440001"].details,
             Some("not_persisted".to_string())
+        );
+    }
+
+    #[test]
+    fn v1_unknown_status_deserializes_as_unknown() {
+        let json = r#"{
+            "results": {
+                "550e8400-e29b-41d4-a716-446655440000": {"result": "ok"},
+                "550e8400-e29b-41d4-a716-446655440001": {"result": "some_future_status", "details": "new_detail"}
+            }
+        }"#;
+
+        let resp: V1BatchResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.results.len(), 2);
+        assert_eq!(
+            resp.results["550e8400-e29b-41d4-a716-446655440001"].result,
+            V1EventStatus::Unknown
         );
     }
 

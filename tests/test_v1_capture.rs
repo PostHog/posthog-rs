@@ -228,7 +228,12 @@ async fn v1_capture_sends_event_options() {
     let server = MockServer::start();
 
     let mock = server.mock(|when, then| {
-        when.method(POST).path("/i/v1/analytics/events");
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            // Overridden options must actually appear on the wire, and unset
+            // options must be omitted (the harness has no path to test this).
+            .body_contains("\"cookieless_mode\":true")
+            .body_contains("\"process_person_profile\":false");
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({
@@ -239,11 +244,123 @@ async fn v1_capture_sends_event_options() {
     let client = create_v1_client(server.base_url()).await;
     let mut event = Event::new("test", "user-1");
     event.set_options(|opts| {
-        opts.cookieless_mode = true;
-        opts.process_person_profile = false;
+        opts.cookieless_mode = Some(true);
+        opts.process_person_profile = Some(false);
     });
 
     client.capture(event).await.unwrap();
+    mock.assert();
+}
+
+#[tokio::test]
+async fn v1_capture_injects_geoip_disable_when_configured() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .body_contains("\"$geoip_disable\":true");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let options = ClientOptionsBuilder::default()
+        .api_key("phc_test_token".to_string())
+        .host(server.base_url())
+        .capture_mode(CaptureMode::V1)
+        .disable_geoip(true)
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(options).await;
+
+    client.capture(Event::new("test", "user-1")).await.unwrap();
+    mock.assert();
+}
+
+#[tokio::test]
+async fn v1_capture_batch_sets_historical_migration() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .body_contains("\"historical_migration\":true");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    let events = vec![Event::new("a", "user-1"), Event::new("b", "user-1")];
+    client.capture_batch(events, true).await.unwrap();
+    mock.assert();
+}
+
+#[tokio::test]
+async fn v1_capture_preserves_uuid_and_timestamp_across_retries() {
+    let server = MockServer::start();
+    let uuid = uuid::Uuid::now_v7();
+    let ts = "2024-01-01T00:00:00.000Z";
+
+    let fail_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-attempt", "1")
+            .body_contains(uuid.to_string())
+            .body_contains(ts);
+        then.status(503)
+            .header("retry-after", "1")
+            .json_body(json!({ "error": "service_unavailable" }));
+    });
+    let success_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-attempt", "2")
+            .body_contains(uuid.to_string())
+            .body_contains(ts);
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    let mut event = Event::new("test", "user-1");
+    event.set_uuid(uuid);
+    event
+        .set_timestamp(chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap())
+        .unwrap();
+
+    client.capture(event).await.unwrap();
+    fail_mock.assert();
+    success_mock.assert();
+}
+
+#[cfg(feature = "compression")]
+#[tokio::test]
+async fn v1_capture_sends_gzip_content_encoding() {
+    use posthog_rs::CaptureCompression;
+
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("content-encoding", "gzip");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let options = ClientOptionsBuilder::default()
+        .api_key("phc_test_token".to_string())
+        .host(server.base_url())
+        .capture_mode(CaptureMode::V1)
+        .capture_compression(CaptureCompression::Gzip)
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(options).await;
+
+    client.capture(Event::new("test", "user-1")).await.unwrap();
     mock.assert();
 }
 

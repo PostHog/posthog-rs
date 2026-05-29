@@ -10,24 +10,20 @@ use crate::Error;
 
 /// Control-plane options for V1 capture. These affect routing and processing
 /// decisions server-side without requiring property deserialization.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// `cookieless_mode` and `disable_skew_correction` are opt-in: when left unset
+/// they are omitted from the wire payload entirely, letting the server apply its
+/// own defaults instead of the SDK forcing a `false`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct EventOptions {
-    pub cookieless_mode: bool,
-    pub disable_skew_correction: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookieless_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_skew_correction: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_tour_id: Option<String>,
-    pub process_person_profile: bool,
-}
-
-impl Default for EventOptions {
-    fn default() -> Self {
-        Self {
-            cookieless_mode: false,
-            disable_skew_correction: false,
-            product_tour_id: None,
-            process_person_profile: true,
-        }
-    }
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_person_profile: Option<bool>,
 }
 
 /// An [`Event`] represents an interaction a user has with your app or
@@ -73,7 +69,7 @@ impl Event {
             timestamp: None,
             uuid: Uuid::now_v7(),
             options: EventOptions {
-                process_person_profile: false,
+                process_person_profile: Some(false),
                 ..EventOptions::default()
             },
         };
@@ -100,7 +96,7 @@ impl Event {
     /// Note that group events cannot be personless, and will be automatically upgraded to include person profile processing if
     /// they were anonymous. This might lead to "empty" person profiles being created.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
-        self.options.process_person_profile = true;
+        self.options.process_person_profile = Some(true);
         self.insert_prop("$process_person_profile", true)
             .expect("bools are safe for serde");
         self.groups.insert(group_name.into(), group_id.into());

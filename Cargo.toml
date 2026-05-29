@@ -30,7 +30,9 @@ tokio = { version = "1", features = [
     "time",
     "macros",
 ], optional = true }
-backon = "1.5"
+flate2 = { version = "1.0", optional = true }
+brotli = { version = "7.0", optional = true }
+zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
 dotenv = "0.15.0"
@@ -45,6 +47,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 default = ["async-client"]
 e2e-test = []
 async-client = ["tokio"]
+# Enables request-body compression for the V1 capture pipeline
+# (gzip/deflate/br/zstd) selected via `ClientOptions::capture_compression`.
+compression = ["flate2", "brotli", "zstd"]
 
 [workspace]
 members = ["compliance/adapter"]

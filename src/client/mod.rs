@@ -15,6 +15,32 @@ pub enum CaptureMode {
     V1,
 }
 
+/// Request-body compression algorithm for the V1 capture pipeline.
+///
+/// When set on [`ClientOptions`], V1 capture requests are compressed and the
+/// matching `Content-Encoding` header is sent. The variant string matches the
+/// HTTP `Content-Encoding` token the server expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureCompression {
+    Gzip,
+    Deflate,
+    Br,
+    Zstd,
+}
+
+impl CaptureCompression {
+    /// The HTTP `Content-Encoding` token for this algorithm.
+    #[cfg_attr(not(feature = "compression"), allow(dead_code))]
+    pub(crate) fn content_encoding(self) -> &'static str {
+        match self {
+            CaptureCompression::Gzip => "gzip",
+            CaptureCompression::Deflate => "deflate",
+            CaptureCompression::Br => "br",
+            CaptureCompression::Zstd => "zstd",
+        }
+    }
+}
+
 #[cfg(not(feature = "async-client"))]
 mod blocking;
 #[cfg(not(feature = "async-client"))]
@@ -104,6 +130,12 @@ pub struct ClientOptions {
     /// Maximum retry backoff duration in milliseconds (default: 30000)
     #[builder(default = "30000")]
     pub(crate) retry_max_backoff_ms: u64,
+
+    /// Optional request-body compression for the V1 capture pipeline. When
+    /// `None` (default), bodies are sent uncompressed. Requires the
+    /// `compression` crate feature to take effect.
+    #[builder(default, setter(strip_option))]
+    pub(crate) capture_compression: Option<CaptureCompression>,
 
     /// Extra HTTP headers injected into every outbound capture request.
     /// Used by the SDK test harness adapter to attach `X-Test-Id` for
