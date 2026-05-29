@@ -32,3 +32,4 @@ jobs:
       adapter-context: .
       test-harness-version: latest
       report-name: rust-sdk-compliance-report-v1
+      concurrency: 10

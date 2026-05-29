@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -14,9 +15,11 @@ use posthog_rs::{CaptureMode, Client, ClientOptionsBuilder, Event};
 
 #[derive(Clone)]
 struct AppState {
-    inner: Arc<Mutex<AdapterState>>,
+    instances: Arc<Mutex<HashMap<String, AdapterState>>>,
     capture_mode: CaptureMode,
 }
+
+const DEFAULT_TEST_ID: &str = "_global";
 
 struct AdapterState {
     client: Option<Client>,
@@ -79,12 +82,25 @@ struct CaptureRequest {
     timestamp: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct TestIdParam {
+    #[serde(default)]
+    test_id: Option<String>,
+}
+
+impl TestIdParam {
+    fn key(&self) -> &str {
+        self.test_id.as_deref().unwrap_or(DEFAULT_TEST_ID)
+    }
+}
+
 #[derive(Serialize)]
 struct HealthResponse {
     sdk_name: &'static str,
     sdk_version: &'static str,
     adapter_version: &'static str,
     capabilities: Vec<&'static str>,
+    supports_parallel: bool,
 }
 
 #[derive(Serialize)]
@@ -114,13 +130,18 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         sdk_version: env!("CARGO_PKG_VERSION"),
         adapter_version: "0.1.0",
         capabilities: vec![capability],
+        supports_parallel: true,
     })
 }
 
-async fn init(State(state): State<AppState>, Json(req): Json<InitRequest>) -> impl IntoResponse {
-    let mut s = state.inner.lock().await;
+async fn init(
+    State(state): State<AppState>,
+    Query(params): Query<TestIdParam>,
+    Json(req): Json<InitRequest>,
+) -> impl IntoResponse {
+    let mut instances = state.instances.lock().await;
+    let s = instances.entry(params.key().to_string()).or_default();
 
-    // Reset state
     *s = AdapterState::default();
 
     let options = ClientOptionsBuilder::default()
@@ -149,9 +170,11 @@ async fn init(State(state): State<AppState>, Json(req): Json<InitRequest>) -> im
 
 async fn capture_event(
     State(state): State<AppState>,
+    Query(params): Query<TestIdParam>,
     Json(req): Json<CaptureRequest>,
 ) -> impl IntoResponse {
-    let mut s = state.inner.lock().await;
+    let mut instances = state.instances.lock().await;
+    let s = instances.entry(params.key().to_string()).or_default();
 
     let client = match &s.client {
         Some(c) => c,
@@ -186,7 +209,6 @@ async fn capture_event(
         Ok(()) => {
             s.total_events_captured += 1;
             s.pending_events += 1;
-            // For V0, events are sent immediately by capture()
             s.total_events_sent += 1;
             s.pending_events -= 1;
             if s.pending_events < 0 {
@@ -207,8 +229,21 @@ async fn capture_event(
     }
 }
 
-async fn flush(State(state): State<AppState>) -> impl IntoResponse {
-    let s = state.inner.lock().await;
+async fn flush(
+    State(state): State<AppState>,
+    Query(params): Query<TestIdParam>,
+) -> impl IntoResponse {
+    let instances = state.instances.lock().await;
+    let s = match instances.get(params.key()) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "SDK not initialized" })),
+            )
+                .into_response();
+        }
+    };
 
     if s.client.is_none() {
         return (
@@ -218,7 +253,6 @@ async fn flush(State(state): State<AppState>) -> impl IntoResponse {
             .into_response();
     }
 
-    // posthog-rs sends events immediately in capture(), so flush is a no-op
     Json(serde_json::json!({
         "success": true,
         "events_flushed": s.total_events_sent
@@ -226,21 +260,41 @@ async fn flush(State(state): State<AppState>) -> impl IntoResponse {
     .into_response()
 }
 
-async fn get_state(State(state): State<AppState>) -> Json<StateResponse> {
-    let s = state.inner.lock().await;
-    Json(StateResponse {
-        pending_events: s.pending_events,
-        total_events_captured: s.total_events_captured,
-        total_events_sent: s.total_events_sent,
-        total_retries: s.total_retries,
-        last_error: s.last_error.clone(),
-        requests_made: s.requests_made.clone(),
-    })
+async fn get_state(
+    State(state): State<AppState>,
+    Query(params): Query<TestIdParam>,
+) -> impl IntoResponse {
+    let instances = state.instances.lock().await;
+    let s = instances.get(params.key());
+
+    match s {
+        Some(s) => Json(serde_json::json!(StateResponse {
+            pending_events: s.pending_events,
+            total_events_captured: s.total_events_captured,
+            total_events_sent: s.total_events_sent,
+            total_retries: s.total_retries,
+            last_error: s.last_error.clone(),
+            requests_made: s.requests_made.clone(),
+        }))
+        .into_response(),
+        None => Json(serde_json::json!(StateResponse {
+            pending_events: 0,
+            total_events_captured: 0,
+            total_events_sent: 0,
+            total_retries: 0,
+            last_error: None,
+            requests_made: vec![],
+        }))
+        .into_response(),
+    }
 }
 
-async fn reset(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let mut s = state.inner.lock().await;
-    *s = AdapterState::default();
+async fn reset(
+    State(state): State<AppState>,
+    Query(params): Query<TestIdParam>,
+) -> Json<serde_json::Value> {
+    let mut instances = state.instances.lock().await;
+    instances.remove(params.key());
     Json(serde_json::json!({ "success": true }))
 }
 
@@ -251,10 +305,10 @@ async fn main() {
         CaptureMode::V0 => "v0",
         CaptureMode::V1 => "v1",
     };
-    eprintln!("Starting posthog-rs SDK adapter (CAPTURE_MODE={mode_str})");
+    eprintln!("Starting posthog-rs SDK adapter (CAPTURE_MODE={mode_str}, parallel=true)");
 
     let state = AppState {
-        inner: Arc::new(Mutex::new(AdapterState::default())),
+        instances: Arc::new(Mutex::new(HashMap::new())),
         capture_mode,
     };
 
