@@ -27,6 +27,10 @@ pub use error::Error;
 
 // Event
 pub use event::Event;
+pub use event::EventOptions;
+
+// V1 Capture types
+pub use event_v1::{V1BatchResponse, V1EventResult, V1EventStatus};
 
 // Feature Flags
 pub use feature_flag_evaluations::{EvaluateFlagsOptions, FeatureFlagEvaluations};

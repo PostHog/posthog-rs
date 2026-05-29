@@ -2,11 +2,33 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
 use semver::Version;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::feature_flag_evaluations::FeatureFlagEvaluations;
 use crate::Error;
+
+/// Control-plane options for V1 capture. These affect routing and processing
+/// decisions server-side without requiring property deserialization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventOptions {
+    pub cookieless_mode: bool,
+    pub disable_skew_correction: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_tour_id: Option<String>,
+    pub process_person_profile: bool,
+}
+
+impl Default for EventOptions {
+    fn default() -> Self {
+        Self {
+            cookieless_mode: false,
+            disable_skew_correction: false,
+            product_tour_id: None,
+            process_person_profile: true,
+        }
+    }
+}
 
 /// An [`Event`] represents an interaction a user has with your app or
 /// website. Examples include button clicks, pageviews, query completions, and signups.
@@ -21,6 +43,8 @@ pub struct Event {
     groups: HashMap<String, String>,
     timestamp: Option<NaiveDateTime>,
     uuid: Uuid,
+    #[serde(skip)]
+    options: EventOptions,
 }
 
 impl Event {
@@ -34,6 +58,7 @@ impl Event {
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
+            options: EventOptions::default(),
         }
     }
 
@@ -47,6 +72,10 @@ impl Event {
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
+            options: EventOptions {
+                process_person_profile: false,
+                ..EventOptions::default()
+            },
         };
         res.insert_prop("$process_person_profile", false)
             .expect("bools are safe for serde");
@@ -71,7 +100,7 @@ impl Event {
     /// Note that group events cannot be personless, and will be automatically upgraded to include person profile processing if
     /// they were anonymous. This might lead to "empty" person profiles being created.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
-        // You cannot disable person profile processing for groups
+        self.options.process_person_profile = true;
         self.insert_prop("$process_person_profile", true)
             .expect("bools are safe for serde");
         self.groups.insert(group_name.into(), group_id.into());
@@ -109,6 +138,40 @@ impl Event {
             self.properties.insert(key, value);
         }
         self
+    }
+
+    /// Mutate the V1 capture options for this event.
+    pub fn set_options<F: FnOnce(&mut EventOptions)>(&mut self, f: F) {
+        f(&mut self.options);
+    }
+
+    /// Access the event options.
+    pub fn options(&self) -> &EventOptions {
+        &self.options
+    }
+
+    pub(crate) fn event_name(&self) -> &str {
+        &self.event
+    }
+
+    pub(crate) fn distinct_id(&self) -> &str {
+        &self.distinct_id
+    }
+
+    pub(crate) fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+
+    pub(crate) fn timestamp(&self) -> Option<NaiveDateTime> {
+        self.timestamp
+    }
+
+    pub(crate) fn properties(&self) -> &HashMap<String, serde_json::Value> {
+        &self.properties
+    }
+
+    pub(crate) fn groups(&self) -> &HashMap<String, String> {
+        &self.groups
     }
 }
 

@@ -2,12 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use chrono::Utc;
 use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
+use uuid::Uuid;
 
 use crate::endpoints::Endpoint;
 use crate::event::BatchRequest;
+use crate::event_v1::{V1BatchResponse, V1EventResult};
 use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
     FlagCalledEventParams,
@@ -221,17 +224,35 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 impl Client {
     /// Capture the provided event, sending it to PostHog.
     #[instrument(skip(self, event), level = "debug")]
-    pub async fn capture(&self, mut event: Event) -> Result<(), Error> {
+    pub async fn capture(&self, event: Event) -> Result<(), Error> {
         if self.options.is_disabled() {
             trace!("Client is disabled, skipping capture");
             return Ok(());
         }
-
-        if self.options.capture_mode == CaptureMode::V1 {
-            return self.capture_v1(vec![event]).await;
+        match self.options.capture_mode {
+            CaptureMode::V0 => self.capture_v0(event).await,
+            CaptureMode::V1 => self.capture_v1(vec![event]).await.map(|_| ()),
         }
+    }
 
-        // Add geoip disable property if configured
+    /// Capture a collection of events with a single request. Events are sent to
+    /// the `/batch/` endpoint. Set `historical_migration` to `true` to route
+    /// events to the historical ingestion topic, bypassing the main pipeline.
+    pub async fn capture_batch(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<(), Error> {
+        if self.options.is_disabled() {
+            return Ok(());
+        }
+        match self.options.capture_mode {
+            CaptureMode::V0 => self.capture_batch_v0(events, historical_migration).await,
+            CaptureMode::V1 => self.capture_v1(events).await.map(|_| ()),
+        }
+    }
+
+    async fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
         if self.options.disable_geoip {
             event.insert_prop("$geoip_disable", true).ok();
         }
@@ -258,22 +279,11 @@ impl Client {
         check_response(response).await
     }
 
-    /// Capture a collection of events with a single request. Events are sent to
-    /// the `/batch/` endpoint. Set `historical_migration` to `true` to route
-    /// events to the historical ingestion topic, bypassing the main pipeline.
-    pub async fn capture_batch(
+    async fn capture_batch_v0(
         &self,
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<(), Error> {
-        if self.options.is_disabled() {
-            return Ok(());
-        }
-
-        if self.options.capture_mode == CaptureMode::V1 {
-            return self.capture_v1(events).await;
-        }
-
         let disable_geoip = self.options.disable_geoip;
         let inner_events: Vec<InnerEvent> = events
             .into_iter()
@@ -318,11 +328,216 @@ impl Client {
         request
     }
 
-    async fn capture_v1(&self, _events: Vec<Event>) -> Result<(), Error> {
-        Err(Error::ServerError {
-            status: 500,
-            message: "Capture V1 not yet implemented".to_string(),
+    async fn capture_v1(&self, events: Vec<Event>) -> Result<V1BatchResponse, Error> {
+        use crate::event_v1::{V1BatchRequest, V1ErrorResponse, V1Event, V1EventStatus};
+
+        let request_id = Uuid::now_v7();
+        let mut attempt: u32 = 1;
+        let mut pending_events: Vec<Event> = events;
+        let mut final_results: HashMap<String, V1EventResult> = HashMap::new();
+
+        let url = self.options.endpoints().build_url(Endpoint::CaptureV1);
+
+        loop {
+            let batch = V1BatchRequest {
+                created_at: Utc::now().to_rfc3339(),
+                historical_migration: None,
+                batch: pending_events.iter().map(V1Event::from_event).collect(),
+            };
+
+            let payload =
+                serde_json::to_string(&batch).map_err(|e| Error::Serialization(e.to_string()))?;
+
+            let headers = self.build_v1_headers(&request_id, attempt);
+
+            let response = self
+                .client
+                .post(&url)
+                .headers(headers)
+                .body(payload)
+                .send()
+                .await;
+
+            let response = match response {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt >= self.options.max_capture_retries {
+                        return Err(Error::Connection(e.to_string()));
+                    }
+                    debug!(
+                        request_id = %request_id,
+                        attempt,
+                        error = %e,
+                        "V1 capture request failed, will retry"
+                    );
+                    attempt += 1;
+                    self.v1_backoff_sleep(attempt, None).await;
+                    continue;
+                }
+            };
+
+            let status = response.status().as_u16();
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+
+            if status == 200 {
+                let batch_resp: V1BatchResponse =
+                    serde_json::from_str(&body).map_err(|e| Error::Serialization(e.to_string()))?;
+
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let result_counts = Self::count_results(&batch_resp);
+                    debug!(
+                        request_id = %request_id,
+                        attempt,
+                        results = ?result_counts,
+                        "V1 capture batch response"
+                    );
+                }
+
+                let mut retry_events = Vec::new();
+                for event in &pending_events {
+                    let uuid_str = event.uuid().to_string();
+                    if let Some(result) = batch_resp.results.get(&uuid_str) {
+                        match result.result {
+                            V1EventStatus::Retry => {
+                                retry_events.push(event.clone());
+                            }
+                            _ => {
+                                final_results.insert(uuid_str, result.clone());
+                            }
+                        }
+                    }
+                }
+
+                if retry_events.is_empty() || attempt >= self.options.max_capture_retries {
+                    for event in &retry_events {
+                        let uuid_str = event.uuid().to_string();
+                        if let Some(result) = batch_resp.results.get(&uuid_str) {
+                            final_results.insert(uuid_str, result.clone());
+                        }
+                    }
+                    break;
+                }
+
+                pending_events = retry_events;
+                attempt += 1;
+                self.v1_backoff_sleep(attempt, retry_after).await;
+            } else if Self::is_retryable_status(status) {
+                let error_desc = serde_json::from_str::<V1ErrorResponse>(&body)
+                    .ok()
+                    .and_then(|e| e.error_description)
+                    .unwrap_or_else(|| body.clone());
+
+                debug!(
+                    request_id = %request_id,
+                    attempt,
+                    status,
+                    error = %error_desc,
+                    "V1 capture request failed, will retry"
+                );
+
+                if attempt >= self.options.max_capture_retries {
+                    return Err(Error::from_http_response(status, body)
+                        .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))));
+                }
+                attempt += 1;
+                self.v1_backoff_sleep(attempt, retry_after).await;
+            } else {
+                return Err(Error::from_http_response(status, body)
+                    .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))));
+            }
+        }
+
+        Ok(V1BatchResponse {
+            results: final_results,
         })
+    }
+
+    fn build_v1_headers(&self, request_id: &Uuid, attempt: u32) -> reqwest::header::HeaderMap {
+        use reqwest::header::{HeaderMap, HeaderValue};
+
+        let version = env!("CARGO_PKG_VERSION");
+        let sdk_info = format!("posthog-rust/{version}");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {}", self.options.api_key))
+                .unwrap_or_else(|_| HeaderValue::from_static("Bearer invalid")),
+        );
+        headers.insert(
+            "user-agent",
+            HeaderValue::from_str(&sdk_info)
+                .unwrap_or_else(|_| HeaderValue::from_static("posthog-rust")),
+        );
+        headers.insert(
+            "posthog-sdk-info",
+            HeaderValue::from_str(&sdk_info)
+                .unwrap_or_else(|_| HeaderValue::from_static("posthog-rust")),
+        );
+        headers.insert(
+            "posthog-attempt",
+            HeaderValue::from_str(&attempt.to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("1")),
+        );
+        headers.insert(
+            "posthog-request-id",
+            HeaderValue::from_str(&request_id.to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+        );
+        headers.insert(
+            "posthog-request-timestamp",
+            HeaderValue::from_str(&Utc::now().to_rfc3339())
+                .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+        );
+        if let Some(ref extra) = self.options.extra_capture_headers {
+            for (k, v) in extra {
+                if let (Ok(name), Ok(val)) = (
+                    reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                    HeaderValue::from_str(v),
+                ) {
+                    headers.insert(name, val);
+                }
+            }
+        }
+        headers
+    }
+
+    async fn v1_backoff_sleep(&self, attempt: u32, retry_after_secs: Option<u64>) {
+        let duration = if let Some(secs) = retry_after_secs {
+            Duration::from_secs(secs)
+        } else {
+            let base_ms = self.options.retry_initial_backoff_ms;
+            let max_ms = self.options.retry_max_backoff_ms;
+            let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
+            Duration::from_millis(backoff_ms.min(max_ms))
+        };
+        tokio::time::sleep(duration).await;
+    }
+
+    fn is_retryable_status(status: u16) -> bool {
+        matches!(status, 408 | 500 | 502 | 503 | 504)
+    }
+
+    fn count_results(resp: &V1BatchResponse) -> HashMap<(String, Option<String>), usize> {
+        let mut counts: HashMap<(String, Option<String>), usize> = HashMap::new();
+        for result in resp.results.values() {
+            let key = (
+                format!("{:?}", result.result).to_lowercase(),
+                result.details.clone(),
+            );
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts
     }
 
     /// Get all feature flags for a user

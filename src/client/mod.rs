@@ -90,8 +90,20 @@ pub struct ClientOptions {
     local_evaluation_only: bool,
 
     /// Selects the capture pipeline. Defaults to `V0` (legacy `/batch/`).
-    #[builder(default)]
+    #[builder(default, setter(into))]
     pub(crate) capture_mode: CaptureMode,
+
+    /// Maximum retry attempts for V1 capture (default: 3)
+    #[builder(default = "3")]
+    pub(crate) max_capture_retries: u32,
+
+    /// Initial retry backoff duration in milliseconds (default: 200)
+    #[builder(default = "200")]
+    pub(crate) retry_initial_backoff_ms: u64,
+
+    /// Maximum retry backoff duration in milliseconds (default: 30000)
+    #[builder(default = "30000")]
+    pub(crate) retry_max_backoff_ms: u64,
 
     /// Extra HTTP headers injected into every outbound capture request.
     /// Used by the SDK test harness adapter to attach `X-Test-Id` for

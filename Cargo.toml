@@ -30,6 +30,7 @@ tokio = { version = "1", features = [
     "time",
     "macros",
 ], optional = true }
+backon = "1.5"
 
 [dev-dependencies]
 dotenv = "0.15.0"
