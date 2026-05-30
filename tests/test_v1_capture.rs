@@ -1,4 +1,4 @@
-#![cfg(feature = "async-client")]
+#![cfg(all(feature = "async-client", feature = "capture-v1"))]
 
 use httpmock::prelude::*;
 use posthog_rs::{CaptureMode, ClientOptionsBuilder, Event};
