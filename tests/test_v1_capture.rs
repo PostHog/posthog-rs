@@ -9,7 +9,7 @@ async fn create_v1_client(base_url: String) -> posthog_rs::Client {
         .api_key("phc_test_token".to_string())
         .host(base_url)
         .capture_mode(CaptureMode::V1)
-        .max_capture_retries(3u32)
+        .max_capture_attempts(3u32)
         .retry_initial_backoff_ms(10u64)
         .retry_max_backoff_ms(50u64)
         .build()
@@ -76,7 +76,7 @@ async fn v1_capture_retries_on_server_error() {
             .header("posthog-attempt", "1");
         then.status(503)
             .header("content-type", "application/json")
-            .header("retry-after", "1")
+            .header("retry-after", "0")
             .json_body(json!({
                 "error": "service_unavailable",
                 "error_description": "Service Unavailable"
@@ -310,7 +310,7 @@ async fn v1_capture_preserves_uuid_and_timestamp_across_retries() {
             .body_contains(uuid.to_string())
             .body_contains(ts);
         then.status(503)
-            .header("retry-after", "1")
+            .header("retry-after", "0")
             .json_body(json!({ "error": "service_unavailable" }));
     });
     let success_mock = server.mock(|when, then| {

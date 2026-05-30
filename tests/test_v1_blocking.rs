@@ -9,7 +9,7 @@ fn create_v1_client(base_url: String) -> posthog_rs::Client {
         .api_key("phc_test_token".to_string())
         .host(base_url)
         .capture_mode(CaptureMode::V1)
-        .max_capture_retries(3u32)
+        .max_capture_attempts(3u32)
         .retry_initial_backoff_ms(10u64)
         .retry_max_backoff_ms(50u64)
         .build()

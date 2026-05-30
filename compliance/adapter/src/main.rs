@@ -178,7 +178,7 @@ async fn init(
     // The harness `max_retries` counts retries; the SDK option counts total
     // attempts (initial + retries), so add one.
     if let Some(retries) = req.max_retries {
-        builder.max_capture_retries(retries.saturating_add(1));
+        builder.max_capture_attempts(retries.saturating_add(1));
     }
 
     if req.enable_compression.unwrap_or(false) {

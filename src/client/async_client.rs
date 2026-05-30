@@ -395,7 +395,7 @@ impl Client {
             let response = match response {
                 Ok(resp) => resp,
                 Err(e) => {
-                    if attempt >= self.options.max_capture_retries {
+                    if attempt >= self.options.max_capture_attempts {
                         return Err(Error::Connection(e.to_string()));
                     }
                     debug!(
@@ -438,7 +438,7 @@ impl Client {
 
                 let retry_uuids = Self::collect_results(&pending, &batch_resp, &mut final_results);
 
-                if retry_uuids.is_empty() || attempt >= self.options.max_capture_retries {
+                if retry_uuids.is_empty() || attempt >= self.options.max_capture_attempts {
                     for v1 in &pending {
                         let uuid_str = v1.uuid.to_string();
                         if retry_uuids.contains(&uuid_str) {
@@ -469,7 +469,7 @@ impl Client {
                     "V1 capture request failed, will retry"
                 );
 
-                if attempt >= self.options.max_capture_retries {
+                if attempt >= self.options.max_capture_attempts {
                     return Err(Error::from_http_response(status, body)
                         .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))));
                 }

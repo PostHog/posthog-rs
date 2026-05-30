@@ -119,10 +119,11 @@ pub struct ClientOptions {
     #[builder(default, setter(into))]
     pub(crate) capture_mode: CaptureMode,
 
-    /// Maximum retry attempts for V1 capture (default: 3)
+    /// Maximum number of attempts for V1 capture requests (default: 3).
+    /// Includes the initial attempt, so `3` means 1 initial + 2 retries.
     #[builder(default = "3")]
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
-    pub(crate) max_capture_retries: u32,
+    pub(crate) max_capture_attempts: u32,
 
     /// Initial retry backoff duration in milliseconds (default: 200)
     #[builder(default = "200")]
