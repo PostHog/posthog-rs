@@ -13,6 +13,8 @@ use tokio::sync::Mutex;
 
 use posthog_rs::{CaptureMode, Client, ClientOptionsBuilder, Event};
 
+const SUPPORTS_PARALLEL: bool = true;
+
 #[derive(Clone)]
 struct AppState {
     instances: Arc<Mutex<HashMap<String, AdapterState>>>,
@@ -23,11 +25,10 @@ const DEFAULT_TEST_ID: &str = "_global";
 
 struct AdapterState {
     client: Option<Client>,
+    historical_migration: bool,
     total_events_captured: u64,
     total_events_sent: u64,
-    total_retries: u64,
     last_error: Option<String>,
-    requests_made: Vec<RequestRecord>,
     pending_events: i64,
 }
 
@@ -35,23 +36,13 @@ impl Default for AdapterState {
     fn default() -> Self {
         Self {
             client: None,
+            historical_migration: false,
             total_events_captured: 0,
             total_events_sent: 0,
-            total_retries: 0,
             last_error: None,
-            requests_made: Vec::new(),
             pending_events: 0,
         }
     }
-}
-
-#[derive(Serialize, Clone)]
-struct RequestRecord {
-    timestamp_ms: u64,
-    status_code: u16,
-    retry_attempt: u32,
-    event_count: usize,
-    uuid_list: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +61,10 @@ struct InitRequest {
     #[allow(dead_code)]
     #[serde(default)]
     enable_compression: Option<bool>,
+    #[serde(default)]
+    disable_geoip: Option<bool>,
+    #[serde(default)]
+    historical_migration: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +75,8 @@ struct CaptureRequest {
     properties: Option<serde_json::Value>,
     #[serde(default)]
     timestamp: Option<String>,
+    #[serde(default)]
+    options: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -110,7 +107,6 @@ struct StateResponse {
     total_events_sent: u64,
     total_retries: u64,
     last_error: Option<String>,
-    requests_made: Vec<RequestRecord>,
 }
 
 fn parse_capture_mode() -> CaptureMode {
@@ -128,9 +124,9 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         sdk_name: "posthog-rs",
         sdk_version: env!("CARGO_PKG_VERSION"),
-        adapter_version: "0.1.0",
+        adapter_version: "0.3.0",
         capabilities: vec![capability],
-        supports_parallel: true,
+        supports_parallel: SUPPORTS_PARALLEL,
     })
 }
 
@@ -143,14 +139,27 @@ async fn init(
     let s = instances.entry(params.key().to_string()).or_default();
 
     *s = AdapterState::default();
+    s.historical_migration = req.historical_migration.unwrap_or(false);
 
-    let options = ClientOptionsBuilder::default()
+    let mut builder = ClientOptionsBuilder::default();
+    builder
         .api_key(req.api_key)
         .host(req.host)
-        .capture_mode(state.capture_mode)
-        .build();
+        .capture_mode(state.capture_mode);
 
-    match options {
+    if req.disable_geoip.unwrap_or(false) {
+        builder.disable_geoip(true);
+    }
+
+    // Inject X-Test-Id header so the mock capture server can partition
+    // requests by test when running in parallel mode.
+    if let Some(ref test_id) = params.test_id {
+        let mut headers = HashMap::new();
+        headers.insert("X-Test-Id".to_string(), test_id.clone());
+        builder.extra_capture_headers(headers);
+    }
+
+    match builder.build() {
         Ok(opts) => {
             let client = posthog_rs::client(opts).await;
             s.client = Some(client);
@@ -202,6 +211,10 @@ async fn capture_event(
             let _ = event.set_timestamp(ts);
         }
     }
+
+    // EventOptions wiring (set_options) is applied in the V1 capture
+    // implementation branch where EventOptions exists on Event.
+    let _ = req.options;
 
     let uuid = uuid::Uuid::now_v7().to_string();
 
@@ -272,9 +285,8 @@ async fn get_state(
             pending_events: s.pending_events,
             total_events_captured: s.total_events_captured,
             total_events_sent: s.total_events_sent,
-            total_retries: s.total_retries,
+            total_retries: 0,
             last_error: s.last_error.clone(),
-            requests_made: s.requests_made.clone(),
         }))
         .into_response(),
         None => Json(serde_json::json!(StateResponse {
@@ -283,7 +295,6 @@ async fn get_state(
             total_events_sent: 0,
             total_retries: 0,
             last_error: None,
-            requests_made: vec![],
         }))
         .into_response(),
     }
@@ -305,7 +316,9 @@ async fn main() {
         CaptureMode::V0 => "v0",
         CaptureMode::V1 => "v1",
     };
-    eprintln!("Starting posthog-rs SDK adapter (CAPTURE_MODE={mode_str}, parallel=true)");
+    eprintln!(
+        "Starting posthog-rs SDK adapter (CAPTURE_MODE={mode_str}, parallel={SUPPORTS_PARALLEL})"
+    );
 
     let state = AppState {
         instances: Arc::new(Mutex::new(HashMap::new())),
