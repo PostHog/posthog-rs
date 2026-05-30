@@ -336,7 +336,7 @@ async fn v1_capture_preserves_uuid_and_timestamp_across_retries() {
     success_mock.assert();
 }
 
-#[cfg(feature = "compression")]
+#[cfg(feature = "capture-v1")]
 #[tokio::test]
 async fn v1_capture_sends_gzip_content_encoding() {
     use posthog_rs::CaptureCompression;

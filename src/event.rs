@@ -137,35 +137,43 @@ impl Event {
     }
 
     /// Mutate the V1 capture options for this event.
+    #[cfg(feature = "capture-v1")]
     pub fn set_options<F: FnOnce(&mut EventOptions)>(&mut self, f: F) {
         f(&mut self.options);
     }
 
     /// Access the event options.
+    #[cfg(feature = "capture-v1")]
     pub fn options(&self) -> &EventOptions {
         &self.options
     }
 
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn event_name(&self) -> &str {
         &self.event
     }
 
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn distinct_id(&self) -> &str {
         &self.distinct_id
     }
 
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn uuid(&self) -> Uuid {
         self.uuid
     }
 
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn timestamp(&self) -> Option<NaiveDateTime> {
         self.timestamp
     }
 
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn properties(&self) -> &HashMap<String, serde_json::Value> {
         &self.properties
     }
 
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn groups(&self) -> &HashMap<String, String> {
         &self.groups
     }

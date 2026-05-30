@@ -2,14 +2,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(feature = "capture-v1")]
 use chrono::Utc;
 use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
+#[cfg(feature = "capture-v1")]
 use uuid::Uuid;
 
 use crate::endpoints::Endpoint;
 use crate::event::BatchRequest;
+#[cfg(feature = "capture-v1")]
 use crate::event_v1::{V1BatchResponse, V1EventResult};
 use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
@@ -331,6 +334,21 @@ impl Client {
         request
     }
 
+    #[cfg(not(feature = "capture-v1"))]
+    async fn capture_v1(
+        &self,
+        _events: Vec<Event>,
+        _historical_migration: bool,
+    ) -> Result<(), Error> {
+        Err(Error::ServerError {
+            status: 500,
+            message: "V1 capture requires the `capture-v1` crate feature. \
+                      Add `posthog-rs = { features = [\"capture-v1\"] }` to Cargo.toml."
+                .to_string(),
+        })
+    }
+
+    #[cfg(feature = "capture-v1")]
     async fn capture_v1(
         &self,
         events: Vec<Event>,
@@ -468,6 +486,7 @@ impl Client {
         })
     }
 
+    #[cfg(feature = "capture-v1")]
     fn build_v1_headers(&self, request_id: &Uuid, attempt: u32) -> reqwest::header::HeaderMap {
         use reqwest::header::{HeaderMap, HeaderValue};
 
@@ -519,13 +538,12 @@ impl Client {
         headers
     }
 
-    /// Build the V1 wire events once, injecting `$geoip_disable` when geoip is
-    /// disabled on the client. Done a single time per logical request so values
-    /// the server keys on (UUID, timestamp) stay stable across retries.
+    #[cfg(feature = "capture-v1")]
     fn build_v1_events(&self, events: &[Event]) -> Vec<crate::event_v1::V1Event> {
         Self::build_v1_events_inner(events, self.options.disable_geoip)
     }
 
+    #[cfg(feature = "capture-v1")]
     async fn v1_backoff_sleep(&self, attempt: u32, retry_after_secs: Option<u64>) {
         let duration = if let Some(secs) = retry_after_secs {
             Duration::from_secs(secs)
@@ -538,9 +556,7 @@ impl Client {
         tokio::time::sleep(duration).await;
     }
 
-    /// Compress the payload in place when `capture_compression` is configured,
-    /// setting the matching `Content-Encoding` header. Falls back to the raw
-    /// payload (no header) when compression is unavailable or fails.
+    #[cfg(feature = "capture-v1")]
     fn maybe_compress(
         &self,
         headers: &mut reqwest::header::HeaderMap,
@@ -549,10 +565,12 @@ impl Client {
         Self::maybe_compress_inner(self.options.capture_compression, headers, payload)
     }
 
+    #[cfg(feature = "capture-v1")]
     fn is_retryable_status(status: u16) -> bool {
         matches!(status, 408 | 500 | 502 | 503 | 504)
     }
 
+    #[cfg(feature = "capture-v1")]
     fn build_v1_events_inner(
         events: &[Event],
         disable_geoip: bool,
@@ -572,6 +590,7 @@ impl Client {
             .collect()
     }
 
+    #[cfg(feature = "capture-v1")]
     fn maybe_compress_inner(
         compression: Option<super::CaptureCompression>,
         headers: &mut reqwest::header::HeaderMap,
@@ -587,9 +606,7 @@ impl Client {
         payload
     }
 
-    /// Split a 200 batch response: fold terminal results (ok/drop/limited/
-    /// unknown) into `final_results` and return the set of UUIDs the server
-    /// asked to retry.
+    #[cfg(feature = "capture-v1")]
     fn collect_results(
         pending: &[crate::event_v1::V1Event],
         batch_resp: &V1BatchResponse,
@@ -613,6 +630,7 @@ impl Client {
         retry_uuids
     }
 
+    #[cfg(feature = "capture-v1")]
     fn count_results(resp: &V1BatchResponse) -> HashMap<(String, Option<String>), usize> {
         let mut counts: HashMap<(String, Option<String>), usize> = HashMap::new();
         for result in resp.results.values() {

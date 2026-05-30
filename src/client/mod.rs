@@ -30,7 +30,7 @@ pub enum CaptureCompression {
 
 impl CaptureCompression {
     /// The HTTP `Content-Encoding` token for this algorithm.
-    #[cfg_attr(not(feature = "compression"), allow(dead_code))]
+    #[cfg(feature = "capture-v1")]
     pub(crate) fn content_encoding(self) -> &'static str {
         match self {
             CaptureCompression::Gzip => "gzip",
@@ -121,20 +121,24 @@ pub struct ClientOptions {
 
     /// Maximum retry attempts for V1 capture (default: 3)
     #[builder(default = "3")]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) max_capture_retries: u32,
 
     /// Initial retry backoff duration in milliseconds (default: 200)
     #[builder(default = "200")]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) retry_initial_backoff_ms: u64,
 
     /// Maximum retry backoff duration in milliseconds (default: 30000)
     #[builder(default = "30000")]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) retry_max_backoff_ms: u64,
 
     /// Optional request-body compression for the V1 capture pipeline. When
     /// `None` (default), bodies are sent uncompressed. Requires the
-    /// `compression` crate feature to take effect.
+    /// `capture-v1` crate feature to take effect.
     #[builder(default, setter(strip_option))]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) capture_compression: Option<CaptureCompression>,
 
     /// Extra HTTP headers injected into every outbound capture request.

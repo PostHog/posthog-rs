@@ -47,9 +47,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 default = ["async-client"]
 e2e-test = []
 async-client = ["tokio"]
-# Enables request-body compression for the V1 capture pipeline
-# (gzip/deflate/br/zstd) selected via `ClientOptions::capture_compression`.
-compression = ["flate2", "brotli", "zstd"]
+capture-v1 = ["flate2", "brotli", "zstd"]
 
 [workspace]
 members = ["compliance/adapter"]

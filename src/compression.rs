@@ -1,16 +1,13 @@
 //! Request-body compression for the V1 capture pipeline.
 //!
-//! Compression is gated behind the `compression` crate feature. When the
-//! feature is disabled, [`compress`] always returns `None` (so the caller sends
-//! the body uncompressed) and logs a warning if compression was requested.
+//! This module is only compiled when the `capture-v1` crate feature is enabled.
 
 use crate::client::CaptureCompression;
 
 /// Compress `data` with `algo`, returning the compressed bytes alongside the
 /// HTTP `Content-Encoding` token to advertise. Returns `None` when compression
-/// is unavailable (feature disabled) or fails, signalling the caller to send the
-/// payload uncompressed without a `Content-Encoding` header.
-#[cfg(feature = "compression")]
+/// fails, signalling the caller to send the payload uncompressed without a
+/// `Content-Encoding` header.
 pub(crate) fn compress(algo: CaptureCompression, data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     use std::io::Write;
 
@@ -29,7 +26,6 @@ pub(crate) fn compress(algo: CaptureCompression, data: &[u8]) -> Option<(Vec<u8>
         CaptureCompression::Br => {
             let mut out = Vec::new();
             {
-                // quality 5, lgwin 22 are reasonable defaults for request bodies.
                 let mut encoder = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
                 if let Err(e) = encoder.write_all(data).and_then(|_| encoder.flush()) {
                     Err(e)
@@ -51,16 +47,7 @@ pub(crate) fn compress(algo: CaptureCompression, data: &[u8]) -> Option<(Vec<u8>
     }
 }
 
-#[cfg(not(feature = "compression"))]
-pub(crate) fn compress(_algo: CaptureCompression, _data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
-    tracing::warn!(
-        "capture_compression is set but the `compression` crate feature is disabled; \
-         sending V1 capture body uncompressed"
-    );
-    None
-}
-
-#[cfg(all(test, feature = "compression"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Read;
