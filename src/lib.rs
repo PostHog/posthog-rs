@@ -1,7 +1,10 @@
 mod client;
+#[cfg(feature = "capture-v1")]
+mod compression;
 mod endpoints;
 mod error;
 mod event;
+#[cfg(feature = "capture-v1")]
 mod event_v1;
 mod feature_flag_evaluations;
 mod feature_flags;
@@ -11,6 +14,7 @@ mod local_evaluation;
 // Public interface - any change to this is breaking!
 // Client
 pub use client::client;
+pub use client::CaptureCompression;
 pub use client::CaptureMode;
 pub use client::Client;
 pub use client::ClientOptions;
@@ -27,6 +31,12 @@ pub use error::Error;
 
 // Event
 pub use event::Event;
+#[cfg(feature = "capture-v1")]
+pub use event::EventOptions;
+
+// V1 Capture types
+#[cfg(feature = "capture-v1")]
+pub use event_v1::{V1BatchResponse, V1EventResult, V1EventStatus};
 
 // Feature Flags
 pub use feature_flag_evaluations::{EvaluateFlagsOptions, FeatureFlagEvaluations};

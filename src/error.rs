@@ -16,6 +16,10 @@ impl Display for Error {
             Error::ServerError { status, message } => {
                 write!(f, "Server Error (HTTP {status}): {message}")
             }
+            Error::Unauthorized => write!(f, "Unauthorized: invalid or missing API token"),
+            Error::BillingLimitExceeded(msg) => {
+                write!(f, "Billing Limit Exceeded: {msg}")
+            }
         }
     }
 }
@@ -42,6 +46,10 @@ pub enum Error {
     BadRequest(String),
     /// HTTP 5xx — the server encountered an error
     ServerError { status: u16, message: String },
+    /// HTTP 401 — invalid or missing Bearer token
+    Unauthorized,
+    /// HTTP 402 — billing quota exceeded (non-retryable)
+    BillingLimitExceeded(String),
 }
 
 impl Error {
@@ -50,6 +58,8 @@ impl Error {
     pub(crate) fn from_http_response(status: u16, body: String) -> Option<Self> {
         match status {
             200..=299 => None,
+            401 => Some(Error::Unauthorized),
+            402 => Some(Error::BillingLimitExceeded(body)),
             429 => Some(Error::RateLimit),
             400 | 413 => Some(Error::BadRequest(body)),
             500..=599 => Some(Error::ServerError {

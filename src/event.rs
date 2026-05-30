@@ -2,11 +2,29 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
 use semver::Version;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::feature_flag_evaluations::FeatureFlagEvaluations;
 use crate::Error;
+
+/// Control-plane options for V1 capture. These affect routing and processing
+/// decisions server-side without requiring property deserialization.
+///
+/// `cookieless_mode` and `disable_skew_correction` are opt-in: when left unset
+/// they are omitted from the wire payload entirely, letting the server apply its
+/// own defaults instead of the SDK forcing a `false`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct EventOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookieless_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_skew_correction: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_tour_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_person_profile: Option<bool>,
+}
 
 /// An [`Event`] represents an interaction a user has with your app or
 /// website. Examples include button clicks, pageviews, query completions, and signups.
@@ -21,6 +39,8 @@ pub struct Event {
     groups: HashMap<String, String>,
     timestamp: Option<NaiveDateTime>,
     uuid: Uuid,
+    #[serde(skip)]
+    options: EventOptions,
 }
 
 impl Event {
@@ -34,6 +54,7 @@ impl Event {
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
+            options: EventOptions::default(),
         }
     }
 
@@ -47,6 +68,10 @@ impl Event {
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
+            options: EventOptions {
+                process_person_profile: Some(false),
+                ..EventOptions::default()
+            },
         };
         res.insert_prop("$process_person_profile", false)
             .expect("bools are safe for serde");
@@ -71,7 +96,7 @@ impl Event {
     /// Note that group events cannot be personless, and will be automatically upgraded to include person profile processing if
     /// they were anonymous. This might lead to "empty" person profiles being created.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
-        // You cannot disable person profile processing for groups
+        self.options.process_person_profile = Some(true);
         self.insert_prop("$process_person_profile", true)
             .expect("bools are safe for serde");
         self.groups.insert(group_name.into(), group_id.into());
@@ -109,6 +134,48 @@ impl Event {
             self.properties.insert(key, value);
         }
         self
+    }
+
+    /// Mutate the V1 capture options for this event.
+    #[cfg(feature = "capture-v1")]
+    pub fn set_options<F: FnOnce(&mut EventOptions)>(&mut self, f: F) {
+        f(&mut self.options);
+    }
+
+    /// Access the event options.
+    #[cfg(feature = "capture-v1")]
+    pub fn options(&self) -> &EventOptions {
+        &self.options
+    }
+
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) fn event_name(&self) -> &str {
+        &self.event
+    }
+
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) fn distinct_id(&self) -> &str {
+        &self.distinct_id
+    }
+
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) fn timestamp(&self) -> Option<NaiveDateTime> {
+        self.timestamp
+    }
+
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) fn properties(&self) -> &HashMap<String, serde_json::Value> {
+        &self.properties
+    }
+
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) fn groups(&self) -> &HashMap<String, String> {
+        &self.groups
     }
 }
 
