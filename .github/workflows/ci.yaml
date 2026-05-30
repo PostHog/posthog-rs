@@ -26,8 +26,11 @@ jobs:
     - name: Build
       run: cargo build --verbose
 
-    - name: Unit test
+    - name: Unit test (default features)
       run: cargo test --verbose
+
+    - name: Unit test (workspace, includes capture-v1)
+      run: cargo test --workspace --verbose
 
     - name: E2E test
       run: cargo test --verbose --features e2e-test --no-default-features
