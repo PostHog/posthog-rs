@@ -18,7 +18,7 @@ use crate::feature_flags::{
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
 use crate::{event::InnerEvent, Error, Event};
 
-use super::ClientOptions;
+use super::{CaptureMode, ClientOptions};
 
 /// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
 /// dedup cache. On overflow the entire map is reset (matches the JS SDK).
@@ -237,6 +237,10 @@ impl Client {
             return Ok(());
         }
 
+        if self.options.capture_mode == CaptureMode::V1 {
+            return self.capture_v1(vec![event]);
+        }
+
         // Add geoip disable property if configured
         if self.options.disable_geoip {
             event.insert_prop("$geoip_disable", true).ok();
@@ -248,11 +252,14 @@ impl Client {
             serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
 
         let url = self.options.endpoints().build_url(Endpoint::Capture);
-        let response = self
+        let mut request = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .body(payload)
+            .body(payload);
+        request = self.apply_extra_headers(request);
+
+        let response = request
             .send()
             .map_err(|e| Error::Connection(e.to_string()))?;
 
@@ -271,6 +278,10 @@ impl Client {
         if self.options.is_disabled() {
             trace!("Client is disabled, skipping batch capture");
             return Ok(());
+        }
+
+        if self.options.capture_mode == CaptureMode::V1 {
+            return self.capture_v1(events);
         }
 
         let disable_geoip = self.options.disable_geoip;
@@ -293,15 +304,37 @@ impl Client {
             .map_err(|e| Error::Serialization(e.to_string()))?;
         let url = self.options.endpoints().build_url(Endpoint::Batch);
 
-        let response = self
+        let mut request = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .body(payload)
+            .body(payload);
+        request = self.apply_extra_headers(request);
+
+        let response = request
             .send()
             .map_err(|e| Error::Connection(e.to_string()))?;
 
         check_response(response)
+    }
+
+    fn apply_extra_headers(
+        &self,
+        mut request: reqwest::blocking::RequestBuilder,
+    ) -> reqwest::blocking::RequestBuilder {
+        if let Some(ref extra) = self.options.extra_capture_headers {
+            for (k, v) in extra {
+                request = request.header(k.as_str(), v.as_str());
+            }
+        }
+        request
+    }
+
+    fn capture_v1(&self, _events: Vec<Event>) -> Result<(), Error> {
+        Err(Error::ServerError {
+            status: 500,
+            message: "Capture V1 not yet implemented".to_string(),
+        })
     }
 
     /// Get all feature flags for a user

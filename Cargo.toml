@@ -44,3 +44,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 default = ["async-client"]
 e2e-test = []
 async-client = ["tokio"]
+
+[workspace]
+members = ["compliance/adapter"]

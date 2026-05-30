@@ -2,6 +2,7 @@ mod client;
 mod endpoints;
 mod error;
 mod event;
+mod event_v1;
 mod feature_flag_evaluations;
 mod feature_flags;
 mod global;
@@ -10,6 +11,7 @@ mod local_evaluation;
 // Public interface - any change to this is breaking!
 // Client
 pub use client::client;
+pub use client::CaptureMode;
 pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;

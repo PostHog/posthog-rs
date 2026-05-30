@@ -18,7 +18,7 @@ use crate::feature_flags::{
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{event::InnerEvent, Error, Event};
 
-use super::ClientOptions;
+use super::{CaptureMode, ClientOptions};
 
 /// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
 /// dedup cache. On overflow the entire map is reset (matches the JS SDK).
@@ -253,6 +253,10 @@ impl Client {
             return Ok(());
         }
 
+        if self.options.capture_mode == CaptureMode::V1 {
+            return self.capture_v1(vec![event]).await;
+        }
+
         // Add geoip disable property if configured
         if self.options.disable_geoip {
             event.insert_prop("$geoip_disable", true).ok();
@@ -265,11 +269,14 @@ impl Client {
 
         let url = self.options.endpoints().build_url(Endpoint::Capture);
 
-        let response = self
+        let mut request = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .body(payload)
+            .body(payload);
+        request = self.apply_extra_headers(request);
+
+        let response = request
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
@@ -287,6 +294,10 @@ impl Client {
     ) -> Result<(), Error> {
         if self.options.is_disabled() {
             return Ok(());
+        }
+
+        if self.options.capture_mode == CaptureMode::V1 {
+            return self.capture_v1(events).await;
         }
 
         let disable_geoip = self.options.disable_geoip;
@@ -309,16 +320,35 @@ impl Client {
             .map_err(|e| Error::Serialization(e.to_string()))?;
         let url = self.options.endpoints().build_url(Endpoint::Batch);
 
-        let response = self
+        let mut request = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .body(payload)
+            .body(payload);
+        request = self.apply_extra_headers(request);
+
+        let response = request
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
         check_response(response).await
+    }
+
+    fn apply_extra_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(ref extra) = self.options.extra_capture_headers {
+            for (k, v) in extra {
+                request = request.header(k.as_str(), v.as_str());
+            }
+        }
+        request
+    }
+
+    async fn capture_v1(&self, _events: Vec<Event>) -> Result<(), Error> {
+        Err(Error::ServerError {
+            status: 500,
+            message: "Capture V1 not yet implemented".to_string(),
+        })
     }
 
     /// Get all feature flags for a user
