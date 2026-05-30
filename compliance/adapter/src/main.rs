@@ -19,7 +19,7 @@ const SUPPORTS_PARALLEL: bool = true;
 struct AppState {
     instances: Arc<Mutex<HashMap<String, AdapterState>>>,
     capture_mode: CaptureMode,
-    compression: CaptureCompression,
+    compression: Option<CaptureCompression>,
 }
 
 const DEFAULT_TEST_ID: &str = "_global";
@@ -118,12 +118,13 @@ fn parse_capture_mode() -> CaptureMode {
     }
 }
 
-fn parse_compression() -> CaptureCompression {
+fn parse_compression() -> Option<CaptureCompression> {
     match std::env::var("COMPRESSION").as_deref() {
-        Ok("deflate") => CaptureCompression::Deflate,
-        Ok("br") => CaptureCompression::Br,
-        Ok("zstd") => CaptureCompression::Zstd,
-        _ => CaptureCompression::Gzip,
+        Ok("gzip") => Some(CaptureCompression::Gzip),
+        Ok("deflate") => Some(CaptureCompression::Deflate),
+        Ok("br") => Some(CaptureCompression::Br),
+        Ok("zstd") => Some(CaptureCompression::Zstd),
+        _ => None,
     }
 }
 
@@ -142,11 +143,9 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         CaptureMode::V0 => capabilities.push("capture_v0".to_string()),
         CaptureMode::V1 => {
             capabilities.push("capture_v1".to_string());
-            // Only the configured algorithm is advertised: a single adapter
-            // instance compresses one way, so advertising the others would run
-            // compression tests it cannot satisfy. CI varies COMPRESSION to
-            // cover the full matrix.
-            capabilities.push(compression_capability(state.compression).to_string());
+            if let Some(algo) = state.compression {
+                capabilities.push(compression_capability(algo).to_string());
+            }
         }
     }
     Json(HealthResponse {
@@ -183,7 +182,9 @@ async fn init(
     }
 
     if req.enable_compression.unwrap_or(false) {
-        builder.capture_compression(state.compression);
+        if let Some(algo) = state.compression {
+            builder.capture_compression(algo);
+        }
     }
 
     if req.disable_geoip.unwrap_or(false) {
@@ -373,9 +374,12 @@ async fn main() {
         CaptureMode::V0 => "v0",
         CaptureMode::V1 => "v1",
     };
+    let compression_str = match compression {
+        Some(algo) => compression_capability(algo),
+        None => "none",
+    };
     eprintln!(
-        "Starting posthog-rs SDK adapter (CAPTURE_MODE={mode_str}, compression={}, parallel={SUPPORTS_PARALLEL})",
-        compression_capability(compression)
+        "Starting posthog-rs SDK adapter (CAPTURE_MODE={mode_str}, compression={compression_str}, parallel={SUPPORTS_PARALLEL})"
     );
 
     let state = AppState {
