@@ -243,11 +243,14 @@ impl Client {
 
         let url = self.options.endpoints().build_url(Endpoint::Capture);
 
-        let response = self
+        let mut request = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .body(payload)
+            .body(payload);
+        request = self.apply_extra_headers(request);
+
+        let response = request
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
@@ -291,16 +294,28 @@ impl Client {
             .map_err(|e| Error::Serialization(e.to_string()))?;
         let url = self.options.endpoints().build_url(Endpoint::Batch);
 
-        let response = self
+        let mut request = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .body(payload)
+            .body(payload);
+        request = self.apply_extra_headers(request);
+
+        let response = request
             .send()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
         check_response(response).await
+    }
+
+    fn apply_extra_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(ref extra) = self.options.extra_capture_headers {
+            for (k, v) in extra {
+                request = request.header(k.as_str(), v.as_str());
+            }
+        }
+        request
     }
 
     async fn capture_v1(&self, _events: Vec<Event>) -> Result<(), Error> {

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::endpoints::{EndpointManager, DEFAULT_HOST};
 use derive_builder::Builder;
 use tracing::warn;
@@ -90,6 +92,12 @@ pub struct ClientOptions {
     /// Selects the capture pipeline. Defaults to `V0` (legacy `/batch/`).
     #[builder(default)]
     pub(crate) capture_mode: CaptureMode,
+
+    /// Extra HTTP headers injected into every outbound capture request.
+    /// Used by the SDK test harness adapter to attach `X-Test-Id` for
+    /// parallel test isolation.
+    #[builder(default, setter(strip_option))]
+    pub(crate) extra_capture_headers: Option<HashMap<String, String>>,
 
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
