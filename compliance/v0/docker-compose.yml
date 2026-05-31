@@ -10,7 +10,7 @@ services:
 
   test-harness:
     image: posthog-sdk-test-harness:debug
-    command: ["run", "--adapter-url", "http://sdk-adapter:8080", "--mock-url", "http://test-harness:8081", "--concurrency", "10"]
+    command: ["run", "--adapter-url", "http://sdk-adapter:8080", "--mock-url", "http://test-harness:8081", "--concurrency", "10", "--suite", "capture"]
     networks:
       - test-network
     depends_on:
