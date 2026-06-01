@@ -308,9 +308,7 @@ async fn main() {
     } else {
         "v0"
     };
-    eprintln!(
-        "Starting posthog-rs SDK adapter (capture={mode_str}, parallel={SUPPORTS_PARALLEL})"
-    );
+    eprintln!("Starting posthog-rs SDK adapter (capture={mode_str}, parallel={SUPPORTS_PARALLEL})");
 
     let state = AppState {
         instances: Arc::new(Mutex::new(HashMap::new())),
