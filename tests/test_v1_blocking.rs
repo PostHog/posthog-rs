@@ -1,14 +1,13 @@
 #![cfg(all(not(feature = "async-client"), feature = "capture-v1"))]
 
 use httpmock::prelude::*;
-use posthog_rs::{CaptureMode, ClientOptionsBuilder, Event};
+use posthog_rs::{ClientOptionsBuilder, Event};
 use serde_json::json;
 
 fn create_v1_client(base_url: String) -> posthog_rs::Client {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test_token".to_string())
         .host(base_url)
-        .capture_mode(CaptureMode::V1)
         .max_capture_attempts(3u32)
         .retry_initial_backoff_ms(10u64)
         .retry_max_backoff_ms(50u64)
@@ -345,6 +344,7 @@ fn v1_blocking_partial_retry_exhausts_attempts() {
     let client = create_v1_client(server.base_url());
     let result = client.capture(event);
 
+    // 200 path returns Ok even when retries are exhausted.
     assert!(result.is_ok());
     mock.assert_hits(3);
 }
@@ -491,7 +491,6 @@ fn v1_blocking_injects_geoip_disable_when_configured() {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test_token".to_string())
         .host(server.base_url())
-        .capture_mode(CaptureMode::V1)
         .disable_geoip(true)
         .build()
         .unwrap();
@@ -520,7 +519,6 @@ fn v1_blocking_batch_sets_historical_migration() {
     mock.assert();
 }
 
-#[cfg(feature = "capture-v1")]
 #[test]
 fn v1_blocking_sends_gzip_content_encoding() {
     use posthog_rs::CaptureCompression;
@@ -538,7 +536,6 @@ fn v1_blocking_sends_gzip_content_encoding() {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test_token".to_string())
         .host(server.base_url())
-        .capture_mode(CaptureMode::V1)
         .capture_compression(CaptureCompression::Gzip)
         .build()
         .unwrap();
@@ -546,4 +543,56 @@ fn v1_blocking_sends_gzip_content_encoding() {
 
     client.capture(Event::new("test", "user-1")).unwrap();
     mock.assert();
+}
+
+#[test]
+fn v1_blocking_preserves_uuid_and_timestamp_across_retries() {
+    let server = MockServer::start();
+    let uuid = uuid::Uuid::now_v7();
+    let ts = "2024-01-01T00:00:00.000Z";
+
+    let fail_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-attempt", "1")
+            .body_contains(uuid.to_string())
+            .body_contains(ts);
+        then.status(503)
+            .header("retry-after", "0")
+            .json_body(json!({ "error": "service_unavailable" }));
+    });
+    let success_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-attempt", "2")
+            .body_contains(uuid.to_string())
+            .body_contains(ts);
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url());
+    let mut event = Event::new("test", "user-1");
+    event.set_uuid(uuid);
+    event
+        .set_timestamp(chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap())
+        .unwrap();
+
+    client.capture(event).unwrap();
+    fail_mock.assert();
+    success_mock.assert();
+}
+
+#[test]
+fn v1_blocking_disabled_client_noop() {
+    let options = ClientOptionsBuilder::default()
+        .api_key("phc_test".to_string())
+        .disabled(true)
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(options);
+
+    let result = client.capture(Event::new("test", "user-1"));
+    assert!(result.is_ok());
 }
