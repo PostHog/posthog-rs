@@ -2,6 +2,34 @@ use crate::endpoints::{EndpointManager, DEFAULT_HOST};
 use derive_builder::Builder;
 use tracing::warn;
 
+/// Request-body compression algorithm for the V1 capture pipeline.
+///
+/// When set on [`ClientOptions`], V1 capture requests are compressed and the
+/// matching `Content-Encoding` header is sent. The variant string matches the
+/// HTTP `Content-Encoding` token the server expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureCompression {
+    Gzip,
+    Deflate,
+    Br,
+    Zstd,
+}
+
+impl CaptureCompression {
+    /// The HTTP `Content-Encoding` token for this algorithm.
+    #[cfg(feature = "capture-v1")]
+    pub(crate) fn content_encoding(self) -> &'static str {
+        match self {
+            CaptureCompression::Gzip => "gzip",
+            CaptureCompression::Deflate => "deflate",
+            CaptureCompression::Br => "br",
+            CaptureCompression::Zstd => "zstd",
+        }
+    }
+}
+
+#[cfg(feature = "capture-v1")]
+mod v1_capture;
 #[cfg(not(feature = "async-client"))]
 mod blocking;
 #[cfg(not(feature = "async-client"))]
@@ -91,6 +119,29 @@ pub struct ClientOptions {
     /// `enable_local_evaluation` is also true.
     #[builder(default = "false")]
     local_evaluation_only: bool,
+
+    /// Maximum number of attempts for V1 capture requests (default: 3).
+    /// Includes the initial attempt, so `3` means 1 initial + 2 retries.
+    #[builder(default = "3")]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) max_capture_attempts: u32,
+
+    /// Initial retry backoff duration in milliseconds (default: 200)
+    #[builder(default = "200")]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) retry_initial_backoff_ms: u64,
+
+    /// Maximum retry backoff duration in milliseconds (default: 30000)
+    #[builder(default = "30000")]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) retry_max_backoff_ms: u64,
+
+    /// Optional request-body compression for the V1 capture pipeline. When
+    /// `None` (default), bodies are sent uncompressed. Requires the
+    /// `capture-v1` crate feature to take effect.
+    #[builder(default, setter(strip_option))]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) capture_compression: Option<CaptureCompression>,
 
     /// Extra HTTP headers injected into every outbound capture request.
     /// Used by the SDK test harness adapter to attach `X-Test-Id` for
