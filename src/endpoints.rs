@@ -11,6 +11,7 @@ pub const DEFAULT_HOST: &str = US_INGESTION_ENDPOINT;
 
 /// API endpoints used by the SDK for different operations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Endpoint {
     /// Event capture endpoint
     Capture,

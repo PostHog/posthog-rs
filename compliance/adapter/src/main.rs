@@ -23,26 +23,14 @@ struct AppState {
 
 const DEFAULT_TEST_ID: &str = "_global";
 
+#[derive(Default)]
 struct AdapterState {
-    client: Option<Client>,
+    client: Option<Arc<Client>>,
     historical_migration: bool,
     total_events_captured: u64,
     total_events_sent: u64,
     last_error: Option<String>,
     pending_events: i64,
-}
-
-impl Default for AdapterState {
-    fn default() -> Self {
-        Self {
-            client: None,
-            historical_migration: false,
-            total_events_captured: 0,
-            total_events_sent: 0,
-            last_error: None,
-            pending_events: 0,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -124,7 +112,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         sdk_name: "posthog-rs",
         sdk_version: env!("CARGO_PKG_VERSION"),
-        adapter_version: "0.3.0",
+        adapter_version: env!("CARGO_PKG_VERSION"),
         capabilities: vec![capability],
         supports_parallel: SUPPORTS_PARALLEL,
     })
@@ -162,7 +150,7 @@ async fn init(
     match builder.build() {
         Ok(opts) => {
             let client = posthog_rs::client(opts).await;
-            s.client = Some(client);
+            s.client = Some(Arc::new(client));
             Json(serde_json::json!({ "success": true })).into_response()
         }
         Err(e) => {
@@ -182,20 +170,29 @@ async fn capture_event(
     Query(params): Query<TestIdParam>,
     Json(req): Json<CaptureRequest>,
 ) -> impl IntoResponse {
-    let mut instances = state.instances.lock().await;
-    let s = instances.entry(params.key().to_string()).or_default();
+    let key = params.key().to_string();
 
-    let client = match &s.client {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "SDK not initialized" })),
-            )
-                .into_response();
+    // Phase 1: short lock — clone Arc<Client>, bump in-flight counter
+    let client = {
+        let mut instances = state.instances.lock().await;
+        let s = instances.entry(key.clone()).or_default();
+        match &s.client {
+            Some(c) => {
+                s.total_events_captured += 1;
+                s.pending_events += 1;
+                c.clone()
+            }
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "SDK not initialized" })),
+                )
+                    .into_response();
+            }
         }
     };
 
+    // Build event outside the lock
     let mut event = Event::new(req.event, req.distinct_id);
 
     if let Some(props) = req.properties {
@@ -218,27 +215,32 @@ async fn capture_event(
 
     let uuid = uuid::Uuid::now_v7().to_string();
 
-    match client.capture(event).await {
-        Ok(()) => {
-            s.total_events_captured += 1;
-            s.pending_events += 1;
-            s.total_events_sent += 1;
-            s.pending_events -= 1;
-            if s.pending_events < 0 {
-                s.pending_events = 0;
+    // Phase 2: network call without holding the lock
+    let result = client.capture(event).await;
+
+    // Phase 3: short lock — record outcome
+    {
+        let mut instances = state.instances.lock().await;
+        if let Some(s) = instances.get_mut(&key) {
+            s.pending_events = (s.pending_events - 1).max(0);
+            match &result {
+                Ok(()) => {
+                    s.total_events_sent += 1;
+                }
+                Err(e) => {
+                    s.last_error = Some(e.to_string());
+                }
             }
-            Json(serde_json::json!({ "success": true, "uuid": uuid })).into_response()
         }
-        Err(e) => {
-            let msg = e.to_string();
-            s.total_events_captured += 1;
-            s.last_error = Some(msg.clone());
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": msg })),
-            )
-                .into_response()
-        }
+    }
+
+    match result {
+        Ok(()) => Json(serde_json::json!({ "success": true, "uuid": uuid })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
