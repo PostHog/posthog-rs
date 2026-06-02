@@ -1,14 +1,13 @@
 #![cfg(all(feature = "async-client", feature = "capture-v1"))]
 
 use httpmock::prelude::*;
-use posthog_rs::{CaptureMode, ClientOptionsBuilder, Event};
+use posthog_rs::{ClientOptionsBuilder, Event};
 use serde_json::json;
 
 async fn create_v1_client(base_url: String) -> posthog_rs::Client {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test_token".to_string())
         .host(base_url)
-        .capture_mode(CaptureMode::V1)
         .max_capture_attempts(3u32)
         .retry_initial_backoff_ms(10u64)
         .retry_max_backoff_ms(50u64)
@@ -424,7 +423,6 @@ async fn v1_capture_injects_geoip_disable_when_configured() {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test_token".to_string())
         .host(server.base_url())
-        .capture_mode(CaptureMode::V1)
         .disable_geoip(true)
         .build()
         .unwrap();
@@ -492,7 +490,6 @@ async fn v1_capture_preserves_uuid_and_timestamp_across_retries() {
     success_mock.assert();
 }
 
-#[cfg(feature = "capture-v1")]
 #[tokio::test]
 async fn v1_capture_sends_gzip_content_encoding() {
     use posthog_rs::CaptureCompression;
@@ -510,7 +507,6 @@ async fn v1_capture_sends_gzip_content_encoding() {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test_token".to_string())
         .host(server.base_url())
-        .capture_mode(CaptureMode::V1)
         .capture_compression(CaptureCompression::Gzip)
         .build()
         .unwrap();
@@ -636,7 +632,6 @@ async fn v1_capture_request_id_stable_across_retries() {
 async fn v1_capture_disabled_client_noop() {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test".to_string())
-        .capture_mode(CaptureMode::V1)
         .disabled(true)
         .build()
         .unwrap();

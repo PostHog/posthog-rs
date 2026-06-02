@@ -64,7 +64,7 @@ async fn get_client_v1_async() {
     use dotenv::dotenv;
     dotenv().ok();
 
-    use posthog_rs::{CaptureMode, ClientOptionsBuilder, Event};
+    use posthog_rs::{ClientOptionsBuilder, Event};
     use std::collections::HashMap;
 
     let api_key = match std::env::var("POSTHOG_RS_E2E_TEST_API_KEY") {
@@ -77,7 +77,6 @@ async fn get_client_v1_async() {
 
     let options = ClientOptionsBuilder::default()
         .api_key(api_key)
-        .capture_mode(CaptureMode::V1)
         .build()
         .unwrap();
     let client = posthog_rs::client(options).await;
