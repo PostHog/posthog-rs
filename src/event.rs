@@ -231,7 +231,10 @@ pub mod tests {
             props.get("$lib"),
             Some(&serde_json::Value::String("posthog-rs".to_string()))
         );
-        assert_eq!(props.get("$is_server"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            props.get("$is_server"),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 
     #[test]
