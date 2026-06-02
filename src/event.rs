@@ -147,6 +147,11 @@ impl InnerEvent {
             );
         }
 
+        // Mark every event as originating from a server-side SDK.
+        if !properties.contains_key("$is_server") {
+            properties.insert("$is_server".into(), serde_json::Value::Bool(true));
+        }
+
         let version_str = env!("CARGO_PKG_VERSION");
         if !properties.contains_key("$lib_version") {
             properties.insert(
@@ -218,6 +223,7 @@ pub mod tests {
             props.get("$lib"),
             Some(&serde_json::Value::String("posthog-rs".to_string()))
         );
+        assert_eq!(props.get("$is_server"), Some(&serde_json::Value::Bool(true)));
     }
 
     #[test]
