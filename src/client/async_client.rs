@@ -328,7 +328,10 @@ impl Client {
 
         #[cfg(feature = "capture-v1")]
         {
-            return self.capture_v1(events, historical_migration).await.map(|_| ());
+            return self
+                .capture_v1(events, historical_migration)
+                .await
+                .map(|_| ());
         }
 
         #[cfg(not(feature = "capture-v1"))]
@@ -426,7 +429,6 @@ impl Client {
         }
         request
     }
-
 
     #[cfg(feature = "capture-v1")]
     async fn capture_v1(

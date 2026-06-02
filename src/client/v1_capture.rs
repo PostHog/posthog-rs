@@ -318,7 +318,11 @@ mod tests {
     #[test]
     fn retryable_statuses() {
         for code in [408, 500, 502, 503, 504] {
-            assert!(is_retryable_status(code), "expected {} to be retryable", code);
+            assert!(
+                is_retryable_status(code),
+                "expected {} to be retryable",
+                code
+            );
         }
     }
 
@@ -417,10 +421,18 @@ mod tests {
         let e2 = dummy_v1_event();
         let results = HashMap::from([
             (e1.uuid, event_result(EventStatus::Ok, None)),
-            (e2.uuid, event_result(EventStatus::Retry, Some("not_persisted"))),
+            (
+                e2.uuid,
+                event_result(EventStatus::Retry, Some("not_persisted")),
+            ),
         ]);
         let mut final_results = HashMap::new();
-        let next = process_batch_response(vec![e1.clone(), e2.clone()], &results, &mut final_results, false);
+        let next = process_batch_response(
+            vec![e1.clone(), e2.clone()],
+            &results,
+            &mut final_results,
+            false,
+        );
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].uuid, e2.uuid);
         assert!(final_results.contains_key(&e1.uuid));
@@ -430,9 +442,10 @@ mod tests {
     #[test]
     fn process_batch_retry_finalized_when_final() {
         let e1 = dummy_v1_event();
-        let results = HashMap::from([
-            (e1.uuid, event_result(EventStatus::Retry, Some("not_persisted"))),
-        ]);
+        let results = HashMap::from([(
+            e1.uuid,
+            event_result(EventStatus::Retry, Some("not_persisted")),
+        )]);
         let mut final_results = HashMap::new();
         let next = process_batch_response(vec![e1.clone()], &results, &mut final_results, true);
         assert!(next.is_empty());
@@ -446,8 +459,14 @@ mod tests {
         let warn_ev = dummy_v1_event();
         let results = HashMap::from([
             (ok_ev.uuid, event_result(EventStatus::Ok, None)),
-            (drop_ev.uuid, event_result(EventStatus::Drop, Some("billing"))),
-            (warn_ev.uuid, event_result(EventStatus::Warning, Some("pp_disabled"))),
+            (
+                drop_ev.uuid,
+                event_result(EventStatus::Drop, Some("billing")),
+            ),
+            (
+                warn_ev.uuid,
+                event_result(EventStatus::Warning, Some("pp_disabled")),
+            ),
         ]);
         let mut final_results = HashMap::new();
         let next = process_batch_response(
@@ -501,7 +520,16 @@ mod tests {
         .to_string();
         let mut pending = vec![e];
         let mut final_results = HashMap::new();
-        let step = after_response(&opts, &rid, 1, 200, None, &body, &mut pending, &mut final_results);
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            200,
+            None,
+            &body,
+            &mut pending,
+            &mut final_results,
+        );
         assert!(matches!(step, Step::Done));
         assert!(pending.is_empty());
     }
@@ -521,7 +549,16 @@ mod tests {
         .to_string();
         let mut pending = vec![e1.clone(), e2.clone()];
         let mut final_results = HashMap::new();
-        let step = after_response(&opts, &rid, 1, 200, None, &body, &mut pending, &mut final_results);
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            200,
+            None,
+            &body,
+            &mut pending,
+            &mut final_results,
+        );
         assert!(matches!(step, Step::Backoff(_)));
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].uuid, e2.uuid);
@@ -535,7 +572,16 @@ mod tests {
         let body = r#"{"error":"service_unavailable"}"#;
         let mut pending = vec![dummy_v1_event()];
         let mut final_results = HashMap::new();
-        let step = after_response(&opts, &rid, 1, 503, Some(1), body, &mut pending, &mut final_results);
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            503,
+            Some(1),
+            body,
+            &mut pending,
+            &mut final_results,
+        );
         assert!(matches!(step, Step::Backoff(_)));
     }
 
@@ -546,7 +592,16 @@ mod tests {
         let body = r#"{"error":"service_unavailable"}"#;
         let mut pending = vec![dummy_v1_event()];
         let mut final_results = HashMap::new();
-        let step = after_response(&opts, &rid, 3, 503, None, body, &mut pending, &mut final_results);
+        let step = after_response(
+            &opts,
+            &rid,
+            3,
+            503,
+            None,
+            body,
+            &mut pending,
+            &mut final_results,
+        );
         assert!(matches!(step, Step::Fail(_)));
     }
 
@@ -557,7 +612,16 @@ mod tests {
         let body = r#"{"error":"billing_limit_exceeded"}"#;
         let mut pending = vec![dummy_v1_event()];
         let mut final_results = HashMap::new();
-        let step = after_response(&opts, &rid, 1, 402, None, body, &mut pending, &mut final_results);
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            402,
+            None,
+            body,
+            &mut pending,
+            &mut final_results,
+        );
         assert!(matches!(step, Step::Fail(Error::BillingLimitExceeded(_))));
     }
 
@@ -567,7 +631,16 @@ mod tests {
         let rid = Uuid::now_v7();
         let mut pending = vec![dummy_v1_event()];
         let mut final_results = HashMap::new();
-        let step = after_response(&opts, &rid, 1, 200, None, "not json", &mut pending, &mut final_results);
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            200,
+            None,
+            "not json",
+            &mut pending,
+            &mut final_results,
+        );
         assert!(matches!(step, Step::Fail(Error::Serialization(_))));
     }
 }

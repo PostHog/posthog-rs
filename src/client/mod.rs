@@ -28,10 +28,10 @@ impl CaptureCompression {
     }
 }
 
-#[cfg(feature = "capture-v1")]
-mod v1_capture;
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+#[cfg(feature = "capture-v1")]
+mod v1_capture;
 #[cfg(not(feature = "async-client"))]
 pub use blocking::client;
 #[cfg(not(feature = "async-client"))]
