@@ -71,6 +71,7 @@ impl Default for FlagCache {
 }
 
 impl FlagCache {
+    /// Create an empty shared flag cache.
     pub fn new() -> Self {
         Self {
             flags: Arc::new(RwLock::new(HashMap::new())),
@@ -79,6 +80,8 @@ impl FlagCache {
         }
     }
 
+    /// Replace cached flags, group type mappings, and cohorts from a local
+    /// evaluation API response.
     pub fn update(&self, response: LocalEvaluationResponse) {
         let flag_count = response.flags.len();
         let mut flags = self.flags.write().unwrap();
@@ -96,18 +99,22 @@ impl FlagCache {
         debug!(flag_count, "Updated flag cache");
     }
 
+    /// Return a cached feature flag by key.
     pub fn get_flag(&self, key: &str) -> Option<FeatureFlag> {
         self.flags.read().unwrap().get(key).cloned()
     }
 
+    /// Return all cached feature flag definitions.
     pub fn get_all_flags(&self) -> Vec<FeatureFlag> {
         self.flags.read().unwrap().values().cloned().collect()
     }
 
+    /// Return a cached cohort by ID.
     pub fn get_cohort(&self, id: &str) -> Option<Cohort> {
         self.cohorts.read().unwrap().get(id).cloned()
     }
 
+    /// Return all cached cohorts, keyed by cohort ID.
     pub fn get_all_cohorts(&self) -> HashMap<String, Cohort> {
         self.cohorts.read().unwrap().clone()
     }
@@ -140,6 +147,7 @@ impl FlagCache {
         self.group_type_mapping.read().unwrap().clone()
     }
 
+    /// Remove all cached flags, group type mappings, and cohorts.
     pub fn clear(&self) {
         self.flags.write().unwrap().clear();
         self.group_type_mapping.write().unwrap().clear();
@@ -157,7 +165,8 @@ pub struct LocalEvaluationConfig {
     pub personal_api_key: String,
     /// Project API key to identify which project's flags to fetch
     pub project_api_key: String,
-    /// PostHog API host URL (e.g., "https://us.posthog.com")
+    /// PostHog API or ingestion host URL (for example,
+    /// `https://us.i.posthog.com`).
     pub api_host: String,
     /// How often to poll for updated flag definitions
     pub poll_interval: Duration,
@@ -169,7 +178,8 @@ pub struct LocalEvaluationConfig {
 ///
 /// Runs a background thread that periodically fetches flag definitions from
 /// the PostHog API and updates the shared cache. Use this for blocking/sync
-/// applications. For async applications, use [`AsyncFlagPoller`] instead.
+/// applications. With the `async-client` feature enabled, use
+/// `AsyncFlagPoller` for async applications instead.
 pub struct FlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
@@ -179,6 +189,12 @@ pub struct FlagPoller {
 }
 
 impl FlagPoller {
+    /// Create a synchronous flag definition poller.
+    ///
+    /// # Parameters
+    ///
+    /// - `config`: Credentials, host, polling interval, and request timeout.
+    /// - `cache`: Shared cache updated by the poller.
     pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(config.request_timeout)
@@ -194,7 +210,10 @@ impl FlagPoller {
         }
     }
 
-    /// Start the polling thread
+    /// Start the polling thread.
+    ///
+    /// Performs an initial synchronous load, then refreshes definitions in the
+    /// background until [`FlagPoller::stop`] is called or the poller is dropped.
     pub fn start(&mut self) {
         info!(
             poll_interval_secs = self.config.poll_interval.as_secs(),
@@ -276,7 +295,13 @@ impl FlagPoller {
         self.thread_handle = Some(handle);
     }
 
-    /// Load flags synchronously
+    /// Load flags synchronously and update the cache once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Connection`] for request failures or non-success HTTP
+    /// statuses, and [`Error::Serialization`] when the response cannot be
+    /// parsed.
     #[instrument(skip(self), level = "debug")]
     pub fn load_flags(&self) -> Result<(), Error> {
         let url = format!(
@@ -313,7 +338,7 @@ impl FlagPoller {
         Ok(())
     }
 
-    /// Stop the polling thread
+    /// Stop the polling thread and wait for it to exit.
     pub fn stop(&mut self) {
         debug!("Stopping flag poller");
         self.stop_signal.store(true, Ordering::Relaxed);
@@ -346,6 +371,12 @@ pub struct AsyncFlagPoller {
 
 #[cfg(feature = "async-client")]
 impl AsyncFlagPoller {
+    /// Create an asynchronous flag definition poller.
+    ///
+    /// # Parameters
+    ///
+    /// - `config`: Credentials, host, polling interval, and request timeout.
+    /// - `cache`: Shared cache updated by the poller.
     pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
         let client = reqwest::Client::builder()
             .timeout(config.request_timeout)
@@ -362,7 +393,11 @@ impl AsyncFlagPoller {
         }
     }
 
-    /// Start the polling task
+    /// Start the polling task.
+    ///
+    /// Performs an initial async load, then refreshes definitions in the
+    /// background until [`AsyncFlagPoller::stop`] is called or the poller is
+    /// dropped.
     pub async fn start(&mut self) {
         // Check if already running
         {
@@ -456,7 +491,13 @@ impl AsyncFlagPoller {
         self.task_handle = Some(task);
     }
 
-    /// Load flags asynchronously
+    /// Load flags asynchronously and update the cache once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Connection`] for request failures or non-success HTTP
+    /// statuses, and [`Error::Serialization`] when the response cannot be
+    /// parsed.
     #[instrument(skip(self), level = "debug")]
     pub async fn load_flags(&self) -> Result<(), Error> {
         let url = format!(
@@ -497,7 +538,7 @@ impl AsyncFlagPoller {
         Ok(())
     }
 
-    /// Stop the polling task
+    /// Stop the polling task.
     pub async fn stop(&mut self) {
         debug!("Stopping async flag poller");
         self.stop_signal.store(true, Ordering::Relaxed);
@@ -507,7 +548,7 @@ impl AsyncFlagPoller {
         *self.is_running.write().await = false;
     }
 
-    /// Check if the poller is running
+    /// Check if the poller currently has a running background task.
     pub async fn is_running(&self) -> bool {
         *self.is_running.read().await
     }
@@ -534,6 +575,7 @@ pub struct LocalEvaluator {
 }
 
 impl LocalEvaluator {
+    /// Create an evaluator backed by a shared [`FlagCache`].
     pub fn new(cache: FlagCache) -> Self {
         Self { cache }
     }
@@ -550,6 +592,16 @@ impl LocalEvaluator {
     /// only consulted when the flag (or one of its conditions) targets a
     /// group via `aggregation_group_type_index`; pass empty maps for
     /// person-targeted flags.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(value))` when the flag is present and evaluated,
+    /// `Ok(None)` when the flag is absent from the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InconclusiveMatchError`] when required properties, cohorts, or
+    /// dependent flags are unavailable locally.
     #[instrument(
         skip(self, person_properties, groups, group_properties),
         level = "trace"
@@ -589,8 +641,21 @@ impl LocalEvaluator {
         }
     }
 
-    /// Evaluate a feature flag locally (simple version without cohort/flag dependency support).
-    /// Use this when you know the flag doesn't have cohort or flag dependency conditions.
+    /// Evaluate a feature flag locally without cohort or flag dependency
+    /// support.
+    ///
+    /// Use this when you know the flag doesn't have cohort or flag dependency
+    /// conditions.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(value))` when the flag is present and evaluated,
+    /// `Ok(None)` when the flag is absent from the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InconclusiveMatchError`] when required properties are
+    /// unavailable locally.
     #[instrument(
         skip(self, person_properties, groups, group_properties),
         level = "trace"
@@ -625,6 +690,10 @@ impl LocalEvaluator {
     }
 
     /// Get all flags and evaluate them with full context support.
+    ///
+    /// The returned map is keyed by feature flag key. Each value can be an
+    /// inconclusive error if that particular flag could not be evaluated from
+    /// the supplied context.
     #[instrument(
         skip(self, person_properties, groups, group_properties),
         level = "debug"

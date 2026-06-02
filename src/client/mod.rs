@@ -18,8 +18,9 @@ pub use async_client::Client;
 
 /// Configuration options for the PostHog client.
 ///
-/// Use [`ClientOptionsBuilder`] to construct options with custom settings,
-/// or create directly from an API key using `ClientOptions::from("your-api-key")`.
+/// Use [`ClientOptionsBuilder`] to construct options with custom settings, or
+/// create options directly from a project API key with
+/// `ClientOptions::from("your-api-key")`.
 ///
 /// # Example
 ///
@@ -27,7 +28,7 @@ pub use async_client::Client;
 /// use posthog_rs::ClientOptionsBuilder;
 ///
 /// let options = ClientOptionsBuilder::default()
-///     .api_key("your-api-key".to_string())
+///     .api_key("your-project-api-key".to_string())
 ///     .host("https://eu.posthog.com")
 ///     .build()
 ///     .unwrap();
@@ -35,39 +36,46 @@ pub use async_client::Client;
 #[derive(Builder, Clone)]
 #[builder(build_fn(name = "build_unchecked", private))]
 pub struct ClientOptions {
-    /// Host URL for the PostHog API (defaults to US ingestion endpoint)
+    /// Host URL for the PostHog API. Defaults to the US ingestion endpoint.
+    /// App hosts such as `https://eu.posthog.com` are normalized to ingestion
+    /// hosts before requests are sent.
     #[builder(setter(into, strip_option), default)]
     host: Option<String>,
 
-    /// Project API key. If missing or blank, the client is disabled.
+    /// PostHog project API key (project token). If missing or blank, the client
+    /// is disabled.
     #[builder(default)]
     api_key: String,
 
-    /// Request timeout in seconds
+    /// Request timeout in seconds for capture, batch, and local evaluation
+    /// definition requests. Defaults to `30`.
     #[builder(default = "30")]
     request_timeout_seconds: u64,
 
-    /// Personal API key for fetching flag definitions (required for local evaluation)
+    /// Personal API key for fetching flag definitions. Required when
+    /// `enable_local_evaluation` is `true`.
     #[builder(setter(into, strip_option), default)]
     personal_api_key: Option<String>,
 
-    /// Enable local evaluation of feature flags
+    /// Enable local evaluation of feature flags using a background definitions
+    /// poller.
     #[builder(default = "false")]
     enable_local_evaluation: bool,
 
-    /// Interval for polling flag definitions (in seconds)
+    /// Interval for polling flag definitions, in seconds. Defaults to `30`.
     #[builder(default = "30")]
     poll_interval_seconds: u64,
 
-    /// Disable tracking (useful for development)
+    /// Disable tracking and remote flag requests. Useful for development and
+    /// tests.
     #[builder(default = "false")]
     disabled: bool,
 
-    /// Disable automatic geoip enrichment
+    /// Disable automatic GeoIP enrichment for capture and flag requests.
     #[builder(default = "false")]
     disable_geoip: bool,
 
-    /// Feature flags request timeout in seconds
+    /// Timeout in seconds for remote `/flags` requests. Defaults to `3`.
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
 
@@ -89,7 +97,10 @@ impl ClientOptions {
         &self.endpoint_manager
     }
 
-    /// Check if the client is disabled
+    /// Check whether the client is disabled.
+    ///
+    /// A client is disabled when configured with `disabled(true)` or when the
+    /// project API key is missing or blank after trimming.
     pub fn is_disabled(&self) -> bool {
         self.disabled
     }
@@ -134,12 +145,18 @@ impl ClientOptionsBuilder {
     /// Missing or whitespace-only API keys are allowed and disable the client so
     /// SDK initialization remains infallible while avoiding requests with an
     /// empty API key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientOptionsBuilderError`] if a required builder value is
+    /// invalid according to the generated builder.
     pub fn build(&self) -> Result<ClientOptions, ClientOptionsBuilderError> {
         Ok(self.build_unchecked()?.sanitize())
     }
 }
 
 impl From<&str> for ClientOptions {
+    /// Create options from a PostHog project API key.
     fn from(api_key: &str) -> Self {
         ClientOptionsBuilder::default()
             .api_key(api_key.to_string())
@@ -149,7 +166,7 @@ impl From<&str> for ClientOptions {
 }
 
 impl From<(&str, &str)> for ClientOptions {
-    /// Create options from API key and host
+    /// Create options from a PostHog project API key and host URL.
     fn from((api_key, host): (&str, &str)) -> Self {
         ClientOptionsBuilder::default()
             .api_key(api_key.to_string())

@@ -41,7 +41,12 @@ pub enum Error {
     /// HTTP 400 or 413 — the request was malformed or too large
     BadRequest(String),
     /// HTTP 5xx — the server encountered an error
-    ServerError { status: u16, message: String },
+    ServerError {
+        /// HTTP status code returned by the server.
+        status: u16,
+        /// Response body or error message returned by the server.
+        message: String,
+    },
 }
 
 impl Error {

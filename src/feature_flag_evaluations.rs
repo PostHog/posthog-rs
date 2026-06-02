@@ -56,10 +56,23 @@ pub(crate) trait FeatureFlagEvaluationsHost: Send + Sync {
 /// Optional inputs for [`Client::evaluate_flags`](crate::Client::evaluate_flags).
 #[derive(Default, Clone, Debug)]
 pub struct EvaluateFlagsOptions {
+    /// Group keys for group-targeted feature flags, keyed by group type (for
+    /// example `{ "company": "company_123" }`). These groups are also
+    /// attached to `$feature_flag_called` events emitted by the returned
+    /// snapshot.
     pub groups: Option<HashMap<String, String>>,
+    /// Person properties used by remote or local flag evaluation. Provide any
+    /// properties referenced by release conditions when using local evaluation.
     pub person_properties: Option<HashMap<String, Value>>,
+    /// Group properties used by group-targeted or mixed-targeting flags, keyed
+    /// first by group type and then by property name.
     pub group_properties: Option<HashMap<String, HashMap<String, Value>>>,
+    /// When `true`, skip the remote `/flags` request and return only locally
+    /// evaluated results. If local evaluation is not configured, the snapshot is
+    /// empty.
     pub only_evaluate_locally: bool,
+    /// Per-call override for GeoIP behavior on `/flags` and
+    /// `$feature_flag_called` requests. `None` uses the client-level setting.
     pub disable_geoip: Option<bool>,
     /// Optional list of flag keys. When provided, only these flags are
     /// evaluated — the underlying `/flags` request asks the server for just
@@ -141,13 +154,21 @@ impl FeatureFlagEvaluations {
 
     /// Whether `key` is enabled. Records the access and fires (deduplicated)
     /// `$feature_flag_called`.
+    ///
+    /// # Returns
+    ///
+    /// `true` for enabled boolean flags or matched multivariate variants, and
+    /// `false` for disabled or missing flags.
     #[must_use]
     pub fn is_enabled(&self, key: &str) -> bool {
         self.record_access(key);
         self.flags.get(key).is_some_and(|f| f.enabled)
     }
 
-    /// Look up the value of `key`. Returns:
+    /// Look up the value of `key`.
+    ///
+    /// # Returns
+    ///
     /// - `None` when the flag is not in the snapshot,
     /// - `Some(FlagValue::Boolean(false))` when disabled,
     /// - `Some(FlagValue::String(variant))` for a multivariate match,
@@ -161,8 +182,12 @@ impl FeatureFlagEvaluations {
         Some(flag_value_for(flag))
     }
 
-    /// Return the JSON payload associated with `key`, if any. This call does
-    /// **not** count as an access and does **not** fire any event.
+    /// Return the JSON payload associated with `key`, if any.
+    ///
+    /// # Remarks
+    ///
+    /// This call does **not** count as an access and does **not** fire any
+    /// event, matching the behavior documented for server-side SDKs.
     #[must_use]
     pub fn get_flag_payload(&self, key: &str) -> Option<Value> {
         self.flags.get(key).and_then(|f| f.payload.clone())
@@ -194,6 +219,9 @@ impl FeatureFlagEvaluations {
 
     /// A clone of the snapshot containing only the listed `keys` (preserving
     /// records). Unknown keys are dropped and surfaced via a single warning.
+    ///
+    /// Use this before [`Event::with_flags`](crate::Event::with_flags) to limit
+    /// the `$feature/<key>` properties attached to a captured event.
     #[must_use]
     pub fn only(&self, keys: &[&str]) -> Self {
         let mut filtered: HashMap<String, EvaluatedFlagRecord> = HashMap::new();

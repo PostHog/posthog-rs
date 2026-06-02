@@ -1,3 +1,9 @@
+//! Official Rust SDK for PostHog.
+//!
+//! Use [`client`] to construct a [`Client`], [`Event`] to capture analytics
+//! events, and [`Client::evaluate_flags`] with [`EvaluateFlagsOptions`] for
+//! feature flag evaluation.
+
 mod client;
 mod endpoints;
 mod error;
