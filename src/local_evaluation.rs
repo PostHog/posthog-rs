@@ -165,8 +165,8 @@ pub struct LocalEvaluationConfig {
     pub personal_api_key: String,
     /// Project API key to identify which project's flags to fetch
     pub project_api_key: String,
-    /// PostHog app host URL (for example, `https://us.posthog.com`).
-    /// Use `https://eu.posthog.com` for EU-hosted projects.
+    /// PostHog API host URL (for example, `https://us.i.posthog.com`).
+    /// Use `https://eu.i.posthog.com` for EU-hosted projects.
     pub api_host: String,
     /// How often to poll for updated flag definitions
     pub poll_interval: Duration,
