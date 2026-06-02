@@ -297,6 +297,9 @@ pub mod tests {
         event.insert_prop("$lib", "posthog-js").unwrap();
         event.insert_prop("$lib_version", "1.42.0").unwrap();
         event.insert_prop("$lib_version__major", 1u64).unwrap();
+        // A forwarded browser event sets $is_server explicitly; the caller's
+        // value must survive even when the client is configured as a server.
+        event.insert_prop("$is_server", false).unwrap();
 
         let inner = InnerEvent::new(event, "key".to_string(), true);
         let props = &inner.properties;
@@ -304,6 +307,10 @@ pub mod tests {
         assert_eq!(
             props.get("$lib"),
             Some(&serde_json::Value::String("posthog-js".to_string()))
+        );
+        assert_eq!(
+            props.get("$is_server"),
+            Some(&serde_json::Value::Bool(false))
         );
         assert_eq!(
             props.get("$lib_version"),
