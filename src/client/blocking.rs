@@ -55,6 +55,7 @@ struct BlockingFlagEventHost {
     endpoints: EndpointManager,
     disabled: bool,
     disable_geoip: bool,
+    is_server: bool,
     dedup_cache: Mutex<HashMap<String, HashSet<String>>>,
 }
 
@@ -66,6 +67,7 @@ impl BlockingFlagEventHost {
             endpoints: options.endpoints().clone(),
             disabled: options.is_disabled(),
             disable_geoip: options.disable_geoip,
+            is_server: options.is_server,
             dedup_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -93,7 +95,7 @@ impl BlockingFlagEventHost {
         if self.disabled {
             return;
         }
-        let inner_event = InnerEvent::new(event, self.api_key.clone());
+        let inner_event = InnerEvent::new(event, self.api_key.clone(), self.is_server);
         let payload = match serde_json::to_string(&inner_event) {
             Ok(p) => p,
             Err(e) => {
@@ -242,7 +244,8 @@ impl Client {
             event.insert_prop("$geoip_disable", true).ok();
         }
 
-        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
+        let inner_event =
+            InnerEvent::new(event, self.options.api_key.clone(), self.options.is_server);
 
         let payload =
             serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -274,13 +277,14 @@ impl Client {
         }
 
         let disable_geoip = self.options.disable_geoip;
+        let is_server = self.options.is_server;
         let inner_events: Vec<InnerEvent> = events
             .into_iter()
             .map(|mut event| {
                 if disable_geoip {
                     event.insert_prop("$geoip_disable", true).ok();
                 }
-                InnerEvent::new(event, self.options.api_key.clone())
+                InnerEvent::new(event, self.options.api_key.clone(), is_server)
             })
             .collect();
 
