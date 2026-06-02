@@ -195,7 +195,7 @@ async fn init(
 
 /// Drain pending events from the buffer under the lock, then send the batch
 /// without holding the lock, and finally re-acquire the lock to record the
-/// outcome. Returns the total number of events sent.
+/// outcome. Returns the number of events flushed in this call.
 async fn flush_buffer(instances: &Mutex<HashMap<String, AdapterState>>, key: &str) -> u64 {
     let (client, events, historical_migration) = {
         let mut map = instances.lock().await;
@@ -217,21 +217,26 @@ async fn flush_buffer(instances: &Mutex<HashMap<String, AdapterState>>, key: &st
     let count = events.len() as u64;
     let result = client.capture_batch(events, historical_migration).await;
 
-    let total_sent = {
+    let flushed = {
         let mut map = instances.lock().await;
         if let Some(s) = map.get_mut(key) {
-            s.pending_events = (s.pending_events - count as i64).max(0);
             match result {
-                Ok(()) => s.total_events_sent += count,
-                Err(e) => s.last_error = Some(e.to_string()),
+                Ok(()) => {
+                    s.pending_events = (s.pending_events - count as i64).max(0);
+                    s.total_events_sent += count;
+                    count
+                }
+                Err(e) => {
+                    s.last_error = Some(e.to_string());
+                    0
+                }
             }
-            s.total_events_sent
         } else {
             0
         }
     };
 
-    total_sent
+    flushed
 }
 
 async fn capture_event(
@@ -313,11 +318,11 @@ async fn flush(
         }
     }
 
-    let total_sent = flush_buffer(&state.instances, &key).await;
+    let flushed = flush_buffer(&state.instances, &key).await;
 
     Json(serde_json::json!({
         "success": true,
-        "events_flushed": total_sent
+        "events_flushed": flushed
     }))
     .into_response()
 }
