@@ -1,19 +1,6 @@
-use std::collections::HashMap;
-
 use crate::endpoints::{EndpointManager, DEFAULT_HOST};
 use derive_builder::Builder;
 use tracing::warn;
-
-/// Selects which capture pipeline the client uses.
-///
-/// - `V0` (default): legacy `/batch/` endpoint with `api_key` in body
-/// - `V1`: new `/i/v1/analytics/events/` endpoint with `Authorization: Bearer` header
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CaptureMode {
-    #[default]
-    V0,
-    V1,
-}
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
@@ -105,15 +92,13 @@ pub struct ClientOptions {
     #[builder(default = "false")]
     local_evaluation_only: bool,
 
-    /// Selects the capture pipeline. Defaults to `V0` (legacy `/batch/`).
-    #[builder(default)]
-    pub(crate) capture_mode: CaptureMode,
-
     /// Extra HTTP headers injected into every outbound capture request.
     /// Used by the SDK test harness adapter to attach `X-Test-Id` for
     /// parallel test isolation.
+    #[cfg(feature = "test-harness")]
     #[builder(default, setter(strip_option))]
-    pub(crate) extra_capture_headers: Option<HashMap<String, String>>,
+    #[allow(dead_code)]
+    pub(crate) extra_capture_headers: Option<std::collections::HashMap<String, String>>,
 
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]

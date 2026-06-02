@@ -406,6 +406,7 @@ async fn test_groups_parameter() {
     flags_mock.assert();
 }
 
+#[cfg(not(feature = "capture-v1"))]
 #[tokio::test]
 async fn test_client_with_empty_api_key_is_noop() {
     for api_key in [None, Some(" \n\t ")] {
@@ -496,6 +497,7 @@ async fn test_capture_batch_sends_to_batch_endpoint() {
     batch_mock.assert();
 }
 
+#[cfg(not(feature = "capture-v1"))]
 #[tokio::test]
 async fn test_capture_batch_historical_migration() {
     let server = MockServer::start();
@@ -516,6 +518,7 @@ async fn test_capture_batch_historical_migration() {
     batch_mock.assert();
 }
 
+#[cfg(not(feature = "capture-v1"))]
 #[tokio::test]
 async fn test_capture_batch_rate_limit() {
     let server = MockServer::start();
@@ -535,6 +538,7 @@ async fn test_capture_batch_rate_limit() {
     batch_mock.assert();
 }
 
+#[cfg(not(feature = "capture-v1"))]
 #[tokio::test]
 async fn test_capture_batch_bad_request() {
     let server = MockServer::start();

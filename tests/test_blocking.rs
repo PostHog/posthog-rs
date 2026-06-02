@@ -227,6 +227,7 @@ fn test_api_error_handling() {
     error_mock.assert();
 }
 
+#[cfg(not(feature = "capture-v1"))]
 #[test]
 fn test_client_with_empty_api_key_is_noop() {
     for api_key in [None, Some(" \n\t ")] {
@@ -313,6 +314,7 @@ fn test_capture_batch_sends_to_batch_endpoint() {
     batch_mock.assert();
 }
 
+#[cfg(not(feature = "capture-v1"))]
 #[test]
 fn test_capture_batch_historical_migration() {
     let server = MockServer::start();
@@ -333,6 +335,7 @@ fn test_capture_batch_historical_migration() {
     batch_mock.assert();
 }
 
+#[cfg(not(feature = "capture-v1"))]
 #[test]
 fn test_capture_batch_rate_limit() {
     let server = MockServer::start();
@@ -352,6 +355,7 @@ fn test_capture_batch_rate_limit() {
     batch_mock.assert();
 }
 
+#[cfg(not(feature = "capture-v1"))]
 #[test]
 fn test_capture_batch_bad_request() {
     let server = MockServer::start();

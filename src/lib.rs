@@ -81,7 +81,6 @@ mod local_evaluation;
 // Public interface - any change to this is breaking!
 // Client
 pub use client::client;
-pub use client::CaptureMode;
 pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;

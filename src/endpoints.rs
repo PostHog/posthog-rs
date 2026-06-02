@@ -11,14 +11,11 @@ pub const DEFAULT_HOST: &str = US_INGESTION_ENDPOINT;
 
 /// API endpoints used by the SDK for different operations.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum Endpoint {
     /// Event capture endpoint
     Capture,
     /// Batch event capture endpoint
     Batch,
-    /// V1 analytics capture endpoint
-    CaptureV1,
     /// Feature flags endpoint
     Flags,
     /// Local evaluation endpoint
@@ -31,7 +28,6 @@ impl Endpoint {
         match self {
             Endpoint::Capture => "/i/v0/e/",
             Endpoint::Batch => "/batch/",
-            Endpoint::CaptureV1 => "/i/v1/analytics/events/",
             Endpoint::Flags => "/flags/?v=2",
             Endpoint::LocalEvaluation => "/flags/definitions/?send_cohorts",
         }

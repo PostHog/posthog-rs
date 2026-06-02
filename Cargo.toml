@@ -44,6 +44,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 default = ["async-client"]
 e2e-test = []
 async-client = ["tokio"]
+capture-v1 = []
+test-harness = []
 
 [workspace]
 members = ["compliance/adapter"]

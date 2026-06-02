@@ -308,6 +308,7 @@ mod blocking {
         capture_mock.assert_hits(0);
     }
 
+    #[cfg(not(feature = "capture-v1"))]
     #[test]
     fn event_with_flags_attaches_properties_without_extra_request() {
         let server = MockServer::start();
@@ -490,7 +491,9 @@ mod blocking {
 #[cfg(feature = "async-client")]
 mod async_tests {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, Event, FlagValue};
+    #[cfg(not(feature = "capture-v1"))]
+    use posthog_rs::Event;
+    use posthog_rs::{EvaluateFlagsOptions, FlagValue};
 
     async fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
@@ -611,6 +614,7 @@ mod async_tests {
         capture_mock.assert_hits(0);
     }
 
+    #[cfg(not(feature = "capture-v1"))]
     #[tokio::test]
     async fn event_with_flags_attaches_properties_without_extra_request() {
         let server = MockServer::start();

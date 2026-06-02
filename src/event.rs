@@ -163,6 +163,7 @@ impl Event {
 
 /// Wrapper for the `/batch/` endpoint that includes the API key and options
 /// alongside the event array.
+#[cfg(not(feature = "capture-v1"))]
 #[derive(Serialize)]
 pub struct BatchRequest {
     pub api_key: String,

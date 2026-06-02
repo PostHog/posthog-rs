@@ -7,6 +7,7 @@ use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
 
 use crate::endpoints::{Endpoint, EndpointManager};
+#[cfg(not(feature = "capture-v1"))]
 use crate::event::BatchRequest;
 use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
@@ -18,7 +19,7 @@ use crate::feature_flags::{
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
 use crate::{event::InnerEvent, Error, Event};
 
-use super::{CaptureMode, ClientOptions};
+use super::ClientOptions;
 
 /// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
 /// dedup cache. On overflow the entire map is reset (matches the JS SDK).
@@ -266,43 +267,48 @@ impl Client {
     ///
     /// Disabled clients skip the request and return `Ok(())`.
     #[instrument(skip(self, event), level = "debug")]
+    #[allow(unused_mut)]
     pub fn capture(&self, mut event: Event) -> Result<(), Error> {
         if self.options.is_disabled() {
             trace!("Client is disabled, skipping capture");
             return Ok(());
         }
 
-        if self.options.capture_mode == CaptureMode::V1 {
+        #[cfg(feature = "capture-v1")]
+        {
             return self.capture_v1(vec![event]);
         }
 
-        // Add geoip disable property if configured
-        if self.options.disable_geoip {
-            event.insert_prop("$geoip_disable", true).ok();
+        #[cfg(not(feature = "capture-v1"))]
+        {
+            // Add geoip disable property if configured
+            if self.options.disable_geoip {
+                event.insert_prop("$geoip_disable", true).ok();
+            }
+            // Mark server-side events so ingestion doesn't attribute the host OS to the person.
+            if self.options.is_server {
+                event.insert_prop("$is_server", true).ok();
+            }
+
+            let inner_event = InnerEvent::new(event, self.options.api_key.clone());
+
+            let payload = serde_json::to_string(&inner_event)
+                .map_err(|e| Error::Serialization(e.to_string()))?;
+
+            let url = self.options.endpoints().build_url(Endpoint::Capture);
+            let mut request = self
+                .client
+                .post(&url)
+                .header(CONTENT_TYPE, "application/json")
+                .body(payload);
+            request = self.apply_extra_headers(request);
+
+            let response = request
+                .send()
+                .map_err(|e| Error::Connection(e.to_string()))?;
+
+            check_response(response)
         }
-        // Mark server-side events so ingestion doesn't attribute the host OS to the person.
-        if self.options.is_server {
-            event.insert_prop("$is_server", true).ok();
-        }
-
-        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
-
-        let payload =
-            serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
-
-        let url = self.options.endpoints().build_url(Endpoint::Capture);
-        let mut request = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload);
-        request = self.apply_extra_headers(request);
-
-        let response = request
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
-
-        check_response(response)
     }
 
     /// Capture a collection of events with a single request.
@@ -329,60 +335,71 @@ impl Client {
             return Ok(());
         }
 
-        if self.options.capture_mode == CaptureMode::V1 {
+        #[cfg(feature = "capture-v1")]
+        {
+            let _ = historical_migration;
             return self.capture_v1(events);
         }
 
-        let disable_geoip = self.options.disable_geoip;
-        let is_server = self.options.is_server;
-        let inner_events: Vec<InnerEvent> = events
-            .into_iter()
-            .map(|mut event| {
-                if disable_geoip {
-                    event.insert_prop("$geoip_disable", true).ok();
-                }
-                if is_server {
-                    event.insert_prop("$is_server", true).ok();
-                }
-                InnerEvent::new(event, self.options.api_key.clone())
-            })
-            .collect();
+        #[cfg(not(feature = "capture-v1"))]
+        {
+            let disable_geoip = self.options.disable_geoip;
+            let is_server = self.options.is_server;
+            let inner_events: Vec<InnerEvent> = events
+                .into_iter()
+                .map(|mut event| {
+                    if disable_geoip {
+                        event.insert_prop("$geoip_disable", true).ok();
+                    }
+                    if is_server {
+                        event.insert_prop("$is_server", true).ok();
+                    }
+                    InnerEvent::new(event, self.options.api_key.clone())
+                })
+                .collect();
 
-        let batch_request = BatchRequest {
-            api_key: self.options.api_key.clone(),
-            historical_migration,
-            batch: inner_events,
-        };
-        let payload = serde_json::to_string(&batch_request)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
-        let url = self.options.endpoints().build_url(Endpoint::Batch);
+            let batch_request = BatchRequest {
+                api_key: self.options.api_key.clone(),
+                historical_migration,
+                batch: inner_events,
+            };
+            let payload = serde_json::to_string(&batch_request)
+                .map_err(|e| Error::Serialization(e.to_string()))?;
+            let url = self.options.endpoints().build_url(Endpoint::Batch);
 
-        let mut request = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload);
-        request = self.apply_extra_headers(request);
+            let mut request = self
+                .client
+                .post(&url)
+                .header(CONTENT_TYPE, "application/json")
+                .body(payload);
+            request = self.apply_extra_headers(request);
 
-        let response = request
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            let response = request
+                .send()
+                .map_err(|e| Error::Connection(e.to_string()))?;
 
-        check_response(response)
+            check_response(response)
+        }
     }
 
+    #[cfg(not(feature = "capture-v1"))]
+    #[allow(unused_mut)]
     fn apply_extra_headers(
         &self,
         mut request: reqwest::blocking::RequestBuilder,
     ) -> reqwest::blocking::RequestBuilder {
-        if let Some(ref extra) = self.options.extra_capture_headers {
-            for (k, v) in extra {
-                request = request.header(k.as_str(), v.as_str());
+        #[cfg(feature = "test-harness")]
+        {
+            if let Some(ref extra) = self.options.extra_capture_headers {
+                for (k, v) in extra {
+                    request = request.header(k.as_str(), v.as_str());
+                }
             }
         }
         request
     }
 
+    #[cfg(feature = "capture-v1")]
     fn capture_v1(&self, _events: Vec<Event>) -> Result<(), Error> {
         Err(Error::ServerError {
             status: 500,

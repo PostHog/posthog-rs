@@ -11,14 +11,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use posthog_rs::{CaptureMode, Client, ClientOptionsBuilder, Event};
+use posthog_rs::{Client, ClientOptionsBuilder, Event};
 
 const SUPPORTS_PARALLEL: bool = true;
 
 #[derive(Clone)]
 struct AppState {
     instances: Arc<Mutex<HashMap<String, AdapterState>>>,
-    capture_mode: CaptureMode,
 }
 
 const DEFAULT_TEST_ID: &str = "_global";
@@ -97,17 +96,11 @@ struct StateResponse {
     last_error: Option<String>,
 }
 
-fn parse_capture_mode() -> CaptureMode {
-    match std::env::var("CAPTURE_MODE").as_deref() {
-        Ok("v1") => CaptureMode::V1,
-        _ => CaptureMode::V0,
-    }
-}
-
-async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let capability = match state.capture_mode {
-        CaptureMode::V0 => "capture_v0",
-        CaptureMode::V1 => "capture_v1",
+async fn health() -> Json<HealthResponse> {
+    let capability = if cfg!(feature = "capture-v1") {
+        "capture_v1"
+    } else {
+        "capture_v0"
     };
     Json(HealthResponse {
         sdk_name: "posthog-rs",
@@ -130,10 +123,7 @@ async fn init(
     s.historical_migration = req.historical_migration.unwrap_or(false);
 
     let mut builder = ClientOptionsBuilder::default();
-    builder
-        .api_key(req.api_key)
-        .host(req.host)
-        .capture_mode(state.capture_mode);
+    builder.api_key(req.api_key).host(req.host);
 
     if req.disable_geoip.unwrap_or(false) {
         builder.disable_geoip(true);
@@ -313,18 +303,15 @@ async fn reset(
 
 #[tokio::main]
 async fn main() {
-    let capture_mode = parse_capture_mode();
-    let mode_str = match capture_mode {
-        CaptureMode::V0 => "v0",
-        CaptureMode::V1 => "v1",
+    let mode_str = if cfg!(feature = "capture-v1") {
+        "v1"
+    } else {
+        "v0"
     };
-    eprintln!(
-        "Starting posthog-rs SDK adapter (CAPTURE_MODE={mode_str}, parallel={SUPPORTS_PARALLEL})"
-    );
+    eprintln!("Starting posthog-rs SDK adapter (capture={mode_str}, parallel={SUPPORTS_PARALLEL})");
 
     let state = AppState {
         instances: Arc::new(Mutex::new(HashMap::new())),
-        capture_mode,
     };
 
     let app = Router::new()
