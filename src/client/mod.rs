@@ -67,26 +67,9 @@ pub struct ClientOptions {
     #[builder(default = "false")]
     disable_geoip: bool,
 
-    /// Whether events originate from a server-side environment.
-    ///
-    /// Defaults to `true`. When `true`, the SDK adds `$is_server: true` to every
-    /// captured event so PostHog can identify server-side events. Set this to
-    /// `false` when running posthog-rs as a client/CLI (for example a desktop or
-    /// command-line tool) so the event's device OS is attributed normally and
-    /// `$is_server` is omitted. A caller-set `$is_server` property on an
-    /// individual event always takes precedence over this option.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use posthog_rs::ClientOptionsBuilder;
-    ///
-    /// let options = ClientOptionsBuilder::default()
-    ///     .api_key("your-api-key".to_string())
-    ///     .is_server(false) // running as a CLI/client
-    ///     .build()
-    ///     .unwrap();
-    /// ```
+    /// Whether events originate from a server-side runtime. Defaults to `true`,
+    /// which stamps `$is_server: true` so PostHog won't attribute the host OS to
+    /// the user. Set `false` for client/CLI use (the property is then omitted).
     #[builder(default = "true")]
     is_server: bool,
 

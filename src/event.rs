@@ -135,12 +135,8 @@ pub struct InnerEvent {
 
 impl InnerEvent {
     /// Build an [`InnerEvent`] from an [`Event`], stamping the SDK metadata
-    /// (`$lib`, `$lib_version`, and so on) and, when `is_server` is `true`,
-    /// marking the event as originating from a server-side SDK via
-    /// `$is_server: true`. A caller-set `$is_server` property is always
-    /// preserved. The `is_server` flag is sourced from the client's
-    /// [`ClientOptions::is_server`](crate::ClientOptions) configuration.
-    pub fn new(event: Event, api_key: String, is_server: bool) -> Self {
+    /// (`$lib`, `$lib_version`).
+    pub fn new(event: Event, api_key: String) -> Self {
         let uuid = event.uuid;
         let mut properties = event.properties;
 
@@ -151,13 +147,6 @@ impl InnerEvent {
                 "$lib".into(),
                 serde_json::Value::String("posthog-rs".into()),
             );
-        }
-
-        // Mark every event as originating from a server-side SDK, unless the
-        // client is configured as a client/CLI (`is_server == false`). A
-        // caller-set value always wins.
-        if is_server && !properties.contains_key("$is_server") {
-            properties.insert("$is_server".into(), serde_json::Value::Bool(true));
         }
 
         let version_str = env!("CARGO_PKG_VERSION");
@@ -223,7 +212,7 @@ pub mod tests {
         let api_key = "test_api_key".to_string();
 
         // Act
-        let inner_event = InnerEvent::new(event, api_key, true);
+        let inner_event = InnerEvent::new(event, api_key);
 
         // Assert
         let props = &inner_event.properties;
@@ -231,51 +220,13 @@ pub mod tests {
             props.get("$lib"),
             Some(&serde_json::Value::String("posthog-rs".to_string()))
         );
-        assert_eq!(
-            props.get("$is_server"),
-            Some(&serde_json::Value::Bool(true))
-        );
-    }
-
-    #[test]
-    fn inner_event_omits_is_server_when_disabled() {
-        // Arrange
-        let mut event = Event::new("unit test event", "1234");
-        event.insert_prop("key1", "value1").unwrap();
-        let api_key = "test_api_key".to_string();
-
-        // Act: client configured as a client/CLI (is_server = false)
-        let inner_event = InnerEvent::new(event, api_key, false);
-
-        // Assert: $is_server must not be added
-        let props = &inner_event.properties;
-        assert_eq!(props.get("$is_server"), None);
-        // Other lib metadata is still stamped
-        assert_eq!(
-            props.get("$lib"),
-            Some(&serde_json::Value::String("posthog-rs".to_string()))
-        );
-    }
-
-    #[test]
-    fn inner_event_preserves_caller_set_is_server_when_disabled() {
-        // A caller-set $is_server always wins, even when is_server == false.
-        let mut event = Event::new("unit test event", "1234");
-        event.insert_prop("$is_server", true).unwrap();
-
-        let inner_event = InnerEvent::new(event, "key".to_string(), false);
-
-        assert_eq!(
-            inner_event.properties.get("$is_server"),
-            Some(&serde_json::Value::Bool(true))
-        );
     }
 
     #[test]
     fn inner_event_includes_auto_generated_uuid() {
         let event = Event::new("test", "user1");
 
-        let inner = InnerEvent::new(event, "key".to_string(), true);
+        let inner = InnerEvent::new(event, "key".to_string());
         let json = serde_json::to_value(&inner).unwrap();
 
         let uuid_str = json["uuid"].as_str().expect("uuid should be present");
@@ -288,7 +239,7 @@ pub mod tests {
         let mut event = Event::new("test", "user1");
         event.set_uuid(uuid);
 
-        let inner = InnerEvent::new(event, "key".to_string(), true);
+        let inner = InnerEvent::new(event, "key".to_string());
         let json = serde_json::to_value(&inner).unwrap();
 
         assert_eq!(json["uuid"], uuid.to_string());
@@ -300,20 +251,13 @@ pub mod tests {
         event.insert_prop("$lib", "posthog-js").unwrap();
         event.insert_prop("$lib_version", "1.42.0").unwrap();
         event.insert_prop("$lib_version__major", 1u64).unwrap();
-        // A forwarded browser event sets $is_server explicitly; the caller's
-        // value must survive even when the client is configured as a server.
-        event.insert_prop("$is_server", false).unwrap();
 
-        let inner = InnerEvent::new(event, "key".to_string(), true);
+        let inner = InnerEvent::new(event, "key".to_string());
         let props = &inner.properties;
 
         assert_eq!(
             props.get("$lib"),
             Some(&serde_json::Value::String("posthog-js".to_string()))
-        );
-        assert_eq!(
-            props.get("$is_server"),
-            Some(&serde_json::Value::Bool(false))
         );
         assert_eq!(
             props.get("$lib_version"),

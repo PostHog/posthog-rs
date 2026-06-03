@@ -104,7 +104,7 @@ impl AsyncFlagEventHost {
         if self.disabled {
             return;
         }
-        let inner_event = InnerEvent::new(event, self.api_key.clone(), self.is_server);
+        let inner_event = InnerEvent::new(event, self.api_key.clone());
         let payload = match serde_json::to_string(&inner_event) {
             Ok(p) => p,
             Err(e) => {
@@ -158,6 +158,9 @@ impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
         }
         if params.disable_geoip.unwrap_or(self.disable_geoip) {
             let _ = event.insert_prop("$geoip_disable", true);
+        }
+        if self.is_server {
+            let _ = event.insert_prop("$is_server", true);
         }
         self.spawn_ship(event);
     }
@@ -259,9 +262,12 @@ impl Client {
         if self.options.disable_geoip {
             event.insert_prop("$geoip_disable", true).ok();
         }
+        // Mark server-side events so ingestion doesn't attribute the host OS to the person.
+        if self.options.is_server {
+            event.insert_prop("$is_server", true).ok();
+        }
 
-        let inner_event =
-            InnerEvent::new(event, self.options.api_key.clone(), self.options.is_server);
+        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
 
         let payload =
             serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -300,7 +306,10 @@ impl Client {
                 if disable_geoip {
                     event.insert_prop("$geoip_disable", true).ok();
                 }
-                InnerEvent::new(event, self.options.api_key.clone(), is_server)
+                if is_server {
+                    event.insert_prop("$is_server", true).ok();
+                }
+                InnerEvent::new(event, self.options.api_key.clone())
             })
             .collect();
 
