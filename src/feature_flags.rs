@@ -608,7 +608,10 @@ pub fn match_feature_flag(
                 // The user's properties matched this group but the rollout
                 // excluded them. With early_exit enabled the flag is
                 // definitively disabled; otherwise fall through to later groups.
-                if flag.filters.early_exit {
+                // Only short-circuit when no prior group was inconclusive — an
+                // inconclusive result means we can't evaluate locally and must
+                // fall back to the server, so it takes priority over early_exit.
+                if flag.filters.early_exit && !is_inconclusive {
                     return Ok(FlagValue::Boolean(false));
                 }
             }
@@ -752,7 +755,10 @@ pub fn match_feature_flag_with_context(
                 // The user's properties matched this group but the rollout
                 // excluded them. With early_exit enabled the flag is
                 // definitively disabled; otherwise fall through to later groups.
-                if flag.filters.early_exit {
+                // Only short-circuit when no prior group was inconclusive — an
+                // inconclusive result means we can't evaluate locally and must
+                // fall back to the server, so it takes priority over early_exit.
+                if flag.filters.early_exit && !is_inconclusive {
                     return Ok(FlagValue::Boolean(false));
                 }
             }
@@ -3429,6 +3435,36 @@ mod tests {
         )
         .unwrap();
         // Property mismatch must not trigger early-exit; second group matches.
+        assert_eq!(result, FlagValue::Boolean(true));
+    }
+
+    #[test]
+    fn test_early_exit_enabled_short_circuits_with_context() {
+        let flag = early_exit_flag(true);
+        let ctx = EvaluationContext {
+            cohorts: &HashMap::new(),
+            flags: &HashMap::new(),
+            distinct_id: "user-123",
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
+        };
+        let result = match_feature_flag_with_context(&flag, &HashMap::new(), &ctx).unwrap();
+        assert_eq!(result, FlagValue::Boolean(false));
+    }
+
+    #[test]
+    fn test_early_exit_unset_falls_through_with_context() {
+        let flag = early_exit_flag(false);
+        let ctx = EvaluationContext {
+            cohorts: &HashMap::new(),
+            flags: &HashMap::new(),
+            distinct_id: "user-123",
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
+        };
+        let result = match_feature_flag_with_context(&flag, &HashMap::new(), &ctx).unwrap();
         assert_eq!(result, FlagValue::Boolean(true));
     }
 }
