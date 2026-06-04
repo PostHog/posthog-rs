@@ -228,6 +228,19 @@ impl Event {
         &self.properties
     }
 
+    /// Insert a default property only if the caller hasn't already set it.
+    ///
+    /// This gives caller-wins semantics: SDK-level defaults (like `$is_server`)
+    /// are injected without overriding an explicit value the user placed on the
+    /// event before calling `capture()`.
+    pub(crate) fn insert_prop_default<K: Into<String>>(
+        &mut self,
+        key: K,
+        value: serde_json::Value,
+    ) {
+        self.properties.entry(key.into()).or_insert(value);
+    }
+
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn groups(&self) -> &HashMap<String, String> {
         &self.groups

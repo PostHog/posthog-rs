@@ -160,13 +160,13 @@ impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
         for (group_name, group_id) in &params.groups {
             event.add_group(group_name, group_id);
         }
-        // Per-call geoip override takes precedence over client default
+        // Per-call geoip override takes precedence over client default; caller-wins.
         let effective_geoip = params.disable_geoip.unwrap_or(self.defaults.disable_geoip);
         if effective_geoip {
-            let _ = event.insert_prop("$geoip_disable", true);
+            event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
         }
         if self.defaults.is_server {
-            let _ = event.insert_prop("$is_server", true);
+            event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
         }
         self.spawn_ship(event);
     }

@@ -378,3 +378,40 @@ fn test_capture_batch_bad_request() {
     }
     batch_mock.assert();
 }
+
+#[cfg(not(feature = "capture-v1"))]
+#[test]
+fn v0_capture_injects_is_server_by_default() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v0/e/")
+            .body_contains("\"$is_server\":true");
+        then.status(200).body("ok");
+    });
+
+    let client = create_test_client(server.base_url());
+    let event = posthog_rs::Event::new("test_event", "user-1");
+    client.capture(event).unwrap();
+    mock.assert();
+}
+
+#[cfg(not(feature = "capture-v1"))]
+#[test]
+fn v0_capture_caller_override_wins_for_is_server() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v0/e/")
+            .body_contains("\"$is_server\":false");
+        then.status(200).body("ok");
+    });
+
+    let client = create_test_client(server.base_url());
+    let mut event = posthog_rs::Event::new("test_event", "user-1");
+    event.insert_prop("$is_server", false).unwrap();
+    client.capture(event).unwrap();
+    mock.assert();
+}

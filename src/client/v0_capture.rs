@@ -2,10 +2,10 @@
 //! Each client keeps only the I/O; this module owns event preparation and
 //! payload construction.
 
-#[cfg(feature = "async-client")]
-use reqwest::RequestBuilder;
 #[cfg(not(feature = "async-client"))]
 use reqwest::blocking::RequestBuilder;
+#[cfg(feature = "async-client")]
+use reqwest::RequestBuilder;
 
 use super::{CaptureDefaults, ClientOptions};
 use crate::error::Error;
@@ -16,12 +16,15 @@ use crate::event::{BatchRequest, Event, InnerEvent};
 // ---------------------------------------------------------------------------
 
 /// Apply client-level default properties (caller-wins) and V0 metadata stamping.
+///
+/// Uses `insert_prop_default` so a caller who explicitly set a property on the
+/// event before calling `capture()` keeps their value.
 pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
     if defaults.disable_geoip {
-        event.insert_prop("$geoip_disable", true).ok();
+        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
     }
     if defaults.is_server {
-        event.insert_prop("$is_server", true).ok();
+        event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
     event.prepare_for_v0();
 }
