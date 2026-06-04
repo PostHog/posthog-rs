@@ -294,6 +294,7 @@ fn assert_disabled_client_is_noop(api_key: Option<&str>) {
     flags_mock.assert_hits(0);
 }
 
+#[cfg(not(feature = "capture-v1"))]
 #[test]
 fn test_capture_batch_sends_to_batch_endpoint() {
     let server = MockServer::start();

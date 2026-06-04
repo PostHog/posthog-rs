@@ -433,6 +433,44 @@ async fn v1_capture_injects_geoip_disable_when_configured() {
 }
 
 #[tokio::test]
+async fn v1_capture_injects_is_server_by_default() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .body_contains("\"$is_server\":true");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    client.capture(Event::new("test", "user-1")).await.unwrap();
+    mock.assert();
+}
+
+#[tokio::test]
+async fn v1_capture_caller_override_wins_for_is_server() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .body_contains("\"$is_server\":false");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    let mut event = Event::new("test", "user-1");
+    event.insert_prop("$is_server", false).unwrap();
+    client.capture(event).await.unwrap();
+    mock.assert();
+}
+
+#[tokio::test]
 async fn v1_capture_batch_sets_historical_migration() {
     let server = MockServer::start();
 
