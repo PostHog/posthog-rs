@@ -14,6 +14,4 @@ repository = "posthog/posthog-rs"
 # show_acknowledgments = true (default)
 
 [packages]
-# Options for package discovery and filtering.
-# ignore_unpublished = false (default)
-# ignore = ["internal-*", "examples/*"]
+ignore = ["compliance/*"]
