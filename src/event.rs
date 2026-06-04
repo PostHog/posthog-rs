@@ -24,8 +24,15 @@ pub struct Event {
 }
 
 impl Event {
-    /// Capture a new identified [`Event`]. Unless you have a distinct ID you can
-    /// associate with a user, you probably want to use [`new_anon`] instead.
+    /// Create a new identified [`Event`]. Unless you have a distinct ID you can
+    /// associate with a user, you probably want to use [`Event::new_anon`]
+    /// instead.
+    ///
+    /// # Parameters
+    ///
+    /// - `event`: Event name, such as `"user_signed_up"`.
+    /// - `distinct_id`: Stable user or account identifier. For backend events,
+    ///   use the same distinct ID your frontend passes to `posthog.identify()`.
     pub fn new<S: Into<String>>(event: S, distinct_id: S) -> Self {
         Self {
             event: event.into(),
@@ -37,8 +44,18 @@ impl Event {
         }
     }
 
-    /// Capture a new anonymous event.
-    /// See https://posthog.com/docs/data/anonymous-vs-identified-events#how-to-capture-anonymous-events
+    /// Create a new anonymous event.
+    ///
+    /// See <https://posthog.com/docs/data/anonymous-vs-identified-events#how-to-capture-anonymous-events>.
+    ///
+    /// # Parameters
+    ///
+    /// - `event`: Event name.
+    ///
+    /// # Remarks
+    ///
+    /// Generates a random distinct ID and sets `$process_person_profile` to
+    /// `false` so PostHog does not create a person profile for the event.
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
         let mut res = Self {
             event: event.into(),
@@ -53,9 +70,16 @@ impl Event {
         res
     }
 
-    /// Add a property to the event
+    /// Add a property to the event.
     ///
-    /// Errors if `prop` fails to serialize
+    /// # Parameters
+    ///
+    /// - `key`: Property name.
+    /// - `prop`: Any value that can be serialized to JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Serialization`] if `prop` cannot be serialized.
     pub fn insert_prop<K: Into<String>, P: Serialize>(
         &mut self,
         key: K,
@@ -67,9 +91,20 @@ impl Event {
         Ok(())
     }
 
-    /// Capture this as a group event. See https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events
-    /// Note that group events cannot be personless, and will be automatically upgraded to include person profile processing if
-    /// they were anonymous. This might lead to "empty" person profiles being created.
+    /// Capture this as a group event.
+    ///
+    /// See <https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events>.
+    ///
+    /// # Parameters
+    ///
+    /// - `group_name`: Group type, such as `"company"`.
+    /// - `group_id`: Stable identifier for the group.
+    ///
+    /// # Remarks
+    ///
+    /// Group events cannot be personless, and will be automatically upgraded to
+    /// include person profile processing if they were anonymous. This might lead
+    /// to "empty" person profiles being created.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
         // You cannot disable person profile processing for groups
         self.insert_prop("$process_person_profile", true)
@@ -79,7 +114,14 @@ impl Event {
 
     /// Set the event timestamp, for events that happened in the past.
     ///
-    /// Errors if the timestamp is in the future.
+    /// # Parameters
+    ///
+    /// - `timestamp`: Timestamp to send with the event. It is converted to UTC
+    ///   before serialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidTimestamp`] if the timestamp is in the future.
     pub fn set_timestamp<Tz>(&mut self, timestamp: DateTime<Tz>) -> Result<(), Error>
     where
         Tz: TimeZone,
@@ -93,17 +135,24 @@ impl Event {
         Ok(())
     }
 
-    /// Override the auto-generated UUID for this event. Useful for
-    /// deduplication when re-importing historical data.
+    /// Override the auto-generated UUID for this event.
+    ///
+    /// Useful for deduplication when re-importing historical data.
     pub fn set_uuid(&mut self, uuid: Uuid) {
         self.uuid = uuid;
     }
 
     /// Attach the flag state captured by a [`FeatureFlagEvaluations`] snapshot
-    /// to this event. Adds `$feature/<key>` for every evaluated flag plus a
-    /// sorted `$active_feature_flags` list of enabled keys, mirroring what
+    /// to this event.
+    ///
+    /// Adds `$feature/<key>` for every evaluated flag plus a sorted
+    /// `$active_feature_flags` list of enabled keys, mirroring what
     /// `send_feature_flags` would otherwise fetch — but without making an
     /// extra `/flags` request.
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` so calls can be chained before capture.
     pub fn with_flags(&mut self, flags: &FeatureFlagEvaluations) -> &mut Self {
         for (key, value) in flags.event_properties() {
             self.properties.insert(key, value);

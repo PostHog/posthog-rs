@@ -206,7 +206,21 @@ fn pct(s: &str) -> String {
         .replace(';', "%3B")
 }
 
-/// This function constructs a new client using the options provided.
+/// Construct an async PostHog client from an API key or [`ClientOptions`].
+///
+/// # Parameters
+///
+/// - `options`: Either a project API key (for example `"phc_..."`) or a
+///   configured [`ClientOptions`] value.
+///
+/// # Returns
+///
+/// A [`Client`] that performs capture and feature flag requests asynchronously.
+///
+/// # Remarks
+///
+/// This constructor is available with the default `async-client` feature and
+/// must be awaited. Passing a blank API key creates a disabled client.
 pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let options = options.into().sanitize();
     let client = HttpClient::builder()
@@ -251,6 +265,22 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
 impl Client {
     /// Capture the provided event, sending it to PostHog.
+    ///
+    /// # Parameters
+    ///
+    /// - `event`: Event name, distinct ID, properties, timestamp, groups, and
+    ///   optional feature flag state to send.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Serialization`] if the event cannot be serialized,
+    /// [`Error::Connection`] for transport or unexpected HTTP failures,
+    /// [`Error::RateLimit`] for HTTP 429, [`Error::BadRequest`] for HTTP 400 or
+    /// 413, and [`Error::ServerError`] for HTTP 5xx.
+    ///
+    /// # Remarks
+    ///
+    /// Disabled clients skip the request and return `Ok(())`.
     #[instrument(skip(self, event), level = "debug")]
     pub async fn capture(&self, mut event: Event) -> Result<(), Error> {
         if self.options.is_disabled() {
@@ -286,9 +316,19 @@ impl Client {
         check_response(response).await
     }
 
-    /// Capture a collection of events with a single request. Events are sent to
-    /// the `/batch/` endpoint. Set `historical_migration` to `true` to route
-    /// events to the historical ingestion topic, bypassing the main pipeline.
+    /// Capture a collection of events with a single request.
+    ///
+    /// Events are sent to the `/batch/` endpoint.
+    ///
+    /// # Parameters
+    ///
+    /// - `events`: Events to send in the batch.
+    /// - `historical_migration`: Set to `true` to route events to the
+    ///   historical ingestion topic, bypassing the main pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same error categories as [`Client::capture`].
     pub async fn capture_batch(
         &self,
         events: Vec<Event>,
@@ -334,7 +374,31 @@ impl Client {
         check_response(response).await
     }
 
-    /// Get all feature flags for a user
+    /// Get all remote feature flags and payloads for a user.
+    ///
+    /// For new code, prefer [`Client::evaluate_flags`] so flag reads are
+    /// deduplicated and can be attached to captured events with
+    /// [`Event::with_flags`](crate::Event::with_flags).
+    ///
+    /// # Parameters
+    ///
+    /// - `distinct_id`: User distinct ID.
+    /// - `groups`: Optional group keys for group-targeted flags.
+    /// - `person_properties`: Optional person properties for release
+    ///   conditions.
+    /// - `group_properties`: Optional group properties for group-targeted
+    ///   release conditions.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(feature_flags, feature_flag_payloads)`, each keyed by flag
+    /// key. Disabled clients return two empty maps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Connection`] for request failures or non-success HTTP
+    /// statuses, and [`Error::Serialization`] when the response cannot be
+    /// parsed.
     #[must_use = "feature flags result should be used"]
     pub async fn get_feature_flags<S: Into<String>>(
         &self,
@@ -409,6 +473,25 @@ impl Client {
     }
 
     /// Get a specific feature flag value for a user.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: Feature flag key.
+    /// - `distinct_id`: User distinct ID.
+    /// - `groups`: Optional group keys for group-targeted flags.
+    /// - `person_properties`: Optional person properties for release
+    ///   conditions.
+    /// - `group_properties`: Optional group properties for group-targeted
+    ///   release conditions.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(value))` when the flag is returned, `Ok(None)` when it is not
+    /// returned or local-only evaluation cannot resolve it.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from remote `/flags` requests or response parsing.
     #[must_use = "feature flag result should be used"]
     #[instrument(skip_all, level = "debug")]
     #[deprecated(
@@ -474,6 +557,15 @@ impl Client {
     }
 
     /// Check if a feature flag is enabled for a user.
+    ///
+    /// # Returns
+    ///
+    /// `true` for `FlagValue::Boolean(true)` or any multivariate variant,
+    /// `false` for disabled or missing flags.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from [`Client::get_feature_flag`].
     #[must_use = "feature flag enabled check result should be used"]
     #[deprecated(
         since = "0.6.0",
@@ -507,6 +599,21 @@ impl Client {
     }
 
     /// Get a feature flag payload for a user.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: Feature flag key.
+    /// - `distinct_id`: User distinct ID.
+    ///
+    /// # Returns
+    ///
+    /// The JSON payload for the flag, if one was returned. This method does not
+    /// emit `$feature_flag_called` events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Connection`] for request failures and
+    /// [`Error::Serialization`] when the response cannot be parsed.
     #[must_use = "feature flag payload result should be used"]
     #[deprecated(
         since = "0.6.0",
@@ -563,10 +670,25 @@ impl Client {
         Ok(payloads.get(&key_str).cloned())
     }
 
-    /// Evaluate a feature flag locally (requires feature flags to be loaded).
+    /// Evaluate a supplied feature flag definition locally.
     ///
     /// `groups` and `group_properties` are only consulted when the flag (or one
     /// of its conditions) targets a group; pass empty maps for person flags.
+    ///
+    /// # Parameters
+    ///
+    /// - `flag`: Feature flag definition to evaluate.
+    /// - `distinct_id`: User distinct ID.
+    /// - `person_properties`: Person properties available to release
+    ///   conditions.
+    /// - `groups`: Group keys for group-targeted flags.
+    /// - `group_properties`: Group properties for group-targeted release
+    ///   conditions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InconclusiveMatch`] when the flag cannot be evaluated
+    /// locally with the supplied context.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate_feature_flag_locally(
         &self,
@@ -592,14 +714,26 @@ impl Client {
         .map_err(|e| Error::InconclusiveMatch(e.message))
     }
 
-    /// Evaluate every feature flag for `distinct_id` in a single round-trip,
-    /// returning a [`FeatureFlagEvaluations`] snapshot.
+    /// Evaluate feature flags for `distinct_id`, returning a
+    /// [`FeatureFlagEvaluations`] snapshot.
     ///
     /// Each `is_enabled` / `get_flag` call on the returned snapshot fires a
     /// dedup-aware `$feature_flag_called` event with full metadata, and the
     /// snapshot can be passed to [`Event::with_flags`] so a downstream
     /// [`Client::capture`] inherits `$feature/<key>` and `$active_feature_flags`
     /// without an extra `/flags` request.
+    ///
+    /// # Parameters
+    ///
+    /// - `distinct_id`: User distinct ID. Empty values return an empty snapshot.
+    /// - `options`: Optional groups, properties, GeoIP override, local-only
+    ///   mode, and flag-key filtering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Connection`] or [`Error::Serialization`] when remote
+    /// evaluation is required and the `/flags` request fails before any local
+    /// results are available.
     ///
     /// [`Event::with_flags`]: crate::Event::with_flags
     pub async fn evaluate_flags<S: Into<String>>(

@@ -3,13 +3,13 @@ use std::fmt;
 /// US ingestion endpoint
 pub const US_INGESTION_ENDPOINT: &str = "https://us.i.posthog.com";
 
-/// EU ingestion endpoint  
+/// EU ingestion endpoint
 pub const EU_INGESTION_ENDPOINT: &str = "https://eu.i.posthog.com";
 
 /// Default host (US by default)
 pub const DEFAULT_HOST: &str = US_INGESTION_ENDPOINT;
 
-/// API endpoints for different operations
+/// API endpoints used by the SDK for different operations.
 #[derive(Debug, Clone)]
 pub enum Endpoint {
     /// Event capture endpoint
@@ -23,7 +23,7 @@ pub enum Endpoint {
 }
 
 impl Endpoint {
-    /// Get the path for this endpoint
+    /// Get the URL path for this endpoint.
     pub fn path(&self) -> &str {
         match self {
             Endpoint::Capture => "/i/v0/e/",
@@ -40,7 +40,11 @@ impl fmt::Display for Endpoint {
     }
 }
 
-/// Manages PostHog API endpoints and host configuration
+/// Manages PostHog API endpoints and host configuration.
+///
+/// This low-level helper normalizes app hosts such as
+/// `https://us.posthog.com` to ingestion hosts such as
+/// [`US_INGESTION_ENDPOINT`].
 #[derive(Debug, Clone)]
 pub struct EndpointManager {
     base_host: String,
@@ -48,7 +52,10 @@ pub struct EndpointManager {
 }
 
 impl EndpointManager {
-    /// Create a new endpoint manager with the given normalized host
+    /// Create a new endpoint manager for `host`.
+    ///
+    /// `host` may be an app host (for example `https://eu.posthog.com`), an
+    /// ingestion host, or a custom reverse-proxy host.
     pub fn new(host: String) -> Self {
         let base_host = Self::determine_server_host(&host);
 
@@ -58,8 +65,11 @@ impl EndpointManager {
         }
     }
 
-    /// Determine the actual server host based on the provided normalized host
-    /// Similar to posthog-python's determine_server_host function
+    /// Determine the ingestion host used for API calls.
+    ///
+    /// Maps PostHog app hosts to their ingestion equivalents and removes a
+    /// trailing slash. Custom hosts are returned unchanged except for the
+    /// trailing slash.
     pub fn determine_server_host(host: &str) -> String {
         let trimmed_host = host.trim_end_matches('/');
 
@@ -72,17 +82,17 @@ impl EndpointManager {
         }
     }
 
-    /// Get the base host URL (for constructing endpoints)
+    /// Get the normalized base host URL used for API calls.
     pub fn base_host(&self) -> &str {
         &self.base_host
     }
 
-    /// Get the raw host (as provided by the user, used for session replay URLs)
+    /// Get the raw host as provided by the user.
     pub fn raw_host(&self) -> &str {
         &self.raw_host
     }
 
-    /// Build a full URL for a given endpoint
+    /// Build a full URL for a given SDK endpoint.
     pub fn build_url(&self, endpoint: Endpoint) -> String {
         format!(
             "{}{}",
@@ -91,7 +101,9 @@ impl EndpointManager {
         )
     }
 
-    /// Build a URL with a custom path
+    /// Build a URL with a custom path relative to the base host.
+    ///
+    /// The path may be passed with or without a leading `/`.
     pub fn build_custom_url(&self, path: &str) -> String {
         let normalized_path = if path.starts_with('/') {
             path.to_string()
@@ -105,7 +117,10 @@ impl EndpointManager {
         )
     }
 
-    /// Build the local evaluation URL with a token
+    /// Build the local evaluation definitions URL with a project token.
+    ///
+    /// The token is included as a query parameter, so avoid logging this URL in
+    /// production diagnostics.
     pub fn build_local_eval_url(&self, token: &str) -> String {
         format!(
             "{}/flags/definitions/?token={}&send_cohorts",
@@ -114,7 +129,7 @@ impl EndpointManager {
         )
     }
 
-    /// Get the base host for API operations (without the path)
+    /// Get the base host for API operations without a trailing slash or path.
     pub fn api_host(&self) -> String {
         self.base_host.trim_end_matches('/').to_string()
     }

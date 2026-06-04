@@ -67,6 +67,7 @@ pub struct InconclusiveMatchError {
 }
 
 impl InconclusiveMatchError {
+    /// Create an inconclusive-match error with a human-readable message.
     pub fn new(message: &str) -> Self {
         Self {
             message: message.to_string(),
@@ -150,12 +151,15 @@ pub struct Property {
     pub key: String,
     /// The value to compare against
     pub value: serde_json::Value,
-    /// Comparison operator: "exact", "is_not", "icontains", "not_icontains",
-    /// "regex", "not_regex", "gt", "gte", "lt", "lte", "is_set", "is_not_set",
-    /// "is_date_before", "is_date_after"
+    /// Comparison operator. Supported property operators include `"exact"`,
+    /// `"is_not"`, `"icontains"`, `"not_icontains"`, `"regex"`,
+    /// `"not_regex"`, `"gt"`, `"gte"`, `"lt"`, `"lte"`, `"is_set"`,
+    /// `"is_not_set"`, `"is_date_before"`, `"is_date_after"`, and the
+    /// `"semver_*"` operators used by PostHog version targeting.
     #[serde(default = "default_operator")]
     pub operator: String,
-    /// Property type, e.g., "cohort" for cohort membership checks
+    /// Property type. Use `Some("cohort")` for cohort membership checks; flag
+    /// dependency checks use a property key that starts with `$feature/`.
     #[serde(rename = "type")]
     pub property_type: Option<String>,
 }
@@ -167,16 +171,22 @@ fn default_operator() -> String {
 /// Definition of a cohort for local evaluation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CohortDefinition {
+    /// Unique identifier for the cohort.
     pub id: String,
     /// Properties can be either:
     /// - A JSON object with "type" and "values" for complex property groups
-    /// - Or a direct Vec<Property> for simple cases
+    /// - Or a direct `Vec<Property>` for simple cases
     #[serde(default)]
     pub properties: serde_json::Value,
 }
 
 impl CohortDefinition {
-    /// Create a new cohort definition with simple property list
+    /// Create a new cohort definition with a simple property list.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: Cohort identifier.
+    /// - `properties`: Property filters that define cohort membership.
     pub fn new(id: String, properties: Vec<Property>) -> Self {
         Self {
             id,
@@ -184,9 +194,10 @@ impl CohortDefinition {
         }
     }
 
-    /// Parse the properties from the JSON structure
+    /// Parse the properties from the JSON structure.
+    ///
     /// PostHog cohort properties come in format:
-    /// {"type": "AND", "values": [{"type": "property", "key": "...", "value": "...", "operator": "..."}]}
+    /// `{"type": "AND", "values": [{"type": "property", "key": "...", "value": "...", "operator": "..."}]}`.
     pub fn parse_properties(&self) -> Vec<Property> {
         // If it's an array, treat it as direct property list
         if let Some(arr) = self.properties.as_array() {
@@ -236,11 +247,19 @@ impl CohortDefinition {
 /// is bucketed on the group key and matched against group properties looked up
 /// via the group type mapping.
 pub struct EvaluationContext<'a> {
+    /// Cohort definitions available to local evaluation, keyed by cohort ID.
     pub cohorts: &'a HashMap<String, CohortDefinition>,
+    /// Feature flag definitions available to evaluate flag dependencies, keyed
+    /// by flag key.
     pub flags: &'a HashMap<String, FeatureFlag>,
+    /// Distinct ID used for person-targeted flag bucketing.
     pub distinct_id: &'a str,
+    /// Group keys for group-targeted flags, keyed by group type.
     pub groups: &'a HashMap<String, String>,
+    /// Group properties for group-targeted flags, keyed by group type and then
+    /// property name.
     pub group_properties: &'a HashMap<String, HashMap<String, serde_json::Value>>,
+    /// Mapping from PostHog group type index to group type name.
     pub group_type_mapping: &'a HashMap<String, String>,
 }
 
@@ -303,7 +322,12 @@ pub enum FeatureFlagsResponse {
 }
 
 impl FeatureFlagsResponse {
-    /// Convert the response to a normalized format
+    /// Convert the response to normalized flag values and payloads.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(feature_flags, feature_flag_payloads)`, each keyed by flag
+    /// key.
     pub fn normalize(
         self,
     ) -> (
@@ -346,8 +370,8 @@ impl FeatureFlagsResponse {
 
 /// Detailed information about a feature flag evaluation result.
 ///
-/// Returned by the `/decide` endpoint with extended information about
-/// why a flag evaluated to a particular value.
+/// Returned by the `/flags/?v=2` endpoint with extended information about why a
+/// flag evaluated to a particular value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlagDetail {
     /// The feature flag key
@@ -483,6 +507,29 @@ fn resolve_condition_target<'a>(
     }
 }
 
+/// Evaluate a feature flag definition against person and optional group
+/// context.
+///
+/// # Parameters
+///
+/// - `flag`: Feature flag definition to evaluate.
+/// - `distinct_id`: Distinct ID used for person bucketing.
+/// - `person_properties`: Person properties available to release conditions.
+/// - `groups`: Group keys for group-targeted flags, keyed by group type.
+/// - `group_properties`: Group properties for group-targeted flags.
+/// - `group_type_mapping`: Mapping from PostHog group type index to group type
+///   name.
+///
+/// # Returns
+///
+/// The matched flag value: `Boolean(false)` for inactive or unmatched flags,
+/// `Boolean(true)` for matched boolean flags, or `String(variant)` for matched
+/// multivariate flags.
+///
+/// # Errors
+///
+/// Returns [`InconclusiveMatchError`] when required properties are missing or an
+/// operator cannot be evaluated locally.
 #[must_use = "feature flag evaluation result should be used"]
 #[allow(clippy::too_many_arguments)]
 pub fn match_feature_flag(
@@ -590,12 +637,17 @@ fn is_condition_match(
     Ok(true)
 }
 
-/// Match a feature flag with full context (cohorts, other flags)
-/// This version supports cohort membership checks and flag dependency checks.
+/// Match a feature flag with full context (cohorts, other flags).
 ///
+/// This version supports cohort membership checks and flag dependency checks.
 /// `person_properties` carries person-level property values; group-level
 /// properties are looked up from `ctx.group_properties` when a condition (or
 /// the flag itself) targets a group via `aggregation_group_type_index`.
+///
+/// # Errors
+///
+/// Returns [`InconclusiveMatchError`] when local evaluation cannot determine a
+/// result with the provided context.
 #[must_use = "feature flag evaluation result should be used"]
 pub fn match_feature_flag_with_context(
     flag: &FeatureFlag,
@@ -706,7 +758,16 @@ fn is_condition_match_with_context(
     Ok(true)
 }
 
-/// Match a property with additional context for cohorts and flag dependencies
+/// Match a property with additional context for cohorts and flag dependencies.
+///
+/// Use this when evaluating local feature flag conditions that can reference
+/// cohort membership (`type = "cohort"`) or another feature flag via
+/// `$feature/<flag-key>`.
+///
+/// # Errors
+///
+/// Returns [`InconclusiveMatchError`] when the property, cohort, or dependent
+/// flag cannot be evaluated from the supplied context.
 pub fn match_property_with_context(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
