@@ -2,6 +2,8 @@ use crate::endpoints::{EndpointManager, DEFAULT_HOST};
 use derive_builder::Builder;
 use tracing::warn;
 
+mod common;
+
 #[cfg(not(feature = "async-client"))]
 mod blocking;
 #[cfg(not(feature = "async-client"))]
