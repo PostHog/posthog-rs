@@ -51,4 +51,4 @@ capture-v1 = ["flate2", "brotli", "zstd"]
 test-harness = []
 
 [workspace]
-members = ["compliance/adapter"]
+members = [".", "compliance/adapter"]
