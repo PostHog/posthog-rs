@@ -1,23 +1,41 @@
-//! Request-body compression for the V1 capture pipeline.
+//! Request-body compression for the capture pipelines.
 //!
-//! This module is only compiled when the `capture-v1` crate feature is enabled.
+//! `gzip` is always available (used by V0 and V1). The multi-algorithm
+//! `compress` entry point is V1-only, since deflate/br/zstd ship behind the
+//! `capture-v1` feature.
 
+#[cfg(feature = "capture-v1")]
 use crate::client::CaptureCompression;
+
+/// Gzip-compress `data`. Returns `None` (with a warning) on failure so the
+/// caller can fall back to sending the payload uncompressed.
+pub(crate) fn gzip(data: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    match encoder.write_all(data).and_then(|_| encoder.finish()) {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to gzip capture body; sending uncompressed");
+            None
+        }
+    }
+}
 
 /// Compress `data` with `algo`, returning the compressed bytes alongside the
 /// HTTP `Content-Encoding` token to advertise. Returns `None` when compression
 /// fails, signalling the caller to send the payload uncompressed without a
 /// `Content-Encoding` header.
+#[cfg(feature = "capture-v1")]
 pub(crate) fn compress(algo: CaptureCompression, data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     use std::io::Write;
 
     let encoding = algo.content_encoding();
+    if let CaptureCompression::Gzip = algo {
+        return gzip(data).map(|bytes| (bytes, encoding));
+    }
     let result: std::io::Result<Vec<u8>> = match algo {
-        CaptureCompression::Gzip => {
-            let mut encoder =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            encoder.write_all(data).and_then(|_| encoder.finish())
-        }
+        CaptureCompression::Gzip => unreachable!("handled above"),
         CaptureCompression::Deflate => {
             let mut encoder =
                 flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
@@ -53,6 +71,19 @@ mod tests {
     use std::io::Read;
 
     #[test]
+    fn gzip_helper_roundtrips() {
+        let data = br#"{"hello":"world"}"#;
+        let compressed = gzip(data).unwrap();
+        assert_ne!(compressed, data);
+
+        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert_eq!(out, data);
+    }
+
+    #[cfg(feature = "capture-v1")]
+    #[test]
     fn gzip_roundtrips() {
         let data = br#"{"hello":"world"}"#;
         let (compressed, encoding) = compress(CaptureCompression::Gzip, data).unwrap();
@@ -65,6 +96,7 @@ mod tests {
         assert_eq!(out, data);
     }
 
+    #[cfg(feature = "capture-v1")]
     #[test]
     fn deflate_roundtrips() {
         let data = br#"{"hello":"world"}"#;
@@ -77,6 +109,7 @@ mod tests {
         assert_eq!(out, data);
     }
 
+    #[cfg(feature = "capture-v1")]
     #[test]
     fn zstd_roundtrips() {
         let data = br#"{"hello":"world"}"#;
@@ -86,6 +119,7 @@ mod tests {
         assert_eq!(out, data);
     }
 
+    #[cfg(feature = "capture-v1")]
     #[test]
     fn brotli_produces_output() {
         let data = br#"{"hello":"world"}"#;

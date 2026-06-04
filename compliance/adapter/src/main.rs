@@ -121,11 +121,11 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let mut capabilities: Vec<String> = Vec::new();
     if cfg!(feature = "capture-v1") {
         capabilities.push("capture_v1".to_string());
-        if let Some(algo) = state.compression {
-            capabilities.push(compression_capability(algo).to_string());
-        }
     } else {
         capabilities.push("capture_v0".to_string());
+    }
+    if let Some(algo) = state.compression {
+        capabilities.push(compression_capability(algo).to_string());
     }
     Json(HealthResponse {
         sdk_name: "posthog-rs",

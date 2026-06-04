@@ -69,7 +69,6 @@
 //! }
 //! ```
 mod client;
-#[cfg(feature = "capture-v1")]
 mod compression;
 mod endpoints;
 mod error;

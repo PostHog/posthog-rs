@@ -2,11 +2,12 @@ use crate::endpoints::{EndpointManager, DEFAULT_HOST};
 use derive_builder::Builder;
 use tracing::warn;
 
-/// Request-body compression algorithm for the V1 capture pipeline.
+/// Request-body compression algorithm for the capture pipelines.
 ///
-/// When set on [`ClientOptions`], V1 capture requests are compressed and the
+/// When set on [`ClientOptions`], capture requests are compressed and the
 /// matching `Content-Encoding` header is sent. The variant string matches the
-/// HTTP `Content-Encoding` token the server expects.
+/// HTTP `Content-Encoding` token the server expects. The V0 pipeline supports
+/// `Gzip` only; V1 supports all variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureCompression {
     Gzip,
@@ -30,6 +31,7 @@ impl CaptureCompression {
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+mod retry;
 #[cfg(not(feature = "capture-v1"))]
 mod v0_capture;
 #[cfg(feature = "capture-v1")]
@@ -138,11 +140,10 @@ pub struct ClientOptions {
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) retry_max_backoff_ms: u64,
 
-    /// Optional request-body compression for the V1 capture pipeline. When
-    /// `None` (default), bodies are sent uncompressed. Requires the
-    /// `capture-v1` crate feature to take effect.
+    /// Optional request-body compression. When `None` (default), bodies are
+    /// sent uncompressed. The V0 pipeline supports `Gzip` only; V1 supports all
+    /// variants.
     #[builder(default, setter(strip_option))]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) capture_compression: Option<CaptureCompression>,
 
     /// Extra HTTP headers injected into every outbound capture request.

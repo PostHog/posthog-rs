@@ -3,6 +3,8 @@ services:
     build:
       context: ../..
       dockerfile: compliance/v0/Dockerfile
+    environment:
+      - COMPRESSION=gzip
     ports:
       - "8080:8080"
     networks:

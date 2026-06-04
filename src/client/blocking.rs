@@ -326,20 +326,9 @@ impl Client {
         super::v0_capture::prepare_event(&mut event, &defaults);
         let payload =
             super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
-
         let url = self.options.endpoints().build_url(Endpoint::Capture);
-        let request = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload);
-        let request = super::v0_capture::apply_extra_headers(&self.options, request);
-
-        let response = request
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
-
-        check_response(response)
+        let (body, gzip) = self.encode_v0_body(payload);
+        self.send_v0_with_retry(&url, body, gzip)
     }
 
     #[cfg(not(feature = "capture-v1"))]
@@ -356,18 +345,86 @@ impl Client {
             &defaults,
         )?;
         let url = self.options.endpoints().build_url(Endpoint::Batch);
-        let request = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload);
-        let request = super::v0_capture::apply_extra_headers(&self.options, request);
+        let (body, gzip) = self.encode_v0_body(payload);
+        self.send_v0_with_retry(&url, body, gzip)
+    }
 
-        let response = request
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+    /// Encode the v0 JSON body, gzip-compressing when gzip is configured.
+    /// Returns the bytes and whether they are gzipped. v0 supports gzip only;
+    /// other algorithms (or a gzip failure) fall back to uncompressed.
+    #[cfg(not(feature = "capture-v1"))]
+    fn encode_v0_body(&self, json: String) -> (Vec<u8>, bool) {
+        match self.options.capture_compression {
+            Some(super::CaptureCompression::Gzip) => {
+                match crate::compression::gzip(json.as_bytes()) {
+                    Some(bytes) => (bytes, true),
+                    None => (json.into_bytes(), false),
+                }
+            }
+            Some(other) => {
+                tracing::warn!(
+                    ?other,
+                    "v0 capture supports gzip only; sending uncompressed"
+                );
+                (json.into_bytes(), false)
+            }
+            None => (json.into_bytes(), false),
+        }
+    }
 
-        check_response(response)
+    /// POST `body` to `url`, retrying transient failures (transport errors and
+    /// 408/429/500/502/503/504) up to `max_capture_attempts`. The body is built
+    /// once by the caller and resent byte-for-byte, so a retried event keeps
+    /// its UUID and timestamp — which dedup relies on. When `gzip`, the request
+    /// advertises `Content-Encoding: gzip` and the `compression=gzip` query
+    /// param (capture reads the query param on v0, not the header).
+    #[cfg(not(feature = "capture-v1"))]
+    fn send_v0_with_retry(&self, url: &str, body: Vec<u8>, gzip: bool) -> Result<(), Error> {
+        // v0 capture/batch URLs carry no query string, so capture reads the
+        // compression hint from this param (it does not consult Content-Encoding).
+        let url = if gzip {
+            format!("{url}?compression=gzip")
+        } else {
+            url.to_string()
+        };
+        let mut attempt: u32 = 1;
+        loop {
+            let mut request = self
+                .client
+                .post(&url)
+                .header(CONTENT_TYPE, "application/json")
+                .body(body.clone());
+            if gzip {
+                request = request.header(reqwest::header::CONTENT_ENCODING, "gzip");
+            }
+            let request = super::v0_capture::apply_extra_headers(&self.options, request);
+
+            match request.send() {
+                Err(e) => {
+                    if attempt >= self.options.max_capture_attempts {
+                        return Err(Error::Connection(e.to_string()));
+                    }
+                }
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let retry_after = super::retry::parse_retry_after(response.headers());
+                    if !(super::retry::should_retry_v0(status, retry_after.is_some())
+                        && attempt < self.options.max_capture_attempts)
+                    {
+                        return check_response(response);
+                    }
+                    let delay =
+                        super::retry::backoff_duration(&self.options, attempt + 1, retry_after);
+                    std::thread::sleep(delay);
+                    attempt += 1;
+                    continue;
+                }
+            }
+
+            let delay = super::retry::backoff_duration(&self.options, attempt + 1, None);
+            std::thread::sleep(delay);
+            attempt += 1;
+        }
     }
 
     #[cfg(feature = "capture-v1")]
