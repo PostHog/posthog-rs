@@ -26,9 +26,14 @@ jobs:
     - name: Build
       run: cargo build --verbose
 
-    - name: Unit test
+    - name: Unit test (default features)
       run: cargo test --verbose
 
+    - name: Unit test (workspace, includes capture-v1)
+      run: cargo test --workspace --verbose
+
+    # TODO: when v1 endpoint ships, remove the capture-v1 feature gate;
+    # v1 e2e test (get_client_v1_async) will then run here automatically.
     - name: E2E test
       run: cargo test --verbose --features e2e-test --no-default-features
       env:

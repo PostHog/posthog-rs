@@ -57,3 +57,37 @@ fn get_client_blocking() {
 
     client.capture(event).unwrap();
 }
+
+#[cfg(all(feature = "e2e-test", feature = "capture-v1", feature = "async-client"))]
+#[tokio::test]
+async fn get_client_v1_async() {
+    use dotenv::dotenv;
+    dotenv().ok();
+
+    use posthog_rs::{ClientOptionsBuilder, Event};
+    use std::collections::HashMap;
+
+    let api_key = match std::env::var("POSTHOG_RS_E2E_TEST_API_KEY") {
+        Ok(key) if !key.is_empty() => key,
+        _ => {
+            eprintln!("Skipping e2e test: POSTHOG_RS_E2E_TEST_API_KEY not set");
+            return;
+        }
+    };
+
+    let options = ClientOptionsBuilder::default()
+        .api_key(api_key)
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(options).await;
+
+    let mut child_map = HashMap::new();
+    child_map.insert("child_key1", "child_value1");
+
+    let mut event = Event::new("e2e v1 test event", "1234");
+    event.insert_prop("key1", "value1").unwrap();
+    event.insert_prop("key2", vec!["a", "b"]).unwrap();
+    event.insert_prop("key3", child_map).unwrap();
+
+    client.capture(event).await.unwrap();
+}
