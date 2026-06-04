@@ -1073,35 +1073,38 @@ fn compute_caret_bounds(version: SemverTuple) -> (SemverTuple, SemverTuple) {
 }
 
 fn parse_property_semver(
-    property: &Property,
+    property_key: &str,
     value: &serde_json::Value,
 ) -> Result<SemverTuple, InconclusiveMatchError> {
     let prop_str = value_to_string(value);
     parse_semver(&prop_str).ok_or_else(|| {
         InconclusiveMatchError::new(&format!(
             "Unable to parse property semver value for '{}': {:?}",
-            property.key, value
+            property_key, value
         ))
     })
 }
 
-fn parse_target_semver(property: &Property) -> Result<SemverTuple, InconclusiveMatchError> {
-    let target_str = value_to_string(&property.value);
+fn parse_target_semver(
+    target_value: &serde_json::Value,
+) -> Result<SemverTuple, InconclusiveMatchError> {
+    let target_str = value_to_string(target_value);
     parse_semver(&target_str).ok_or_else(|| {
         InconclusiveMatchError::new(&format!(
             "Unable to parse target semver value: {:?}",
-            property.value
+            target_value
         ))
     })
 }
 
 fn parse_semver_operands(
-    property: &Property,
+    property_key: &str,
+    target_value: &serde_json::Value,
     value: &serde_json::Value,
 ) -> Result<(SemverTuple, SemverTuple), InconclusiveMatchError> {
     Ok((
-        parse_property_semver(property, value)?,
-        parse_target_semver(property)?,
+        parse_property_semver(property_key, value)?,
+        parse_target_semver(target_value)?,
     ))
 }
 
@@ -1205,7 +1208,8 @@ fn match_property(
         }
         // Semver comparison operators
         "semver_eq" | "semver_neq" | "semver_gt" | "semver_gte" | "semver_lt" | "semver_lte" => {
-            let (prop_version, target_version) = parse_semver_operands(property, value)?;
+            let (prop_version, target_version) =
+                parse_semver_operands(&property.key, &property.value, value)?;
 
             match property.operator.as_str() {
                 "semver_eq" => prop_version == target_version,
@@ -1218,17 +1222,19 @@ fn match_property(
             }
         }
         "semver_tilde" => {
-            let (prop_version, target_version) = parse_semver_operands(property, value)?;
+            let (prop_version, target_version) =
+                parse_semver_operands(&property.key, &property.value, value)?;
             let (lower, upper) = compute_tilde_bounds(target_version);
             prop_version >= lower && prop_version < upper
         }
         "semver_caret" => {
-            let (prop_version, target_version) = parse_semver_operands(property, value)?;
+            let (prop_version, target_version) =
+                parse_semver_operands(&property.key, &property.value, value)?;
             let (lower, upper) = compute_caret_bounds(target_version);
             prop_version >= lower && prop_version < upper
         }
         "semver_wildcard" => {
-            let prop_version = parse_property_semver(property, value)?;
+            let prop_version = parse_property_semver(&property.key, value)?;
             let target_str = value_to_string(&property.value);
 
             let (lower, upper) = parse_semver_wildcard(&target_str).ok_or_else(|| {
