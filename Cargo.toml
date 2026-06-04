@@ -51,4 +51,7 @@ capture-v1 = ["flate2", "brotli", "zstd"]
 test-harness = []
 
 [workspace]
-members = ["compliance/adapter"]
+# Explicitly list "." so the root posthog-rs package stays a discoverable
+# workspace member. Without it, sampo only sees `members` and fails to find
+# `cargo/posthog-rs` when applying changesets during release.
+members = [".", "compliance/adapter"]
