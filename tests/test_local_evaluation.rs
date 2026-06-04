@@ -35,6 +35,7 @@ fn test_local_evaluation_basic() {
             multivariate: None,
             payloads: HashMap::new(),
             aggregation_group_type_index: None,
+            early_exit: false,
         },
     };
 
@@ -84,6 +85,7 @@ fn test_local_evaluation_with_properties() {
             multivariate: None,
             payloads: HashMap::new(),
             aggregation_group_type_index: None,
+            early_exit: false,
         },
     };
 
@@ -242,6 +244,7 @@ fn test_cache_operations() {
                 multivariate: None,
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
+                early_exit: false,
             },
         },
         FeatureFlag {
@@ -252,6 +255,7 @@ fn test_cache_operations() {
                 multivariate: None,
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
+                early_exit: false,
             },
         },
     ];
@@ -770,6 +774,7 @@ fn mixed_flag() -> FeatureFlag {
             multivariate: None,
             payloads: HashMap::new(),
             aggregation_group_type_index: None, // null = mixed
+            early_exit: false,
         },
     }
 }
@@ -794,6 +799,7 @@ fn only_group_flag() -> FeatureFlag {
             payloads: HashMap::new(),
             // Pure group flag at the flag level
             aggregation_group_type_index: Some(0),
+            early_exit: false,
         },
     }
 }
@@ -923,6 +929,7 @@ fn test_mixed_flag_only_group_condition_no_groups_returns_false() {
             multivariate: None,
             payloads: HashMap::new(),
             aggregation_group_type_index: None,
+            early_exit: false,
         },
     };
     let evaluator = LocalEvaluator::new(cache_with(flag));
@@ -957,6 +964,7 @@ fn test_group_condition_uses_group_key_for_bucketing() {
             multivariate: None,
             payloads: HashMap::new(),
             aggregation_group_type_index: Some(0),
+            early_exit: false,
         },
     };
     let evaluator = LocalEvaluator::new(cache_with(flag));
