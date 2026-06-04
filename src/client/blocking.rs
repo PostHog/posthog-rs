@@ -11,8 +11,6 @@ use tracing::{debug, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::endpoints::{Endpoint, EndpointManager};
-#[cfg(not(feature = "capture-v1"))]
-use crate::event::BatchRequest;
 #[cfg(feature = "capture-v1")]
 use crate::event_v1::CaptureResponse;
 use crate::feature_flag_evaluations::{
@@ -323,26 +321,17 @@ impl Client {
 
     #[cfg(not(feature = "capture-v1"))]
     fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
-        if self.options.disable_geoip {
-            event.insert_prop("$geoip_disable", true).ok();
-        }
-        if self.options.is_server {
-            event.insert_prop("$is_server", true).ok();
-        }
-        event.prepare_for_v0();
-
-        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
-
+        super::v0_capture::prepare_event(&mut event, &self.options);
         let payload =
-            serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
+            super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
 
         let url = self.options.endpoints().build_url(Endpoint::Capture);
-        let mut request = self
+        let request = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload);
-        request = self.apply_extra_headers(request);
+        let request = super::v0_capture::apply_extra_headers(&self.options, request);
 
         let response = request
             .send()
@@ -357,60 +346,25 @@ impl Client {
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<(), Error> {
-        let disable_geoip = self.options.disable_geoip;
-        let is_server = self.options.is_server;
-        let inner_events: Vec<InnerEvent> = events
-            .into_iter()
-            .map(|mut event| {
-                if disable_geoip {
-                    event.insert_prop("$geoip_disable", true).ok();
-                }
-                if is_server {
-                    event.insert_prop("$is_server", true).ok();
-                }
-                event.prepare_for_v0();
-                InnerEvent::new(event, self.options.api_key.clone())
-            })
-            .collect();
-
-        let batch_request = BatchRequest {
-            api_key: self.options.api_key.clone(),
+        let payload = super::v0_capture::build_batch_payload(
+            events,
+            self.options.api_key.clone(),
             historical_migration,
-            batch: inner_events,
-        };
-        let payload = serde_json::to_string(&batch_request)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+            &self.options,
+        )?;
         let url = self.options.endpoints().build_url(Endpoint::Batch);
-
-        let mut request = self
+        let request = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload);
-        request = self.apply_extra_headers(request);
+        let request = super::v0_capture::apply_extra_headers(&self.options, request);
 
         let response = request
             .send()
             .map_err(|e| Error::Connection(e.to_string()))?;
 
         check_response(response)
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    #[allow(unused_mut)]
-    fn apply_extra_headers(
-        &self,
-        mut request: reqwest::blocking::RequestBuilder,
-    ) -> reqwest::blocking::RequestBuilder {
-        #[cfg(feature = "test-harness")]
-        {
-            if let Some(ref extra) = self.options.extra_capture_headers {
-                for (k, v) in extra {
-                    request = request.header(k.as_str(), v.as_str());
-                }
-            }
-        }
-        request
     }
 
     #[cfg(feature = "capture-v1")]

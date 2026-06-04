@@ -30,6 +30,8 @@ impl CaptureCompression {
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+#[cfg(not(feature = "capture-v1"))]
+mod v0_capture;
 #[cfg(feature = "capture-v1")]
 mod v1_capture;
 #[cfg(not(feature = "async-client"))]
