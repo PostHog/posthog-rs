@@ -550,6 +550,31 @@ mod async_tests {
         capture_mock.assert_hits(2);
     }
 
+    #[cfg(not(feature = "capture-v1"))]
+    #[tokio::test]
+    async fn flag_called_event_contains_is_server_and_lib() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v0/e/")
+                .body_contains("\"$is_server\":true")
+                .body_contains("\"$lib\":\"posthog-rs\"");
+            then.status(200);
+        });
+        let client = create_test_client(server.base_url()).await;
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        assert!(snapshot.is_enabled("alpha"));
+        flush_spawned_events().await;
+        capture_mock.assert_hits(1);
+    }
+
     #[tokio::test]
     async fn get_flag_payload_does_not_fire_event() {
         let server = MockServer::start();
