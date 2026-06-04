@@ -75,6 +75,12 @@ pub struct ClientOptions {
     #[builder(default = "false")]
     disable_geoip: bool,
 
+    /// Whether events originate from a server-side runtime. Defaults to `true`,
+    /// which stamps `$is_server: true` so PostHog won't attribute the host OS to
+    /// the user. Set `false` for client/CLI use (the property is then omitted).
+    #[builder(default = "true")]
+    is_server: bool,
+
     /// Timeout in seconds for remote `/flags` requests. Defaults to `3`.
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,

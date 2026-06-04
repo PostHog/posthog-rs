@@ -55,6 +55,7 @@ struct BlockingFlagEventHost {
     endpoints: EndpointManager,
     disabled: bool,
     disable_geoip: bool,
+    is_server: bool,
     dedup_cache: Mutex<HashMap<String, HashSet<String>>>,
 }
 
@@ -66,6 +67,7 @@ impl BlockingFlagEventHost {
             endpoints: options.endpoints().clone(),
             disabled: options.is_disabled(),
             disable_geoip: options.disable_geoip,
+            is_server: options.is_server,
             dedup_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -140,6 +142,9 @@ impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
         }
         if params.disable_geoip.unwrap_or(self.disable_geoip) {
             let _ = event.insert_prop("$geoip_disable", true);
+        }
+        if self.is_server {
+            let _ = event.insert_prop("$is_server", true);
         }
         self.ship_event(event);
     }
@@ -271,6 +276,10 @@ impl Client {
         if self.options.disable_geoip {
             event.insert_prop("$geoip_disable", true).ok();
         }
+        // Mark server-side events so ingestion doesn't attribute the host OS to the person.
+        if self.options.is_server {
+            event.insert_prop("$is_server", true).ok();
+        }
 
         let inner_event = InnerEvent::new(event, self.options.api_key.clone());
 
@@ -314,11 +323,15 @@ impl Client {
         }
 
         let disable_geoip = self.options.disable_geoip;
+        let is_server = self.options.is_server;
         let inner_events: Vec<InnerEvent> = events
             .into_iter()
             .map(|mut event| {
                 if disable_geoip {
                     event.insert_prop("$geoip_disable", true).ok();
+                }
+                if is_server {
+                    event.insert_prop("$is_server", true).ok();
                 }
                 InnerEvent::new(event, self.options.api_key.clone())
             })

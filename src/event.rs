@@ -183,6 +183,8 @@ pub struct InnerEvent {
 }
 
 impl InnerEvent {
+    /// Build an [`InnerEvent`] from an [`Event`], stamping the SDK metadata
+    /// (`$lib`, `$lib_version`).
     pub fn new(event: Event, api_key: String) -> Self {
         let uuid = event.uuid;
         let mut properties = event.properties;

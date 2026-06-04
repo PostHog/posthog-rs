@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.8.0 — 2026-06-03
+
+### Minor changes
+
+- [edd3797](https://github.com/posthog/posthog-rs/commit/edd3797f5f0b3f4db707a9078163d56858e2d1d8) Add a configurable `$is_server` event property (default `true`) so PostHog can identify server-side events. Set `is_server` to `false` when using posthog-rs as a client/CLI so the device OS is attributed normally. — Thanks @turnipdabeets for your first contribution 🎉!
+
 ## 0.7.3 — 2026-05-28
 
 ### Patch changes
