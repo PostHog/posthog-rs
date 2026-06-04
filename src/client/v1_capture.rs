@@ -11,7 +11,7 @@ use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use tracing::debug;
 use uuid::Uuid;
 
-use super::{CaptureCompression, ClientOptions};
+use super::{CaptureCompression, CaptureDefaults, ClientOptions};
 use crate::error::Error;
 use crate::event::Event;
 use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse, V1Event};
@@ -20,14 +20,19 @@ use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse
 // Request building
 // ---------------------------------------------------------------------------
 
-pub(crate) fn build_events(events: &[Event], disable_geoip: bool) -> Vec<V1Event> {
+pub(crate) fn build_events(events: &[Event], defaults: &CaptureDefaults) -> Vec<V1Event> {
     events
         .iter()
         .map(|event| {
             let mut v1 = V1Event::from_event(event);
-            if disable_geoip {
-                if let serde_json::Value::Object(ref mut map) = v1.properties {
-                    map.insert("$geoip_disable".to_string(), serde_json::Value::Bool(true));
+            if let serde_json::Value::Object(ref mut map) = v1.properties {
+                if defaults.disable_geoip {
+                    map.entry("$geoip_disable")
+                        .or_insert(serde_json::Value::Bool(true));
+                }
+                if defaults.is_server {
+                    map.entry("$is_server")
+                        .or_insert(serde_json::Value::Bool(true));
                 }
             }
             v1

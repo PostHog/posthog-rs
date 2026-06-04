@@ -7,7 +7,7 @@ use reqwest::RequestBuilder;
 #[cfg(not(feature = "async-client"))]
 use reqwest::blocking::RequestBuilder;
 
-use super::ClientOptions;
+use super::{CaptureDefaults, ClientOptions};
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
@@ -15,12 +15,12 @@ use crate::event::{BatchRequest, Event, InnerEvent};
 // Event preparation
 // ---------------------------------------------------------------------------
 
-/// Apply client-level default properties and V0 metadata stamping.
-pub(crate) fn prepare_event(event: &mut Event, options: &ClientOptions) {
-    if options.disable_geoip {
+/// Apply client-level default properties (caller-wins) and V0 metadata stamping.
+pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
+    if defaults.disable_geoip {
         event.insert_prop("$geoip_disable", true).ok();
     }
-    if options.is_server {
+    if defaults.is_server {
         event.insert_prop("$is_server", true).ok();
     }
     event.prepare_for_v0();
@@ -41,12 +41,12 @@ pub(crate) fn build_batch_payload(
     events: Vec<Event>,
     api_key: String,
     historical_migration: bool,
-    options: &ClientOptions,
+    defaults: &CaptureDefaults,
 ) -> Result<String, Error> {
     let inner_events: Vec<InnerEvent> = events
         .into_iter()
         .map(|mut event| {
-            prepare_event(&mut event, options);
+            prepare_event(&mut event, defaults);
             InnerEvent::new(event, api_key.clone())
         })
         .collect();

@@ -158,7 +158,27 @@ pub struct ClientOptions {
     endpoint_manager: EndpointManager,
 }
 
+/// Resolved client-level default properties for capture requests.
+///
+/// Built once from [`ClientOptions`] and threaded through all event-producing
+/// paths (V0 capture, V0 flag-called host, V1 capture) so each default is
+/// applied in exactly one place with caller-wins (`entry().or_insert`)
+/// semantics.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CaptureDefaults {
+    pub(crate) disable_geoip: bool,
+    pub(crate) is_server: bool,
+}
+
 impl ClientOptions {
+    /// Build the resolved capture defaults for this client configuration.
+    pub(crate) fn capture_defaults(&self) -> CaptureDefaults {
+        CaptureDefaults {
+            disable_geoip: self.disable_geoip,
+            is_server: self.is_server,
+        }
+    }
+
     /// Get the endpoint manager
     pub(crate) fn endpoints(&self) -> &EndpointManager {
         &self.endpoint_manager

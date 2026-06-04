@@ -59,8 +59,7 @@ struct BlockingFlagEventHost {
     api_key: String,
     endpoints: EndpointManager,
     disabled: bool,
-    disable_geoip: bool,
-    is_server: bool,
+    defaults: super::CaptureDefaults,
     dedup_cache: Mutex<HashMap<String, HashSet<String>>>,
 }
 
@@ -71,8 +70,7 @@ impl BlockingFlagEventHost {
             api_key: options.api_key.clone(),
             endpoints: options.endpoints().clone(),
             disabled: options.is_disabled(),
-            disable_geoip: options.disable_geoip,
-            is_server: options.is_server,
+            defaults: options.capture_defaults(),
             dedup_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -96,10 +94,11 @@ impl BlockingFlagEventHost {
         false
     }
 
-    fn ship_event(&self, event: Event) {
+    fn ship_event(&self, mut event: Event) {
         if self.disabled {
             return;
         }
+        event.prepare_for_v0();
         let inner_event = InnerEvent::new(event, self.api_key.clone());
         let payload = match serde_json::to_string(&inner_event) {
             Ok(p) => p,
@@ -145,10 +144,12 @@ impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
         for (group_name, group_id) in &params.groups {
             event.add_group(group_name, group_id);
         }
-        if params.disable_geoip.unwrap_or(self.disable_geoip) {
+        // Per-call geoip override takes precedence over client default
+        let effective_geoip = params.disable_geoip.unwrap_or(self.defaults.disable_geoip);
+        if effective_geoip {
             let _ = event.insert_prop("$geoip_disable", true);
         }
-        if self.is_server {
+        if self.defaults.is_server {
             let _ = event.insert_prop("$is_server", true);
         }
         self.ship_event(event);
@@ -321,7 +322,8 @@ impl Client {
 
     #[cfg(not(feature = "capture-v1"))]
     fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
-        super::v0_capture::prepare_event(&mut event, &self.options);
+        let defaults = self.options.capture_defaults();
+        super::v0_capture::prepare_event(&mut event, &defaults);
         let payload =
             super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
 
@@ -346,11 +348,12 @@ impl Client {
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<(), Error> {
+        let defaults = self.options.capture_defaults();
         let payload = super::v0_capture::build_batch_payload(
             events,
             self.options.api_key.clone(),
             historical_migration,
-            &self.options,
+            &defaults,
         )?;
         let url = self.options.endpoints().build_url(Endpoint::Batch);
         let request = self
@@ -379,7 +382,8 @@ impl Client {
         let request_id = Uuid::now_v7();
         let created_at = Utc::now().to_rfc3339();
         let mut attempt: u32 = 1;
-        let mut pending = v1_capture::build_events(&events, self.options.disable_geoip);
+        let defaults = self.options.capture_defaults();
+        let mut pending = v1_capture::build_events(&events, &defaults);
         let mut final_results = HashMap::new();
         let historical_migration = historical_migration.then_some(true);
         let url = self
