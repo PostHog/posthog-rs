@@ -3,7 +3,45 @@
 //! Use [`client`] to construct a [`Client`], [`Event`] to capture analytics
 //! events, and [`Client::evaluate_flags`] with [`EvaluateFlagsOptions`] for
 //! feature flag evaluation.
-
+//!
+//! See the [PostHog Rust SDK documentation](https://posthog.com/docs/libraries/rust)
+//! for installation, configuration, and more examples.
+//!
+//! # Getting started
+//!
+//! Add `posthog-rs` to your `Cargo.toml`, then initialize a client with your
+//! project API key.
+//!
+//! ```no_run
+//! use posthog_rs::{client, EvaluateFlagsOptions, Event};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), posthog_rs::Error> {
+//!     let api_key = std::env::var("POSTHOG_API_KEY")
+//!         .expect("set POSTHOG_API_KEY to your PostHog project API key");
+//!
+//!     let posthog = client(api_key.as_str()).await;
+//!     let distinct_id = "user-123";
+//!
+//!     // Capture an analytics event.
+//!     let mut event = Event::new("signed_up", distinct_id);
+//!     event.insert_prop("plan", "pro")?;
+//!     posthog.capture(event).await?;
+//!
+//!     // Evaluate feature flags once, then read from the snapshot.
+//!     let flags = posthog
+//!         .evaluate_flags(distinct_id, EvaluateFlagsOptions::default())
+//!         .await?;
+//!
+//!     if flags.is_enabled("new-onboarding") {
+//!         let mut event = Event::new("onboarding_step_completed", distinct_id);
+//!         event.with_flags(&flags.only_accessed());
+//!         posthog.capture(event).await?;
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
 mod client;
 mod endpoints;
 mod error;
