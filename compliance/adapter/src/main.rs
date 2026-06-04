@@ -11,13 +11,14 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use posthog_rs::{Client, ClientOptionsBuilder, Event};
+use posthog_rs::{CaptureCompression, Client, ClientOptionsBuilder, Event};
 
 const SUPPORTS_PARALLEL: bool = true;
 
 #[derive(Clone)]
 struct AppState {
     instances: Arc<Mutex<HashMap<String, AdapterState>>>,
+    compression: Option<CaptureCompression>,
 }
 
 const DEFAULT_TEST_ID: &str = "_global";
@@ -26,6 +27,8 @@ const DEFAULT_TEST_ID: &str = "_global";
 struct AdapterState {
     client: Option<Arc<Client>>,
     historical_migration: bool,
+    buffer: Vec<Event>,
+    flush_at: Option<u32>,
     total_events_captured: u64,
     total_events_sent: u64,
     last_error: Option<String>,
@@ -36,16 +39,13 @@ struct AdapterState {
 struct InitRequest {
     api_key: String,
     host: String,
-    #[allow(dead_code)]
     #[serde(default)]
     flush_at: Option<u32>,
     #[allow(dead_code)]
     #[serde(default)]
     flush_interval_ms: Option<u64>,
-    #[allow(dead_code)]
     #[serde(default)]
     max_retries: Option<u32>,
-    #[allow(dead_code)]
     #[serde(default)]
     enable_compression: Option<bool>,
     #[serde(default)]
@@ -62,6 +62,7 @@ struct CaptureRequest {
     properties: Option<serde_json::Value>,
     #[serde(default)]
     timestamp: Option<String>,
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     #[serde(default)]
     options: Option<serde_json::Value>,
 }
@@ -83,7 +84,7 @@ struct HealthResponse {
     sdk_name: &'static str,
     sdk_version: &'static str,
     adapter_version: &'static str,
-    capabilities: Vec<&'static str>,
+    capabilities: Vec<String>,
     supports_parallel: bool,
 }
 
@@ -92,21 +93,45 @@ struct StateResponse {
     pending_events: i64,
     total_events_captured: u64,
     total_events_sent: u64,
+    // Always 0: capture API does not expose retry counts; retries are validated at the wire level.
     total_retries: u64,
     last_error: Option<String>,
 }
 
-async fn health() -> Json<HealthResponse> {
-    let capability = if cfg!(feature = "capture-v1") {
-        "capture_v1"
+fn parse_compression() -> Option<CaptureCompression> {
+    match std::env::var("COMPRESSION").as_deref() {
+        Ok("gzip") => Some(CaptureCompression::Gzip),
+        Ok("deflate") => Some(CaptureCompression::Deflate),
+        Ok("br") => Some(CaptureCompression::Br),
+        Ok("zstd") => Some(CaptureCompression::Zstd),
+        _ => None,
+    }
+}
+
+fn compression_capability(c: CaptureCompression) -> &'static str {
+    match c {
+        CaptureCompression::Gzip => "encoding_gzip",
+        CaptureCompression::Deflate => "encoding_deflate",
+        CaptureCompression::Br => "encoding_br",
+        CaptureCompression::Zstd => "encoding_zstd",
+    }
+}
+
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let mut capabilities: Vec<String> = Vec::new();
+    if cfg!(feature = "capture-v1") {
+        capabilities.push("capture_v1".to_string());
+        if let Some(algo) = state.compression {
+            capabilities.push(compression_capability(algo).to_string());
+        }
     } else {
-        "capture_v0"
-    };
+        capabilities.push("capture_v0".to_string());
+    }
     Json(HealthResponse {
         sdk_name: "posthog-rs",
         sdk_version: env!("CARGO_PKG_VERSION"),
         adapter_version: env!("CARGO_PKG_VERSION"),
-        capabilities: vec![capability],
+        capabilities,
         supports_parallel: SUPPORTS_PARALLEL,
     })
 }
@@ -121,9 +146,22 @@ async fn init(
 
     *s = AdapterState::default();
     s.historical_migration = req.historical_migration.unwrap_or(false);
+    s.flush_at = req.flush_at;
 
     let mut builder = ClientOptionsBuilder::default();
     builder.api_key(req.api_key).host(req.host);
+
+    // The harness `max_retries` counts retries; the SDK option counts total
+    // attempts (initial + retries), so add one.
+    if let Some(retries) = req.max_retries {
+        builder.max_capture_attempts(retries.saturating_add(1));
+    }
+
+    if req.enable_compression.unwrap_or(false) {
+        if let Some(algo) = state.compression {
+            builder.capture_compression(algo);
+        }
+    }
 
     if req.disable_geoip.unwrap_or(false) {
         builder.disable_geoip(true);
@@ -155,6 +193,52 @@ async fn init(
     }
 }
 
+/// Drain pending events from the buffer under the lock, then send the batch
+/// without holding the lock, and finally re-acquire the lock to record the
+/// outcome. Returns the number of events flushed in this call.
+async fn flush_buffer(instances: &Mutex<HashMap<String, AdapterState>>, key: &str) -> u64 {
+    let (client, events, historical_migration) = {
+        let mut map = instances.lock().await;
+        let s = match map.get_mut(key) {
+            Some(s) => s,
+            None => return 0,
+        };
+        if s.buffer.is_empty() {
+            return 0;
+        }
+        let client = match &s.client {
+            Some(c) => c.clone(),
+            None => return 0,
+        };
+        let events = std::mem::take(&mut s.buffer);
+        (client, events, s.historical_migration)
+    };
+
+    let count = events.len() as u64;
+    let result = client.capture_batch(events, historical_migration).await;
+
+    let flushed = {
+        let mut map = instances.lock().await;
+        if let Some(s) = map.get_mut(key) {
+            match result {
+                Ok(()) => {
+                    s.pending_events = (s.pending_events - count as i64).max(0);
+                    s.total_events_sent += count;
+                    count
+                }
+                Err(e) => {
+                    s.last_error = Some(e.to_string());
+                    0
+                }
+            }
+        } else {
+            0
+        }
+    };
+
+    flushed
+}
+
 async fn capture_event(
     State(state): State<AppState>,
     Query(params): Query<TestIdParam>,
@@ -162,17 +246,69 @@ async fn capture_event(
 ) -> impl IntoResponse {
     let key = params.key().to_string();
 
-    // Phase 1: short lock — clone Arc<Client>, bump in-flight counter
-    let client = {
+    let needs_flush = {
         let mut instances = state.instances.lock().await;
         let s = instances.entry(key.clone()).or_default();
-        match &s.client {
-            Some(c) => {
-                s.total_events_captured += 1;
-                s.pending_events += 1;
-                c.clone()
+
+        if s.client.is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "SDK not initialized" })),
+            )
+                .into_response();
+        }
+
+        let mut event = Event::new(req.event, req.distinct_id);
+
+        if let Some(props) = req.properties {
+            if let Some(obj) = props.as_object() {
+                for (k, v) in obj {
+                    let _ = event.insert_prop(k.clone(), v.clone());
+                }
             }
-            None => {
+        }
+
+        if let Some(ts_str) = req.timestamp {
+            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&ts_str) {
+                let _ = event.set_timestamp(ts);
+            }
+        }
+
+        #[cfg(feature = "capture-v1")]
+        if let Some(opts_val) = req.options {
+            if let Some(obj) = opts_val.as_object() {
+                for (k, v) in obj {
+                    let _ = event.set_option(k, v.clone());
+                }
+            }
+        }
+
+        s.total_events_captured += 1;
+        s.pending_events += 1;
+        s.buffer.push(event);
+
+        matches!(s.flush_at, Some(threshold) if s.buffer.len() as u32 >= threshold)
+    };
+
+    if needs_flush {
+        flush_buffer(&state.instances, &key).await;
+    }
+
+    let uuid = uuid::Uuid::now_v7().to_string();
+    Json(serde_json::json!({ "success": true, "uuid": uuid })).into_response()
+}
+
+async fn flush(
+    State(state): State<AppState>,
+    Query(params): Query<TestIdParam>,
+) -> impl IntoResponse {
+    let key = params.key().to_string();
+
+    {
+        let instances = state.instances.lock().await;
+        match instances.get(&key) {
+            Some(s) if s.client.is_some() => {}
+            _ => {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": "SDK not initialized" })),
@@ -180,87 +316,13 @@ async fn capture_event(
                     .into_response();
             }
         }
-    };
-
-    // Build event outside the lock
-    let mut event = Event::new(req.event, req.distinct_id);
-
-    if let Some(props) = req.properties {
-        if let Some(obj) = props.as_object() {
-            for (k, v) in obj {
-                let _ = event.insert_prop(k.clone(), v.clone());
-            }
-        }
     }
 
-    if let Some(ts_str) = req.timestamp {
-        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&ts_str) {
-            let _ = event.set_timestamp(ts);
-        }
-    }
-
-    // EventOptions wiring (set_options) is applied in the V1 capture
-    // implementation branch where EventOptions exists on Event.
-    let _ = req.options;
-
-    let uuid = uuid::Uuid::now_v7().to_string();
-
-    // Phase 2: network call without holding the lock
-    let result = client.capture(event).await;
-
-    // Phase 3: short lock — record outcome
-    {
-        let mut instances = state.instances.lock().await;
-        if let Some(s) = instances.get_mut(&key) {
-            s.pending_events = (s.pending_events - 1).max(0);
-            match &result {
-                Ok(()) => {
-                    s.total_events_sent += 1;
-                }
-                Err(e) => {
-                    s.last_error = Some(e.to_string());
-                }
-            }
-        }
-    }
-
-    match result {
-        Ok(()) => Json(serde_json::json!({ "success": true, "uuid": uuid })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-async fn flush(
-    State(state): State<AppState>,
-    Query(params): Query<TestIdParam>,
-) -> impl IntoResponse {
-    let instances = state.instances.lock().await;
-    let s = match instances.get(params.key()) {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "SDK not initialized" })),
-            )
-                .into_response();
-        }
-    };
-
-    if s.client.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "SDK not initialized" })),
-        )
-            .into_response();
-    }
+    let flushed = flush_buffer(&state.instances, &key).await;
 
     Json(serde_json::json!({
         "success": true,
-        "events_flushed": s.total_events_sent
+        "events_flushed": flushed
     }))
     .into_response()
 }
@@ -270,9 +332,7 @@ async fn get_state(
     Query(params): Query<TestIdParam>,
 ) -> impl IntoResponse {
     let instances = state.instances.lock().await;
-    let s = instances.get(params.key());
-
-    match s {
+    match instances.get(params.key()) {
         Some(s) => Json(serde_json::json!(StateResponse {
             pending_events: s.pending_events,
             total_events_captured: s.total_events_captured,
@@ -303,15 +363,23 @@ async fn reset(
 
 #[tokio::main]
 async fn main() {
+    let compression = parse_compression();
     let mode_str = if cfg!(feature = "capture-v1") {
         "v1"
     } else {
         "v0"
     };
-    eprintln!("Starting posthog-rs SDK adapter (capture={mode_str}, parallel={SUPPORTS_PARALLEL})");
+    let compression_str = match compression {
+        Some(algo) => compression_capability(algo),
+        None => "none",
+    };
+    eprintln!(
+        "Starting posthog-rs SDK adapter (capture={mode_str}, compression={compression_str}, parallel={SUPPORTS_PARALLEL})"
+    );
 
     let state = AppState {
         instances: Arc::new(Mutex::new(HashMap::new())),
+        compression,
     };
 
     let app = Router::new()

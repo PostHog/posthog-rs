@@ -2,13 +2,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(feature = "capture-v1")]
+use chrono::Utc;
 use reqwest::{blocking::Client as HttpClient, header::CONTENT_TYPE};
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
+#[cfg(feature = "capture-v1")]
+use uuid::Uuid;
 
 use crate::endpoints::{Endpoint, EndpointManager};
-#[cfg(not(feature = "capture-v1"))]
-use crate::event::BatchRequest;
+#[cfg(feature = "capture-v1")]
+use crate::event_v1::CaptureResponse;
 use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
     FlagCalledEventParams,
@@ -55,8 +59,7 @@ struct BlockingFlagEventHost {
     api_key: String,
     endpoints: EndpointManager,
     disabled: bool,
-    disable_geoip: bool,
-    is_server: bool,
+    defaults: super::CaptureDefaults,
     dedup_cache: Mutex<HashMap<String, HashSet<String>>>,
 }
 
@@ -67,8 +70,7 @@ impl BlockingFlagEventHost {
             api_key: options.api_key.clone(),
             endpoints: options.endpoints().clone(),
             disabled: options.is_disabled(),
-            disable_geoip: options.disable_geoip,
-            is_server: options.is_server,
+            defaults: options.capture_defaults(),
             dedup_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -92,10 +94,11 @@ impl BlockingFlagEventHost {
         false
     }
 
-    fn ship_event(&self, event: Event) {
+    fn ship_event(&self, mut event: Event) {
         if self.disabled {
             return;
         }
+        event.prepare_for_v0();
         let inner_event = InnerEvent::new(event, self.api_key.clone());
         let payload = match serde_json::to_string(&inner_event) {
             Ok(p) => p,
@@ -141,11 +144,13 @@ impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
         for (group_name, group_id) in &params.groups {
             event.add_group(group_name, group_id);
         }
-        if params.disable_geoip.unwrap_or(self.disable_geoip) {
-            let _ = event.insert_prop("$geoip_disable", true);
+        // Per-call geoip override takes precedence over client default; caller-wins.
+        let effective_geoip = params.disable_geoip.unwrap_or(self.defaults.disable_geoip);
+        if effective_geoip {
+            event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
         }
-        if self.is_server {
-            let _ = event.insert_prop("$is_server", true);
+        if self.defaults.is_server {
+            event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
         }
         self.ship_event(event);
     }
@@ -267,8 +272,7 @@ impl Client {
     ///
     /// Disabled clients skip the request and return `Ok(())`.
     #[instrument(skip(self, event), level = "debug")]
-    #[allow(unused_mut)]
-    pub fn capture(&self, mut event: Event) -> Result<(), Error> {
+    pub fn capture(&self, event: Event) -> Result<(), Error> {
         if self.options.is_disabled() {
             trace!("Client is disabled, skipping capture");
             return Ok(());
@@ -276,39 +280,11 @@ impl Client {
 
         #[cfg(feature = "capture-v1")]
         {
-            return self.capture_v1(vec![event]);
+            return self.capture_v1(vec![event], false).map(|_| ());
         }
 
         #[cfg(not(feature = "capture-v1"))]
-        {
-            // Add geoip disable property if configured
-            if self.options.disable_geoip {
-                event.insert_prop("$geoip_disable", true).ok();
-            }
-            // Mark server-side events so ingestion doesn't attribute the host OS to the person.
-            if self.options.is_server {
-                event.insert_prop("$is_server", true).ok();
-            }
-
-            let inner_event = InnerEvent::new(event, self.options.api_key.clone());
-
-            let payload = serde_json::to_string(&inner_event)
-                .map_err(|e| Error::Serialization(e.to_string()))?;
-
-            let url = self.options.endpoints().build_url(Endpoint::Capture);
-            let mut request = self
-                .client
-                .post(&url)
-                .header(CONTENT_TYPE, "application/json")
-                .body(payload);
-            request = self.apply_extra_headers(request);
-
-            let response = request
-                .send()
-                .map_err(|e| Error::Connection(e.to_string()))?;
-
-            check_response(response)
-        }
+        self.capture_v0(event)
     }
 
     /// Capture a collection of events with a single request.
@@ -337,73 +313,132 @@ impl Client {
 
         #[cfg(feature = "capture-v1")]
         {
-            let _ = historical_migration;
-            return self.capture_v1(events);
+            return self.capture_v1(events, historical_migration).map(|_| ());
         }
 
         #[cfg(not(feature = "capture-v1"))]
-        {
-            let disable_geoip = self.options.disable_geoip;
-            let is_server = self.options.is_server;
-            let inner_events: Vec<InnerEvent> = events
-                .into_iter()
-                .map(|mut event| {
-                    if disable_geoip {
-                        event.insert_prop("$geoip_disable", true).ok();
-                    }
-                    if is_server {
-                        event.insert_prop("$is_server", true).ok();
-                    }
-                    InnerEvent::new(event, self.options.api_key.clone())
-                })
-                .collect();
-
-            let batch_request = BatchRequest {
-                api_key: self.options.api_key.clone(),
-                historical_migration,
-                batch: inner_events,
-            };
-            let payload = serde_json::to_string(&batch_request)
-                .map_err(|e| Error::Serialization(e.to_string()))?;
-            let url = self.options.endpoints().build_url(Endpoint::Batch);
-
-            let mut request = self
-                .client
-                .post(&url)
-                .header(CONTENT_TYPE, "application/json")
-                .body(payload);
-            request = self.apply_extra_headers(request);
-
-            let response = request
-                .send()
-                .map_err(|e| Error::Connection(e.to_string()))?;
-
-            check_response(response)
-        }
+        self.capture_batch_v0(events, historical_migration)
     }
 
     #[cfg(not(feature = "capture-v1"))]
-    #[allow(unused_mut)]
-    fn apply_extra_headers(
+    fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
+        let defaults = self.options.capture_defaults();
+        super::v0_capture::prepare_event(&mut event, &defaults);
+        let payload =
+            super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
+
+        let url = self.options.endpoints().build_url(Endpoint::Capture);
+        let request = self
+            .client
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(payload);
+        let request = super::v0_capture::apply_extra_headers(&self.options, request);
+
+        let response = request
+            .send()
+            .map_err(|e| Error::Connection(e.to_string()))?;
+
+        check_response(response)
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    fn capture_batch_v0(
         &self,
-        mut request: reqwest::blocking::RequestBuilder,
-    ) -> reqwest::blocking::RequestBuilder {
-        #[cfg(feature = "test-harness")]
-        {
-            if let Some(ref extra) = self.options.extra_capture_headers {
-                for (k, v) in extra {
-                    request = request.header(k.as_str(), v.as_str());
-                }
-            }
-        }
-        request
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<(), Error> {
+        let defaults = self.options.capture_defaults();
+        let payload = super::v0_capture::build_batch_payload(
+            events,
+            self.options.api_key.clone(),
+            historical_migration,
+            &defaults,
+        )?;
+        let url = self.options.endpoints().build_url(Endpoint::Batch);
+        let request = self
+            .client
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(payload);
+        let request = super::v0_capture::apply_extra_headers(&self.options, request);
+
+        let response = request
+            .send()
+            .map_err(|e| Error::Connection(e.to_string()))?;
+
+        check_response(response)
     }
 
     #[cfg(feature = "capture-v1")]
-    fn capture_v1(&self, _events: Vec<Event>) -> Result<(), Error> {
-        Err(Error::ServerError {
-            status: 500,
-            message: "Capture V1 not yet implemented".to_string(),
+    fn capture_v1(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<CaptureResponse, Error> {
+        use super::v1_capture::{self, Step};
+        use crate::event_v1::V1BatchRequestRef;
+
+        let request_id = Uuid::now_v7();
+        let created_at = Utc::now().to_rfc3339();
+        let mut attempt: u32 = 1;
+        let defaults = self.options.capture_defaults();
+        let mut pending = v1_capture::build_events(&events, &defaults);
+        let mut final_results = HashMap::new();
+        let historical_migration = historical_migration.then_some(true);
+        let url = self
+            .options
+            .endpoints()
+            .build_custom_url(v1_capture::V1_CAPTURE_PATH);
+
+        loop {
+            let req = V1BatchRequestRef {
+                created_at: &created_at,
+                historical_migration,
+                batch: &pending,
+            };
+            let payload =
+                serde_json::to_vec(&req).map_err(|e| Error::Serialization(e.to_string()))?;
+            let mut headers = v1_capture::build_headers(&self.options, &request_id, attempt);
+            let body =
+                v1_capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
+
+            let step = match self.client.post(&url).headers(headers).body(body).send() {
+                Err(e) => v1_capture::after_transport_error(
+                    &self.options,
+                    &request_id,
+                    attempt,
+                    e.to_string(),
+                ),
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let retry_after = v1_capture::parse_retry_after(resp.headers());
+                    let text = resp.text().unwrap_or_else(|_| "Unknown error".to_string());
+                    v1_capture::after_response(
+                        &self.options,
+                        &request_id,
+                        attempt,
+                        status,
+                        retry_after,
+                        &text,
+                        &mut pending,
+                        &mut final_results,
+                    )
+                }
+            };
+
+            match step {
+                Step::Done => break,
+                Step::Fail(e) => return Err(e),
+                Step::Backoff(d) => {
+                    attempt += 1;
+                    std::thread::sleep(d);
+                }
+            }
+        }
+
+        Ok(CaptureResponse {
+            results: final_results,
         })
     }
 

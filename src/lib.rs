@@ -84,6 +84,7 @@ mod local_evaluation;
 // Public interface - any change to this is breaking!
 // Client
 pub use client::client;
+pub use client::CaptureCompression;
 pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
@@ -99,6 +100,8 @@ pub use error::Error;
 
 // Event
 pub use event::Event;
+#[cfg(feature = "capture-v1")]
+pub use event::EventOptions;
 
 // V1 Capture types
 #[cfg(feature = "capture-v1")]
