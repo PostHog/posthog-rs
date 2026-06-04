@@ -344,7 +344,7 @@ impl Client {
         let payload =
             super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
         let url = self.options.endpoints().build_url(Endpoint::Capture);
-        let (body, gzip) = self.encode_v0_body(payload);
+        let (body, gzip) = super::v0_capture::encode_body(&self.options, payload);
         self.send_v0_with_retry(&url, body, gzip).await
     }
 
@@ -362,31 +362,8 @@ impl Client {
             &defaults,
         )?;
         let url = self.options.endpoints().build_url(Endpoint::Batch);
-        let (body, gzip) = self.encode_v0_body(payload);
+        let (body, gzip) = super::v0_capture::encode_body(&self.options, payload);
         self.send_v0_with_retry(&url, body, gzip).await
-    }
-
-    /// Encode the v0 JSON body, gzip-compressing when gzip is configured.
-    /// Returns the bytes and whether they are gzipped. v0 supports gzip only;
-    /// other algorithms (or a gzip failure) fall back to uncompressed.
-    #[cfg(not(feature = "capture-v1"))]
-    fn encode_v0_body(&self, json: String) -> (Vec<u8>, bool) {
-        match self.options.capture_compression {
-            Some(super::CaptureCompression::Gzip) => {
-                match crate::compression::gzip(json.as_bytes()) {
-                    Some(bytes) => (bytes, true),
-                    None => (json.into_bytes(), false),
-                }
-            }
-            Some(other) => {
-                tracing::warn!(
-                    ?other,
-                    "v0 capture supports gzip only; sending uncompressed"
-                );
-                (json.into_bytes(), false)
-            }
-            None => (json.into_bytes(), false),
-        }
     }
 
     /// POST `body` to `url`, retrying transient failures (transport errors and

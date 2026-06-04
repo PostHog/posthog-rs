@@ -7,7 +7,7 @@ use reqwest::blocking::RequestBuilder;
 #[cfg(feature = "async-client")]
 use reqwest::RequestBuilder;
 
-use super::{CaptureDefaults, ClientOptions};
+use super::{CaptureCompression, CaptureDefaults, ClientOptions};
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
@@ -60,6 +60,26 @@ pub(crate) fn build_batch_payload(
         batch: inner_events,
     };
     serde_json::to_string(&batch_request).map_err(|e| Error::Serialization(e.to_string()))
+}
+
+/// Encode the V0 JSON body, gzip-compressing when gzip is configured. Returns
+/// the bytes and whether they are gzipped. V0 supports gzip only; other
+/// algorithms (or a gzip failure) fall back to uncompressed.
+pub(crate) fn encode_body(options: &ClientOptions, json: String) -> (Vec<u8>, bool) {
+    match options.capture_compression {
+        Some(CaptureCompression::Gzip) => match crate::compression::gzip(json.as_bytes()) {
+            Some(bytes) => (bytes, true),
+            None => (json.into_bytes(), false),
+        },
+        Some(other) => {
+            tracing::warn!(
+                ?other,
+                "v0 capture supports gzip only; sending uncompressed"
+            );
+            (json.into_bytes(), false)
+        }
+        None => (json.into_bytes(), false),
+    }
 }
 
 // ---------------------------------------------------------------------------

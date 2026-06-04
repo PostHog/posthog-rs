@@ -106,23 +106,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_retry_after_valid() {
-        let mut headers = HeaderMap::new();
-        headers.insert("retry-after", HeaderValue::from_static("5"));
-        assert_eq!(parse_retry_after(&headers), Some(5));
-    }
-
-    #[test]
-    fn parse_retry_after_missing() {
-        let headers = HeaderMap::new();
-        assert_eq!(parse_retry_after(&headers), None);
-    }
-
-    #[test]
-    fn parse_retry_after_non_numeric() {
-        let mut headers = HeaderMap::new();
-        headers.insert("retry-after", HeaderValue::from_static("not-a-number"));
-        assert_eq!(parse_retry_after(&headers), None);
+    fn parse_retry_after_cases() {
+        // (header value, expected): numeric parses, missing/non-numeric are None.
+        let cases: [(Option<&str>, Option<u64>); 3] = [
+            (Some("5"), Some(5)),
+            (None, None),
+            (Some("not-a-number"), None),
+        ];
+        for (header_val, expected) in cases {
+            let mut headers = HeaderMap::new();
+            if let Some(v) = header_val {
+                headers.insert("retry-after", HeaderValue::from_str(v).unwrap());
+            }
+            assert_eq!(
+                parse_retry_after(&headers),
+                expected,
+                "header={:?}",
+                header_val
+            );
+        }
     }
 
     #[test]
