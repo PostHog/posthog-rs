@@ -128,7 +128,13 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         capabilities.push(compression_capability(algo).to_string());
     }
     Json(HealthResponse {
-        sdk_name: "posthog-rs",
+        // Per-build name so the v0 and v1 compliance jobs post distinct PR
+        // comments instead of overwriting one shared report.
+        sdk_name: if cfg!(feature = "capture-v1") {
+            "posthog-rs-v1"
+        } else {
+            "posthog-rs-v0"
+        },
         sdk_version: env!("CARGO_PKG_VERSION"),
         adapter_version: env!("CARGO_PKG_VERSION"),
         capabilities,
