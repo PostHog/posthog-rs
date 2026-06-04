@@ -15,6 +15,7 @@
 //! ```no_run
 //! use posthog_rs::{client, EvaluateFlagsOptions, Event};
 //!
+//! #[cfg(feature = "async-client")]
 //! #[tokio::main]
 //! async fn main() -> Result<(), posthog_rs::Error> {
 //!     let api_key = std::env::var("POSTHOG_API_KEY")
@@ -37,6 +38,31 @@
 //!         let mut event = Event::new("onboarding_step_completed", distinct_id);
 //!         event.with_flags(&flags.only_accessed());
 //!         posthog.capture(event).await?;
+//!     }
+//!
+//!     Ok(())
+//! }
+//!
+//! #[cfg(not(feature = "async-client"))]
+//! fn main() -> Result<(), posthog_rs::Error> {
+//!     let api_key = std::env::var("POSTHOG_API_KEY")
+//!         .expect("set POSTHOG_API_KEY to your PostHog project API key");
+//!
+//!     let posthog = client(api_key.as_str());
+//!     let distinct_id = "user-123";
+//!
+//!     // Capture an analytics event.
+//!     let mut event = Event::new("signed_up", distinct_id);
+//!     event.insert_prop("plan", "pro")?;
+//!     posthog.capture(event)?;
+//!
+//!     // Evaluate feature flags once, then read from the snapshot.
+//!     let flags = posthog.evaluate_flags(distinct_id, EvaluateFlagsOptions::default())?;
+//!
+//!     if flags.is_enabled("new-onboarding") {
+//!         let mut event = Event::new("onboarding_step_completed", distinct_id);
+//!         event.with_flags(&flags.only_accessed());
+//!         posthog.capture(event)?;
 //!     }
 //!
 //!     Ok(())
