@@ -3299,38 +3299,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_early_exit_enabled_returns_false_without_evaluating_later_group() {
-        let flag = early_exit_flag(true);
-        let result = match_feature_flag(
-            &flag,
-            "user-123",
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
-        // The first group is out-of-rollout-bound; early_exit short-circuits to
-        // false even though the second group would have matched.
-        assert_eq!(result, FlagValue::Boolean(false));
+    macro_rules! test_early_exit {
+        ($name:ident, $early_exit:expr, $expected:expr) => {
+            #[test]
+            fn $name() {
+                let flag = early_exit_flag($early_exit);
+                let result = match_feature_flag(
+                    &flag,
+                    "user-123",
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+                assert_eq!(result, $expected);
+            }
+        };
     }
 
-    #[test]
-    fn test_early_exit_unset_falls_through_to_matching_group() {
-        // `early_exit` defaults to false via Default / serde(default).
-        let flag = early_exit_flag(false);
-        let result = match_feature_flag(
-            &flag,
-            "user-123",
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(result, FlagValue::Boolean(true));
-    }
+    test_early_exit!(
+        test_early_exit_enabled_returns_false_without_evaluating_later_group,
+        true,
+        FlagValue::Boolean(false)
+    );
+    test_early_exit!(
+        test_early_exit_unset_falls_through_to_matching_group,
+        false,
+        FlagValue::Boolean(true)
+    );
 
     #[test]
     fn test_early_exit_default_is_false_from_json() {
@@ -3438,33 +3435,89 @@ mod tests {
         assert_eq!(result, FlagValue::Boolean(true));
     }
 
-    #[test]
-    fn test_early_exit_enabled_short_circuits_with_context() {
-        let flag = early_exit_flag(true);
-        let ctx = EvaluationContext {
-            cohorts: &HashMap::new(),
-            flags: &HashMap::new(),
-            distinct_id: "user-123",
-            groups: &HashMap::new(),
-            group_properties: &HashMap::new(),
-            group_type_mapping: &HashMap::new(),
+    macro_rules! test_early_exit_with_context {
+        ($name:ident, $early_exit:expr, $expected:expr) => {
+            #[test]
+            fn $name() {
+                let flag = early_exit_flag($early_exit);
+                let ctx = EvaluationContext {
+                    cohorts: &HashMap::new(),
+                    flags: &HashMap::new(),
+                    distinct_id: "user-123",
+                    groups: &HashMap::new(),
+                    group_properties: &HashMap::new(),
+                    group_type_mapping: &HashMap::new(),
+                };
+                let result = match_feature_flag_with_context(&flag, &HashMap::new(), &ctx).unwrap();
+                assert_eq!(result, $expected);
+            }
         };
-        let result = match_feature_flag_with_context(&flag, &HashMap::new(), &ctx).unwrap();
-        assert_eq!(result, FlagValue::Boolean(false));
     }
 
+    test_early_exit_with_context!(
+        test_early_exit_enabled_short_circuits_with_context,
+        true,
+        FlagValue::Boolean(false)
+    );
+    test_early_exit_with_context!(
+        test_early_exit_unset_falls_through_with_context,
+        false,
+        FlagValue::Boolean(true)
+    );
+
     #[test]
-    fn test_early_exit_unset_falls_through_with_context() {
-        let flag = early_exit_flag(false);
-        let ctx = EvaluationContext {
-            cohorts: &HashMap::new(),
-            flags: &HashMap::new(),
-            distinct_id: "user-123",
-            groups: &HashMap::new(),
-            group_properties: &HashMap::new(),
-            group_type_mapping: &HashMap::new(),
+    fn test_early_exit_does_not_short_circuit_when_prior_group_inconclusive() {
+        // Group 1: group-targeted (aggregation_group_type_index = 0). The
+        // group_type_mapping resolves "0" → "company" and groups supplies the
+        // company key, but group_properties has no entry for "company" →
+        // ConditionTarget::Inconclusive → is_inconclusive = true.
+        // Group 2: person-targeted, rollout 0% → OutOfRolloutBound.
+        // With early_exit = true, the !is_inconclusive guard must prevent
+        // short-circuiting, and the overall result must be InconclusiveMatchError.
+        let flag = FeatureFlag {
+            key: "early-exit-flag".to_string(),
+            active: true,
+            filters: FeatureFlagFilters {
+                groups: vec![
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(100.0),
+                        variant: None,
+                        aggregation_group_type_index: Some(0),
+                    },
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(0.0),
+                        variant: None,
+                        aggregation_group_type_index: None,
+                    },
+                ],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: true,
+            },
         };
-        let result = match_feature_flag_with_context(&flag, &HashMap::new(), &ctx).unwrap();
-        assert_eq!(result, FlagValue::Boolean(true));
+
+        let mut group_type_mapping = HashMap::new();
+        group_type_mapping.insert("0".to_string(), "company".to_string());
+
+        let mut groups = HashMap::new();
+        groups.insert("company".to_string(), "acme".to_string());
+
+        // group_properties intentionally omitted for "company" → Inconclusive
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &HashMap::new(),
+            &groups,
+            &HashMap::new(), // empty group_properties
+            &group_type_mapping,
+        );
+        assert!(
+            result.is_err(),
+            "expected InconclusiveMatchError, got {:?}",
+            result
+        );
     }
 }
