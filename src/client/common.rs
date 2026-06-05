@@ -204,3 +204,95 @@ fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
         other => other,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn groups(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn flag_params(
+        properties: HashMap<String, serde_json::Value>,
+        groups: HashMap<String, String>,
+        disable_geoip: Option<bool>,
+    ) -> FlagCalledEventParams {
+        FlagCalledEventParams {
+            distinct_id: "user-1".to_string(),
+            key: "alpha".to_string(),
+            response: Some(FlagValue::Boolean(true)),
+            groups,
+            disable_geoip,
+            properties,
+        }
+    }
+
+    #[test]
+    fn dedup_key_canonicalizes_group_order_and_escapes_separators() {
+        let first = build_dedup_key(
+            "alpha",
+            Some(&FlagValue::Boolean(true)),
+            &groups(&[("organization", "org-a"), ("team", "red")]),
+        );
+        let second = build_dedup_key(
+            "alpha",
+            Some(&FlagValue::Boolean(true)),
+            &groups(&[("team", "red"), ("organization", "org-a")]),
+        );
+        assert_eq!(first, second);
+
+        let with_separator_in_key = build_dedup_key(
+            "alpha",
+            Some(&FlagValue::Boolean(true)),
+            &groups(&[("a=b", "c")]),
+        );
+        let with_separator_in_value = build_dedup_key(
+            "alpha",
+            Some(&FlagValue::Boolean(true)),
+            &groups(&[("a", "b=c")]),
+        );
+        assert_ne!(with_separator_in_key, with_separator_in_value);
+    }
+
+    #[test]
+    fn flag_called_event_applies_defaults_groups_and_preserves_caller_properties() {
+        let mut properties = HashMap::new();
+        properties.insert("$is_server".to_string(), json!(false));
+        properties.insert("$geoip_disable".to_string(), json!(false));
+
+        let event = flag_called_event(
+            flag_params(properties, groups(&[("organization", "org-a")]), Some(true)),
+            true,
+            true,
+        )
+        .expect("valid flag-called event");
+
+        assert_eq!(
+            event.groups().get("organization"),
+            Some(&"org-a".to_string())
+        );
+        assert_eq!(event.properties().get("$is_server"), Some(&json!(false)));
+        assert_eq!(
+            event.properties().get("$geoip_disable"),
+            Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn flag_called_event_adds_defaults_when_missing() {
+        let event = flag_called_event(
+            flag_params(HashMap::new(), HashMap::new(), None),
+            true,
+            true,
+        )
+        .expect("valid flag-called event");
+
+        assert_eq!(event.properties().get("$is_server"), Some(&json!(true)));
+        assert_eq!(event.properties().get("$geoip_disable"), Some(&json!(true)));
+    }
+}
