@@ -2,12 +2,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+#[cfg(feature = "capture-v1")]
+use chrono::Utc;
 use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
+#[cfg(feature = "capture-v1")]
+use uuid::Uuid;
 
 use crate::endpoints::Endpoint;
-use crate::event::BatchRequest;
+#[cfg(feature = "capture-v1")]
+use crate::event_v1::CaptureResponse;
 use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
     FlagCalledEventParams,
@@ -80,10 +85,11 @@ impl AsyncFlagEventHost {
         }
     }
 
-    fn spawn_ship(&self, event: Event) {
+    fn spawn_ship(&self, mut event: Event) {
         if self.disabled {
             return;
         }
+        event.prepare_for_v0();
         let inner_event = InnerEvent::new(event, self.api_key.clone());
         let payload = match serde_json::to_string(&inner_event) {
             Ok(p) => p,
@@ -212,38 +218,19 @@ impl Client {
     ///
     /// Disabled clients skip the request and return `Ok(())`.
     #[instrument(skip(self, event), level = "debug")]
-    pub async fn capture(&self, mut event: Event) -> Result<(), Error> {
+    pub async fn capture(&self, event: Event) -> Result<(), Error> {
         if self.options.is_disabled() {
             trace!("Client is disabled, skipping capture");
             return Ok(());
         }
 
-        // Add geoip disable property if configured
-        if self.options.disable_geoip {
-            event.insert_prop("$geoip_disable", true).ok();
-        }
-        // Mark server-side events so ingestion doesn't attribute the host OS to the person.
-        if self.options.is_server {
-            event.insert_prop("$is_server", true).ok();
+        #[cfg(feature = "capture-v1")]
+        {
+            return self.capture_v1(vec![event], false).await.map(|_| ());
         }
 
-        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
-
-        let payload =
-            serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))?;
-
-        let url = self.options.endpoints().build_url(Endpoint::Capture);
-
-        let response = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload)
-            .send()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
-
-        check_response(response).await
+        #[cfg(not(feature = "capture-v1"))]
+        self.capture_v0(event).await
     }
 
     /// Capture a collection of events with a single request.
@@ -268,40 +255,186 @@ impl Client {
             return Ok(());
         }
 
-        let disable_geoip = self.options.disable_geoip;
-        let is_server = self.options.is_server;
-        let inner_events: Vec<InnerEvent> = events
-            .into_iter()
-            .map(|mut event| {
-                if disable_geoip {
-                    event.insert_prop("$geoip_disable", true).ok();
-                }
-                if is_server {
-                    event.insert_prop("$is_server", true).ok();
-                }
-                InnerEvent::new(event, self.options.api_key.clone())
-            })
-            .collect();
+        #[cfg(feature = "capture-v1")]
+        {
+            return self
+                .capture_v1(events, historical_migration)
+                .await
+                .map(|_| ());
+        }
 
-        let batch_request = BatchRequest {
-            api_key: self.options.api_key.clone(),
+        #[cfg(not(feature = "capture-v1"))]
+        self.capture_batch_v0(events, historical_migration).await
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    async fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
+        let defaults = self.options.capture_defaults();
+        super::v0_capture::prepare_event(&mut event, &defaults);
+        let payload =
+            super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
+        let url = self.options.endpoints().build_url(Endpoint::Capture);
+        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
+        self.send_v0_with_retry(&url, body, encoding).await
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    async fn capture_batch_v0(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<(), Error> {
+        let defaults = self.options.capture_defaults();
+        let payload = super::v0_capture::build_batch_payload(
+            events,
+            self.options.api_key.clone(),
             historical_migration,
-            batch: inner_events,
-        };
-        let payload = serde_json::to_string(&batch_request)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+            &defaults,
+        )?;
         let url = self.options.endpoints().build_url(Endpoint::Batch);
+        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
+        self.send_v0_with_retry(&url, body, encoding).await
+    }
 
-        let response = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload)
-            .send()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+    /// POST `body` to `url`, retrying transient failures (transport errors and
+    /// 408/429/500/502/503/504) up to `max_capture_attempts`. The body is built
+    /// once by the caller and resent byte-for-byte, so a retried event keeps
+    /// its UUID and timestamp — which dedup relies on. The retry decision is the
+    /// shared sans-IO logic in [`super::retry`]; this loop is just the transport.
+    /// When `encoding` is `Some`, the request advertises that `Content-Encoding`
+    /// and a matching `compression=<token>` query param (capture reads the query
+    /// param on v0, not the header).
+    #[cfg(not(feature = "capture-v1"))]
+    async fn send_v0_with_retry(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        encoding: Option<&'static str>,
+    ) -> Result<(), Error> {
+        use super::retry::{v0_after_response, v0_after_transport_error, Step};
 
-        check_response(response).await
+        // v0 capture/batch URLs carry no query string, so capture reads the
+        // compression hint from this param (it does not consult Content-Encoding).
+        let url = match encoding {
+            Some(token) => format!("{url}?compression={token}"),
+            None => url.to_string(),
+        };
+        let mut attempt: u32 = 1;
+        loop {
+            let mut request = self
+                .client
+                .post(&url)
+                .header(CONTENT_TYPE, "application/json")
+                .body(body.clone());
+            if let Some(token) = encoding {
+                request = request.header(reqwest::header::CONTENT_ENCODING, token);
+            }
+            let request = super::v0_capture::apply_extra_headers(&self.options, request);
+
+            let step = match request.send().await {
+                Err(e) => v0_after_transport_error(&self.options, attempt, e.to_string()),
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let retry_after = super::retry::parse_retry_after(response.headers());
+                    let body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    v0_after_response(&self.options, attempt, status, retry_after, &body)
+                }
+            };
+
+            match step {
+                Step::Done => return Ok(()),
+                Step::Fail(e) => return Err(e),
+                Step::Backoff(delay) => {
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "capture-v1")]
+    async fn capture_v1(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<CaptureResponse, Error> {
+        use super::v1_capture::{self, Step};
+        use crate::event_v1::V1BatchRequestRef;
+
+        let request_id = Uuid::now_v7();
+        let created_at = Utc::now().to_rfc3339();
+        let mut attempt: u32 = 1;
+        let defaults = self.options.capture_defaults();
+        let mut pending = v1_capture::build_events(&events, &defaults);
+        let mut final_results = HashMap::new();
+        let historical_migration = historical_migration.then_some(true);
+        let url = self
+            .options
+            .endpoints()
+            .build_custom_url(v1_capture::V1_CAPTURE_PATH);
+
+        loop {
+            let req = V1BatchRequestRef {
+                created_at: &created_at,
+                historical_migration,
+                batch: &pending,
+            };
+            let payload =
+                serde_json::to_vec(&req).map_err(|e| Error::Serialization(e.to_string()))?;
+            let mut headers = v1_capture::build_headers(&self.options, &request_id, attempt);
+            let body =
+                v1_capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
+
+            let step = match self
+                .client
+                .post(&url)
+                .headers(headers)
+                .body(body)
+                .send()
+                .await
+            {
+                Err(e) => v1_capture::after_transport_error(
+                    &self.options,
+                    &request_id,
+                    attempt,
+                    e.to_string(),
+                ),
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let retry_after = v1_capture::parse_retry_after(resp.headers());
+                    let text = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    v1_capture::after_response(
+                        &self.options,
+                        &request_id,
+                        attempt,
+                        status,
+                        retry_after,
+                        &text,
+                        &mut pending,
+                        &mut final_results,
+                    )
+                }
+            };
+
+            match step {
+                Step::Done => break,
+                Step::Fail(e) => return Err(e),
+                Step::Backoff(d) => {
+                    attempt += 1;
+                    tokio::time::sleep(d).await;
+                }
+            }
+        }
+
+        Ok(CaptureResponse {
+            results: final_results,
+        })
     }
 
     /// Get all remote feature flags and payloads for a user.

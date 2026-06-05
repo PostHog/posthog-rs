@@ -1,0 +1,35 @@
+name: SDK Compliance Tests (V0 Capture)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'compliance/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/sdk-compliance-tests-v0.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'compliance/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/sdk-compliance-tests-v0.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+  pull-requests: write
+
+jobs:
+  test-rust-sdk-v0:
+    uses: PostHog/posthog-sdk-test-harness/.github/workflows/test-sdk-action.yml@main
+    with:
+      adapter-dockerfile: compliance/v0/Dockerfile
+      adapter-context: .
+      test-harness-version: latest
+      report-name: rust-sdk-compliance-report-v0
+      concurrency: 10

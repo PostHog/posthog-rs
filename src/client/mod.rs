@@ -4,8 +4,39 @@ use tracing::warn;
 
 mod common;
 
+/// Request-body compression algorithm for the capture pipelines.
+///
+/// When set on [`ClientOptions`], capture requests are compressed and the
+/// matching `Content-Encoding` header is sent. The variant string matches the
+/// HTTP `Content-Encoding` token the server expects. The V0 pipeline supports
+/// `Gzip` only; V1 supports all variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureCompression {
+    Gzip,
+    Deflate,
+    Br,
+    Zstd,
+}
+
+impl CaptureCompression {
+    /// The HTTP `Content-Encoding` token for this algorithm.
+    pub(crate) fn content_encoding(self) -> &'static str {
+        match self {
+            CaptureCompression::Gzip => "gzip",
+            CaptureCompression::Deflate => "deflate",
+            CaptureCompression::Br => "br",
+            CaptureCompression::Zstd => "zstd",
+        }
+    }
+}
+
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+mod retry;
+#[cfg(not(feature = "capture-v1"))]
+mod v0_capture;
+#[cfg(feature = "capture-v1")]
+mod v1_capture;
 #[cfg(not(feature = "async-client"))]
 pub use blocking::client;
 #[cfg(not(feature = "async-client"))]
@@ -94,12 +125,62 @@ pub struct ClientOptions {
     #[builder(default = "false")]
     local_evaluation_only: bool,
 
+    /// Maximum number of attempts for V1 capture requests (default: 3).
+    /// Includes the initial attempt, so `3` means 1 initial + 2 retries.
+    #[builder(default = "3")]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) max_capture_attempts: u32,
+
+    /// Initial retry backoff duration in milliseconds (default: 200)
+    #[builder(default = "200")]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) retry_initial_backoff_ms: u64,
+
+    /// Maximum retry backoff duration in milliseconds (default: 30000)
+    #[builder(default = "30000")]
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) retry_max_backoff_ms: u64,
+
+    /// Optional request-body compression. When `None` (default), bodies are
+    /// sent uncompressed. The V0 pipeline supports `Gzip` only; V1 supports all
+    /// variants.
+    #[builder(default, setter(strip_option))]
+    pub(crate) capture_compression: Option<CaptureCompression>,
+
+    /// Extra HTTP headers injected into every outbound capture request.
+    /// Used by the SDK test harness adapter to attach `X-Test-Id` for
+    /// parallel test isolation.
+    #[cfg(feature = "test-harness")]
+    #[builder(default, setter(strip_option))]
+    #[allow(dead_code)]
+    pub(crate) extra_capture_headers: Option<std::collections::HashMap<String, String>>,
+
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
     endpoint_manager: EndpointManager,
 }
 
+/// Resolved client-level default properties for capture requests.
+///
+/// Built once from [`ClientOptions`] and threaded through all event-producing
+/// paths (V0 capture, V0 flag-called host, V1 capture) so each default is
+/// applied in exactly one place with caller-wins (`entry().or_insert`)
+/// semantics.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CaptureDefaults {
+    pub(crate) disable_geoip: bool,
+    pub(crate) is_server: bool,
+}
+
 impl ClientOptions {
+    /// Build the resolved capture defaults for this client configuration.
+    pub(crate) fn capture_defaults(&self) -> CaptureDefaults {
+        CaptureDefaults {
+            disable_geoip: self.disable_geoip,
+            is_server: self.is_server,
+        }
+    }
+
     /// Get the endpoint manager
     pub(crate) fn endpoints(&self) -> &EndpointManager {
         &self.endpoint_manager

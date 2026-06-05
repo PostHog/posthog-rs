@@ -87,10 +87,10 @@ pub(super) fn flag_called_event(
         event.add_group(group_name, group_id);
     }
     if params.disable_geoip.unwrap_or(client_disable_geoip) {
-        let _ = event.insert_prop("$geoip_disable", true);
+        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
     }
     if is_server {
-        let _ = event.insert_prop("$is_server", true);
+        event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
     Some(event)
 }

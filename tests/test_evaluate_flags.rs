@@ -308,6 +308,7 @@ mod blocking {
         capture_mock.assert_hits(0);
     }
 
+    #[cfg(not(feature = "capture-v1"))]
     #[test]
     fn event_with_flags_attaches_properties_without_extra_request() {
         let server = MockServer::start();
@@ -490,7 +491,9 @@ mod blocking {
 #[cfg(feature = "async-client")]
 mod async_tests {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, Event, FlagValue};
+    #[cfg(not(feature = "capture-v1"))]
+    use posthog_rs::Event;
+    use posthog_rs::{EvaluateFlagsOptions, FlagValue};
 
     async fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
@@ -545,6 +548,31 @@ mod async_tests {
         );
         flush_spawned_events().await;
         capture_mock.assert_hits(2);
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    #[tokio::test]
+    async fn flag_called_event_contains_is_server_and_lib() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v0/e/")
+                .body_contains("\"$is_server\":true")
+                .body_contains("\"$lib\":\"posthog-rs\"");
+            then.status(200);
+        });
+        let client = create_test_client(server.base_url()).await;
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        assert!(snapshot.is_enabled("alpha"));
+        flush_spawned_events().await;
+        capture_mock.assert_hits(1);
     }
 
     #[tokio::test]
@@ -611,6 +639,7 @@ mod async_tests {
         capture_mock.assert_hits(0);
     }
 
+    #[cfg(not(feature = "capture-v1"))]
     #[tokio::test]
     async fn event_with_flags_attaches_properties_without_extra_request() {
         let server = MockServer::start();
