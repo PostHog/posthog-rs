@@ -414,6 +414,7 @@ async fn test_client_with_empty_api_key_is_noop() {
     }
 }
 
+#[cfg(not(feature = "capture-v1"))]
 async fn assert_disabled_client_is_noop(api_key: Option<&str>) {
     let server = MockServer::start();
 

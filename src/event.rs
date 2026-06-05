@@ -33,7 +33,6 @@ pub struct EventOptions {
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     event: String,
-    #[serde(rename = "$distinct_id")]
     distinct_id: String,
     properties: HashMap<String, serde_json::Value>,
     groups: HashMap<String, String>,
@@ -319,7 +318,6 @@ pub struct InnerEvent {
     api_key: String,
     uuid: Uuid,
     event: String,
-    #[serde(rename = "$distinct_id")]
     distinct_id: String,
     properties: HashMap<String, serde_json::Value>,
     timestamp: Option<NaiveDateTime>,
@@ -362,6 +360,39 @@ pub mod tests {
             inner.properties.get("$lib"),
             Some(&serde_json::Value::String("posthog-rs".to_string()))
         );
+    }
+
+    #[test]
+    fn v0_serializes_distinct_id_at_root() {
+        let inner = build_v0(Event::new("test", "user1"));
+        let json = serde_json::to_value(&inner).unwrap();
+
+        // Canonical field at the event root; the legacy `$distinct_id` spelling
+        // (only tolerated by capture via a serde alias) must not be emitted.
+        assert_eq!(json["distinct_id"], "user1");
+        assert!(json.get("$distinct_id").is_none());
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    #[test]
+    fn v0_batch_serializes_distinct_id_at_root() {
+        use crate::event::BatchRequest;
+
+        let batch = BatchRequest {
+            api_key: "test_api_key".to_string(),
+            historical_migration: false,
+            batch: vec![
+                build_v0(Event::new("e1", "user1")),
+                build_v0(Event::new("e2", "user2")),
+            ],
+        };
+        let json = serde_json::to_value(&batch).unwrap();
+
+        let events = json["batch"].as_array().expect("batch is an array");
+        for (event, expected_id) in events.iter().zip(["user1", "user2"]) {
+            assert_eq!(event["distinct_id"], expected_id);
+            assert!(event.get("$distinct_id").is_none());
+        }
     }
 
     #[test]

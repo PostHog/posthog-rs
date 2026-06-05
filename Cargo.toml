@@ -30,7 +30,7 @@ tokio = { version = "1", features = [
     "time",
     "macros",
 ], optional = true }
-flate2 = { version = "1.0", optional = true }
+flate2 = "1.0"
 brotli = { version = "7.0", optional = true }
 zstd = { version = "0.13", optional = true }
 
@@ -47,7 +47,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 default = ["async-client"]
 e2e-test = []
 async-client = ["tokio"]
-capture-v1 = ["flate2", "brotli", "zstd"]
+capture-v1 = ["brotli", "zstd"]
 test-harness = []
 
 [workspace]
