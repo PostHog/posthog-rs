@@ -327,8 +327,8 @@ impl Client {
         let payload =
             super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
         let url = self.options.endpoints().build_url(Endpoint::Capture);
-        let (body, gzip) = super::v0_capture::encode_body(&self.options, payload);
-        self.send_v0_with_retry(&url, body, gzip)
+        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
+        self.send_v0_with_retry(&url, body, encoding)
     }
 
     #[cfg(not(feature = "capture-v1"))]
@@ -345,24 +345,32 @@ impl Client {
             &defaults,
         )?;
         let url = self.options.endpoints().build_url(Endpoint::Batch);
-        let (body, gzip) = super::v0_capture::encode_body(&self.options, payload);
-        self.send_v0_with_retry(&url, body, gzip)
+        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
+        self.send_v0_with_retry(&url, body, encoding)
     }
 
     /// POST `body` to `url`, retrying transient failures (transport errors and
     /// 408/429/500/502/503/504) up to `max_capture_attempts`. The body is built
     /// once by the caller and resent byte-for-byte, so a retried event keeps
-    /// its UUID and timestamp — which dedup relies on. When `gzip`, the request
-    /// advertises `Content-Encoding: gzip` and the `compression=gzip` query
-    /// param (capture reads the query param on v0, not the header).
+    /// its UUID and timestamp — which dedup relies on. The retry decision is the
+    /// shared sans-IO logic in [`super::retry`]; this loop is just the transport.
+    /// When `encoding` is `Some`, the request advertises that `Content-Encoding`
+    /// and a matching `compression=<token>` query param (capture reads the query
+    /// param on v0, not the header).
     #[cfg(not(feature = "capture-v1"))]
-    fn send_v0_with_retry(&self, url: &str, body: Vec<u8>, gzip: bool) -> Result<(), Error> {
+    fn send_v0_with_retry(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        encoding: Option<&'static str>,
+    ) -> Result<(), Error> {
+        use super::retry::{v0_after_response, v0_after_transport_error, Step};
+
         // v0 capture/batch URLs carry no query string, so capture reads the
         // compression hint from this param (it does not consult Content-Encoding).
-        let url = if gzip {
-            format!("{url}?compression=gzip")
-        } else {
-            url.to_string()
+        let url = match encoding {
+            Some(token) => format!("{url}?compression={token}"),
+            None => url.to_string(),
         };
         let mut attempt: u32 = 1;
         loop {
@@ -371,36 +379,31 @@ impl Client {
                 .post(&url)
                 .header(CONTENT_TYPE, "application/json")
                 .body(body.clone());
-            if gzip {
-                request = request.header(reqwest::header::CONTENT_ENCODING, "gzip");
+            if let Some(token) = encoding {
+                request = request.header(reqwest::header::CONTENT_ENCODING, token);
             }
             let request = super::v0_capture::apply_extra_headers(&self.options, request);
 
-            match request.send() {
-                Err(e) => {
-                    if attempt >= self.options.max_capture_attempts {
-                        return Err(Error::Connection(e.to_string()));
-                    }
-                }
+            let step = match request.send() {
+                Err(e) => v0_after_transport_error(&self.options, attempt, e.to_string()),
                 Ok(response) => {
                     let status = response.status().as_u16();
                     let retry_after = super::retry::parse_retry_after(response.headers());
-                    if !(super::retry::should_retry_v0(status, retry_after.is_some())
-                        && attempt < self.options.max_capture_attempts)
-                    {
-                        return check_response(response);
-                    }
-                    let delay =
-                        super::retry::backoff_duration(&self.options, attempt + 1, retry_after);
+                    let body = response
+                        .text()
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    v0_after_response(&self.options, attempt, status, retry_after, &body)
+                }
+            };
+
+            match step {
+                Step::Done => return Ok(()),
+                Step::Fail(e) => return Err(e),
+                Step::Backoff(delay) => {
                     std::thread::sleep(delay);
                     attempt += 1;
-                    continue;
                 }
             }
-
-            let delay = super::retry::backoff_duration(&self.options, attempt + 1, None);
-            std::thread::sleep(delay);
-            attempt += 1;
         }
     }
 

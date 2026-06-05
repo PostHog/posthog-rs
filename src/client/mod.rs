@@ -18,7 +18,6 @@ pub enum CaptureCompression {
 
 impl CaptureCompression {
     /// The HTTP `Content-Encoding` token for this algorithm.
-    #[cfg(feature = "capture-v1")]
     pub(crate) fn content_encoding(self) -> &'static str {
         match self {
             CaptureCompression::Gzip => "gzip",

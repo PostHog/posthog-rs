@@ -7,7 +7,7 @@ use reqwest::blocking::RequestBuilder;
 #[cfg(feature = "async-client")]
 use reqwest::RequestBuilder;
 
-use super::{CaptureCompression, CaptureDefaults, ClientOptions};
+use super::{CaptureDefaults, ClientOptions};
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
@@ -62,23 +62,21 @@ pub(crate) fn build_batch_payload(
     serde_json::to_string(&batch_request).map_err(|e| Error::Serialization(e.to_string()))
 }
 
-/// Encode the V0 JSON body, gzip-compressing when gzip is configured. Returns
-/// the bytes and whether they are gzipped. V0 supports gzip only; other
-/// algorithms (or a gzip failure) fall back to uncompressed.
-pub(crate) fn encode_body(options: &ClientOptions, json: String) -> (Vec<u8>, bool) {
+/// Encode the V0 JSON body, compressing when configured. Returns the bytes and
+/// the `Content-Encoding` token to advertise (`Some(token)` when compressed,
+/// `None` when sent uncompressed). Routes through the shared `compress()`, so a
+/// V0 build is gzip-only by construction; a non-gzip algorithm or a compression
+/// failure falls back to uncompressed.
+pub(crate) fn encode_body(
+    options: &ClientOptions,
+    json: String,
+) -> (Vec<u8>, Option<&'static str>) {
     match options.capture_compression {
-        Some(CaptureCompression::Gzip) => match crate::compression::gzip(json.as_bytes()) {
-            Some(bytes) => (bytes, true),
-            None => (json.into_bytes(), false),
+        Some(algo) => match crate::compression::compress(algo, json.as_bytes()) {
+            Some((bytes, encoding)) => (bytes, Some(encoding)),
+            None => (json.into_bytes(), None),
         },
-        Some(other) => {
-            tracing::warn!(
-                ?other,
-                "v0 capture supports gzip only; sending uncompressed"
-            );
-            (json.into_bytes(), false)
-        }
-        None => (json.into_bytes(), false),
+        None => (json.into_bytes(), None),
     }
 }
 

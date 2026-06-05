@@ -5,6 +5,16 @@ use std::time::Duration;
 use reqwest::header::HeaderMap;
 
 use super::ClientOptions;
+use crate::error::Error;
+
+/// Outcome of one capture attempt, computed without any I/O so both the async
+/// and blocking clients (and both V0 and V1) can share the decision logic and
+/// keep only the transport-specific loop.
+pub(crate) enum Step {
+    Done,
+    Backoff(Duration),
+    Fail(Error),
+}
 
 /// Statuses worth retrying. Everything else (including 429) is terminal so the
 /// caller surfaces it without burning the attempt budget.
@@ -47,6 +57,41 @@ pub(crate) fn backoff_duration(
         let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
         Duration::from_millis(backoff_ms.min(max_ms))
     }
+}
+
+/// Sans-IO decision for a completed V0 capture response. `attempt` is the
+/// just-finished attempt number (1-based); the backoff for the next attempt
+/// uses `attempt` directly so the first retry waits exactly
+/// `retry_initial_backoff_ms`.
+#[cfg(not(feature = "capture-v1"))]
+pub(crate) fn v0_after_response(
+    opts: &ClientOptions,
+    attempt: u32,
+    status: u16,
+    retry_after: Option<u64>,
+    body: &str,
+) -> Step {
+    if should_retry_v0(status, retry_after.is_some()) && attempt < opts.max_capture_attempts {
+        return Step::Backoff(backoff_duration(opts, attempt, retry_after));
+    }
+    match Error::from_http_response(status, body.to_string()) {
+        Some(err) => Step::Fail(err),
+        None => Step::Done,
+    }
+}
+
+/// Sans-IO decision for a V0 transport error (no HTTP response). Retries
+/// transport failures until the attempt budget is exhausted.
+#[cfg(not(feature = "capture-v1"))]
+pub(crate) fn v0_after_transport_error(
+    opts: &ClientOptions,
+    attempt: u32,
+    err_msg: String,
+) -> Step {
+    if attempt >= opts.max_capture_attempts {
+        return Step::Fail(Error::Connection(err_msg));
+    }
+    Step::Backoff(backoff_duration(opts, attempt, None))
 }
 
 #[cfg(test)]
@@ -153,5 +198,99 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(backoff_duration(&opts, 3, None), Duration::from_millis(150));
+    }
+
+    // -- v0 sans-IO decisions ------------------------------------------------
+
+    #[cfg(not(feature = "capture-v1"))]
+    fn schedule_opts() -> ClientOptions {
+        ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .max_capture_attempts(10u32)
+            .retry_initial_backoff_ms(100u64)
+            .retry_max_backoff_ms(1_000_000u64)
+            .build()
+            .unwrap()
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    fn backoff_ms(step: Step) -> u64 {
+        match step {
+            Step::Backoff(d) => d.as_millis() as u64,
+            _ => panic!("expected Step::Backoff"),
+        }
+    }
+
+    /// The schedule the call sites actually produce. Guards the `attempt + 1`
+    /// off-by-one: the first retry must wait exactly `retry_initial_backoff_ms`
+    /// (100ms here), not double it.
+    #[cfg(not(feature = "capture-v1"))]
+    #[test]
+    fn v0_backoff_schedule_starts_at_initial() {
+        let opts = schedule_opts();
+        // attempt = the just-finished attempt; first retry follows attempt 1.
+        assert_eq!(
+            backoff_ms(v0_after_response(&opts, 1, 503, None, "")),
+            100,
+            "first retry must honor retry_initial_backoff_ms exactly"
+        );
+        assert_eq!(backoff_ms(v0_after_response(&opts, 2, 503, None, "")), 200);
+        assert_eq!(backoff_ms(v0_after_response(&opts, 3, 503, None, "")), 400);
+        // Same schedule for transport errors.
+        assert_eq!(
+            backoff_ms(v0_after_transport_error(&opts, 1, "timeout".into())),
+            100
+        );
+        assert_eq!(
+            backoff_ms(v0_after_transport_error(&opts, 2, "timeout".into())),
+            200
+        );
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    #[test]
+    fn v0_after_response_terminal_and_success() {
+        let opts = schedule_opts();
+        // 2xx -> Done.
+        assert!(matches!(
+            v0_after_response(&opts, 1, 200, None, ""),
+            Step::Done
+        ));
+        // Bare 429 (no Retry-After) -> terminal RateLimit, no retry.
+        assert!(matches!(
+            v0_after_response(&opts, 1, 429, None, ""),
+            Step::Fail(Error::RateLimit)
+        ));
+        // 429 + Retry-After -> retried.
+        assert!(matches!(
+            v0_after_response(&opts, 1, 429, Some(1), ""),
+            Step::Backoff(_)
+        ));
+        // Non-retryable 4xx -> terminal.
+        assert!(matches!(
+            v0_after_response(&opts, 1, 400, None, "bad"),
+            Step::Fail(Error::BadRequest(_))
+        ));
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    #[test]
+    fn v0_exhausts_attempt_budget() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .max_capture_attempts(3u32)
+            .retry_initial_backoff_ms(1u64)
+            .retry_max_backoff_ms(5u64)
+            .build()
+            .unwrap();
+        // Retryable status on the final attempt surfaces the error instead of backing off.
+        assert!(matches!(
+            v0_after_response(&opts, 3, 503, None, "boom"),
+            Step::Fail(Error::ServerError { .. })
+        ));
+        assert!(matches!(
+            v0_after_transport_error(&opts, 3, "timeout".into()),
+            Step::Fail(Error::Connection(_))
+        ));
     }
 }

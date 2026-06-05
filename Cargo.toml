@@ -38,7 +38,6 @@ zstd = { version = "0.13", optional = true }
 dotenv = "0.15.0"
 ctor = "0.1.26"
 tokio = { version = "1", features = ["full"] }
-flate2 = "1.0"
 httpmock = "0.7"
 serde_json = "1.0"
 futures = "0.3"

@@ -2,7 +2,6 @@
 //! Each client keeps only the I/O; this module owns everything else.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 pub(crate) const V1_CAPTURE_PATH: &str = "/i/v1/analytics/events";
 
@@ -12,9 +11,9 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::retry::{backoff_duration, is_retryable_status};
-// Re-exported so the V1 capture loop in the client modules can reach it as
-// `v1_capture::parse_retry_after`.
-pub(crate) use super::retry::parse_retry_after;
+// Re-exported so the V1 capture loops in the client modules can reach them as
+// `v1_capture::parse_retry_after` / `v1_capture::Step`.
+pub(crate) use super::retry::{parse_retry_after, Step};
 use super::{CaptureCompression, CaptureDefaults, ClientOptions};
 use crate::error::Error;
 use crate::event::Event;
@@ -155,12 +154,6 @@ pub(crate) fn process_batch_response(
 // Sans-IO control flow
 // ---------------------------------------------------------------------------
 
-pub(crate) enum Step {
-    Done,
-    Backoff(Duration),
-    Fail(Error),
-}
-
 pub(crate) fn after_transport_error(
     opts: &ClientOptions,
     request_id: &Uuid,
@@ -176,7 +169,7 @@ pub(crate) fn after_transport_error(
         error = %err_msg,
         "V1 capture request failed, will retry"
     );
-    Step::Backoff(backoff_duration(opts, attempt + 1, None))
+    Step::Backoff(backoff_duration(opts, attempt, None))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -218,7 +211,7 @@ pub(crate) fn after_response(
         if pending.is_empty() || is_final {
             Step::Done
         } else {
-            Step::Backoff(backoff_duration(opts, attempt + 1, retry_after))
+            Step::Backoff(backoff_duration(opts, attempt, retry_after))
         }
     } else if is_retryable_status(status) {
         let error_desc = serde_json::from_str::<V1ErrorResponse>(body)
@@ -240,7 +233,7 @@ pub(crate) fn after_response(
                     .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))),
             )
         } else {
-            Step::Backoff(backoff_duration(opts, attempt + 1, retry_after))
+            Step::Backoff(backoff_duration(opts, attempt, retry_after))
         }
     } else {
         Step::Fail(
@@ -386,6 +379,55 @@ mod tests {
         let next = process_batch_response(vec![e.clone()], &results, &mut final_results, false);
         assert!(next.is_empty());
         assert!(final_results.is_empty());
+    }
+
+    // -- backoff schedule ----------------------------------------------------
+
+    /// Guards the `attempt + 1` off-by-one on the V1 call sites: the first
+    /// retry must wait exactly `retry_initial_backoff_ms`, not double it.
+    #[test]
+    fn v1_backoff_schedule_starts_at_initial() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .max_capture_attempts(10u32)
+            .retry_initial_backoff_ms(100u64)
+            .retry_max_backoff_ms(1_000_000u64)
+            .build()
+            .unwrap();
+        let rid = Uuid::now_v7();
+        let ms = |step: Step| match step {
+            Step::Backoff(d) => d.as_millis() as u64,
+            _ => panic!("expected Step::Backoff"),
+        };
+        assert_eq!(
+            ms(after_transport_error(&opts, &rid, 1, "timeout".into())),
+            100,
+            "first retry must honor retry_initial_backoff_ms exactly"
+        );
+        assert_eq!(
+            ms(after_transport_error(&opts, &rid, 2, "timeout".into())),
+            200
+        );
+        assert_eq!(
+            ms(after_transport_error(&opts, &rid, 3, "timeout".into())),
+            400
+        );
+
+        // Same schedule via a retryable HTTP response.
+        let body = r#"{"error":"service_unavailable"}"#;
+        let mut pending = vec![dummy_v1_event()];
+        let mut final_results = HashMap::new();
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            503,
+            None,
+            body,
+            &mut pending,
+            &mut final_results,
+        );
+        assert_eq!(ms(step), 100);
     }
 
     // -- after_transport_error -----------------------------------------------

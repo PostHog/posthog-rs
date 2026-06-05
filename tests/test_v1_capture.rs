@@ -528,6 +528,23 @@ async fn v1_capture_preserves_uuid_and_timestamp_across_retries() {
     success_mock.assert();
 }
 
+/// Matcher: the request body is valid gzip that decodes to the expected event.
+/// Asserts the compressor actually produced the advertised encoding, not just
+/// that the header was set.
+fn v1_body_gunzips_to_user1(req: &HttpMockRequest) -> bool {
+    use std::io::Read;
+
+    let Some(body) = req.body.as_ref() else {
+        return false;
+    };
+    let mut decoder = flate2::read::GzDecoder::new(&body[..]);
+    let mut decoded = String::new();
+    match decoder.read_to_string(&mut decoded) {
+        Ok(_) => decoded.contains(r#""distinct_id":"user-1""#),
+        Err(_) => false,
+    }
+}
+
 #[tokio::test]
 async fn v1_capture_sends_gzip_content_encoding() {
     use posthog_rs::CaptureCompression;
@@ -536,7 +553,8 @@ async fn v1_capture_sends_gzip_content_encoding() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/i/v1/analytics/events")
-            .header("content-encoding", "gzip");
+            .header("content-encoding", "gzip")
+            .matches(v1_body_gunzips_to_user1);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({ "results": {} }));
@@ -552,6 +570,48 @@ async fn v1_capture_sends_gzip_content_encoding() {
 
     client.capture(Event::new("test", "user-1")).await.unwrap();
     mock.assert();
+}
+
+#[tokio::test]
+async fn v1_capture_honors_retry_after_header() {
+    use std::time::{Duration, Instant};
+
+    // A retryable status carrying Retry-After must delay the resend by the
+    // header value, not the tiny exponential backoff — parity with the v0 test.
+    let server = MockServer::start();
+    let fail_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-attempt", "1");
+        then.status(503)
+            .header("content-type", "application/json")
+            .header("retry-after", "1")
+            .json_body(json!({ "error": "service_unavailable" }));
+    });
+    let success_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-attempt", "2");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    let start = Instant::now();
+    let result = client.capture(Event::new("test", "user-1")).await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_ok());
+    fail_mock.assert();
+    success_mock.assert();
+    // The client's exponential backoff here is ~10ms; only an honored
+    // Retry-After: 1 produces a gap this large.
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "Retry-After header not honored: waited only {:?}",
+        elapsed
+    );
 }
 
 #[tokio::test]

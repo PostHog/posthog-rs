@@ -557,6 +557,21 @@ fn v1_blocking_batch_sets_historical_migration() {
     mock.assert();
 }
 
+/// Matcher: the request body is valid gzip that decodes to the expected event.
+fn v1_body_gunzips_to_user1(req: &HttpMockRequest) -> bool {
+    use std::io::Read;
+
+    let Some(body) = req.body.as_ref() else {
+        return false;
+    };
+    let mut decoder = flate2::read::GzDecoder::new(&body[..]);
+    let mut decoded = String::new();
+    match decoder.read_to_string(&mut decoded) {
+        Ok(_) => decoded.contains(r#""distinct_id":"user-1""#),
+        Err(_) => false,
+    }
+}
+
 #[test]
 fn v1_blocking_sends_gzip_content_encoding() {
     use posthog_rs::CaptureCompression;
@@ -565,7 +580,8 @@ fn v1_blocking_sends_gzip_content_encoding() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/i/v1/analytics/events")
-            .header("content-encoding", "gzip");
+            .header("content-encoding", "gzip")
+            .matches(v1_body_gunzips_to_user1);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({ "results": {} }));
