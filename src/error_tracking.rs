@@ -597,7 +597,8 @@ mod tests {
     impl StdError for BorrowedError<'_> {}
 
     fn event_json(capture: ExceptionCapture) -> Value {
-        let event = capture.into_event().unwrap();
+        let mut event = capture.into_event().unwrap();
+        event.prepare_for_v0();
         serde_json::to_value(InnerEvent::new(event, "api-key".to_string())).unwrap()
     }
 
@@ -607,7 +608,7 @@ mod tests {
         let json = event_json(ExceptionCapture::from_error(&error).with_distinct_id("user-1"));
 
         assert_eq!(json["event"], "$exception");
-        assert_eq!(json["$distinct_id"], "user-1");
+        assert_eq!(json["distinct_id"], "user-1");
         assert_eq!(json["properties"]["$exception_level"], "error");
 
         let exception_list = json["properties"]["$exception_list"].as_array().unwrap();
