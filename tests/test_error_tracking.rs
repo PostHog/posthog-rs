@@ -49,6 +49,19 @@ fn request_has_capture_error_user_frame_first(req: &HttpMockRequest) -> bool {
         && !first_function.contains("Client::capture_error")
 }
 
+fn request_has_capture_error_anon_user_frame_first(req: &HttpMockRequest) -> bool {
+    let Some(body) = req.body.as_deref() else {
+        return false;
+    };
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let first_function = first_exception_stack_function(&body);
+
+    first_function.contains("capture_error_anon_sends_personless_exception_event")
+        && !first_function.contains("Client::capture_error")
+}
+
 fn first_exception_stack_function(body: &serde_json::Value) -> &str {
     body.pointer("/properties/$exception_list/0/stacktrace/frames")
         .and_then(|value| value.as_array())
@@ -91,6 +104,25 @@ mod blocking {
     }
 
     #[test]
+    fn capture_error_anon_sends_personless_exception_event() {
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v0/e/")
+                .body_contains(r#""event":"$exception""#)
+                .body_contains(r#""$process_person_profile":false"#)
+                .body_contains(r#""value":"payment failed""#)
+                .matches(request_has_capture_error_anon_user_frame_first);
+            then.status(200);
+        });
+
+        let client = create_test_client(server.base_url());
+        client.capture_error_anon(&TestError).unwrap();
+
+        capture_mock.assert_hits(1);
+    }
+
+    #[test]
     fn disabled_capture_error_does_not_build_exception_payload() {
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
@@ -101,6 +133,7 @@ mod blocking {
         let client = posthog_rs::client(options);
 
         client.capture_error(&PanicDisplayError, "user-1").unwrap();
+        client.capture_error_anon(&PanicDisplayError).unwrap();
     }
 
     #[test]
@@ -235,6 +268,25 @@ mod async_client {
     }
 
     #[tokio::test]
+    async fn capture_error_anon_sends_personless_exception_event() {
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v0/e/")
+                .body_contains(r#""event":"$exception""#)
+                .body_contains(r#""$process_person_profile":false"#)
+                .body_contains(r#""value":"payment failed""#)
+                .matches(request_has_capture_error_anon_user_frame_first);
+            then.status(200);
+        });
+
+        let client = create_test_client(server.base_url()).await;
+        client.capture_error_anon(&TestError).await.unwrap();
+
+        capture_mock.assert_hits(1);
+    }
+
+    #[tokio::test]
     async fn disabled_capture_error_does_not_build_exception_payload() {
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
@@ -248,6 +300,7 @@ mod async_client {
             .capture_error(&PanicDisplayError, "user-1")
             .await
             .unwrap();
+        client.capture_error_anon(&PanicDisplayError).await.unwrap();
     }
 
     #[tokio::test]

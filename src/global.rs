@@ -108,6 +108,16 @@ where
     client.capture_error(error, distinct_id).await
 }
 
+/// Capture a Rust error personlessly using the global client.
+#[cfg(all(feature = "async-client", feature = "error-tracking"))]
+pub async fn capture_error_anon<E>(error: &E) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_error_anon(error).await
+}
+
 /// Capture the provided event using the global client.
 ///
 /// # Errors
@@ -136,4 +146,14 @@ where
 {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
     client.capture_error(error, distinct_id)
+}
+
+/// Capture a Rust error personlessly using the global client.
+#[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
+pub fn capture_error_anon<E>(error: &E) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_error_anon(error)
 }

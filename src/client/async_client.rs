@@ -275,6 +275,22 @@ impl Client {
         self.capture_exception(exception).await
     }
 
+    /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
+    #[cfg(feature = "error-tracking")]
+    pub async fn capture_error_anon<E>(&self, error: &E) -> Result<(), Error>
+    where
+        E: StdError + ?Sized,
+    {
+        if self.options.is_disabled() {
+            trace!("Client is disabled, skipping anonymous error capture");
+            return Ok(());
+        }
+
+        let exception =
+            ExceptionCapture::from_error_with_options(error, self.options.error_tracking());
+        self.capture_exception(exception).await
+    }
+
     /// Capture a collection of events with a single request.
     ///
     /// Events are sent to the `/batch/` endpoint.

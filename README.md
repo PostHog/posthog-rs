@@ -59,6 +59,7 @@ let client = client("your-api-key").await;
 let error = std::io::Error::new(std::io::ErrorKind::Other, "checkout failed");
 
 client.capture_error(&error, "user-123").await.unwrap();
+client.capture_error_anon(&error).await.unwrap();
 
 let exception = client.exception_from_error(&error)
     .with_distinct_id("user-123")
@@ -68,11 +69,14 @@ let exception = client.exception_from_error(&error)
 client.capture_exception(exception).await.unwrap();
 ```
 
-Use `capture_error` for identified errors. To send a personless exception, build
-an `ExceptionCapture` without `with_distinct_id`:
+Use `capture_error` for identified errors and `capture_error_anon` when there
+is no distinct ID. For custom properties, groups, flags, or fingerprints, build
+an `ExceptionCapture` manually:
 
 ```rust
-let exception = client.exception_from_error(&error);
+let exception = client.exception_from_error(&error)
+    .with_prop("route", "/checkout")
+    .unwrap();
 client.capture_exception(exception).await.unwrap();
 ```
 

@@ -137,6 +137,8 @@ pub use global::capture;
 #[cfg(feature = "error-tracking")]
 pub use global::capture_error;
 #[cfg(feature = "error-tracking")]
+pub use global::capture_error_anon;
+#[cfg(feature = "error-tracking")]
 pub use global::capture_exception;
 pub use global::disable as disable_global;
 pub use global::init_global_client as init_global;
