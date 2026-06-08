@@ -425,7 +425,6 @@ fn capture_application_stacktrace(options: &ErrorTrackingOptions) -> ExceptionSt
 
 fn is_internal_capture_frame(function: &str) -> bool {
     function.starts_with("backtrace::")
-        || function.contains("DefaultStackTraceExtractor::capture")
         || function.contains("capture_frames_current_first")
         || function.contains("capture_application_stacktrace")
         || function.contains("ExceptionCapture::from_error")

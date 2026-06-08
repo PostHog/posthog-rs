@@ -237,7 +237,6 @@ impl Client {
         self.capture_v0(event).await
     }
 
-    /// Capture a collection of events with a single request.
     /// Capture an exception event, sending it to PostHog Error Tracking.
     #[cfg(feature = "error-tracking")]
     pub async fn capture_exception(&self, exception: ExceptionCapture) -> Result<(), Error> {
