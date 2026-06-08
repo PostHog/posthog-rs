@@ -1,4 +1,6 @@
 use crate::endpoints::{EndpointManager, DEFAULT_HOST};
+#[cfg(feature = "error-tracking")]
+use crate::error_tracking::ErrorTrackingOptions;
 use derive_builder::Builder;
 use tracing::warn;
 
@@ -118,6 +120,11 @@ pub struct ClientOptions {
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
 
+    /// Error tracking stacktrace and frame classification options
+    #[cfg(feature = "error-tracking")]
+    #[builder(default)]
+    error_tracking: ErrorTrackingOptions,
+
     /// When true, never fall back to the remote API for flag evaluation. If local
     /// evaluation is inconclusive (flag not cached or missing properties), the SDK
     /// returns `Ok(None)` instead of making a network call. Only meaningful when
@@ -184,6 +191,12 @@ impl ClientOptions {
     /// Get the endpoint manager
     pub(crate) fn endpoints(&self) -> &EndpointManager {
         &self.endpoint_manager
+    }
+
+    /// Get error tracking options.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn error_tracking(&self) -> &ErrorTrackingOptions {
+        &self.error_tracking
     }
 
     /// Check whether the client is disabled.

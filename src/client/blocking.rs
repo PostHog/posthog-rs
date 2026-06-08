@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "error-tracking")]
+use std::error::Error as StdError;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -11,6 +13,8 @@ use tracing::{debug, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::endpoints::{Endpoint, EndpointManager};
+#[cfg(feature = "error-tracking")]
+use crate::error_tracking::ExceptionCapture;
 #[cfg(feature = "capture-v1")]
 use crate::event_v1::CaptureResponse;
 use crate::feature_flag_evaluations::{
@@ -215,6 +219,45 @@ impl Client {
 
         #[cfg(not(feature = "capture-v1"))]
         self.capture_v0(event)
+    }
+
+    /// Capture a collection of events with a single request.
+    /// Capture an exception event, sending it to PostHog Error Tracking.
+    #[cfg(feature = "error-tracking")]
+    pub fn capture_exception(&self, exception: ExceptionCapture) -> Result<(), Error> {
+        if self.options.is_disabled() {
+            trace!("Client is disabled, skipping exception capture");
+            return Ok(());
+        }
+
+        self.capture(exception.into_event()?)
+    }
+
+    /// Build an exception capture from a Rust error using this client's Error Tracking options.
+    #[cfg(feature = "error-tracking")]
+    pub fn exception_from_error<E>(&self, error: &E) -> ExceptionCapture
+    where
+        E: StdError + ?Sized,
+    {
+        ExceptionCapture::from_error_with_options(error, self.options.error_tracking())
+    }
+
+    /// Capture a Rust error with a distinct ID, sending it to PostHog Error Tracking.
+    #[cfg(feature = "error-tracking")]
+    pub fn capture_error<E, S>(&self, error: &E, distinct_id: S) -> Result<(), Error>
+    where
+        E: StdError + ?Sized,
+        S: Into<String>,
+    {
+        if self.options.is_disabled() {
+            trace!("Client is disabled, skipping error capture");
+            return Ok(());
+        }
+
+        let exception =
+            ExceptionCapture::from_error_with_options(error, self.options.error_tracking())
+                .with_distinct_id(distinct_id);
+        self.capture_exception(exception)
     }
 
     /// Capture a collection of events with a single request.

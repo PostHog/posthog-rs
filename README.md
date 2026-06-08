@@ -9,6 +9,7 @@ The official Rust SDK for [PostHog](https://posthog.com). See the [PostHog docs]
 
 - **Event capture** - Send events to PostHog for product analytics
 - **Feature flags** - Evaluate feature flags with local or remote evaluation
+- **Error tracking** - Capture Rust errors with stack traces
 - **A/B testing** - Support for multivariate flags and experiments
 - **Group analytics** - Track events and flags for B2B use cases
 - **Async and sync clients** - Choose based on your runtime
@@ -19,7 +20,7 @@ Add `posthog-rs` to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-posthog-rs = "0.3.7"
+posthog-rs = "0.8.0"
 ```
 
 ```rust
@@ -44,6 +45,35 @@ let is_enabled = client.is_feature_enabled(
 if is_enabled {
     println!("Feature is enabled!");
 }
+```
+
+## Error Tracking
+
+Capture Rust errors manually with stack traces and send them to PostHog Error Tracking.
+Enable the `error-tracking` feature to use these APIs.
+
+```rust
+use posthog_rs::client;
+
+let client = client("your-api-key").await;
+let error = std::io::Error::new(std::io::ErrorKind::Other, "checkout failed");
+
+client.capture_error(&error, "user-123").await.unwrap();
+
+let exception = client.exception_from_error(&error)
+    .with_distinct_id("user-123")
+    .with_prop("route", "/checkout")
+    .unwrap();
+
+client.capture_exception(exception).await.unwrap();
+```
+
+Use `capture_error` for identified errors. To send a personless exception, build
+an `ExceptionCapture` without `with_distinct_id`:
+
+```rust
+let exception = client.exception_from_error(&error);
+client.capture_exception(exception).await.unwrap();
 ```
 
 ## Feature Flags

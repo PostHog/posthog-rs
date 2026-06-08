@@ -72,6 +72,8 @@ mod client;
 mod compression;
 mod endpoints;
 mod error;
+#[cfg(feature = "error-tracking")]
+mod error_tracking;
 mod event;
 #[cfg(feature = "capture-v1")]
 mod event_v1;
@@ -96,6 +98,13 @@ pub use endpoints::{
 
 // Error
 pub use error::Error;
+
+// Error Tracking
+#[cfg(feature = "error-tracking")]
+pub use error_tracking::{
+    ErrorTrackingOptions, ErrorTrackingOptionsBuilder, ErrorTrackingOptionsBuilderError,
+    ExceptionCapture, ExceptionItem, ExceptionMechanism, ExceptionStacktrace, StackFrame,
+};
 
 // Event
 pub use event::Event;
@@ -125,6 +134,10 @@ pub use local_evaluation::AsyncFlagPoller;
 
 // We expose a global capture function as a convenience, that uses a global client
 pub use global::capture;
+#[cfg(feature = "error-tracking")]
+pub use global::capture_error;
+#[cfg(feature = "error-tracking")]
+pub use global::capture_exception;
 pub use global::disable as disable_global;
 pub use global::init_global_client as init_global;
 pub use global::is_disabled as global_is_disabled;

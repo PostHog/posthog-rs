@@ -1,5 +1,9 @@
+#[cfg(feature = "error-tracking")]
+use std::error::Error as StdError;
 use std::sync::OnceLock;
 
+#[cfg(feature = "error-tracking")]
+use crate::ExceptionCapture;
 use crate::{client, Client, ClientOptions, Error, Event};
 
 static GLOBAL_CLIENT: OnceLock<Client> = OnceLock::new();
@@ -86,6 +90,24 @@ pub async fn capture(event: Event) -> Result<(), Error> {
     client.capture(event).await
 }
 
+/// Capture an exception event using the global client.
+#[cfg(all(feature = "async-client", feature = "error-tracking"))]
+pub async fn capture_exception(exception: ExceptionCapture) -> Result<(), Error> {
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_exception(exception).await
+}
+
+/// Capture a Rust error using the global client.
+#[cfg(all(feature = "async-client", feature = "error-tracking"))]
+pub async fn capture_error<E, S>(error: &E, distinct_id: S) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+    S: Into<String>,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_error(error, distinct_id).await
+}
+
 /// Capture the provided event using the global client.
 ///
 /// # Errors
@@ -96,4 +118,22 @@ pub async fn capture(event: Event) -> Result<(), Error> {
 pub fn capture(event: Event) -> Result<(), Error> {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
     client.capture(event)
+}
+
+/// Capture an exception event using the global client.
+#[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
+pub fn capture_exception(exception: ExceptionCapture) -> Result<(), Error> {
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_exception(exception)
+}
+
+/// Capture a Rust error using the global client.
+#[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
+pub fn capture_error<E, S>(error: &E, distinct_id: S) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+    S: Into<String>,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_error(error, distinct_id)
 }
