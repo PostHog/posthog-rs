@@ -125,6 +125,11 @@ pub struct ClientOptions {
     #[builder(default)]
     error_tracking: ErrorTrackingOptions,
 
+    /// Timeout in seconds for best-effort panic autocapture requests. Defaults to `2`.
+    #[cfg(feature = "error-tracking")]
+    #[builder(default = "2")]
+    panic_capture_timeout_seconds: u64,
+
     /// When true, never fall back to the remote API for flag evaluation. If local
     /// evaluation is inconclusive (flag not cached or missing properties), the SDK
     /// returns `Ok(None)` instead of making a network call. Only meaningful when
@@ -197,6 +202,18 @@ impl ClientOptions {
     #[cfg(feature = "error-tracking")]
     pub(crate) fn error_tracking(&self) -> &ErrorTrackingOptions {
         &self.error_tracking
+    }
+
+    /// Timeout used by panic autocapture's synchronous best-effort request.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn panic_capture_timeout_seconds(&self) -> u64 {
+        self.panic_capture_timeout_seconds
+    }
+
+    /// Project API key used by capture requests.
+    #[cfg_attr(not(feature = "error-tracking"), allow(dead_code))]
+    pub(crate) fn api_key(&self) -> &str {
+        &self.api_key
     }
 
     /// Check whether the client is disabled.

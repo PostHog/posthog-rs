@@ -49,8 +49,9 @@ if is_enabled {
 
 ## Error Tracking
 
-Capture Rust errors manually with stack traces and send them to PostHog Error Tracking.
-Enable the `error-tracking` feature to use these APIs.
+Enable the `error-tracking` feature to capture Rust errors and panics with stack traces.
+
+### Manual capture
 
 ```rust
 use posthog_rs::{client, CaptureExceptionOptions};
@@ -74,6 +75,17 @@ client.capture_exception(&error).await.unwrap();
 `CaptureExceptionOptions` carries everything optional: `distinct_id` to
 associate a person, custom properties, groups, a custom `fingerprint`, and a
 severity `level` (defaults to `"error"`).
+
+### Panic autocapture
+
+Install the panic hook once near application startup to capture Rust panics
+personlessly. Panic autocapture is best-effort: caught panics are still captured
+because Rust runs panic hooks before unwinding, and aborting processes may exit
+before delivery completes.
+
+```rust
+posthog_rs::install_panic_hook("your-api-key").unwrap();
+```
 
 ## Feature Flags
 

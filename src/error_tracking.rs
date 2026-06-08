@@ -1,14 +1,24 @@
 use std::any::{type_name, type_name_of_val};
 use std::error::Error as StdError;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use derive_builder::Builder;
+use reqwest::blocking::Client as BlockingHttpClient;
+use reqwest::header::CONTENT_TYPE;
 use serde::Serialize;
 use serde_json::Value;
+use tracing::debug;
 
+use crate::client::ClientOptions;
+use crate::endpoints::Endpoint;
+use crate::event::InnerEvent;
 use crate::{Error, Event};
 
 const DEFAULT_MAX_FRAMES: usize = 64;
 const DEFAULT_MAX_ERROR_SOURCES: usize = 50;
+static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Error Tracking stacktrace and frame classification options.
 #[derive(Builder, Clone, Debug)]
@@ -90,6 +100,33 @@ impl ErrorTrackingOptions {
 
         filename.is_some()
     }
+}
+
+/// Install process-wide panic autocapture.
+///
+/// Captured panics are sent personlessly using a synchronous best-effort request,
+/// then the previously installed panic hook is called.
+pub fn install_panic_hook<C: Into<ClientOptions>>(options: C) -> Result<(), Error> {
+    if PANIC_HOOK_INSTALLED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(Error::PanicHookAlreadyInstalled);
+    }
+
+    let options = options.into();
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        match panic::catch_unwind(AssertUnwindSafe(|| capture_panic(&options, panic_info))) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => debug!(error = %error, "failed to capture panic"),
+            Err(_) => debug!("panic autocapture failed unexpectedly"),
+        }
+
+        previous_hook(panic_info);
+    }));
+
+    Ok(())
 }
 
 /// Optional context for `capture_exception_with`: person identity, custom
@@ -269,12 +306,34 @@ impl Exception {
     ///
     /// Caller-provided stacktraces are sent as-is: no stacktrace is captured
     /// and client-side frame classification is not applied.
-    // Unused until panic autocapture (stacked PR) builds its payloads here.
+    // Unused: kept as the seam for caller-normalized exception payloads.
     #[allow(dead_code)]
     pub fn from_exception_list(items: Vec<ExceptionItem>) -> Self {
         Self {
             items,
             captured_frames: None,
+            fingerprint: None,
+            level: "error".to_string(),
+        }
+    }
+
+    /// Build an exception from a panic, capturing the current stacktrace.
+    #[allow(deprecated)]
+    fn from_panic_info(panic_info: &panic::PanicInfo<'_>) -> Self {
+        Self {
+            items: vec![ExceptionItem {
+                exception_type: "Panic".to_string(),
+                value: panic_message(panic_info),
+                mechanism: ExceptionMechanism {
+                    mechanism_type: "panic".to_string(),
+                    handled: false,
+                    synthetic: false,
+                    exception_id: None,
+                    parent_id: None,
+                },
+                stacktrace: None,
+            }],
+            captured_frames: Some(capture_raw_panic_frames()),
             fingerprint: None,
             level: "error".to_string(),
         }
@@ -502,6 +561,106 @@ fn is_internal_capture_frame(function: &str) -> bool {
         || function.contains("global::capture_exception")
 }
 
+fn capture_raw_panic_frames() -> Vec<StackFrame> {
+    let mut frames = capture_frames_current_first(0);
+    while frames
+        .first()
+        .map(|frame| is_internal_panic_frame(&frame.function))
+        .unwrap_or(false)
+    {
+        frames.remove(0);
+    }
+
+    frames
+}
+
+fn is_internal_panic_frame(function: &str) -> bool {
+    is_internal_capture_frame(function)
+        || function.contains("capture_panic")
+        || function.contains("capture_raw_panic_frames")
+        || function.contains("install_panic_hook")
+        || function.contains("Exception::from_panic_info")
+        || function.contains("AssertUnwindSafe")
+        || function.starts_with("core::ops::function::FnOnce::call_once")
+        || function.starts_with("std::panicking::")
+        || function.starts_with("core::panicking::")
+        || function.starts_with("std::sys::backtrace::")
+        || function == "___rust_try"
+        || function.contains("rust_begin_unwind")
+}
+
+#[allow(deprecated)]
+fn capture_panic(options: &ClientOptions, panic_info: &panic::PanicInfo<'_>) -> Result<(), Error> {
+    if options.is_disabled() {
+        return Ok(());
+    }
+
+    let mut event = Exception::from_panic_info(panic_info).into_event_anon();
+    if let Some(location) = panic_info.location() {
+        event.insert_prop("$exception_panic_file", location.file())?;
+        event.insert_prop("$exception_panic_line", location.line())?;
+        event.insert_prop("$exception_panic_column", location.column())?;
+    }
+
+    send_panic_exception(options, event)
+}
+
+fn send_panic_exception(options: &ClientOptions, mut event: Event) -> Result<(), Error> {
+    prepare_panic_event(&mut event, options)?;
+    let payload = serde_json::to_string(&InnerEvent::new(event, options.api_key().to_string()))
+        .map_err(|e| Error::Serialization(e.to_string()))?;
+    let client = BlockingHttpClient::builder()
+        .timeout(Duration::from_secs(options.panic_capture_timeout_seconds()))
+        .build()
+        .map_err(|e| Error::Connection(e.to_string()))?;
+    let response = client
+        .post(options.endpoints().build_url(Endpoint::Capture))
+        .header(CONTENT_TYPE, "application/json")
+        .body(payload)
+        .send()
+        .map_err(|e| Error::Connection(e.to_string()))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .unwrap_or_else(|_| "Unknown error".to_string());
+
+    match Error::from_http_response(status, body) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Finalize the panic exception payload, apply client-level default
+/// properties, and stamp V0 metadata.
+fn prepare_panic_event(event: &mut Event, options: &ClientOptions) -> Result<(), Error> {
+    finalize_exception(event, options.error_tracking())?;
+    let defaults = options.capture_defaults();
+    if defaults.disable_geoip {
+        event.insert_prop_default("$geoip_disable", Value::Bool(true));
+    }
+    if defaults.is_server {
+        event.insert_prop_default("$is_server", Value::Bool(true));
+    }
+    event.prepare_for_v0();
+    Ok(())
+}
+
+#[allow(deprecated)]
+fn panic_message(panic_info: &panic::PanicInfo<'_>) -> String {
+    let value = panic_info
+        .payload()
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_string())
+        .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic occurred".to_string());
+
+    if value.is_empty() {
+        "panic occurred".to_string()
+    } else {
+        value
+    }
+}
+
 fn path_to_string(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -618,10 +777,13 @@ fn default_in_app_function(function: &str) -> bool {
 mod tests {
     use std::error::Error as StdError;
     use std::fmt;
+    use std::sync::{Arc, Mutex, OnceLock};
 
+    use httpmock::prelude::*;
     use serde_json::{json, Value};
 
     use super::*;
+    use crate::client::ClientOptionsBuilder;
     use crate::event::InnerEvent;
 
     #[derive(Debug)]
@@ -675,6 +837,149 @@ mod tests {
 
     fn event_json(exception: Exception) -> Value {
         finalized_json(exception.into_event_anon())
+    }
+
+    #[allow(deprecated)]
+    type PanicHook = Box<dyn Fn(&panic::PanicInfo<'_>) + Sync + Send + 'static>;
+
+    struct PanicHookReset {
+        previous: Option<PanicHook>,
+    }
+
+    impl PanicHookReset {
+        fn new(previous: PanicHook) -> Self {
+            Self {
+                previous: Some(previous),
+            }
+        }
+
+        fn restore(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                panic::set_hook(previous);
+            }
+            PANIC_HOOK_INSTALLED.store(false, Ordering::Release);
+        }
+    }
+
+    impl Drop for PanicHookReset {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                self.restore();
+            }
+        }
+    }
+
+    fn panic_hook_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[inline(never)]
+    fn panic_hook_test_panic_site() {
+        panic!("panic hook boom");
+    }
+
+    #[inline(never)]
+    fn panic_hook_disabled_test_panic_site() {
+        panic!("disabled panic hook boom");
+    }
+
+    fn request_has_panic_payload(req: &HttpMockRequest) -> bool {
+        let Some(body) = req.body.as_deref() else {
+            return false;
+        };
+        let Ok(body) = serde_json::from_slice::<Value>(body) else {
+            return false;
+        };
+        let exception = &body["properties"]["$exception_list"][0];
+        let first_function = exception["stacktrace"]["frames"][0]["function"]
+            .as_str()
+            .unwrap_or_default();
+
+        body["event"] == "$exception"
+            && body["properties"]["$process_person_profile"] == false
+            && exception["type"] == "Panic"
+            && exception["value"] == "panic hook boom"
+            && exception["mechanism"]["type"] == "panic"
+            && exception["mechanism"]["handled"] == false
+            && body["properties"]["$exception_panic_file"]
+                .as_str()
+                .is_some_and(|file| file.contains("error_tracking.rs"))
+            && body["properties"]["$exception_panic_line"]
+                .as_u64()
+                .is_some_and(|line| line > 0)
+            && body["properties"]["$exception_panic_column"]
+                .as_u64()
+                .is_some_and(|column| column > 0)
+            && first_function.contains("panic_hook_test_panic_site")
+            && !first_function.contains("std::panicking")
+            && !first_function.contains("core::panicking")
+            && !first_function.contains("install_panic_hook")
+    }
+
+    #[test]
+    fn panic_hook_sends_personless_exception_and_calls_previous_hook() {
+        let _guard = panic_hook_test_lock().lock().unwrap();
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        let previous_called = Arc::new(AtomicBool::new(false));
+        let previous_called_for_hook = Arc::clone(&previous_called);
+        panic::set_hook(Box::new(move |_| {
+            previous_called_for_hook.store(true, Ordering::Release);
+        }));
+
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v0/e/")
+                .matches(request_has_panic_payload);
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .build()
+            .unwrap();
+
+        install_panic_hook(options).unwrap();
+        assert!(matches!(
+            install_panic_hook("test_api_key"),
+            Err(Error::PanicHookAlreadyInstalled)
+        ));
+
+        let result = panic::catch_unwind(panic_hook_test_panic_site);
+        reset.restore();
+
+        assert!(result.is_err());
+        assert!(previous_called.load(Ordering::Acquire));
+        capture_mock.assert_hits(1);
+    }
+
+    #[test]
+    fn disabled_panic_hook_does_not_send() {
+        let _guard = panic_hook_test_lock().lock().unwrap();
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        panic::set_hook(Box::new(|_| {}));
+
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST).path("/i/v0/e/");
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .disabled(true)
+            .build()
+            .unwrap();
+
+        install_panic_hook(options).unwrap();
+        let result = panic::catch_unwind(panic_hook_disabled_test_panic_site);
+        reset.restore();
+
+        assert!(result.is_err());
+        capture_mock.assert_hits(0);
     }
 
     #[test]
