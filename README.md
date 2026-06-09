@@ -20,7 +20,7 @@ Add `posthog-rs` to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-posthog-rs = "0.8.0"
+posthog-rs = "$version"
 ```
 
 ```rust
