@@ -85,7 +85,7 @@ impl BeforeSendHook {
         (hook)(event)
     }
 }
-const POSTHOG_RUST_USERAGENT: &str = "posthog-node/rust";
+pub const POSTHOG_RUST_USERAGENT: &str = "posthog-node/rust";
 
 /// Configuration options for the PostHog client.
 ///
