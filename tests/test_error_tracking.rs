@@ -5,8 +5,6 @@ use serde_json::json;
 use std::error::Error as StdError;
 use std::fmt;
 
-use chrono::{Duration, Utc};
-
 #[derive(Debug)]
 struct TestError;
 
@@ -88,7 +86,7 @@ fn first_exception_stack_function(body: &serde_json::Value) -> &str {
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, ExceptionCapture};
+    use posthog_rs::{EvaluateFlagsOptions, Exception};
 
     fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
@@ -151,7 +149,7 @@ mod blocking {
     }
 
     #[test]
-    fn disabled_capture_exception_does_not_convert_payload() {
+    fn disabled_capture_exception_does_not_send() {
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host("http://127.0.0.1:1")
@@ -159,8 +157,7 @@ mod blocking {
             .build()
             .unwrap();
         let client = posthog_rs::client(options);
-        let exception = ExceptionCapture::from_message("FutureError", "future event")
-            .with_timestamp(Utc::now() + Duration::days(1));
+        let exception = Exception::from_message("DroppedError", "never sent");
 
         client.capture_exception(exception).unwrap();
     }
@@ -212,19 +209,19 @@ mod blocking {
             then.status(200);
         });
 
-        let exception = ExceptionCapture::from_message("CheckoutError", "card declined")
-            .with_distinct_id("user-1")
-            .with_prop("route", "/checkout")
-            .unwrap()
-            .with_group("company", "company-1")
-            .with_fingerprint("checkout-error");
+        let mut exception = Exception::from_message("CheckoutError", "card declined");
+        exception.set_fingerprint("checkout-error");
+
+        let mut event = exception.into_event("user-1");
+        event.insert_prop("route", "/checkout").unwrap();
+        event.add_group("company", "company-1");
 
         let client = create_test_client(server.base_url());
         let flags = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .unwrap();
-        let exception = exception.with_flags(&flags);
-        client.capture_exception(exception).unwrap();
+        event.with_flags(&flags);
+        client.capture(event).unwrap();
 
         capture_mock.assert_hits(1);
     }
@@ -233,7 +230,7 @@ mod blocking {
 #[cfg(feature = "async-client")]
 mod async_client {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, ExceptionCapture};
+    use posthog_rs::{EvaluateFlagsOptions, Exception};
 
     async fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
@@ -299,7 +296,7 @@ mod async_client {
     }
 
     #[tokio::test]
-    async fn disabled_capture_exception_does_not_convert_payload() {
+    async fn disabled_capture_exception_does_not_send() {
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host("http://127.0.0.1:1")
@@ -307,8 +304,7 @@ mod async_client {
             .build()
             .unwrap();
         let client = posthog_rs::client(options).await;
-        let exception = ExceptionCapture::from_message("FutureError", "future event")
-            .with_timestamp(Utc::now() + Duration::days(1));
+        let exception = Exception::from_message("DroppedError", "never sent");
 
         client.capture_exception(exception).await.unwrap();
     }
@@ -360,20 +356,20 @@ mod async_client {
             then.status(200);
         });
 
-        let exception = ExceptionCapture::from_message("CheckoutError", "card declined")
-            .with_distinct_id("user-1")
-            .with_prop("route", "/checkout")
-            .unwrap()
-            .with_group("company", "company-1")
-            .with_fingerprint("checkout-error");
+        let mut exception = Exception::from_message("CheckoutError", "card declined");
+        exception.set_fingerprint("checkout-error");
+
+        let mut event = exception.into_event("user-1");
+        event.insert_prop("route", "/checkout").unwrap();
+        event.add_group("company", "company-1");
 
         let client = create_test_client(server.base_url()).await;
         let flags = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .await
             .unwrap();
-        let exception = exception.with_flags(&flags);
-        client.capture_exception(exception).await.unwrap();
+        event.with_flags(&flags);
+        client.capture(event).await.unwrap();
 
         capture_mock.assert_hits(1);
     }

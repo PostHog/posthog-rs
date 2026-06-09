@@ -1,14 +1,9 @@
 use std::any::{type_name, type_name_of_val};
-use std::collections::HashMap;
 use std::error::Error as StdError;
 
-use chrono::{DateTime, TimeZone, Utc};
 use derive_builder::Builder;
 use serde::Serialize;
-use serde_json::Value;
-use uuid::Uuid;
 
-use crate::feature_flag_evaluations::FeatureFlagEvaluations;
 use crate::{Error, Event};
 
 const DEFAULT_MAX_FRAMES: usize = 64;
@@ -96,53 +91,50 @@ impl ErrorTrackingOptions {
     }
 }
 
-/// A PostHog Error Tracking event builder.
-#[derive(Clone, Debug)]
-pub struct ExceptionCapture {
-    distinct_id: Option<String>,
-    exception_list: Vec<ExceptionItem>,
-    properties: HashMap<String, Value>,
-    groups: HashMap<String, String>,
-    timestamp: Option<DateTime<Utc>>,
-    uuid: Option<Uuid>,
+/// A PostHog Error Tracking exception payload.
+///
+/// Holds only exception-specific data. Identity, custom properties, groups,
+/// feature flags, and timestamps are attached by converting into an [`Event`]
+/// with [`Exception::into_event`] / [`Exception::into_event_anon`] and using
+/// the standard Event API.
+///
+/// Client-level [`ErrorTrackingOptions`] (stacktrace capture, in-app
+/// classification, frame limits) are applied by the capturing client, so an
+/// exception built anywhere always honors the client configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exception {
+    items: Vec<ExceptionItem>,
+    // SDK-captured raw frames pending client policy (in-app classification,
+    // trimming, stacktrace opt-out), applied in finalize_exception and attached
+    // to items[0]. None when the caller supplied stacktraces directly via
+    // from_exception_list.
+    captured_frames: Option<Vec<StackFrame>>,
     fingerprint: Option<String>,
     level: String,
 }
 
-impl ExceptionCapture {
-    /// Build an exception capture from a Rust error.
+impl Exception {
+    /// Build an exception from a Rust error, capturing the current stacktrace
+    /// and walking the `source()` chain.
     pub fn from_error<E>(error: &E) -> Self
     where
         E: StdError + ?Sized,
     {
-        Self::from_error_with_options(error, &ErrorTrackingOptions::default())
-    }
-
-    /// Build an exception capture from a Rust error with custom options.
-    pub fn from_error_with_options<E>(error: &E, options: &ErrorTrackingOptions) -> Self
-    where
-        E: StdError + ?Sized,
-    {
-        let mut exception_list = Vec::new();
-        let stacktrace = if options.capture_stacktrace() {
-            Some(capture_application_stacktrace(options))
-        } else {
-            None
-        };
-
-        exception_list.push(ExceptionItem {
+        let mut items = vec![ExceptionItem {
             exception_type: simple_type_name(type_name::<E>()),
             value: error_value(error),
             mechanism: ExceptionMechanism::default(),
-            stacktrace,
-        });
+            stacktrace: None,
+        }];
 
         let mut source = error.source();
         while let Some(err) = source {
-            if exception_list.len() >= options.max_error_sources() {
+            // Hard safety bound for pathological/cyclic source chains; the
+            // client's max_error_sources is applied at capture time.
+            if items.len() >= DEFAULT_MAX_ERROR_SOURCES {
                 break;
             }
-            exception_list.push(ExceptionItem {
+            items.push(ExceptionItem {
                 exception_type: source_type_name(err),
                 value: error_value(err),
                 mechanism: ExceptionMechanism::default(),
@@ -151,137 +143,114 @@ impl ExceptionCapture {
             source = err.source();
         }
 
-        link_exception_chain(&mut exception_list);
+        link_exception_chain(&mut items);
 
-        Self::from_exception_list(exception_list)
-    }
-
-    /// Build an exception capture from an arbitrary type/message pair.
-    pub fn from_message<T: Into<String>, V: Into<String>>(exception_type: T, value: V) -> Self {
-        Self::from_message_with_options(exception_type, value, &ErrorTrackingOptions::default())
-    }
-
-    /// Build an exception capture from an arbitrary type/message pair with custom options.
-    pub fn from_message_with_options<T: Into<String>, V: Into<String>>(
-        exception_type: T,
-        value: V,
-        options: &ErrorTrackingOptions,
-    ) -> Self {
-        let stacktrace = if options.capture_stacktrace() {
-            Some(capture_application_stacktrace(options))
-        } else {
-            None
-        };
-        Self::from_exception_list(vec![ExceptionItem {
-            exception_type: exception_type.into(),
-            value: value.into(),
-            mechanism: ExceptionMechanism::default(),
-            stacktrace,
-        }])
-    }
-
-    /// Build an exception capture from normalized exception items.
-    pub fn from_exception_list(exception_list: Vec<ExceptionItem>) -> Self {
         Self {
-            distinct_id: None,
-            exception_list,
-            properties: HashMap::new(),
-            groups: HashMap::new(),
-            timestamp: None,
-            uuid: None,
+            items,
+            captured_frames: Some(capture_raw_application_frames()),
             fingerprint: None,
             level: "error".to_string(),
         }
     }
 
-    /// Attach a distinct ID. Without this, the exception is sent personlessly.
-    pub fn with_distinct_id<S: Into<String>>(mut self, distinct_id: S) -> Self {
-        self.distinct_id = Some(distinct_id.into());
-        self
-    }
-
-    /// Add a custom property to the exception event.
-    pub fn with_prop<K: Into<String>, P: Serialize>(
-        mut self,
-        key: K,
-        prop: P,
-    ) -> Result<Self, Error> {
-        let as_json =
-            serde_json::to_value(prop).map_err(|e| Error::Serialization(e.to_string()))?;
-        self.properties.insert(key.into(), as_json);
-        Ok(self)
-    }
-
-    /// Capture this exception as a group event.
-    pub fn with_group<N: Into<String>, I: Into<String>>(
-        mut self,
-        group_name: N,
-        group_id: I,
-    ) -> Self {
-        self.groups.insert(group_name.into(), group_id.into());
-        self
-    }
-
-    /// Attach a feature flag snapshot to this exception event.
-    pub fn with_flags(mut self, flags: &FeatureFlagEvaluations) -> Self {
-        for (key, value) in flags.event_properties() {
-            self.properties.insert(key, value);
+    /// Build an exception from an arbitrary type/message pair, capturing the
+    /// current stacktrace.
+    pub fn from_message<T: Into<String>, V: Into<String>>(exception_type: T, value: V) -> Self {
+        Self {
+            items: vec![ExceptionItem {
+                exception_type: exception_type.into(),
+                value: value.into(),
+                mechanism: ExceptionMechanism::default(),
+                stacktrace: None,
+            }],
+            captured_frames: Some(capture_raw_application_frames()),
+            fingerprint: None,
+            level: "error".to_string(),
         }
-        self
     }
 
-    /// Set the exception event timestamp.
-    pub fn with_timestamp<Tz>(mut self, timestamp: DateTime<Tz>) -> Self
-    where
-        Tz: TimeZone,
-    {
-        self.timestamp = Some(timestamp.with_timezone(&Utc));
-        self
-    }
-
-    /// Override the auto-generated UUID for this exception event.
-    pub fn with_uuid(mut self, uuid: Uuid) -> Self {
-        self.uuid = Some(uuid);
-        self
+    /// Build an exception from normalized exception items.
+    ///
+    /// Caller-provided stacktraces are sent as-is: no stacktrace is captured
+    /// and client-side frame classification is not applied.
+    pub fn from_exception_list(items: Vec<ExceptionItem>) -> Self {
+        Self {
+            items,
+            captured_frames: None,
+            fingerprint: None,
+            level: "error".to_string(),
+        }
     }
 
     /// Set a custom exception fingerprint.
-    pub fn with_fingerprint<S: Into<String>>(mut self, fingerprint: S) -> Self {
+    pub fn set_fingerprint<S: Into<String>>(&mut self, fingerprint: S) {
         self.fingerprint = Some(fingerprint.into());
-        self
     }
 
-    /// Convert this builder into a PostHog capture event.
-    pub fn into_event(self) -> Result<Event, Error> {
-        let mut event = match self.distinct_id {
-            Some(distinct_id) if !distinct_id.is_empty() => {
-                Event::new("$exception".to_string(), distinct_id)
+    /// Set the exception severity level. Defaults to `"error"`.
+    pub fn set_level<S: Into<String>>(&mut self, level: S) {
+        self.level = level.into();
+    }
+
+    /// Convert into an identified `$exception` [`Event`].
+    ///
+    /// Use the standard [`Event`] API to attach custom properties, groups,
+    /// feature flags, or a timestamp before capturing.
+    pub fn into_event<S: Into<String>>(self, distinct_id: S) -> Event {
+        let mut event = Event::new("$exception".to_string(), distinct_id.into());
+        event.exception = Some(self);
+        event
+    }
+
+    /// Convert into a personless `$exception` [`Event`].
+    pub fn into_event_anon(self) -> Event {
+        let mut event = Event::new_anon("$exception");
+        event.exception = Some(self);
+        event
+    }
+}
+
+/// Apply client-level Error Tracking options to an event's pending exception
+/// payload and write the reserved `$exception_*` properties.
+///
+/// Runs at capture time inside the client, so exception constructors never
+/// need client options — and after user-set properties, so reserved keys
+/// can't be overridden.
+pub(crate) fn finalize_exception(
+    event: &mut Event,
+    options: &ErrorTrackingOptions,
+) -> Result<(), Error> {
+    let Some(exception) = event.exception.take() else {
+        return Ok(());
+    };
+    let Exception {
+        mut items,
+        captured_frames,
+        fingerprint,
+        level,
+    } = exception;
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    items.truncate(options.max_error_sources().max(1));
+    if options.capture_stacktrace() {
+        if let Some(mut frames) = captured_frames {
+            for frame in frames.iter_mut() {
+                let function = (!frame.function.is_empty()).then_some(frame.function.as_str());
+                frame.in_app = options.is_in_app_frame(frame.filename.as_deref(), function);
             }
-            _ => Event::new_anon("$exception".to_string()),
-        };
-
-        for (key, value) in self.properties {
-            event.insert_prop(key, value)?;
+            trim_to_max_frames(&mut frames, options.max_frames());
+            items[0].stacktrace = Some(ExceptionStacktrace::raw(frames));
         }
-        for (group_name, group_id) in self.groups {
-            event.add_group(&group_name, &group_id);
-        }
-
-        event.insert_prop("$exception_level", self.level)?;
-        if let Some(fingerprint) = self.fingerprint {
-            event.insert_prop("$exception_fingerprint", fingerprint)?;
-        }
-        event.insert_prop("$exception_list", self.exception_list)?;
-
-        if let Some(timestamp) = self.timestamp {
-            event.set_timestamp(timestamp)?;
-        }
-        if let Some(uuid) = self.uuid {
-            event.set_uuid(uuid);
-        }
-
-        Ok(event)
     }
+
+    event.insert_prop("$exception_level", level)?;
+    if let Some(fingerprint) = fingerprint {
+        event.insert_prop("$exception_fingerprint", fingerprint)?;
+    }
+    event.insert_prop("$exception_list", items)?;
+    Ok(())
 }
 
 /// A normalized exception entry in `$exception_list`.
@@ -356,8 +325,10 @@ pub struct StackFrame {
     pub platform: String,
 }
 
-// Captures Rust stack traces for Error Tracking.
-fn capture_frames_current_first(options: &ErrorTrackingOptions, skip: usize) -> Vec<StackFrame> {
+// Captures raw Rust stack traces for Error Tracking. Frames are unclassified
+// at this point: in-app classification and trimming are client policy, applied
+// at capture time by finalize_exception.
+fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
     let mut frames = Vec::new();
     let mut skipped = 0usize;
 
@@ -382,14 +353,12 @@ fn capture_frames_current_first(options: &ErrorTrackingOptions, skip: usize) -> 
                 return;
             }
 
-            let in_app = options.is_in_app_frame(filename.as_deref(), function.as_deref());
-
             frames.push(StackFrame {
                 filename,
                 line_no: symbol.lineno(),
                 function: function.unwrap_or_default(),
                 lang: "rust".to_string(),
-                in_app,
+                in_app: false,
                 synthetic: false,
                 resolved: true,
                 platform: "rust".to_string(),
@@ -409,8 +378,10 @@ fn trim_to_max_frames(frames: &mut Vec<StackFrame>, max_frames: usize) {
     }
 }
 
-fn capture_application_stacktrace(options: &ErrorTrackingOptions) -> ExceptionStacktrace {
-    let mut frames = capture_frames_current_first(options, 0);
+/// Capture the current raw stacktrace, dropping the SDK's own capture frames
+/// so the caller's frame comes first.
+fn capture_raw_application_frames() -> Vec<StackFrame> {
+    let mut frames = capture_frames_current_first(0);
     while frames
         .first()
         .map(|frame| is_internal_capture_frame(&frame.function))
@@ -418,17 +389,16 @@ fn capture_application_stacktrace(options: &ErrorTrackingOptions) -> ExceptionSt
     {
         frames.remove(0);
     }
-    trim_to_max_frames(&mut frames, options.max_frames());
 
-    ExceptionStacktrace::raw(frames)
+    frames
 }
 
 fn is_internal_capture_frame(function: &str) -> bool {
     function.starts_with("backtrace::")
         || function.contains("capture_frames_current_first")
-        || function.contains("capture_application_stacktrace")
-        || function.contains("ExceptionCapture::from_error")
-        || function.contains("ExceptionCapture::from_message")
+        || function.contains("capture_raw_application_frames")
+        || function.contains("Exception::from_error")
+        || function.contains("Exception::from_message")
         || function.contains("Client::capture_error")
         || function.contains("global::capture_error")
 }
@@ -550,7 +520,7 @@ mod tests {
     use std::error::Error as StdError;
     use std::fmt;
 
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::*;
     use crate::event::InnerEvent;
@@ -594,16 +564,24 @@ mod tests {
 
     impl StdError for BorrowedError<'_> {}
 
-    fn event_json(capture: ExceptionCapture) -> Value {
-        let mut event = capture.into_event().unwrap();
+    fn finalized_json(mut event: Event) -> Value {
+        finalized_json_with(&mut event, &ErrorTrackingOptions::default())
+    }
+
+    fn finalized_json_with(event: &mut Event, options: &ErrorTrackingOptions) -> Value {
+        finalize_exception(event, options).unwrap();
         event.prepare_for_v0();
-        serde_json::to_value(InnerEvent::new(event, "api-key".to_string())).unwrap()
+        serde_json::to_value(InnerEvent::new(event.clone(), "api-key".to_string())).unwrap()
+    }
+
+    fn event_json(exception: Exception) -> Value {
+        finalized_json(exception.into_event_anon())
     }
 
     #[test]
     fn from_error_builds_exception_list_with_stacktrace() {
         let error = OuterError { source: InnerError };
-        let json = event_json(ExceptionCapture::from_error(&error).with_distinct_id("user-1"));
+        let json = finalized_json(Exception::from_error(&error).into_event("user-1"));
 
         assert_eq!(json["event"], "$exception");
         assert_eq!(json["distinct_id"], "user-1");
@@ -639,7 +617,7 @@ mod tests {
             top_function
         );
         assert!(
-            !top_function.contains("ExceptionCapture"),
+            !top_function.contains("Exception::"),
             "expected SDK frames to be skipped, got {:?}",
             top_function
         );
@@ -649,7 +627,7 @@ mod tests {
     fn from_error_accepts_borrowed_error_types() {
         let message = String::from("borrowed parse failure");
         let error = BorrowedError(&message);
-        let json = event_json(ExceptionCapture::from_error(&error));
+        let json = event_json(Exception::from_error(&error));
 
         assert_eq!(
             json["properties"]["$exception_list"][0]["value"],
@@ -659,7 +637,7 @@ mod tests {
 
     #[test]
     fn personless_capture_disables_person_profile() {
-        let json = event_json(ExceptionCapture::from_message("Error", "no user context"));
+        let json = event_json(Exception::from_message("Error", "no user context"));
 
         assert_eq!(json["event"], "$exception");
         assert_eq!(json["properties"]["$process_person_profile"], false);
@@ -667,11 +645,12 @@ mod tests {
 
     #[test]
     fn custom_properties_cannot_override_reserved_exception_payload() {
-        let capture = ExceptionCapture::from_message("Error", "real message")
-            .with_prop("$exception_list", json!([{"value": "fake"}]))
+        let mut event = Exception::from_message("Error", "real message").into_event_anon();
+        event
+            .insert_prop("$exception_list", json!([{"value": "fake"}]))
             .unwrap();
 
-        let json = event_json(capture);
+        let json = finalized_json(event);
         assert_eq!(
             json["properties"]["$exception_list"][0]["value"],
             "real message"
@@ -686,7 +665,8 @@ mod tests {
             .build()
             .unwrap();
         let error = OuterError { source: InnerError };
-        let json = event_json(ExceptionCapture::from_error_with_options(&error, &options));
+        let mut event = Exception::from_error(&error).into_event_anon();
+        let json = finalized_json_with(&mut event, &options);
 
         let exception_list = json["properties"]["$exception_list"].as_array().unwrap();
         assert_eq!(exception_list.len(), 1);
@@ -767,11 +747,8 @@ mod tests {
             .max_frames(1usize)
             .build()
             .unwrap();
-        let json = event_json(ExceptionCapture::from_message_with_options(
-            "SmallStack",
-            "keeps user frame",
-            &options,
-        ));
+        let mut event = Exception::from_message("SmallStack", "keeps user frame").into_event_anon();
+        let json = finalized_json_with(&mut event, &options);
 
         let frames = json["properties"]["$exception_list"][0]["stacktrace"]["frames"]
             .as_array()
@@ -784,7 +761,7 @@ mod tests {
             top_function
         );
         assert!(
-            !top_function.contains("ExceptionCapture"),
+            !top_function.contains("Exception::"),
             "expected SDK frames to be skipped, got {:?}",
             top_function
         );
@@ -792,17 +769,13 @@ mod tests {
 
     #[test]
     fn stacktrace_keeps_top_frame_first() {
-        fn capture(options: &ErrorTrackingOptions) -> ExceptionStacktrace {
-            let mut frames = capture_frames_current_first(options, 0);
-            trim_to_max_frames(&mut frames, options.max_frames());
+        fn capture() -> ExceptionStacktrace {
+            let mut frames = capture_frames_current_first(0);
+            trim_to_max_frames(&mut frames, 8);
             ExceptionStacktrace::raw(frames)
         }
 
-        let options = ErrorTrackingOptionsBuilder::default()
-            .max_frames(8usize)
-            .build()
-            .unwrap();
-        let frames = capture(&options).frames;
+        let frames = capture().frames;
         let functions: Vec<&str> = frames
             .iter()
             .map(|frame| frame.function.as_str())

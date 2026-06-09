@@ -3,7 +3,7 @@ use std::error::Error as StdError;
 use std::sync::OnceLock;
 
 #[cfg(feature = "error-tracking")]
-use crate::ExceptionCapture;
+use crate::Exception;
 use crate::{client, Client, ClientOptions, Error, Event};
 
 static GLOBAL_CLIENT: OnceLock<Client> = OnceLock::new();
@@ -92,7 +92,7 @@ pub async fn capture(event: Event) -> Result<(), Error> {
 
 /// Capture an exception event using the global client.
 #[cfg(all(feature = "async-client", feature = "error-tracking"))]
-pub async fn capture_exception(exception: ExceptionCapture) -> Result<(), Error> {
+pub async fn capture_exception(exception: Exception) -> Result<(), Error> {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
     client.capture_exception(exception).await
 }
@@ -132,7 +132,7 @@ pub fn capture(event: Event) -> Result<(), Error> {
 
 /// Capture an exception event using the global client.
 #[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
-pub fn capture_exception(exception: ExceptionCapture) -> Result<(), Error> {
+pub fn capture_exception(exception: Exception) -> Result<(), Error> {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
     client.capture_exception(exception)
 }

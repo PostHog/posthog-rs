@@ -7,7 +7,7 @@ use reqwest::blocking::RequestBuilder;
 #[cfg(feature = "async-client")]
 use reqwest::RequestBuilder;
 
-use super::{CaptureDefaults, ClientOptions};
+use super::ClientOptions;
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
@@ -15,11 +15,16 @@ use crate::event::{BatchRequest, Event, InnerEvent};
 // Event preparation
 // ---------------------------------------------------------------------------
 
-/// Apply client-level default properties (caller-wins) and V0 metadata stamping.
+/// Finalize any pending exception payload, apply client-level default
+/// properties (caller-wins), and stamp V0 metadata.
 ///
 /// Uses `insert_prop_default` so a caller who explicitly set a property on the
 /// event before calling `capture()` keeps their value.
-pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
+pub(crate) fn prepare_event(event: &mut Event, options: &ClientOptions) -> Result<(), Error> {
+    #[cfg(feature = "error-tracking")]
+    crate::error_tracking::finalize_exception(event, options.error_tracking())?;
+
+    let defaults = options.capture_defaults();
     if defaults.disable_geoip {
         event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
     }
@@ -27,6 +32,7 @@ pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
     event.prepare_for_v0();
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -44,15 +50,15 @@ pub(crate) fn build_batch_payload(
     events: Vec<Event>,
     api_key: String,
     historical_migration: bool,
-    defaults: &CaptureDefaults,
+    options: &ClientOptions,
 ) -> Result<String, Error> {
     let inner_events: Vec<InnerEvent> = events
         .into_iter()
         .map(|mut event| {
-            prepare_event(&mut event, defaults);
-            InnerEvent::new(event, api_key.clone())
+            prepare_event(&mut event, options)?;
+            Ok(InnerEvent::new(event, api_key.clone()))
         })
-        .collect();
+        .collect::<Result<_, Error>>()?;
 
     let batch_request = BatchRequest {
         api_key,

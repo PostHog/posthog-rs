@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
-use crate::error_tracking::ExceptionCapture;
+use crate::error_tracking::Exception;
 #[cfg(feature = "capture-v1")]
 use crate::event_v1::CaptureResponse;
 use crate::feature_flag_evaluations::{
@@ -237,15 +237,18 @@ impl Client {
         self.capture_v0(event).await
     }
 
-    /// Capture an exception event, sending it to PostHog Error Tracking.
+    /// Capture an exception personlessly, sending it to PostHog Error Tracking.
+    ///
+    /// To attach a distinct ID or other event context, convert the exception
+    /// with [`Exception::into_event`] and use [`Client::capture`] instead.
     #[cfg(feature = "error-tracking")]
-    pub async fn capture_exception(&self, exception: ExceptionCapture) -> Result<(), Error> {
+    pub async fn capture_exception(&self, exception: Exception) -> Result<(), Error> {
         if self.options.is_disabled() {
             trace!("Client is disabled, skipping exception capture");
             return Ok(());
         }
 
-        self.capture(exception.into_event()?).await
+        self.capture(exception.into_event_anon()).await
     }
 
     /// Capture a Rust error with a distinct ID, sending it to PostHog Error Tracking.
@@ -260,10 +263,8 @@ impl Client {
             return Ok(());
         }
 
-        let exception =
-            ExceptionCapture::from_error_with_options(error, self.options.error_tracking())
-                .with_distinct_id(distinct_id);
-        self.capture_exception(exception).await
+        self.capture(Exception::from_error(error).into_event(distinct_id))
+            .await
     }
 
     /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
@@ -277,9 +278,8 @@ impl Client {
             return Ok(());
         }
 
-        let exception =
-            ExceptionCapture::from_error_with_options(error, self.options.error_tracking());
-        self.capture_exception(exception).await
+        self.capture(Exception::from_error(error).into_event_anon())
+            .await
     }
 
     /// Capture a collection of events with a single request.
@@ -318,8 +318,7 @@ impl Client {
 
     #[cfg(not(feature = "capture-v1"))]
     async fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
-        let defaults = self.options.capture_defaults();
-        super::v0_capture::prepare_event(&mut event, &defaults);
+        super::v0_capture::prepare_event(&mut event, &self.options)?;
         let payload =
             super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
         let url = self.options.endpoints().build_url(Endpoint::Capture);
@@ -333,12 +332,11 @@ impl Client {
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<(), Error> {
-        let defaults = self.options.capture_defaults();
         let payload = super::v0_capture::build_batch_payload(
             events,
             self.options.api_key.clone(),
             historical_migration,
-            &defaults,
+            &self.options,
         )?;
         let url = self.options.endpoints().build_url(Endpoint::Batch);
         let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
@@ -407,7 +405,7 @@ impl Client {
     #[cfg(feature = "capture-v1")]
     async fn capture_v1(
         &self,
-        events: Vec<Event>,
+        mut events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureResponse, Error> {
         use super::v1_capture::{self, Step};
@@ -416,8 +414,7 @@ impl Client {
         let request_id = Uuid::now_v7();
         let created_at = Utc::now().to_rfc3339();
         let mut attempt: u32 = 1;
-        let defaults = self.options.capture_defaults();
-        let mut pending = v1_capture::build_events(&events, &defaults);
+        let mut pending = v1_capture::build_events(&mut events, &self.options)?;
         let mut final_results = HashMap::new();
         let historical_migration = historical_migration.then_some(true);
         let url = self

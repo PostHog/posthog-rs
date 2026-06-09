@@ -102,8 +102,8 @@ pub use error::Error;
 // Error Tracking
 #[cfg(feature = "error-tracking")]
 pub use error_tracking::{
-    ErrorTrackingOptions, ErrorTrackingOptionsBuilder, ErrorTrackingOptionsBuilderError,
-    ExceptionCapture, ExceptionItem, ExceptionMechanism, ExceptionStacktrace, StackFrame,
+    ErrorTrackingOptions, ErrorTrackingOptionsBuilder, ErrorTrackingOptionsBuilderError, Exception,
+    ExceptionItem, ExceptionMechanism, ExceptionStacktrace, StackFrame,
 };
 
 // Event

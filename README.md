@@ -53,7 +53,7 @@ Capture Rust errors manually with stack traces and send them to PostHog Error Tr
 Enable the `error-tracking` feature to use these APIs.
 
 ```rust
-use posthog_rs::{client, ExceptionCapture};
+use posthog_rs::{client, Exception};
 
 let client = client("your-api-key").await;
 let error = std::io::Error::new(std::io::ErrorKind::Other, "checkout failed");
@@ -61,23 +61,18 @@ let error = std::io::Error::new(std::io::ErrorKind::Other, "checkout failed");
 client.capture_error(&error, "user-123").await.unwrap();
 client.capture_error_anon(&error).await.unwrap();
 
-let exception = ExceptionCapture::from_error(&error)
-    .with_distinct_id("user-123")
-    .with_prop("route", "/checkout")
-    .unwrap();
-
-client.capture_exception(exception).await.unwrap();
+// Or capture a prebuilt exception personlessly.
+client.capture_exception(Exception::from_error(&error)).await.unwrap();
 ```
 
 Use `capture_error` for identified errors and `capture_error_anon` when there
-is no distinct ID. For custom properties, groups, flags, or fingerprints, build
-an `ExceptionCapture` manually:
+is no distinct ID. For custom properties, groups, flags, or a fingerprint,
+convert the exception into an event and use the standard `Event` API:
 
 ```rust
-let exception = ExceptionCapture::from_error(&error)
-    .with_prop("route", "/checkout")
-    .unwrap();
-client.capture_exception(exception).await.unwrap();
+let mut event = Exception::from_error(&error).into_event("user-123");
+event.insert_prop("route", "/checkout").unwrap();
+client.capture(event).await.unwrap();
 ```
 
 ## Feature Flags

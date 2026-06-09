@@ -40,6 +40,13 @@ pub struct Event {
     uuid: Uuid,
     #[serde(skip)]
     options: EventOptions,
+    /// Pending Error Tracking payload. Client policy is applied and the
+    /// `$exception_*` properties are written at capture time, so an event
+    /// converted from an [`crate::error_tracking::Exception`] always honors
+    /// the capturing client's configuration.
+    #[cfg(feature = "error-tracking")]
+    #[serde(skip)]
+    pub(crate) exception: Option<crate::error_tracking::Exception>,
 }
 
 impl Event {
@@ -61,6 +68,8 @@ impl Event {
             timestamp: None,
             uuid: Uuid::now_v7(),
             options: EventOptions::default(),
+            #[cfg(feature = "error-tracking")]
+            exception: None,
         }
     }
 
@@ -88,6 +97,8 @@ impl Event {
                 process_person_profile: Some(false),
                 ..EventOptions::default()
             },
+            #[cfg(feature = "error-tracking")]
+            exception: None,
         }
     }
 
