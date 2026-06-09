@@ -62,6 +62,20 @@ fn request_has_capture_error_anon_user_frame_first(req: &HttpMockRequest) -> boo
         && !first_function.contains("Client::capture_error")
 }
 
+fn request_has_no_stacktrace(req: &HttpMockRequest) -> bool {
+    let Some(body) = req.body.as_deref() else {
+        return false;
+    };
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+
+    body.pointer("/properties/$exception_list/0").is_some()
+        && body
+            .pointer("/properties/$exception_list/0/stacktrace")
+            .is_none()
+}
+
 fn first_exception_stack_function(body: &serde_json::Value) -> &str {
     body.pointer("/properties/$exception_list/0/stacktrace/frames")
         .and_then(|value| value.as_array())
@@ -152,10 +166,20 @@ mod blocking {
     }
 
     #[test]
-    fn exception_from_error_uses_client_error_tracking_options() {
+    fn capture_error_uses_client_error_tracking_options() {
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v0/e/")
+                .body_contains(r#""event":"$exception""#)
+                .body_contains(r#""value":"payment failed""#)
+                .matches(request_has_no_stacktrace);
+            then.status(200);
+        });
+
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
-            .host("http://127.0.0.1:1")
+            .host(server.base_url())
             .error_tracking(
                 posthog_rs::ErrorTrackingOptionsBuilder::default()
                     .capture_stacktrace(false)
@@ -166,38 +190,9 @@ mod blocking {
             .unwrap();
         let client = posthog_rs::client(options);
 
-        let event = client
-            .exception_from_error(&TestError)
-            .into_event()
-            .unwrap();
-        let json = serde_json::to_value(event).unwrap();
+        client.capture_error(&TestError, "user-1").unwrap();
 
-        assert!(json["properties"]["$exception_list"][0]
-            .get("stacktrace")
-            .is_none());
-    }
-
-    #[test]
-    fn exception_from_error_skips_client_helper_frame() {
-        let client = create_test_client("http://127.0.0.1:1".to_string());
-
-        let event = client
-            .exception_from_error(&TestError)
-            .into_event()
-            .unwrap();
-        let json = serde_json::to_value(event).unwrap();
-        let first_function = first_exception_stack_function(&json);
-
-        assert!(
-            first_function.contains("exception_from_error_skips_client_helper_frame"),
-            "expected user frame first, got {:?}",
-            first_function
-        );
-        assert!(
-            !first_function.contains("Client::exception_from_error"),
-            "expected SDK helper frame to be skipped, got {:?}",
-            first_function
-        );
+        capture_mock.assert_hits(1);
     }
 
     #[test]
@@ -319,10 +314,20 @@ mod async_client {
     }
 
     #[tokio::test]
-    async fn exception_from_error_uses_client_error_tracking_options() {
+    async fn capture_error_uses_client_error_tracking_options() {
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v0/e/")
+                .body_contains(r#""event":"$exception""#)
+                .body_contains(r#""value":"payment failed""#)
+                .matches(request_has_no_stacktrace);
+            then.status(200);
+        });
+
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
-            .host("http://127.0.0.1:1")
+            .host(server.base_url())
             .error_tracking(
                 posthog_rs::ErrorTrackingOptionsBuilder::default()
                     .capture_stacktrace(false)
@@ -333,38 +338,9 @@ mod async_client {
             .unwrap();
         let client = posthog_rs::client(options).await;
 
-        let event = client
-            .exception_from_error(&TestError)
-            .into_event()
-            .unwrap();
-        let json = serde_json::to_value(event).unwrap();
+        client.capture_error(&TestError, "user-1").await.unwrap();
 
-        assert!(json["properties"]["$exception_list"][0]
-            .get("stacktrace")
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn exception_from_error_skips_client_helper_frame() {
-        let client = create_test_client("http://127.0.0.1:1".to_string()).await;
-
-        let event = client
-            .exception_from_error(&TestError)
-            .into_event()
-            .unwrap();
-        let json = serde_json::to_value(event).unwrap();
-        let first_function = first_exception_stack_function(&json);
-
-        assert!(
-            first_function.contains("exception_from_error_skips_client_helper_frame"),
-            "expected user frame first, got {:?}",
-            first_function
-        );
-        assert!(
-            !first_function.contains("Client::exception_from_error"),
-            "expected SDK helper frame to be skipped, got {:?}",
-            first_function
-        );
+        capture_mock.assert_hits(1);
     }
 
     #[tokio::test]

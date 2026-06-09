@@ -232,15 +232,6 @@ impl Client {
         self.capture(exception.into_event()?)
     }
 
-    /// Build an exception capture from a Rust error using this client's Error Tracking options.
-    #[cfg(feature = "error-tracking")]
-    pub fn exception_from_error<E>(&self, error: &E) -> ExceptionCapture
-    where
-        E: StdError + ?Sized,
-    {
-        ExceptionCapture::from_error_with_options(error, self.options.error_tracking())
-    }
-
     /// Capture a Rust error with a distinct ID, sending it to PostHog Error Tracking.
     #[cfg(feature = "error-tracking")]
     pub fn capture_error<E, S>(&self, error: &E, distinct_id: S) -> Result<(), Error>

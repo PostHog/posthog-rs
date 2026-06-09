@@ -429,7 +429,6 @@ fn is_internal_capture_frame(function: &str) -> bool {
         || function.contains("capture_application_stacktrace")
         || function.contains("ExceptionCapture::from_error")
         || function.contains("ExceptionCapture::from_message")
-        || function.contains("Client::exception_from_error")
         || function.contains("Client::capture_error")
         || function.contains("global::capture_error")
 }
