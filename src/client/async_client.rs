@@ -248,6 +248,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
                 api_host: options.endpoints().api_host(),
                 poll_interval: Duration::from_secs(options.poll_interval_seconds),
                 request_timeout: Duration::from_secs(options.request_timeout_seconds),
+                user_agent: options.user_agent.clone(),
             };
 
             let mut poller = AsyncFlagPoller::new(config, cache.clone());

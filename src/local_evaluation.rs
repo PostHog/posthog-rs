@@ -172,6 +172,8 @@ pub struct LocalEvaluationConfig {
     pub poll_interval: Duration,
     /// Timeout for API requests
     pub request_timeout: Duration,
+    /// User agent for API Requests
+    pub user_agent: String,
 }
 
 /// Synchronous poller for feature flag definitions.
