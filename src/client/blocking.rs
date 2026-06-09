@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 #[cfg(feature = "capture-v1")]
@@ -17,17 +17,16 @@ use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
     FlagCalledEventParams,
 };
-use crate::feature_flags::{
-    match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagDetail, FlagValue,
-};
+use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
 use crate::{event::InnerEvent, Error, Event};
 
+use super::common::{
+    already_reported, build_dedup_key, extract_flag_details, flag_called_event,
+    flag_event_dedup_cache, local_record, remote_record_from_detail, DetailedFlagsResponse,
+    FlagEventDedupCache,
+};
 use super::ClientOptions;
-
-/// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
-/// dedup cache. On overflow the entire map is reset (matches the JS SDK).
-const MAX_FLAG_CALLED_CACHE_SIZE: usize = 50_000;
 
 fn check_response(response: reqwest::blocking::Response) -> Result<(), Error> {
     let status = response.status().as_u16();
@@ -59,8 +58,9 @@ struct BlockingFlagEventHost {
     api_key: String,
     endpoints: EndpointManager,
     disabled: bool,
-    defaults: super::CaptureDefaults,
-    dedup_cache: Mutex<HashMap<String, HashSet<String>>>,
+    disable_geoip: bool,
+    is_server: bool,
+    dedup_cache: FlagEventDedupCache,
 }
 
 impl BlockingFlagEventHost {
@@ -70,28 +70,10 @@ impl BlockingFlagEventHost {
             api_key: options.api_key.clone(),
             endpoints: options.endpoints().clone(),
             disabled: options.is_disabled(),
-            defaults: options.capture_defaults(),
-            dedup_cache: Mutex::new(HashMap::new()),
+            disable_geoip: options.disable_geoip,
+            is_server: options.is_server,
+            dedup_cache: flag_event_dedup_cache(),
         }
-    }
-
-    /// Returns `true` when the helper has already shipped this
-    /// `(distinct_id, key, response)` combination and the caller should skip.
-    fn already_reported(&self, distinct_id: &str, dedup_key: &str) -> bool {
-        let mut cache = self.dedup_cache.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(seen) = cache.get(distinct_id) {
-            if seen.contains(dedup_key) {
-                return true;
-            }
-        }
-        if cache.len() >= MAX_FLAG_CALLED_CACHE_SIZE {
-            cache.clear();
-        }
-        cache
-            .entry(distinct_id.to_string())
-            .or_default()
-            .insert(dedup_key.to_string());
-        false
     }
 
     fn ship_event(&self, mut event: Event) {
@@ -128,31 +110,13 @@ impl BlockingFlagEventHost {
 impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
     fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
         let dedup_key = build_dedup_key(&params.key, params.response.as_ref(), &params.groups);
-        if self.already_reported(&params.distinct_id, &dedup_key) {
+        if already_reported(&self.dedup_cache, &params.distinct_id, &dedup_key) {
             return;
         }
 
-        let mut event = Event::new(
-            "$feature_flag_called".to_string(),
-            params.distinct_id.clone(),
-        );
-        for (k, v) in params.properties {
-            if event.insert_prop(k, v).is_err() {
-                return;
-            }
+        if let Some(event) = flag_called_event(params, self.disable_geoip, self.is_server) {
+            self.ship_event(event);
         }
-        for (group_name, group_id) in &params.groups {
-            event.add_group(group_name, group_id);
-        }
-        // Per-call geoip override takes precedence over client default; caller-wins.
-        let effective_geoip = params.disable_geoip.unwrap_or(self.defaults.disable_geoip);
-        if effective_geoip {
-            event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
-        }
-        if self.defaults.is_server {
-            event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
-        }
-        self.ship_event(event);
     }
 
     fn log_warning(&self, message: &str) {
@@ -160,40 +124,6 @@ impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
         // with their tracing-subscriber level filter (e.g. `posthog_rs=error`).
         warn!("{message}");
     }
-}
-
-fn build_dedup_key(
-    flag_key: &str,
-    response: Option<&FlagValue>,
-    groups: &HashMap<String, String>,
-) -> String {
-    let response_repr = match response {
-        Some(FlagValue::Boolean(true)) => "true".to_string(),
-        Some(FlagValue::Boolean(false)) => "false".to_string(),
-        Some(FlagValue::String(s)) => s.clone(),
-        None => "::null::".to_string(),
-    };
-    if groups.is_empty() {
-        format!("{flag_key}_{response_repr}")
-    } else {
-        // Canonicalize so two equal group maps with different insertion orders
-        // produce the same dedup key — necessary for group-scoped flags to fire
-        // exactly once per distinct group context.
-        let mut sorted: Vec<(&String, &String)> = groups.iter().collect();
-        sorted.sort_by(|a, b| a.0.cmp(b.0));
-        let groups_repr: String = sorted
-            .iter()
-            .map(|(k, v)| format!("{}={}", pct(k), pct(v)))
-            .collect::<Vec<_>>()
-            .join(";");
-        format!("{flag_key}_{response_repr}_{groups_repr}")
-    }
-}
-
-fn pct(s: &str) -> String {
-    s.replace('%', "%25")
-        .replace('=', "%3D")
-        .replace(';', "%3B")
 }
 
 /// Construct a blocking PostHog client from an API key or [`ClientOptions`].
@@ -993,117 +923,5 @@ impl Client {
             Error::Serialization(format!("Failed to parse feature flags response: {e}"))
         })?;
         Ok(extract_flag_details(parsed))
-    }
-}
-
-/// Normalised view of a `/flags?v=2` response surfacing the per-flag detail
-/// shape needed by the snapshot path.
-struct DetailedFlagsResponse {
-    flags: HashMap<String, FlagDetail>,
-    request_id: Option<String>,
-    errors_while_computing_flags: bool,
-    quota_limited: bool,
-}
-
-fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFlagsResponse {
-    match response {
-        FeatureFlagsResponse::V2 {
-            flags,
-            request_id,
-            errors_while_computing_flags,
-            quota_limited,
-        } => DetailedFlagsResponse {
-            flags,
-            request_id,
-            errors_while_computing_flags,
-            quota_limited,
-        },
-        // The legacy decide format does not surface metadata; build a synthetic
-        // detail so the snapshot still carries enabled/variant for each flag.
-        FeatureFlagsResponse::Legacy {
-            feature_flags,
-            feature_flag_payloads,
-            errors,
-        } => {
-            let mut flags = HashMap::new();
-            for (key, value) in feature_flags {
-                let (enabled, variant) = match value {
-                    FlagValue::Boolean(b) => (b, None),
-                    FlagValue::String(s) => (true, Some(s)),
-                };
-                let payload = feature_flag_payloads.get(&key).cloned();
-                flags.insert(
-                    key.clone(),
-                    FlagDetail {
-                        key,
-                        enabled,
-                        variant,
-                        reason: None,
-                        metadata: payload.map(|payload| crate::feature_flags::FlagMetadata {
-                            id: 0,
-                            version: 0,
-                            description: None,
-                            payload: Some(payload),
-                        }),
-                    },
-                );
-            }
-            DetailedFlagsResponse {
-                flags,
-                request_id: None,
-                errors_while_computing_flags: errors.is_some_and(|e| !e.is_empty()),
-                quota_limited: false,
-            }
-        }
-    }
-}
-
-fn local_record(value: FlagValue) -> EvaluatedFlagRecord {
-    let (enabled, variant) = match value {
-        FlagValue::Boolean(b) => (b, None),
-        FlagValue::String(s) => (true, Some(s)),
-    };
-    EvaluatedFlagRecord {
-        enabled,
-        variant,
-        // Local definitions do not surface a payload through the poller today.
-        payload: None,
-        id: None,
-        version: None,
-        reason: Some("Evaluated locally".to_string()),
-        locally_evaluated: true,
-    }
-}
-
-fn remote_record_from_detail(detail: FlagDetail) -> EvaluatedFlagRecord {
-    let metadata = detail.metadata;
-    let reason = detail
-        .reason
-        .and_then(|r| r.description.or(Some(r.code)))
-        .filter(|s| !s.is_empty());
-    let id = metadata.as_ref().map(|m| m.id);
-    let version = metadata.as_ref().map(|m| m.version);
-    let payload = metadata.and_then(|m| m.payload).map(normalize_payload);
-    EvaluatedFlagRecord {
-        enabled: detail.enabled,
-        variant: detail.variant,
-        payload,
-        id,
-        version,
-        reason,
-        locally_evaluated: false,
-    }
-}
-
-/// `metadata.payload` from `/flags?v=2` is sometimes a JSON-encoded string
-/// (e.g. `"{\"color\":\"blue\"}"`) rather than already-parsed JSON. Try to
-/// parse a `String` payload as JSON and fall back to the raw string on
-/// failure so users can branch on a uniform [`serde_json::Value`].
-fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
-    match payload {
-        serde_json::Value::String(raw) => {
-            serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))
-        }
-        other => other,
     }
 }

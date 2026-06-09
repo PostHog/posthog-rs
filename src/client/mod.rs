@@ -2,6 +2,8 @@ use crate::endpoints::{EndpointManager, DEFAULT_HOST};
 use derive_builder::Builder;
 use tracing::warn;
 
+mod common;
+
 /// Request-body compression algorithm for the capture pipelines.
 ///
 /// When set on [`ClientOptions`], capture requests are compressed and the

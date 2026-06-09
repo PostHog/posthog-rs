@@ -1117,6 +1117,18 @@ fn compute_caret_bounds(version: SemverTuple) -> (SemverTuple, SemverTuple) {
     }
 }
 
+fn parse_target_semver(
+    target_value: &serde_json::Value,
+) -> Result<SemverTuple, InconclusiveMatchError> {
+    let target_str = value_to_string(target_value);
+    parse_semver(&target_str).ok_or_else(|| {
+        InconclusiveMatchError::new(&format!(
+            "Unable to parse target semver value: {:?}",
+            target_value
+        ))
+    })
+}
+
 fn match_property(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
@@ -1138,6 +1150,22 @@ fn match_property(
                 property.key
             )));
         }
+    };
+
+    let parse_property_semver = || {
+        let prop_str = value_to_string(value);
+        parse_semver(&prop_str).ok_or_else(|| {
+            InconclusiveMatchError::new(&format!(
+                "Unable to parse property semver value for '{}': {:?}",
+                property.key, value
+            ))
+        })
+    };
+    let parse_semver_operands = || {
+        Ok((
+            parse_property_semver()?,
+            parse_target_semver(&property.value)?,
+        ))
     };
 
     Ok(match property.operator.as_str() {
@@ -1217,22 +1245,7 @@ fn match_property(
         }
         // Semver comparison operators
         "semver_eq" | "semver_neq" | "semver_gt" | "semver_gte" | "semver_lt" | "semver_lte" => {
-            let prop_str = value_to_string(value);
-            let target_str = value_to_string(&property.value);
-
-            let prop_version = parse_semver(&prop_str).ok_or_else(|| {
-                InconclusiveMatchError::new(&format!(
-                    "Unable to parse property semver value for '{}': {:?}",
-                    property.key, value
-                ))
-            })?;
-
-            let target_version = parse_semver(&target_str).ok_or_else(|| {
-                InconclusiveMatchError::new(&format!(
-                    "Unable to parse target semver value: {:?}",
-                    property.value
-                ))
-            })?;
+            let (prop_version, target_version) = parse_semver_operands()?;
 
             match property.operator.as_str() {
                 "semver_eq" => prop_version == target_version,
@@ -1245,57 +1258,18 @@ fn match_property(
             }
         }
         "semver_tilde" => {
-            let prop_str = value_to_string(value);
-            let target_str = value_to_string(&property.value);
-
-            let prop_version = parse_semver(&prop_str).ok_or_else(|| {
-                InconclusiveMatchError::new(&format!(
-                    "Unable to parse property semver value for '{}': {:?}",
-                    property.key, value
-                ))
-            })?;
-
-            let target_version = parse_semver(&target_str).ok_or_else(|| {
-                InconclusiveMatchError::new(&format!(
-                    "Unable to parse target semver value: {:?}",
-                    property.value
-                ))
-            })?;
-
+            let (prop_version, target_version) = parse_semver_operands()?;
             let (lower, upper) = compute_tilde_bounds(target_version);
             prop_version >= lower && prop_version < upper
         }
         "semver_caret" => {
-            let prop_str = value_to_string(value);
-            let target_str = value_to_string(&property.value);
-
-            let prop_version = parse_semver(&prop_str).ok_or_else(|| {
-                InconclusiveMatchError::new(&format!(
-                    "Unable to parse property semver value for '{}': {:?}",
-                    property.key, value
-                ))
-            })?;
-
-            let target_version = parse_semver(&target_str).ok_or_else(|| {
-                InconclusiveMatchError::new(&format!(
-                    "Unable to parse target semver value: {:?}",
-                    property.value
-                ))
-            })?;
-
+            let (prop_version, target_version) = parse_semver_operands()?;
             let (lower, upper) = compute_caret_bounds(target_version);
             prop_version >= lower && prop_version < upper
         }
         "semver_wildcard" => {
-            let prop_str = value_to_string(value);
+            let prop_version = parse_property_semver()?;
             let target_str = value_to_string(&property.value);
-
-            let prop_version = parse_semver(&prop_str).ok_or_else(|| {
-                InconclusiveMatchError::new(&format!(
-                    "Unable to parse property semver value for '{}': {:?}",
-                    property.key, value
-                ))
-            })?;
 
             let (lower, upper) = parse_semver_wildcard(&target_str).ok_or_else(|| {
                 InconclusiveMatchError::new(&format!(
