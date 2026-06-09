@@ -82,7 +82,8 @@ fn flags_response_fixture() -> Value {
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, Event, FlagValue};
+    use posthog_rs::{get_default_user_agent, EvaluateFlagsOptions, Event, FlagValue};
+    use reqwest::header::USER_AGENT;
 
     fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
@@ -108,6 +109,47 @@ mod blocking {
         assert_eq!(keys, vec!["alpha", "beta", "variant-flag"]);
         flags_mock.assert_hits(1);
         capture_mock.assert_hits(0);
+    }
+
+    #[test]
+    fn evaluate_flags_uses_default_useragent() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/flags/")
+                .header(USER_AGENT.to_string(), get_default_user_agent());
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = create_test_client(server.base_url());
+        let _ = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .unwrap();
+        flags_mock.assert();
+    }
+
+    #[test]
+    fn evaluate_flags_uses_custom_useragent() {
+        let server = MockServer::start();
+        let custom_user_agent = "my-custom-user-agent";
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/flags/")
+                .header(USER_AGENT.to_string(), custom_user_agent);
+            then.status(200).json_body(flags_response_fixture());
+        });
+
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".into())
+            .host(server.base_url().as_str())
+            .user_agent(custom_user_agent.to_string())
+            .build()
+            .expect("should build client options");
+        let client = posthog_rs::client(options);
+
+        let _ = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .unwrap();
+        flags_mock.assert();
     }
 
     #[test]
@@ -539,7 +581,8 @@ mod async_tests {
     use super::*;
     #[cfg(not(feature = "capture-v1"))]
     use posthog_rs::Event;
-    use posthog_rs::{EvaluateFlagsOptions, FlagValue};
+    use posthog_rs::{get_default_user_agent, EvaluateFlagsOptions, FlagValue};
+    use reqwest::header::USER_AGENT;
 
     async fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
@@ -568,6 +611,49 @@ mod async_tests {
         keys.sort();
         assert_eq!(keys, vec!["alpha", "beta", "variant-flag"]);
         flags_mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn evaluate_flags_uses_default_useragent() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/flags/")
+                .header(USER_AGENT.to_string(), get_default_user_agent());
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = create_test_client(server.base_url()).await;
+        let _ = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        flags_mock.assert();
+    }
+
+    #[tokio::test]
+    async fn evaluate_flags_uses_custom_useragent() {
+        let server = MockServer::start();
+        let custom_user_agent = "my-custom-user-agent";
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/flags/")
+                .header(USER_AGENT.to_string(), custom_user_agent);
+            then.status(200).json_body(flags_response_fixture());
+        });
+
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".into())
+            .host(server.base_url().as_str())
+            .user_agent(custom_user_agent.to_string())
+            .build()
+            .expect("should build client options");
+        let client = posthog_rs::client(options).await;
+
+        let _ = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        flags_mock.assert();
     }
 
     #[tokio::test]
