@@ -120,6 +120,13 @@ pub struct FeatureFlagFilters {
     /// targeting (or mixed, when individual conditions set their own).
     #[serde(default)]
     pub aggregation_group_type_index: Option<i32>,
+    /// When `true`, local evaluation stops and returns a definitive disabled
+    /// result as soon as a condition group's property filters match (or it has
+    /// no property filters) but the rollout percentage excludes the user,
+    /// instead of falling through to later condition groups. Defaults to
+    /// `false`, which preserves the legacy fall-through behavior.
+    #[serde(default)]
+    pub early_exit: bool,
 }
 
 /// A single condition group within a feature flag's targeting rules.
@@ -575,7 +582,7 @@ pub fn match_feature_flag(
         };
 
         match is_condition_match(flag, &effective_bucketing, &condition, effective_properties) {
-            Ok(true) => {
+            Ok(ConditionMatch::Match) => {
                 if let Some(variant_override) = &condition.variant {
                     // Check if variant is valid
                     if let Some(ref multivariate) = flag.filters.multivariate {
@@ -597,7 +604,18 @@ pub fn match_feature_flag(
                 }
                 return Ok(FlagValue::Boolean(true));
             }
-            Ok(false) => continue,
+            Ok(ConditionMatch::OutOfRolloutBound) => {
+                // The user's properties matched this group but the rollout
+                // excluded them. With early_exit enabled the flag is
+                // definitively disabled; otherwise fall through to later groups.
+                // Only short-circuit when no prior group was inconclusive — an
+                // inconclusive result means we can't evaluate locally and must
+                // fall back to the server, so it takes priority over early_exit.
+                if flag.filters.early_exit && !is_inconclusive {
+                    return Ok(FlagValue::Boolean(false));
+                }
+            }
+            Ok(ConditionMatch::NoMatch) => continue,
             Err(_) => {
                 is_inconclusive = true;
             }
@@ -613,16 +631,32 @@ pub fn match_feature_flag(
     Ok(FlagValue::Boolean(false))
 }
 
+/// Outcome of evaluating a single condition group, mirroring the PostHog Rust
+/// evaluation engine's tri-state so the local loop can distinguish a
+/// property-filter miss (always fall through) from a rollout exclusion (which
+/// can short-circuit when `early_exit` is enabled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConditionMatch {
+    /// Property filters matched (or there were none) and the rollout included
+    /// the user — the flag matches.
+    Match,
+    /// A property filter did not match — always continue to the next group.
+    NoMatch,
+    /// Property filters matched (or there were none) but the rollout excluded
+    /// the user.
+    OutOfRolloutBound,
+}
+
 fn is_condition_match(
     flag: &FeatureFlag,
     bucketing_id: &str,
     condition: &FeatureFlagCondition,
     properties: &HashMap<String, serde_json::Value>,
-) -> Result<bool, InconclusiveMatchError> {
+) -> Result<ConditionMatch, InconclusiveMatchError> {
     // Check properties first
     for prop in &condition.properties {
         if !match_property(prop, properties)? {
-            return Ok(false);
+            return Ok(ConditionMatch::NoMatch);
         }
     }
 
@@ -630,11 +664,11 @@ fn is_condition_match(
     if let Some(rollout_percentage) = condition.rollout_percentage {
         let hash_value = hash_key(&flag.key, bucketing_id, ROLLOUT_HASH_SALT);
         if hash_value > (rollout_percentage / 100.0) {
-            return Ok(false);
+            return Ok(ConditionMatch::OutOfRolloutBound);
         }
     }
 
-    Ok(true)
+    Ok(ConditionMatch::Match)
 }
 
 /// Match a feature flag with full context (cohorts, other flags).
@@ -695,7 +729,7 @@ pub fn match_feature_flag_with_context(
             effective_properties,
             ctx,
         ) {
-            Ok(true) => {
+            Ok(ConditionMatch::Match) => {
                 if let Some(variant_override) = &condition.variant {
                     // Check if variant is valid
                     if let Some(ref multivariate) = flag.filters.multivariate {
@@ -717,7 +751,18 @@ pub fn match_feature_flag_with_context(
                 }
                 return Ok(FlagValue::Boolean(true));
             }
-            Ok(false) => continue,
+            Ok(ConditionMatch::OutOfRolloutBound) => {
+                // The user's properties matched this group but the rollout
+                // excluded them. With early_exit enabled the flag is
+                // definitively disabled; otherwise fall through to later groups.
+                // Only short-circuit when no prior group was inconclusive — an
+                // inconclusive result means we can't evaluate locally and must
+                // fall back to the server, so it takes priority over early_exit.
+                if flag.filters.early_exit && !is_inconclusive {
+                    return Ok(FlagValue::Boolean(false));
+                }
+            }
+            Ok(ConditionMatch::NoMatch) => continue,
             Err(_) => {
                 is_inconclusive = true;
             }
@@ -739,11 +784,11 @@ fn is_condition_match_with_context(
     condition: &FeatureFlagCondition,
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
-) -> Result<bool, InconclusiveMatchError> {
+) -> Result<ConditionMatch, InconclusiveMatchError> {
     // Check properties first (using context-aware matching for cohorts/flag dependencies)
     for prop in &condition.properties {
         if !match_property_with_context(prop, properties, ctx)? {
-            return Ok(false);
+            return Ok(ConditionMatch::NoMatch);
         }
     }
 
@@ -751,11 +796,11 @@ fn is_condition_match_with_context(
     if let Some(rollout_percentage) = condition.rollout_percentage {
         let hash_value = hash_key(&flag.key, bucketing_id, ROLLOUT_HASH_SALT);
         if hash_value > (rollout_percentage / 100.0) {
-            return Ok(false);
+            return Ok(ConditionMatch::OutOfRolloutBound);
         }
     }
 
-    Ok(true)
+    Ok(ConditionMatch::Match)
 }
 
 /// Match a property with additional context for cohorts and flag dependencies.
@@ -1339,6 +1384,7 @@ mod tests {
                 multivariate: None,
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
+                early_exit: false,
             },
         };
 
@@ -1399,6 +1445,7 @@ mod tests {
                 }),
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
+                early_exit: false,
             },
         };
 
@@ -1436,6 +1483,7 @@ mod tests {
                 multivariate: None,
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
+                early_exit: false,
             },
         };
 
@@ -1467,6 +1515,7 @@ mod tests {
                 multivariate: None,
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
+                early_exit: false,
             },
         };
 
@@ -1602,6 +1651,7 @@ mod tests {
                 multivariate: None,
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
+                early_exit: false,
             },
         };
 
@@ -2009,6 +2059,7 @@ mod tests {
                     multivariate: None,
                     payloads: HashMap::new(),
                     aggregation_group_type_index: None,
+                    early_exit: false,
                 },
             },
         );
@@ -2048,6 +2099,7 @@ mod tests {
                     multivariate: None,
                     payloads: HashMap::new(),
                     aggregation_group_type_index: None,
+                    early_exit: false,
                 },
             },
         );
@@ -2103,6 +2155,7 @@ mod tests {
                     }),
                     payloads: HashMap::new(),
                     aggregation_group_type_index: None,
+                    early_exit: false,
                 },
             },
         );
@@ -3182,5 +3235,263 @@ mod tests {
                 bad_pattern
             );
         }
+    }
+
+    // ==================== Tests for early_exit ====================
+
+    /// Build a two-group flag where the first group always lands
+    /// out-of-rollout-bound (no property filters, 0% rollout) and the second
+    /// group always matches (no property filters, 100% rollout). Without
+    /// `early_exit`, evaluation falls through to the matching second group.
+    fn early_exit_flag(early_exit: bool) -> FeatureFlag {
+        FeatureFlag {
+            key: "early-exit-flag".to_string(),
+            active: true,
+            filters: FeatureFlagFilters {
+                groups: vec![
+                    // Group 1: matches on properties (none) but rollout excludes
+                    // everyone -> OUT_OF_ROLLOUT_BOUND.
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(0.0),
+                        variant: None,
+                        aggregation_group_type_index: None,
+                    },
+                    // Group 2: would match everyone -> MATCH.
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(100.0),
+                        variant: None,
+                        aggregation_group_type_index: None,
+                    },
+                ],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit,
+            },
+        }
+    }
+
+    macro_rules! test_early_exit {
+        ($name:ident, $early_exit:expr, $expected:expr) => {
+            #[test]
+            fn $name() {
+                let flag = early_exit_flag($early_exit);
+                let result = match_feature_flag(
+                    &flag,
+                    "user-123",
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+                assert_eq!(result, $expected);
+            }
+        };
+    }
+
+    test_early_exit!(
+        test_early_exit_enabled_returns_false_without_evaluating_later_group,
+        true,
+        FlagValue::Boolean(false)
+    );
+    test_early_exit!(
+        test_early_exit_unset_falls_through_to_matching_group,
+        false,
+        FlagValue::Boolean(true)
+    );
+
+    #[test]
+    fn test_early_exit_default_is_false_from_json() {
+        // A flag definition that omits `early_exit` must deserialize to false
+        // and preserve the legacy fall-through behavior.
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "early-exit-flag",
+            "active": true,
+            "filters": {
+                "groups": [
+                    { "properties": [], "rollout_percentage": 0.0, "variant": null },
+                    { "properties": [], "rollout_percentage": 100.0, "variant": null }
+                ]
+            }
+        }))
+        .unwrap();
+        assert!(!flag.filters.early_exit);
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(result, FlagValue::Boolean(true));
+    }
+
+    #[test]
+    fn test_early_exit_explicit_false_falls_through() {
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "early-exit-flag",
+            "active": true,
+            "filters": {
+                "early_exit": false,
+                "groups": [
+                    { "properties": [], "rollout_percentage": 0.0, "variant": null },
+                    { "properties": [], "rollout_percentage": 100.0, "variant": null }
+                ]
+            }
+        }))
+        .unwrap();
+        assert!(!flag.filters.early_exit);
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(result, FlagValue::Boolean(true));
+    }
+
+    #[test]
+    fn test_early_exit_property_mismatch_does_not_short_circuit() {
+        // First group fails on a property filter (NO_MATCH), not rollout, so
+        // even with early_exit enabled we must fall through to the matching
+        // second group.
+        let flag = FeatureFlag {
+            key: "early-exit-flag".to_string(),
+            active: true,
+            filters: FeatureFlagFilters {
+                groups: vec![
+                    FeatureFlagCondition {
+                        properties: vec![Property {
+                            key: "country".to_string(),
+                            value: json!("US"),
+                            operator: "exact".to_string(),
+                            property_type: None,
+                        }],
+                        rollout_percentage: Some(100.0),
+                        variant: None,
+                        aggregation_group_type_index: None,
+                    },
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(100.0),
+                        variant: None,
+                        aggregation_group_type_index: None,
+                    },
+                ],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: true,
+            },
+        };
+
+        let mut properties = HashMap::new();
+        properties.insert("country".to_string(), json!("UK")); // does not match "US"
+
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &properties,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        // Property mismatch must not trigger early-exit; second group matches.
+        assert_eq!(result, FlagValue::Boolean(true));
+    }
+
+    macro_rules! test_early_exit_with_context {
+        ($name:ident, $early_exit:expr, $expected:expr) => {
+            #[test]
+            fn $name() {
+                let flag = early_exit_flag($early_exit);
+                let ctx = EvaluationContext {
+                    cohorts: &HashMap::new(),
+                    flags: &HashMap::new(),
+                    distinct_id: "user-123",
+                    groups: &HashMap::new(),
+                    group_properties: &HashMap::new(),
+                    group_type_mapping: &HashMap::new(),
+                };
+                let result = match_feature_flag_with_context(&flag, &HashMap::new(), &ctx).unwrap();
+                assert_eq!(result, $expected);
+            }
+        };
+    }
+
+    test_early_exit_with_context!(
+        test_early_exit_enabled_short_circuits_with_context,
+        true,
+        FlagValue::Boolean(false)
+    );
+    test_early_exit_with_context!(
+        test_early_exit_unset_falls_through_with_context,
+        false,
+        FlagValue::Boolean(true)
+    );
+
+    #[test]
+    fn test_early_exit_does_not_short_circuit_when_prior_group_inconclusive() {
+        // Group 1: group-targeted (aggregation_group_type_index = 0). The
+        // group_type_mapping resolves "0" → "company" and groups supplies the
+        // company key, but group_properties has no entry for "company" →
+        // ConditionTarget::Inconclusive → is_inconclusive = true.
+        // Group 2: person-targeted, rollout 0% → OutOfRolloutBound.
+        // With early_exit = true, the !is_inconclusive guard must prevent
+        // short-circuiting, and the overall result must be InconclusiveMatchError.
+        let flag = FeatureFlag {
+            key: "early-exit-flag".to_string(),
+            active: true,
+            filters: FeatureFlagFilters {
+                groups: vec![
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(100.0),
+                        variant: None,
+                        aggregation_group_type_index: Some(0),
+                    },
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(0.0),
+                        variant: None,
+                        aggregation_group_type_index: None,
+                    },
+                ],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: true,
+            },
+        };
+
+        let mut group_type_mapping = HashMap::new();
+        group_type_mapping.insert("0".to_string(), "company".to_string());
+
+        let mut groups = HashMap::new();
+        groups.insert("company".to_string(), "acme".to_string());
+
+        // group_properties intentionally omitted for "company" → Inconclusive
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &HashMap::new(),
+            &groups,
+            &HashMap::new(), // empty group_properties
+            &group_type_mapping,
+        );
+        assert!(
+            result.is_err(),
+            "expected InconclusiveMatchError, got {:?}",
+            result
+        );
     }
 }

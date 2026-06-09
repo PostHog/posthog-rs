@@ -1,5 +1,13 @@
 # posthog-rs
 
+## 0.10.0 — 2026-06-05
+
+### Minor changes
+
+- [b4a60a7](https://github.com/posthog/posthog-rs/commit/b4a60a7d6a62c1ccd9ae2dc59983b81db99c2329) feat(feature-flags): support `early_exit` in local evaluation
+  
+  Adds support for the `early_exit` option on a feature flag's `filters` during local evaluation. When `early_exit` is `true` and a condition group's property filters match (or it has no property filters) but the rollout percentage excludes the user, evaluation now stops and returns a definitive disabled result instead of falling through to later condition groups. A property-filter mismatch always falls through, regardless of `early_exit`. The flag defaults to `false` (absent), preserving the existing fall-through behavior. This mirrors the PostHog Rust evaluation engine and the posthog-node/posthog-python implementations. — Thanks @gustavohstrassburger!
+
 ## 0.9.1 — 2026-06-05
 
 ### Patch changes
