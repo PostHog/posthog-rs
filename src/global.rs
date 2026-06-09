@@ -2,8 +2,6 @@
 use std::error::Error as StdError;
 use std::sync::OnceLock;
 
-#[cfg(feature = "error-tracking")]
-use crate::Exception;
 use crate::{client, Client, ClientOptions, Error, Event};
 
 static GLOBAL_CLIENT: OnceLock<Client> = OnceLock::new();
@@ -90,32 +88,25 @@ pub async fn capture(event: Event) -> Result<(), Error> {
     client.capture(event).await
 }
 
-/// Capture an exception event using the global client.
+/// Capture a Rust error with a distinct ID using the global client.
 #[cfg(all(feature = "async-client", feature = "error-tracking"))]
-pub async fn capture_exception(exception: Exception) -> Result<(), Error> {
-    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
-    client.capture_exception(exception).await
-}
-
-/// Capture a Rust error using the global client.
-#[cfg(all(feature = "async-client", feature = "error-tracking"))]
-pub async fn capture_error<E, S>(error: &E, distinct_id: S) -> Result<(), Error>
+pub async fn capture_exception<E, S>(error: &E, distinct_id: S) -> Result<(), Error>
 where
     E: StdError + ?Sized,
     S: Into<String>,
 {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
-    client.capture_error(error, distinct_id).await
+    client.capture_exception(error, distinct_id).await
 }
 
 /// Capture a Rust error personlessly using the global client.
 #[cfg(all(feature = "async-client", feature = "error-tracking"))]
-pub async fn capture_error_anon<E>(error: &E) -> Result<(), Error>
+pub async fn capture_exception_anon<E>(error: &E) -> Result<(), Error>
 where
     E: StdError + ?Sized,
 {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
-    client.capture_error_anon(error).await
+    client.capture_exception_anon(error).await
 }
 
 /// Capture the provided event using the global client.
@@ -130,30 +121,23 @@ pub fn capture(event: Event) -> Result<(), Error> {
     client.capture(event)
 }
 
-/// Capture an exception event using the global client.
+/// Capture a Rust error with a distinct ID using the global client.
 #[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
-pub fn capture_exception(exception: Exception) -> Result<(), Error> {
-    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
-    client.capture_exception(exception)
-}
-
-/// Capture a Rust error using the global client.
-#[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
-pub fn capture_error<E, S>(error: &E, distinct_id: S) -> Result<(), Error>
+pub fn capture_exception<E, S>(error: &E, distinct_id: S) -> Result<(), Error>
 where
     E: StdError + ?Sized,
     S: Into<String>,
 {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
-    client.capture_error(error, distinct_id)
+    client.capture_exception(error, distinct_id)
 }
 
 /// Capture a Rust error personlessly using the global client.
 #[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
-pub fn capture_error_anon<E>(error: &E) -> Result<(), Error>
+pub fn capture_exception_anon<E>(error: &E) -> Result<(), Error>
 where
     E: StdError + ?Sized,
 {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
-    client.capture_error_anon(error)
+    client.capture_exception_anon(error)
 }

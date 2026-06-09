@@ -135,11 +135,9 @@ pub use local_evaluation::AsyncFlagPoller;
 // We expose a global capture function as a convenience, that uses a global client
 pub use global::capture;
 #[cfg(feature = "error-tracking")]
-pub use global::capture_error;
-#[cfg(feature = "error-tracking")]
-pub use global::capture_error_anon;
-#[cfg(feature = "error-tracking")]
 pub use global::capture_exception;
+#[cfg(feature = "error-tracking")]
+pub use global::capture_exception_anon;
 pub use global::disable as disable_global;
 pub use global::init_global_client as init_global;
 pub use global::is_disabled as global_is_disabled;

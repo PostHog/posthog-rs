@@ -221,29 +221,23 @@ impl Client {
         self.capture_v0(event)
     }
 
-    /// Capture an exception personlessly, sending it to PostHog Error Tracking.
-    ///
-    /// To attach a distinct ID or other event context, convert the exception
-    /// with [`Exception::into_event`] and use [`Client::capture`] instead.
-    #[cfg(feature = "error-tracking")]
-    pub fn capture_exception(&self, exception: Exception) -> Result<(), Error> {
-        if self.options.is_disabled() {
-            trace!("Client is disabled, skipping exception capture");
-            return Ok(());
-        }
-
-        self.capture(exception.into_event_anon())
-    }
-
     /// Capture a Rust error with a distinct ID, sending it to PostHog Error Tracking.
+    ///
+    /// Accepts any [`std::error::Error`], including `&dyn Error`. A
+    /// `Box<dyn Error>` does not implement `Error` itself, so pass the
+    /// dereferenced trait object: `capture_exception(&*boxed, ...)`.
+    ///
+    /// To attach custom properties, groups, flags, or a fingerprint, build an
+    /// [`Exception`], convert it with [`Exception::into_event`], and use
+    /// [`Client::capture`] instead.
     #[cfg(feature = "error-tracking")]
-    pub fn capture_error<E, S>(&self, error: &E, distinct_id: S) -> Result<(), Error>
+    pub fn capture_exception<E, S>(&self, error: &E, distinct_id: S) -> Result<(), Error>
     where
         E: StdError + ?Sized,
         S: Into<String>,
     {
         if self.options.is_disabled() {
-            trace!("Client is disabled, skipping error capture");
+            trace!("Client is disabled, skipping exception capture");
             return Ok(());
         }
 
@@ -252,12 +246,12 @@ impl Client {
 
     /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
     #[cfg(feature = "error-tracking")]
-    pub fn capture_error_anon<E>(&self, error: &E) -> Result<(), Error>
+    pub fn capture_exception_anon<E>(&self, error: &E) -> Result<(), Error>
     where
         E: StdError + ?Sized,
     {
         if self.options.is_disabled() {
-            trace!("Client is disabled, skipping anonymous error capture");
+            trace!("Client is disabled, skipping anonymous exception capture");
             return Ok(());
         }
 

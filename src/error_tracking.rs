@@ -399,8 +399,8 @@ fn is_internal_capture_frame(function: &str) -> bool {
         || function.contains("capture_raw_application_frames")
         || function.contains("Exception::from_error")
         || function.contains("Exception::from_message")
-        || function.contains("Client::capture_error")
-        || function.contains("global::capture_error")
+        || function.contains("Client::capture_exception")
+        || function.contains("global::capture_exception")
 }
 
 fn path_to_string(path: &std::path::Path) -> String {
@@ -684,7 +684,9 @@ mod tests {
         assert!(options.is_in_app_frame(None, Some("checkout_service::submit")));
         assert!(!options.is_in_app_frame(None, Some("std::rt::lang_start")));
         assert!(!options.is_in_app_frame(None, Some("core::ops::function::FnOnce::call_once")));
-        assert!(!options.is_in_app_frame(None, Some("posthog_rs::client::Client::capture_error")));
+        assert!(
+            !options.is_in_app_frame(None, Some("posthog_rs::client::Client::capture_exception"))
+        );
         assert!(!options.is_in_app_frame(None, Some("_main")));
 
         let options = ErrorTrackingOptionsBuilder::default()

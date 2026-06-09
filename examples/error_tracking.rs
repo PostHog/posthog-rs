@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let error = std::io::Error::other("checkout failed");
 
     // Happy path: capture a Rust error directly.
-    client.capture_error(&error, "user-123").await?;
+    client.capture_exception(&error, "user-123").await?;
 
     // Custom context: convert to an event and use the standard Event API.
     let mut event = Exception::from_error(&error).into_event("user-123");

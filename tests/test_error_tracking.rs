@@ -34,7 +34,7 @@ fn flags_response_fixture() -> serde_json::Value {
     })
 }
 
-fn request_has_capture_error_user_frame_first(req: &HttpMockRequest) -> bool {
+fn request_has_capture_exception_user_frame_first(req: &HttpMockRequest) -> bool {
     let Some(body) = req.body.as_deref() else {
         return false;
     };
@@ -43,11 +43,11 @@ fn request_has_capture_error_user_frame_first(req: &HttpMockRequest) -> bool {
     };
     let first_function = first_exception_stack_function(&body);
 
-    first_function.contains("capture_error_sends_exception_event")
-        && !first_function.contains("Client::capture_error")
+    first_function.contains("capture_exception_sends_exception_event")
+        && !first_function.contains("Client::capture_exception")
 }
 
-fn request_has_capture_error_anon_user_frame_first(req: &HttpMockRequest) -> bool {
+fn request_has_capture_exception_anon_user_frame_first(req: &HttpMockRequest) -> bool {
     let Some(body) = req.body.as_deref() else {
         return false;
     };
@@ -56,8 +56,8 @@ fn request_has_capture_error_anon_user_frame_first(req: &HttpMockRequest) -> boo
     };
     let first_function = first_exception_stack_function(&body);
 
-    first_function.contains("capture_error_anon_sends_personless_exception_event")
-        && !first_function.contains("Client::capture_error")
+    first_function.contains("capture_exception_anon_sends_personless_exception_event")
+        && !first_function.contains("Client::capture_exception")
 }
 
 fn request_has_no_stacktrace(req: &HttpMockRequest) -> bool {
@@ -94,7 +94,7 @@ mod blocking {
     }
 
     #[test]
-    fn capture_error_sends_exception_event() {
+    fn capture_exception_sends_exception_event() {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
@@ -105,18 +105,18 @@ mod blocking {
                 .body_contains(r#""value":"payment failed""#)
                 .body_contains(r#""platform":"rust""#)
                 .body_contains(r#""lang":"rust""#)
-                .matches(request_has_capture_error_user_frame_first);
+                .matches(request_has_capture_exception_user_frame_first);
             then.status(200);
         });
 
         let client = create_test_client(server.base_url());
-        client.capture_error(&TestError, "user-1").unwrap();
+        client.capture_exception(&TestError, "user-1").unwrap();
 
         capture_mock.assert_hits(1);
     }
 
     #[test]
-    fn capture_error_anon_sends_personless_exception_event() {
+    fn capture_exception_anon_sends_personless_exception_event() {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
@@ -124,18 +124,18 @@ mod blocking {
                 .body_contains(r#""event":"$exception""#)
                 .body_contains(r#""$process_person_profile":false"#)
                 .body_contains(r#""value":"payment failed""#)
-                .matches(request_has_capture_error_anon_user_frame_first);
+                .matches(request_has_capture_exception_anon_user_frame_first);
             then.status(200);
         });
 
         let client = create_test_client(server.base_url());
-        client.capture_error_anon(&TestError).unwrap();
+        client.capture_exception_anon(&TestError).unwrap();
 
         capture_mock.assert_hits(1);
     }
 
     #[test]
-    fn disabled_capture_error_does_not_build_exception_payload() {
+    fn disabled_capture_exception_does_not_build_exception_payload() {
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host("http://127.0.0.1:1")
@@ -144,12 +144,14 @@ mod blocking {
             .unwrap();
         let client = posthog_rs::client(options);
 
-        client.capture_error(&PanicDisplayError, "user-1").unwrap();
-        client.capture_error_anon(&PanicDisplayError).unwrap();
+        client
+            .capture_exception(&PanicDisplayError, "user-1")
+            .unwrap();
+        client.capture_exception_anon(&PanicDisplayError).unwrap();
     }
 
     #[test]
-    fn disabled_capture_exception_does_not_send() {
+    fn disabled_capture_does_not_send_exception_event() {
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host("http://127.0.0.1:1")
@@ -159,11 +161,11 @@ mod blocking {
         let client = posthog_rs::client(options);
         let exception = Exception::from_message("DroppedError", "never sent");
 
-        client.capture_exception(exception).unwrap();
+        client.capture(exception.into_event_anon()).unwrap();
     }
 
     #[test]
-    fn capture_error_uses_client_error_tracking_options() {
+    fn capture_exception_uses_client_error_tracking_options() {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
@@ -187,7 +189,7 @@ mod blocking {
             .unwrap();
         let client = posthog_rs::client(options);
 
-        client.capture_error(&TestError, "user-1").unwrap();
+        client.capture_exception(&TestError, "user-1").unwrap();
 
         capture_mock.assert_hits(1);
     }
@@ -238,7 +240,7 @@ mod async_client {
     }
 
     #[tokio::test]
-    async fn capture_error_sends_exception_event() {
+    async fn capture_exception_sends_exception_event() {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
@@ -249,18 +251,21 @@ mod async_client {
                 .body_contains(r#""value":"payment failed""#)
                 .body_contains(r#""platform":"rust""#)
                 .body_contains(r#""lang":"rust""#)
-                .matches(request_has_capture_error_user_frame_first);
+                .matches(request_has_capture_exception_user_frame_first);
             then.status(200);
         });
 
         let client = create_test_client(server.base_url()).await;
-        client.capture_error(&TestError, "user-1").await.unwrap();
+        client
+            .capture_exception(&TestError, "user-1")
+            .await
+            .unwrap();
 
         capture_mock.assert_hits(1);
     }
 
     #[tokio::test]
-    async fn capture_error_anon_sends_personless_exception_event() {
+    async fn capture_exception_anon_sends_personless_exception_event() {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
@@ -268,18 +273,18 @@ mod async_client {
                 .body_contains(r#""event":"$exception""#)
                 .body_contains(r#""$process_person_profile":false"#)
                 .body_contains(r#""value":"payment failed""#)
-                .matches(request_has_capture_error_anon_user_frame_first);
+                .matches(request_has_capture_exception_anon_user_frame_first);
             then.status(200);
         });
 
         let client = create_test_client(server.base_url()).await;
-        client.capture_error_anon(&TestError).await.unwrap();
+        client.capture_exception_anon(&TestError).await.unwrap();
 
         capture_mock.assert_hits(1);
     }
 
     #[tokio::test]
-    async fn disabled_capture_error_does_not_build_exception_payload() {
+    async fn disabled_capture_exception_does_not_build_exception_payload() {
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host("http://127.0.0.1:1")
@@ -289,14 +294,17 @@ mod async_client {
         let client = posthog_rs::client(options).await;
 
         client
-            .capture_error(&PanicDisplayError, "user-1")
+            .capture_exception(&PanicDisplayError, "user-1")
             .await
             .unwrap();
-        client.capture_error_anon(&PanicDisplayError).await.unwrap();
+        client
+            .capture_exception_anon(&PanicDisplayError)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn disabled_capture_exception_does_not_send() {
+    async fn disabled_capture_does_not_send_exception_event() {
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host("http://127.0.0.1:1")
@@ -306,11 +314,11 @@ mod async_client {
         let client = posthog_rs::client(options).await;
         let exception = Exception::from_message("DroppedError", "never sent");
 
-        client.capture_exception(exception).await.unwrap();
+        client.capture(exception.into_event_anon()).await.unwrap();
     }
 
     #[tokio::test]
-    async fn capture_error_uses_client_error_tracking_options() {
+    async fn capture_exception_uses_client_error_tracking_options() {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
@@ -334,7 +342,10 @@ mod async_client {
             .unwrap();
         let client = posthog_rs::client(options).await;
 
-        client.capture_error(&TestError, "user-1").await.unwrap();
+        client
+            .capture_exception(&TestError, "user-1")
+            .await
+            .unwrap();
 
         capture_mock.assert_hits(1);
     }
