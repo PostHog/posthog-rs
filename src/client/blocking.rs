@@ -6,7 +6,10 @@ use std::time::Duration;
 
 #[cfg(feature = "capture-v1")]
 use chrono::Utc;
-use reqwest::{blocking::Client as HttpClient, header::CONTENT_TYPE};
+use reqwest::{
+    blocking::Client as HttpClient,
+    header::{CONTENT_TYPE, USER_AGENT},
+};
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
 #[cfg(feature = "capture-v1")]
@@ -224,6 +227,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
                 api_host: options.endpoints().api_host(),
                 poll_interval: Duration::from_secs(options.poll_interval_seconds),
                 request_timeout: Duration::from_secs(options.request_timeout_seconds),
+                user_agent: options.user_agent.clone(),
             };
 
             let mut poller = FlagPoller::new(config, cache.clone());
