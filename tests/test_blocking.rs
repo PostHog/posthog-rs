@@ -7,7 +7,8 @@
 #![allow(deprecated)]
 
 use httpmock::prelude::*;
-use posthog_rs::FlagValue;
+use posthog_rs::{get_default_user_agent, FlagValue};
+use reqwest::header::USER_AGENT;
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -70,6 +71,59 @@ fn test_get_all_feature_flags() {
 
     assert!(payloads.contains_key("variant-flag"));
 
+    flags_mock.assert();
+}
+
+#[test]
+fn test_sends_default_useragent() {
+    let server = MockServer::start();
+
+    let mock_response = json!({});
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/flags/")
+            .header(USER_AGENT.to_string(), get_default_user_agent())
+            .query_param("v", "2");
+
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(mock_response);
+    });
+
+    let client = create_test_client(server.base_url());
+
+    let _ = client.get_feature_flags("test-user".to_string(), None, None, None);
+    flags_mock.assert();
+}
+
+#[test]
+fn test_sends_custom_useragent() {
+    let server = MockServer::start();
+
+    let mock_response = json!({});
+    let custom_user_agent = "custom-user-agent";
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/flags/")
+            .header(USER_AGENT.to_string(), custom_user_agent)
+            .query_param("v", "2");
+
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(mock_response);
+    });
+
+    let options = posthog_rs::ClientOptionsBuilder::default()
+        .api_key("test_api_key".into())
+        .host(server.base_url().as_str())
+        .user_agent("custom-user-agent".to_string())
+        .build()
+        .expect("should build client options");
+    let client = posthog_rs::client(options);
+
+    let _ = client.get_feature_flags("test-user".to_string(), None, None, None);
     flags_mock.assert();
 }
 
