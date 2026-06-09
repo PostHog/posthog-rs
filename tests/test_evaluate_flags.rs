@@ -4,6 +4,24 @@ use serde_json::{json, Value};
 #[cfg(feature = "async-client")]
 use std::time::Duration;
 
+/// Capture endpoint `$feature_flag_called` events ship to: the V1 analytics
+/// path with `capture-v1`, the legacy v0 path otherwise.
+#[cfg(feature = "capture-v1")]
+const CAPTURE_PATH: &str = "/i/v1/analytics/events";
+#[cfg(not(feature = "capture-v1"))]
+const CAPTURE_PATH: &str = "/i/v0/e/";
+
+/// Feature-aware mock for the capture endpoint. The JSON body is required by
+/// the V1 client and harmlessly ignored by the v0 flag-event host.
+fn capture_path_mock(server: &MockServer) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        when.method(POST).path(CAPTURE_PATH);
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    })
+}
+
 fn flags_response_fixture() -> Value {
     json!({
         "flags": {
@@ -80,10 +98,7 @@ mod blocking {
             when.method(POST).path("/flags/").query_param("v", "2");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
 
         let client = create_test_client(server.base_url());
         let snapshot = client
@@ -104,10 +119,7 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let _snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -123,10 +135,7 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -154,10 +163,7 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -177,10 +183,7 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
 
         let snap_1 = client
@@ -231,10 +234,7 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snap = client
             .evaluate_flags(
@@ -294,10 +294,7 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("", EvaluateFlagsOptions::default())
@@ -316,10 +313,7 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -354,10 +348,7 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -391,10 +382,7 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(response);
         });
-        server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -464,6 +452,69 @@ mod blocking {
         );
     }
 
+    /// C5: with `capture-v1`, `$feature_flag_called` ships through the V1
+    /// analytics endpoint (single attempt, SDK identity in headers) and
+    /// nothing hits the legacy v0 path.
+    #[cfg(feature = "capture-v1")]
+    #[test]
+    fn flag_called_event_routes_to_v1_endpoint() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let v1_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v1/analytics/events")
+                .header("posthog-attempt", "1")
+                .header(
+                    "posthog-sdk-info",
+                    format!("posthog-rs/{}", env!("CARGO_PKG_VERSION")),
+                )
+                .body_contains("$feature_flag_called")
+                .body_contains("\"$feature_flag\":\"alpha\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "results": {} }));
+        });
+        let v0_mock = server.mock(|when, then| {
+            when.method(POST).path("/i/v0/e/");
+            then.status(200);
+        });
+        let client = create_test_client(server.base_url());
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .unwrap();
+        assert!(snapshot.is_enabled("alpha"));
+        v1_mock.assert_hits(1);
+        v0_mock.assert_hits(0);
+    }
+
+    /// C5: a failed V1 flag-event ship is fire-and-forget — exactly one
+    /// attempt, no retry loop, and no error surfaced to the flag read.
+    #[cfg(feature = "capture-v1")]
+    #[test]
+    fn flag_called_event_v1_failure_is_single_attempt_and_silent() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let v1_mock = server.mock(|when, then| {
+            when.method(POST).path("/i/v1/analytics/events");
+            then.status(503)
+                .header("content-type", "application/json")
+                .json_body(json!({ "error": "service_unavailable" }));
+        });
+        let client = create_test_client(server.base_url());
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .unwrap();
+        // The flag read still succeeds; the ship is attempted exactly once.
+        assert!(snapshot.is_enabled("alpha"));
+        v1_mock.assert_hits(1);
+    }
+
     #[test]
     fn disabled_client_returns_empty_snapshot() {
         let server = MockServer::start();
@@ -531,10 +582,7 @@ mod async_tests {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url()).await;
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -582,10 +630,7 @@ mod async_tests {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url()).await;
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -624,10 +669,7 @@ mod async_tests {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url()).await;
         let snapshot = client
             .evaluate_flags("", EvaluateFlagsOptions::default())
@@ -639,6 +681,73 @@ mod async_tests {
         capture_mock.assert_hits(0);
     }
 
+    /// C5: with `capture-v1`, `$feature_flag_called` ships through the V1
+    /// analytics endpoint (single attempt, SDK identity in headers) and
+    /// nothing hits the legacy v0 path.
+    #[cfg(feature = "capture-v1")]
+    #[tokio::test]
+    async fn flag_called_event_routes_to_v1_endpoint() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let v1_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v1/analytics/events")
+                .header("posthog-attempt", "1")
+                .header(
+                    "posthog-sdk-info",
+                    format!("posthog-rs/{}", env!("CARGO_PKG_VERSION")),
+                )
+                .body_contains("$feature_flag_called")
+                .body_contains("\"$feature_flag\":\"alpha\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "results": {} }));
+        });
+        let v0_mock = server.mock(|when, then| {
+            when.method(POST).path("/i/v0/e/");
+            then.status(200);
+        });
+        let client = create_test_client(server.base_url()).await;
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        assert!(snapshot.is_enabled("alpha"));
+        flush_spawned_events().await;
+        v1_mock.assert_hits(1);
+        v0_mock.assert_hits(0);
+    }
+
+    /// C5: a failed V1 flag-event ship is fire-and-forget — exactly one
+    /// attempt, no retry loop, and no error surfaced to the flag read.
+    #[cfg(feature = "capture-v1")]
+    #[tokio::test]
+    async fn flag_called_event_v1_failure_is_single_attempt_and_silent() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let v1_mock = server.mock(|when, then| {
+            when.method(POST).path("/i/v1/analytics/events");
+            then.status(503)
+                .header("content-type", "application/json")
+                .json_body(json!({ "error": "service_unavailable" }));
+        });
+        let client = create_test_client(server.base_url()).await;
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        // The flag read still succeeds; the ship is attempted exactly once.
+        assert!(snapshot.is_enabled("alpha"));
+        flush_spawned_events().await;
+        v1_mock.assert_hits(1);
+    }
+
     #[cfg(not(feature = "capture-v1"))]
     #[tokio::test]
     async fn event_with_flags_attaches_properties_without_extra_request() {
@@ -647,10 +756,7 @@ mod async_tests {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
+        let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url()).await;
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())

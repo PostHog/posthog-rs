@@ -11,6 +11,8 @@ use tracing::{debug, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::endpoints::Endpoint;
+#[cfg(not(feature = "capture-v1"))]
+use crate::event::InnerEvent;
 #[cfg(feature = "capture-v1")]
 use crate::event_v1::CaptureResponse;
 use crate::feature_flag_evaluations::{
@@ -19,7 +21,7 @@ use crate::feature_flag_evaluations::{
 };
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
-use crate::{event::InnerEvent, Error, Event};
+use crate::{Error, Event};
 
 use super::common::{
     already_reported, build_dedup_key, extract_flag_details, flag_called_event,
@@ -28,6 +30,7 @@ use super::common::{
 };
 use super::ClientOptions;
 
+#[cfg(not(feature = "capture-v1"))]
 async fn check_response(response: reqwest::Response) -> Result<(), Error> {
     let status = response.status().as_u16();
     let body = response
@@ -54,13 +57,14 @@ pub struct Client {
 /// `$feature_flag_called` events through a clone of the async [`Client`]'s
 /// HTTP transport. The event ship is fire-and-forget: errors are logged at
 /// `debug` level but do not surface to the caller, matching the JS SDK.
+///
+/// With the `capture-v1` feature the events go to the same V1 endpoint as
+/// regular capture (single attempt, no retry loop); otherwise they take the
+/// legacy v0 `/i/v0/e/` path.
 struct AsyncFlagEventHost {
     http_client: HttpClient,
-    api_key: String,
+    options: ClientOptions,
     capture_url: String,
-    disabled: bool,
-    disable_geoip: bool,
-    is_server: bool,
     dedup_cache: FlagEventDedupCache,
     /// Tokio runtime handle captured at host construction (which always runs
     /// inside the runtime that hosts `evaluate_flags`). This lets snapshot
@@ -72,25 +76,80 @@ struct AsyncFlagEventHost {
 
 impl AsyncFlagEventHost {
     fn from_options(options: &ClientOptions, http_client: HttpClient) -> Self {
+        #[cfg(feature = "capture-v1")]
+        let capture_url = options
+            .endpoints()
+            .build_custom_url(super::v1_capture::V1_CAPTURE_PATH);
+        #[cfg(not(feature = "capture-v1"))]
         let capture_url = options.endpoints().build_url(Endpoint::Capture);
         Self {
             http_client,
-            api_key: options.api_key.clone(),
+            options: options.clone(),
             capture_url,
-            disabled: options.is_disabled(),
-            disable_geoip: options.disable_geoip,
-            is_server: options.is_server,
             dedup_cache: flag_event_dedup_cache(),
             runtime: tokio::runtime::Handle::current(),
         }
     }
 
-    fn spawn_ship(&self, mut event: Event) {
-        if self.disabled {
+    fn spawn_ship(&self, event: Event) {
+        if self.options.is_disabled() {
             return;
         }
+        #[cfg(feature = "capture-v1")]
+        self.spawn_ship_v1(event);
+        #[cfg(not(feature = "capture-v1"))]
+        self.spawn_ship_v0(event);
+    }
+
+    /// Ship over the V1 capture endpoint. Deliberately a single attempt with
+    /// no retry loop, matching v0 flag-event semantics: a lost
+    /// `$feature_flag_called` event is not worth retry traffic, and shipping
+    /// must never block or slow flag reads.
+    #[cfg(feature = "capture-v1")]
+    fn spawn_ship_v1(&self, event: Event) {
+        let (headers, body) =
+            match super::v1_capture::build_flag_event_request(&self.options, &event) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    debug!(error = %e, "failed to serialize $feature_flag_called event");
+                    return;
+                }
+            };
+        let http_client = self.http_client.clone();
+        let url = self.capture_url.clone();
+        self.runtime.spawn(async move {
+            match http_client
+                .post(&url)
+                .headers(headers)
+                .body(body)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    if !(200..=299).contains(&status) {
+                        let message = resp
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Unknown error".to_string());
+                        debug!(
+                            status,
+                            "$feature_flag_called event rejected by server: {message}"
+                        );
+                    }
+                }
+                Err(send_err) => {
+                    let message = send_err.to_string();
+                    debug!("failed to send $feature_flag_called event: {message}");
+                }
+            }
+        });
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    fn spawn_ship_v0(&self, mut event: Event) {
         event.prepare_for_v0();
-        let inner_event = InnerEvent::new(event, self.api_key.clone());
+        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
         let payload = match serde_json::to_string(&inner_event) {
             Ok(p) => p,
             Err(e) => {
@@ -130,7 +189,9 @@ impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
             return;
         }
 
-        if let Some(event) = flag_called_event(params, self.disable_geoip, self.is_server) {
+        if let Some(event) =
+            flag_called_event(params, self.options.disable_geoip, self.options.is_server)
+        {
             self.spawn_ship(event);
         }
     }
