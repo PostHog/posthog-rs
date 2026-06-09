@@ -86,6 +86,11 @@ impl BeforeSendHook {
     }
 }
 pub const POSTHOG_RUST_USERAGENT: &str = "posthog-node/rust";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub fn get_default_user_agent() -> String {
+    format!("{}/{}", POSTHOG_RUST_USERAGENT, VERSION)
+}
 
 /// Configuration options for the PostHog client.
 ///
@@ -206,7 +211,7 @@ pub struct ClientOptions {
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
     endpoint_manager: EndpointManager,
 
-    #[builder(default = "POSTHOG_RUST_USERAGENT.to_string()")]
+    #[builder(default = "get_default_user_agent()")]
     user_agent: String,
 }
 

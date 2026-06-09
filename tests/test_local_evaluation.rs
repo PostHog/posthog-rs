@@ -7,9 +7,9 @@ use httpmock::prelude::*;
 #[cfg(feature = "async-client")]
 use posthog_rs::AsyncFlagPoller;
 use posthog_rs::{
-    ClientOptionsBuilder, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache,
-    FlagPoller, FlagValue, LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator,
-    Property, POSTHOG_RUST_USERAGENT,
+    get_default_user_agent, ClientOptionsBuilder, FeatureFlag, FeatureFlagCondition,
+    FeatureFlagFilters, FlagCache, FlagPoller, FlagValue, LocalEvaluationConfig,
+    LocalEvaluationResponse, LocalEvaluator, Property,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -337,7 +337,7 @@ async fn test_etag_sent_on_second_poll() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
         request_timeout: Duration::from_secs(5),
-        user_agent: POSTHOG_RUST_USERAGENT.to_string(),
+        user_agent: get_default_user_agent(),
     };
 
     let mut poller = AsyncFlagPoller::new(config, cache.clone());
@@ -426,7 +426,7 @@ async fn test_304_preserves_cache() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
         request_timeout: Duration::from_secs(5),
-        user_agent: POSTHOG_RUST_USERAGENT.to_string(),
+        user_agent: get_default_user_agent(),
     };
 
     let mut poller = AsyncFlagPoller::new(config, cache.clone());
@@ -492,7 +492,7 @@ async fn test_no_etag_from_server() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(50),
         request_timeout: Duration::from_secs(5),
-        user_agent: POSTHOG_RUST_USERAGENT.to_string(),
+        user_agent: get_default_user_agent(),
     };
 
     let mut poller = AsyncFlagPoller::new(config, cache.clone());
@@ -569,7 +569,7 @@ fn test_sync_etag_sent_on_second_poll() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
         request_timeout: Duration::from_secs(5),
-        user_agent: POSTHOG_RUST_USERAGENT.to_string(),
+        user_agent: get_default_user_agent(),
     };
 
     let mut poller = FlagPoller::new(config, cache.clone());
@@ -655,7 +655,7 @@ fn test_sync_304_preserves_cache() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
         request_timeout: Duration::from_secs(5),
-        user_agent: POSTHOG_RUST_USERAGENT.to_string(),
+        user_agent: get_default_user_agent(),
     };
 
     let mut poller = FlagPoller::new(config, cache.clone());
@@ -720,7 +720,7 @@ fn test_sync_no_etag_from_server() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(50),
         request_timeout: Duration::from_secs(5),
-        user_agent: POSTHOG_RUST_USERAGENT.to_string(),
+        user_agent: get_default_user_agent(),
     };
 
     let mut poller = FlagPoller::new(config, cache.clone());

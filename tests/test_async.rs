@@ -7,7 +7,7 @@
 #![allow(deprecated)]
 
 use httpmock::prelude::*;
-use posthog_rs::{FlagValue, POSTHOG_RUST_USERAGENT};
+use posthog_rs::{get_default_user_agent, FlagValue};
 use reqwest::header::USER_AGENT;
 use serde_json::json;
 use std::collections::HashMap;
@@ -89,7 +89,7 @@ async fn test_sends_default_useragent() {
     let flags_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/flags/")
-            .header(USER_AGENT.to_string(), POSTHOG_RUST_USERAGENT)
+            .header(USER_AGENT.to_string(), get_default_user_agent())
             .query_param("v", "2");
 
         then.status(200)

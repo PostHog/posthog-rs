@@ -85,13 +85,13 @@ mod local_evaluation;
 // Public interface - any change to this is breaking!
 // Client
 pub use client::client;
+pub use client::get_default_user_agent;
 pub use client::BeforeSendHook;
 pub use client::CaptureCompression;
 pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
-pub use client::POSTHOG_RUST_USERAGENT;
 
 // Endpoints
 pub use endpoints::{
