@@ -647,7 +647,11 @@ fn capture_panic(options: &ClientOptions, panic_info: &panic::PanicInfo<'_>) -> 
 }
 
 fn send_panic_exception(options: &ClientOptions, mut event: Event) -> Result<(), Error> {
-    prepare_panic_event(&mut event, options);
+    // Panic autocapture uses a temporary synchronous V0 send for the MVP: the
+    // hook runs during unwinding and cannot rely on the normal Capture V1
+    // client path. Keep this prep local until panic capture gets a blocking V1
+    // sender instead of making V0 prep a feature-agnostic client helper.
+    prepare_panic_v0_event(&mut event, options);
     let payload = serde_json::to_string(&InnerEvent::new(event, options.api_key().to_string()))
         .map_err(|e| Error::Serialization(e.to_string()))?;
     let client = BlockingHttpClient::builder()
@@ -672,7 +676,7 @@ fn send_panic_exception(options: &ClientOptions, mut event: Event) -> Result<(),
 }
 
 /// Apply client-level default properties and stamp V0 metadata.
-fn prepare_panic_event(event: &mut Event, options: &ClientOptions) {
+fn prepare_panic_v0_event(event: &mut Event, options: &ClientOptions) {
     let defaults = options.capture_defaults();
     if defaults.disable_geoip {
         event.insert_prop_default("$geoip_disable", Value::Bool(true));
