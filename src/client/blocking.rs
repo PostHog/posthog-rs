@@ -654,6 +654,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, &self.options.user_agent)
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
@@ -852,6 +853,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, &self.options.user_agent)
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
@@ -1075,6 +1077,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, &self.options.user_agent)
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,

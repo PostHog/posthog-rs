@@ -3,7 +3,7 @@ use crate::feature_flags::{
     FeatureFlag, FlagValue, InconclusiveMatchError,
 };
 use crate::Error;
-use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH};
+use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH, USER_AGENT};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -259,7 +259,8 @@ impl FlagPoller {
                         "Authorization",
                         format!("Bearer {}", config.personal_api_key),
                     )
-                    .header("X-PostHog-Project-Api-Key", &config.project_api_key);
+                    .header("X-PostHog-Project-Api-Key", &config.project_api_key)
+                    .header(USER_AGENT, &config.user_agent);
 
                 if let Some(ref etag) = last_etag {
                     request = request.header(IF_NONE_MATCH, etag.as_str());
@@ -319,6 +320,7 @@ impl FlagPoller {
                 format!("Bearer {}", self.config.personal_api_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
+            .header(USER_AGENT, &self.config.user_agent)
             .send()
             .map_err(|e| {
                 error!(error = %e, "Connection error loading flags");
@@ -450,7 +452,8 @@ impl AsyncFlagPoller {
                         let mut request = client
                             .get(&url)
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
-                            .header("X-PostHog-Project-Api-Key", &config.project_api_key);
+                            .header("X-PostHog-Project-Api-Key", &config.project_api_key)
+                            .header(USER_AGENT, &config.user_agent);
 
                         if let Some(ref etag) = last_etag {
                             request = request.header(IF_NONE_MATCH, etag.as_str());
@@ -502,6 +505,8 @@ impl AsyncFlagPoller {
     /// parsed.
     #[instrument(skip(self), level = "debug")]
     pub async fn load_flags(&self) -> Result<(), Error> {
+        use reqwest::header::USER_AGENT;
+
         let url = format!(
             "{}/flags/definitions/?send_cohorts",
             self.config.api_host.trim_end_matches('/')
@@ -515,6 +520,7 @@ impl AsyncFlagPoller {
                 format!("Bearer {}", self.config.personal_api_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
+            .header(USER_AGENT, &self.config.user_agent)
             .send()
             .await
             .map_err(|e| {

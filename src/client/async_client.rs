@@ -6,6 +6,7 @@ use std::time::Duration;
 
 #[cfg(feature = "capture-v1")]
 use chrono::Utc;
+use reqwest::header::USER_AGENT;
 use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
@@ -691,6 +692,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, &self.options.user_agent)
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
@@ -894,6 +896,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, &self.options.user_agent)
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
@@ -1119,6 +1122,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, &self.options.user_agent)
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
