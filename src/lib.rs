@@ -91,6 +91,7 @@ pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
+pub use client::POSTHOG_RUST_USERAGENT;
 
 // Endpoints
 pub use endpoints::{
