@@ -10,6 +10,7 @@ use crate::error::Error;
 /// Outcome of one capture attempt, computed without any I/O so both the async
 /// and blocking clients (and both V0 and V1) can share the decision logic and
 /// keep only the transport-specific loop.
+#[derive(Debug)]
 pub(crate) enum Step {
     Done,
     Backoff(Duration),

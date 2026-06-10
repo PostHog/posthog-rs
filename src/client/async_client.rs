@@ -312,6 +312,10 @@ impl Client {
         if self.options.is_disabled() {
             return Ok(());
         }
+        if events.is_empty() {
+            trace!("Empty batch, skipping capture request");
+            return Ok(());
+        }
 
         #[cfg(feature = "capture-v1")]
         {

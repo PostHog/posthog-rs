@@ -480,6 +480,23 @@ async fn assert_disabled_client_is_noop(api_key: Option<&str>) {
 
 #[cfg(not(feature = "capture-v1"))]
 #[tokio::test]
+async fn test_capture_batch_empty_is_noop() {
+    let server = MockServer::start();
+
+    let batch_mock = server.mock(|when, then| {
+        when.method(POST).path("/batch/");
+        then.status(200).body("ok");
+    });
+
+    let client = create_test_client(server.base_url()).await;
+    let result = client.capture_batch(vec![], false).await;
+
+    assert!(result.is_ok());
+    batch_mock.assert_hits(0);
+}
+
+#[cfg(not(feature = "capture-v1"))]
+#[tokio::test]
 async fn test_capture_batch_sends_to_batch_endpoint() {
     let server = MockServer::start();
 

@@ -635,7 +635,8 @@ mod tests {
             );
             assert!(
                 matches!(step, Step::Done),
-                "HTTP {status} should be treated as success"
+                "HTTP {} should be treated as success",
+                status
             );
             assert_eq!(final_results.len(), 1);
         }
@@ -659,6 +660,36 @@ mod tests {
             &mut final_results,
         );
         assert!(matches!(step, Step::Fail(Error::Serialization(_))));
+    }
+
+    /// A body-less 2xx (e.g. 204 from beacon mode) is terminal on the first
+    /// attempt: Serialization error, no retry, final_results left empty.
+    /// posthog-rs never opts into beacon mode, so this is a safety net.
+    #[test]
+    fn after_response_204_empty_body_is_terminal_serialization_error() {
+        let opts = test_opts();
+        let rid = Uuid::now_v7();
+        let mut pending = vec![dummy_v1_event()];
+        let mut final_results = HashMap::new();
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            204,
+            None,
+            "",
+            &mut pending,
+            &mut final_results,
+        );
+        assert!(
+            matches!(step, Step::Fail(Error::Serialization(_))),
+            "expected terminal Serialization error, got {:?}",
+            step
+        );
+        assert!(
+            final_results.is_empty(),
+            "no events should be finalized from a body-less 2xx"
+        );
     }
 
     // -- build_headers SDK identity -------------------------------------------
