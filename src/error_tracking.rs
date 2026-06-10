@@ -360,21 +360,6 @@ impl Exception {
         }
     }
 
-    /// Build an exception from normalized exception items.
-    ///
-    /// Caller-provided stacktraces are sent as-is: no stacktrace is captured
-    /// and client-side frame classification is not applied.
-    // Unused until panic autocapture (stacked PR) builds its payloads here.
-    #[allow(dead_code)]
-    pub(crate) fn from_exception_list(items: Vec<ExceptionItem>) -> Self {
-        Self {
-            items,
-            captured_frames: None,
-            fingerprint: None,
-            level: "error".to_string(),
-        }
-    }
-
     /// Build an exception from a panic, capturing the current stacktrace when
     /// `capture_stacktrace` is set.
     #[allow(deprecated)]
