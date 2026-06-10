@@ -59,6 +59,10 @@ type SharedBeforeSendHook = Arc<Mutex<Box<BeforeSendFn>>>;
 ///
 /// Hooks run before serialization. Return `Some(event)` to continue sending the
 /// event, or `None` to drop it.
+///
+/// Hook panics are caught and cause the current event to be dropped. If a hook
+/// keeps mutable state, a panic can leave that state partially updated; the SDK
+/// recovers the hook mutex and subsequent events continue through the same hook.
 #[derive(Clone)]
 pub struct BeforeSendHook(SharedBeforeSendHook);
 
@@ -265,6 +269,10 @@ impl ClientOptions {
 
 impl ClientOptionsBuilder {
     /// Add a hook that can modify or discard events before they are sent.
+    ///
+    /// Hooks should avoid panicking. Panics are caught and drop the current event,
+    /// but any mutable state captured by the hook may be left partially updated
+    /// and will be reused on subsequent calls.
     pub fn before_send<F>(&mut self, hook: F) -> &mut Self
     where
         F: FnMut(Event) -> Option<Event> + Send + 'static,

@@ -21,12 +21,14 @@ use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{event::InnerEvent, Error, Event};
 
+#[cfg(feature = "capture-v1")]
+use super::common::apply_capture_defaults;
 use super::common::{
     already_reported, apply_before_send_hooks, build_dedup_key, extract_flag_details,
     flag_called_event, flag_event_dedup_cache, local_record, remote_record_from_detail,
     DetailedFlagsResponse, FlagEventDedupCache,
 };
-use super::ClientOptions;
+use super::{BeforeSendHook, ClientOptions};
 
 async fn check_response(response: reqwest::Response) -> Result<(), Error> {
     let status = response.status().as_u16();
@@ -61,7 +63,7 @@ struct AsyncFlagEventHost {
     disabled: bool,
     disable_geoip: bool,
     is_server: bool,
-    before_send: Vec<super::BeforeSendHook>,
+    before_send: Vec<BeforeSendHook>,
     dedup_cache: FlagEventDedupCache,
     /// Tokio runtime handle captured at host construction (which always runs
     /// inside the runtime that hosts `evaluate_flags`). This lets snapshot
@@ -231,6 +233,9 @@ impl Client {
 
         #[cfg(feature = "capture-v1")]
         {
+            let mut event = event;
+            let defaults = self.options.capture_defaults();
+            apply_capture_defaults(&mut event, &defaults);
             let Some(event) = apply_before_send_hooks(&self.options.before_send, event) else {
                 return Ok(());
             };
@@ -265,9 +270,13 @@ impl Client {
 
         #[cfg(feature = "capture-v1")]
         {
+            let defaults = self.options.capture_defaults();
             let events: Vec<_> = events
                 .into_iter()
-                .filter_map(|event| apply_before_send_hooks(&self.options.before_send, event))
+                .filter_map(|mut event| {
+                    apply_capture_defaults(&mut event, &defaults);
+                    apply_before_send_hooks(&self.options.before_send, event)
+                })
                 .collect();
             if events.is_empty() {
                 return Ok(());

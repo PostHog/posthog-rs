@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use crate::client::BeforeSendHook;
+use crate::client::CaptureDefaults;
 use crate::feature_flag_evaluations::{EvaluatedFlagRecord, FlagCalledEventParams};
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
 use crate::Event;
@@ -15,6 +16,15 @@ pub(super) type FlagEventDedupCache = Mutex<HashMap<String, HashSet<String>>>;
 
 pub(super) fn flag_event_dedup_cache() -> FlagEventDedupCache {
     Mutex::new(HashMap::new())
+}
+
+pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaults) {
+    if defaults.disable_geoip {
+        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
+    }
+    if defaults.is_server {
+        event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
+    }
 }
 
 pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {

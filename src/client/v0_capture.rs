@@ -7,7 +7,10 @@ use reqwest::blocking::RequestBuilder;
 #[cfg(feature = "async-client")]
 use reqwest::RequestBuilder;
 
-use super::{common::apply_before_send_hooks, BeforeSendHook, CaptureDefaults, ClientOptions};
+use super::{
+    common::{apply_before_send_hooks, apply_capture_defaults},
+    BeforeSendHook, CaptureDefaults, ClientOptions,
+};
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
@@ -20,12 +23,7 @@ use crate::event::{BatchRequest, Event, InnerEvent};
 /// Uses `insert_prop_default` so a caller who explicitly set a property on the
 /// event before calling `capture()` keeps their value.
 pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
-    if defaults.disable_geoip {
-        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
-    }
-    if defaults.is_server {
-        event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
-    }
+    apply_capture_defaults(event, defaults);
     event.prepare_for_v0();
 }
 

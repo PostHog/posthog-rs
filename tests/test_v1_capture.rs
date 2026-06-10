@@ -471,6 +471,75 @@ async fn v1_capture_caller_override_wins_for_is_server() {
 }
 
 #[tokio::test]
+async fn v1_before_send_runs_after_capture_defaults() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .body_contains("\"hook_saw_defaults\":true");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let options = ClientOptionsBuilder::default()
+        .api_key("phc_test_token".to_string())
+        .host(server.base_url())
+        .disable_geoip(true)
+        .before_send(|mut event| {
+            let saw_defaults = event.properties().get("$is_server") == Some(&json!(true))
+                && event.properties().get("$geoip_disable") == Some(&json!(true));
+            event
+                .insert_prop("hook_saw_defaults", saw_defaults)
+                .unwrap();
+            Some(event)
+        })
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(options).await;
+
+    client.capture(Event::new("test", "user-1")).await.unwrap();
+    mock.assert();
+}
+
+#[tokio::test]
+async fn v1_batch_before_send_runs_after_capture_defaults() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .body_contains("\"hook_saw_defaults\":true");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let options = ClientOptionsBuilder::default()
+        .api_key("phc_test_token".to_string())
+        .host(server.base_url())
+        .disable_geoip(true)
+        .before_send(|mut event| {
+            let saw_defaults = event.properties().get("$is_server") == Some(&json!(true))
+                && event.properties().get("$geoip_disable") == Some(&json!(true));
+            event
+                .insert_prop("hook_saw_defaults", saw_defaults)
+                .unwrap();
+            Some(event)
+        })
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(options).await;
+
+    client
+        .capture_batch(vec![Event::new("test", "user-1")], false)
+        .await
+        .unwrap();
+    mock.assert();
+}
+
+#[tokio::test]
 async fn v1_capture_batch_sets_historical_migration() {
     let server = MockServer::start();
 
