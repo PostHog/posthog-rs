@@ -10,7 +10,9 @@ use tracing::{debug, instrument, trace, warn};
 #[cfg(feature = "capture-v1")]
 use uuid::Uuid;
 
-use crate::endpoints::{Endpoint, EndpointManager};
+use crate::endpoints::Endpoint;
+#[cfg(not(feature = "capture-v1"))]
+use crate::event::InnerEvent;
 #[cfg(feature = "capture-v1")]
 use crate::event_v1::CaptureResponse;
 use crate::feature_flag_evaluations::{
@@ -19,7 +21,7 @@ use crate::feature_flag_evaluations::{
 };
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
-use crate::{event::InnerEvent, Error, Event};
+use crate::{Error, Event};
 
 use super::common::{
     already_reported, build_dedup_key, extract_flag_details, flag_called_event,
@@ -28,6 +30,7 @@ use super::common::{
 };
 use super::ClientOptions;
 
+#[cfg(not(feature = "capture-v1"))]
 fn check_response(response: reqwest::blocking::Response) -> Result<(), Error> {
     let status = response.status().as_u16();
     let body = response
@@ -53,35 +56,81 @@ pub struct Client {
 /// `$feature_flag_called` events through a clone of the blocking [`Client`]'s
 /// HTTP transport. Constructed lazily and cached on the [`Client`] so all
 /// snapshots share a single dedup cache.
+///
+/// With `capture-v1`, events ship to the V1 endpoint (single synchronous
+/// attempt); otherwise the legacy v0 `/i/v0/e/` path.
 struct BlockingFlagEventHost {
     http_client: HttpClient,
-    api_key: String,
-    endpoints: EndpointManager,
-    disabled: bool,
-    disable_geoip: bool,
-    is_server: bool,
+    options: ClientOptions,
+    capture_url: String,
     dedup_cache: FlagEventDedupCache,
 }
 
 impl BlockingFlagEventHost {
     fn from_options(options: &ClientOptions, http_client: HttpClient) -> Self {
+        #[cfg(feature = "capture-v1")]
+        let capture_url = options
+            .endpoints()
+            .build_custom_url(super::v1_capture::V1_CAPTURE_PATH);
+        #[cfg(not(feature = "capture-v1"))]
+        let capture_url = options.endpoints().build_url(Endpoint::Capture);
         Self {
             http_client,
-            api_key: options.api_key.clone(),
-            endpoints: options.endpoints().clone(),
-            disabled: options.is_disabled(),
-            disable_geoip: options.disable_geoip,
-            is_server: options.is_server,
+            options: options.clone(),
+            capture_url,
             dedup_cache: flag_event_dedup_cache(),
         }
     }
 
-    fn ship_event(&self, mut event: Event) {
-        if self.disabled {
+    fn ship_event(&self, event: Event) {
+        if self.options.is_disabled() {
             return;
         }
+        #[cfg(feature = "capture-v1")]
+        self.ship_event_v1(event);
+        #[cfg(not(feature = "capture-v1"))]
+        self.ship_event_v0(event);
+    }
+
+    /// Single attempt, no retries — matches v0 flag-event semantics: losses
+    /// aren't worth retry traffic or extra blocking time on the caller.
+    #[cfg(feature = "capture-v1")]
+    fn ship_event_v1(&self, event: Event) {
+        let (headers, body) =
+            match super::v1_capture::build_flag_event_request(&self.options, &event) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    debug!(error = %e, "failed to serialize $feature_flag_called event");
+                    return;
+                }
+            };
+        let result = self
+            .http_client
+            .post(&self.capture_url)
+            .headers(headers)
+            .body(body)
+            .send();
+        match result {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                if !(200..=299).contains(&status) {
+                    let message = response
+                        .text()
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    debug!(
+                        status,
+                        "$feature_flag_called event rejected by server: {message}"
+                    );
+                }
+            }
+            Err(e) => debug!(error = %e, "failed to send $feature_flag_called event"),
+        }
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    fn ship_event_v0(&self, mut event: Event) {
         event.prepare_for_v0();
-        let inner_event = InnerEvent::new(event, self.api_key.clone());
+        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
         let payload = match serde_json::to_string(&inner_event) {
             Ok(p) => p,
             Err(e) => {
@@ -89,10 +138,9 @@ impl BlockingFlagEventHost {
                 return;
             }
         };
-        let url = self.endpoints.build_url(Endpoint::Capture);
         let result = self
             .http_client
-            .post(&url)
+            .post(&self.capture_url)
             .header(CONTENT_TYPE, "application/json")
             .body(payload)
             .send();
@@ -114,7 +162,9 @@ impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
             return;
         }
 
-        if let Some(event) = flag_called_event(params, self.disable_geoip, self.is_server) {
+        if let Some(event) =
+            flag_called_event(params, self.options.disable_geoip, self.options.is_server)
+        {
             self.ship_event(event);
         }
     }
