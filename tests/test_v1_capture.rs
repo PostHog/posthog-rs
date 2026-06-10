@@ -726,8 +726,7 @@ async fn v1_capture_request_id_stable_across_retries() {
     );
 }
 
-/// C3: a non-200 success status (e.g. a future 201/202) with a well-formed
-/// batch response body must be treated as success, not a connection error.
+/// C3: a non-200 2xx with a well-formed body is success, not a connection error.
 #[tokio::test]
 async fn v1_capture_accepts_alternate_2xx_status() {
     let server = MockServer::start();
@@ -753,9 +752,8 @@ async fn v1_capture_accepts_alternate_2xx_status() {
     mock.assert_hits(1);
 }
 
-/// C4: pins the SDK identity sent on the wire — capture parses
-/// `posthog-sdk-info` (`<canonical-$lib-name>/<semver>`) into
-/// `$lib`/`$lib_version`, so the name segment must be "posthog-rs".
+/// C4: pins the wire identity `posthog-rs/<semver>` that capture parses
+/// into `$lib`/`$lib_version`.
 #[tokio::test]
 async fn v1_capture_sends_canonical_sdk_info_header() {
     let server = MockServer::start();

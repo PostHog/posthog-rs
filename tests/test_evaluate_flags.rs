@@ -4,15 +4,13 @@ use serde_json::{json, Value};
 #[cfg(feature = "async-client")]
 use std::time::Duration;
 
-/// Capture endpoint `$feature_flag_called` events ship to: the V1 analytics
-/// path with `capture-v1`, the legacy v0 path otherwise.
+/// Where `$feature_flag_called` ships: V1 analytics with `capture-v1`, else v0.
 #[cfg(feature = "capture-v1")]
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
 #[cfg(not(feature = "capture-v1"))]
 const CAPTURE_PATH: &str = "/i/v0/e/";
 
-/// Feature-aware mock for the capture endpoint. The JSON body is required by
-/// the V1 client and harmlessly ignored by the v0 flag-event host.
+/// Feature-aware capture mock; the JSON body is required by V1, ignored by v0.
 fn capture_path_mock(server: &MockServer) -> httpmock::Mock<'_> {
     server.mock(|when, then| {
         when.method(POST).path(CAPTURE_PATH);
@@ -452,9 +450,7 @@ mod blocking {
         );
     }
 
-    /// C5: with `capture-v1`, `$feature_flag_called` ships through the V1
-    /// analytics endpoint (single attempt, SDK identity in headers) and
-    /// nothing hits the legacy v0 path.
+    /// C5: `$feature_flag_called` ships via the V1 endpoint, never the v0 path.
     #[cfg(feature = "capture-v1")]
     #[test]
     fn flag_called_event_routes_to_v1_endpoint() {
@@ -490,8 +486,7 @@ mod blocking {
         v0_mock.assert_hits(0);
     }
 
-    /// C5: a failed V1 flag-event ship is fire-and-forget — exactly one
-    /// attempt, no retry loop, and no error surfaced to the flag read.
+    /// C5: a failed ship is fire-and-forget — one attempt, no surfaced error.
     #[cfg(feature = "capture-v1")]
     #[test]
     fn flag_called_event_v1_failure_is_single_attempt_and_silent() {
@@ -681,9 +676,7 @@ mod async_tests {
         capture_mock.assert_hits(0);
     }
 
-    /// C5: with `capture-v1`, `$feature_flag_called` ships through the V1
-    /// analytics endpoint (single attempt, SDK identity in headers) and
-    /// nothing hits the legacy v0 path.
+    /// C5: `$feature_flag_called` ships via the V1 endpoint, never the v0 path.
     #[cfg(feature = "capture-v1")]
     #[tokio::test]
     async fn flag_called_event_routes_to_v1_endpoint() {
@@ -721,8 +714,7 @@ mod async_tests {
         v0_mock.assert_hits(0);
     }
 
-    /// C5: a failed V1 flag-event ship is fire-and-forget — exactly one
-    /// attempt, no retry loop, and no error surfaced to the flag read.
+    /// C5: a failed ship is fire-and-forget — one attempt, no surfaced error.
     #[cfg(feature = "capture-v1")]
     #[tokio::test]
     async fn flag_called_event_v1_failure_is_single_attempt_and_silent() {

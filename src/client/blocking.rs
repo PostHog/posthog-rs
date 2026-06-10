@@ -57,9 +57,8 @@ pub struct Client {
 /// HTTP transport. Constructed lazily and cached on the [`Client`] so all
 /// snapshots share a single dedup cache.
 ///
-/// With the `capture-v1` feature the events go to the same V1 endpoint as
-/// regular capture (single synchronous attempt, no retry loop); otherwise
-/// they take the legacy v0 `/i/v0/e/` path.
+/// With `capture-v1`, events ship to the V1 endpoint (single synchronous
+/// attempt); otherwise the legacy v0 `/i/v0/e/` path.
 struct BlockingFlagEventHost {
     http_client: HttpClient,
     options: ClientOptions,
@@ -93,10 +92,8 @@ impl BlockingFlagEventHost {
         self.ship_event_v0(event);
     }
 
-    /// Ship over the V1 capture endpoint. Deliberately a single attempt with
-    /// no retry loop, matching v0 flag-event semantics: a lost
-    /// `$feature_flag_called` event is not worth retry traffic or extra
-    /// blocking time on the caller's thread.
+    /// Single attempt, no retries — matches v0 flag-event semantics: losses
+    /// aren't worth retry traffic or extra blocking time on the caller.
     #[cfg(feature = "capture-v1")]
     fn ship_event_v1(&self, event: Event) {
         let (headers, body) =

@@ -45,12 +45,8 @@ pub(crate) fn build_events(events: &[Event], defaults: &CaptureDefaults) -> Vec<
 
 pub(crate) fn build_headers(opts: &ClientOptions, request_id: &Uuid, attempt: u32) -> HeaderMap {
     let version = env!("CARGO_PKG_VERSION");
-    // V1 SDK-identity standard: `<canonical-$lib-name>/<semver>`. The name
-    // segment MUST equal the value this SDK sends as `$lib` on the v0 path
-    // ("posthog-rs"); consumers parse by splitting at the LAST '/'. Capture
-    // materializes this header into `$lib`/`$lib_version` event properties
-    // server-side, so downstream surfaces (SDK Health, usage reports, Library
-    // columns) attribute v1 traffic correctly.
+    // SDK identity: `<canonical-$lib-name>/<semver>`. The name must match v0's
+    // `$lib` ("posthog-rs"); capture materializes it into `$lib`/`$lib_version`.
     let sdk_info = format!("posthog-rs/{version}");
 
     let mut headers = HeaderMap::new();
@@ -111,15 +107,10 @@ pub(crate) fn maybe_compress(
     payload
 }
 
-/// Build headers and (possibly compressed) body for a single-event,
-/// fire-and-forget `$feature_flag_called` ship over the V1 endpoint.
-///
-/// Always a single attempt (`posthog-attempt: 1`): the flag-event hosts
-/// mirror the v0 behavior where a lost `$feature_flag_called` event is not
-/// worth retry traffic, and shipping must never block flag reads. `$lib` /
-/// `$lib_version` are intentionally not injected into properties here — on
-/// the V1 path they are carried by the `posthog-sdk-info` header and
-/// materialized server-side by capture.
+/// Headers + (possibly compressed) body for a single-event, fire-and-forget
+/// `$feature_flag_called` ship over the V1 endpoint. Always one attempt:
+/// flag-event loss isn't worth retry traffic, and shipping must never block
+/// flag reads.
 pub(crate) fn build_flag_event_request(
     opts: &ClientOptions,
     event: &Event,
@@ -215,10 +206,8 @@ pub(crate) fn after_response(
     pending: &mut Vec<V1Event>,
     final_results: &mut HashMap<Uuid, EventResult>,
 ) -> Step {
-    // The backend returns exactly 200 on success today (per-event outcomes are
-    // carried in the JSON body, never via alternate 2xx codes), but accept the
-    // whole success class so a future 201/202/207 is not misclassified as a
-    // connection error.
+    // The backend sends exactly 200 today; accept the whole 2xx class so a
+    // future 201/202 isn't misclassified as a connection error.
     if (200..=299).contains(&status) {
         let batch_resp: CaptureResponse = match serde_json::from_str(body) {
             Ok(r) => r,
@@ -652,8 +641,7 @@ mod tests {
         }
     }
 
-    /// C3: a 2xx whose body is not a batch response is a Serialization error —
-    /// success classification must not silently swallow an unreadable body.
+    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
     #[test]
     fn after_response_alternate_2xx_malformed_body_fails() {
         let opts = test_opts();
@@ -675,10 +663,8 @@ mod tests {
 
     // -- build_headers SDK identity -------------------------------------------
 
-    /// C4: pins the v1 SDK-identity wire format `<canonical-$lib-name>/<semver>`.
-    /// The name segment must be "posthog-rs" — the same value the v0 path sends
-    /// as `$lib` — because capture materializes this header into
-    /// `$lib`/`$lib_version` properties server-side.
+    /// C4: pins the wire identity `posthog-rs/<semver>` — the name must equal
+    /// v0's `$lib` so capture's `$lib`/`$lib_version` materialization is correct.
     #[test]
     fn build_headers_sdk_info_is_canonical_lib_slash_version() {
         let opts = test_opts();

@@ -58,9 +58,8 @@ pub struct Client {
 /// HTTP transport. The event ship is fire-and-forget: errors are logged at
 /// `debug` level but do not surface to the caller, matching the JS SDK.
 ///
-/// With the `capture-v1` feature the events go to the same V1 endpoint as
-/// regular capture (single attempt, no retry loop); otherwise they take the
-/// legacy v0 `/i/v0/e/` path.
+/// With `capture-v1`, events ship to the V1 endpoint (single attempt);
+/// otherwise the legacy v0 `/i/v0/e/` path.
 struct AsyncFlagEventHost {
     http_client: HttpClient,
     options: ClientOptions,
@@ -101,10 +100,8 @@ impl AsyncFlagEventHost {
         self.spawn_ship_v0(event);
     }
 
-    /// Ship over the V1 capture endpoint. Deliberately a single attempt with
-    /// no retry loop, matching v0 flag-event semantics: a lost
-    /// `$feature_flag_called` event is not worth retry traffic, and shipping
-    /// must never block or slow flag reads.
+    /// Single attempt, no retries — matches v0 flag-event semantics: losses
+    /// aren't worth retry traffic and shipping must never slow flag reads.
     #[cfg(feature = "capture-v1")]
     fn spawn_ship_v1(&self, event: Event) {
         let (headers, body) =
