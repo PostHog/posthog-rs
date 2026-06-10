@@ -291,7 +291,6 @@ impl Client {
             return Ok(());
         }
         if events.is_empty() {
-            trace!("Empty batch, skipping capture request");
             return Ok(());
         }
 
