@@ -567,23 +567,19 @@ fn debug_id_from_gnu_build_id(build_id: &[u8]) -> Option<String> {
     Some(uuid::Uuid::from_bytes(data).to_string())
 }
 
-fn debug_id_for(id: &findshlibs::SharedLibraryId) -> Option<(String, Option<String>)> {
+fn debug_id_for(id: &findshlibs::SharedLibraryId) -> Option<String> {
     use findshlibs::SharedLibraryId;
 
     match id {
-        SharedLibraryId::GnuBuildId(bytes) => {
-            let code_id = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-            debug_id_from_gnu_build_id(bytes).map(|debug_id| (debug_id, Some(code_id)))
-        }
-        SharedLibraryId::Uuid(bytes) => Some((uuid::Uuid::from_bytes(*bytes).to_string(), None)),
+        SharedLibraryId::GnuBuildId(bytes) => debug_id_from_gnu_build_id(bytes),
+        SharedLibraryId::Uuid(bytes) => Some(uuid::Uuid::from_bytes(*bytes).to_string()),
         SharedLibraryId::PdbSignature(guid, age) => {
             let uuid = uuid::Uuid::from_bytes(*guid).to_string();
-            let debug_id = if *age > 0 {
+            Some(if *age > 0 {
                 format!("{uuid}-{age:x}")
             } else {
                 uuid
-            };
-            Some((debug_id, None))
+            })
         }
         // PE timestamp/size signatures carry no debug id we can match symbols to.
         _ => None,
@@ -617,10 +613,19 @@ fn collect_loaded_modules() -> Vec<LoadedModule> {
             Some(name)
         };
 
-        let ids = shlib.id().as_ref().and_then(debug_id_for);
-        let (debug_id, code_id) = match ids {
-            Some((debug_id, code_id)) => (debug_id, code_id),
-            None => (String::new(), None),
+        // debug_id() (PDB GUID+age on Windows, same as id() elsewhere) is the
+        // identifier that matches uploaded symbols; id() supplies the full
+        // code identifier (e.g. complete GNU build id).
+        let debug_id = shlib
+            .debug_id()
+            .as_ref()
+            .and_then(debug_id_for)
+            .unwrap_or_default();
+        let code_id = match shlib.id() {
+            Some(findshlibs::SharedLibraryId::GnuBuildId(bytes)) => {
+                Some(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+            }
+            _ => None,
         };
 
         modules.push(LoadedModule {
@@ -657,6 +662,10 @@ fn find_module(modules: &[LoadedModule], addr: u64) -> Option<&LoadedModule> {
 // at capture time by finalize_exception. Every frame carries its instruction
 // address; function/file/line enrichment is best-effort and missing entirely
 // in stripped release builds.
+//
+// inline(never): the entry address of this function identifies the SDK's own
+// frames for address-based stripping, which must survive symbol-less builds.
+#[inline(never)]
 fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<StackFrame> {
     let mut frames = Vec::new();
     let mut skipped = 0usize;
@@ -738,9 +747,32 @@ fn trim_to_max_frames(frames: &mut Vec<StackFrame>, max_frames: usize) {
 /// crash/capture-site frame last, matching the other PostHog SDKs — dropping
 /// the SDK's own capture frames. Also returns the loaded modules referenced
 /// by the captured frames, for the `$debug_images` property.
+#[inline(never)]
 fn capture_raw_application_stack() -> (Vec<StackFrame>, Vec<DebugImage>) {
     let modules = collect_loaded_modules();
     let mut frames = capture_frames_current_first(0, &modules);
+
+    // Address-based stripping first: identify the SDK's own capture frames by
+    // function entry address, which works even in stripped builds where the
+    // name-based check below has nothing to match. The unwinder's frames sit
+    // inner-most (before ours), so dropping through the last match removes
+    // them too.
+    let pinned_entries = [
+        capture_frames_current_first as usize as u64,
+        capture_raw_application_stack as usize as u64,
+    ];
+    let scan = frames.len().min(16);
+    let matches_pinned = |frame: &StackFrame| {
+        frame
+            .symbol_addr
+            .as_deref()
+            .and_then(|addr| u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok())
+            .is_some_and(|addr| pinned_entries.contains(&addr))
+    };
+    if let Some(last_sdk) = frames[..scan].iter().rposition(matches_pinned) {
+        frames.drain(..=last_sdk);
+    }
+
     while frames
         .first()
         .map(|frame| is_internal_capture_frame(&frame.function))
