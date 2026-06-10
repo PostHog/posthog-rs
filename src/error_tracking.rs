@@ -525,8 +525,9 @@ const fn native_image_type() -> &'static str {
 
 /// Render 16 bytes laid out as a little-endian GUID (Microsoft convention:
 /// the first three fields are stored byte-swapped) as a canonical UUID
-/// string. This matches how symbolic's `DebugId` — used by the server and
-/// CLI — interprets GNU build ids and CodeView PDB signatures.
+/// string. The swap is unconditional — not gated on this target's endianness —
+/// because it must match the ids computed at upload time by symbolic running
+/// on PostHog's (little-endian) servers and the CLI.
 fn guid_le_to_uuid(mut data: [u8; 16]) -> String {
     data[0..4].reverse();
     data[4..6].reverse();
@@ -551,7 +552,11 @@ fn debug_id_for(id: &findshlibs::SharedLibraryId) -> Option<String> {
 
     match id {
         SharedLibraryId::GnuBuildId(bytes) => debug_id_from_gnu_build_id(bytes),
-        SharedLibraryId::Uuid(bytes) => Some(uuid::Uuid::from_bytes(*bytes).to_string()),
+        // Uppercase to match the chunk_ids stored by `posthog-cli dsym
+        // upload`, which takes them verbatim from dwarfdump output.
+        SharedLibraryId::Uuid(bytes) => {
+            Some(uuid::Uuid::from_bytes(*bytes).to_string().to_uppercase())
+        }
         SharedLibraryId::PdbSignature(guid, age) => {
             let uuid = guid_le_to_uuid(*guid);
             Some(if *age > 0 {
@@ -746,6 +751,12 @@ fn capture_raw_application_stack() -> (Vec<StackFrame>, Vec<DebugImage>) {
     // name-based check below has nothing to match. The unwinder's frames sit
     // inner-most (before ours), so dropping through the last match removes
     // them too.
+    //
+    // Platform caveat: entry addresses come from the unwinder
+    // (`_Unwind_FindEnclosingFunction` on Linux/glibc) or symbol tables. On
+    // fully stripped Apple/Windows builds neither is available and the
+    // captured stack keeps the SDK prefix as address-only frames; they regain
+    // names through server-side symbolication.
     let pinned_entries = [
         capture_frames_current_first as usize as u64,
         capture_raw_application_stack as usize as u64,
