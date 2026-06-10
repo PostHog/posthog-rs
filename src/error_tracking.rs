@@ -239,6 +239,9 @@ pub struct Exception {
     // trimming, stacktrace opt-out), applied in finalize_exception and attached
     // to items[0].
     captured_frames: Option<Vec<StackFrame>>,
+    // Loaded modules referenced by captured_frames; becomes the event-level
+    // $debug_images property after trimming.
+    captured_images: Vec<DebugImage>,
     fingerprint: Option<String>,
     level: String,
 }
@@ -275,9 +278,11 @@ impl Exception {
 
         link_exception_chain(&mut items);
 
+        let (frames, images) = capture_raw_application_stack();
         Self {
             items,
-            captured_frames: Some(capture_raw_application_frames()),
+            captured_frames: Some(frames),
+            captured_images: images,
             fingerprint: None,
             level: "error".to_string(),
         }
@@ -288,6 +293,7 @@ impl Exception {
     // Only exercised by tests today; kept as the message-capture seam.
     #[allow(dead_code)]
     pub fn from_message<T: Into<String>, V: Into<String>>(exception_type: T, value: V) -> Self {
+        let (frames, images) = capture_raw_application_stack();
         Self {
             items: vec![ExceptionItem {
                 exception_type: exception_type.into(),
@@ -295,7 +301,8 @@ impl Exception {
                 mechanism: ExceptionMechanism::default(),
                 stacktrace: None,
             }],
-            captured_frames: Some(capture_raw_application_frames()),
+            captured_frames: Some(frames),
+            captured_images: images,
             fingerprint: None,
             level: "error".to_string(),
         }
@@ -304,6 +311,7 @@ impl Exception {
     /// Build an exception from a panic, capturing the current stacktrace.
     #[allow(deprecated)]
     fn from_panic_info(panic_info: &panic::PanicInfo<'_>) -> Self {
+        let (frames, images) = capture_raw_panic_frames();
         Self {
             items: vec![ExceptionItem {
                 exception_type: "Panic".to_string(),
@@ -317,7 +325,8 @@ impl Exception {
                 },
                 stacktrace: None,
             }],
-            captured_frames: Some(capture_raw_panic_frames()),
+            captured_frames: Some(frames),
+            captured_images: images,
             fingerprint: None,
             level: "error".to_string(),
         }
@@ -367,6 +376,7 @@ pub(crate) fn finalize_exception(
     let Exception {
         mut items,
         captured_frames,
+        captured_images,
         fingerprint,
         level,
     } = exception;
@@ -375,13 +385,28 @@ pub(crate) fn finalize_exception(
     }
 
     items.truncate(options.max_error_sources().max(1));
+    let mut debug_images = Vec::new();
     if options.capture_stacktrace() {
         if let Some(mut frames) = captured_frames {
             for frame in frames.iter_mut() {
                 let function = (!frame.function.is_empty()).then_some(frame.function.as_str());
-                frame.in_app = options.is_in_app_frame(frame.filename.as_deref(), function);
+                // Frames without any symbol information keep their capture-time
+                // image-based classification; the path/function rules have
+                // nothing to act on.
+                if function.is_some() || frame.filename.is_some() {
+                    frame.in_app = options.is_in_app_frame(frame.filename.as_deref(), function);
+                }
             }
             trim_to_max_frames(&mut frames, options.max_frames());
+            // Only report modules still referenced after trimming.
+            debug_images = captured_images
+                .into_iter()
+                .filter(|image| {
+                    frames
+                        .iter()
+                        .any(|f| f.image_addr.as_deref() == Some(image.image_addr.as_str()))
+                })
+                .collect();
             items[0].stacktrace = Some(ExceptionStacktrace::raw(frames));
         }
     }
@@ -389,6 +414,9 @@ pub(crate) fn finalize_exception(
     event.insert_prop("$exception_level", level)?;
     if let Some(fingerprint) = fingerprint {
         event.insert_prop("$exception_fingerprint", fingerprint)?;
+    }
+    if !debug_images.is_empty() {
+        event.insert_prop("$debug_images", debug_images)?;
     }
     event.insert_prop("$exception_list", items)?;
     Ok(())
@@ -451,6 +479,11 @@ impl ExceptionStacktrace {
 }
 
 /// A normalized stack frame.
+///
+/// Frames carry the raw `instruction_addr` for server-side symbolication
+/// against uploaded debug symbols (`posthog-cli debug-symbols upload`), plus
+/// best-effort client-side enrichment (`function`/`filename`/`lineno`) used
+/// for display when no debug symbols are available.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct StackFrame {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -458,18 +491,173 @@ pub struct StackFrame {
     #[serde(rename = "lineno")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_no: Option<u32>,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub function: String,
     pub lang: String,
     pub in_app: bool,
     pub synthetic: bool,
-    pub resolved: bool,
     pub platform: String,
+    /// Absolute address of the instruction, as a hex string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_addr: Option<String>,
+    /// Start address of the enclosing symbol, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_addr: Option<String>,
+    /// Load address of the module containing the instruction, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_addr: Option<String>,
+}
+
+/// A loaded module (binary image) referenced by captured stack frames. Sent as
+/// the event-level `$debug_images` property so the server can map instruction
+/// addresses onto uploaded debug symbols.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct DebugImage {
+    #[serde(rename = "type")]
+    pub image_type: String,
+    /// The debug identifier matching the uploaded symbol set (derived from
+    /// the GNU build id on ELF, `LC_UUID` on Mach-O).
+    pub debug_id: String,
+    /// The full code identifier (e.g. complete GNU build id), when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_id: Option<String>,
+    pub image_addr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_vmaddr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_file: Option<String>,
+    pub arch: String,
+}
+
+/// A module mapped into the process, used to attach load addresses to frames
+/// and build the `$debug_images` list.
+struct LoadedModule {
+    base: u64,
+    end: u64,
+    is_main: bool,
+    image: DebugImage,
+}
+
+const fn native_image_type() -> &'static str {
+    if cfg!(any(target_os = "macos", target_os = "ios")) {
+        "macho"
+    } else if cfg!(target_os = "windows") {
+        "pe"
+    } else {
+        "elf"
+    }
+}
+
+/// Derive a debug id from a GNU build id, matching how the server and CLI
+/// derive it from the binary: the first 16 bytes interpreted as a
+/// little-endian GUID (first three fields byte-swapped), zero-padded when the
+/// build id is shorter.
+fn debug_id_from_gnu_build_id(build_id: &[u8]) -> Option<String> {
+    if build_id.is_empty() {
+        return None;
+    }
+    let mut data = [0u8; 16];
+    let len = build_id.len().min(16);
+    data[..len].copy_from_slice(&build_id[..len]);
+    data[0..4].reverse();
+    data[4..6].reverse();
+    data[6..8].reverse();
+    Some(uuid::Uuid::from_bytes(data).to_string())
+}
+
+fn debug_id_for(id: &findshlibs::SharedLibraryId) -> Option<(String, Option<String>)> {
+    use findshlibs::SharedLibraryId;
+
+    match id {
+        SharedLibraryId::GnuBuildId(bytes) => {
+            let code_id = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            debug_id_from_gnu_build_id(bytes).map(|debug_id| (debug_id, Some(code_id)))
+        }
+        SharedLibraryId::Uuid(bytes) => Some((uuid::Uuid::from_bytes(*bytes).to_string(), None)),
+        SharedLibraryId::PdbSignature(guid, age) => {
+            let uuid = uuid::Uuid::from_bytes(*guid).to_string();
+            let debug_id = if *age > 0 {
+                format!("{uuid}-{age:x}")
+            } else {
+                uuid
+            };
+            Some((debug_id, None))
+        }
+        // PE timestamp/size signatures carry no debug id we can match symbols to.
+        _ => None,
+    }
+}
+
+/// Enumerate the modules currently mapped into the process, sorted by load
+/// address. Modules without a usable debug id are kept for address matching
+/// (frames still get an `image_addr`) but marked so they're never reported
+/// in `$debug_images`.
+fn collect_loaded_modules() -> Vec<LoadedModule> {
+    use findshlibs::{IterationControl, SharedLibrary, TargetSharedLibrary};
+
+    let mut modules = Vec::new();
+    let mut is_first = true;
+
+    TargetSharedLibrary::each(|shlib| {
+        let base = shlib.actual_load_addr().0 as u64;
+        let size = shlib.len() as u64;
+        // The first module reported is the main executable on all supported
+        // platforms; its name can be empty on Linux.
+        let is_main = is_first;
+        is_first = false;
+
+        let name = shlib.name().to_string_lossy().into_owned();
+        let code_file = if name.is_empty() {
+            std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        } else {
+            Some(name)
+        };
+
+        let ids = shlib.id().as_ref().and_then(debug_id_for);
+        let (debug_id, code_id) = match ids {
+            Some((debug_id, code_id)) => (debug_id, code_id),
+            None => (String::new(), None),
+        };
+
+        modules.push(LoadedModule {
+            base,
+            end: base.saturating_add(size),
+            is_main,
+            image: DebugImage {
+                image_type: native_image_type().to_string(),
+                debug_id,
+                code_id,
+                image_addr: format!("0x{base:x}"),
+                image_size: Some(size),
+                image_vmaddr: Some(format!("0x{:x}", shlib.stated_load_addr().0 as u64)),
+                code_file,
+                arch: std::env::consts::ARCH.to_string(),
+            },
+        });
+
+        IterationControl::Continue
+    });
+
+    modules.sort_by_key(|m| m.base);
+    modules
+}
+
+fn find_module(modules: &[LoadedModule], addr: u64) -> Option<&LoadedModule> {
+    let idx = modules.partition_point(|m| m.base <= addr);
+    let module = modules[..idx].last()?;
+    (addr < module.end).then_some(module)
 }
 
 // Captures raw Rust stack traces for Error Tracking. Frames are unclassified
 // at this point: in-app classification and trimming are client policy, applied
-// at capture time by finalize_exception.
-fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
+// at capture time by finalize_exception. Every frame carries its instruction
+// address; function/file/line enrichment is best-effort and missing entirely
+// in stripped release builds.
+fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<StackFrame> {
     let mut frames = Vec::new();
     let mut skipped = 0usize;
 
@@ -478,6 +666,10 @@ fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
             skipped += 1;
             return true;
         }
+
+        let instruction_addr = frame.ip() as u64;
+        let symbol_addr = frame.symbol_address() as u64;
+        let module = find_module(modules, instruction_addr);
 
         let mut pushed = false;
         backtrace::resolve_frame(frame, |symbol| {
@@ -501,11 +693,32 @@ fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
                 lang: "rust".to_string(),
                 in_app: false,
                 synthetic: false,
-                resolved: true,
-                platform: "rust".to_string(),
+                platform: "native".to_string(),
+                instruction_addr: Some(format!("0x{instruction_addr:x}")),
+                symbol_addr: (symbol_addr != 0).then(|| format!("0x{symbol_addr:x}")),
+                image_addr: module.map(|m| m.image.image_addr.clone()),
             });
             pushed = true;
         });
+
+        if !pushed {
+            // No symbol information (e.g. stripped binary): keep the frame as
+            // an address-only entry for server-side symbolication. In-app
+            // classification has no names to work with, so default by module:
+            // the main executable is application code, shared libraries aren't.
+            frames.push(StackFrame {
+                filename: None,
+                line_no: None,
+                function: String::new(),
+                lang: "rust".to_string(),
+                in_app: module.is_some_and(|m| m.is_main),
+                synthetic: false,
+                platform: "native".to_string(),
+                instruction_addr: Some(format!("0x{instruction_addr:x}")),
+                symbol_addr: (symbol_addr != 0).then(|| format!("0x{symbol_addr:x}")),
+                image_addr: module.map(|m| m.image.image_addr.clone()),
+            });
+        }
 
         true
     });
@@ -523,9 +736,11 @@ fn trim_to_max_frames(frames: &mut Vec<StackFrame>, max_frames: usize) {
 
 /// Capture the current raw stacktrace in wire order — outermost frame first,
 /// crash/capture-site frame last, matching the other PostHog SDKs — dropping
-/// the SDK's own capture frames.
-fn capture_raw_application_frames() -> Vec<StackFrame> {
-    let mut frames = capture_frames_current_first(0);
+/// the SDK's own capture frames. Also returns the loaded modules referenced
+/// by the captured frames, for the `$debug_images` property.
+fn capture_raw_application_stack() -> (Vec<StackFrame>, Vec<DebugImage>) {
+    let modules = collect_loaded_modules();
+    let mut frames = capture_frames_current_first(0, &modules);
     while frames
         .first()
         .map(|frame| is_internal_capture_frame(&frame.function))
@@ -535,13 +750,31 @@ fn capture_raw_application_frames() -> Vec<StackFrame> {
     }
 
     frames.reverse();
-    frames
+
+    let images = referenced_images(modules, &frames);
+    (frames, images)
+}
+
+/// Only report modules that frames actually point into, and only those with a
+/// usable debug id; the final filtering against the trimmed frame list happens
+/// in finalize_exception.
+fn referenced_images(modules: Vec<LoadedModule>, frames: &[StackFrame]) -> Vec<DebugImage> {
+    modules
+        .into_iter()
+        .filter(|m| !m.image.debug_id.is_empty())
+        .map(|m| m.image)
+        .filter(|image| {
+            frames
+                .iter()
+                .any(|f| f.image_addr.as_deref() == Some(image.image_addr.as_str()))
+        })
+        .collect()
 }
 
 fn is_internal_capture_frame(function: &str) -> bool {
     function.starts_with("backtrace::")
         || function.contains("capture_frames_current_first")
-        || function.contains("capture_raw_application_frames")
+        || function.contains("capture_raw_application_stack")
         || function.contains("Exception::from_error")
         || function.contains("Exception::from_message")
         || function.contains("build_exception_event")
@@ -551,8 +784,10 @@ fn is_internal_capture_frame(function: &str) -> bool {
 
 /// Capture the panic stacktrace in wire order — outermost frame first, panic
 /// site last — dropping the panic machinery and the SDK's own hook frames.
-fn capture_raw_panic_frames() -> Vec<StackFrame> {
-    let mut frames = capture_frames_current_first(0);
+/// Also returns the loaded modules referenced by the captured frames.
+fn capture_raw_panic_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
+    let modules = collect_loaded_modules();
+    let mut frames = capture_frames_current_first(0, &modules);
     while frames
         .first()
         .map(|frame| is_internal_panic_frame(&frame.function))
@@ -562,7 +797,9 @@ fn capture_raw_panic_frames() -> Vec<StackFrame> {
     }
 
     frames.reverse();
-    frames
+
+    let images = referenced_images(modules, &frames);
+    (frames, images)
 }
 
 fn is_internal_panic_frame(function: &str) -> bool {
@@ -1010,9 +1247,14 @@ mod tests {
             .expect("expected stack frames");
         // Wire order is outermost first, crash/capture frame last
         let crash_frame = frames.last().expect("expected crash frame");
-        assert_eq!(crash_frame["platform"], "rust");
+        assert_eq!(crash_frame["platform"], "native");
         assert_eq!(crash_frame["lang"], "rust");
-        assert_eq!(crash_frame["resolved"], true);
+        let instruction_addr = crash_frame["instruction_addr"].as_str().unwrap_or_default();
+        assert!(
+            instruction_addr.starts_with("0x"),
+            "expected hex instruction_addr, got {:?}",
+            instruction_addr
+        );
         let crash_function = crash_frame["function"].as_str().unwrap_or_default();
         assert!(
             crash_function.contains("from_error_builds_exception_list_with_stacktrace"),
@@ -1174,9 +1416,117 @@ mod tests {
     }
 
     #[test]
+    fn gnu_build_ids_convert_to_debug_ids_like_the_server() {
+        // Vector verified against symbolic's ElfObject::debug_id (which the
+        // server and CLI use): the first 16 bytes as a little-endian GUID.
+        let build_id: Vec<u8> = (0..20)
+            .map(|i| {
+                u8::from_str_radix(
+                    &"555398ebd01c90285a3d85138a19cbf9bbcec352"[i * 2..i * 2 + 2],
+                    16,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            debug_id_from_gnu_build_id(&build_id).as_deref(),
+            Some("eb985355-1cd0-2890-5a3d-85138a19cbf9")
+        );
+
+        // Short build ids are zero-padded to 16 bytes
+        assert_eq!(
+            debug_id_from_gnu_build_id(&[0xab, 0xcd]).as_deref(),
+            Some("0000cdab-0000-0000-0000-000000000000")
+        );
+        assert_eq!(debug_id_from_gnu_build_id(&[]), None);
+    }
+
+    #[test]
+    fn find_module_matches_address_ranges() {
+        let module_at = |base: u64, size: u64, is_main: bool| LoadedModule {
+            base,
+            end: base + size,
+            is_main,
+            image: DebugImage {
+                image_type: "elf".to_string(),
+                debug_id: "test".to_string(),
+                code_id: None,
+                image_addr: format!("0x{base:x}"),
+                image_size: Some(size),
+                image_vmaddr: None,
+                code_file: None,
+                arch: "x86_64".to_string(),
+            },
+        };
+
+        let modules = vec![
+            module_at(0x1000, 0x1000, true),
+            module_at(0x4000, 0x1000, false),
+        ];
+
+        assert!(find_module(&modules, 0x1500).is_some_and(|m| m.is_main));
+        assert!(find_module(&modules, 0x4000).is_some_and(|m| !m.is_main));
+        assert!(find_module(&modules, 0x2000).is_none()); // gap between modules
+        assert!(find_module(&modules, 0x500).is_none()); // before first module
+        assert!(find_module(&modules, 0x5000).is_none()); // past the last module
+    }
+
+    #[test]
+    fn captured_stacks_reference_loaded_debug_images() {
+        let json = finalized_json(
+            Exception::from_message("AddrCheck", "captures addresses").into_event_anon(),
+        );
+
+        let frames = json["properties"]["$exception_list"][0]["stacktrace"]["frames"]
+            .as_array()
+            .expect("expected stack frames");
+
+        // Every frame carries a parseable instruction address
+        for frame in frames {
+            let addr = frame["instruction_addr"].as_str().unwrap_or_default();
+            assert!(
+                addr.starts_with("0x") && u64::from_str_radix(&addr[2..], 16).is_ok(),
+                "expected hex instruction_addr, got {:?}",
+                frame["instruction_addr"]
+            );
+        }
+
+        // The test binary itself is a loaded module with a debug id on the
+        // platforms we capture modules on, so $debug_images must be present
+        // and every entry must be referenced by at least one frame.
+        let images = json["properties"]["$debug_images"]
+            .as_array()
+            .expect("expected $debug_images");
+        assert!(!images.is_empty());
+        let expected_type = super::native_image_type();
+        for image in images {
+            assert_eq!(image["type"].as_str(), Some(expected_type));
+            assert_eq!(
+                image["arch"].as_str(),
+                Some(std::env::consts::ARCH),
+                "arch should match the running process"
+            );
+            let debug_id = image["debug_id"].as_str().unwrap_or_default();
+            assert!(
+                debug_id.len() >= 36,
+                "expected uuid-shaped debug_id, got {:?}",
+                debug_id
+            );
+            let image_addr = image["image_addr"].as_str().unwrap_or_default();
+            assert!(
+                frames
+                    .iter()
+                    .any(|f| f["image_addr"].as_str() == Some(image_addr)),
+                "image {} not referenced by any frame",
+                image_addr
+            );
+        }
+    }
+
+    #[test]
     fn stacktrace_keeps_crash_frame_last() {
         fn capture() -> ExceptionStacktrace {
-            let mut frames = capture_raw_application_frames();
+            let (mut frames, _images) = capture_raw_application_stack();
             trim_to_max_frames(&mut frames, 8);
             ExceptionStacktrace::raw(frames)
         }

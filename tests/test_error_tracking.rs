@@ -98,7 +98,7 @@ mod blocking {
                 .body_contains(r#""$process_person_profile":false"#)
                 .body_contains(r#""$exception_level":"error""#)
                 .body_contains(r#""value":"payment failed""#)
-                .body_contains(r#""platform":"rust""#)
+                .body_contains(r#""platform":"native""#)
                 .body_contains(r#""lang":"rust""#)
                 .matches(request_has_capture_exception_user_frame_last);
             then.status(200);
@@ -213,7 +213,7 @@ mod async_client {
                 .body_contains(r#""$process_person_profile":false"#)
                 .body_contains(r#""$exception_level":"error""#)
                 .body_contains(r#""value":"payment failed""#)
-                .body_contains(r#""platform":"rust""#)
+                .body_contains(r#""platform":"native""#)
                 .body_contains(r#""lang":"rust""#)
                 .matches(request_has_capture_exception_user_frame_last);
             then.status(200);
