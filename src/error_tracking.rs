@@ -249,15 +249,6 @@ pub struct Exception {
 }
 
 impl Exception {
-    /// Build an exception from a Rust error, capturing the current stacktrace
-    /// and walking the `source()` chain.
-    pub fn from_error<E>(error: &E) -> Self
-    where
-        E: StdError + ?Sized,
-    {
-        Self::from_items_captured(error_items(error))
-    }
-
     /// Build an exception from an arbitrary type/message pair, capturing the
     /// current stacktrace.
     // Only exercised by tests today; kept as the message-capture seam.
@@ -816,7 +807,6 @@ fn is_internal_capture_frame(function: &str) -> bool {
         || function.contains("capture_frames_current_first")
         || function.contains("capture_raw_application_stack")
         || function.contains("from_items_captured")
-        || function.contains("Exception::from_error")
         || function.contains("Exception::from_message")
         || function.contains("Exception::from_panic_info")
         || function.contains("build_exception_event")
@@ -1273,7 +1263,9 @@ mod tests {
     #[test]
     fn from_error_builds_exception_list_with_stacktrace() {
         let error = OuterError { source: InnerError };
-        let json = finalized_json(Exception::from_error(&error).into_event("user-1"));
+        let json = finalized_json(
+            Exception::from_items_captured(error_items(&error)).into_event("user-1"),
+        );
 
         assert_eq!(json["event"], "$exception");
         assert_eq!(json["distinct_id"], "user-1");
@@ -1325,7 +1317,7 @@ mod tests {
     fn from_error_accepts_borrowed_error_types() {
         let message = String::from("borrowed parse failure");
         let error = BorrowedError(&message);
-        let json = event_json(Exception::from_error(&error));
+        let json = event_json(Exception::from_items_captured(error_items(&error)));
 
         assert_eq!(
             json["properties"]["$exception_list"][0]["value"],
@@ -1363,7 +1355,7 @@ mod tests {
             .build()
             .unwrap();
         let error = OuterError { source: InnerError };
-        let mut event = Exception::from_error(&error).into_event_anon();
+        let mut event = Exception::from_items_captured(error_items(&error)).into_event_anon();
         let json = finalized_json_with(&mut event, &options);
 
         let exception_list = json["properties"]["$exception_list"].as_array().unwrap();
