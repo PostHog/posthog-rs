@@ -1733,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "posthog-rs"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "brotli",
  "chrono",

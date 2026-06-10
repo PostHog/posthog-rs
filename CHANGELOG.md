@@ -1,5 +1,14 @@
 # posthog-rs
 
+## 0.10.2 — 2026-06-10
+
+### Patch changes
+
+- [7131402](https://github.com/posthog/posthog-rs/commit/713140296c579472025ef7ee42a6ca504c2fffcb) `capture_batch` with an empty event list is now a no-op on both clients and
+  both capture paths — no HTTP request is sent (the v1 backend rejects empty
+  batches). Also derives `Debug` for the internal retry `Step` and pins that a
+  body-less 2xx response is a terminal serialization error, not a retry. — Thanks @eli-r-ph!
+
 ## 0.10.1 — 2026-06-10
 
 ### Patch changes
