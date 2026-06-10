@@ -1580,9 +1580,13 @@ mod tests {
         let expected_type = super::native_image_type();
         for image in images {
             assert_eq!(image["type"].as_str(), Some(expected_type));
+            let expected_arch = match std::env::consts::ARCH {
+                "aarch64" => "arm64",
+                arch => arch,
+            };
             assert_eq!(
                 image["arch"].as_str(),
-                Some(std::env::consts::ARCH),
+                Some(expected_arch),
                 "arch should match the running process"
             );
             let debug_id = image["debug_id"].as_str().unwrap_or_default();
