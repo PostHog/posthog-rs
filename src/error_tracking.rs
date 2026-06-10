@@ -513,14 +513,17 @@ fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
     frames
 }
 
+// Frames are kept in wire order (outermost first, crash frame last), so
+// truncation drops the outermost frames and keeps the ones nearest the crash.
 fn trim_to_max_frames(frames: &mut Vec<StackFrame>, max_frames: usize) {
     if frames.len() > max_frames {
-        frames.truncate(max_frames);
+        frames.drain(..frames.len() - max_frames);
     }
 }
 
-/// Capture the current raw stacktrace, dropping the SDK's own capture frames
-/// so the caller's frame comes first.
+/// Capture the current raw stacktrace in wire order — outermost frame first,
+/// crash/capture-site frame last, matching the other PostHog SDKs — dropping
+/// the SDK's own capture frames.
 fn capture_raw_application_frames() -> Vec<StackFrame> {
     let mut frames = capture_frames_current_first(0);
     while frames
@@ -531,6 +534,7 @@ fn capture_raw_application_frames() -> Vec<StackFrame> {
         frames.remove(0);
     }
 
+    frames.reverse();
     frames
 }
 
@@ -545,6 +549,8 @@ fn is_internal_capture_frame(function: &str) -> bool {
         || function.contains("global::capture_exception")
 }
 
+/// Capture the panic stacktrace in wire order — outermost frame first, panic
+/// site last — dropping the panic machinery and the SDK's own hook frames.
 fn capture_raw_panic_frames() -> Vec<StackFrame> {
     let mut frames = capture_frames_current_first(0);
     while frames
@@ -555,6 +561,7 @@ fn capture_raw_panic_frames() -> Vec<StackFrame> {
         frames.remove(0);
     }
 
+    frames.reverse();
     frames
 }
 
@@ -880,8 +887,11 @@ mod tests {
             return false;
         };
         let exception = &body["properties"]["$exception_list"][0];
-        let first_function = exception["stacktrace"]["frames"][0]["function"]
-            .as_str()
+        // Wire order is outermost first, so the panic site is the last frame
+        let crash_function = exception["stacktrace"]["frames"]
+            .as_array()
+            .and_then(|frames| frames.last())
+            .and_then(|frame| frame["function"].as_str())
             .unwrap_or_default();
 
         body["event"] == "$exception"
@@ -899,10 +909,10 @@ mod tests {
             && body["properties"]["$exception_panic_column"]
                 .as_u64()
                 .is_some_and(|column| column > 0)
-            && first_function.contains("panic_hook_test_panic_site")
-            && !first_function.contains("std::panicking")
-            && !first_function.contains("core::panicking")
-            && !first_function.contains("install_panic_hook")
+            && crash_function.contains("panic_hook_test_panic_site")
+            && !crash_function.contains("std::panicking")
+            && !crash_function.contains("core::panicking")
+            && !crash_function.contains("install_panic_hook")
     }
 
     #[test]
@@ -998,20 +1008,21 @@ mod tests {
         let frames = exception_list[0]["stacktrace"]["frames"]
             .as_array()
             .expect("expected stack frames");
-        let top_frame = frames.first().expect("expected top frame");
-        assert_eq!(top_frame["platform"], "rust");
-        assert_eq!(top_frame["lang"], "rust");
-        assert_eq!(top_frame["resolved"], true);
-        let top_function = top_frame["function"].as_str().unwrap_or_default();
+        // Wire order is outermost first, crash/capture frame last
+        let crash_frame = frames.last().expect("expected crash frame");
+        assert_eq!(crash_frame["platform"], "rust");
+        assert_eq!(crash_frame["lang"], "rust");
+        assert_eq!(crash_frame["resolved"], true);
+        let crash_function = crash_frame["function"].as_str().unwrap_or_default();
         assert!(
-            top_function.contains("from_error_builds_exception_list_with_stacktrace"),
+            crash_function.contains("from_error_builds_exception_list_with_stacktrace"),
             "expected user frame last, got {:?}",
-            top_function
+            crash_function
         );
         assert!(
-            !top_function.contains("Exception::"),
+            !crash_function.contains("Exception::"),
             "expected SDK frames to be skipped, got {:?}",
-            top_function
+            crash_function
         );
     }
 
@@ -1148,6 +1159,7 @@ mod tests {
             .as_array()
             .expect("expected stack frames");
         assert_eq!(frames.len(), 1);
+        // Truncation keeps the crash-side frame: the user frame nearest capture
         let top_function = frames[0]["function"].as_str().unwrap_or_default();
         assert!(
             top_function.contains("application_stacktrace_applies_max_frames"),
@@ -1162,9 +1174,9 @@ mod tests {
     }
 
     #[test]
-    fn stacktrace_keeps_top_frame_first() {
+    fn stacktrace_keeps_crash_frame_last() {
         fn capture() -> ExceptionStacktrace {
-            let mut frames = capture_frames_current_first(0);
+            let mut frames = capture_raw_application_frames();
             trim_to_max_frames(&mut frames, 8);
             ExceptionStacktrace::raw(frames)
         }
@@ -1178,16 +1190,16 @@ mod tests {
 
         let capture_index = functions
             .iter()
-            .position(|function| function.contains("stacktrace_keeps_top_frame_first::capture"))
+            .position(|function| function.contains("stacktrace_keeps_crash_frame_last::capture"))
             .expect("expected capture frame");
         let test_index = functions
             .iter()
-            .position(|function| function.ends_with("stacktrace_keeps_top_frame_first"))
+            .position(|function| function.ends_with("stacktrace_keeps_crash_frame_last"))
             .expect("expected test frame");
 
         assert!(
-            capture_index < test_index,
-            "expected top frame before caller, got {:?}",
+            capture_index > test_index,
+            "expected the innermost (capture-site) frame after its caller, got {:?}",
             functions
         );
     }
