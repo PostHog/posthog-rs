@@ -186,6 +186,9 @@ impl CaptureExceptionOptions {
 }
 
 /// Build a `$exception` [`Event`] from a Rust error and capture options.
+// inline(never): direct callers of from_items_captured must stay physical
+// frames — see the contract on from_items_captured.
+#[inline(never)]
 pub(crate) fn build_exception_event<E>(
     error: &E,
     options: CaptureExceptionOptions,
@@ -252,7 +255,10 @@ impl Exception {
     /// Build an exception from an arbitrary type/message pair, capturing the
     /// current stacktrace.
     // Only exercised by tests today; kept as the message-capture seam.
+    // inline(never): direct callers of from_items_captured must stay physical
+    // frames — see the contract on from_items_captured.
     #[allow(dead_code)]
+    #[inline(never)]
     pub fn from_message<T: Into<String>, V: Into<String>>(exception_type: T, value: V) -> Self {
         Self::from_items_captured(vec![ExceptionItem {
             exception_type: exception_type.into(),
@@ -265,8 +271,12 @@ impl Exception {
     /// Monomorphic capture chokepoint for every API that captures the current
     /// stacktrace. Its entry address is pinned by the SDK-frame stripping in
     /// `capture_raw_application_stack`, which also drops the frame directly
-    /// above it — the (generic, otherwise unpinnable) constructor or client
-    /// convenience wrapper that called it.
+    /// above it — the (generic, otherwise unpinnable) constructor or wrapper
+    /// that called it.
+    ///
+    /// Contract: every direct caller must be `#[inline(never)]`, otherwise the
+    /// caller can inline into application code and the dropped frame would be
+    /// the user's own.
     #[inline(never)]
     pub(crate) fn from_items_captured(items: Vec<ExceptionItem>) -> Self {
         let (frames, images) = capture_raw_application_stack();
@@ -281,6 +291,7 @@ impl Exception {
 
     /// Build an exception from a panic, capturing the current stacktrace.
     #[allow(deprecated)]
+    #[inline(never)]
     fn from_panic_info(panic_info: &panic::PanicInfo<'_>) -> Self {
         Self::from_items_captured(vec![ExceptionItem {
             exception_type: "Panic".to_string(),
@@ -743,11 +754,14 @@ fn capture_raw_application_stack() -> (Vec<StackFrame>, Vec<DebugImage>) {
     // inner-most (before ours), so dropping through the last match removes
     // them too.
     //
-    // Platform caveat: entry addresses come from the unwinder
-    // (`_Unwind_FindEnclosingFunction` on Linux/glibc) or symbol tables. On
-    // fully stripped Apple/Windows builds neither is available and the
-    // captured stack keeps the SDK prefix as address-only frames; they regain
-    // names through server-side symbolication.
+    // Platform caveat: this only works where the frame's symbol address is
+    // the runtime function entry (Linux/glibc via
+    // `_Unwind_FindEnclosingFunction`). On macOS the symbolization backend
+    // reports the queried address rather than the function entry, so the
+    // address pass never matches there and the name-based pass below does the
+    // stripping instead; fully stripped Apple/Windows builds keep the SDK
+    // prefix as address-only frames, which regain names through server-side
+    // symbolication.
     let pinned_entries = [
         capture_frames_current_first as usize as u64,
         capture_raw_application_stack as usize as u64,
@@ -1114,6 +1128,14 @@ mod tests {
         finalized_json(exception.into_event_anon())
     }
 
+    // Pinned like the production wrappers (the address pass drops it as the
+    // chokepoint's caller where that works), and named so the name-based pass
+    // strips it on every other platform.
+    #[inline(never)]
+    fn from_items_captured_test_entry<E: StdError + ?Sized>(error: &E) -> Exception {
+        Exception::from_items_captured(error_items(error))
+    }
+
     #[allow(deprecated)]
     type PanicHook = Box<dyn Fn(&panic::PanicInfo<'_>) + Sync + Send + 'static>;
 
@@ -1263,9 +1285,7 @@ mod tests {
     #[test]
     fn from_error_builds_exception_list_with_stacktrace() {
         let error = OuterError { source: InnerError };
-        let json = finalized_json(
-            Exception::from_items_captured(error_items(&error)).into_event("user-1"),
-        );
+        let json = finalized_json(from_items_captured_test_entry(&error).into_event("user-1"));
 
         assert_eq!(json["event"], "$exception");
         assert_eq!(json["distinct_id"], "user-1");
@@ -1317,7 +1337,7 @@ mod tests {
     fn from_error_accepts_borrowed_error_types() {
         let message = String::from("borrowed parse failure");
         let error = BorrowedError(&message);
-        let json = event_json(Exception::from_items_captured(error_items(&error)));
+        let json = event_json(from_items_captured_test_entry(&error));
 
         assert_eq!(
             json["properties"]["$exception_list"][0]["value"],
@@ -1355,7 +1375,7 @@ mod tests {
             .build()
             .unwrap();
         let error = OuterError { source: InnerError };
-        let mut event = Exception::from_items_captured(error_items(&error)).into_event_anon();
+        let mut event = from_items_captured_test_entry(&error).into_event_anon();
         let json = finalized_json_with(&mut event, &options);
 
         let exception_list = json["properties"]["$exception_list"].as_array().unwrap();
