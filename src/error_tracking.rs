@@ -550,10 +550,19 @@ const fn native_image_type() -> &'static str {
     }
 }
 
-/// Derive a debug id from a GNU build id, matching how the server and CLI
-/// derive it from the binary: the first 16 bytes interpreted as a
-/// little-endian GUID (first three fields byte-swapped), zero-padded when the
-/// build id is shorter.
+/// Render 16 bytes laid out as a little-endian GUID (Microsoft convention:
+/// the first three fields are stored byte-swapped) as a canonical UUID
+/// string. This matches how symbolic's `DebugId` — used by the server and
+/// CLI — interprets GNU build ids and CodeView PDB signatures.
+fn guid_le_to_uuid(mut data: [u8; 16]) -> String {
+    data[0..4].reverse();
+    data[4..6].reverse();
+    data[6..8].reverse();
+    uuid::Uuid::from_bytes(data).to_string()
+}
+
+/// Derive a debug id from a GNU build id: the first 16 bytes as a
+/// little-endian GUID, zero-padded when the build id is shorter.
 fn debug_id_from_gnu_build_id(build_id: &[u8]) -> Option<String> {
     if build_id.is_empty() {
         return None;
@@ -561,10 +570,7 @@ fn debug_id_from_gnu_build_id(build_id: &[u8]) -> Option<String> {
     let mut data = [0u8; 16];
     let len = build_id.len().min(16);
     data[..len].copy_from_slice(&build_id[..len]);
-    data[0..4].reverse();
-    data[4..6].reverse();
-    data[6..8].reverse();
-    Some(uuid::Uuid::from_bytes(data).to_string())
+    Some(guid_le_to_uuid(data))
 }
 
 fn debug_id_for(id: &findshlibs::SharedLibraryId) -> Option<String> {
@@ -574,7 +580,7 @@ fn debug_id_for(id: &findshlibs::SharedLibraryId) -> Option<String> {
         SharedLibraryId::GnuBuildId(bytes) => debug_id_from_gnu_build_id(bytes),
         SharedLibraryId::Uuid(bytes) => Some(uuid::Uuid::from_bytes(*bytes).to_string()),
         SharedLibraryId::PdbSignature(guid, age) => {
-            let uuid = uuid::Uuid::from_bytes(*guid).to_string();
+            let uuid = guid_le_to_uuid(*guid);
             Some(if *age > 0 {
                 format!("{uuid}-{age:x}")
             } else {
@@ -770,7 +776,13 @@ fn capture_raw_application_stack() -> (Vec<StackFrame>, Vec<DebugImage>) {
             .is_some_and(|addr| pinned_entries.contains(&addr))
     };
     if let Some(last_sdk) = frames[..scan].iter().rposition(matches_pinned) {
-        frames.drain(..=last_sdk);
+        // Also drop the frame directly above the pinned capture function: it
+        // is always an `Exception` constructor, the only callers of
+        // capture_raw_application_stack. Higher SDK wrappers (e.g.
+        // Client::capture_error) are generic, so they can only be removed by
+        // the name-based pass below and remain in fully stripped builds.
+        let constructor = (last_sdk + 1).min(frames.len().saturating_sub(1));
+        frames.drain(..=constructor);
     }
 
     while frames
@@ -1557,13 +1569,16 @@ mod tests {
 
     #[test]
     fn stacktrace_keeps_crash_frame_last() {
-        fn capture() -> ExceptionStacktrace {
-            let (mut frames, _images) = capture_raw_application_stack();
-            trim_to_max_frames(&mut frames, 8);
-            ExceptionStacktrace::raw(frames)
+        // Use the real constructor path: capture_raw_application_stack drops
+        // its direct caller as the constructor frame, so calling it from
+        // anywhere else would eat an application frame.
+        #[inline(never)]
+        fn user_capture_site() -> Exception {
+            Exception::from_message("Ordering", "wire order check")
         }
 
-        let frames = capture().frames;
+        let exception = user_capture_site();
+        let frames = exception.captured_frames.expect("expected captured frames");
         let functions: Vec<&str> = frames
             .iter()
             .map(|frame| frame.function.as_str())
@@ -1572,8 +1587,10 @@ mod tests {
 
         let capture_index = functions
             .iter()
-            .position(|function| function.contains("stacktrace_keeps_crash_frame_last::capture"))
-            .expect("expected capture frame");
+            .position(|function| {
+                function.contains("stacktrace_keeps_crash_frame_last::user_capture_site")
+            })
+            .expect("expected capture-site frame");
         let test_index = functions
             .iter()
             .position(|function| function.ends_with("stacktrace_keeps_crash_frame_last"))
