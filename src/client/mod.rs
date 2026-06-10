@@ -52,12 +52,15 @@ pub use async_client::client;
 #[cfg(feature = "async-client")]
 pub use async_client::Client;
 
+type BeforeSendFn = dyn FnMut(Event) -> Option<Event> + Send + 'static;
+type SharedBeforeSendHook = Arc<Mutex<Box<BeforeSendFn>>>;
+
 /// Hook that can modify or discard events before they are sent.
 ///
 /// Hooks run before serialization. Return `Some(event)` to continue sending the
 /// event, or `None` to drop it.
 #[derive(Clone)]
-pub struct BeforeSendHook(Arc<Mutex<Box<dyn FnMut(Event) -> Option<Event> + Send + 'static>>>);
+pub struct BeforeSendHook(SharedBeforeSendHook);
 
 impl BeforeSendHook {
     /// Create a new before-send hook.
