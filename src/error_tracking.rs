@@ -665,6 +665,10 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
         let instruction_addr = frame.ip() as u64;
         let frame_symbol_addr = frame.symbol_address() as u64;
         let module = find_module(modules, instruction_addr);
+        // Only send addresses the server can actually resolve: without a
+        // module carrying a debug id there is no `$debug_images` entry to
+        // match, and the frame should pass through as purely client-resolved.
+        let resolvable = module.is_some_and(|m| !m.image.debug_id.is_empty());
 
         let mut pushed = false;
         backtrace::resolve_frame(frame, |symbol| {
@@ -699,9 +703,11 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                 in_app: false,
                 synthetic: false,
                 platform: "native".to_string(),
-                instruction_addr: Some(format!("0x{instruction_addr:x}")),
-                symbol_addr: (symbol_addr != 0).then(|| format!("0x{symbol_addr:x}")),
-                image_addr: module.map(|m| m.image.image_addr.clone()),
+                instruction_addr: resolvable.then(|| format!("0x{instruction_addr:x}")),
+                symbol_addr: (resolvable && symbol_addr != 0).then(|| format!("0x{symbol_addr:x}")),
+                image_addr: resolvable
+                    .then(|| module.map(|m| m.image.image_addr.clone()))
+                    .flatten(),
             });
             pushed = true;
         });
@@ -719,9 +725,12 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                 in_app: module.is_some_and(|m| m.is_main),
                 synthetic: false,
                 platform: "native".to_string(),
-                instruction_addr: Some(format!("0x{instruction_addr:x}")),
-                symbol_addr: (frame_symbol_addr != 0).then(|| format!("0x{frame_symbol_addr:x}")),
-                image_addr: module.map(|m| m.image.image_addr.clone()),
+                instruction_addr: resolvable.then(|| format!("0x{instruction_addr:x}")),
+                symbol_addr: (resolvable && frame_symbol_addr != 0)
+                    .then(|| format!("0x{frame_symbol_addr:x}")),
+                image_addr: resolvable
+                    .then(|| module.map(|m| m.image.image_addr.clone()))
+                    .flatten(),
             });
         }
 
