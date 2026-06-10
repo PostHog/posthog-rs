@@ -201,7 +201,9 @@ where
         level,
     } = options;
 
-    let mut exception = Exception::from_error(error);
+    // Pair error_items with from_items_captured directly so the capture
+    // happens one frame below this builder and its own frame gets stripped.
+    let mut exception = Exception::from_items_captured(error_items(error));
     if let Some(fingerprint) = fingerprint {
         exception.set_fingerprint(fingerprint);
     }
@@ -253,31 +255,29 @@ impl Exception {
     where
         E: StdError + ?Sized,
     {
-        let mut items = vec![ExceptionItem {
-            exception_type: simple_type_name(type_name::<E>()),
-            value: error_value(error),
+        Self::from_items_captured(error_items(error))
+    }
+
+    /// Build an exception from an arbitrary type/message pair, capturing the
+    /// current stacktrace.
+    // Only exercised by tests today; kept as the message-capture seam.
+    #[allow(dead_code)]
+    pub fn from_message<T: Into<String>, V: Into<String>>(exception_type: T, value: V) -> Self {
+        Self::from_items_captured(vec![ExceptionItem {
+            exception_type: exception_type.into(),
+            value: value.into(),
             mechanism: ExceptionMechanism::default(),
             stacktrace: None,
-        }];
+        }])
+    }
 
-        let mut source = error.source();
-        while let Some(err) = source {
-            // Hard safety bound for pathological/cyclic source chains; the
-            // client's max_error_sources is applied at capture time.
-            if items.len() >= DEFAULT_MAX_ERROR_SOURCES {
-                break;
-            }
-            items.push(ExceptionItem {
-                exception_type: source_type_name(err),
-                value: error_value(err),
-                mechanism: ExceptionMechanism::default(),
-                stacktrace: None,
-            });
-            source = err.source();
-        }
-
-        link_exception_chain(&mut items);
-
+    /// Monomorphic capture chokepoint for every API that captures the current
+    /// stacktrace. Its entry address is pinned by the SDK-frame stripping in
+    /// `capture_raw_application_stack`, which also drops the frame directly
+    /// above it — the (generic, otherwise unpinnable) constructor or client
+    /// convenience wrapper that called it.
+    #[inline(never)]
+    pub(crate) fn from_items_captured(items: Vec<ExceptionItem>) -> Self {
         let (frames, images) = capture_raw_application_stack();
         Self {
             items,
@@ -288,48 +288,21 @@ impl Exception {
         }
     }
 
-    /// Build an exception from an arbitrary type/message pair, capturing the
-    /// current stacktrace.
-    // Only exercised by tests today; kept as the message-capture seam.
-    #[allow(dead_code)]
-    pub fn from_message<T: Into<String>, V: Into<String>>(exception_type: T, value: V) -> Self {
-        let (frames, images) = capture_raw_application_stack();
-        Self {
-            items: vec![ExceptionItem {
-                exception_type: exception_type.into(),
-                value: value.into(),
-                mechanism: ExceptionMechanism::default(),
-                stacktrace: None,
-            }],
-            captured_frames: Some(frames),
-            captured_images: images,
-            fingerprint: None,
-            level: "error".to_string(),
-        }
-    }
-
     /// Build an exception from a panic, capturing the current stacktrace.
     #[allow(deprecated)]
     fn from_panic_info(panic_info: &panic::PanicInfo<'_>) -> Self {
-        let (frames, images) = capture_raw_panic_frames();
-        Self {
-            items: vec![ExceptionItem {
-                exception_type: "Panic".to_string(),
-                value: panic_message(panic_info),
-                mechanism: ExceptionMechanism {
-                    mechanism_type: "panic".to_string(),
-                    handled: false,
-                    synthetic: false,
-                    exception_id: None,
-                    parent_id: None,
-                },
-                stacktrace: None,
-            }],
-            captured_frames: Some(frames),
-            captured_images: images,
-            fingerprint: None,
-            level: "error".to_string(),
-        }
+        Self::from_items_captured(vec![ExceptionItem {
+            exception_type: "Panic".to_string(),
+            value: panic_message(panic_info),
+            mechanism: ExceptionMechanism {
+                mechanism_type: "panic".to_string(),
+                handled: false,
+                synthetic: false,
+                exception_id: None,
+                parent_id: None,
+            },
+            stacktrace: None,
+        }])
     }
 
     /// Set a custom exception fingerprint.
@@ -683,7 +656,7 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
         }
 
         let instruction_addr = frame.ip() as u64;
-        let symbol_addr = frame.symbol_address() as u64;
+        let frame_symbol_addr = frame.symbol_address() as u64;
         let module = find_module(modules, instruction_addr);
 
         let mut pushed = false;
@@ -700,6 +673,16 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
             if filename.is_none() && function.is_none() {
                 return;
             }
+
+            // The resolver's symbol.addr() is the actual symbol entry; the
+            // frame's symbol_address() can fall back to the instruction
+            // pointer on some platforms. The entry address is what the
+            // pinned-function stripping compares against.
+            let symbol_addr = symbol
+                .addr()
+                .map(|a| a as u64)
+                .filter(|a| *a != 0)
+                .unwrap_or(frame_symbol_addr);
 
             frames.push(StackFrame {
                 filename,
@@ -730,7 +713,7 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                 synthetic: false,
                 platform: "native".to_string(),
                 instruction_addr: Some(format!("0x{instruction_addr:x}")),
-                symbol_addr: (symbol_addr != 0).then(|| format!("0x{symbol_addr:x}")),
+                symbol_addr: (frame_symbol_addr != 0).then(|| format!("0x{frame_symbol_addr:x}")),
                 image_addr: module.map(|m| m.image.image_addr.clone()),
             });
         }
@@ -766,6 +749,7 @@ fn capture_raw_application_stack() -> (Vec<StackFrame>, Vec<DebugImage>) {
     let pinned_entries = [
         capture_frames_current_first as usize as u64,
         capture_raw_application_stack as usize as u64,
+        Exception::from_items_captured as usize as u64,
     ];
     let scan = frames.len().min(16);
     let matches_pinned = |frame: &StackFrame| {
@@ -776,13 +760,14 @@ fn capture_raw_application_stack() -> (Vec<StackFrame>, Vec<DebugImage>) {
             .is_some_and(|addr| pinned_entries.contains(&addr))
     };
     if let Some(last_sdk) = frames[..scan].iter().rposition(matches_pinned) {
-        // Also drop the frame directly above the pinned capture function: it
-        // is always an `Exception` constructor, the only callers of
-        // capture_raw_application_stack. Higher SDK wrappers (e.g.
-        // Client::capture_error) are generic, so they can only be removed by
-        // the name-based pass below and remain in fully stripped builds.
-        let constructor = (last_sdk + 1).min(frames.len().saturating_sub(1));
-        frames.drain(..=constructor);
+        // Also drop the frame directly above the outermost pinned function:
+        // `from_items_captured` is only ever called by an `Exception`
+        // constructor or a client convenience wrapper, both generic and
+        // otherwise unpinnable. Deeper delegators (the `global::` one-liners)
+        // can only be removed by the name-based pass below, leaving at most
+        // one SDK frame in fully stripped builds.
+        let api_entry = (last_sdk + 1).min(frames.len().saturating_sub(1));
+        frames.drain(..=api_entry);
     }
 
     while frames
@@ -819,39 +804,17 @@ fn is_internal_capture_frame(function: &str) -> bool {
     function.starts_with("backtrace::")
         || function.contains("capture_frames_current_first")
         || function.contains("capture_raw_application_stack")
+        || function.contains("from_items_captured")
         || function.contains("Exception::from_error")
         || function.contains("Exception::from_message")
+        || function.contains("Exception::from_panic_info")
         || function.contains("build_exception_event")
         || function.contains("Client::capture_exception")
         || function.contains("global::capture_exception")
-}
-
-/// Capture the panic stacktrace in wire order — outermost frame first, panic
-/// site last — dropping the panic machinery and the SDK's own hook frames.
-/// Also returns the loaded modules referenced by the captured frames.
-fn capture_raw_panic_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
-    let modules = collect_loaded_modules();
-    let mut frames = capture_frames_current_first(0, &modules);
-    while frames
-        .first()
-        .map(|frame| is_internal_panic_frame(&frame.function))
-        .unwrap_or(false)
-    {
-        frames.remove(0);
-    }
-
-    frames.reverse();
-
-    let images = referenced_images(modules, &frames);
-    (frames, images)
-}
-
-fn is_internal_panic_frame(function: &str) -> bool {
-    is_internal_capture_frame(function)
+        // Panic-hook machinery: these sit between the hook closure and the
+        // panic site, so they form part of the strippable prefix.
         || function.contains("capture_panic")
-        || function.contains("capture_raw_panic_frames")
         || function.contains("install_panic_hook")
-        || function.contains("Exception::from_panic_info")
         || function.contains("AssertUnwindSafe")
         || function.starts_with("core::ops::function::FnOnce::call_once")
         || function.starts_with("std::panicking::")
@@ -998,6 +961,41 @@ where
     } else {
         value
     }
+}
+
+/// Build the normalized exception items for an error and its `source()`
+/// chain, without capturing a stacktrace. Client convenience wrappers pair
+/// this with [`Exception::from_items_captured`] directly so that the capture
+/// happens one frame below them and their own frame gets stripped.
+pub(crate) fn error_items<E>(error: &E) -> Vec<ExceptionItem>
+where
+    E: StdError + ?Sized,
+{
+    let mut items = vec![ExceptionItem {
+        exception_type: simple_type_name(type_name::<E>()),
+        value: error_value(error),
+        mechanism: ExceptionMechanism::default(),
+        stacktrace: None,
+    }];
+
+    let mut source = error.source();
+    while let Some(err) = source {
+        // Hard safety bound for pathological/cyclic source chains; the
+        // client's max_error_sources is applied at capture time.
+        if items.len() >= DEFAULT_MAX_ERROR_SOURCES {
+            break;
+        }
+        items.push(ExceptionItem {
+            exception_type: source_type_name(err),
+            value: error_value(err),
+            mechanism: ExceptionMechanism::default(),
+            stacktrace: None,
+        });
+        source = err.source();
+    }
+
+    link_exception_chain(&mut items);
+    items
 }
 
 fn normalize_function_name(function: &str) -> String {
