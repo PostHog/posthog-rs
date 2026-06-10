@@ -1,4 +1,7 @@
+use std::sync::{Arc, Mutex};
+
 use crate::endpoints::{EndpointManager, DEFAULT_HOST};
+use crate::event::Event;
 use derive_builder::Builder;
 use tracing::warn;
 
@@ -48,6 +51,31 @@ mod async_client;
 pub use async_client::client;
 #[cfg(feature = "async-client")]
 pub use async_client::Client;
+
+/// Hook that can modify or discard events before they are sent.
+///
+/// Hooks run before serialization. Return `Some(event)` to continue sending the
+/// event, or `None` to drop it.
+#[derive(Clone)]
+pub struct BeforeSendHook(Arc<Mutex<Box<dyn FnMut(Event) -> Option<Event> + Send + 'static>>>);
+
+impl BeforeSendHook {
+    /// Create a new before-send hook.
+    pub fn new<F>(hook: F) -> Self
+    where
+        F: FnMut(Event) -> Option<Event> + Send + 'static,
+    {
+        Self(Arc::new(Mutex::new(Box::new(hook))))
+    }
+
+    pub(crate) fn apply(&self, event: Event) -> Option<Event> {
+        let mut hook = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (hook)(event)
+    }
+}
 
 /// Configuration options for the PostHog client.
 ///
@@ -147,6 +175,10 @@ pub struct ClientOptions {
     #[builder(default, setter(strip_option))]
     pub(crate) capture_compression: Option<CaptureCompression>,
 
+    /// Hooks to modify, filter, or sample events before they are sent.
+    #[builder(default, setter(custom))]
+    pub(crate) before_send: Vec<BeforeSendHook>,
+
     /// Extra HTTP headers injected into every outbound capture request.
     /// Used by the SDK test harness adapter to attach `X-Test-Id` for
     /// parallel test isolation.
@@ -229,6 +261,17 @@ impl ClientOptions {
 }
 
 impl ClientOptionsBuilder {
+    /// Add a hook that can modify or discard events before they are sent.
+    pub fn before_send<F>(&mut self, hook: F) -> &mut Self
+    where
+        F: FnMut(Event) -> Option<Event> + Send + 'static,
+    {
+        self.before_send
+            .get_or_insert_with(Vec::new)
+            .push(BeforeSendHook::new(hook));
+        self
+    }
+
     /// Build sanitized [`ClientOptions`].
     ///
     /// Missing or whitespace-only API keys are allowed and disable the client so

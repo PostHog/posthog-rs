@@ -22,9 +22,9 @@ use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, Loca
 use crate::{event::InnerEvent, Error, Event};
 
 use super::common::{
-    already_reported, build_dedup_key, extract_flag_details, flag_called_event,
-    flag_event_dedup_cache, local_record, remote_record_from_detail, DetailedFlagsResponse,
-    FlagEventDedupCache,
+    already_reported, apply_before_send_hooks, build_dedup_key, extract_flag_details,
+    flag_called_event, flag_event_dedup_cache, local_record, remote_record_from_detail,
+    DetailedFlagsResponse, FlagEventDedupCache,
 };
 use super::ClientOptions;
 
@@ -60,6 +60,7 @@ struct BlockingFlagEventHost {
     disabled: bool,
     disable_geoip: bool,
     is_server: bool,
+    before_send: Vec<super::BeforeSendHook>,
     dedup_cache: FlagEventDedupCache,
 }
 
@@ -72,6 +73,7 @@ impl BlockingFlagEventHost {
             disabled: options.is_disabled(),
             disable_geoip: options.disable_geoip,
             is_server: options.is_server,
+            before_send: options.before_send.clone(),
             dedup_cache: flag_event_dedup_cache(),
         }
     }
@@ -81,6 +83,9 @@ impl BlockingFlagEventHost {
             return;
         }
         event.prepare_for_v0();
+        let Some(event) = apply_before_send_hooks(&self.before_send, event) else {
+            return;
+        };
         let inner_event = InnerEvent::new(event, self.api_key.clone());
         let payload = match serde_json::to_string(&inner_event) {
             Ok(p) => p,
@@ -210,6 +215,9 @@ impl Client {
 
         #[cfg(feature = "capture-v1")]
         {
+            let Some(event) = apply_before_send_hooks(&self.options.before_send, event) else {
+                return Ok(());
+            };
             return self.capture_v1(vec![event], false).map(|_| ());
         }
 
@@ -243,6 +251,13 @@ impl Client {
 
         #[cfg(feature = "capture-v1")]
         {
+            let events: Vec<_> = events
+                .into_iter()
+                .filter_map(|event| apply_before_send_hooks(&self.options.before_send, event))
+                .collect();
+            if events.is_empty() {
+                return Ok(());
+            }
             return self.capture_v1(events, historical_migration).map(|_| ());
         }
 
@@ -254,6 +269,9 @@ impl Client {
     fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
         let defaults = self.options.capture_defaults();
         super::v0_capture::prepare_event(&mut event, &defaults);
+        let Some(event) = apply_before_send_hooks(&self.options.before_send, event) else {
+            return Ok(());
+        };
         let payload =
             super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
         let url = self.options.endpoints().build_url(Endpoint::Capture);
@@ -268,12 +286,16 @@ impl Client {
         historical_migration: bool,
     ) -> Result<(), Error> {
         let defaults = self.options.capture_defaults();
-        let payload = super::v0_capture::build_batch_payload(
+        let Some(payload) = super::v0_capture::build_batch_payload(
             events,
             self.options.api_key.clone(),
             historical_migration,
             &defaults,
-        )?;
+            &self.options.before_send,
+        )?
+        else {
+            return Ok(());
+        };
         let url = self.options.endpoints().build_url(Endpoint::Batch);
         let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
         self.send_v0_with_retry(&url, body, encoding)
