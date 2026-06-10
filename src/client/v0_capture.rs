@@ -7,7 +7,7 @@ use reqwest::blocking::RequestBuilder;
 #[cfg(feature = "async-client")]
 use reqwest::RequestBuilder;
 
-use super::{CaptureDefaults, ClientOptions};
+use super::{common::apply_runtime_context, CaptureDefaults, ClientOptions};
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
@@ -26,6 +26,7 @@ pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
     if defaults.is_server {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
+    apply_runtime_context(event);
     event.prepare_for_v0();
 }
 

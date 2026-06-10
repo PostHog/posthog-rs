@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use crate::feature_flag_evaluations::{EvaluatedFlagRecord, FlagCalledEventParams};
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
@@ -10,6 +10,32 @@ use crate::Event;
 pub(super) const MAX_FLAG_CALLED_CACHE_SIZE: usize = 50_000;
 
 pub(super) type FlagEventDedupCache = Mutex<HashMap<String, HashSet<String>>>;
+
+struct RuntimeContext {
+    os: String,
+    os_version: String,
+}
+
+static RUNTIME_CONTEXT: OnceLock<RuntimeContext> = OnceLock::new();
+
+fn runtime_context() -> &'static RuntimeContext {
+    RUNTIME_CONTEXT.get_or_init(|| {
+        let info = os_info::get();
+        RuntimeContext {
+            os: info.os_type().to_string(),
+            os_version: info.version().to_string(),
+        }
+    })
+}
+
+pub(super) fn apply_runtime_context(event: &mut Event) {
+    let context = runtime_context();
+    event.insert_prop_default("$os", serde_json::Value::String(context.os.clone()));
+    event.insert_prop_default(
+        "$os_version",
+        serde_json::Value::String(context.os_version.clone()),
+    );
+}
 
 pub(super) fn flag_event_dedup_cache() -> FlagEventDedupCache {
     Mutex::new(HashMap::new())
@@ -92,6 +118,7 @@ pub(super) fn flag_called_event(
     if is_server {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
+    apply_runtime_context(&mut event);
     Some(event)
 }
 
@@ -294,5 +321,31 @@ mod tests {
 
         assert_eq!(event.properties().get("$is_server"), Some(&json!(true)));
         assert_eq!(event.properties().get("$geoip_disable"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn runtime_context_adds_missing_os_properties_only() {
+        let mut event = Event::new("test", "user-1");
+        event.insert_prop("$os", "custom-os").unwrap();
+
+        apply_runtime_context(&mut event);
+
+        assert_eq!(event.properties().get("$os"), Some(&json!("custom-os")));
+        assert!(event.properties().contains_key("$os_version"));
+        assert!(!event.properties().contains_key("$os_arch"));
+    }
+
+    #[test]
+    fn flag_called_event_adds_runtime_context() {
+        let event = flag_called_event(
+            flag_params(HashMap::new(), HashMap::new(), None),
+            false,
+            true,
+        )
+        .expect("valid flag-called event");
+
+        assert!(event.properties().contains_key("$os"));
+        assert!(event.properties().contains_key("$os_version"));
+        assert!(!event.properties().contains_key("$os_arch"));
     }
 }

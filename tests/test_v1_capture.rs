@@ -451,6 +451,47 @@ async fn v1_capture_injects_is_server_by_default() {
 }
 
 #[tokio::test]
+async fn v1_capture_injects_runtime_context() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .body_contains("\"$os\":")
+            .body_contains("\"$os_version\":");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    client.capture(Event::new("test", "user-1")).await.unwrap();
+    mock.assert();
+}
+
+#[tokio::test]
+async fn v1_capture_caller_override_wins_for_runtime_context() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .body_contains("\"$os\":\"custom-os\"")
+            .body_contains("\"$os_version\":\"custom-version\"");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    let mut event = Event::new("test", "user-1");
+    event.insert_prop("$os", "custom-os").unwrap();
+    event.insert_prop("$os_version", "custom-version").unwrap();
+    client.capture(event).await.unwrap();
+    mock.assert();
+}
+
+#[tokio::test]
 async fn v1_capture_caller_override_wins_for_is_server() {
     let server = MockServer::start();
 

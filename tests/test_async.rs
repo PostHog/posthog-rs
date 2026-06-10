@@ -584,6 +584,48 @@ async fn v0_capture_injects_is_server_by_default() {
 
 #[cfg(not(feature = "capture-v1"))]
 #[tokio::test]
+async fn v0_capture_injects_runtime_context() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v0/e/")
+            .body_contains("\"$os\":")
+            .body_contains("\"$os_version\":");
+        then.status(200).body("ok");
+    });
+
+    let client = create_test_client(server.base_url()).await;
+    client
+        .capture(posthog_rs::Event::new("test_event", "user-1"))
+        .await
+        .unwrap();
+    mock.assert();
+}
+
+#[cfg(not(feature = "capture-v1"))]
+#[tokio::test]
+async fn v0_capture_caller_override_wins_for_runtime_context() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v0/e/")
+            .body_contains("\"$os\":\"custom-os\"")
+            .body_contains("\"$os_version\":\"custom-version\"");
+        then.status(200).body("ok");
+    });
+
+    let client = create_test_client(server.base_url()).await;
+    let mut event = posthog_rs::Event::new("test_event", "user-1");
+    event.insert_prop("$os", "custom-os").unwrap();
+    event.insert_prop("$os_version", "custom-version").unwrap();
+    client.capture(event).await.unwrap();
+    mock.assert();
+}
+
+#[cfg(not(feature = "capture-v1"))]
+#[tokio::test]
 async fn v0_capture_caller_override_wins_for_is_server() {
     let server = MockServer::start();
 
