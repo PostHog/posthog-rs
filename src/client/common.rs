@@ -118,7 +118,6 @@ pub(super) fn flag_called_event(
     if is_server {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
-    apply_runtime_context(&mut event);
     Some(event)
 }
 
@@ -336,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn flag_called_event_adds_runtime_context() {
+    fn flag_called_event_leaves_runtime_context_to_capture_path() {
         let event = flag_called_event(
             flag_params(HashMap::new(), HashMap::new(), None),
             false,
@@ -344,8 +343,8 @@ mod tests {
         )
         .expect("valid flag-called event");
 
-        assert!(event.properties().contains_key("$os"));
-        assert!(event.properties().contains_key("$os_version"));
+        assert!(!event.properties().contains_key("$os"));
+        assert!(!event.properties().contains_key("$os_version"));
         assert!(!event.properties().contains_key("$os_arch"));
     }
 }
