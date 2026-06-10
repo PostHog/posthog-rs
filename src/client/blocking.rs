@@ -290,6 +290,9 @@ impl Client {
             trace!("Client is disabled, skipping batch capture");
             return Ok(());
         }
+        if events.is_empty() {
+            return Ok(());
+        }
 
         #[cfg(feature = "capture-v1")]
         {

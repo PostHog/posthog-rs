@@ -775,6 +775,24 @@ async fn v1_capture_sends_canonical_sdk_info_header() {
 }
 
 #[tokio::test]
+async fn v1_capture_batch_empty_is_noop() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v1/analytics/events");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    let result = client.capture_batch(vec![], false).await;
+
+    assert!(result.is_ok());
+    mock.assert_hits(0);
+}
+
+#[tokio::test]
 async fn v1_capture_disabled_client_noop() {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test".to_string())

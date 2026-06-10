@@ -312,6 +312,9 @@ impl Client {
         if self.options.is_disabled() {
             return Ok(());
         }
+        if events.is_empty() {
+            return Ok(());
+        }
 
         #[cfg(feature = "capture-v1")]
         {
