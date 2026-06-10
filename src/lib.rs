@@ -102,8 +102,8 @@ pub use error::Error;
 // Error Tracking
 #[cfg(feature = "error-tracking")]
 pub use error_tracking::{
-    ErrorTrackingOptions, ErrorTrackingOptionsBuilder, ErrorTrackingOptionsBuilderError, Exception,
-    ExceptionItem, ExceptionMechanism, ExceptionStacktrace, StackFrame,
+    CaptureExceptionOptions, ErrorTrackingOptions, ErrorTrackingOptionsBuilder,
+    ErrorTrackingOptionsBuilderError,
 };
 
 // Event
@@ -137,7 +137,7 @@ pub use global::capture;
 #[cfg(feature = "error-tracking")]
 pub use global::capture_exception;
 #[cfg(feature = "error-tracking")]
-pub use global::capture_exception_anon;
+pub use global::capture_exception_with;
 pub use global::disable as disable_global;
 pub use global::init_global_client as init_global;
 pub use global::is_disabled as global_is_disabled;

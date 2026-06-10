@@ -1,7 +1,6 @@
 #![cfg(feature = "error-tracking")]
 
 use httpmock::prelude::*;
-use serde_json::json;
 use std::error::Error as StdError;
 use std::fmt;
 
@@ -27,13 +26,6 @@ impl fmt::Display for PanicDisplayError {
 
 impl StdError for PanicDisplayError {}
 
-fn flags_response_fixture() -> serde_json::Value {
-    json!({
-        "featureFlags": {"checkout": true},
-        "featureFlagPayloads": {}
-    })
-}
-
 fn request_has_capture_exception_user_frame_first(req: &HttpMockRequest) -> bool {
     let Some(body) = req.body.as_deref() else {
         return false;
@@ -45,9 +37,10 @@ fn request_has_capture_exception_user_frame_first(req: &HttpMockRequest) -> bool
 
     first_function.contains("capture_exception_sends_exception_event")
         && !first_function.contains("Client::capture_exception")
+        && !first_function.contains("build_exception_event")
 }
 
-fn request_has_capture_exception_anon_user_frame_first(req: &HttpMockRequest) -> bool {
+fn request_has_capture_exception_with_user_frame_first(req: &HttpMockRequest) -> bool {
     let Some(body) = req.body.as_deref() else {
         return false;
     };
@@ -56,8 +49,9 @@ fn request_has_capture_exception_anon_user_frame_first(req: &HttpMockRequest) ->
     };
     let first_function = first_exception_stack_function(&body);
 
-    first_function.contains("capture_exception_anon_sends_personless_exception_event")
+    first_function.contains("capture_exception_with_attaches_identity_and_context")
         && !first_function.contains("Client::capture_exception")
+        && !first_function.contains("build_exception_event")
 }
 
 fn request_has_no_stacktrace(req: &HttpMockRequest) -> bool {
@@ -86,7 +80,7 @@ fn first_exception_stack_function(body: &serde_json::Value) -> &str {
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, Exception};
+    use posthog_rs::CaptureExceptionOptions;
 
     fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
@@ -100,7 +94,7 @@ mod blocking {
             when.method(POST)
                 .path("/i/v0/e/")
                 .body_contains(r#""event":"$exception""#)
-                .body_contains(r#""distinct_id":"user-1""#)
+                .body_contains(r#""$process_person_profile":false"#)
                 .body_contains(r#""$exception_level":"error""#)
                 .body_contains(r#""value":"payment failed""#)
                 .body_contains(r#""platform":"rust""#)
@@ -110,26 +104,40 @@ mod blocking {
         });
 
         let client = create_test_client(server.base_url());
-        client.capture_exception(&TestError, "user-1").unwrap();
+        client.capture_exception(&TestError).unwrap();
 
         capture_mock.assert_hits(1);
     }
 
     #[test]
-    fn capture_exception_anon_sends_personless_exception_event() {
+    fn capture_exception_with_attaches_identity_and_context() {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/i/v0/e/")
                 .body_contains(r#""event":"$exception""#)
-                .body_contains(r#""$process_person_profile":false"#)
-                .body_contains(r#""value":"payment failed""#)
-                .matches(request_has_capture_exception_anon_user_frame_first);
+                .body_contains(r#""distinct_id":"user-1""#)
+                .body_contains(r#""route":"/checkout""#)
+                .body_contains(r#""$groups":{"company":"company-1"}"#)
+                .body_contains(r#""$exception_fingerprint":"checkout-error""#)
+                .body_contains(r#""$exception_level":"warning""#)
+                .matches(request_has_capture_exception_with_user_frame_first);
             then.status(200);
         });
 
         let client = create_test_client(server.base_url());
-        client.capture_exception_anon(&TestError).unwrap();
+        client
+            .capture_exception_with(
+                &TestError,
+                CaptureExceptionOptions::new()
+                    .distinct_id("user-1")
+                    .property("route", "/checkout")
+                    .unwrap()
+                    .group("company", "company-1")
+                    .fingerprint("checkout-error")
+                    .level("warning"),
+            )
+            .unwrap();
 
         capture_mock.assert_hits(1);
     }
@@ -144,24 +152,13 @@ mod blocking {
             .unwrap();
         let client = posthog_rs::client(options);
 
+        client.capture_exception(&PanicDisplayError).unwrap();
         client
-            .capture_exception(&PanicDisplayError, "user-1")
+            .capture_exception_with(
+                &PanicDisplayError,
+                CaptureExceptionOptions::new().distinct_id("user-1"),
+            )
             .unwrap();
-        client.capture_exception_anon(&PanicDisplayError).unwrap();
-    }
-
-    #[test]
-    fn disabled_capture_does_not_send_exception_event() {
-        let options = posthog_rs::ClientOptionsBuilder::default()
-            .api_key("test_api_key".to_string())
-            .host("http://127.0.0.1:1")
-            .disabled(true)
-            .build()
-            .unwrap();
-        let client = posthog_rs::client(options);
-        let exception = Exception::from_message("DroppedError", "never sent");
-
-        client.capture(exception.into_event_anon()).unwrap();
     }
 
     #[test]
@@ -189,41 +186,7 @@ mod blocking {
             .unwrap();
         let client = posthog_rs::client(options);
 
-        client.capture_exception(&TestError, "user-1").unwrap();
-
-        capture_mock.assert_hits(1);
-    }
-
-    #[test]
-    fn capture_exception_attaches_custom_properties_groups_and_flags() {
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST).path("/flags/");
-            then.status(200).json_body(flags_response_fixture());
-        });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/i/v0/e/")
-                .body_contains(r#""route":"/checkout""#)
-                .body_contains(r#""$groups":{"company":"company-1"}"#)
-                .body_contains(r#""$feature/checkout":true"#)
-                .body_contains(r#""$exception_fingerprint":"checkout-error""#);
-            then.status(200);
-        });
-
-        let mut exception = Exception::from_message("CheckoutError", "card declined");
-        exception.set_fingerprint("checkout-error");
-
-        let mut event = exception.into_event("user-1");
-        event.insert_prop("route", "/checkout").unwrap();
-        event.add_group("company", "company-1");
-
-        let client = create_test_client(server.base_url());
-        let flags = client
-            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
-            .unwrap();
-        event.with_flags(&flags);
-        client.capture(event).unwrap();
+        client.capture_exception(&TestError).unwrap();
 
         capture_mock.assert_hits(1);
     }
@@ -232,7 +195,7 @@ mod blocking {
 #[cfg(feature = "async-client")]
 mod async_client {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, Exception};
+    use posthog_rs::CaptureExceptionOptions;
 
     async fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
@@ -246,7 +209,7 @@ mod async_client {
             when.method(POST)
                 .path("/i/v0/e/")
                 .body_contains(r#""event":"$exception""#)
-                .body_contains(r#""distinct_id":"user-1""#)
+                .body_contains(r#""$process_person_profile":false"#)
                 .body_contains(r#""$exception_level":"error""#)
                 .body_contains(r#""value":"payment failed""#)
                 .body_contains(r#""platform":"rust""#)
@@ -256,29 +219,41 @@ mod async_client {
         });
 
         let client = create_test_client(server.base_url()).await;
-        client
-            .capture_exception(&TestError, "user-1")
-            .await
-            .unwrap();
+        client.capture_exception(&TestError).await.unwrap();
 
         capture_mock.assert_hits(1);
     }
 
     #[tokio::test]
-    async fn capture_exception_anon_sends_personless_exception_event() {
+    async fn capture_exception_with_attaches_identity_and_context() {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/i/v0/e/")
                 .body_contains(r#""event":"$exception""#)
-                .body_contains(r#""$process_person_profile":false"#)
-                .body_contains(r#""value":"payment failed""#)
-                .matches(request_has_capture_exception_anon_user_frame_first);
+                .body_contains(r#""distinct_id":"user-1""#)
+                .body_contains(r#""route":"/checkout""#)
+                .body_contains(r#""$groups":{"company":"company-1"}"#)
+                .body_contains(r#""$exception_fingerprint":"checkout-error""#)
+                .body_contains(r#""$exception_level":"warning""#)
+                .matches(request_has_capture_exception_with_user_frame_first);
             then.status(200);
         });
 
         let client = create_test_client(server.base_url()).await;
-        client.capture_exception_anon(&TestError).await.unwrap();
+        client
+            .capture_exception_with(
+                &TestError,
+                CaptureExceptionOptions::new()
+                    .distinct_id("user-1")
+                    .property("route", "/checkout")
+                    .unwrap()
+                    .group("company", "company-1")
+                    .fingerprint("checkout-error")
+                    .level("warning"),
+            )
+            .await
+            .unwrap();
 
         capture_mock.assert_hits(1);
     }
@@ -293,28 +268,14 @@ mod async_client {
             .unwrap();
         let client = posthog_rs::client(options).await;
 
+        client.capture_exception(&PanicDisplayError).await.unwrap();
         client
-            .capture_exception(&PanicDisplayError, "user-1")
+            .capture_exception_with(
+                &PanicDisplayError,
+                CaptureExceptionOptions::new().distinct_id("user-1"),
+            )
             .await
             .unwrap();
-        client
-            .capture_exception_anon(&PanicDisplayError)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn disabled_capture_does_not_send_exception_event() {
-        let options = posthog_rs::ClientOptionsBuilder::default()
-            .api_key("test_api_key".to_string())
-            .host("http://127.0.0.1:1")
-            .disabled(true)
-            .build()
-            .unwrap();
-        let client = posthog_rs::client(options).await;
-        let exception = Exception::from_message("DroppedError", "never sent");
-
-        client.capture(exception.into_event_anon()).await.unwrap();
     }
 
     #[tokio::test]
@@ -342,45 +303,7 @@ mod async_client {
             .unwrap();
         let client = posthog_rs::client(options).await;
 
-        client
-            .capture_exception(&TestError, "user-1")
-            .await
-            .unwrap();
-
-        capture_mock.assert_hits(1);
-    }
-
-    #[tokio::test]
-    async fn capture_exception_attaches_custom_properties_groups_and_flags() {
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST).path("/flags/");
-            then.status(200).json_body(flags_response_fixture());
-        });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/i/v0/e/")
-                .body_contains(r#""route":"/checkout""#)
-                .body_contains(r#""$groups":{"company":"company-1"}"#)
-                .body_contains(r#""$feature/checkout":true"#)
-                .body_contains(r#""$exception_fingerprint":"checkout-error""#);
-            then.status(200);
-        });
-
-        let mut exception = Exception::from_message("CheckoutError", "card declined");
-        exception.set_fingerprint("checkout-error");
-
-        let mut event = exception.into_event("user-1");
-        event.insert_prop("route", "/checkout").unwrap();
-        event.add_group("company", "company-1");
-
-        let client = create_test_client(server.base_url()).await;
-        let flags = client
-            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
-            .await
-            .unwrap();
-        event.with_flags(&flags);
-        client.capture(event).await.unwrap();
+        client.capture_exception(&TestError).await.unwrap();
 
         capture_mock.assert_hits(1);
     }

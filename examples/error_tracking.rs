@@ -6,7 +6,7 @@
 #[cfg(all(feature = "async-client", feature = "error-tracking"))]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use posthog_rs::{client, Exception};
+    use posthog_rs::{client, CaptureExceptionOptions};
 
     let api_key = std::env::var("POSTHOG_API_KEY")?;
     let host = std::env::var("POSTHOG_HOST").unwrap_or_else(|_| posthog_rs::DEFAULT_HOST.into());
@@ -14,13 +14,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let error = std::io::Error::other("checkout failed");
 
-    // Happy path: capture a Rust error directly.
-    client.capture_exception(&error, "user-123").await?;
+    // Associate the error with a person and attach context.
+    client
+        .capture_exception_with(
+            &error,
+            CaptureExceptionOptions::new()
+                .distinct_id("user-123")
+                .property("route", "/checkout")?,
+        )
+        .await?;
 
-    // Custom context: convert to an event and use the standard Event API.
-    let mut event = Exception::from_error(&error).into_event("user-123");
-    event.insert_prop("route", "/checkout")?;
-    client.capture(event).await?;
+    // Personless capture.
+    client.capture_exception(&error).await?;
 
     Ok(())
 }

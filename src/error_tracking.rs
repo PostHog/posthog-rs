@@ -3,6 +3,7 @@ use std::error::Error as StdError;
 
 use derive_builder::Builder;
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::{Error, Event};
 
@@ -91,6 +92,99 @@ impl ErrorTrackingOptions {
     }
 }
 
+/// Optional context for `capture_exception_with`: person identity, custom
+/// properties, groups, and exception fingerprint/level.
+///
+/// All fields are optional. An empty options set (`new()` / `Default`)
+/// captures the exception personlessly with no extra context.
+#[derive(Clone, Debug, Default)]
+pub struct CaptureExceptionOptions {
+    distinct_id: Option<String>,
+    properties: Vec<(String, Value)>,
+    groups: Vec<(String, String)>,
+    fingerprint: Option<String>,
+    level: Option<String>,
+}
+
+impl CaptureExceptionOptions {
+    /// Create an empty options set: personless, no extra context.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Associate the exception with a person.
+    pub fn distinct_id<S: Into<String>>(mut self, distinct_id: S) -> Self {
+        self.distinct_id = Some(distinct_id.into());
+        self
+    }
+
+    /// Add a custom property to the exception event.
+    pub fn property<K: Into<String>, V: Serialize>(
+        mut self,
+        key: K,
+        value: V,
+    ) -> Result<Self, Error> {
+        let value = serde_json::to_value(value).map_err(|e| Error::Serialization(e.to_string()))?;
+        self.properties.push((key.into(), value));
+        Ok(self)
+    }
+
+    /// Capture the exception as a group event.
+    pub fn group<N: Into<String>, I: Into<String>>(mut self, group_name: N, group_id: I) -> Self {
+        self.groups.push((group_name.into(), group_id.into()));
+        self
+    }
+
+    /// Set a custom exception fingerprint.
+    pub fn fingerprint<S: Into<String>>(mut self, fingerprint: S) -> Self {
+        self.fingerprint = Some(fingerprint.into());
+        self
+    }
+
+    /// Set the exception severity level. Defaults to `"error"`.
+    pub fn level<S: Into<String>>(mut self, level: S) -> Self {
+        self.level = Some(level.into());
+        self
+    }
+}
+
+/// Build a `$exception` [`Event`] from a Rust error and capture options.
+pub(crate) fn build_exception_event<E>(
+    error: &E,
+    options: CaptureExceptionOptions,
+) -> Result<Event, Error>
+where
+    E: StdError + ?Sized,
+{
+    let CaptureExceptionOptions {
+        distinct_id,
+        properties,
+        groups,
+        fingerprint,
+        level,
+    } = options;
+
+    let mut exception = Exception::from_error(error);
+    if let Some(fingerprint) = fingerprint {
+        exception.set_fingerprint(fingerprint);
+    }
+    if let Some(level) = level {
+        exception.set_level(level);
+    }
+
+    let mut event = match distinct_id {
+        Some(distinct_id) => exception.into_event(distinct_id),
+        None => exception.into_event_anon(),
+    };
+    for (key, value) in properties {
+        event.insert_prop(key, value)?;
+    }
+    for (group_name, group_id) in groups {
+        event.add_group(&group_name, &group_id);
+    }
+    Ok(event)
+}
+
 /// A PostHog Error Tracking exception payload.
 ///
 /// Holds only exception-specific data. Identity, custom properties, groups,
@@ -155,6 +249,8 @@ impl Exception {
 
     /// Build an exception from an arbitrary type/message pair, capturing the
     /// current stacktrace.
+    // Only exercised by tests today; kept as the message-capture seam.
+    #[allow(dead_code)]
     pub fn from_message<T: Into<String>, V: Into<String>>(exception_type: T, value: V) -> Self {
         Self {
             items: vec![ExceptionItem {
@@ -173,6 +269,8 @@ impl Exception {
     ///
     /// Caller-provided stacktraces are sent as-is: no stacktrace is captured
     /// and client-side frame classification is not applied.
+    // Unused until panic autocapture (stacked PR) builds its payloads here.
+    #[allow(dead_code)]
     pub fn from_exception_list(items: Vec<ExceptionItem>) -> Self {
         Self {
             items,
@@ -399,6 +497,7 @@ fn is_internal_capture_frame(function: &str) -> bool {
         || function.contains("capture_raw_application_frames")
         || function.contains("Exception::from_error")
         || function.contains("Exception::from_message")
+        || function.contains("build_exception_event")
         || function.contains("Client::capture_exception")
         || function.contains("global::capture_exception")
 }
@@ -798,5 +897,39 @@ mod tests {
             "expected top frame before caller, got {:?}",
             functions
         );
+    }
+
+    #[test]
+    fn build_exception_event_defaults_to_personless() {
+        let error = OuterError { source: InnerError };
+        let event = build_exception_event(&error, CaptureExceptionOptions::default()).unwrap();
+        let json = finalized_json(event);
+
+        assert_eq!(json["event"], "$exception");
+        assert_eq!(json["properties"]["$process_person_profile"], false);
+        assert_eq!(json["properties"]["$exception_level"], "error");
+    }
+
+    #[test]
+    fn build_exception_event_applies_options() {
+        let error = OuterError { source: InnerError };
+        let options = CaptureExceptionOptions::new()
+            .distinct_id("user-1")
+            .property("route", "/checkout")
+            .unwrap()
+            .group("company", "acme")
+            .fingerprint("checkout-error")
+            .level("warning");
+        let event = build_exception_event(&error, options).unwrap();
+        let json = finalized_json(event);
+
+        assert_eq!(json["distinct_id"], "user-1");
+        assert_eq!(json["properties"]["route"], "/checkout");
+        assert_eq!(json["properties"]["$groups"]["company"], "acme");
+        assert_eq!(
+            json["properties"]["$exception_fingerprint"],
+            "checkout-error"
+        );
+        assert_eq!(json["properties"]["$exception_level"], "warning");
     }
 }

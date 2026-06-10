@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
-use crate::error_tracking::Exception;
+use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
 #[cfg(feature = "capture-v1")]
 use crate::event_v1::CaptureResponse;
 use crate::feature_flag_evaluations::{
@@ -237,43 +237,44 @@ impl Client {
         self.capture_v0(event).await
     }
 
-    /// Capture a Rust error with a distinct ID, sending it to PostHog Error Tracking.
+    /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
     ///
     /// Accepts any [`std::error::Error`], including `&dyn Error`. A
     /// `Box<dyn Error>` does not implement `Error` itself, so pass the
-    /// dereferenced trait object: `capture_exception(&*boxed, ...)`.
+    /// dereferenced trait object: `capture_exception(&*boxed)`.
     ///
-    /// To attach custom properties, groups, flags, or a fingerprint, build an
-    /// [`Exception`], convert it with [`Exception::into_event`], and use
-    /// [`Client::capture`] instead.
+    /// To associate the exception with a person or attach custom properties,
+    /// groups, a fingerprint, or a severity level, use
+    /// [`Client::capture_exception_with`].
     #[cfg(feature = "error-tracking")]
-    pub async fn capture_exception<E, S>(&self, error: &E, distinct_id: S) -> Result<(), Error>
+    pub async fn capture_exception<E>(&self, error: &E) -> Result<(), Error>
     where
         E: StdError + ?Sized,
-        S: Into<String>,
+    {
+        self.capture_exception_with(error, CaptureExceptionOptions::default())
+            .await
+    }
+
+    /// Capture a Rust error with optional context, sending it to PostHog
+    /// Error Tracking.
+    ///
+    /// Set [`CaptureExceptionOptions::distinct_id`] to associate the exception
+    /// with a person; without it the exception is captured personlessly.
+    #[cfg(feature = "error-tracking")]
+    pub async fn capture_exception_with<E>(
+        &self,
+        error: &E,
+        options: CaptureExceptionOptions,
+    ) -> Result<(), Error>
+    where
+        E: StdError + ?Sized,
     {
         if self.options.is_disabled() {
             trace!("Client is disabled, skipping exception capture");
             return Ok(());
         }
 
-        self.capture(Exception::from_error(error).into_event(distinct_id))
-            .await
-    }
-
-    /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
-    #[cfg(feature = "error-tracking")]
-    pub async fn capture_exception_anon<E>(&self, error: &E) -> Result<(), Error>
-    where
-        E: StdError + ?Sized,
-    {
-        if self.options.is_disabled() {
-            trace!("Client is disabled, skipping anonymous exception capture");
-            return Ok(());
-        }
-
-        self.capture(Exception::from_error(error).into_event_anon())
-            .await
+        self.capture(build_exception_event(error, options)?).await
     }
 
     /// Capture a collection of events with a single request.
