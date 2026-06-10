@@ -626,7 +626,12 @@ fn collect_loaded_modules() -> Vec<LoadedModule> {
                 image_size: Some(size),
                 image_vmaddr: Some(format!("0x{:x}", shlib.stated_load_addr().0 as u64)),
                 code_file,
-                arch: std::env::consts::ARCH.to_string(),
+                // Align with the arch vocabulary used by other native SDKs
+                // (informational; image matching is by debug_id and address)
+                arch: match std::env::consts::ARCH {
+                    "aarch64" => "arm64".to_string(),
+                    arch => arch.to_string(),
+                },
             },
         });
 
