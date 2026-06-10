@@ -237,8 +237,7 @@ pub struct Exception {
     items: Vec<ExceptionItem>,
     // SDK-captured raw frames pending client policy (in-app classification,
     // trimming, stacktrace opt-out), applied in finalize_exception and attached
-    // to items[0]. None when the caller supplied stacktraces directly via
-    // from_exception_list.
+    // to items[0].
     captured_frames: Option<Vec<StackFrame>>,
     fingerprint: Option<String>,
     level: String,
@@ -297,21 +296,6 @@ impl Exception {
                 stacktrace: None,
             }],
             captured_frames: Some(capture_raw_application_frames()),
-            fingerprint: None,
-            level: "error".to_string(),
-        }
-    }
-
-    /// Build an exception from normalized exception items.
-    ///
-    /// Caller-provided stacktraces are sent as-is: no stacktrace is captured
-    /// and client-side frame classification is not applied.
-    // Unused: kept as the seam for caller-normalized exception payloads.
-    #[allow(dead_code)]
-    pub fn from_exception_list(items: Vec<ExceptionItem>) -> Self {
-        Self {
-            items,
-            captured_frames: None,
             fingerprint: None,
             level: "error".to_string(),
         }
