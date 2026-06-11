@@ -7,16 +7,18 @@ use serde_json::Value;
 
 use crate::{Error, Event};
 
-const DEFAULT_MAX_FRAMES: usize = 64;
-const DEFAULT_MAX_ERROR_SOURCES: usize = 50;
+/// Hard cap on stack frames per exception; frames beyond it are trimmed from
+/// the outermost end.
+const MAX_FRAMES: usize = 64;
+/// Hard cap on the `source()` chain walk, bounding pathological or cyclic
+/// error chains.
+const MAX_ERROR_SOURCES: usize = 50;
 
 /// Error Tracking stacktrace and frame classification options.
 #[derive(Builder, Clone, Debug)]
 #[builder(default)]
 pub struct ErrorTrackingOptions {
     capture_stacktrace: bool,
-    max_frames: usize,
-    max_error_sources: usize,
     in_app_include_paths: Vec<String>,
     in_app_exclude_paths: Vec<String>,
 }
@@ -25,8 +27,6 @@ impl Default for ErrorTrackingOptions {
     fn default() -> Self {
         Self {
             capture_stacktrace: true,
-            max_frames: DEFAULT_MAX_FRAMES,
-            max_error_sources: DEFAULT_MAX_ERROR_SOURCES,
             in_app_include_paths: Vec::new(),
             in_app_exclude_paths: Vec::new(),
         }
@@ -36,14 +36,6 @@ impl Default for ErrorTrackingOptions {
 impl ErrorTrackingOptions {
     fn capture_stacktrace(&self) -> bool {
         self.capture_stacktrace
-    }
-
-    fn max_frames(&self) -> usize {
-        self.max_frames
-    }
-
-    fn max_error_sources(&self) -> usize {
-        self.max_error_sources
     }
 
     fn is_in_app_path(&self, filename: &str) -> bool {
@@ -231,9 +223,7 @@ impl Exception {
 
         let mut source = error.source();
         while let Some(err) = source {
-            // Hard safety bound for pathological/cyclic source chains; the
-            // client's max_error_sources is applied at capture time.
-            if items.len() >= DEFAULT_MAX_ERROR_SOURCES {
+            if items.len() >= MAX_ERROR_SOURCES {
                 break;
             }
             items.push(ExceptionItem {
@@ -324,13 +314,12 @@ impl Exception {
             return Ok(());
         }
 
-        items.truncate(options.max_error_sources().max(1));
         if let Some(mut frames) = captured_frames {
             for frame in frames.iter_mut() {
                 let function = (!frame.function.is_empty()).then_some(frame.function.as_str());
                 frame.in_app = options.is_in_app_frame(frame.filename.as_deref(), function);
             }
-            trim_to_max_frames(&mut frames, options.max_frames());
+            trim_to_max_frames(&mut frames, MAX_FRAMES);
             items[0].stacktrace = Some(ExceptionStacktrace::raw(frames));
         }
 
@@ -761,10 +750,9 @@ mod tests {
     }
 
     #[test]
-    fn options_can_disable_stacktrace_and_limit_sources() {
+    fn options_can_disable_stacktrace() {
         let options = ErrorTrackingOptionsBuilder::default()
             .capture_stacktrace(false)
-            .max_error_sources(1usize)
             .build()
             .unwrap();
         let error = OuterError { source: InnerError };
@@ -773,7 +761,7 @@ mod tests {
         let json = built_event_json(event);
 
         let exception_list = json["properties"]["$exception_list"].as_array().unwrap();
-        assert_eq!(exception_list.len(), 1);
+        assert_eq!(exception_list.len(), 2);
         assert!(exception_list[0].get("stacktrace").is_none());
     }
 
@@ -848,31 +836,36 @@ mod tests {
     }
 
     #[test]
-    fn application_stacktrace_applies_max_frames_after_skipping_sdk_frames() {
-        let options = ErrorTrackingOptionsBuilder::default()
-            .max_frames(1usize)
-            .build()
-            .unwrap();
-        let json = event_json_with(
-            Exception::from_message("SmallStack", "keeps user frame", true),
-            &options,
-        );
+    fn frames_are_trimmed_to_max_frames_keeping_the_top() {
+        let synthetic_frame = |index: usize| StackFrame {
+            filename: None,
+            line_no: None,
+            function: format!("frame_{index}"),
+            lang: "rust".to_string(),
+            in_app: true,
+            synthetic: false,
+            resolved: true,
+            platform: "rust".to_string(),
+        };
+        let exception = Exception {
+            items: vec![ExceptionItem {
+                exception_type: "Error".to_string(),
+                value: "trimmed".to_string(),
+                mechanism: ExceptionMechanism::default(),
+                stacktrace: None,
+            }],
+            captured_frames: Some((0..MAX_FRAMES + 5).map(synthetic_frame).collect()),
+            fingerprint: None,
+            level: "error".to_string(),
+        };
 
+        let json = event_json_with(exception, &ErrorTrackingOptions::default());
         let frames = json["properties"]["$exception_list"][0]["stacktrace"]["frames"]
             .as_array()
             .expect("expected stack frames");
-        assert_eq!(frames.len(), 1);
-        let top_function = frames[0]["function"].as_str().unwrap_or_default();
-        assert!(
-            top_function.contains("application_stacktrace_applies_max_frames"),
-            "expected user frame after SDK frame filtering, got {:?}",
-            top_function
-        );
-        assert!(
-            !top_function.contains("Exception::"),
-            "expected SDK frames to be skipped, got {:?}",
-            top_function
-        );
+        assert_eq!(frames.len(), MAX_FRAMES);
+        // Trimming drops the outermost tail; the crash-site top frame survives.
+        assert_eq!(frames[0]["function"], "frame_0");
     }
 
     #[test]
