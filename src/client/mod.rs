@@ -210,9 +210,6 @@ pub struct ClientOptions {
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
     endpoint_manager: EndpointManager,
-
-    #[builder(default = "get_default_user_agent()")]
-    user_agent: String,
 }
 
 /// Resolved client-level default properties for capture requests.

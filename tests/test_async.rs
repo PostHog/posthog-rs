@@ -106,38 +106,6 @@ async fn test_sends_default_useragent() {
 }
 
 #[tokio::test]
-async fn test_sends_custom_useragent() {
-    let server = MockServer::start();
-
-    let mock_response = json!({});
-    let custom_user_agent = "custom-user-agent";
-
-    let flags_mock = server.mock(|when, then| {
-        when.method(POST)
-            .path("/flags/")
-            .header(USER_AGENT.to_string(), custom_user_agent)
-            .query_param("v", "2");
-
-        then.status(200)
-            .header("content-type", "application/json")
-            .json_body(mock_response);
-    });
-
-    let options = posthog_rs::ClientOptionsBuilder::default()
-        .api_key("test_api_key".into())
-        .host(server.base_url().as_str())
-        .user_agent("custom-user-agent".to_string())
-        .build()
-        .expect("should build client options");
-    let client = posthog_rs::client(options).await;
-
-    let _ = client
-        .get_feature_flags("test-user".to_string(), None, None, None)
-        .await;
-    flags_mock.assert();
-}
-
-#[tokio::test]
 async fn test_is_feature_enabled() {
     let server = MockServer::start();
 

@@ -128,31 +128,6 @@ mod blocking {
     }
 
     #[test]
-    fn evaluate_flags_uses_custom_useragent() {
-        let server = MockServer::start();
-        let custom_user_agent = "my-custom-user-agent";
-        let flags_mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/flags/")
-                .header(USER_AGENT.to_string(), custom_user_agent);
-            then.status(200).json_body(flags_response_fixture());
-        });
-
-        let options = posthog_rs::ClientOptionsBuilder::default()
-            .api_key("test_api_key".into())
-            .host(server.base_url().as_str())
-            .user_agent(custom_user_agent.to_string())
-            .build()
-            .expect("should build client options");
-        let client = posthog_rs::client(options);
-
-        let _ = client
-            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
-            .unwrap();
-        flags_mock.assert();
-    }
-
-    #[test]
     fn unaccessed_flags_do_not_fire_events() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
@@ -623,32 +598,6 @@ mod async_tests {
             then.status(200).json_body(flags_response_fixture());
         });
         let client = create_test_client(server.base_url()).await;
-        let _ = client
-            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
-            .await
-            .unwrap();
-        flags_mock.assert();
-    }
-
-    #[tokio::test]
-    async fn evaluate_flags_uses_custom_useragent() {
-        let server = MockServer::start();
-        let custom_user_agent = "my-custom-user-agent";
-        let flags_mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/flags/")
-                .header(USER_AGENT.to_string(), custom_user_agent);
-            then.status(200).json_body(flags_response_fixture());
-        });
-
-        let options = posthog_rs::ClientOptionsBuilder::default()
-            .api_key("test_api_key".into())
-            .host(server.base_url().as_str())
-            .user_agent(custom_user_agent.to_string())
-            .build()
-            .expect("should build client options");
-        let client = posthog_rs::client(options).await;
-
         let _ = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .await

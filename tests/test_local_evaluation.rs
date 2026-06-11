@@ -276,53 +276,6 @@ async fn test_local_evaluation_with_mock_server_sends_default_user_agent() {
     eval_mock.assert();
 }
 
-#[cfg(feature = "async-client")]
-#[tokio::test]
-async fn test_local_evaluation_with_mock_server_sends_custom_user_agent() {
-    let server = MockServer::start();
-
-    // Mock the local evaluation endpoint
-    let mock_flags = json!({
-        "flags": [],
-        "group_type_mapping": {},
-        "cohorts": {}
-    });
-
-    let customer_useragent = "my-custom-user-agent";
-
-    let eval_mock = server.mock(|when, then| {
-        when.method(GET)
-            .path("/flags/definitions/")
-            .header("Authorization", "Bearer test_personal_key")
-            .header("X-PostHog-Project-Api-Key", "test_project_key")
-            .header(USER_AGENT.to_string(), customer_useragent)
-            .query_param("send_cohorts", "");
-        then.status(200).json_body(mock_flags);
-    });
-
-    // Create client with local evaluation enabled
-    let options = ClientOptionsBuilder::default()
-        .host(server.base_url())
-        .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
-        .enable_local_evaluation(true)
-        .poll_interval_seconds(60)
-        .user_agent(customer_useragent.to_string())
-        .build()
-        .unwrap();
-
-    let client = posthog_rs::client(options).await;
-
-    // Give it a moment to load initial flags
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let _ = client
-        .get_feature_flag("feature-b", "", None, None, None)
-        .await;
-
-    eval_mock.assert();
-}
-
 #[test]
 fn test_cache_operations() {
     let cache = FlagCache::new();
@@ -430,7 +383,6 @@ async fn test_etag_sent_on_second_poll() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
         request_timeout: Duration::from_secs(5),
-        user_agent: get_default_user_agent(),
     };
 
     let mut poller = AsyncFlagPoller::new(config, cache.clone());
@@ -519,7 +471,6 @@ async fn test_304_preserves_cache() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
         request_timeout: Duration::from_secs(5),
-        user_agent: get_default_user_agent(),
     };
 
     let mut poller = AsyncFlagPoller::new(config, cache.clone());
@@ -585,7 +536,6 @@ async fn test_no_etag_from_server() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(50),
         request_timeout: Duration::from_secs(5),
-        user_agent: get_default_user_agent(),
     };
 
     let mut poller = AsyncFlagPoller::new(config, cache.clone());
@@ -662,7 +612,6 @@ fn test_sync_etag_sent_on_second_poll() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
         request_timeout: Duration::from_secs(5),
-        user_agent: get_default_user_agent(),
     };
 
     let mut poller = FlagPoller::new(config, cache.clone());
@@ -748,7 +697,6 @@ fn test_sync_304_preserves_cache() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
         request_timeout: Duration::from_secs(5),
-        user_agent: get_default_user_agent(),
     };
 
     let mut poller = FlagPoller::new(config, cache.clone());
@@ -813,7 +761,6 @@ fn test_sync_no_etag_from_server() {
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(50),
         request_timeout: Duration::from_secs(5),
-        user_agent: get_default_user_agent(),
     };
 
     let mut poller = FlagPoller::new(config, cache.clone());
