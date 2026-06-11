@@ -69,6 +69,9 @@ struct BlockingFlagEventHost {
     http_client: HttpClient,
     options: ClientOptions,
     capture_url: String,
+    // Read by the v0 ship path only; unused under capture-v1, where the
+    // flag-event path does not currently apply before_send hooks.
+    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
     before_send: Vec<BeforeSendHook>,
     dedup_cache: FlagEventDedupCache,
 }
@@ -277,11 +280,13 @@ impl Client {
             let Some(event) = apply_before_send_hooks(&self.options.before_send, event) else {
                 return Ok(());
             };
-            return self.capture_v1(vec![event], false).map(|_| ());
+            self.capture_v1(vec![event], false).map(|_| ())
         }
 
         #[cfg(not(feature = "capture-v1"))]
-        self.capture_v0(event)
+        {
+            self.capture_v0(event)
+        }
     }
 
     /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
@@ -402,11 +407,13 @@ impl Client {
             if events.is_empty() {
                 return Ok(());
             }
-            return self.capture_v1(events, historical_migration).map(|_| ());
+            self.capture_v1(events, historical_migration).map(|_| ())
         }
 
         #[cfg(not(feature = "capture-v1"))]
-        self.capture_batch_v0(events, historical_migration)
+        {
+            self.capture_batch_v0(events, historical_migration)
+        }
     }
 
     #[cfg(not(feature = "capture-v1"))]

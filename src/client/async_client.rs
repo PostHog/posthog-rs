@@ -70,6 +70,9 @@ struct AsyncFlagEventHost {
     http_client: HttpClient,
     options: ClientOptions,
     capture_url: String,
+    // Read by the v0 ship path only; unused under capture-v1, where the
+    // flag-event path does not currently apply before_send hooks.
+    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
     before_send: Vec<BeforeSendHook>,
     dedup_cache: FlagEventDedupCache,
     /// Tokio runtime handle captured at host construction (which always runs
