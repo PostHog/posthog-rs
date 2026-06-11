@@ -50,7 +50,8 @@ if is_enabled {
 ## Error Tracking
 
 Capture Rust errors manually with stack traces and send them to PostHog Error Tracking.
-Enable the `error-tracking` feature to use these APIs.
+Error tracking ships enabled by default (the `error-tracking` feature); opt out
+with `default-features = false`.
 
 ```rust
 use posthog_rs::{client, CaptureExceptionOptions};

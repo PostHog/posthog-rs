@@ -62,7 +62,7 @@ Demonstrates manual error tracking capture:
 
 ```bash
 export POSTHOG_API_KEY=phc_your_project_key
-cargo run --example error_tracking --features "async-client,error-tracking"
+cargo run --example error_tracking
 ```
 
 Shows:

@@ -1,7 +1,7 @@
 //! Manual Error Tracking capture.
 //!
 //! Run with:
-//!   POSTHOG_API_KEY=phc_... cargo run --example error_tracking --features "async-client,error-tracking"
+//!   POSTHOG_API_KEY=phc_... cargo run --example error_tracking
 
 #[cfg(all(feature = "async-client", feature = "error-tracking"))]
 #[tokio::main]
@@ -32,8 +32,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(not(all(feature = "async-client", feature = "error-tracking")))]
 fn main() {
-    println!("This example requires the async-client and error-tracking features.");
-    println!(
-        "Run with: cargo run --example error_tracking --features \"async-client,error-tracking\""
-    );
+    println!("This example requires the async-client and error-tracking features (both default).");
+    println!("Run with: cargo run --example error_tracking");
 }

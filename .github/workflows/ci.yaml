@@ -40,14 +40,11 @@ jobs:
     - name: Unit test (capture-v1, blocking client)
       run: cargo test --verbose --no-default-features --features capture-v1
 
-    - name: Unit test (error-tracking, async client)
-      run: cargo test --verbose --features error-tracking
-
+    # error-tracking is a default feature, so the default and capture-v1 steps
+    # above already cover it on the async client; these cover the blocking
+    # client with and without capture-v1.
     - name: Unit test (error-tracking, blocking client)
       run: cargo test --verbose --no-default-features --features error-tracking
-
-    - name: Unit test (error-tracking + capture-v1, async client)
-      run: cargo test --verbose --features error-tracking,capture-v1
 
     - name: Unit test (error-tracking + capture-v1, blocking client)
       run: cargo test --verbose --no-default-features --features error-tracking,capture-v1
