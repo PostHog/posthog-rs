@@ -27,6 +27,7 @@ use crate::feature_flag_evaluations::{
     FlagCalledEventParams,
 };
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
+use crate::get_default_user_agent;
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
@@ -657,7 +658,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, &self.options.user_agent)
+            .header(USER_AGENT, get_default_user_agent())
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
@@ -856,7 +857,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, &self.options.user_agent)
+            .header(USER_AGENT, get_default_user_agent())
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
@@ -1080,7 +1081,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, &self.options.user_agent)
+            .header(USER_AGENT, get_default_user_agent())
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
