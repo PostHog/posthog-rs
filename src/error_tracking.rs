@@ -197,7 +197,7 @@ where
 /// only a `capture_stacktrace` cost hint — the stack walk must happen at the
 /// capture site or not at all, and disabling it skips the walk entirely.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Exception {
+pub(crate) struct Exception {
     items: Vec<ExceptionItem>,
     // SDK-captured raw frames pending client policy (in-app classification
     // and trimming), applied in write_into and attached to items[0]. None when
@@ -210,7 +210,7 @@ pub struct Exception {
 impl Exception {
     /// Build an exception from a Rust error, walking the `source()` chain and
     /// capturing the current stacktrace when `capture_stacktrace` is set.
-    pub fn from_error<E>(error: &E, capture_stacktrace: bool) -> Self
+    pub(crate) fn from_error<E>(error: &E, capture_stacktrace: bool) -> Self
     where
         E: StdError + ?Sized,
     {
@@ -253,7 +253,7 @@ impl Exception {
     /// current stacktrace when `capture_stacktrace` is set.
     // Only exercised by tests today; kept as the message-capture seam.
     #[allow(dead_code)]
-    pub fn from_message<T: Into<String>, V: Into<String>>(
+    pub(crate) fn from_message<T: Into<String>, V: Into<String>>(
         exception_type: T,
         value: V,
         capture_stacktrace: bool,
@@ -281,7 +281,7 @@ impl Exception {
     /// and client-side frame classification is not applied.
     // Unused until panic autocapture (stacked PR) builds its payloads here.
     #[allow(dead_code)]
-    pub fn from_exception_list(items: Vec<ExceptionItem>) -> Self {
+    pub(crate) fn from_exception_list(items: Vec<ExceptionItem>) -> Self {
         Self {
             items,
             captured_frames: None,
@@ -291,12 +291,12 @@ impl Exception {
     }
 
     /// Set a custom exception fingerprint.
-    pub fn set_fingerprint<S: Into<String>>(&mut self, fingerprint: S) {
+    pub(crate) fn set_fingerprint<S: Into<String>>(&mut self, fingerprint: S) {
         self.fingerprint = Some(fingerprint.into());
     }
 
     /// Set the exception severity level. Defaults to `"error"`.
-    pub fn set_level<S: Into<String>>(&mut self, level: S) {
+    pub(crate) fn set_level<S: Into<String>>(&mut self, level: S) {
         self.level = level.into();
     }
 
@@ -334,7 +334,7 @@ impl Exception {
 
 /// A normalized exception entry in `$exception_list`.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct ExceptionItem {
+pub(crate) struct ExceptionItem {
     #[serde(rename = "type")]
     pub exception_type: String,
     pub value: String,
@@ -345,7 +345,7 @@ pub struct ExceptionItem {
 
 /// How an exception was captured.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct ExceptionMechanism {
+pub(crate) struct ExceptionMechanism {
     #[serde(rename = "type")]
     pub mechanism_type: String,
     pub handled: bool,
@@ -373,7 +373,7 @@ impl Default for ExceptionMechanism {
 
 /// A normalized stacktrace.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct ExceptionStacktrace {
+pub(crate) struct ExceptionStacktrace {
     #[serde(rename = "type")]
     pub stacktrace_type: String,
     pub frames: Vec<StackFrame>,
@@ -390,7 +390,7 @@ impl ExceptionStacktrace {
 
 /// A normalized stack frame.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct StackFrame {
+pub(crate) struct StackFrame {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     #[serde(rename = "lineno")]
