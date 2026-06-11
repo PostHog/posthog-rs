@@ -14,7 +14,7 @@ use super::retry::{backoff_duration, is_retryable_status};
 // Re-exported so the V1 capture loops in the client modules can reach them as
 // `v1_capture::parse_retry_after` / `v1_capture::Step`.
 pub(crate) use super::retry::{parse_retry_after, Step};
-use super::{CaptureCompression, CaptureDefaults, ClientOptions};
+use super::{common::apply_runtime_context, CaptureCompression, CaptureDefaults, ClientOptions};
 use crate::error::Error;
 use crate::event::Event;
 use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse, V1Event};
@@ -27,7 +27,9 @@ pub(crate) fn build_events(events: &[Event], defaults: &CaptureDefaults) -> Vec<
     events
         .iter()
         .map(|event| {
-            let mut v1 = V1Event::from_event(event);
+            let mut event = event.clone();
+            apply_runtime_context(&mut event);
+            let mut v1 = V1Event::from_event(&event);
             if let serde_json::Value::Object(ref mut map) = v1.properties {
                 if defaults.disable_geoip {
                     map.entry("$geoip_disable")

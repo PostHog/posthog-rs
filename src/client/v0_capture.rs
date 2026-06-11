@@ -8,7 +8,7 @@ use reqwest::blocking::RequestBuilder;
 use reqwest::RequestBuilder;
 
 use super::{
-    common::{apply_before_send_hooks, apply_capture_defaults},
+    common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
     BeforeSendHook, CaptureDefaults, ClientOptions,
 };
 use crate::error::Error;
@@ -24,6 +24,7 @@ use crate::event::{BatchRequest, Event, InnerEvent};
 /// event before calling `capture()` keeps their value.
 pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
     apply_capture_defaults(event, defaults);
+    apply_runtime_context(event);
     event.prepare_for_v0();
 }
 
