@@ -321,6 +321,8 @@ pub struct BatchRequest {
 }
 
 // This exists so that the client doesn't have to specify the API key over and over
+// With `capture-v1` enabled nothing outside tests builds the V0 wire format.
+#[cfg_attr(feature = "capture-v1", allow(dead_code))]
 #[derive(Serialize)]
 pub struct InnerEvent {
     api_key: String,
@@ -334,6 +336,7 @@ pub struct InnerEvent {
 impl InnerEvent {
     /// Construct the V0 wire event. Expects that [`Event::prepare_for_v0`] has
     /// already been called so properties are fully decorated.
+    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
     pub fn new(event: Event, api_key: String) -> Self {
         Self {
             api_key,

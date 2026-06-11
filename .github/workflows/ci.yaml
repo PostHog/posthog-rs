@@ -29,8 +29,16 @@ jobs:
     - name: Unit test (default features)
       run: cargo test --verbose
 
-    - name: Unit test (workspace, includes capture-v1)
+    # The adapter only enables async-client + test-harness, so the workspace
+    # build does NOT unify capture-v1 in; it gets its own explicit steps below.
+    - name: Unit test (workspace)
       run: cargo test --workspace --verbose
+
+    - name: Unit test (capture-v1, async client)
+      run: cargo test --verbose --features capture-v1
+
+    - name: Unit test (capture-v1, blocking client)
+      run: cargo test --verbose --no-default-features --features capture-v1
 
     # TODO: when v1 endpoint ships, remove the capture-v1 feature gate;
     # v1 e2e test (get_client_v1_async) will then run here automatically.

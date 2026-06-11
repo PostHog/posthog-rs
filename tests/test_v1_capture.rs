@@ -795,6 +795,72 @@ async fn v1_capture_request_id_stable_across_retries() {
     );
 }
 
+/// C3: a non-200 2xx with a well-formed body is success, not a connection error.
+#[tokio::test]
+async fn v1_capture_accepts_alternate_2xx_status() {
+    let server = MockServer::start();
+
+    let uuid = uuid::Uuid::now_v7();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v1/analytics/events");
+        then.status(201)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "results": {
+                    uuid.to_string(): { "result": "ok" }
+                }
+            }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    let mut event = Event::new("test", "user-1");
+    event.set_uuid(uuid);
+
+    let result = client.capture(event).await;
+    assert!(result.is_ok(), "201 should be accepted as success");
+    mock.assert_hits(1);
+}
+
+/// C4: pins the wire identity `posthog-rs/<semver>` that capture parses
+/// into `$lib`/`$lib_version`.
+#[tokio::test]
+async fn v1_capture_sends_canonical_sdk_info_header() {
+    let server = MockServer::start();
+
+    let expected = format!("posthog-rs/{}", env!("CARGO_PKG_VERSION"));
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-sdk-info", &expected)
+            .header("user-agent", &expected);
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    client.capture(Event::new("test", "user-1")).await.unwrap();
+    mock.assert();
+}
+
+#[tokio::test]
+async fn v1_capture_batch_empty_is_noop() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v1/analytics/events");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url()).await;
+    let result = client.capture_batch(vec![], false).await;
+
+    assert!(result.is_ok());
+    mock.assert_hits(0);
+}
+
 #[tokio::test]
 async fn v1_capture_disabled_client_noop() {
     let options = ClientOptionsBuilder::default()
