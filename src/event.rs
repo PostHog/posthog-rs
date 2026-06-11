@@ -123,6 +123,11 @@ impl Event {
         Ok(())
     }
 
+    /// Remove a property from the event and return its previous value, if any.
+    pub fn remove_prop(&mut self, key: &str) -> Option<serde_json::Value> {
+        self.properties.remove(key)
+    }
+
     /// Capture this as a group event.
     ///
     /// See <https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events>.
@@ -213,13 +218,15 @@ impl Event {
         &self.options
     }
 
+    /// Return the event name.
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
-    pub(crate) fn event_name(&self) -> &str {
+    pub fn event_name(&self) -> &str {
         &self.event
     }
 
+    /// Return the event distinct ID.
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
-    pub(crate) fn distinct_id(&self) -> &str {
+    pub fn distinct_id(&self) -> &str {
         &self.distinct_id
     }
 
@@ -233,8 +240,9 @@ impl Event {
         self.timestamp
     }
 
+    /// Return the event properties.
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
-    pub(crate) fn properties(&self) -> &HashMap<String, serde_json::Value> {
+    pub fn properties(&self) -> &HashMap<String, serde_json::Value> {
         &self.properties
     }
 
@@ -324,6 +332,8 @@ pub struct BatchRequest {
 }
 
 // This exists so that the client doesn't have to specify the API key over and over
+// With `capture-v1` enabled nothing outside tests builds the V0 wire format.
+#[cfg_attr(feature = "capture-v1", allow(dead_code))]
 #[derive(Serialize)]
 pub struct InnerEvent {
     api_key: String,
@@ -337,6 +347,7 @@ pub struct InnerEvent {
 impl InnerEvent {
     /// Construct the V0 wire event. Expects that [`Event::prepare_for_v0`] has
     /// already been called so properties are fully decorated.
+    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
     pub fn new(event: Event, api_key: String) -> Self {
         Self {
             api_key,

@@ -7,7 +7,10 @@ use reqwest::blocking::RequestBuilder;
 #[cfg(feature = "async-client")]
 use reqwest::RequestBuilder;
 
-use super::ClientOptions;
+use super::{
+    common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
+    ClientOptions,
+};
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
@@ -24,13 +27,8 @@ pub(crate) fn prepare_event(event: &mut Event, options: &ClientOptions) -> Resul
     #[cfg(feature = "error-tracking")]
     crate::error_tracking::finalize_exception(event, options.error_tracking())?;
 
-    let defaults = options.capture_defaults();
-    if defaults.disable_geoip {
-        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
-    }
-    if defaults.is_server {
-        event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
-    }
+    apply_capture_defaults(event, &options.capture_defaults());
+    apply_runtime_context(event);
     event.prepare_for_v0();
     Ok(())
 }
@@ -51,21 +49,30 @@ pub(crate) fn build_batch_payload(
     api_key: String,
     historical_migration: bool,
     options: &ClientOptions,
-) -> Result<String, Error> {
+) -> Result<Option<String>, Error> {
     let inner_events: Vec<InnerEvent> = events
         .into_iter()
-        .map(|mut event| {
-            prepare_event(&mut event, options)?;
-            Ok(InnerEvent::new(event, api_key.clone()))
+        .filter_map(|mut event| {
+            if let Err(e) = prepare_event(&mut event, options) {
+                return Some(Err(e));
+            }
+            apply_before_send_hooks(&options.before_send, event)
+                .map(|event| Ok(InnerEvent::new(event, api_key.clone())))
         })
         .collect::<Result<_, Error>>()?;
+
+    if inner_events.is_empty() {
+        return Ok(None);
+    }
 
     let batch_request = BatchRequest {
         api_key,
         historical_migration,
         batch: inner_events,
     };
-    serde_json::to_string(&batch_request).map_err(|e| Error::Serialization(e.to_string()))
+    serde_json::to_string(&batch_request)
+        .map(Some)
+        .map_err(|e| Error::Serialization(e.to_string()))
 }
 
 /// Encode the V0 JSON body, compressing when configured. Returns the bytes and

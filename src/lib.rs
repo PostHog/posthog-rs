@@ -85,6 +85,7 @@ mod local_evaluation;
 // Public interface - any change to this is breaking!
 // Client
 pub use client::client;
+pub use client::BeforeSendHook;
 pub use client::CaptureCompression;
 pub use client::Client;
 pub use client::ClientOptions;
