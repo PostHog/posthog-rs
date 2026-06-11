@@ -286,6 +286,10 @@ impl Client {
 
     /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
     ///
+    /// The error's type, message, and full `source()` chain are sent as
+    /// `$exception_list`, with a stacktrace of the capture site attached to
+    /// the first entry (see `ErrorTrackingOptions::capture_stacktrace`).
+    ///
     /// Accepts any [`std::error::Error`], including `&dyn Error`. A
     /// `Box<dyn Error>` does not implement `Error` itself, so pass the
     /// dereferenced trait object: `capture_exception(&*boxed)`.
@@ -293,6 +297,18 @@ impl Client {
     /// To associate the exception with a person or attach custom properties,
     /// groups, a fingerprint, or a severity level, use
     /// [`Client::capture_exception_with`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), posthog_rs::Error> {
+    /// let client = posthog_rs::client("phc_project_api_key");
+    /// let error = std::io::Error::other("checkout failed");
+    ///
+    /// client.capture_exception(&error)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(feature = "error-tracking")]
     pub fn capture_exception<E>(&self, error: &E) -> Result<(), Error>
     where
@@ -306,6 +322,25 @@ impl Client {
     ///
     /// Set [`CaptureExceptionOptions::distinct_id`] to associate the exception
     /// with a person; without it the exception is captured personlessly.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), posthog_rs::Error> {
+    /// use posthog_rs::CaptureExceptionOptions;
+    ///
+    /// let client = posthog_rs::client("phc_project_api_key");
+    /// let error = std::io::Error::other("checkout failed");
+    ///
+    /// client.capture_exception_with(
+    ///     &error,
+    ///     CaptureExceptionOptions::new()
+    ///         .distinct_id("user-123")
+    ///         .property("route", "/checkout")?,
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(feature = "error-tracking")]
     pub fn capture_exception_with<E>(
         &self,

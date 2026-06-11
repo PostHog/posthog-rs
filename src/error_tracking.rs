@@ -14,12 +14,46 @@ const MAX_FRAMES: usize = 64;
 /// error chains.
 const MAX_ERROR_SOURCES: usize = 50;
 
-/// Error Tracking stacktrace and frame classification options.
+/// Client-level Error Tracking configuration, applied to every exception the
+/// client captures. Set it via [`ErrorTrackingOptionsBuilder`] on
+/// `ClientOptions::error_tracking`.
+///
+/// # Examples
+///
+/// ```
+/// use posthog_rs::ErrorTrackingOptionsBuilder;
+///
+/// let options = ErrorTrackingOptionsBuilder::default()
+///     .capture_stacktrace(true)
+///     // Substring patterns match file paths and function symbols, so a
+///     // crate prefix marks that crate's frames as not in-app.
+///     .in_app_exclude_paths(vec!["other_crate::".to_string()])
+///     .build()
+///     .unwrap();
+/// ```
 #[derive(Builder, Clone, Debug)]
 #[builder(default)]
 pub struct ErrorTrackingOptions {
+    /// Capture a stack trace at the `capture_exception` call site and attach
+    /// it to the first entry of `$exception_list` (default: `true`).
+    ///
+    /// The trace shows where the error was *captured*, not where it was
+    /// created — a bubbled-up `Err` value carries no stack of its own. The
+    /// error type/message chain in `$exception_list` is always sent regardless
+    /// of this setting. Disabling it skips the stack walk and per-frame symbol
+    /// resolution entirely, which can matter when capturing handled errors in
+    /// high-volume paths.
     capture_stacktrace: bool,
+    /// Treat only frames matching one of these patterns as in-app. Patterns
+    /// are substring matches against a frame's file path *and* function
+    /// symbol, so both path fragments (`"/service/"`) and crate prefixes
+    /// (`"my_service::"`) work. When empty, built-in defaults apply: frames
+    /// from the cargo registry, the standard library, and vendored/target
+    /// paths are library frames, everything else is in-app.
     in_app_include_paths: Vec<String>,
+    /// Always mark matching frames as not in-app, taking precedence over
+    /// includes and defaults. Same matching rules as `in_app_include_paths`
+    /// — e.g. `"other_crate::"` excludes every frame of that crate.
     in_app_exclude_paths: Vec<String>,
 }
 
@@ -89,6 +123,20 @@ impl ErrorTrackingOptions {
 ///
 /// All fields are optional. An empty options set (`new()` / `Default`)
 /// captures the exception personlessly with no extra context.
+///
+/// # Examples
+///
+/// ```
+/// use posthog_rs::CaptureExceptionOptions;
+///
+/// let options = CaptureExceptionOptions::new()
+///     .distinct_id("user-123")
+///     .property("route", "/checkout")?
+///     .group("company", "acme")
+///     .fingerprint("checkout-error")
+///     .level("warning");
+/// # Ok::<(), posthog_rs::Error>(())
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct CaptureExceptionOptions {
     distinct_id: Option<String>,

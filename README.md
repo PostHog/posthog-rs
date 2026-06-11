@@ -75,6 +75,36 @@ client.capture_exception(&error).await.unwrap();
 associate a person, custom properties, groups, a custom `fingerprint`, and a
 severity `level` (defaults to `"error"`).
 
+The stacktrace is captured at the call site (a bubbled-up `Err` carries no
+stack of its own); the error's type, message, and `source()` chain are always
+sent regardless. Configure stacktrace capture and in-app frame classification
+through `ErrorTrackingOptionsBuilder` on `ClientOptions::error_tracking` —
+in-app patterns match both file paths and function symbols, so a crate prefix
+like `"other_crate::"` marks that crate's frames as library code:
+
+```rust
+use posthog_rs::{ClientOptionsBuilder, ErrorTrackingOptionsBuilder};
+
+let options = ClientOptionsBuilder::default()
+    .api_key("your-api-key".to_string())
+    .error_tracking(
+        ErrorTrackingOptionsBuilder::default()
+            .in_app_exclude_paths(vec!["other_crate::".to_string()])
+            .build()
+            .unwrap(),
+    )
+    .build()
+    .unwrap();
+```
+
+### Captured properties
+
+| Property | Contents |
+|---|---|
+| `$exception_list` | One entry per error in the `source()` chain: type, message, and mechanism, with the captured stacktrace attached to the first entry. |
+| `$exception_level` | `"error"` unless set via `CaptureExceptionOptions::level`. |
+| `$exception_fingerprint` | Only present when set via `CaptureExceptionOptions::fingerprint`; overrides server-side issue grouping. |
+
 ## Feature Flags
 
 The SDK now supports PostHog feature flags, allowing you to control feature rollout and run A/B tests.
