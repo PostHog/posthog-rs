@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fmt:
@@ -57,12 +57,20 @@ jobs:
         run: cargo clippy -- -D warnings
 
   build:
-    name: Build (${{ matrix.toolchain }})
+    name: Build (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable]
+        include:
+          - name: default features
+            toolchain: stable
+            cache-key: default-features
+            command: cargo build --verbose
+          - name: capture-v1
+            toolchain: stable
+            cache-key: capture-v1
+            command: cargo build --verbose --features capture-v1
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -82,13 +90,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-build-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-${{ matrix.toolchain }}-${{ matrix.cache-key }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.toolchain }}-
             ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --verbose
+        run: ${{ matrix.command }}
 
   test:
     name: ${{ matrix.name }}
