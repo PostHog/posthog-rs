@@ -9,7 +9,7 @@ use reqwest::RequestBuilder;
 
 use super::{
     common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
-    ClientOptions,
+    BeforeSendHook, CaptureDefaults, ClientOptions,
 };
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
@@ -18,19 +18,14 @@ use crate::event::{BatchRequest, Event, InnerEvent};
 // Event preparation
 // ---------------------------------------------------------------------------
 
-/// Finalize any pending exception payload, apply client-level default
-/// properties (caller-wins), and stamp V0 metadata.
+/// Apply client-level default properties (caller-wins) and V0 metadata stamping.
 ///
 /// Uses `insert_prop_default` so a caller who explicitly set a property on the
 /// event before calling `capture()` keeps their value.
-pub(crate) fn prepare_event(event: &mut Event, options: &ClientOptions) -> Result<(), Error> {
-    #[cfg(feature = "error-tracking")]
-    crate::error_tracking::finalize_exception(event, options.error_tracking())?;
-
-    apply_capture_defaults(event, &options.capture_defaults());
+pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
+    apply_capture_defaults(event, defaults);
     apply_runtime_context(event);
     event.prepare_for_v0();
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -48,18 +43,17 @@ pub(crate) fn build_batch_payload(
     events: Vec<Event>,
     api_key: String,
     historical_migration: bool,
-    options: &ClientOptions,
+    defaults: &CaptureDefaults,
+    before_send: &[BeforeSendHook],
 ) -> Result<Option<String>, Error> {
     let inner_events: Vec<InnerEvent> = events
         .into_iter()
         .filter_map(|mut event| {
-            if let Err(e) = prepare_event(&mut event, options) {
-                return Some(Err(e));
-            }
-            apply_before_send_hooks(&options.before_send, event)
-                .map(|event| Ok(InnerEvent::new(event, api_key.clone())))
+            prepare_event(&mut event, defaults);
+            apply_before_send_hooks(before_send, event)
+                .map(|event| InnerEvent::new(event, api_key.clone()))
         })
-        .collect::<Result<_, Error>>()?;
+        .collect();
 
     if inner_events.is_empty() {
         return Ok(None);

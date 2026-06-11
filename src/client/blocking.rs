@@ -320,7 +320,11 @@ impl Client {
             return Ok(());
         }
 
-        self.capture(build_exception_event(error, options)?)
+        self.capture(build_exception_event(
+            error,
+            options,
+            self.options.error_tracking(),
+        )?)
     }
 
     /// Capture a collection of events with a single request.
@@ -372,7 +376,8 @@ impl Client {
 
     #[cfg(not(feature = "capture-v1"))]
     fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
-        super::v0_capture::prepare_event(&mut event, &self.options)?;
+        let defaults = self.options.capture_defaults();
+        super::v0_capture::prepare_event(&mut event, &defaults);
         let Some(event) = apply_before_send_hooks(&self.options.before_send, event) else {
             return Ok(());
         };
@@ -389,11 +394,13 @@ impl Client {
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<(), Error> {
+        let defaults = self.options.capture_defaults();
         let Some(payload) = super::v0_capture::build_batch_payload(
             events,
             self.options.api_key.clone(),
             historical_migration,
-            &self.options,
+            &defaults,
+            &self.options.before_send,
         )?
         else {
             return Ok(());
@@ -464,7 +471,7 @@ impl Client {
     #[cfg(feature = "capture-v1")]
     fn capture_v1(
         &self,
-        mut events: Vec<Event>,
+        events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureResponse, Error> {
         use super::v1_capture::{self, Step};
@@ -473,7 +480,8 @@ impl Client {
         let request_id = Uuid::now_v7();
         let created_at = Utc::now().to_rfc3339();
         let mut attempt: u32 = 1;
-        let mut pending = v1_capture::build_events(&mut events, &self.options)?;
+        let defaults = self.options.capture_defaults();
+        let mut pending = v1_capture::build_events(&events, &defaults);
         let mut final_results = HashMap::new();
         let historical_migration = historical_migration.then_some(true);
         let url = self

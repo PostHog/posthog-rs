@@ -148,10 +148,17 @@ impl CaptureExceptionOptions {
     }
 }
 
-/// Build a `$exception` [`Event`] from a Rust error and capture options.
+/// Build a finalized `$exception` [`Event`] from a Rust error, capture
+/// options, and the capturing client's Error Tracking configuration.
+///
+/// All client policy is applied here, eagerly: the stack walk only runs when
+/// `capture_stacktrace` is enabled, and in-app classification, frame and
+/// source-chain limits, and the reserved `$exception_*` properties are written
+/// before the event is returned. The returned event is an ordinary [`Event`].
 pub(crate) fn build_exception_event<E>(
     error: &E,
     options: CaptureExceptionOptions,
+    et_options: &ErrorTrackingOptions,
 ) -> Result<Event, Error>
 where
     E: StdError + ?Sized,
@@ -164,7 +171,7 @@ where
         level,
     } = options;
 
-    let mut exception = Exception::from_error(error);
+    let mut exception = Exception::from_error(error, et_options.capture_stacktrace());
     if let Some(fingerprint) = fingerprint {
         exception.set_fingerprint(fingerprint);
     }
@@ -173,8 +180,8 @@ where
     }
 
     let mut event = match distinct_id {
-        Some(distinct_id) => exception.into_event(distinct_id),
-        None => exception.into_event_anon(),
+        Some(distinct_id) => Event::new("$exception".to_string(), distinct_id),
+        None => Event::new_anon("$exception"),
     };
     for (key, value) in properties {
         event.insert_prop(key, value)?;
@@ -182,35 +189,36 @@ where
     for (group_name, group_id) in groups {
         event.add_group(&group_name, &group_id);
     }
+
+    // Reserved $exception_* properties are written after user-set properties
+    // so they can't be overridden.
+    exception.write_into(&mut event, et_options)?;
     Ok(event)
 }
 
 /// A PostHog Error Tracking exception payload.
 ///
-/// Holds only exception-specific data. Identity, custom properties, groups,
-/// feature flags, and timestamps are attached by converting into an [`Event`]
-/// with [`Exception::into_event`] / [`Exception::into_event_anon`] and using
-/// the standard Event API.
-///
-/// Client-level [`ErrorTrackingOptions`] (stacktrace capture, in-app
-/// classification, frame limits) are applied by the capturing client, so an
-/// exception built anywhere always honors the client configuration.
+/// Internal staging type: every construction site lives in this module and is
+/// reached through a client method that holds the client's
+/// [`ErrorTrackingOptions`], so client policy is applied eagerly when the
+/// `$exception` event is built ([`build_exception_event`]). Constructors take
+/// only a `capture_stacktrace` cost hint — the stack walk must happen at the
+/// capture site or not at all, and disabling it skips the walk entirely.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Exception {
     items: Vec<ExceptionItem>,
-    // SDK-captured raw frames pending client policy (in-app classification,
-    // trimming, stacktrace opt-out), applied in finalize_exception and attached
-    // to items[0]. None when the caller supplied stacktraces directly via
-    // from_exception_list.
+    // SDK-captured raw frames pending client policy (in-app classification
+    // and trimming), applied in write_into and attached to items[0]. None when
+    // stacktrace capture is disabled.
     captured_frames: Option<Vec<StackFrame>>,
     fingerprint: Option<String>,
     level: String,
 }
 
 impl Exception {
-    /// Build an exception from a Rust error, capturing the current stacktrace
-    /// and walking the `source()` chain.
-    pub fn from_error<E>(error: &E) -> Self
+    /// Build an exception from a Rust error, walking the `source()` chain and
+    /// capturing the current stacktrace when `capture_stacktrace` is set.
+    pub fn from_error<E>(error: &E, capture_stacktrace: bool) -> Self
     where
         E: StdError + ?Sized,
     {
@@ -241,17 +249,25 @@ impl Exception {
 
         Self {
             items,
-            captured_frames: Some(capture_raw_application_frames()),
+            captured_frames: if capture_stacktrace {
+                Some(capture_raw_application_frames())
+            } else {
+                None
+            },
             fingerprint: None,
             level: "error".to_string(),
         }
     }
 
     /// Build an exception from an arbitrary type/message pair, capturing the
-    /// current stacktrace.
+    /// current stacktrace when `capture_stacktrace` is set.
     // Only exercised by tests today; kept as the message-capture seam.
     #[allow(dead_code)]
-    pub fn from_message<T: Into<String>, V: Into<String>>(exception_type: T, value: V) -> Self {
+    pub fn from_message<T: Into<String>, V: Into<String>>(
+        exception_type: T,
+        value: V,
+        capture_stacktrace: bool,
+    ) -> Self {
         Self {
             items: vec![ExceptionItem {
                 exception_type: exception_type.into(),
@@ -259,7 +275,11 @@ impl Exception {
                 mechanism: ExceptionMechanism::default(),
                 stacktrace: None,
             }],
-            captured_frames: Some(capture_raw_application_frames()),
+            captured_frames: if capture_stacktrace {
+                Some(capture_raw_application_frames())
+            } else {
+                None
+            },
             fingerprint: None,
             level: "error".to_string(),
         }
@@ -290,49 +310,21 @@ impl Exception {
         self.level = level.into();
     }
 
-    /// Convert into an identified `$exception` [`Event`].
-    ///
-    /// Use the standard [`Event`] API to attach custom properties, groups,
-    /// feature flags, or a timestamp before capturing.
-    pub fn into_event<S: Into<String>>(self, distinct_id: S) -> Event {
-        let mut event = Event::new("$exception".to_string(), distinct_id.into());
-        event.exception = Some(self);
-        event
-    }
+    /// Apply client-level Error Tracking options (in-app classification, frame
+    /// and source-chain limits) and write the reserved `$exception_*`
+    /// properties onto `event`.
+    fn write_into(self, event: &mut Event, options: &ErrorTrackingOptions) -> Result<(), Error> {
+        let Exception {
+            mut items,
+            captured_frames,
+            fingerprint,
+            level,
+        } = self;
+        if items.is_empty() {
+            return Ok(());
+        }
 
-    /// Convert into a personless `$exception` [`Event`].
-    pub fn into_event_anon(self) -> Event {
-        let mut event = Event::new_anon("$exception");
-        event.exception = Some(self);
-        event
-    }
-}
-
-/// Apply client-level Error Tracking options to an event's pending exception
-/// payload and write the reserved `$exception_*` properties.
-///
-/// Runs at capture time inside the client, so exception constructors never
-/// need client options — and after user-set properties, so reserved keys
-/// can't be overridden.
-pub(crate) fn finalize_exception(
-    event: &mut Event,
-    options: &ErrorTrackingOptions,
-) -> Result<(), Error> {
-    let Some(exception) = event.exception.take() else {
-        return Ok(());
-    };
-    let Exception {
-        mut items,
-        captured_frames,
-        fingerprint,
-        level,
-    } = exception;
-    if items.is_empty() {
-        return Ok(());
-    }
-
-    items.truncate(options.max_error_sources().max(1));
-    if options.capture_stacktrace() {
+        items.truncate(options.max_error_sources().max(1));
         if let Some(mut frames) = captured_frames {
             for frame in frames.iter_mut() {
                 let function = (!frame.function.is_empty()).then_some(frame.function.as_str());
@@ -341,14 +333,14 @@ pub(crate) fn finalize_exception(
             trim_to_max_frames(&mut frames, options.max_frames());
             items[0].stacktrace = Some(ExceptionStacktrace::raw(frames));
         }
-    }
 
-    event.insert_prop("$exception_level", level)?;
-    if let Some(fingerprint) = fingerprint {
-        event.insert_prop("$exception_fingerprint", fingerprint)?;
+        event.insert_prop("$exception_level", level)?;
+        if let Some(fingerprint) = fingerprint {
+            event.insert_prop("$exception_fingerprint", fingerprint)?;
+        }
+        event.insert_prop("$exception_list", items)?;
+        Ok(())
     }
-    event.insert_prop("$exception_list", items)?;
-    Ok(())
 }
 
 /// A normalized exception entry in `$exception_list`.
@@ -663,24 +655,31 @@ mod tests {
 
     impl StdError for BorrowedError<'_> {}
 
-    fn finalized_json(mut event: Event) -> Value {
-        finalized_json_with(&mut event, &ErrorTrackingOptions::default())
+    fn built_event_json(mut event: Event) -> Value {
+        event.prepare_for_v0();
+        serde_json::to_value(InnerEvent::new(event, "api-key".to_string())).unwrap()
     }
 
-    fn finalized_json_with(event: &mut Event, options: &ErrorTrackingOptions) -> Value {
-        finalize_exception(event, options).unwrap();
-        event.prepare_for_v0();
-        serde_json::to_value(InnerEvent::new(event.clone(), "api-key".to_string())).unwrap()
+    fn event_json_with(exception: Exception, options: &ErrorTrackingOptions) -> Value {
+        let mut event = Event::new_anon("$exception");
+        exception.write_into(&mut event, options).unwrap();
+        built_event_json(event)
     }
 
     fn event_json(exception: Exception) -> Value {
-        finalized_json(exception.into_event_anon())
+        event_json_with(exception, &ErrorTrackingOptions::default())
     }
 
     #[test]
     fn from_error_builds_exception_list_with_stacktrace() {
         let error = OuterError { source: InnerError };
-        let json = finalized_json(Exception::from_error(&error).into_event("user-1"));
+        let event = build_exception_event(
+            &error,
+            CaptureExceptionOptions::new().distinct_id("user-1"),
+            &ErrorTrackingOptions::default(),
+        )
+        .unwrap();
+        let json = built_event_json(event);
 
         assert_eq!(json["event"], "$exception");
         assert_eq!(json["distinct_id"], "user-1");
@@ -726,7 +725,7 @@ mod tests {
     fn from_error_accepts_borrowed_error_types() {
         let message = String::from("borrowed parse failure");
         let error = BorrowedError(&message);
-        let json = event_json(Exception::from_error(&error));
+        let json = event_json(Exception::from_error(&error, true));
 
         assert_eq!(
             json["properties"]["$exception_list"][0]["value"],
@@ -736,7 +735,7 @@ mod tests {
 
     #[test]
     fn personless_capture_disables_person_profile() {
-        let json = event_json(Exception::from_message("Error", "no user context"));
+        let json = event_json(Exception::from_message("Error", "no user context", true));
 
         assert_eq!(json["event"], "$exception");
         assert_eq!(json["properties"]["$process_person_profile"], false);
@@ -744,15 +743,20 @@ mod tests {
 
     #[test]
     fn custom_properties_cannot_override_reserved_exception_payload() {
-        let mut event = Exception::from_message("Error", "real message").into_event_anon();
-        event
-            .insert_prop("$exception_list", json!([{"value": "fake"}]))
-            .unwrap();
+        let error = OuterError { source: InnerError };
+        let event = build_exception_event(
+            &error,
+            CaptureExceptionOptions::new()
+                .property("$exception_list", json!([{"value": "fake"}]))
+                .unwrap(),
+            &ErrorTrackingOptions::default(),
+        )
+        .unwrap();
 
-        let json = finalized_json(event);
+        let json = built_event_json(event);
         assert_eq!(
             json["properties"]["$exception_list"][0]["value"],
-            "real message"
+            "checkout failed"
         );
     }
 
@@ -764,8 +768,9 @@ mod tests {
             .build()
             .unwrap();
         let error = OuterError { source: InnerError };
-        let mut event = Exception::from_error(&error).into_event_anon();
-        let json = finalized_json_with(&mut event, &options);
+        let event =
+            build_exception_event(&error, CaptureExceptionOptions::new(), &options).unwrap();
+        let json = built_event_json(event);
 
         let exception_list = json["properties"]["$exception_list"].as_array().unwrap();
         assert_eq!(exception_list.len(), 1);
@@ -848,8 +853,10 @@ mod tests {
             .max_frames(1usize)
             .build()
             .unwrap();
-        let mut event = Exception::from_message("SmallStack", "keeps user frame").into_event_anon();
-        let json = finalized_json_with(&mut event, &options);
+        let json = event_json_with(
+            Exception::from_message("SmallStack", "keeps user frame", true),
+            &options,
+        );
 
         let frames = json["properties"]["$exception_list"][0]["stacktrace"]["frames"]
             .as_array()
@@ -902,8 +909,13 @@ mod tests {
     #[test]
     fn build_exception_event_defaults_to_personless() {
         let error = OuterError { source: InnerError };
-        let event = build_exception_event(&error, CaptureExceptionOptions::default()).unwrap();
-        let json = finalized_json(event);
+        let event = build_exception_event(
+            &error,
+            CaptureExceptionOptions::default(),
+            &ErrorTrackingOptions::default(),
+        )
+        .unwrap();
+        let json = built_event_json(event);
 
         assert_eq!(json["event"], "$exception");
         assert_eq!(json["properties"]["$process_person_profile"], false);
@@ -920,8 +932,9 @@ mod tests {
             .group("company", "acme")
             .fingerprint("checkout-error")
             .level("warning");
-        let event = build_exception_event(&error, options).unwrap();
-        let json = finalized_json(event);
+        let event =
+            build_exception_event(&error, options, &ErrorTrackingOptions::default()).unwrap();
+        let json = built_event_json(event);
 
         assert_eq!(json["distinct_id"], "user-1");
         assert_eq!(json["properties"]["route"], "/checkout");
