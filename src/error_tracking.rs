@@ -406,7 +406,7 @@ pub struct StackFrame {
 
 // Captures raw Rust stack traces for Error Tracking. Frames are unclassified
 // at this point: in-app classification and trimming are client policy, applied
-// at capture time by finalize_exception.
+// when the exception event is built.
 fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
     let mut frames = Vec::new();
     let mut skipped = 0usize;
@@ -417,12 +417,11 @@ fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
             return true;
         }
 
-        let mut pushed = false;
+        // One physical frame resolves to multiple symbols when the compiler
+        // inlined functions into it; emit each inlined layer as its own frame
+        // so the logical call chain survives. The resolver yields layers
+        // innermost-first, which matches this stack's current-first order.
         backtrace::resolve_frame(frame, |symbol| {
-            if pushed {
-                return;
-            }
-
             let filename = symbol.filename().map(path_to_string);
             let function = symbol
                 .name()
@@ -442,7 +441,6 @@ fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
                 resolved: true,
                 platform: "rust".to_string(),
             });
-            pushed = true;
         });
 
         true
@@ -895,6 +893,39 @@ mod tests {
         assert!(
             capture_index < test_index,
             "expected top frame before caller, got {:?}",
+            functions
+        );
+    }
+
+    #[test]
+    fn inlined_functions_become_separate_frames() {
+        // inline(always) is honored in debug builds, so the two helpers share
+        // the test function's physical frame and must surface as their own
+        // logical frames, innermost first.
+        #[inline(always)]
+        fn inline_leaf() -> Vec<StackFrame> {
+            capture_raw_application_frames()
+        }
+
+        #[inline(always)]
+        fn inline_mid() -> Vec<StackFrame> {
+            inline_leaf()
+        }
+
+        let frames = inline_mid();
+        let functions: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
+
+        let leaf_index = functions
+            .iter()
+            .position(|function| function.contains("inline_leaf"))
+            .unwrap_or_else(|| panic!("expected inline_leaf frame, got {:?}", functions));
+        let mid_index = functions
+            .iter()
+            .position(|function| function.contains("inline_mid"))
+            .unwrap_or_else(|| panic!("expected inline_mid frame, got {:?}", functions));
+        assert!(
+            leaf_index < mid_index,
+            "expected innermost inlined layer first, got {:?}",
             functions
         );
     }
