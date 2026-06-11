@@ -1,5 +1,12 @@
 # posthog-rs
 
+## 0.11.0 — 2026-06-11
+
+### Minor changes
+
+- [b84ec43](https://github.com/posthog/posthog-rs/commit/b84ec433bb1f2049673442a6e58e41c4cb92bc08) Add OS runtime context properties to captured events. — Thanks @marandaneto!
+- [dba50e1](https://github.com/posthog/posthog-rs/commit/dba50e13c275edd3326b1762afab22796acfca27) Add before_send hooks for mutating or dropping events before capture. — Thanks @marandaneto!
+
 ## 0.10.2 — 2026-06-10
 
 ### Patch changes
