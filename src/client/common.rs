@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
+use crate::client::BeforeSendHook;
+use crate::client::CaptureDefaults;
 use crate::feature_flag_evaluations::{EvaluatedFlagRecord, FlagCalledEventParams};
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
 use crate::Event;
+use tracing::error;
 
 /// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
 /// dedup cache. On overflow the entire map is reset (matches the JS SDK).
@@ -13,6 +16,33 @@ pub(super) type FlagEventDedupCache = Mutex<HashMap<String, HashSet<String>>>;
 
 pub(super) fn flag_event_dedup_cache() -> FlagEventDedupCache {
     Mutex::new(HashMap::new())
+}
+
+pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaults) {
+    if defaults.disable_geoip {
+        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
+    }
+    if defaults.is_server {
+        event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
+    }
+}
+
+pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
+    let mut current = Some(event);
+
+    for hook in hooks {
+        let event = current.take().expect("event is present between hooks");
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.apply(event))) {
+            Ok(Some(next)) => current = Some(next),
+            Ok(None) => return None,
+            Err(_) => {
+                error!("panic in PostHog before_send hook; dropping event");
+                return None;
+            }
+        }
+    }
+
+    current
 }
 
 /// Returns `true` when the helper has already shipped this
@@ -294,5 +324,45 @@ mod tests {
 
         assert_eq!(event.properties().get("$is_server"), Some(&json!(true)));
         assert_eq!(event.properties().get("$geoip_disable"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn before_send_hooks_mutate_and_drop_events() {
+        let options = crate::ClientOptionsBuilder::default()
+            .api_key("test-key".to_string())
+            .before_send(|mut event| {
+                event.insert_prop("from_hook", true).unwrap();
+                Some(event)
+            })
+            .before_send(|event| {
+                if event.event_name() == "drop" {
+                    None
+                } else {
+                    Some(event)
+                }
+            })
+            .build()
+            .unwrap();
+
+        let event = apply_before_send_hooks(&options.before_send, Event::new("keep", "user-1"))
+            .expect("event should be kept");
+        assert_eq!(event.properties().get("from_hook"), Some(&json!(true)));
+
+        assert!(
+            apply_before_send_hooks(&options.before_send, Event::new("drop", "user-1")).is_none()
+        );
+    }
+
+    #[test]
+    fn before_send_hook_panic_drops_event() {
+        let options = crate::ClientOptionsBuilder::default()
+            .api_key("test-key".to_string())
+            .before_send(|_event| panic!("boom"))
+            .build()
+            .unwrap();
+
+        assert!(
+            apply_before_send_hooks(&options.before_send, Event::new("test", "user-1")).is_none()
+        );
     }
 }

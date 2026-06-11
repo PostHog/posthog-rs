@@ -7,7 +7,10 @@ use reqwest::blocking::RequestBuilder;
 #[cfg(feature = "async-client")]
 use reqwest::RequestBuilder;
 
-use super::{CaptureDefaults, ClientOptions};
+use super::{
+    common::{apply_before_send_hooks, apply_capture_defaults},
+    BeforeSendHook, CaptureDefaults, ClientOptions,
+};
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
@@ -20,12 +23,7 @@ use crate::event::{BatchRequest, Event, InnerEvent};
 /// Uses `insert_prop_default` so a caller who explicitly set a property on the
 /// event before calling `capture()` keeps their value.
 pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
-    if defaults.disable_geoip {
-        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
-    }
-    if defaults.is_server {
-        event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
-    }
+    apply_capture_defaults(event, defaults);
     event.prepare_for_v0();
 }
 
@@ -45,21 +43,29 @@ pub(crate) fn build_batch_payload(
     api_key: String,
     historical_migration: bool,
     defaults: &CaptureDefaults,
-) -> Result<String, Error> {
+    before_send: &[BeforeSendHook],
+) -> Result<Option<String>, Error> {
     let inner_events: Vec<InnerEvent> = events
         .into_iter()
-        .map(|mut event| {
+        .filter_map(|mut event| {
             prepare_event(&mut event, defaults);
-            InnerEvent::new(event, api_key.clone())
+            apply_before_send_hooks(before_send, event)
+                .map(|event| InnerEvent::new(event, api_key.clone()))
         })
         .collect();
+
+    if inner_events.is_empty() {
+        return Ok(None);
+    }
 
     let batch_request = BatchRequest {
         api_key,
         historical_migration,
         batch: inner_events,
     };
-    serde_json::to_string(&batch_request).map_err(|e| Error::Serialization(e.to_string()))
+    serde_json::to_string(&batch_request)
+        .map(Some)
+        .map_err(|e| Error::Serialization(e.to_string()))
 }
 
 /// Encode the V0 JSON body, compressing when configured. Returns the bytes and

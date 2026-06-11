@@ -23,12 +23,14 @@ use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
+#[cfg(feature = "capture-v1")]
+use super::common::apply_capture_defaults;
 use super::common::{
-    already_reported, build_dedup_key, extract_flag_details, flag_called_event,
-    flag_event_dedup_cache, local_record, remote_record_from_detail, DetailedFlagsResponse,
-    FlagEventDedupCache,
+    already_reported, apply_before_send_hooks, build_dedup_key, extract_flag_details,
+    flag_called_event, flag_event_dedup_cache, local_record, remote_record_from_detail,
+    DetailedFlagsResponse, FlagEventDedupCache,
 };
-use super::ClientOptions;
+use super::{BeforeSendHook, ClientOptions};
 
 #[cfg(not(feature = "capture-v1"))]
 async fn check_response(response: reqwest::Response) -> Result<(), Error> {
@@ -64,6 +66,7 @@ struct AsyncFlagEventHost {
     http_client: HttpClient,
     options: ClientOptions,
     capture_url: String,
+    before_send: Vec<BeforeSendHook>,
     dedup_cache: FlagEventDedupCache,
     /// Tokio runtime handle captured at host construction (which always runs
     /// inside the runtime that hosts `evaluate_flags`). This lets snapshot
@@ -85,6 +88,7 @@ impl AsyncFlagEventHost {
             http_client,
             options: options.clone(),
             capture_url,
+            before_send: options.before_send.clone(),
             dedup_cache: flag_event_dedup_cache(),
             runtime: tokio::runtime::Handle::current(),
         }
@@ -146,6 +150,9 @@ impl AsyncFlagEventHost {
     #[cfg(not(feature = "capture-v1"))]
     fn spawn_ship_v0(&self, mut event: Event) {
         event.prepare_for_v0();
+        let Some(event) = apply_before_send_hooks(&self.before_send, event) else {
+            return;
+        };
         let inner_event = InnerEvent::new(event, self.options.api_key.clone());
         let payload = match serde_json::to_string(&inner_event) {
             Ok(p) => p,
@@ -284,6 +291,12 @@ impl Client {
 
         #[cfg(feature = "capture-v1")]
         {
+            let mut event = event;
+            let defaults = self.options.capture_defaults();
+            apply_capture_defaults(&mut event, &defaults);
+            let Some(event) = apply_before_send_hooks(&self.options.before_send, event) else {
+                return Ok(());
+            };
             return self.capture_v1(vec![event], false).await.map(|_| ());
         }
 
@@ -318,6 +331,17 @@ impl Client {
 
         #[cfg(feature = "capture-v1")]
         {
+            let defaults = self.options.capture_defaults();
+            let events: Vec<_> = events
+                .into_iter()
+                .filter_map(|mut event| {
+                    apply_capture_defaults(&mut event, &defaults);
+                    apply_before_send_hooks(&self.options.before_send, event)
+                })
+                .collect();
+            if events.is_empty() {
+                return Ok(());
+            }
             return self
                 .capture_v1(events, historical_migration)
                 .await
@@ -332,6 +356,9 @@ impl Client {
     async fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
         let defaults = self.options.capture_defaults();
         super::v0_capture::prepare_event(&mut event, &defaults);
+        let Some(event) = apply_before_send_hooks(&self.options.before_send, event) else {
+            return Ok(());
+        };
         let payload =
             super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
         let url = self.options.endpoints().build_url(Endpoint::Capture);
@@ -346,12 +373,16 @@ impl Client {
         historical_migration: bool,
     ) -> Result<(), Error> {
         let defaults = self.options.capture_defaults();
-        let payload = super::v0_capture::build_batch_payload(
+        let Some(payload) = super::v0_capture::build_batch_payload(
             events,
             self.options.api_key.clone(),
             historical_migration,
             &defaults,
-        )?;
+            &self.options.before_send,
+        )?
+        else {
+            return Ok(());
+        };
         let url = self.options.endpoints().build_url(Endpoint::Batch);
         let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
         self.send_v0_with_retry(&url, body, encoding).await
