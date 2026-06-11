@@ -40,6 +40,18 @@ jobs:
     - name: Unit test (capture-v1, blocking client)
       run: cargo test --verbose --no-default-features --features capture-v1
 
+    - name: Unit test (error-tracking, async client)
+      run: cargo test --verbose --features error-tracking
+
+    - name: Unit test (error-tracking, blocking client)
+      run: cargo test --verbose --no-default-features --features error-tracking
+
+    - name: Unit test (error-tracking + capture-v1, async client)
+      run: cargo test --verbose --features error-tracking,capture-v1
+
+    - name: Unit test (error-tracking + capture-v1, blocking client)
+      run: cargo test --verbose --no-default-features --features error-tracking,capture-v1
+
     # TODO: when v1 endpoint ships, remove the capture-v1 feature gate;
     # v1 e2e test (get_client_v1_async) will then run here automatically.
     - name: E2E test
