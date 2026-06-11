@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: ['1.78.0', stable]
+        toolchain: [stable]
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -98,14 +98,19 @@ jobs:
       matrix:
         include:
           - name: Unit test (default features)
+            cache-key: default-features
             command: cargo test --verbose
           - name: Unit test (workspace)
+            cache-key: workspace
             command: cargo test --workspace --verbose
           - name: Unit test (capture-v1, async client)
+            cache-key: capture-v1-async-client
             command: cargo test --verbose --features capture-v1
           - name: Unit test (capture-v1, blocking client)
+            cache-key: capture-v1-blocking-client
             command: cargo test --verbose --no-default-features --features capture-v1
           - name: E2E test
+            cache-key: e2e
             command: cargo test --verbose --features e2e-test --no-default-features
     steps:
       - name: Checkout code
@@ -123,7 +128,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-test-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ matrix.cache-key }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-
             ${{ runner.os }}-cargo-
