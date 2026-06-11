@@ -47,7 +47,9 @@ pub(crate) fn build_events(events: &[Event], defaults: &CaptureDefaults) -> Vec<
 
 pub(crate) fn build_headers(opts: &ClientOptions, request_id: &Uuid, attempt: u32) -> HeaderMap {
     let version = env!("CARGO_PKG_VERSION");
-    let sdk_info = format!("posthog-rust/{version}");
+    // SDK identity: `<canonical-$lib-name>/<semver>`. The name must match v0's
+    // `$lib` ("posthog-rs"); capture materializes it into `$lib`/`$lib_version`.
+    let sdk_info = format!("posthog-rs/{version}");
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -58,13 +60,11 @@ pub(crate) fn build_headers(opts: &ClientOptions, request_id: &Uuid, attempt: u3
     );
     headers.insert(
         "user-agent",
-        HeaderValue::from_str(&sdk_info)
-            .unwrap_or_else(|_| HeaderValue::from_static("posthog-rust")),
+        HeaderValue::from_str(&sdk_info).unwrap_or_else(|_| HeaderValue::from_static("posthog-rs")),
     );
     headers.insert(
         "posthog-sdk-info",
-        HeaderValue::from_str(&sdk_info)
-            .unwrap_or_else(|_| HeaderValue::from_static("posthog-rust")),
+        HeaderValue::from_str(&sdk_info).unwrap_or_else(|_| HeaderValue::from_static("posthog-rs")),
     );
     headers.insert(
         "posthog-attempt",
@@ -107,6 +107,29 @@ pub(crate) fn maybe_compress(
         }
     }
     payload
+}
+
+/// Headers + (possibly compressed) body for a single-event, fire-and-forget
+/// `$feature_flag_called` ship over the V1 endpoint. Always one attempt:
+/// flag-event loss isn't worth retry traffic, and shipping must never block
+/// flag reads.
+pub(crate) fn build_flag_event_request(
+    opts: &ClientOptions,
+    event: &Event,
+) -> Result<(HeaderMap, Vec<u8>), Error> {
+    use crate::event_v1::V1BatchRequestRef;
+
+    let batch = build_events(std::slice::from_ref(event), &opts.capture_defaults());
+    let created_at = Utc::now().to_rfc3339();
+    let req = V1BatchRequestRef {
+        created_at: &created_at,
+        historical_migration: None,
+        batch: &batch,
+    };
+    let payload = serde_json::to_vec(&req).map_err(|e| Error::Serialization(e.to_string()))?;
+    let mut headers = build_headers(opts, &Uuid::now_v7(), 1);
+    let body = maybe_compress(opts.capture_compression, &mut headers, payload);
+    Ok((headers, body))
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +208,9 @@ pub(crate) fn after_response(
     pending: &mut Vec<V1Event>,
     final_results: &mut HashMap<Uuid, EventResult>,
 ) -> Step {
-    if status == 200 {
+    // The backend sends exactly 200 today; accept the whole 2xx class so a
+    // future 201/202 isn't misclassified as a connection error.
+    if (200..=299).contains(&status) {
         let batch_resp: CaptureResponse = match serde_json::from_str(body) {
             Ok(r) => r,
             Err(e) => return Step::Fail(Error::Serialization(e.to_string())),
@@ -585,5 +610,178 @@ mod tests {
             &mut final_results,
         );
         assert!(matches!(step, Step::Fail(Error::Serialization(_))));
+    }
+
+    /// C3: any 2xx with a well-formed body is success, not a connection error.
+    #[test]
+    fn after_response_alternate_2xx_statuses_succeed() {
+        let opts = test_opts();
+        let rid = Uuid::now_v7();
+        for status in [201u16, 202, 204, 207, 299] {
+            let e = dummy_v1_event();
+            let body = serde_json::json!({
+                "results": { e.uuid.to_string(): { "result": "ok" } }
+            })
+            .to_string();
+            let mut pending = vec![e];
+            let mut final_results = HashMap::new();
+            let step = after_response(
+                &opts,
+                &rid,
+                1,
+                status,
+                None,
+                &body,
+                &mut pending,
+                &mut final_results,
+            );
+            assert!(
+                matches!(step, Step::Done),
+                "HTTP {} should be treated as success",
+                status
+            );
+            assert_eq!(final_results.len(), 1);
+        }
+    }
+
+    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
+    #[test]
+    fn after_response_alternate_2xx_malformed_body_fails() {
+        let opts = test_opts();
+        let rid = Uuid::now_v7();
+        let mut pending = vec![dummy_v1_event()];
+        let mut final_results = HashMap::new();
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            201,
+            None,
+            "not json",
+            &mut pending,
+            &mut final_results,
+        );
+        assert!(matches!(step, Step::Fail(Error::Serialization(_))));
+    }
+
+    /// A body-less 2xx (e.g. 204 from beacon mode) is terminal on the first
+    /// attempt: Serialization error, no retry, final_results left empty.
+    /// posthog-rs never opts into beacon mode, so this is a safety net.
+    #[test]
+    fn after_response_204_empty_body_is_terminal_serialization_error() {
+        let opts = test_opts();
+        let rid = Uuid::now_v7();
+        let mut pending = vec![dummy_v1_event()];
+        let mut final_results = HashMap::new();
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            204,
+            None,
+            "",
+            &mut pending,
+            &mut final_results,
+        );
+        assert!(
+            matches!(step, Step::Fail(Error::Serialization(_))),
+            "expected terminal Serialization error, got {:?}",
+            step
+        );
+        assert!(
+            final_results.is_empty(),
+            "no events should be finalized from a body-less 2xx"
+        );
+    }
+
+    // -- build_headers SDK identity -------------------------------------------
+
+    /// C4: pins the wire identity `posthog-rs/<semver>` — the name must equal
+    /// v0's `$lib` so capture's `$lib`/`$lib_version` materialization is correct.
+    #[test]
+    fn build_headers_sdk_info_is_canonical_lib_slash_version() {
+        let opts = test_opts();
+        let rid = Uuid::now_v7();
+        let headers = build_headers(&opts, &rid, 1);
+
+        let sdk_info = headers.get("posthog-sdk-info").unwrap().to_str().unwrap();
+        let expected = format!("posthog-rs/{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(sdk_info, expected);
+
+        // Parse the way capture does: split at the last '/'.
+        let (lib, version) = sdk_info.rsplit_once('/').unwrap();
+        assert_eq!(lib, "posthog-rs");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        assert!(!version.is_empty());
+
+        // user-agent mirrors the same identity string.
+        let ua = headers.get("user-agent").unwrap().to_str().unwrap();
+        assert_eq!(ua, expected);
+    }
+
+    // -- build_flag_event_request ----------------------------------------------
+
+    fn flag_called_test_event() -> Event {
+        let mut event = Event::new("$feature_flag_called", "user-1");
+        event.insert_prop("$feature_flag", "my-flag").unwrap();
+        event.insert_prop("$feature_flag_response", true).unwrap();
+        event
+    }
+
+    #[test]
+    fn build_flag_event_request_single_event_batch() {
+        let opts = test_opts();
+        let (headers, body) = build_flag_event_request(&opts, &flag_called_test_event()).unwrap();
+
+        assert_eq!(headers.get("content-type").unwrap(), "application/json");
+        assert_eq!(headers.get("posthog-attempt").unwrap(), "1");
+        assert!(headers.get("posthog-request-id").is_some());
+        assert_eq!(
+            headers.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer phc_test"
+        );
+        assert!(headers.get("content-encoding").is_none());
+
+        let parsed: crate::event_v1::V1BatchRequest = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.batch.len(), 1);
+        assert_eq!(parsed.batch[0].event, "$feature_flag_called");
+        assert_eq!(parsed.batch[0].distinct_id, "user-1");
+        assert!(parsed.historical_migration.is_none());
+        let props = parsed.batch[0].properties.as_object().unwrap();
+        assert_eq!(props.get("$feature_flag").unwrap(), "my-flag");
+        // V1 carries SDK identity in headers, not properties.
+        assert!(!props.contains_key("$lib"));
+        assert!(!props.contains_key("$lib_version"));
+    }
+
+    #[test]
+    fn build_flag_event_request_applies_capture_defaults() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .disable_geoip(true)
+            .is_server(true)
+            .build()
+            .unwrap();
+        let (_, body) = build_flag_event_request(&opts, &flag_called_test_event()).unwrap();
+        let parsed: crate::event_v1::V1BatchRequest = serde_json::from_slice(&body).unwrap();
+        let props = parsed.batch[0].properties.as_object().unwrap();
+        assert_eq!(
+            props.get("$geoip_disable").unwrap(),
+            &serde_json::json!(true)
+        );
+        assert_eq!(props.get("$is_server").unwrap(), &serde_json::json!(true));
+    }
+
+    #[test]
+    fn build_flag_event_request_compresses_when_configured() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .capture_compression(CaptureCompression::Gzip)
+            .build()
+            .unwrap();
+        let (headers, body) = build_flag_event_request(&opts, &flag_called_test_event()).unwrap();
+        assert_eq!(headers.get("content-encoding").unwrap(), "gzip");
+        // gzip magic bytes — the body is actually compressed.
+        assert_eq!(&body[..2], &[0x1f, 0x8b]);
     }
 }

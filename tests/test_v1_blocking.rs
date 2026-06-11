@@ -639,6 +639,24 @@ fn v1_blocking_preserves_uuid_and_timestamp_across_retries() {
 }
 
 #[test]
+fn v1_blocking_capture_batch_empty_is_noop() {
+    let server = MockServer::start();
+
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v1/analytics/events");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_v1_client(server.base_url());
+    let result = client.capture_batch(vec![], false);
+
+    assert!(result.is_ok());
+    mock.assert_hits(0);
+}
+
+#[test]
 fn v1_blocking_disabled_client_noop() {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test".to_string())
