@@ -5,50 +5,127 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: Run Tests
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-    - name: Set up Rust
-      run: |
-        rustup update stable
-        rustup default stable
-        rustup component add rustfmt clippy
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt
 
-    - name: Print Rust version
-      run: rustc --version
+      - name: Check formatting
+        run: cargo fmt -- --check
 
-    - name: Build
-      run: cargo build --verbose
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-    - name: Unit test (default features)
-      run: cargo test --verbose
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy
 
-    # The adapter only enables async-client + test-harness, so the workspace
-    # build does NOT unify capture-v1 in; it gets its own explicit steps below.
-    - name: Unit test (workspace)
-      run: cargo test --workspace --verbose
+      - name: Cache cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
-    - name: Unit test (capture-v1, async client)
-      run: cargo test --verbose --features capture-v1
+      - name: Clippy
+        run: cargo clippy -- -D warnings
 
-    - name: Unit test (capture-v1, blocking client)
-      run: cargo test --verbose --no-default-features --features capture-v1
+  build:
+    name: Build (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ['1.78.0', stable]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-    # TODO: when v1 endpoint ships, remove the capture-v1 feature gate;
-    # v1 e2e test (get_client_v1_async) will then run here automatically.
-    - name: E2E test
-      run: cargo test --verbose --features e2e-test --no-default-features
-      env:
-        POSTHOG_RS_E2E_TEST_API_KEY: "${{ secrets.POSTHOG_RS_E2E_TEST_API_KEY }}"
+      - name: Set up Rust ${{ matrix.toolchain }}
+        run: |
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal
+          rustup default ${{ matrix.toolchain }}
 
-    - name: Check formatting
-      run: cargo fmt -- --check
+      - name: Print Rust version
+        run: rustc --version
 
-    - name: Clippy
-      run: cargo clippy -- -D warnings
+      - name: Cache cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-build-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.toolchain }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --verbose
+
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Unit test (default features)
+            command: cargo test --verbose
+          - name: Unit test (workspace)
+            command: cargo test --workspace --verbose
+          - name: Unit test (capture-v1, async client)
+            command: cargo test --verbose --features capture-v1
+          - name: Unit test (capture-v1, blocking client)
+            command: cargo test --verbose --no-default-features --features capture-v1
+          - name: E2E test
+            command: cargo test --verbose --features e2e-test --no-default-features
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-
+
+      - name: Run tests
+        run: ${{ matrix.command }}
+        env:
+          POSTHOG_RS_E2E_TEST_API_KEY: ${{ secrets.POSTHOG_RS_E2E_TEST_API_KEY }}
