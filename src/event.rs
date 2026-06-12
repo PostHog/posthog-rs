@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::feature_flag_evaluations::FeatureFlagEvaluations;
-use crate::Error;
+use crate::{Error, CRATE_VERSION};
 
 /// Per-event V1 capture options. Known fields are typed; unknown keys go into
 /// `extra` via `#[serde(flatten)]` for forward compatibility with new backend
@@ -265,7 +265,7 @@ impl Event {
             );
         }
 
-        let version_str = env!("CARGO_PKG_VERSION");
+        let version_str = CRATE_VERSION;
         if !self.properties.contains_key("$lib_version") {
             self.properties.insert(
                 "$lib_version".into(),

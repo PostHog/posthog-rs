@@ -85,11 +85,11 @@ impl BeforeSendHook {
         (hook)(event)
     }
 }
-pub const POSTHOG_RUST_USERAGENT: &str = "posthog-node/rust";
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SDK_USERAGENT_NAME: &str = "posthog-rust";
 
 pub fn get_default_user_agent() -> String {
-    format!("{}/{}", POSTHOG_RUST_USERAGENT, VERSION)
+    format!("{}/{}", SDK_USERAGENT_NAME, CRATE_VERSION)
 }
 
 /// Configuration options for the PostHog client.
