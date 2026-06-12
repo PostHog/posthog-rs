@@ -503,8 +503,6 @@ impl AsyncFlagPoller {
     /// parsed.
     #[instrument(skip(self), level = "debug")]
     pub async fn load_flags(&self) -> Result<(), Error> {
-        use reqwest::header::USER_AGENT;
-
         let url = format!(
             "{}/flags/definitions/?send_cohorts",
             self.config.api_host.trim_end_matches('/')
