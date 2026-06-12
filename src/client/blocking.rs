@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "error-tracking")]
+use std::error::Error as StdError;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -11,6 +13,8 @@ use tracing::{debug, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::endpoints::Endpoint;
+#[cfg(feature = "error-tracking")]
+use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
 #[cfg(not(feature = "capture-v1"))]
 use crate::event::InnerEvent;
 #[cfg(feature = "capture-v1")]
@@ -65,6 +69,9 @@ struct BlockingFlagEventHost {
     http_client: HttpClient,
     options: ClientOptions,
     capture_url: String,
+    // Read by the v0 ship path only; unused under capture-v1, where the
+    // flag-event path does not currently apply before_send hooks.
+    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
     before_send: Vec<BeforeSendHook>,
     dedup_cache: FlagEventDedupCache,
 }
@@ -273,11 +280,91 @@ impl Client {
             let Some(event) = apply_before_send_hooks(&self.options.before_send, event) else {
                 return Ok(());
             };
-            return self.capture_v1(vec![event], false).map(|_| ());
+            self.capture_v1(vec![event], false).map(|_| ())
         }
 
         #[cfg(not(feature = "capture-v1"))]
-        self.capture_v0(event)
+        {
+            self.capture_v0(event)
+        }
+    }
+
+    /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
+    ///
+    /// The error's type, message, and full `source()` chain are sent as
+    /// `$exception_list`, with a stacktrace of the capture site attached to
+    /// the first entry (see `ErrorTrackingOptions::capture_stacktrace`).
+    ///
+    /// Accepts any [`std::error::Error`], including `&dyn Error`. A
+    /// `Box<dyn Error>` does not implement `Error` itself, so pass the
+    /// dereferenced trait object: `capture_exception(&*boxed)`.
+    ///
+    /// To associate the exception with a person or attach custom properties,
+    /// groups, a fingerprint, or a severity level, use
+    /// [`Client::capture_exception_with`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), posthog_rs::Error> {
+    /// let client = posthog_rs::client("phc_project_api_key");
+    /// let error = std::io::Error::other("checkout failed");
+    ///
+    /// client.capture_exception(&error)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "error-tracking")]
+    pub fn capture_exception<E>(&self, error: &E) -> Result<(), Error>
+    where
+        E: StdError + ?Sized,
+    {
+        self.capture_exception_with(error, CaptureExceptionOptions::default())
+    }
+
+    /// Capture a Rust error with optional context, sending it to PostHog
+    /// Error Tracking.
+    ///
+    /// Set [`CaptureExceptionOptions::distinct_id`] to associate the exception
+    /// with a person; without it the exception is captured personlessly.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), posthog_rs::Error> {
+    /// use posthog_rs::CaptureExceptionOptions;
+    ///
+    /// let client = posthog_rs::client("phc_project_api_key");
+    /// let error = std::io::Error::other("checkout failed");
+    ///
+    /// client.capture_exception_with(
+    ///     &error,
+    ///     CaptureExceptionOptions::new()
+    ///         .distinct_id("user-123")
+    ///         .property("route", "/checkout")?,
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "error-tracking")]
+    pub fn capture_exception_with<E>(
+        &self,
+        error: &E,
+        options: CaptureExceptionOptions,
+    ) -> Result<(), Error>
+    where
+        E: StdError + ?Sized,
+    {
+        if self.options.is_disabled() {
+            trace!("Client is disabled, skipping exception capture");
+            return Ok(());
+        }
+
+        self.capture(build_exception_event(
+            error,
+            options,
+            self.options.error_tracking(),
+        )?)
     }
 
     /// Capture a collection of events with a single request.
@@ -320,11 +407,13 @@ impl Client {
             if events.is_empty() {
                 return Ok(());
             }
-            return self.capture_v1(events, historical_migration).map(|_| ());
+            self.capture_v1(events, historical_migration).map(|_| ())
         }
 
         #[cfg(not(feature = "capture-v1"))]
-        self.capture_batch_v0(events, historical_migration)
+        {
+            self.capture_batch_v0(events, historical_migration)
+        }
     }
 
     #[cfg(not(feature = "capture-v1"))]

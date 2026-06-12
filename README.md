@@ -9,6 +9,7 @@ The official Rust SDK for [PostHog](https://posthog.com). See the [PostHog docs]
 
 - **Event capture** - Send events to PostHog for product analytics
 - **Feature flags** - Evaluate feature flags with local or remote evaluation
+- **Error tracking** - Capture Rust errors with stack traces
 - **A/B testing** - Support for multivariate flags and experiments
 - **Group analytics** - Track events and flags for B2B use cases
 - **Async and sync clients** - Choose based on your runtime
@@ -19,7 +20,7 @@ Add `posthog-rs` to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-posthog-rs = "0.3.7"
+posthog-rs = "$version"
 ```
 
 ```rust
@@ -45,6 +46,65 @@ if is_enabled {
     println!("Feature is enabled!");
 }
 ```
+
+## Error Tracking
+
+Capture Rust errors manually with stack traces and send them to PostHog Error Tracking.
+Error tracking ships enabled by default (the `error-tracking` feature); opt out
+with `default-features = false`.
+
+```rust
+use posthog_rs::{client, CaptureExceptionOptions};
+
+let client = client("your-api-key").await;
+let error = std::io::Error::new(std::io::ErrorKind::Other, "checkout failed");
+
+// Associate the exception with a person and attach optional context.
+client.capture_exception_with(
+    &error,
+    CaptureExceptionOptions::new()
+        .distinct_id("user-123")
+        .property("route", "/checkout").unwrap()
+        .fingerprint("checkout-error"),
+).await.unwrap();
+
+// Bare capture is personless.
+client.capture_exception(&error).await.unwrap();
+```
+
+`CaptureExceptionOptions` carries everything optional: `distinct_id` to
+associate a person, custom properties, groups, a custom `fingerprint`, and a
+severity `level` (defaults to `"error"`).
+
+The stacktrace is captured at the call site (a bubbled-up `Err` carries no
+stack of its own); the error's type, message, and `source()` chain are always
+sent regardless. Configure stacktrace capture and in-app frame classification
+through `ErrorTrackingOptionsBuilder` on `ClientOptions::error_tracking` —
+in-app patterns match both file paths and function symbols, so a crate prefix
+like `"other_crate::"` marks that crate's frames as library code:
+
+```rust
+use posthog_rs::{ClientOptionsBuilder, ErrorTrackingOptionsBuilder};
+
+let options = ClientOptionsBuilder::default()
+    .api_key("your-api-key".to_string())
+    .error_tracking(
+        ErrorTrackingOptionsBuilder::default()
+            .in_app_exclude_paths(vec!["other_crate::".to_string()])
+            .build()
+            .unwrap(),
+    )
+    .build()
+    .unwrap();
+```
+
+### Captured properties
+
+| Property | Contents |
+|---|---|
+| `$exception_list` | One entry per error in the `source()` chain: type, message, and mechanism, with the captured stacktrace attached to the first entry. |
+| `$exception_level` | `"error"` unless set via `CaptureExceptionOptions::level`. |
+| `$exception_fingerprint` | Only present when set via `CaptureExceptionOptions::fingerprint`; overrides server-side issue grouping. |
 
 ## Feature Flags
 
