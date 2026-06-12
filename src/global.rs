@@ -1,4 +1,9 @@
+#[cfg(feature = "error-tracking")]
+use std::error::Error as StdError;
 use std::sync::OnceLock;
+
+#[cfg(feature = "error-tracking")]
+use crate::error_tracking::CaptureExceptionOptions;
 
 use crate::{client, Client, ClientOptions, Error, Event};
 
@@ -86,6 +91,29 @@ pub async fn capture(event: Event) -> Result<(), Error> {
     client.capture(event).await
 }
 
+/// Capture a Rust error personlessly using the global client.
+#[cfg(all(feature = "async-client", feature = "error-tracking"))]
+pub async fn capture_exception<E>(error: &E) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_exception(error).await
+}
+
+/// Capture a Rust error with optional context using the global client.
+#[cfg(all(feature = "async-client", feature = "error-tracking"))]
+pub async fn capture_exception_with<E>(
+    error: &E,
+    options: CaptureExceptionOptions,
+) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_exception_with(error, options).await
+}
+
 /// Capture the provided event using the global client.
 ///
 /// # Errors
@@ -96,4 +124,24 @@ pub async fn capture(event: Event) -> Result<(), Error> {
 pub fn capture(event: Event) -> Result<(), Error> {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
     client.capture(event)
+}
+
+/// Capture a Rust error personlessly using the global client.
+#[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
+pub fn capture_exception<E>(error: &E) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_exception(error)
+}
+
+/// Capture a Rust error with optional context using the global client.
+#[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
+pub fn capture_exception_with<E>(error: &E, options: CaptureExceptionOptions) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_exception_with(error, options)
 }

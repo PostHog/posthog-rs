@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.12.0 — 2026-06-12
+
+### Minor changes
+
+- [d35ffa7](https://github.com/posthog/posthog-rs/commit/d35ffa7302f158a9aab7fe38507fabcd504d0daf) Add manual Rust error tracking capture APIs, enabled by default via the `error-tracking` feature. — Thanks @cat-ph for your first contribution 🎉!
+
 ## 0.11.0 — 2026-06-11
 
 ### Minor changes

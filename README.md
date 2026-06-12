@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/posthog-rs.svg)](https://crates.io/crates/posthog-rs)
 [![Documentation](https://docs.rs/posthog-rs/badge.svg)](https://docs.rs/posthog-rs)
 
-Please see the main [PostHog docs](https://posthog.com/docs).
+The official Rust SDK for [PostHog](https://posthog.com). See the main [PostHog docs](https://posthog.com/docs) for more information.
 
 SDK usage examples and code snippets live in the official documentation so they stay up to date.
 
