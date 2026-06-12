@@ -142,6 +142,11 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
+        if: matrix.cache-key != 'e2e'
+        run: ${{ matrix.command }}
+
+      - name: Run E2E tests
+        if: matrix.cache-key == 'e2e'
         run: ${{ matrix.command }}
         env:
           POSTHOG_RS_E2E_TEST_API_KEY: ${{ secrets.POSTHOG_RS_E2E_TEST_API_KEY }}
