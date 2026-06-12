@@ -1,5 +1,6 @@
 use std::any::{type_name, type_name_of_val};
 use std::error::Error as StdError;
+use std::io::Write;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -9,7 +10,6 @@ use reqwest::blocking::Client as BlockingHttpClient;
 use reqwest::header::CONTENT_TYPE;
 use serde::Serialize;
 use serde_json::Value;
-use tracing::debug;
 
 use crate::client::ClientOptions;
 use crate::endpoints::Endpoint;
@@ -148,10 +148,19 @@ pub fn install_panic_hook<C: Into<ClientOptions>>(options: C) -> Result<(), Erro
     let options = options.into();
     let previous_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
-        match panic::catch_unwind(AssertUnwindSafe(|| capture_panic(&options, panic_info))) {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => debug!(error = %error, "failed to capture panic"),
-            Err(_) => debug!("panic autocapture failed unexpectedly"),
+        // Report capture failures straight to stderr: dispatching through
+        // tracing would run arbitrary subscriber code on the panicking thread
+        // (the same hazard before_send is excluded for). The default hook
+        // below writes to stderr anyway, and unlike eprintln! a discarded
+        // writeln! cannot itself panic on a closed stream.
+        if let Ok(Err(error)) =
+            panic::catch_unwind(AssertUnwindSafe(|| capture_panic(&options, panic_info)))
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "posthog-rs: failed to capture panic: {}",
+                error
+            );
         }
 
         previous_hook(panic_info);
@@ -610,7 +619,9 @@ fn is_internal_panic_frame(function: &str) -> bool {
         || function.starts_with("std::panicking::")
         || function.starts_with("core::panicking::")
         || function.starts_with("std::sys::backtrace::")
-        || function == "___rust_try"
+        // The unwind shim symbol is `__rust_try` on ELF and `___rust_try`
+        // under Mach-O's extra leading underscore.
+        || function.ends_with("__rust_try")
         || function.contains("rust_begin_unwind")
 }
 
