@@ -132,6 +132,11 @@ impl ErrorTrackingOptions {
 ///
 /// Captured panics are sent personlessly using a synchronous best-effort request,
 /// then the previously installed panic hook is called.
+///
+/// Panic captures bypass `before_send` hooks: hooks run arbitrary user code
+/// that cannot safely execute inside a panic hook (a hook mutex may be held
+/// mid-panic by this thread, and a panic inside a panic hook aborts the
+/// process).
 pub fn install_panic_hook<C: Into<ClientOptions>>(options: C) -> Result<(), Error> {
     if PANIC_HOOK_INSTALLED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -637,19 +642,38 @@ fn send_panic_exception(options: &ClientOptions, mut event: Event) -> Result<(),
     // client path. Keep this prep local until panic capture gets a blocking V1
     // sender instead of making V0 prep a feature-agnostic client helper.
     prepare_panic_v0_event(&mut event, options);
-    // Honor before_send like the client capture paths: hooks may scrub the
-    // payload or drop the event entirely.
-    let Some(event) = crate::client::apply_before_send_hooks(&options.before_send, event) else {
-        return Ok(());
-    };
+    // before_send hooks are deliberately NOT applied to panic captures: they
+    // run arbitrary user code behind a mutex that can be held mid-panic by
+    // this very thread (the hook fires before unwinding releases it), and any
+    // panic raised inside a panic hook aborts the process — catch_unwind
+    // cannot intervene there.
     let payload = serde_json::to_string(&InnerEvent::new(event, options.api_key().to_string()))
         .map_err(|e| Error::Serialization(e.to_string()))?;
+    let url = options.endpoints().build_url(Endpoint::Capture);
+    let timeout = Duration::from_secs(options.panic_capture_timeout_seconds());
+
+    // Send from a dedicated thread: the panic count is thread-local, so a
+    // panic anywhere in the HTTP stack becomes a joinable thread panic instead
+    // of the process abort that any panic on the hook thread would cause.
+    // The join is bounded by the request timeout configured above.
+    let sender = std::thread::Builder::new()
+        .name("posthog-panic-capture".to_string())
+        .spawn(move || send_panic_payload(&url, payload, timeout))
+        .map_err(|e| Error::Connection(format!("failed to spawn panic capture sender: {e}")))?;
+    sender.join().unwrap_or_else(|_| {
+        Err(Error::Connection(
+            "panic capture sender panicked".to_string(),
+        ))
+    })
+}
+
+fn send_panic_payload(url: &str, payload: String, timeout: Duration) -> Result<(), Error> {
     let client = BlockingHttpClient::builder()
-        .timeout(Duration::from_secs(options.panic_capture_timeout_seconds()))
+        .timeout(timeout)
         .build()
         .map_err(|e| Error::Connection(e.to_string()))?;
     let response = client
-        .post(options.endpoints().build_url(Endpoint::Capture))
+        .post(url)
         .header(CONTENT_TYPE, "application/json")
         .body(payload)
         .send()
@@ -1067,33 +1091,6 @@ mod tests {
         assert!(result.is_err());
         assert!(current_result.is_err());
         capture_mock.assert_hits(2);
-    }
-
-    #[test]
-    fn panic_hook_honors_before_send_drop() {
-        let _guard = panic_hook_test_lock().lock().unwrap();
-        let original_hook = panic::take_hook();
-        let mut reset = PanicHookReset::new(original_hook);
-        panic::set_hook(Box::new(|_| {}));
-
-        let server = MockServer::start();
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v0/e/");
-            then.status(200);
-        });
-        let mut builder = ClientOptionsBuilder::default();
-        builder
-            .api_key("test_api_key".to_string())
-            .host(server.base_url());
-        builder.before_send(|_| None);
-        let options = builder.build().unwrap();
-
-        install_panic_hook(options).unwrap();
-        let result = panic::catch_unwind(panic_hook_disabled_test_panic_site);
-        reset.restore();
-
-        assert!(result.is_err());
-        capture_mock.assert_hits(0);
     }
 
     #[test]

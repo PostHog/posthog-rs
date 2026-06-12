@@ -9,11 +9,6 @@ use tracing::warn;
 
 mod common;
 
-// Panic autocapture sends outside the client capture paths but must honor the
-// same before_send semantics.
-#[cfg(feature = "error-tracking")]
-pub(crate) use common::apply_before_send_hooks;
-
 /// Request-body compression algorithm for the capture pipelines.
 ///
 /// When set on [`ClientOptions`], capture requests are compressed and the

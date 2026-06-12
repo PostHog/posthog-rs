@@ -53,7 +53,7 @@ pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaul
     }
 }
 
-pub(crate) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
+pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
     let mut current = Some(event);
 
     for hook in hooks {
