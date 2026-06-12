@@ -637,6 +637,11 @@ fn send_panic_exception(options: &ClientOptions, mut event: Event) -> Result<(),
     // client path. Keep this prep local until panic capture gets a blocking V1
     // sender instead of making V0 prep a feature-agnostic client helper.
     prepare_panic_v0_event(&mut event, options);
+    // Honor before_send like the client capture paths: hooks may scrub the
+    // payload or drop the event entirely.
+    let Some(event) = crate::client::apply_before_send_hooks(&options.before_send, event) else {
+        return Ok(());
+    };
     let payload = serde_json::to_string(&InnerEvent::new(event, options.api_key().to_string()))
         .map_err(|e| Error::Serialization(e.to_string()))?;
     let client = BlockingHttpClient::builder()
@@ -1001,6 +1006,87 @@ mod tests {
             .disabled(true)
             .build()
             .unwrap();
+
+        install_panic_hook(options).unwrap();
+        let result = panic::catch_unwind(panic_hook_disabled_test_panic_site);
+        reset.restore();
+
+        assert!(result.is_err());
+        capture_mock.assert_hits(0);
+    }
+
+    /// Panics inside Tokio tasks run the hook on a runtime worker thread,
+    /// where a blocking reqwest send would itself panic and drop the event.
+    #[cfg(feature = "async-client")]
+    #[test]
+    fn panic_hook_captures_panics_on_tokio_runtime_threads() {
+        let _guard = panic_hook_test_lock().lock().unwrap();
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        panic::set_hook(Box::new(|_| {}));
+
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v0/e/")
+                .body_contains(r#""value":"tokio task boom""#);
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .build()
+            .unwrap();
+        install_panic_hook(options).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            tokio::spawn(async {
+                panic!("tokio task boom");
+            })
+            .await
+        });
+        drop(runtime);
+
+        // Strictest flavor: the hook fires on the very thread driving
+        // block_on of a current-thread runtime.
+        let current_thread = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let current_result = current_thread.block_on(async {
+            panic::catch_unwind(AssertUnwindSafe(|| panic!("tokio task boom")))
+        });
+        drop(current_thread);
+        reset.restore();
+
+        assert!(result.is_err());
+        assert!(current_result.is_err());
+        capture_mock.assert_hits(2);
+    }
+
+    #[test]
+    fn panic_hook_honors_before_send_drop() {
+        let _guard = panic_hook_test_lock().lock().unwrap();
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        panic::set_hook(Box::new(|_| {}));
+
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST).path("/i/v0/e/");
+            then.status(200);
+        });
+        let mut builder = ClientOptionsBuilder::default();
+        builder
+            .api_key("test_api_key".to_string())
+            .host(server.base_url());
+        builder.before_send(|_| None);
+        let options = builder.build().unwrap();
 
         install_panic_hook(options).unwrap();
         let result = panic::catch_unwind(panic_hook_disabled_test_panic_site);
