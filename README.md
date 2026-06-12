@@ -78,7 +78,6 @@ client.capture_exception(&error).await.unwrap();
 associate a person, custom properties, groups, a custom `fingerprint`, and a
 severity `level` (defaults to `"error"`).
 
-<<<<<<< HEAD
 The stacktrace is captured at the call site (a bubbled-up `Err` carries no
 stack of its own); the error's type, message, and `source()` chain are always
 sent regardless. Configure stacktrace capture and in-app frame classification
