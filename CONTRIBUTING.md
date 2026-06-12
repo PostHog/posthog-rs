@@ -16,6 +16,14 @@ cargo test --verbose
 cargo test --verbose --features e2e-test --no-default-features
 cargo fmt -- --check
 cargo clippy -- -D warnings
+scripts/check-public-api.sh
+```
+
+`check-public-api.sh` compares the public API in your working tree with the checked-in `api/public-api.txt` snapshot. If an API change is intentional, run `scripts/check-public-api.sh --update` and review the snapshot diff. It requires:
+
+```bash
+cargo install cargo-public-api --version 0.52.0 --locked
+rustup toolchain install nightly --profile minimal
 ```
 
 ## Running examples
