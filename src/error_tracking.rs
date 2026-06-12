@@ -619,6 +619,11 @@ fn is_internal_panic_frame(function: &str) -> bool {
         || function.starts_with("std::panicking::")
         || function.starts_with("core::panicking::")
         || function.starts_with("std::sys::backtrace::")
+        // The boxed hook dispatch frame (`<Box<dyn Fn(&PanicHookInfo)> as
+        // Fn>::call`) names the hook argument type; `PanicInfo` covers
+        // binaries built before the 1.82 rename.
+        || function.contains("PanicHookInfo")
+        || function.contains("PanicInfo")
         // The unwind shim symbol is `__rust_try` on ELF and `___rust_try`
         // under Mach-O's extra leading underscore.
         || function.ends_with("__rust_try")
@@ -791,11 +796,51 @@ where
     }
 }
 
+/// Demangled symbols carry compiler-internal hashes that vary per platform
+/// and rustc release: legacy mangling appends a trailing `::h<16 hex>`, and
+/// v0 mangling tags crate names with `[<hex>]` disambiguators — the standard
+/// library ships v0-mangled on Linux, so std frames there demangle as
+/// `std[b887e3750a86e3a0]::panicking::…`. Strip both so internal-frame
+/// matching and server-side grouping see stable, readable names.
 fn normalize_function_name(function: &str) -> String {
+    let function = strip_crate_disambiguators(function);
     match function.rsplit_once("::") {
         Some((prefix, suffix)) if is_rust_symbol_hash(suffix) => prefix.to_string(),
-        _ => function.to_string(),
+        _ => function,
     }
+}
+
+fn strip_crate_disambiguators(function: &str) -> String {
+    let mut out = String::with_capacity(function.len());
+    let mut rest = function;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let bracketed = &rest[open..];
+        match bracketed.find(']') {
+            Some(close) => {
+                let content = &bracketed[1..close];
+                if !is_crate_disambiguator(content) {
+                    out.push_str(&bracketed[..=close]);
+                }
+                rest = &bracketed[close + 1..];
+            }
+            None => {
+                out.push_str(bracketed);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Lowercase-hex bracket contents of disambiguator length; array/slice type
+/// brackets (`[u8; 32]`) never qualify.
+fn is_crate_disambiguator(content: &str) -> bool {
+    content.len() >= 8
+        && content
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
 }
 
 fn is_rust_symbol_hash(segment: &str) -> bool {
@@ -1252,6 +1297,30 @@ mod tests {
         assert_eq!(
             normalize_function_name("checkout_service::submit"),
             "checkout_service::submit"
+        );
+    }
+
+    #[test]
+    fn function_names_strip_v0_crate_disambiguators() {
+        // std ships v0-mangled on Linux; crate names demangle with `[hex]`.
+        assert_eq!(
+            normalize_function_name("std[b887e3750a86e3a0]::panicking::panic_with_hook"),
+            "std::panicking::panic_with_hook"
+        );
+        assert_eq!(
+            normalize_function_name(
+                "<alloc[8a71accd1b3711a1]::boxed::Box<dyn core[e000b89356eb4406]::ops::function::Fn<(&std[b887e3750a86e3a0]::panic::PanicHookInfo,)>> as core[e000b89356eb4406]::ops::function::Fn<(&std[b887e3750a86e3a0]::panic::PanicHookInfo,)>>::call"
+            ),
+            "<alloc::boxed::Box<dyn core::ops::function::Fn<(&std::panic::PanicHookInfo,)>> as core::ops::function::Fn<(&std::panic::PanicHookInfo,)>>::call"
+        );
+        // Array and slice type brackets are not disambiguators.
+        assert_eq!(
+            normalize_function_name("core::array::<impl [u8; 32]>::map"),
+            "core::array::<impl [u8; 32]>::map"
+        );
+        assert_eq!(
+            normalize_function_name("<[u8] as checkout_service::Digest>::digest"),
+            "<[u8] as checkout_service::Digest>::digest"
         );
     }
 
