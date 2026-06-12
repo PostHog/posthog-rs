@@ -92,6 +92,7 @@ pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
+pub use client::CRATE_VERSION;
 
 // Endpoints
 pub use endpoints::{
