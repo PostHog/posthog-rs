@@ -51,73 +51,8 @@ if is_enabled {
 
 Capture Rust errors and panics with stack traces and send them to PostHog
 Error Tracking. Error tracking ships enabled by default (the `error-tracking`
-feature); opt out with `default-features = false`.
-
-### Manual capture
-
-```rust
-use posthog_rs::{client, CaptureExceptionOptions};
-
-let client = client("your-api-key").await;
-let error = std::io::Error::new(std::io::ErrorKind::Other, "checkout failed");
-
-// Associate the exception with a person and attach optional context.
-client.capture_exception_with(
-    &error,
-    CaptureExceptionOptions::new()
-        .distinct_id("user-123")
-        .property("route", "/checkout").unwrap()
-        .fingerprint("checkout-error"),
-).await.unwrap();
-
-// Bare capture is personless.
-client.capture_exception(&error).await.unwrap();
-```
-
-`CaptureExceptionOptions` carries everything optional: `distinct_id` to
-associate a person, custom properties, groups, a custom `fingerprint`, and a
-severity `level` (defaults to `"error"`).
-
-The stacktrace is captured at the call site (a bubbled-up `Err` carries no
-stack of its own); the error's type, message, and `source()` chain are always
-sent regardless. Configure stacktrace capture and in-app frame classification
-through `ErrorTrackingOptionsBuilder` on `ClientOptions::error_tracking` —
-in-app patterns match both file paths and function symbols, so a crate prefix
-like `"other_crate::"` marks that crate's frames as library code:
-
-```rust
-use posthog_rs::{ClientOptionsBuilder, ErrorTrackingOptionsBuilder};
-
-let options = ClientOptionsBuilder::default()
-    .api_key("your-api-key".to_string())
-    .error_tracking(
-        ErrorTrackingOptionsBuilder::default()
-            .in_app_exclude_paths(vec!["other_crate::".to_string()])
-            .build()
-            .unwrap(),
-    )
-    .build()
-    .unwrap();
-```
-
-### Captured properties
-
-| Property | Contents |
-|---|---|
-| `$exception_list` | One entry per error in the `source()` chain: type, message, and mechanism, with the captured stacktrace attached to the first entry. |
-| `$exception_level` | `"error"` unless set via `CaptureExceptionOptions::level`. |
-| `$exception_fingerprint` | Only present when set via `CaptureExceptionOptions::fingerprint`; overrides server-side issue grouping. |
-
-### Panic autocapture
-
-Install the panic hook once near application startup to capture Rust panics
-personlessly. Panic autocapture is best-effort: caught panics are still captured
-because Rust runs panic hooks before unwinding, and aborting processes may exit
-before delivery completes.
-
-```rust
-posthog_rs::install_panic_hook("your-api-key").unwrap();
-```
+feature); opt out with `default-features = false`. See the
+[error tracking docs](https://posthog.com/docs/error-tracking) for usage.
 
 ## Feature Flags
 
