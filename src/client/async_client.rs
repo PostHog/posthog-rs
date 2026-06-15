@@ -448,9 +448,9 @@ impl Client {
         Ok(())
     }
 
-    /// Number of events queued for delivery but not yet picked up by the worker.
-    /// Returns 0 for a disabled client. Does not count events already in flight
-    /// or held for retry.
+    /// Number of events accepted but not yet delivered or dropped — those still
+    /// in the channel, in the worker's current batch, or held for retry. Returns
+    /// 0 for a disabled client.
     pub fn pending_events(&self) -> usize {
         self.transport.as_ref().map_or(0, |t| t.pending())
     }
