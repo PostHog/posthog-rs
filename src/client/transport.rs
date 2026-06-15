@@ -160,8 +160,8 @@ impl TransportHandle {
         self.closed.load(Ordering::Acquire)
     }
 
-    /// Events queued but not yet pulled by the worker. Excludes batches already
-    /// pulled into the worker's buffer or held for retry.
+    /// Events accepted but not yet delivered or dropped: channel depth plus the
+    /// worker's current batch buffer plus any batches held for retry.
     pub(crate) fn pending(&self) -> usize {
         self.len.load(Ordering::Acquire)
     }
@@ -226,8 +226,23 @@ fn try_reserve(len: &AtomicUsize, max: usize, warned: &AtomicBool) -> bool {
             .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            // Re-arm the full-queue warning once the queue has fully drained, so a
+            // service that repeatedly fills then drains warns once per episode
+            // instead of only on the very first overflow.
+            if current == 0 {
+                warned.store(false, Ordering::Release);
+            }
             return true;
         }
+    }
+}
+
+/// Decrement the in-flight counter by `n` (no-op for 0). Called when events reach
+/// a terminal outcome (delivered or dropped) so `pending()` reflects everything
+/// still in flight: channel + worker buffer + retry queue.
+fn dec_len(len: &AtomicUsize, n: usize) {
+    if n > 0 {
+        len.fetch_sub(n, Ordering::AcqRel);
     }
 }
 
@@ -264,7 +279,7 @@ fn run_worker(
     let flush_at = options.flush_at.max(1);
     let max_batch_size = options.max_batch_size.max(1);
     let flush_interval = Duration::from_millis(options.flush_interval_ms);
-    let mut pipeline = Pipeline::new(&options, Arc::clone(&clock));
+    let mut pipeline = Pipeline::new(&options, Arc::clone(&clock), len);
 
     let mut buffer: Vec<Event> = Vec::new();
     let mut buffer_hist = false;
@@ -294,7 +309,9 @@ fn run_worker(
                 event,
                 historical_migration,
             }) => {
-                len.fetch_sub(1, Ordering::AcqRel);
+                // `len` is not decremented here: the in-flight counter spans the
+                // whole worker lifecycle (channel + buffer + retries) and is
+                // decremented by the pipeline once a batch is delivered or dropped.
                 // Keep each batch homogeneous in historical_migration: flush the
                 // current buffer before mixing in an event with a different flag.
                 if !buffer.is_empty() && historical_migration != buffer_hist {
@@ -445,12 +462,13 @@ struct Pipeline {
     options: ClientOptions,
     url: String,
     clock: Arc<dyn Clock>,
+    len: Arc<AtomicUsize>,
     retries: VecDeque<RetryBatch>,
 }
 
 #[cfg(feature = "capture-v1")]
 impl Pipeline {
-    fn new(options: &ClientOptions, clock: Arc<dyn Clock>) -> Self {
+    fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(options.request_timeout_seconds))
             .build()
@@ -463,6 +481,7 @@ impl Pipeline {
             options: options.clone(),
             url,
             clock,
+            len,
             retries: VecDeque::new(),
         }
     }
@@ -471,6 +490,7 @@ impl Pipeline {
         use super::common::{apply_before_send_hooks, apply_capture_defaults};
 
         let defaults = self.options.capture_defaults();
+        let original = events.len();
         let processed: Vec<Event> = events
             .into_iter()
             .filter_map(|mut event| {
@@ -478,6 +498,8 @@ impl Pipeline {
                 apply_before_send_hooks(&self.options.before_send, event)
             })
             .collect();
+        // Events dropped by before_send are terminal.
+        dec_len(&self.len, original - processed.len());
         if processed.is_empty() {
             return;
         }
@@ -508,7 +530,11 @@ impl Pipeline {
         let payload = match serde_json::to_vec(&req) {
             Ok(p) => p,
             Err(e) => {
-                warn!("posthog-rs: dropping batch, serialization failed: {e}");
+                warn!(
+                    "posthog-rs: dropping {} event(s), serialization failed: {e}",
+                    batch.pending.len()
+                );
+                dec_len(&self.len, batch.pending.len());
                 return;
             }
         };
@@ -546,15 +572,22 @@ impl Pipeline {
             }
         };
 
+        // Events that left `pending` (the ok/drop/warning subset) are terminal.
+        dec_len(&self.len, count - batch.pending.len());
+
         match step {
             Step::Done => {}
-            Step::Fail(e) => warn!("posthog-rs: dropping {count} event(s): {e}"),
+            Step::Fail(e) => {
+                warn!("posthog-rs: dropping {} event(s): {e}", batch.pending.len());
+                dec_len(&self.len, batch.pending.len());
+            }
             Step::Backoff(delay) => {
                 if final_attempt {
                     warn!(
                         "posthog-rs: dropping {} undelivered event(s) on shutdown",
                         batch.pending.len()
                     );
+                    dec_len(&self.len, batch.pending.len());
                 } else {
                     batch.attempt += 1;
                     batch.next_at = self.clock.now() + delay;
@@ -608,12 +641,13 @@ struct Pipeline {
     options: ClientOptions,
     url_base: String,
     clock: Arc<dyn Clock>,
+    len: Arc<AtomicUsize>,
     retries: VecDeque<RetryBatch>,
 }
 
 #[cfg(not(feature = "capture-v1"))]
 impl Pipeline {
-    fn new(options: &ClientOptions, clock: Arc<dyn Clock>) -> Self {
+    fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(options.request_timeout_seconds))
             .build()
@@ -626,6 +660,7 @@ impl Pipeline {
             options: options.clone(),
             url_base,
             clock,
+            len,
             retries: VecDeque::new(),
         }
     }
@@ -641,9 +676,14 @@ impl Pipeline {
             &self.options.before_send,
         ) {
             Ok(Some(p)) => p,
-            Ok(None) => return, // every event dropped by before_send
+            Ok(None) => {
+                // Every event dropped by before_send (terminal).
+                dec_len(&self.len, count);
+                return;
+            }
             Err(e) => {
-                warn!("posthog-rs: dropping batch, serialization failed: {e}");
+                warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
+                dec_len(&self.len, count);
                 return;
             }
         };
@@ -690,14 +730,18 @@ impl Pipeline {
         };
 
         match step {
-            Step::Done => {}
-            Step::Fail(e) => warn!("posthog-rs: dropping {} event(s): {e}", batch.count),
+            Step::Done => dec_len(&self.len, batch.count),
+            Step::Fail(e) => {
+                warn!("posthog-rs: dropping {} event(s): {e}", batch.count);
+                dec_len(&self.len, batch.count);
+            }
             Step::Backoff(delay) => {
                 if final_attempt {
                     warn!(
                         "posthog-rs: dropping {} undelivered event(s) on shutdown",
                         batch.count
                     );
+                    dec_len(&self.len, batch.count);
                 } else {
                     batch.attempt += 1;
                     batch.next_at = self.clock.now() + delay;
@@ -802,13 +846,18 @@ mod tests {
     }
 
     #[test]
-    fn try_reserve_allows_again_after_drain() {
+    fn try_reserve_rearms_warning_after_full_drain() {
         let len = AtomicUsize::new(0);
         let warned = AtomicBool::new(false);
         assert!(try_reserve(&len, 1, &warned));
+        assert!(!try_reserve(&len, 1, &warned)); // full -> warns
+        assert!(warned.load(Ordering::Acquire));
+        len.fetch_sub(1, Ordering::AcqRel); // queue fully drains
+        assert!(try_reserve(&len, 1, &warned)); // reserve from empty re-arms the warning
+        assert!(!warned.load(Ordering::Acquire));
+        // A fresh overflow warns again (a new full episode).
         assert!(!try_reserve(&len, 1, &warned));
-        len.fetch_sub(1, Ordering::AcqRel); // worker consumed one
-        assert!(try_reserve(&len, 1, &warned));
+        assert!(warned.load(Ordering::Acquire));
     }
 
     #[test]
@@ -860,10 +909,20 @@ mod tests {
         handle.enqueue(Event::new("Delayed", "user-1"), false);
         handle.tick(); // interval not yet elapsed
         mock.assert_hits(0);
+        assert_eq!(
+            handle.pending(),
+            1,
+            "buffered-but-undelivered event stays in flight"
+        );
 
         clock.advance(Duration::from_secs(10));
         handle.tick(); // interval elapsed -> flush, no real sleep
         mock.assert_hits(1);
+        assert_eq!(
+            handle.pending(),
+            0,
+            "delivered event is decremented from in flight"
+        );
 
         handle.shutdown_blocking();
     }

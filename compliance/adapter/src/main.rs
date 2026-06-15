@@ -316,6 +316,13 @@ async fn get_state(
     let instances = state.instances.lock().await;
     match instances.get(params.key()) {
         Some(s) => {
+            // `pending_events` reflects everything the SDK still holds in flight
+            // (channel + worker buffer + retries), so "sent" = captured - pending.
+            // Caveat: capture() is fire-and-forget, so an event dropped because the
+            // SDK queue was full still counts toward `total_events_captured` and is
+            // therefore counted as sent here. An exact sent-count would need an SDK
+            // delivery callback; the acceptance suite never fills the queue, so this
+            // approximation is accurate for it.
             let pending = s.client.as_ref().map_or(0, |c| c.pending_events()) as i64;
             Json(serde_json::json!(StateResponse {
                 pending_events: pending,
