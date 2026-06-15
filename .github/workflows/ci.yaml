@@ -56,6 +56,22 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
 
+  public-api:
+    name: Public API
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install public API tooling
+        run: |
+          rustup toolchain install nightly-2026-06-12 --profile minimal
+          cargo install cargo-public-api --version 0.52.0 --locked
+
+      - name: Check public API snapshot
+        run: scripts/check-public-api.sh
+
   build:
     name: Build (${{ matrix.name }})
     runs-on: ubuntu-latest
