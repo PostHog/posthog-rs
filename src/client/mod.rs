@@ -86,7 +86,7 @@ impl BeforeSendHook {
     }
 }
 pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SDK_USERAGENT_NAME: &str = "posthog-rust";
+const SDK_USERAGENT_NAME: &str = "posthog-rs";
 
 pub fn get_default_user_agent() -> String {
     format!("{}/{}", SDK_USERAGENT_NAME, CRATE_VERSION)
