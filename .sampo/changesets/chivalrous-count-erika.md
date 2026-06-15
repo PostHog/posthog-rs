@@ -2,4 +2,4 @@
 cargo/posthog-rs: minor
 ---
 
-Add custom user agent support
+Requests now use a client-specific user-agent
