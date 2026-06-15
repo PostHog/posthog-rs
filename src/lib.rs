@@ -83,6 +83,9 @@ mod global;
 mod local_evaluation;
 
 // Public interface - any change to this is breaking!
+/// Temporary public API used to verify CI detects unchecked public API changes.
+pub const PUBLIC_API_SNAPSHOT_CI_PROBE: &str = "public-api-snapshot-ci-probe";
+
 // Client
 pub use client::client;
 pub use client::BeforeSendHook;
