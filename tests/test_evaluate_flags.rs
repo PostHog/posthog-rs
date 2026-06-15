@@ -1,3 +1,6 @@
+mod common;
+
+use common::default_user_agent;
 use httpmock::prelude::*;
 use serde_json::{json, Value};
 
@@ -9,10 +12,6 @@ use std::time::Duration;
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
 #[cfg(not(feature = "capture-v1"))]
 const CAPTURE_PATH: &str = "/i/v0/e/";
-
-fn default_user_agent() -> String {
-    format!("posthog-rs/{}", env!("CARGO_PKG_VERSION"))
-}
 
 /// Feature-aware capture mock; the JSON body is required by V1, ignored by v0.
 fn capture_path_mock(server: &MockServer) -> httpmock::Mock<'_> {

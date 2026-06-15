@@ -6,15 +6,14 @@
 // `tests/test_evaluate_flags.rs`.
 #![allow(deprecated)]
 
+mod common;
+
+use common::default_user_agent;
 use httpmock::prelude::*;
 use posthog_rs::FlagValue;
 use reqwest::header::USER_AGENT;
 use serde_json::json;
 use std::collections::HashMap;
-
-fn default_user_agent() -> String {
-    format!("posthog-rs/{}", env!("CARGO_PKG_VERSION"))
-}
 
 async fn create_test_client(base_url: String) -> posthog_rs::Client {
     // Use the From implementation to ensure endpoint_manager is set up correctly
