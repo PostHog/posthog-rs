@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.13.1 — 2026-06-15
+
+### Patch changes
+
+- [8a291b6](https://github.com/posthog/posthog-rs/commit/8a291b67a9088342f5f2d2c8414fe60815e15532) Send the default SDK User-Agent on V0 capture requests. — Thanks @marandaneto!
+
 ## 0.13.0 — 2026-06-15
 
 ### Minor changes

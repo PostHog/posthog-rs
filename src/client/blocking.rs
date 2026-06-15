@@ -157,6 +157,7 @@ impl BlockingFlagEventHost {
             .http_client
             .post(&self.capture_url)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, get_default_user_agent())
             .body(payload)
             .send();
         match result {

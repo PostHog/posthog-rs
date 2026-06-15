@@ -173,6 +173,7 @@ impl AsyncFlagEventHost {
             let response = match http_client
                 .post(&url)
                 .header(CONTENT_TYPE, "application/json")
+                .header(USER_AGENT, get_default_user_agent())
                 .body(payload)
                 .send()
                 .await

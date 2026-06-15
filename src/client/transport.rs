@@ -699,8 +699,9 @@ impl Pipeline {
     }
 
     fn attempt(&mut self, mut batch: RetryBatch, final_attempt: bool) {
+        use super::get_default_user_agent;
         use super::retry::{v0_after_response, v0_after_transport_error, Step};
-        use reqwest::header::CONTENT_TYPE;
+        use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 
         // v0 capture reads the compression hint from the query param, not the header.
         let url = match batch.encoding {
@@ -711,6 +712,7 @@ impl Pipeline {
             .http
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, get_default_user_agent())
             .body(batch.body.clone());
         if let Some(token) = batch.encoding {
             request = request.header(reqwest::header::CONTENT_ENCODING, token);
