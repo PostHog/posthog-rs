@@ -60,6 +60,8 @@ trap cleanup EXIT
     echo '# Do not edit manually.'
     echo '# Public API scope: exported Rust API for the posthog-rs crate with all features enabled.'
     echo
+    # Intentionally use simplification level 3 to keep the snapshot stable
+    # and focused on externally meaningful API changes.
     cargo +"$toolchain" public-api \
         --package "$package" \
         --all-features \
