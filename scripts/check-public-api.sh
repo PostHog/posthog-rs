@@ -4,7 +4,7 @@ set -euo pipefail
 update=false
 snapshot_file="api/public-api.txt"
 package="posthog-rs"
-toolchain="${PUBLIC_API_TOOLCHAIN:-nightly}"
+toolchain="${PUBLIC_API_TOOLCHAIN:-nightly-2026-06-12}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -45,6 +45,8 @@ if ! rustup run "$toolchain" rustc --version >/dev/null 2>&1; then
 error: Rust toolchain '$toolchain' is not installed.
 Install it with:
   rustup toolchain install $toolchain --profile minimal
+
+Override with PUBLIC_API_TOOLCHAIN if the pinned nightly needs to be updated.
 EOF
     exit 1
 fi

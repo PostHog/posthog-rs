@@ -23,7 +23,7 @@ scripts/check-public-api.sh
 
 ```bash
 cargo install cargo-public-api --version 0.52.0 --locked
-rustup toolchain install nightly --profile minimal
+rustup toolchain install nightly-2026-06-12 --profile minimal
 ```
 
 ## Running examples
