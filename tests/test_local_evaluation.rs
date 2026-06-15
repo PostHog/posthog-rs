@@ -3,6 +3,9 @@
 // during the transition window.
 #![allow(deprecated)]
 
+mod common;
+
+use common::default_user_agent;
 use httpmock::prelude::*;
 #[cfg(feature = "async-client")]
 use posthog_rs::AsyncFlagPoller;
@@ -11,6 +14,7 @@ use posthog_rs::{
     FlagPoller, FlagValue, LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator,
     Property,
 };
+use reqwest::header::USER_AGENT;
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -226,6 +230,85 @@ async fn test_local_evaluation_with_mock_server() {
         .await;
 
     assert!(result.unwrap() == Some(FlagValue::Boolean(true)));
+
+    eval_mock.assert();
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_local_evaluation_with_mock_server_sends_default_user_agent() {
+    let server = MockServer::start();
+
+    // Mock the local evaluation endpoint
+    let mock_flags = json!({
+        "flags": [],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    let eval_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/flags/definitions/")
+            .header("Authorization", "Bearer test_personal_key")
+            .header("X-PostHog-Project-Api-Key", "test_project_key")
+            .header(USER_AGENT.to_string(), default_user_agent())
+            .query_param("send_cohorts", "");
+        then.status(200).json_body(mock_flags);
+    });
+
+    // Create client with local evaluation enabled
+    let options = ClientOptionsBuilder::default()
+        .host(server.base_url())
+        .api_key("test_project_key".to_string())
+        .personal_api_key("test_personal_key".to_string())
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(60)
+        .build()
+        .unwrap();
+
+    let client = posthog_rs::client(options).await;
+
+    // Give it a moment to load initial flags
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let _ = client
+        .get_feature_flag("feature-b", "", None, None, None)
+        .await;
+
+    eval_mock.assert();
+}
+
+#[test]
+fn test_sync_local_evaluation_with_mock_server_sends_default_user_agent() {
+    let server = MockServer::start();
+
+    let mock_flags = json!({
+        "flags": [],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    let eval_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/flags/definitions/")
+            .header("Authorization", "Bearer test_personal_key")
+            .header("X-PostHog-Project-Api-Key", "test_project_key")
+            .header(USER_AGENT.to_string(), default_user_agent())
+            .query_param("send_cohorts", "");
+        then.status(200).json_body(mock_flags);
+    });
+
+    let cache = FlagCache::new();
+    let config = LocalEvaluationConfig {
+        personal_api_key: "test_personal_key".to_string(),
+        project_api_key: "test_project_key".to_string(),
+        api_host: server.base_url(),
+        poll_interval: Duration::from_secs(60),
+        request_timeout: Duration::from_secs(5),
+    };
+
+    let poller = FlagPoller::new(config, cache);
+    poller.load_flags().unwrap();
 
     eval_mock.assert();
 }
