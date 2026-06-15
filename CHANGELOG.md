@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.13.0 — 2026-06-15
+
+### Minor changes
+
+- [84d06a1](https://github.com/posthog/posthog-rs/commit/84d06a1d68c894f3752e1268b4fc39f1350b966f) Requests now use a client-specific user-agent — Thanks @marandaneto!
+
 ## 0.12.0 — 2026-06-12
 
 ### Minor changes
