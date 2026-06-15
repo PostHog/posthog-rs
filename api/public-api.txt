@@ -107,10 +107,15 @@ pub async fn posthog_rs::Client::capture_exception<E>(&self, &E) -> core::result
 pub async fn posthog_rs::Client::capture_exception_with<E>(&self, &E, posthog_rs::CaptureExceptionOptions) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub fn posthog_rs::Client::evaluate_feature_flag_locally(&self, &posthog_rs::FeatureFlag, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::Error>
 pub async fn posthog_rs::Client::evaluate_flags<S: core::convert::Into<alloc::string::String>>(&self, S, posthog_rs::EvaluateFlagsOptions) -> core::result::Result<posthog_rs::FeatureFlagEvaluations, posthog_rs::Error>
+pub async fn posthog_rs::Client::flush(&self)
 pub async fn posthog_rs::Client::get_feature_flag<K: core::convert::Into<alloc::string::String>, D: core::convert::Into<alloc::string::String>>(&self, K, D, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>>) -> core::result::Result<core::option::Option<posthog_rs::FlagValue>, posthog_rs::Error>
 pub async fn posthog_rs::Client::get_feature_flag_payload<K: core::convert::Into<alloc::string::String>, D: core::convert::Into<alloc::string::String>>(&self, K, D) -> core::result::Result<core::option::Option<serde_json::value::Value>, posthog_rs::Error>
 pub async fn posthog_rs::Client::get_feature_flags<S: core::convert::Into<alloc::string::String>>(&self, S, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>>) -> core::result::Result<(std::collections::hash::map::HashMap<alloc::string::String, posthog_rs::FlagValue>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>), posthog_rs::Error>
 pub async fn posthog_rs::Client::is_feature_enabled<K: core::convert::Into<alloc::string::String>, D: core::convert::Into<alloc::string::String>>(&self, K, D, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>>) -> core::result::Result<bool, posthog_rs::Error>
+pub fn posthog_rs::Client::pending_events(&self) -> usize
+pub async fn posthog_rs::Client::shutdown(&self)
+impl core::ops::drop::Drop for posthog_rs::Client
+pub fn posthog_rs::Client::drop(&mut self)
 pub struct posthog_rs::ClientOptions
 impl posthog_rs::ClientOptions
 pub fn posthog_rs::ClientOptions::is_disabled(&self) -> bool
@@ -128,10 +133,14 @@ pub fn posthog_rs::ClientOptionsBuilder::enable_local_evaluation(&mut self, bool
 pub fn posthog_rs::ClientOptionsBuilder::error_tracking(&mut self, posthog_rs::ErrorTrackingOptions) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::extra_capture_headers(&mut self, std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::feature_flags_request_timeout_seconds(&mut self, u64) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::flush_at(&mut self, usize) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::flush_interval_ms(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::host<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::is_server(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::local_evaluation_only(&mut self, bool) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::max_batch_size(&mut self, usize) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::max_capture_attempts(&mut self, u32) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::max_queue_size(&mut self, usize) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::personal_api_key<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::poll_interval_seconds(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::request_timeout_seconds(&mut self, u64) -> &mut Self
@@ -315,8 +324,10 @@ pub async fn posthog_rs::capture_exception<E>(&E) -> core::result::Result<(), po
 pub async fn posthog_rs::capture_exception_with<E>(&E, posthog_rs::CaptureExceptionOptions) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub async fn posthog_rs::client<C: core::convert::Into<posthog_rs::ClientOptions>>(C) -> posthog_rs::Client
 pub fn posthog_rs::disable_global()
+pub async fn posthog_rs::flush()
 pub fn posthog_rs::global_is_disabled() -> bool
 pub async fn posthog_rs::init_global<C: core::convert::Into<posthog_rs::ClientOptions>>(C) -> core::result::Result<(), posthog_rs::Error>
 pub fn posthog_rs::match_feature_flag(&posthog_rs::FeatureFlag, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::InconclusiveMatchError>
 pub fn posthog_rs::match_feature_flag_with_context(&posthog_rs::FeatureFlag, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &posthog_rs::EvaluationContext<'_>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::InconclusiveMatchError>
 pub fn posthog_rs::match_property_with_context(&posthog_rs::Property, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &posthog_rs::EvaluationContext<'_>) -> core::result::Result<bool, posthog_rs::InconclusiveMatchError>
+pub async fn posthog_rs::shutdown()

@@ -1,0 +1,904 @@
+//! Runtime-independent event transport.
+//!
+//! A single background `std::thread` drains a channel, batches events, sends
+//! them with **blocking** reqwest, and retries transient failures on a schedule.
+//! Being a plain thread with a blocking client (never a tokio task) it works for
+//! the async client, the blocking client, and — in a later change — a
+//! `std::panic` hook with no runtime present.
+//!
+//! `capture()` becomes a non-blocking enqueue (`Control::Capture`). `flush()` and
+//! `shutdown()` send a control message carrying a [`Completion`] the worker
+//! signals once the requested work is done, bridging the std-thread worker to
+//! either an async (`oneshot`) or blocking (`mpsc`) caller without putting a
+//! runtime in the worker.
+//!
+//! A [`Clock`] is injected into the worker so the interval timer, retry backoff,
+//! and v1 wire timestamps are deterministic in tests (a `ManualClock` plus a
+//! test-only `Tick` command drive the worker with virtual time — no real sleeps).
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use tracing::warn;
+
+use super::ClientOptions;
+use crate::Event;
+
+/// Messages sent from producers (`capture`/`flush`/`shutdown`) to the worker.
+pub(crate) enum Control {
+    // Boxed so the channel node isn't sized to a whole Event on every flush/
+    // shutdown message (clippy::large_enum_variant).
+    Capture {
+        event: Box<Event>,
+        historical_migration: bool,
+    },
+    Flush(Completion),
+    Shutdown(Completion),
+    /// Test-only: re-evaluate the (virtual) clock and flush/retry whatever is now
+    /// due, so interval and backoff timing can be driven without real sleeps.
+    #[cfg(test)]
+    Tick(Completion),
+}
+
+/// Completion signal handed to the worker so the caller can wait for a flush or
+/// shutdown to finish. The worker calls [`Completion::signal`] without needing a
+/// runtime — `oneshot::Sender::send` and `mpsc::Sender::send` are both runtime-free.
+pub(crate) enum Completion {
+    Blocking(mpsc::Sender<()>),
+    #[cfg(feature = "async-client")]
+    Async(tokio::sync::oneshot::Sender<()>),
+}
+
+impl Completion {
+    fn signal(self) {
+        match self {
+            Completion::Blocking(tx) => {
+                let _ = tx.send(());
+            }
+            #[cfg(feature = "async-client")]
+            Completion::Async(tx) => {
+                let _ = tx.send(());
+            }
+        }
+    }
+}
+
+/// Source of time for the worker. Injected so tests can drive the interval
+/// timer, retry backoff, and v1 wire timestamps deterministically.
+pub(crate) trait Clock: Send + Sync + 'static {
+    /// Monotonic time, for batching/retry scheduling.
+    fn now(&self) -> Instant;
+    /// Wall-clock time, for v1 `created_at` / event timestamps / request headers.
+    /// Unused by the v0 pipeline, which takes its timestamp from the event itself.
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    fn now_utc(&self) -> DateTime<Utc>;
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn now_utc(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
+/// Handle stored on the client. `&self` methods use the atomics/mutex so the
+/// client can stay a plain field while `capture`/`flush`/`shutdown` take `&self`.
+pub(crate) struct TransportHandle {
+    tx: mpsc::Sender<Control>,
+    /// Pending `Capture` events not yet pulled by the worker. Gates the bounded queue.
+    len: Arc<AtomicUsize>,
+    /// Set once `shutdown`/`Drop` begins; blocks further enqueue and control sends.
+    closed: AtomicBool,
+    worker: Mutex<Option<JoinHandle<()>>>,
+    /// Latches the single "queue full" warning so a full queue doesn't spam logs.
+    full_warned: AtomicBool,
+    max_queue_size: usize,
+}
+
+impl TransportHandle {
+    /// Spawn the worker with the real system clock.
+    pub(crate) fn spawn(options: ClientOptions) -> Self {
+        Self::spawn_with_clock(options, Arc::new(SystemClock))
+    }
+
+    fn spawn_with_clock(options: ClientOptions, clock: Arc<dyn Clock>) -> Self {
+        let (tx, rx) = mpsc::channel::<Control>();
+        let len = Arc::new(AtomicUsize::new(0));
+        let max_queue_size = options.max_queue_size;
+        let worker_len = len.clone();
+        let worker = thread::Builder::new()
+            .name("posthog-transport".to_string())
+            .spawn(move || run_worker(options, rx, worker_len, clock))
+            .ok();
+        Self {
+            tx,
+            len,
+            closed: AtomicBool::new(false),
+            worker: Mutex::new(worker),
+            full_warned: AtomicBool::new(false),
+            max_queue_size,
+        }
+    }
+
+    /// Non-blocking enqueue. Drops (with a single warning) when the queue is full
+    /// or the client is closed.
+    pub(crate) fn enqueue(&self, event: Event, historical_migration: bool) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        if !try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
+            return;
+        }
+        if self
+            .tx
+            .send(Control::Capture {
+                event: Box::new(event),
+                historical_migration,
+            })
+            .is_err()
+        {
+            // Worker gone; release the slot we reserved.
+            self.len.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Send a flush/shutdown control message. Returns `false` if closed or the
+    /// worker is gone, so a caller's wait becomes a no-op instead of hanging.
+    pub(crate) fn send_control(&self, control: Control) -> bool {
+        self.tx.send(control).is_ok()
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// Events queued but not yet pulled by the worker. Excludes batches already
+    /// pulled into the worker's buffer or held for retry.
+    pub(crate) fn pending(&self) -> usize {
+        self.len.load(Ordering::Acquire)
+    }
+
+    /// Mark closed. Returns `true` for the caller that won the transition (so
+    /// shutdown is idempotent and only one caller drives teardown).
+    pub(crate) fn begin_close(&self) -> bool {
+        !self.closed.swap(true, Ordering::AcqRel)
+    }
+
+    /// Join the worker thread. Safe to call repeatedly.
+    pub(crate) fn join(&self) {
+        if let Some(handle) = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = handle.join();
+        }
+    }
+
+    /// Test helper: drive one worker cycle against the current (virtual) clock.
+    #[cfg(test)]
+    fn tick(&self) {
+        let (tx, rx) = mpsc::channel();
+        if self.send_control(Control::Tick(Completion::Blocking(tx))) {
+            let _ = rx.recv();
+        }
+    }
+
+    /// Test helper: blocking flush (the async client uses a oneshot instead).
+    #[cfg(test)]
+    fn flush_blocking(&self) {
+        let (tx, rx) = mpsc::channel();
+        if self.send_control(Control::Flush(Completion::Blocking(tx))) {
+            let _ = rx.recv();
+        }
+    }
+
+    /// Test helper: flush + stop + join, mirroring the client's shutdown.
+    #[cfg(test)]
+    fn shutdown_blocking(&self) {
+        if !self.begin_close() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        if self.send_control(Control::Shutdown(Completion::Blocking(tx))) {
+            let _ = rx.recv();
+        }
+        self.join();
+    }
+}
+
+/// Reserve a queue slot under the bounded-capacity cap. Returns `false` (and
+/// warns once) when full. A CAS keeps the count exact under concurrent producers.
+fn try_reserve(len: &AtomicUsize, max: usize, warned: &AtomicBool) -> bool {
+    loop {
+        let current = len.load(Ordering::Acquire);
+        if current >= max {
+            if !warned.swap(true, Ordering::AcqRel) {
+                warn!("posthog-rs: event queue full (capacity {max}); dropping events");
+            }
+            return false;
+        }
+        if len
+            .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+/// Time until the next scheduled wakeup: the buffer's flush-interval deadline or
+/// the earliest retry, whichever is sooner. `None` means nothing is pending, so
+/// the worker should block on `recv` until a message arrives.
+fn compute_wait(
+    now: Instant,
+    buffer_since: Option<Instant>,
+    flush_interval: Duration,
+    earliest_retry: Option<Instant>,
+) -> Option<Duration> {
+    let deadline = match (buffer_since, earliest_retry) {
+        (Some(since), Some(retry)) => Some((since + flush_interval).min(retry)),
+        (Some(since), None) => Some(since + flush_interval),
+        (None, Some(retry)) => Some(retry),
+        (None, None) => None,
+    };
+    deadline.map(|d| d.saturating_duration_since(now))
+}
+
+enum Wake {
+    Msg(Control),
+    Timeout,
+    Disconnected,
+}
+
+fn run_worker(
+    options: ClientOptions,
+    rx: mpsc::Receiver<Control>,
+    len: Arc<AtomicUsize>,
+    clock: Arc<dyn Clock>,
+) {
+    let flush_at = options.flush_at.max(1);
+    let max_batch_size = options.max_batch_size.max(1);
+    let flush_interval = Duration::from_millis(options.flush_interval_ms);
+    let mut pipeline = Pipeline::new(&options, Arc::clone(&clock));
+
+    let mut buffer: Vec<Event> = Vec::new();
+    let mut buffer_hist = false;
+    let mut buffer_since: Option<Instant> = None;
+
+    loop {
+        let wait = compute_wait(
+            clock.now(),
+            buffer_since,
+            flush_interval,
+            pipeline.earliest_retry(),
+        );
+        let wake = match wait {
+            None => match rx.recv() {
+                Ok(msg) => Wake::Msg(msg),
+                Err(_) => Wake::Disconnected,
+            },
+            Some(timeout) => match rx.recv_timeout(timeout) {
+                Ok(msg) => Wake::Msg(msg),
+                Err(mpsc::RecvTimeoutError::Timeout) => Wake::Timeout,
+                Err(mpsc::RecvTimeoutError::Disconnected) => Wake::Disconnected,
+            },
+        };
+
+        match wake {
+            Wake::Msg(Control::Capture {
+                event,
+                historical_migration,
+            }) => {
+                len.fetch_sub(1, Ordering::AcqRel);
+                // Keep each batch homogeneous in historical_migration: flush the
+                // current buffer before mixing in an event with a different flag.
+                if !buffer.is_empty() && historical_migration != buffer_hist {
+                    send_buffer(
+                        &mut pipeline,
+                        &mut buffer,
+                        buffer_hist,
+                        max_batch_size,
+                        false,
+                    );
+                    buffer_since = None;
+                }
+                if buffer.is_empty() {
+                    buffer_hist = historical_migration;
+                    buffer_since = Some(clock.now());
+                }
+                buffer.push(*event);
+                if buffer.len() >= flush_at {
+                    send_buffer(
+                        &mut pipeline,
+                        &mut buffer,
+                        buffer_hist,
+                        max_batch_size,
+                        false,
+                    );
+                    buffer_since = None;
+                }
+            }
+            Wake::Msg(Control::Flush(completion)) => {
+                // One delivery attempt per pending batch: retry the already-held
+                // batches first, then the freshly buffered ones. Failures from
+                // either are held for the next cycle (so a single 503 leaves the
+                // event queued rather than being re-attempted in this same call).
+                pipeline.flush_retries(false);
+                send_buffer(
+                    &mut pipeline,
+                    &mut buffer,
+                    buffer_hist,
+                    max_batch_size,
+                    false,
+                );
+                buffer_since = None;
+                completion.signal();
+            }
+            Wake::Msg(Control::Shutdown(completion)) => {
+                // FIFO delivery means every pre-shutdown Capture has already been
+                // buffered, so one final attempt per batch is sufficient.
+                pipeline.flush_retries(true);
+                send_buffer(
+                    &mut pipeline,
+                    &mut buffer,
+                    buffer_hist,
+                    max_batch_size,
+                    true,
+                );
+                completion.signal();
+                return;
+            }
+            #[cfg(test)]
+            Wake::Msg(Control::Tick(completion)) => {
+                if buffer_since
+                    .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
+                {
+                    send_buffer(
+                        &mut pipeline,
+                        &mut buffer,
+                        buffer_hist,
+                        max_batch_size,
+                        false,
+                    );
+                    buffer_since = None;
+                }
+                pipeline.attempt_due();
+                completion.signal();
+            }
+            Wake::Timeout => {
+                if buffer_since
+                    .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
+                {
+                    send_buffer(
+                        &mut pipeline,
+                        &mut buffer,
+                        buffer_hist,
+                        max_batch_size,
+                        false,
+                    );
+                    buffer_since = None;
+                }
+                pipeline.attempt_due();
+            }
+            Wake::Disconnected => {
+                // All client handles dropped without an explicit shutdown — best
+                // effort drain, then exit.
+                send_buffer(
+                    &mut pipeline,
+                    &mut buffer,
+                    buffer_hist,
+                    max_batch_size,
+                    true,
+                );
+                pipeline.flush_retries(true);
+                return;
+            }
+        }
+    }
+}
+
+/// Drain `buffer` into batches of at most `max_batch_size`, FIFO from the front,
+/// attempting each once. `final_attempt` warns-and-drops on transient failure
+/// (shutdown) instead of scheduling a retry.
+fn send_buffer(
+    pipeline: &mut Pipeline,
+    buffer: &mut Vec<Event>,
+    historical_migration: bool,
+    max_batch_size: usize,
+    final_attempt: bool,
+) {
+    while !buffer.is_empty() {
+        let take = buffer.len().min(max_batch_size);
+        let chunk: Vec<Event> = buffer.drain(..take).collect();
+        pipeline.send_batch(chunk, historical_migration, final_attempt);
+    }
+}
+
+// ===========================================================================
+// V1 pipeline
+// ===========================================================================
+
+#[cfg(feature = "capture-v1")]
+use std::collections::HashMap;
+#[cfg(feature = "capture-v1")]
+use uuid::Uuid;
+
+#[cfg(feature = "capture-v1")]
+struct RetryBatch {
+    pending: Vec<crate::event_v1::V1Event>,
+    request_id: Uuid,
+    created_at: String,
+    final_results: HashMap<Uuid, crate::event_v1::EventResult>,
+    historical_migration: bool,
+    attempt: u32,
+    next_at: Instant,
+}
+
+#[cfg(feature = "capture-v1")]
+struct Pipeline {
+    http: reqwest::blocking::Client,
+    options: ClientOptions,
+    url: String,
+    clock: Arc<dyn Clock>,
+    retries: VecDeque<RetryBatch>,
+}
+
+#[cfg(feature = "capture-v1")]
+impl Pipeline {
+    fn new(options: &ClientOptions, clock: Arc<dyn Clock>) -> Self {
+        let http = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(options.request_timeout_seconds))
+            .build()
+            .unwrap_or_default();
+        let url = options
+            .endpoints()
+            .build_custom_url(super::v1_capture::V1_CAPTURE_PATH);
+        Self {
+            http,
+            options: options.clone(),
+            url,
+            clock,
+            retries: VecDeque::new(),
+        }
+    }
+
+    fn send_batch(&mut self, events: Vec<Event>, historical_migration: bool, final_attempt: bool) {
+        use super::common::{apply_before_send_hooks, apply_capture_defaults};
+
+        let defaults = self.options.capture_defaults();
+        let processed: Vec<Event> = events
+            .into_iter()
+            .filter_map(|mut event| {
+                apply_capture_defaults(&mut event, &defaults);
+                apply_before_send_hooks(&self.options.before_send, event)
+            })
+            .collect();
+        if processed.is_empty() {
+            return;
+        }
+        let now = self.clock.now();
+        let pending =
+            super::v1_capture::build_events_at(&processed, &defaults, self.clock.now_utc());
+        let batch = RetryBatch {
+            pending,
+            request_id: Uuid::now_v7(),
+            created_at: self.clock.now_utc().to_rfc3339(),
+            final_results: HashMap::new(),
+            historical_migration,
+            attempt: 1,
+            next_at: now,
+        };
+        self.attempt(batch, final_attempt);
+    }
+
+    fn attempt(&mut self, mut batch: RetryBatch, final_attempt: bool) {
+        use super::v1_capture::{self, Step};
+        use crate::event_v1::V1BatchRequestRef;
+
+        let req = V1BatchRequestRef {
+            created_at: &batch.created_at,
+            historical_migration: batch.historical_migration.then_some(true),
+            batch: &batch.pending,
+        };
+        let payload = match serde_json::to_vec(&req) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("posthog-rs: dropping batch, serialization failed: {e}");
+                return;
+            }
+        };
+        let mut headers = v1_capture::build_headers_at(
+            &self.options,
+            &batch.request_id,
+            batch.attempt,
+            self.clock.now_utc(),
+        );
+        let body =
+            v1_capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
+
+        let count = batch.pending.len();
+        let step = match self.http.post(&self.url).headers(headers).body(body).send() {
+            Err(e) => v1_capture::after_transport_error(
+                &self.options,
+                &batch.request_id,
+                batch.attempt,
+                e.to_string(),
+            ),
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let retry_after = v1_capture::parse_retry_after(resp.headers());
+                let text = resp.text().unwrap_or_else(|_| "Unknown error".to_string());
+                v1_capture::after_response(
+                    &self.options,
+                    &batch.request_id,
+                    batch.attempt,
+                    status,
+                    retry_after,
+                    &text,
+                    &mut batch.pending,
+                    &mut batch.final_results,
+                )
+            }
+        };
+
+        match step {
+            Step::Done => {}
+            Step::Fail(e) => warn!("posthog-rs: dropping {count} event(s): {e}"),
+            Step::Backoff(delay) => {
+                if final_attempt {
+                    warn!(
+                        "posthog-rs: dropping {} undelivered event(s) on shutdown",
+                        batch.pending.len()
+                    );
+                } else {
+                    batch.attempt += 1;
+                    batch.next_at = self.clock.now() + delay;
+                    self.retries.push_back(batch);
+                }
+            }
+        }
+    }
+
+    fn earliest_retry(&self) -> Option<Instant> {
+        self.retries.iter().map(|b| b.next_at).min()
+    }
+
+    fn attempt_due(&mut self) {
+        let now = self.clock.now();
+        for batch in std::mem::take(&mut self.retries) {
+            if now >= batch.next_at {
+                self.attempt(batch, false);
+            } else {
+                self.retries.push_back(batch);
+            }
+        }
+    }
+
+    fn flush_retries(&mut self, final_attempt: bool) {
+        for batch in std::mem::take(&mut self.retries) {
+            self.attempt(batch, final_attempt);
+        }
+        if final_attempt && !self.retries.is_empty() {
+            warn!("posthog-rs: shutdown completed with undelivered events");
+        }
+    }
+}
+
+// ===========================================================================
+// V0 pipeline
+// ===========================================================================
+
+#[cfg(not(feature = "capture-v1"))]
+struct RetryBatch {
+    body: Vec<u8>,
+    encoding: Option<&'static str>,
+    count: usize,
+    attempt: u32,
+    next_at: Instant,
+}
+
+#[cfg(not(feature = "capture-v1"))]
+struct Pipeline {
+    http: reqwest::blocking::Client,
+    options: ClientOptions,
+    url_base: String,
+    clock: Arc<dyn Clock>,
+    retries: VecDeque<RetryBatch>,
+}
+
+#[cfg(not(feature = "capture-v1"))]
+impl Pipeline {
+    fn new(options: &ClientOptions, clock: Arc<dyn Clock>) -> Self {
+        let http = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(options.request_timeout_seconds))
+            .build()
+            .unwrap_or_default();
+        let url_base = options
+            .endpoints()
+            .build_url(crate::endpoints::Endpoint::Batch);
+        Self {
+            http,
+            options: options.clone(),
+            url_base,
+            clock,
+            retries: VecDeque::new(),
+        }
+    }
+
+    fn send_batch(&mut self, events: Vec<Event>, historical_migration: bool, final_attempt: bool) {
+        let defaults = self.options.capture_defaults();
+        let count = events.len();
+        let payload = match super::v0_capture::build_batch_payload(
+            events,
+            self.options.api_key.clone(),
+            historical_migration,
+            &defaults,
+            &self.options.before_send,
+        ) {
+            Ok(Some(p)) => p,
+            Ok(None) => return, // every event dropped by before_send
+            Err(e) => {
+                warn!("posthog-rs: dropping batch, serialization failed: {e}");
+                return;
+            }
+        };
+        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
+        let batch = RetryBatch {
+            body,
+            encoding,
+            count,
+            attempt: 1,
+            next_at: self.clock.now(),
+        };
+        self.attempt(batch, final_attempt);
+    }
+
+    fn attempt(&mut self, mut batch: RetryBatch, final_attempt: bool) {
+        use super::retry::{v0_after_response, v0_after_transport_error, Step};
+        use reqwest::header::CONTENT_TYPE;
+
+        // v0 capture reads the compression hint from the query param, not the header.
+        let url = match batch.encoding {
+            Some(token) => format!("{}?compression={token}", self.url_base),
+            None => self.url_base.clone(),
+        };
+        let mut request = self
+            .http
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(batch.body.clone());
+        if let Some(token) = batch.encoding {
+            request = request.header(reqwest::header::CONTENT_ENCODING, token);
+        }
+        let request = super::v0_capture::apply_extra_headers(&self.options, request);
+
+        let step = match request.send() {
+            Err(e) => v0_after_transport_error(&self.options, batch.attempt, e.to_string()),
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let retry_after = super::retry::parse_retry_after(response.headers());
+                let body = response
+                    .text()
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                v0_after_response(&self.options, batch.attempt, status, retry_after, &body)
+            }
+        };
+
+        match step {
+            Step::Done => {}
+            Step::Fail(e) => warn!("posthog-rs: dropping {} event(s): {e}", batch.count),
+            Step::Backoff(delay) => {
+                if final_attempt {
+                    warn!(
+                        "posthog-rs: dropping {} undelivered event(s) on shutdown",
+                        batch.count
+                    );
+                } else {
+                    batch.attempt += 1;
+                    batch.next_at = self.clock.now() + delay;
+                    self.retries.push_back(batch);
+                }
+            }
+        }
+    }
+
+    fn earliest_retry(&self) -> Option<Instant> {
+        self.retries.iter().map(|b| b.next_at).min()
+    }
+
+    fn attempt_due(&mut self) {
+        let now = self.clock.now();
+        for batch in std::mem::take(&mut self.retries) {
+            if now >= batch.next_at {
+                self.attempt(batch, false);
+            } else {
+                self.retries.push_back(batch);
+            }
+        }
+    }
+
+    fn flush_retries(&mut self, final_attempt: bool) {
+        for batch in std::mem::take(&mut self.retries) {
+            self.attempt(batch, final_attempt);
+        }
+        if final_attempt && !self.retries.is_empty() {
+            warn!("posthog-rs: shutdown completed with undelivered events");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::ClientOptionsBuilder;
+    use httpmock::prelude::*;
+
+    /// Test clock with manually advanced virtual time, so interval and backoff
+    /// timing are exercised without real sleeps.
+    #[derive(Clone)]
+    struct ManualClock {
+        inner: Arc<Mutex<(Instant, DateTime<Utc>)>>,
+    }
+
+    impl ManualClock {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(Mutex::new((Instant::now(), Utc::now()))),
+            }
+        }
+        fn advance(&self, by: Duration) {
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            g.0 += by;
+            g.1 += chrono::Duration::from_std(by).expect("test duration fits chrono");
+        }
+    }
+
+    impl Clock for ManualClock {
+        fn now(&self) -> Instant {
+            self.inner.lock().unwrap_or_else(|p| p.into_inner()).0
+        }
+        fn now_utc(&self) -> DateTime<Utc> {
+            self.inner.lock().unwrap_or_else(|p| p.into_inner()).1
+        }
+    }
+
+    fn ok_mock(server: &MockServer) -> httpmock::Mock<'_> {
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "results": {} }));
+        })
+    }
+
+    fn options(base_url: String) -> ClientOptionsBuilder {
+        let mut builder = ClientOptionsBuilder::default();
+        builder
+            .api_key("phc_test".to_string())
+            .host(base_url)
+            .flush_at(100usize)
+            .flush_interval_ms(10_000u64);
+        builder
+    }
+
+    // -- pure helpers --------------------------------------------------------
+
+    #[test]
+    fn try_reserve_bounds_at_capacity_and_warns_once() {
+        let len = AtomicUsize::new(0);
+        let warned = AtomicBool::new(false);
+        assert!(try_reserve(&len, 2, &warned));
+        assert!(try_reserve(&len, 2, &warned));
+        assert!(!try_reserve(&len, 2, &warned)); // third dropped
+        assert_eq!(len.load(Ordering::Acquire), 2);
+        assert!(warned.load(Ordering::Acquire));
+        // A second overflow does not re-warn (single warning when full).
+        assert!(!try_reserve(&len, 2, &warned));
+    }
+
+    #[test]
+    fn try_reserve_allows_again_after_drain() {
+        let len = AtomicUsize::new(0);
+        let warned = AtomicBool::new(false);
+        assert!(try_reserve(&len, 1, &warned));
+        assert!(!try_reserve(&len, 1, &warned));
+        len.fetch_sub(1, Ordering::AcqRel); // worker consumed one
+        assert!(try_reserve(&len, 1, &warned));
+    }
+
+    #[test]
+    fn compute_wait_picks_interval_then_zero_when_elapsed() {
+        let base = Instant::now();
+        let interval = Duration::from_secs(10);
+        assert_eq!(
+            compute_wait(base, Some(base), interval, None),
+            Some(interval)
+        );
+        assert_eq!(
+            compute_wait(base + Duration::from_secs(10), Some(base), interval, None),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            compute_wait(base + Duration::from_secs(9), Some(base), interval, None),
+            Some(Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn compute_wait_blocks_when_idle_and_prefers_earliest() {
+        let base = Instant::now();
+        let interval = Duration::from_secs(10);
+        assert_eq!(compute_wait(base, None, interval, None), None);
+        let retry_at = base + Duration::from_secs(2);
+        assert_eq!(
+            compute_wait(base, Some(base), interval, Some(retry_at)),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            compute_wait(base, None, interval, Some(retry_at)),
+            Some(Duration::from_secs(2))
+        );
+    }
+
+    // -- virtual-clock worker tests (no real sleeps) -------------------------
+
+    #[test]
+    fn interval_flush_fires_on_clock_advance() {
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url()).build().unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        handle.enqueue(Event::new("Delayed", "user-1"), false);
+        handle.tick(); // interval not yet elapsed
+        mock.assert_hits(0);
+
+        clock.advance(Duration::from_secs(10));
+        handle.tick(); // interval elapsed -> flush, no real sleep
+        mock.assert_hits(1);
+
+        handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn retry_backoff_is_honored_against_the_clock() {
+        let server = MockServer::start();
+        let mut fail = server.mock(|when, then| {
+            when.method(POST);
+            then.status(503);
+        });
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .max_capture_attempts(5u32)
+                .retry_initial_backoff_ms(1_000u64)
+                .retry_max_backoff_ms(60_000u64)
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        handle.enqueue(Event::new("Save", "user-1"), false);
+        handle.flush_blocking(); // attempt 1 -> 503, held with next_at = now + 1s
+        fail.assert_hits(1);
+
+        handle.tick(); // backoff not elapsed -> no retry
+        fail.assert_hits(1);
+
+        fail.delete();
+        let ok = ok_mock(&server);
+        clock.advance(Duration::from_secs(1)); // now >= next_at
+        handle.tick(); // due -> retried, delivered
+        ok.assert_hits(1);
+
+        handle.shutdown_blocking();
+    }
+}

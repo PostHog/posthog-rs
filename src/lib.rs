@@ -133,12 +133,16 @@ pub use local_evaluation::{
 #[cfg(feature = "async-client")]
 pub use local_evaluation::AsyncFlagPoller;
 
-// We expose a global capture function as a convenience, that uses a global client
+// We expose global convenience functions (capture/flush/shutdown) that use a
+// global client. flush/shutdown matter because the global singleton lives in a
+// `static`, whose `Drop` never runs — they must be called to drain on exit.
 pub use global::capture;
 #[cfg(feature = "error-tracking")]
 pub use global::capture_exception;
 #[cfg(feature = "error-tracking")]
 pub use global::capture_exception_with;
 pub use global::disable as disable_global;
+pub use global::flush;
 pub use global::init_global_client as init_global;
 pub use global::is_disabled as global_is_disabled;
+pub use global::shutdown;

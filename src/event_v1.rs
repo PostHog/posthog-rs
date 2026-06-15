@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -21,7 +21,17 @@ pub struct V1Event {
 }
 
 impl V1Event {
+    // Only the tests build a V1Event without an injected clock; the worker uses
+    // `from_event_at` so its timestamps are deterministic.
+    #[cfg(test)]
     pub fn from_event(event: &Event) -> Self {
+        Self::from_event_at(event, Utc::now())
+    }
+
+    /// Like [`V1Event::from_event`] but with an injected `now`, so the transport
+    /// worker can stamp a deterministic timestamp from its clock when the event
+    /// carries none of its own.
+    pub(crate) fn from_event_at(event: &Event, now: DateTime<Utc>) -> Self {
         let mut properties = event.properties().clone();
 
         if !event.groups().is_empty() {
@@ -40,7 +50,7 @@ impl V1Event {
         let timestamp = event
             .timestamp()
             .map(|ts| ts.and_utc().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
-            .unwrap_or_else(|| Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
+            .unwrap_or_else(|| now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
 
         // V1 carries process_person_profile in options; strip the property
         // duplicate in case a caller manually inserted it.

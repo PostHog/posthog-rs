@@ -108,6 +108,7 @@ mod blocking {
 
         let client = create_test_client(server.base_url());
         client.capture_exception(&TestError).unwrap();
+        client.flush();
 
         capture_mock.assert_hits(1);
     }
@@ -143,6 +144,7 @@ mod blocking {
                     .level("warning"),
             )
             .unwrap();
+        client.flush();
 
         capture_mock.assert_hits(1);
     }
@@ -201,6 +203,7 @@ mod async_client {
 
         let client = create_test_client(server.base_url()).await;
         client.capture_exception(&TestError).await.unwrap();
+        client.flush().await;
 
         capture_mock.assert_hits(1);
     }
@@ -237,6 +240,7 @@ mod async_client {
             )
             .await
             .unwrap();
+        client.flush().await;
 
         capture_mock.assert_hits(1);
     }

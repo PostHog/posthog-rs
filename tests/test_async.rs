@@ -539,9 +539,9 @@ async fn test_capture_batch_sends_to_batch_endpoint() {
     let client = create_test_client(server.base_url()).await;
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    let result = client.capture_batch(vec![event], false).await;
+    client.capture_batch(vec![event], false).await.unwrap();
+    client.flush().await;
 
-    assert!(result.is_ok());
     batch_mock.assert();
 }
 
@@ -560,9 +560,9 @@ async fn test_capture_batch_historical_migration() {
     let client = create_test_client(server.base_url()).await;
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    let result = client.capture_batch(vec![event], true).await;
+    client.capture_batch(vec![event], true).await.unwrap();
+    client.flush().await;
 
-    assert!(result.is_ok());
     batch_mock.assert();
 }
 
@@ -579,10 +579,11 @@ async fn test_capture_batch_rate_limit() {
     let client = create_test_client(server.base_url()).await;
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    let result = client.capture_batch(vec![event], true).await;
+    // Capture is now infallible; a terminal 429 is attempted once on flush and
+    // then dropped (the rate-limit is logged, not returned to the caller).
+    client.capture_batch(vec![event], true).await.unwrap();
+    client.flush().await;
 
-    assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), posthog_rs::Error::RateLimit));
     batch_mock.assert();
 }
 
@@ -599,14 +600,11 @@ async fn test_capture_batch_bad_request() {
     let client = create_test_client(server.base_url()).await;
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    let result = client.capture_batch(vec![event], false).await;
+    // Capture is now infallible; a terminal 400 is attempted once on flush and
+    // then dropped (the bad-request is logged, not returned to the caller).
+    client.capture_batch(vec![event], false).await.unwrap();
+    client.flush().await;
 
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    match err {
-        posthog_rs::Error::BadRequest(msg) => assert_eq!(msg, "invalid payload"),
-        other => panic!("expected BadRequest, got: {:?}", other),
-    }
     batch_mock.assert();
 }
 
@@ -617,7 +615,7 @@ async fn v0_capture_injects_is_server_by_default() {
 
     let mock = server.mock(|when, then| {
         when.method(POST)
-            .path("/i/v0/e/")
+            .path("/batch/")
             .body_contains("\"$is_server\":true");
         then.status(200).body("ok");
     });
@@ -625,6 +623,7 @@ async fn v0_capture_injects_is_server_by_default() {
     let client = create_test_client(server.base_url()).await;
     let event = posthog_rs::Event::new("test_event", "user-1");
     client.capture(event).await.unwrap();
+    client.flush().await;
     mock.assert();
 }
 
@@ -643,7 +642,7 @@ async fn v0_capture_applies_runtime_context_defaults_and_preserves_caller_values
 
         let mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/i/v0/e/")
+                .path("/batch/")
                 .body_contains(expected_os)
                 .body_contains(expected_os_version);
             then.status(200).body("ok");
@@ -656,6 +655,7 @@ async fn v0_capture_applies_runtime_context_defaults_and_preserves_caller_values
             event.insert_prop("$os_version", os_version).unwrap();
         }
         client.capture(event).await.unwrap();
+        client.flush().await;
         mock.assert();
     }
 }
@@ -667,7 +667,7 @@ async fn v0_capture_caller_override_wins_for_is_server() {
 
     let mock = server.mock(|when, then| {
         when.method(POST)
-            .path("/i/v0/e/")
+            .path("/batch/")
             .body_contains("\"$is_server\":false");
         then.status(200).body("ok");
     });
@@ -676,6 +676,7 @@ async fn v0_capture_caller_override_wins_for_is_server() {
     let mut event = posthog_rs::Event::new("test_event", "user-1");
     event.insert_prop("$is_server", false).unwrap();
     client.capture(event).await.unwrap();
+    client.flush().await;
     mock.assert();
 }
 

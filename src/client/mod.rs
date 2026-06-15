@@ -38,6 +38,7 @@ impl CaptureCompression {
 #[cfg(not(feature = "async-client"))]
 mod blocking;
 mod retry;
+mod transport;
 #[cfg(not(feature = "capture-v1"))]
 mod v0_capture;
 #[cfg(feature = "capture-v1")]
@@ -189,6 +190,25 @@ pub struct ClientOptions {
     #[builder(default = "30000")]
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) retry_max_backoff_ms: u64,
+
+    /// Number of buffered events that triggers an automatic flush (default: 100).
+    #[builder(default = "100")]
+    pub(crate) flush_at: usize,
+
+    /// Maximum number of events sent in a single batch request (default: 100).
+    /// A flush of more than this many events is split into multiple requests.
+    #[builder(default = "100")]
+    pub(crate) max_batch_size: usize,
+
+    /// Interval between automatic time-based flushes, in milliseconds
+    /// (default: 5000).
+    #[builder(default = "5000")]
+    pub(crate) flush_interval_ms: u64,
+
+    /// Maximum number of events buffered before new events are dropped
+    /// (default: 10000). A single warning is logged while the queue is full.
+    #[builder(default = "10000")]
+    pub(crate) max_queue_size: usize,
 
     /// Optional request-body compression. When `None` (default), bodies are
     /// sent uncompressed. The V0 pipeline supports `Gzip` only; V1 supports all

@@ -13,6 +13,13 @@ const CAPTURE_PATH: &str = "/i/v1/analytics/events";
 #[cfg(not(feature = "capture-v1"))]
 const CAPTURE_PATH: &str = "/i/v0/e/";
 
+/// Where the background worker ships analytics captures on v0: the batch
+/// endpoint (single captures are batched too now). Used only by the v0-gated
+/// `event_with_flags` tests below; `$feature_flag_called` still ships via the
+/// fire-and-forget `/i/v0/e/` host path (`CAPTURE_PATH`).
+#[cfg(not(feature = "capture-v1"))]
+const WORKER_CAPTURE_PATH: &str = "/batch/";
+
 /// Feature-aware capture mock; the JSON body is required by V1, ignored by v0.
 fn capture_path_mock(server: &MockServer) -> httpmock::Mock<'_> {
     server.mock(|when, then| {
@@ -331,7 +338,12 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = capture_path_mock(&server);
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST).path(WORKER_CAPTURE_PATH);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "results": {} }));
+        });
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -339,7 +351,8 @@ mod blocking {
         let mut event = Event::new("checkout-started", "user-1");
         event.with_flags(&snapshot);
         client.capture(event).expect("capture should succeed");
-        // One /flags request, one /i/v0/e/ request — no second flag fetch.
+        client.flush();
+        // One /flags request, one capture request — no second flag fetch.
         flags_mock.assert_hits(1);
         capture_mock.assert_hits(1);
     }
@@ -786,7 +799,12 @@ mod async_tests {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = capture_path_mock(&server);
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST).path(WORKER_CAPTURE_PATH);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "results": {} }));
+        });
         let client = create_test_client(server.base_url()).await;
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -795,6 +813,7 @@ mod async_tests {
         let mut event = Event::new("checkout-started", "user-1");
         event.with_flags(&snapshot);
         client.capture(event).await.unwrap();
+        client.flush().await;
         flags_mock.assert_hits(1);
         capture_mock.assert_hits(1);
     }

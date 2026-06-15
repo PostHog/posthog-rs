@@ -91,6 +91,28 @@ pub async fn capture(event: Event) -> Result<(), Error> {
     client.capture(event).await
 }
 
+/// Flush the global client's queued events, awaiting the worker's next delivery
+/// attempt. No-op if `init_global` has not run.
+///
+/// `capture` only enqueues, and the global client lives in a `static` whose
+/// `Drop` never runs at process exit, so call this (or [`shutdown`]) before
+/// exiting to avoid losing buffered events.
+#[cfg(feature = "async-client")]
+pub async fn flush() {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.flush().await;
+    }
+}
+
+/// Flush and stop the global client's background worker. Idempotent; no-op if
+/// `init_global` has not run.
+#[cfg(feature = "async-client")]
+pub async fn shutdown() {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.shutdown().await;
+    }
+}
+
 /// Capture a Rust error personlessly using the global client.
 #[cfg(all(feature = "async-client", feature = "error-tracking"))]
 pub async fn capture_exception<E>(error: &E) -> Result<(), Error>
@@ -124,6 +146,28 @@ where
 pub fn capture(event: Event) -> Result<(), Error> {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
     client.capture(event)
+}
+
+/// Flush the global client's queued events, blocking until the worker's next
+/// delivery attempt. No-op if `init_global` has not run.
+///
+/// `capture` only enqueues, and the global client lives in a `static` whose
+/// `Drop` never runs at process exit, so call this (or [`shutdown`]) before
+/// exiting to avoid losing buffered events.
+#[cfg(not(feature = "async-client"))]
+pub fn flush() {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.flush();
+    }
+}
+
+/// Flush and stop the global client's background worker. Idempotent; no-op if
+/// `init_global` has not run.
+#[cfg(not(feature = "async-client"))]
+pub fn shutdown() {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.shutdown();
+    }
 }
 
 /// Capture a Rust error personlessly using the global client.

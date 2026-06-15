@@ -4,14 +4,10 @@ use std::error::Error as StdError;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-#[cfg(feature = "capture-v1")]
-use chrono::Utc;
 use reqwest::header::USER_AGENT;
 use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
-#[cfg(feature = "capture-v1")]
-use uuid::Uuid;
 
 use super::get_default_user_agent;
 use crate::endpoints::Endpoint;
@@ -19,8 +15,6 @@ use crate::endpoints::Endpoint;
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
 #[cfg(not(feature = "capture-v1"))]
 use crate::event::InnerEvent;
-#[cfg(feature = "capture-v1")]
-use crate::event_v1::CaptureResponse;
 use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
     FlagCalledEventParams,
@@ -29,13 +23,14 @@ use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
-#[cfg(feature = "capture-v1")]
-use super::common::apply_capture_defaults;
+#[cfg(not(feature = "capture-v1"))]
+use super::common::apply_before_send_hooks;
 use super::common::{
-    already_reported, apply_before_send_hooks, build_dedup_key, extract_flag_details,
-    flag_called_event, flag_event_dedup_cache, local_record, remote_record_from_detail,
-    DetailedFlagsResponse, FlagEventDedupCache,
+    already_reported, build_dedup_key, extract_flag_details, flag_called_event,
+    flag_event_dedup_cache, local_record, remote_record_from_detail, DetailedFlagsResponse,
+    FlagEventDedupCache,
 };
+use super::transport::{Completion, Control, TransportHandle};
 use super::{BeforeSendHook, ClientOptions};
 
 #[cfg(not(feature = "capture-v1"))]
@@ -59,6 +54,8 @@ pub struct Client {
     local_evaluator: Option<LocalEvaluator>,
     _flag_poller: Option<AsyncFlagPoller>,
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
+    /// Background event transport. `None` for disabled clients.
+    transport: Option<TransportHandle>,
 }
 
 /// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
@@ -264,12 +261,19 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         (None, None)
     };
 
+    let transport = if options.is_disabled() {
+        None
+    } else {
+        Some(TransportHandle::spawn(options.clone()))
+    };
+
     Client {
         options,
         client,
         local_evaluator,
         _flag_poller: flag_poller,
         flag_event_host: OnceLock::new(),
+        transport,
     }
 }
 
@@ -291,26 +295,49 @@ impl Client {
     /// # Remarks
     ///
     /// Disabled clients skip the request and return `Ok(())`.
+    /// Enqueue `event` for delivery. Non-blocking: the event is handed to the
+    /// background worker, which batches, sends, and retries it. Returns once the
+    /// event is queued — not once it is delivered. Disabled clients and a full
+    /// queue drop the event (the latter with a single warning).
     #[instrument(skip(self, event), level = "debug")]
     pub async fn capture(&self, event: Event) -> Result<(), Error> {
-        if self.options.is_disabled() {
-            trace!("Client is disabled, skipping capture");
-            return Ok(());
+        if let Some(transport) = &self.transport {
+            transport.enqueue(event, false);
         }
+        Ok(())
+    }
 
-        #[cfg(feature = "capture-v1")]
-        {
-            let mut event = event;
-            let defaults = self.options.capture_defaults();
-            apply_capture_defaults(&mut event, &defaults);
-            let Some(event) = apply_before_send_hooks(&self.options.before_send, event) else {
-                return Ok(());
-            };
-            return self.capture_v1(vec![event], false).await.map(|_| ());
+    /// Flush queued events, returning once the worker has attempted delivery of
+    /// everything queued before this call. Transient failures are kept for retry
+    /// (the call still returns without error). A no-op for disabled clients.
+    pub async fn flush(&self) {
+        let Some(transport) = &self.transport else {
+            return;
+        };
+        if transport.is_closed() {
+            return;
         }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if transport.send_control(Control::Flush(Completion::Async(tx))) {
+            let _ = rx.await;
+        }
+    }
 
-        #[cfg(not(feature = "capture-v1"))]
-        self.capture_v0(event).await
+    /// Flush, stop the background worker, and join it. Idempotent: subsequent
+    /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
+    /// disabled clients.
+    pub async fn shutdown(&self) {
+        let Some(transport) = &self.transport else {
+            return;
+        };
+        if !transport.begin_close() {
+            return;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if transport.send_control(Control::Shutdown(Completion::Async(tx))) {
+            let _ = rx.await;
+        }
+        transport.join();
     }
 
     /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
@@ -413,211 +440,19 @@ impl Client {
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<(), Error> {
-        if self.options.is_disabled() {
-            return Ok(());
-        }
-        if events.is_empty() {
-            return Ok(());
-        }
-
-        #[cfg(feature = "capture-v1")]
-        {
-            let defaults = self.options.capture_defaults();
-            let events: Vec<_> = events
-                .into_iter()
-                .filter_map(|mut event| {
-                    apply_capture_defaults(&mut event, &defaults);
-                    apply_before_send_hooks(&self.options.before_send, event)
-                })
-                .collect();
-            if events.is_empty() {
-                return Ok(());
-            }
-            return self
-                .capture_v1(events, historical_migration)
-                .await
-                .map(|_| ());
-        }
-
-        #[cfg(not(feature = "capture-v1"))]
-        self.capture_batch_v0(events, historical_migration).await
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    async fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
-        let defaults = self.options.capture_defaults();
-        super::v0_capture::prepare_event(&mut event, &defaults);
-        let Some(event) = apply_before_send_hooks(&self.options.before_send, event) else {
-            return Ok(());
-        };
-        let payload =
-            super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
-        let url = self.options.endpoints().build_url(Endpoint::Capture);
-        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
-        self.send_v0_with_retry(&url, body, encoding).await
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    async fn capture_batch_v0(
-        &self,
-        events: Vec<Event>,
-        historical_migration: bool,
-    ) -> Result<(), Error> {
-        let defaults = self.options.capture_defaults();
-        let Some(payload) = super::v0_capture::build_batch_payload(
-            events,
-            self.options.api_key.clone(),
-            historical_migration,
-            &defaults,
-            &self.options.before_send,
-        )?
-        else {
-            return Ok(());
-        };
-        let url = self.options.endpoints().build_url(Endpoint::Batch);
-        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
-        self.send_v0_with_retry(&url, body, encoding).await
-    }
-
-    /// POST `body` to `url`, retrying transient failures (transport errors and
-    /// 408/429/500/502/503/504) up to `max_capture_attempts`. The body is built
-    /// once by the caller and resent byte-for-byte, so a retried event keeps
-    /// its UUID and timestamp — which dedup relies on. The retry decision is the
-    /// shared sans-IO logic in [`super::retry`]; this loop is just the transport.
-    /// When `encoding` is `Some`, the request advertises that `Content-Encoding`
-    /// and a matching `compression=<token>` query param (capture reads the query
-    /// param on v0, not the header).
-    #[cfg(not(feature = "capture-v1"))]
-    async fn send_v0_with_retry(
-        &self,
-        url: &str,
-        body: Vec<u8>,
-        encoding: Option<&'static str>,
-    ) -> Result<(), Error> {
-        use super::retry::{v0_after_response, v0_after_transport_error, Step};
-
-        // v0 capture/batch URLs carry no query string, so capture reads the
-        // compression hint from this param (it does not consult Content-Encoding).
-        let url = match encoding {
-            Some(token) => format!("{url}?compression={token}"),
-            None => url.to_string(),
-        };
-        let mut attempt: u32 = 1;
-        loop {
-            let mut request = self
-                .client
-                .post(&url)
-                .header(CONTENT_TYPE, "application/json")
-                .body(body.clone());
-            if let Some(token) = encoding {
-                request = request.header(reqwest::header::CONTENT_ENCODING, token);
-            }
-            let request = super::v0_capture::apply_extra_headers(&self.options, request);
-
-            let step = match request.send().await {
-                Err(e) => v0_after_transport_error(&self.options, attempt, e.to_string()),
-                Ok(response) => {
-                    let status = response.status().as_u16();
-                    let retry_after = super::retry::parse_retry_after(response.headers());
-                    let body = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    v0_after_response(&self.options, attempt, status, retry_after, &body)
-                }
-            };
-
-            match step {
-                Step::Done => return Ok(()),
-                Step::Fail(e) => return Err(e),
-                Step::Backoff(delay) => {
-                    tokio::time::sleep(delay).await;
-                    attempt += 1;
-                }
+        if let Some(transport) = &self.transport {
+            for event in events {
+                transport.enqueue(event, historical_migration);
             }
         }
+        Ok(())
     }
 
-    #[cfg(feature = "capture-v1")]
-    async fn capture_v1(
-        &self,
-        events: Vec<Event>,
-        historical_migration: bool,
-    ) -> Result<CaptureResponse, Error> {
-        use super::v1_capture::{self, Step};
-        use crate::event_v1::V1BatchRequestRef;
-
-        let request_id = Uuid::now_v7();
-        let created_at = Utc::now().to_rfc3339();
-        let mut attempt: u32 = 1;
-        let defaults = self.options.capture_defaults();
-        let mut pending = v1_capture::build_events(&events, &defaults);
-        let mut final_results = HashMap::new();
-        let historical_migration = historical_migration.then_some(true);
-        let url = self
-            .options
-            .endpoints()
-            .build_custom_url(v1_capture::V1_CAPTURE_PATH);
-
-        loop {
-            let req = V1BatchRequestRef {
-                created_at: &created_at,
-                historical_migration,
-                batch: &pending,
-            };
-            let payload =
-                serde_json::to_vec(&req).map_err(|e| Error::Serialization(e.to_string()))?;
-            let mut headers = v1_capture::build_headers(&self.options, &request_id, attempt);
-            let body =
-                v1_capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
-
-            let step = match self
-                .client
-                .post(&url)
-                .headers(headers)
-                .body(body)
-                .send()
-                .await
-            {
-                Err(e) => v1_capture::after_transport_error(
-                    &self.options,
-                    &request_id,
-                    attempt,
-                    e.to_string(),
-                ),
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let retry_after = v1_capture::parse_retry_after(resp.headers());
-                    let text = resp
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    v1_capture::after_response(
-                        &self.options,
-                        &request_id,
-                        attempt,
-                        status,
-                        retry_after,
-                        &text,
-                        &mut pending,
-                        &mut final_results,
-                    )
-                }
-            };
-
-            match step {
-                Step::Done => break,
-                Step::Fail(e) => return Err(e),
-                Step::Backoff(d) => {
-                    attempt += 1;
-                    tokio::time::sleep(d).await;
-                }
-            }
-        }
-
-        Ok(CaptureResponse {
-            results: final_results,
-        })
+    /// Number of events queued for delivery but not yet picked up by the worker.
+    /// Returns 0 for a disabled client. Does not count events already in flight
+    /// or held for retry.
+    pub fn pending_events(&self) -> usize {
+        self.transport.as_ref().map_or(0, |t| t.pending())
     }
 
     /// Get all remote feature flags and payloads for a user.
@@ -1146,5 +981,24 @@ impl Client {
             Error::Serialization(format!("Failed to parse feature flags response: {e}"))
         })?;
         Ok(extract_flag_details(parsed))
+    }
+}
+
+impl Drop for Client {
+    /// Best-effort flush and worker join on drop. A blocking drain (the async
+    /// `shutdown` can't run in a destructor); an explicit `shutdown().await`
+    /// beforehand makes this a no-op.
+    fn drop(&mut self) {
+        let Some(transport) = &self.transport else {
+            return;
+        };
+        if !transport.begin_close() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        if transport.send_control(Control::Shutdown(Completion::Blocking(tx))) {
+            let _ = rx.recv();
+        }
+        transport.join();
     }
 }

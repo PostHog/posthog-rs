@@ -2,10 +2,9 @@
 //! Each client keeps only the I/O; this module owns event preparation and
 //! payload construction.
 
-#[cfg(not(feature = "async-client"))]
+// The transport worker is always blocking reqwest, even for the async client,
+// so the v0 request helpers operate on the blocking RequestBuilder.
 use reqwest::blocking::RequestBuilder;
-#[cfg(feature = "async-client")]
-use reqwest::RequestBuilder;
 
 use super::{
     common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
@@ -31,12 +30,6 @@ pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
 // ---------------------------------------------------------------------------
 // Payload building
 // ---------------------------------------------------------------------------
-
-/// Build the JSON body for a single-event V0 capture request.
-pub(crate) fn build_capture_payload(event: Event, api_key: String) -> Result<String, Error> {
-    let inner_event = InnerEvent::new(event, api_key);
-    serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))
-}
 
 /// Build the JSON body for a V0 batch capture request.
 pub(crate) fn build_batch_payload(
