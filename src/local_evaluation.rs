@@ -1,9 +1,10 @@
+use crate::client::get_default_user_agent;
 use crate::feature_flags::{
     match_feature_flag, match_feature_flag_with_context, CohortDefinition, EvaluationContext,
     FeatureFlag, FlagValue, InconclusiveMatchError,
 };
 use crate::Error;
-use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH};
+use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH, USER_AGENT};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -257,7 +258,8 @@ impl FlagPoller {
                         "Authorization",
                         format!("Bearer {}", config.personal_api_key),
                     )
-                    .header("X-PostHog-Project-Api-Key", &config.project_api_key);
+                    .header("X-PostHog-Project-Api-Key", &config.project_api_key)
+                    .header(USER_AGENT, get_default_user_agent());
 
                 if let Some(ref etag) = last_etag {
                     request = request.header(IF_NONE_MATCH, etag.as_str());
@@ -317,6 +319,7 @@ impl FlagPoller {
                 format!("Bearer {}", self.config.personal_api_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
+            .header(USER_AGENT, get_default_user_agent())
             .send()
             .map_err(|e| {
                 error!(error = %e, "Connection error loading flags");
@@ -448,7 +451,8 @@ impl AsyncFlagPoller {
                         let mut request = client
                             .get(&url)
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
-                            .header("X-PostHog-Project-Api-Key", &config.project_api_key);
+                            .header("X-PostHog-Project-Api-Key", &config.project_api_key)
+                            .header(USER_AGENT, get_default_user_agent());
 
                         if let Some(ref etag) = last_etag {
                             request = request.header(IF_NONE_MATCH, etag.as_str());
@@ -513,6 +517,7 @@ impl AsyncFlagPoller {
                 format!("Bearer {}", self.config.personal_api_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
+            .header(USER_AGENT, get_default_user_agent())
             .send()
             .await
             .map_err(|e| {

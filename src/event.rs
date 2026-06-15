@@ -5,6 +5,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::client::CRATE_VERSION;
 use crate::feature_flag_evaluations::FeatureFlagEvaluations;
 use crate::Error;
 
@@ -265,7 +266,7 @@ impl Event {
             );
         }
 
-        let version_str = env!("CARGO_PKG_VERSION");
+        let version_str = CRATE_VERSION;
         if !self.properties.contains_key("$lib_version") {
             self.properties.insert(
                 "$lib_version".into(),

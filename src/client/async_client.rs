@@ -6,12 +6,14 @@ use std::time::Duration;
 
 #[cfg(feature = "capture-v1")]
 use chrono::Utc;
+use reqwest::header::USER_AGENT;
 use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
 #[cfg(feature = "capture-v1")]
 use uuid::Uuid;
 
+use super::get_default_user_agent;
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
@@ -690,6 +692,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, get_default_user_agent())
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
@@ -893,6 +896,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, get_default_user_agent())
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
@@ -1118,6 +1122,7 @@ impl Client {
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, get_default_user_agent())
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,

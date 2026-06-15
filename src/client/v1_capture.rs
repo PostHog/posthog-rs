@@ -15,6 +15,7 @@ use super::retry::{backoff_duration, is_retryable_status};
 // `v1_capture::parse_retry_after` / `v1_capture::Step`.
 pub(crate) use super::retry::{parse_retry_after, Step};
 use super::{common::apply_runtime_context, CaptureCompression, CaptureDefaults, ClientOptions};
+use crate::client::get_default_user_agent;
 use crate::error::Error;
 use crate::event::Event;
 use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse, V1Event};
@@ -46,10 +47,7 @@ pub(crate) fn build_events(events: &[Event], defaults: &CaptureDefaults) -> Vec<
 }
 
 pub(crate) fn build_headers(opts: &ClientOptions, request_id: &Uuid, attempt: u32) -> HeaderMap {
-    let version = env!("CARGO_PKG_VERSION");
-    // SDK identity: `<canonical-$lib-name>/<semver>`. The name must match v0's
-    // `$lib` ("posthog-rs"); capture materializes it into `$lib`/`$lib_version`.
-    let sdk_info = format!("posthog-rs/{version}");
+    let sdk_info = get_default_user_agent();
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

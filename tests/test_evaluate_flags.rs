@@ -10,6 +10,10 @@ const CAPTURE_PATH: &str = "/i/v1/analytics/events";
 #[cfg(not(feature = "capture-v1"))]
 const CAPTURE_PATH: &str = "/i/v0/e/";
 
+fn default_user_agent() -> String {
+    format!("posthog-rs/{}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Feature-aware capture mock; the JSON body is required by V1, ignored by v0.
 fn capture_path_mock(server: &MockServer) -> httpmock::Mock<'_> {
     server.mock(|when, then| {
@@ -83,6 +87,7 @@ fn flags_response_fixture() -> Value {
 mod blocking {
     use super::*;
     use posthog_rs::{EvaluateFlagsOptions, Event, FlagValue};
+    use reqwest::header::USER_AGENT;
 
     fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
@@ -108,6 +113,22 @@ mod blocking {
         assert_eq!(keys, vec!["alpha", "beta", "variant-flag"]);
         flags_mock.assert_hits(1);
         capture_mock.assert_hits(0);
+    }
+
+    #[test]
+    fn evaluate_flags_uses_default_useragent() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/flags/")
+                .header(USER_AGENT.to_string(), default_user_agent());
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = create_test_client(server.base_url());
+        let _ = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .unwrap();
+        flags_mock.assert();
     }
 
     #[test]
@@ -540,6 +561,7 @@ mod async_tests {
     #[cfg(not(feature = "capture-v1"))]
     use posthog_rs::Event;
     use posthog_rs::{EvaluateFlagsOptions, FlagValue};
+    use reqwest::header::USER_AGENT;
 
     async fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
@@ -568,6 +590,23 @@ mod async_tests {
         keys.sort();
         assert_eq!(keys, vec!["alpha", "beta", "variant-flag"]);
         flags_mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn evaluate_flags_uses_default_useragent() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/flags/")
+                .header(USER_AGENT.to_string(), default_user_agent());
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = create_test_client(server.base_url()).await;
+        let _ = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        flags_mock.assert();
     }
 
     #[tokio::test]

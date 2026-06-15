@@ -8,8 +8,13 @@
 
 use httpmock::prelude::*;
 use posthog_rs::FlagValue;
+use reqwest::header::USER_AGENT;
 use serde_json::json;
 use std::collections::HashMap;
+
+fn default_user_agent() -> String {
+    format!("posthog-rs/{}", env!("CARGO_PKG_VERSION"))
+}
 
 async fn create_test_client(base_url: String) -> posthog_rs::Client {
     // Use the From implementation to ensure endpoint_manager is set up correctly
@@ -76,6 +81,31 @@ async fn test_get_all_feature_flags() {
 
     assert!(payloads.contains_key("variant-flag"));
 
+    flags_mock.assert();
+}
+
+#[tokio::test]
+async fn test_sends_default_useragent() {
+    let server = MockServer::start();
+
+    let mock_response = json!({});
+
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/flags/")
+            .header(USER_AGENT.to_string(), default_user_agent())
+            .query_param("v", "2");
+
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(mock_response);
+    });
+
+    let client = create_test_client(server.base_url()).await;
+
+    let _ = client
+        .get_feature_flags("test-user".to_string(), None, None, None)
+        .await;
     flags_mock.assert();
 }
 
