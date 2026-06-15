@@ -532,6 +532,7 @@ async fn test_capture_batch_sends_to_batch_endpoint() {
     let batch_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/batch/")
+            .header(USER_AGENT.to_string(), default_user_agent())
             .body_contains(r#""historical_migration":false"#);
         then.status(200);
     });
@@ -618,6 +619,7 @@ async fn v0_capture_injects_is_server_by_default() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/i/v0/e/")
+            .header(USER_AGENT.to_string(), default_user_agent())
             .body_contains("\"$is_server\":true");
         then.status(200).body("ok");
     });

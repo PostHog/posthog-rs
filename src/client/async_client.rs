@@ -176,6 +176,7 @@ impl AsyncFlagEventHost {
             let response = match http_client
                 .post(&url)
                 .header(CONTENT_TYPE, "application/json")
+                .header(USER_AGENT, get_default_user_agent())
                 .body(payload)
                 .send()
                 .await
@@ -508,6 +509,7 @@ impl Client {
                 .client
                 .post(&url)
                 .header(CONTENT_TYPE, "application/json")
+                .header(USER_AGENT, get_default_user_agent())
                 .body(body.clone());
             if let Some(token) = encoding {
                 request = request.header(reqwest::header::CONTENT_ENCODING, token);
