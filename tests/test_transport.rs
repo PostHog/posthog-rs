@@ -16,11 +16,15 @@ async fn client_with(host: String, flush_at: usize, max_attempts: u32) -> Client
         .host(host)
         .flush_at(flush_at)
         .max_batch_size(100usize)
-        .flush_interval_ms(50u64)
+        // Large interval + backoff so the worker never flushes or retries on its
+        // own mid-test: every send is driven by the flush_at threshold or an
+        // explicit flush()/shutdown(), keeping the hit-count assertions
+        // deterministic. (Autonomous interval/backoff timing is covered by the
+        // ManualClock unit tests in transport.rs.)
+        .flush_interval_ms(600_000u64)
         .max_capture_attempts(max_attempts)
-        // Tiny backoffs keep scheduled retries fast in tests.
-        .retry_initial_backoff_ms(1u64)
-        .retry_max_backoff_ms(5u64)
+        .retry_initial_backoff_ms(600_000u64)
+        .retry_max_backoff_ms(600_000u64)
         .build()
         .unwrap();
     posthog_rs::client(options).await
