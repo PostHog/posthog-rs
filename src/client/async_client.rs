@@ -452,6 +452,10 @@ impl Client {
     /// Number of events accepted but not yet delivered or dropped — those still
     /// in the channel, in the worker's current batch, or held for retry. Returns
     /// 0 for a disabled client.
+    ///
+    /// Gated behind the `test-harness` feature: it exposes internal queue depth
+    /// for the SDK compliance harness and is not part of the normal public API.
+    #[cfg(feature = "test-harness")]
     pub fn pending_events(&self) -> usize {
         self.transport.as_ref().map_or(0, |t| t.pending())
     }

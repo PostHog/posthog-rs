@@ -161,7 +161,9 @@ impl TransportHandle {
     }
 
     /// Events accepted but not yet delivered or dropped: channel depth plus the
-    /// worker's current batch buffer plus any batches held for retry.
+    /// worker's current batch buffer plus any batches held for retry. Only the
+    /// `test-harness`-gated `Client::pending_events` and the unit tests read this.
+    #[cfg(any(test, feature = "test-harness"))]
     pub(crate) fn pending(&self) -> usize {
         self.len.load(Ordering::Acquire)
     }
