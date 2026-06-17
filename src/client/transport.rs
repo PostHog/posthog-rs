@@ -1,20 +1,24 @@
 //! Runtime-independent event transport.
 //!
-//! A single background `std::thread` drains a channel, batches events, sends
-//! them with **blocking** reqwest, and retries transient failures on a schedule.
-//! Being a plain thread with a blocking client (never a tokio task) it works for
-//! the async client, the blocking client, and — in a later change — a
+//! A background **dispatcher** `std::thread` drains the control channel, batches
+//! events, and schedules retries; it hands each built batch to a small pool of
+//! **sender** threads that perform the **blocking** reqwest POST, so one slow or
+//! stalled endpoint can't head-of-line block draining. Senders report each
+//! outcome back to the dispatcher, which solely owns the retry queue and
+//! schedule. Being plain threads with a blocking client (never tokio tasks) this
+//! works for the async client, the blocking client, and — in a later change — a
 //! `std::panic` hook with no runtime present.
 //!
 //! `capture()` becomes a non-blocking enqueue (`Control::Capture`). `flush()` and
-//! `shutdown()` send a control message carrying a [`Completion`] the worker
-//! signals once the requested work is done, bridging the std-thread worker to
-//! either an async (`oneshot`) or blocking (`mpsc`) caller without putting a
+//! `shutdown()` send a control message carrying a [`Completion`] the dispatcher
+//! signals once the sends it dispatched have reported back, bridging the threads
+//! to either an async (`oneshot`) or blocking (`mpsc`) caller without putting a
 //! runtime in the worker.
 //!
-//! A [`Clock`] is injected into the worker so the interval timer, retry backoff,
-//! and v1 wire timestamps are deterministic in tests (a `ManualClock` plus a
-//! test-only `Tick` command drive the worker with virtual time — no real sleeps).
+//! A [`Clock`] is injected so the interval timer, retry backoff, and v1 wire
+//! timestamps are deterministic in tests (a `ManualClock` plus a test-only `Tick`
+//! command drive the dispatcher with virtual time; barriers wait on real sender
+//! outcomes — still no real sleeps).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -23,6 +27,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use tracing::warn;
 
 use super::ClientOptions;
@@ -92,7 +97,7 @@ impl Clock for SystemClock {
 /// Handle stored on the client. `&self` methods use the atomics/mutex so the
 /// client can stay a plain field while `capture`/`flush`/`shutdown` take `&self`.
 pub(crate) struct TransportHandle {
-    tx: mpsc::Sender<Control>,
+    tx: Sender<Control>,
     /// Pending `Capture` events not yet pulled by the worker. Gates the bounded queue.
     len: Arc<AtomicUsize>,
     /// Set once `shutdown`/`Drop` begins; blocks further enqueue and control sends.
@@ -112,7 +117,7 @@ impl TransportHandle {
     }
 
     fn spawn_with_clock(options: ClientOptions, clock: Arc<dyn Clock>) -> Self {
-        let (tx, rx) = mpsc::channel::<Control>();
+        let (tx, rx) = unbounded::<Control>();
         let len = Arc::new(AtomicUsize::new(0));
         let max_queue_size = options.max_queue_size;
         let worker_len = len.clone();
@@ -273,15 +278,406 @@ fn compute_wait(
     deadline.map(|d| d.saturating_duration_since(now))
 }
 
-enum Wake {
-    Msg(Control),
-    Timeout,
-    Disconnected,
+/// Number of concurrent sender threads. Telemetry sends are network-bound, so we
+/// only need enough concurrency that one slow or stalled endpoint can't
+/// head-of-line block the rest; capped so a many-core host doesn't oversubscribe.
+fn sender_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(4))
+        .unwrap_or(2)
+}
+
+/// A built batch handed to a sender thread for one blocking HTTP attempt.
+struct SendJob {
+    batch: RetryBatch,
+    final_attempt: bool,
+}
+
+/// What a sender reports back after one attempt. Terminal outcomes (delivered or
+/// dropped) have already adjusted `len`; `Retry` carries the batch back so the
+/// dispatcher can reschedule it at `batch.next_at`.
+enum SendResult {
+    Done,
+    Retry(RetryBatch),
+}
+
+/// Sender thread body: pull built batches, POST them (blocking), report outcomes.
+fn run_sender(
+    pipeline: Arc<Pipeline>,
+    jobs: Receiver<SendJob>,
+    outcomes: Sender<SendResult>,
+    abandon: Arc<AtomicBool>,
+) {
+    while let Ok(job) = jobs.recv() {
+        // The shutdown deadline fired: drop jobs still queued for this sender
+        // instead of POSTing them, so a closed client can't keep doing network
+        // work past `shutdown_timeout`. (An already in-flight POST still finishes,
+        // bounded by the request timeout — it can't be cancelled mid-flight.)
+        if abandon.load(Ordering::Acquire) {
+            pipeline.drop_batch(job.batch);
+            continue;
+        }
+        let result = pipeline.attempt(job.batch, job.final_attempt);
+        if let Err(crossbeam_channel::SendError(undelivered)) = outcomes.send(result) {
+            // Dispatcher gone (e.g. the shutdown deadline already fired). A `Retry`
+            // result still owns its events — `attempt` only decremented terminal
+            // outcomes — so account for them before stopping, or `pending_events`
+            // would leak.
+            if let SendResult::Retry(batch) = undelivered {
+                pipeline.drop_batch(batch);
+            }
+            return;
+        }
+    }
+}
+
+/// Owns the buffer, retry queue, and schedule on a single thread (so neither
+/// needs a lock) and fans batch sends out to the pool. A send never blocks the
+/// dispatcher; `flush`/`shutdown`/`Tick` are barriers that complete once the
+/// sends they dispatched report back (`in_flight` returns to zero). While a
+/// barrier is pending, no new threshold/interval/retry sends are started, so
+/// `in_flight` can drain to zero.
+struct Dispatcher {
+    pipeline: Arc<Pipeline>,
+    jobs: Sender<SendJob>,
+    /// Shared with the senders: set when the shutdown deadline fires so they drop
+    /// queued jobs instead of POSTing them after the dispatcher has exited.
+    abandon: Arc<AtomicBool>,
+    clock: Arc<dyn Clock>,
+    flush_at: usize,
+    max_batch_size: usize,
+    flush_interval: Duration,
+    shutdown_timeout: Duration,
+    buffer: Vec<Event>,
+    buffer_hist: bool,
+    buffer_since: Option<Instant>,
+    /// Captures received while a barrier is pending; replayed once it clears so a
+    /// flush only waits for work queued before it.
+    deferred: Vec<(Box<Event>, bool)>,
+    retries: VecDeque<RetryBatch>,
+    /// Batches dispatched to the pool but not yet reported back.
+    in_flight: usize,
+    /// Flush/Tick completions awaiting `in_flight == 0`.
+    flush_waiters: Vec<Completion>,
+    /// Set once shutdown/disconnect begins; carries the drain deadline.
+    shutdown_deadline: Option<Instant>,
+    shutdown_completion: Option<Completion>,
+    /// Control channel hung up (all clients dropped without an explicit shutdown).
+    disconnected: bool,
+    done: bool,
+}
+
+impl Dispatcher {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        pipeline: Arc<Pipeline>,
+        jobs: Sender<SendJob>,
+        abandon: Arc<AtomicBool>,
+        clock: Arc<dyn Clock>,
+        flush_at: usize,
+        max_batch_size: usize,
+        flush_interval: Duration,
+        shutdown_timeout: Duration,
+    ) -> Self {
+        Self {
+            pipeline,
+            jobs,
+            abandon,
+            clock,
+            flush_at,
+            max_batch_size,
+            flush_interval,
+            shutdown_timeout,
+            buffer: Vec::new(),
+            buffer_hist: false,
+            buffer_since: None,
+            deferred: Vec::new(),
+            retries: VecDeque::new(),
+            in_flight: 0,
+            flush_waiters: Vec::new(),
+            shutdown_deadline: None,
+            shutdown_completion: None,
+            disconnected: false,
+            done: false,
+        }
+    }
+
+    /// While draining, no new threshold/interval/retry sends are started so
+    /// `in_flight` can fall to zero and the pending barrier(s) can complete.
+    fn draining(&self) -> bool {
+        !self.flush_waiters.is_empty() || self.shutdown_deadline.is_some() || self.disconnected
+    }
+
+    /// Time until the next wakeup. `None` means block on the channels (idle, or
+    /// draining a flush — bounded by the per-attempt request timeout).
+    fn wait(&self) -> Option<Duration> {
+        if let Some(deadline) = self.shutdown_deadline {
+            return Some(deadline.saturating_duration_since(self.clock.now()));
+        }
+        if !self.flush_waiters.is_empty() {
+            return None;
+        }
+        compute_wait(
+            self.clock.now(),
+            self.buffer_since,
+            self.flush_interval,
+            self.retries.iter().map(|b| b.next_at).min(),
+        )
+    }
+
+    fn dispatch(&mut self, batch: RetryBatch, final_attempt: bool) {
+        match self.jobs.send(SendJob {
+            batch,
+            final_attempt,
+        }) {
+            Ok(()) => self.in_flight += 1,
+            // Pool gone (only at teardown): account for the lost events.
+            Err(crossbeam_channel::SendError(job)) => self.pipeline.drop_batch(job.batch),
+        }
+    }
+
+    /// Drain the buffer into batches of at most `max_batch_size`, dispatching each.
+    fn dispatch_buffer(&mut self, final_attempt: bool) {
+        while !self.buffer.is_empty() {
+            let take = self.buffer.len().min(self.max_batch_size);
+            let chunk: Vec<Event> = self.buffer.drain(..take).collect();
+            if let Some(batch) = self.pipeline.build(chunk, self.buffer_hist) {
+                self.dispatch(batch, final_attempt);
+            }
+        }
+        self.buffer_since = None;
+    }
+
+    fn dispatch_all_retries(&mut self, final_attempt: bool) {
+        for batch in std::mem::take(&mut self.retries) {
+            self.dispatch(batch, final_attempt);
+        }
+    }
+
+    fn dispatch_due_retries(&mut self) {
+        let now = self.clock.now();
+        for batch in std::mem::take(&mut self.retries) {
+            if now >= batch.next_at {
+                self.dispatch(batch, false);
+            } else {
+                self.retries.push_back(batch);
+            }
+        }
+    }
+
+    fn drop_buffer(&mut self) {
+        if !self.buffer.is_empty() {
+            warn!(
+                "posthog-rs: shutdown timeout reached; dropping {} buffered event(s)",
+                self.buffer.len()
+            );
+            dec_len(&self.pipeline.len, self.buffer.len());
+            self.buffer.clear();
+        }
+        self.buffer_since = None;
+    }
+
+    fn drop_all_retries(&mut self) {
+        for batch in std::mem::take(&mut self.retries) {
+            self.pipeline.drop_batch(batch);
+        }
+    }
+
+    /// Buffer one capture: flush first to keep each batch homogeneous in
+    /// historical_migration, then dispatch on the size threshold. Only reached
+    /// outside a barrier (captures arriving during one are deferred).
+    fn buffer_capture(&mut self, event: Box<Event>, historical_migration: bool) {
+        if !self.buffer.is_empty() && historical_migration != self.buffer_hist {
+            self.dispatch_buffer(false);
+        }
+        if self.buffer.is_empty() {
+            self.buffer_hist = historical_migration;
+            self.buffer_since = Some(self.clock.now());
+        }
+        self.buffer.push(*event);
+        if self.buffer.len() >= self.flush_at {
+            self.dispatch_buffer(false);
+        }
+    }
+
+    /// Replay captures held while a barrier was pending.
+    fn replay_deferred(&mut self) {
+        for (event, historical_migration) in std::mem::take(&mut self.deferred) {
+            self.buffer_capture(event, historical_migration);
+        }
+    }
+
+    /// Drop held captures (zero-grace shutdown), accounting for them in `len`.
+    fn drop_deferred(&mut self) {
+        let n = self.deferred.len();
+        if n > 0 {
+            self.deferred.clear();
+            dec_len(&self.pipeline.len, n);
+        }
+    }
+
+    /// Register a flush/tick completion, or signal it now if nothing is in flight.
+    fn register_barrier(&mut self, completion: Completion) {
+        if self.in_flight == 0 {
+            completion.signal();
+        } else {
+            self.flush_waiters.push(completion);
+        }
+    }
+
+    fn on_control(&mut self, msg: Result<Control, crossbeam_channel::RecvError>) {
+        let msg = match msg {
+            Ok(m) => m,
+            Err(_) => return self.on_disconnect(),
+        };
+        match msg {
+            Control::Capture {
+                event,
+                historical_migration,
+            } => {
+                // `len` is not decremented here: the in-flight counter spans the
+                // whole lifecycle (channel + buffer + sends + retries) and is
+                // adjusted by the pipeline once a batch is delivered or dropped.
+                // While a barrier is pending, hold the capture so the barrier only
+                // waits for work queued before it; it's replayed once the barrier
+                // clears (and folded back in on shutdown).
+                if self.draining() {
+                    self.deferred.push((event, historical_migration));
+                } else {
+                    self.buffer_capture(event, historical_migration);
+                }
+            }
+            Control::Flush(completion) => {
+                // One attempt per pending batch (held retries + buffered events);
+                // failures are held for a future cycle. Completes once those sends
+                // report back (in_flight returns to zero).
+                //
+                // Known limitation: the barrier waits on the *global* in-flight
+                // count, and captures arriving mid-drain are deferred then replayed.
+                // With concurrent flush() calls from multiple threads, a later flush
+                // can complete based on the shared drain rather than strictly the
+                // events captured before that specific call. Single-threaded use
+                // (the common case) is exact. A fully precise fix needs per-flush
+                // generation tracking; tracked as a follow-up.
+                self.dispatch_all_retries(false);
+                self.dispatch_buffer(false);
+                self.register_barrier(completion);
+            }
+            Control::Shutdown(completion) => {
+                let deadline = self.clock.now() + self.shutdown_timeout;
+                if self.clock.now() >= deadline {
+                    // Zero/elapsed grace: drop without attempting.
+                    self.drop_deferred();
+                    self.drop_all_retries();
+                    self.drop_buffer();
+                } else {
+                    // Fold captures held during an in-progress flush back in so
+                    // they get a final attempt too.
+                    self.replay_deferred();
+                    self.dispatch_all_retries(true);
+                    self.dispatch_buffer(true);
+                }
+                if self.in_flight == 0 {
+                    completion.signal();
+                    self.done = true;
+                } else {
+                    self.shutdown_deadline = Some(deadline);
+                    self.shutdown_completion = Some(completion);
+                }
+            }
+            #[cfg(test)]
+            Control::Tick(completion) => {
+                if !self.draining() {
+                    if self
+                        .buffer_since
+                        .is_some_and(|s| self.clock.now().duration_since(s) >= self.flush_interval)
+                    {
+                        self.dispatch_buffer(false);
+                    }
+                    self.dispatch_due_retries();
+                }
+                self.register_barrier(completion);
+            }
+        }
+    }
+
+    fn on_outcome(&mut self, res: Result<SendResult, crossbeam_channel::RecvError>) {
+        let Ok(result) = res else {
+            return;
+        };
+        self.in_flight = self.in_flight.saturating_sub(1);
+        if let SendResult::Retry(batch) = result {
+            match self.shutdown_deadline {
+                // Mid-teardown. A final attempt never returns Retry, so this batch
+                // was dispatched before shutdown and failed transiently; it is owed
+                // one final attempt. Give it one while the deadline allows (matching
+                // the pre-pool single-worker behavior); past the deadline, drop it.
+                Some(deadline) if self.clock.now() < deadline => self.dispatch(batch, true),
+                Some(_) => self.pipeline.drop_batch(batch),
+                None => self.retries.push_back(batch),
+            }
+        }
+        if self.in_flight == 0 {
+            for c in self.flush_waiters.drain(..) {
+                c.signal();
+            }
+            if self.shutdown_deadline.is_some() {
+                if let Some(c) = self.shutdown_completion.take() {
+                    c.signal();
+                }
+                self.done = true;
+            } else {
+                // Flush barrier cleared; process captures held during it.
+                self.replay_deferred();
+            }
+        }
+    }
+
+    fn on_timeout(&mut self) {
+        if self
+            .shutdown_deadline
+            .is_some_and(|d| self.clock.now() >= d)
+        {
+            // Deadline hit with sends still outstanding: tell the senders to drop
+            // their queued jobs (any in-flight POST still finishes, bounded by the
+            // request timeout), signal the waiter, and exit.
+            self.abandon.store(true, Ordering::Release);
+            if let Some(c) = self.shutdown_completion.take() {
+                c.signal();
+            }
+            self.done = true;
+            return;
+        }
+        if !self.draining() {
+            if self
+                .buffer_since
+                .is_some_and(|s| self.clock.now().duration_since(s) >= self.flush_interval)
+            {
+                self.dispatch_buffer(false);
+            }
+            self.dispatch_due_retries();
+        }
+    }
+
+    fn on_disconnect(&mut self) {
+        // All clients dropped without an explicit shutdown. Best-effort final
+        // drain bounded by `shutdown_timeout`, then exit.
+        self.disconnected = true;
+        let deadline = self.clock.now() + self.shutdown_timeout;
+        self.replay_deferred();
+        self.dispatch_all_retries(true);
+        self.dispatch_buffer(true);
+        if self.in_flight == 0 {
+            self.done = true;
+        } else {
+            self.shutdown_deadline = Some(deadline);
+        }
+    }
 }
 
 fn run_worker(
     options: ClientOptions,
-    rx: mpsc::Receiver<Control>,
+    control: Receiver<Control>,
     len: Arc<AtomicUsize>,
     clock: Arc<dyn Clock>,
 ) {
@@ -289,176 +685,67 @@ fn run_worker(
     let max_batch_size = options.max_batch_size.max(1);
     let flush_interval = Duration::from_millis(options.flush_interval_ms);
     let shutdown_timeout = Duration::from_millis(options.shutdown_timeout_ms);
-    let mut pipeline = Pipeline::new(&options, Arc::clone(&clock), len);
+    let pipeline = Arc::new(Pipeline::new(&options, Arc::clone(&clock), len));
 
-    let mut buffer: Vec<Event> = Vec::new();
-    let mut buffer_hist = false;
-    let mut buffer_since: Option<Instant> = None;
+    // Sender pool: the blocking POST runs here, off the dispatcher, so a slow or
+    // stalled endpoint can't head-of-line block draining. Senders are detached;
+    // they exit when the dispatcher drops `job_tx` at teardown.
+    let (job_tx, job_rx) = unbounded::<SendJob>();
+    let (outcome_tx, outcome_rx) = unbounded::<SendResult>();
+    let abandon = Arc::new(AtomicBool::new(false));
+    for i in 0..sender_pool_size() {
+        let pipeline = Arc::clone(&pipeline);
+        let jobs = job_rx.clone();
+        let outcomes = outcome_tx.clone();
+        let abandon = Arc::clone(&abandon);
+        let _ = thread::Builder::new()
+            .name(format!("posthog-sender-{i}"))
+            .spawn(move || run_sender(pipeline, jobs, outcomes, abandon));
+    }
+    drop(job_rx);
+    drop(outcome_tx);
 
-    loop {
-        let wait = compute_wait(
-            clock.now(),
-            buffer_since,
-            flush_interval,
-            pipeline.earliest_retry(),
-        );
-        let wake = match wait {
-            None => match rx.recv() {
-                Ok(msg) => Wake::Msg(msg),
-                Err(_) => Wake::Disconnected,
-            },
-            Some(timeout) => match rx.recv_timeout(timeout) {
-                Ok(msg) => Wake::Msg(msg),
-                Err(mpsc::RecvTimeoutError::Timeout) => Wake::Timeout,
-                Err(mpsc::RecvTimeoutError::Disconnected) => Wake::Disconnected,
-            },
-        };
+    let mut dispatcher = Dispatcher::new(
+        pipeline,
+        job_tx,
+        Arc::clone(&abandon),
+        clock,
+        flush_at,
+        max_batch_size,
+        flush_interval,
+        shutdown_timeout,
+    );
 
-        match wake {
-            Wake::Msg(Control::Capture {
-                event,
-                historical_migration,
-            }) => {
-                // `len` is not decremented here: the in-flight counter spans the
-                // whole worker lifecycle (channel + buffer + retries) and is
-                // decremented by the pipeline once a batch is delivered or dropped.
-                // Keep each batch homogeneous in historical_migration: flush the
-                // current buffer before mixing in an event with a different flag.
-                if !buffer.is_empty() && historical_migration != buffer_hist {
-                    send_buffer(
-                        &mut pipeline,
-                        &mut buffer,
-                        buffer_hist,
-                        max_batch_size,
-                        None,
-                    );
-                    buffer_since = None;
-                }
-                if buffer.is_empty() {
-                    buffer_hist = historical_migration;
-                    buffer_since = Some(clock.now());
-                }
-                buffer.push(*event);
-                if buffer.len() >= flush_at {
-                    send_buffer(
-                        &mut pipeline,
-                        &mut buffer,
-                        buffer_hist,
-                        max_batch_size,
-                        None,
-                    );
-                    buffer_since = None;
-                }
+    while !dispatcher.done {
+        let wait = dispatcher.wait();
+        if dispatcher.disconnected {
+            // Control hung up; only sender outcomes remain to drain.
+            match wait {
+                Some(dur) => select! {
+                    recv(outcome_rx) -> r => dispatcher.on_outcome(r),
+                    default(dur) => dispatcher.on_timeout(),
+                },
+                None => match outcome_rx.recv() {
+                    Ok(r) => dispatcher.on_outcome(Ok(r)),
+                    Err(_) => dispatcher.done = true,
+                },
             }
-            Wake::Msg(Control::Flush(completion)) => {
-                // One delivery attempt per pending batch: retry the already-held
-                // batches first, then the freshly buffered ones. Failures from
-                // either are held for the next cycle (so a single 503 leaves the
-                // event queued rather than being re-attempted in this same call).
-                pipeline.flush_retries(None);
-                send_buffer(
-                    &mut pipeline,
-                    &mut buffer,
-                    buffer_hist,
-                    max_batch_size,
-                    None,
-                );
-                buffer_since = None;
-                completion.signal();
-            }
-            Wake::Msg(Control::Shutdown(completion)) => {
-                // Drain held retries then buffered events, one final attempt each,
-                // bounded by `shutdown_timeout`: once the deadline passes the rest
-                // is dropped so teardown can't hang on a slow/unreachable endpoint.
-                let deadline = clock.now() + shutdown_timeout;
-                pipeline.flush_retries(Some(deadline));
-                send_buffer(
-                    &mut pipeline,
-                    &mut buffer,
-                    buffer_hist,
-                    max_batch_size,
-                    Some(deadline),
-                );
-                completion.signal();
-                return;
-            }
-            #[cfg(test)]
-            Wake::Msg(Control::Tick(completion)) => {
-                if buffer_since
-                    .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
-                {
-                    send_buffer(
-                        &mut pipeline,
-                        &mut buffer,
-                        buffer_hist,
-                        max_batch_size,
-                        None,
-                    );
-                    buffer_since = None;
-                }
-                pipeline.attempt_due();
-                completion.signal();
-            }
-            Wake::Timeout => {
-                if buffer_since
-                    .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
-                {
-                    send_buffer(
-                        &mut pipeline,
-                        &mut buffer,
-                        buffer_hist,
-                        max_batch_size,
-                        None,
-                    );
-                    buffer_since = None;
-                }
-                pipeline.attempt_due();
-            }
-            Wake::Disconnected => {
-                // All client handles dropped without an explicit shutdown — best
-                // effort drain bounded by `shutdown_timeout`, then exit.
-                let deadline = clock.now() + shutdown_timeout;
-                send_buffer(
-                    &mut pipeline,
-                    &mut buffer,
-                    buffer_hist,
-                    max_batch_size,
-                    Some(deadline),
-                );
-                pipeline.flush_retries(Some(deadline));
-                return;
+        } else {
+            match wait {
+                Some(dur) => select! {
+                    recv(control) -> m => dispatcher.on_control(m),
+                    recv(outcome_rx) -> r => dispatcher.on_outcome(r),
+                    default(dur) => dispatcher.on_timeout(),
+                },
+                None => select! {
+                    recv(control) -> m => dispatcher.on_control(m),
+                    recv(outcome_rx) -> r => dispatcher.on_outcome(r),
+                },
             }
         }
     }
-}
-
-/// Drain `buffer` into batches of at most `max_batch_size`, FIFO from the front,
-/// attempting each once. `deadline` is `Some` only on the shutdown/disconnect
-/// path: those attempts are final (warn-and-drop on transient failure instead of
-/// scheduling a retry), and once the deadline passes the rest of the buffer is
-/// dropped so teardown can't hang on a slow endpoint.
-fn send_buffer(
-    pipeline: &mut Pipeline,
-    buffer: &mut Vec<Event>,
-    historical_migration: bool,
-    max_batch_size: usize,
-    deadline: Option<Instant>,
-) {
-    let final_attempt = deadline.is_some();
-    while !buffer.is_empty() {
-        if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
-            warn!(
-                "posthog-rs: shutdown timeout reached; dropping {} buffered event(s)",
-                buffer.len()
-            );
-            dec_len(&pipeline.len, buffer.len());
-            buffer.clear();
-            return;
-        }
-        let take = buffer.len().min(max_batch_size);
-        let chunk: Vec<Event> = buffer.drain(..take).collect();
-        pipeline.send_batch(chunk, historical_migration, final_attempt);
-    }
+    // `dispatcher` (and its `job_tx`) drops here, so the pool's senders see the
+    // job channel close and exit after any in-flight POST completes.
 }
 
 // ===========================================================================
@@ -488,7 +775,6 @@ struct Pipeline {
     url: String,
     clock: Arc<dyn Clock>,
     len: Arc<AtomicUsize>,
-    retries: VecDeque<RetryBatch>,
 }
 
 #[cfg(feature = "capture-v1")]
@@ -507,11 +793,12 @@ impl Pipeline {
             url,
             clock,
             len,
-            retries: VecDeque::new(),
         }
     }
 
-    fn send_batch(&mut self, events: Vec<Event>, historical_migration: bool, final_attempt: bool) {
+    /// Dispatcher-side: apply defaults + before_send and build the wire batch.
+    /// Returns `None` when every event was dropped by before_send.
+    fn build(&self, events: Vec<Event>, historical_migration: bool) -> Option<RetryBatch> {
         use super::common::{apply_before_send_hooks, apply_capture_defaults};
 
         let defaults = self.options.capture_defaults();
@@ -526,24 +813,24 @@ impl Pipeline {
         // Events dropped by before_send are terminal.
         dec_len(&self.len, original - processed.len());
         if processed.is_empty() {
-            return;
+            return None;
         }
-        let now = self.clock.now();
         let pending =
             super::v1_capture::build_events_at(&processed, &defaults, self.clock.now_utc());
-        let batch = RetryBatch {
+        Some(RetryBatch {
             pending,
             request_id: Uuid::now_v7(),
             created_at: self.clock.now_utc().to_rfc3339(),
             final_results: HashMap::new(),
             historical_migration,
             attempt: 1,
-            next_at: now,
-        };
-        self.attempt(batch, final_attempt);
+            next_at: self.clock.now(),
+        })
     }
 
-    fn attempt(&mut self, mut batch: RetryBatch, final_attempt: bool) {
+    /// Sender-side: one blocking HTTP attempt. Terminal outcomes adjust `len` and
+    /// return `Done`; a transient failure returns `Retry` with `next_at` set.
+    fn attempt(&self, mut batch: RetryBatch, final_attempt: bool) -> SendResult {
         use super::v1_capture::{self, Step};
         use crate::event_v1::V1BatchRequestRef;
 
@@ -560,7 +847,7 @@ impl Pipeline {
                     batch.pending.len()
                 );
                 dec_len(&self.len, batch.pending.len());
-                return;
+                return SendResult::Done;
             }
         };
         let mut headers = v1_capture::build_headers_at(
@@ -601,10 +888,11 @@ impl Pipeline {
         dec_len(&self.len, count - batch.pending.len());
 
         match step {
-            Step::Done => {}
+            Step::Done => SendResult::Done,
             Step::Fail(e) => {
                 warn!("posthog-rs: dropping {} event(s): {e}", batch.pending.len());
                 dec_len(&self.len, batch.pending.len());
+                SendResult::Done
             }
             Step::Backoff(delay) => {
                 if final_attempt {
@@ -613,46 +901,19 @@ impl Pipeline {
                         batch.pending.len()
                     );
                     dec_len(&self.len, batch.pending.len());
+                    SendResult::Done
                 } else {
                     batch.attempt += 1;
                     batch.next_at = self.clock.now() + delay;
-                    self.retries.push_back(batch);
+                    SendResult::Retry(batch)
                 }
             }
         }
     }
 
-    fn earliest_retry(&self) -> Option<Instant> {
-        self.retries.iter().map(|b| b.next_at).min()
-    }
-
-    fn attempt_due(&mut self) {
-        let now = self.clock.now();
-        for batch in std::mem::take(&mut self.retries) {
-            if now >= batch.next_at {
-                self.attempt(batch, false);
-            } else {
-                self.retries.push_back(batch);
-            }
-        }
-    }
-
-    fn flush_retries(&mut self, deadline: Option<Instant>) {
-        // `Some` is the shutdown/disconnect path: attempts are final (drop on
-        // failure), and any batch still pending once the deadline passes is
-        // dropped rather than attempted.
-        let final_attempt = deadline.is_some();
-        for batch in std::mem::take(&mut self.retries) {
-            if deadline.is_some_and(|d| self.clock.now() >= d) {
-                warn!(
-                    "posthog-rs: shutdown timeout reached; dropping {} undelivered event(s)",
-                    batch.pending.len()
-                );
-                dec_len(&self.len, batch.pending.len());
-            } else {
-                self.attempt(batch, final_attempt);
-            }
-        }
+    /// Account for a built-but-unsent batch (shutdown deadline / pool gone).
+    fn drop_batch(&self, batch: RetryBatch) {
+        dec_len(&self.len, batch.pending.len());
     }
 }
 
@@ -662,8 +923,9 @@ impl Pipeline {
 
 #[cfg(not(feature = "capture-v1"))]
 struct RetryBatch {
-    body: Vec<u8>,
-    encoding: Option<&'static str>,
+    /// Structured so `sent_at` can be re-stamped and the body re-serialized on
+    /// each attempt; `count` is the original event count for `len` accounting.
+    request: crate::event::BatchRequest,
     count: usize,
     attempt: u32,
     next_at: Instant,
@@ -676,7 +938,6 @@ struct Pipeline {
     url_base: String,
     clock: Arc<dyn Clock>,
     len: Arc<AtomicUsize>,
-    retries: VecDeque<RetryBatch>,
 }
 
 #[cfg(not(feature = "capture-v1"))]
@@ -695,51 +956,58 @@ impl Pipeline {
             url_base,
             clock,
             len,
-            retries: VecDeque::new(),
         }
     }
 
-    fn send_batch(&mut self, events: Vec<Event>, historical_migration: bool, final_attempt: bool) {
+    /// Dispatcher-side: apply defaults + before_send and serialize the wire body.
+    /// Returns `None` when every event was dropped by before_send.
+    fn build(&self, events: Vec<Event>, historical_migration: bool) -> Option<RetryBatch> {
         let defaults = self.options.capture_defaults();
         let count = events.len();
-        let payload = match super::v0_capture::build_batch_payload(
+        match super::v0_capture::build_batch_payload(
             events,
             self.options.api_key.clone(),
             historical_migration,
-            self.clock.now_utc(),
             &defaults,
             &self.options.before_send,
         ) {
-            Ok(Some(p)) => p,
-            Ok(None) => {
+            Some(request) => Some(RetryBatch {
+                request,
+                count,
+                attempt: 1,
+                next_at: self.clock.now(),
+            }),
+            None => {
                 // Every event dropped by before_send (terminal).
                 dec_len(&self.len, count);
-                return;
+                None
             }
-            Err(e) => {
-                warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
-                dec_len(&self.len, count);
-                return;
-            }
-        };
-        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
-        let batch = RetryBatch {
-            body,
-            encoding,
-            count,
-            attempt: 1,
-            next_at: self.clock.now(),
-        };
-        self.attempt(batch, final_attempt);
+        }
     }
 
-    fn attempt(&mut self, mut batch: RetryBatch, final_attempt: bool) {
+    /// Sender-side: one blocking HTTP attempt. Terminal outcomes adjust `len` and
+    /// return `Done`; a transient failure returns `Retry` with `next_at` set.
+    fn attempt(&self, mut batch: RetryBatch, final_attempt: bool) -> SendResult {
         use super::get_default_user_agent;
         use super::retry::{v0_after_response, v0_after_transport_error, Step};
         use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 
+        // Stamp sent_at at the actual send time, per attempt, so a retried batch
+        // carries when it was really sent (for server-side clock-skew correction).
+        batch.request.sent_at = self.clock.now_utc().to_rfc3339();
+        let (body, encoding) = match serde_json::to_string(&batch.request) {
+            Ok(json) => super::v0_capture::encode_body(&self.options, json),
+            Err(e) => {
+                warn!(
+                    "posthog-rs: dropping {} event(s), serialization failed: {e}",
+                    batch.count
+                );
+                dec_len(&self.len, batch.count);
+                return SendResult::Done;
+            }
+        };
         // v0 capture reads the compression hint from the query param, not the header.
-        let url = match batch.encoding {
+        let url = match encoding {
             Some(token) => format!("{}?compression={token}", self.url_base),
             None => self.url_base.clone(),
         };
@@ -748,8 +1016,8 @@ impl Pipeline {
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .header(USER_AGENT, get_default_user_agent())
-            .body(batch.body.clone());
-        if let Some(token) = batch.encoding {
+            .body(body);
+        if let Some(token) = encoding {
             request = request.header(reqwest::header::CONTENT_ENCODING, token);
         }
         let request = super::v0_capture::apply_extra_headers(&self.options, request);
@@ -767,10 +1035,14 @@ impl Pipeline {
         };
 
         match step {
-            Step::Done => dec_len(&self.len, batch.count),
+            Step::Done => {
+                dec_len(&self.len, batch.count);
+                SendResult::Done
+            }
             Step::Fail(e) => {
                 warn!("posthog-rs: dropping {} event(s): {e}", batch.count);
                 dec_len(&self.len, batch.count);
+                SendResult::Done
             }
             Step::Backoff(delay) => {
                 if final_attempt {
@@ -779,46 +1051,19 @@ impl Pipeline {
                         batch.count
                     );
                     dec_len(&self.len, batch.count);
+                    SendResult::Done
                 } else {
                     batch.attempt += 1;
                     batch.next_at = self.clock.now() + delay;
-                    self.retries.push_back(batch);
+                    SendResult::Retry(batch)
                 }
             }
         }
     }
 
-    fn earliest_retry(&self) -> Option<Instant> {
-        self.retries.iter().map(|b| b.next_at).min()
-    }
-
-    fn attempt_due(&mut self) {
-        let now = self.clock.now();
-        for batch in std::mem::take(&mut self.retries) {
-            if now >= batch.next_at {
-                self.attempt(batch, false);
-            } else {
-                self.retries.push_back(batch);
-            }
-        }
-    }
-
-    fn flush_retries(&mut self, deadline: Option<Instant>) {
-        // `Some` is the shutdown/disconnect path: attempts are final (drop on
-        // failure), and any batch still pending once the deadline passes is
-        // dropped rather than attempted.
-        let final_attempt = deadline.is_some();
-        for batch in std::mem::take(&mut self.retries) {
-            if deadline.is_some_and(|d| self.clock.now() >= d) {
-                warn!(
-                    "posthog-rs: shutdown timeout reached; dropping {} undelivered event(s)",
-                    batch.count
-                );
-                dec_len(&self.len, batch.count);
-            } else {
-                self.attempt(batch, final_attempt);
-            }
-        }
+    /// Account for a built-but-unsent batch (shutdown deadline / pool gone).
+    fn drop_batch(&self, batch: RetryBatch) {
+        dec_len(&self.len, batch.count);
     }
 }
 
@@ -1091,6 +1336,115 @@ mod tests {
             handle.pending(),
             0,
             "dropped events leave nothing in flight"
+        );
+    }
+
+    #[test]
+    fn flush_waits_for_every_batch_across_the_pool() {
+        // max_batch_size = 1 forces one batch per event, so a single flush fans
+        // several sends out to the pool concurrently. The flush barrier must wait
+        // for *all* of them to report back before returning.
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .max_batch_size(1usize)
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        for _ in 0..5 {
+            handle.enqueue(Event::new("E", "user-1"), false);
+        }
+        handle.flush_blocking();
+
+        mock.assert_hits(5);
+        assert_eq!(handle.pending(), 0, "all batches delivered after flush");
+        handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn sender_abandons_queued_jobs_without_posting() {
+        // With the abandon flag set (shutdown deadline passed), a sender drops
+        // queued jobs and accounts for them instead of POSTing, so a closed client
+        // stops doing network work even with batches still queued.
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+        let len = Arc::new(AtomicUsize::new(1));
+        let clock: Arc<dyn Clock> = Arc::new(ManualClock::new());
+        let pipeline = Arc::new(Pipeline::new(
+            &options(server.base_url()).build().unwrap(),
+            Arc::clone(&clock),
+            Arc::clone(&len),
+        ));
+        let batch = pipeline
+            .build(vec![Event::new("E", "user-1")], false)
+            .expect("batch built");
+
+        let (job_tx, job_rx) = unbounded::<SendJob>();
+        let (out_tx, _out_rx) = unbounded::<SendResult>();
+        job_tx
+            .send(SendJob {
+                batch,
+                final_attempt: true,
+            })
+            .unwrap();
+        drop(job_tx); // sender's recv ends once the queue drains
+
+        run_sender(pipeline, job_rx, out_tx, Arc::new(AtomicBool::new(true)));
+
+        mock.assert_hits(0);
+        assert_eq!(
+            len.load(Ordering::Acquire),
+            0,
+            "abandoned batch is dropped from in-flight, not sent"
+        );
+    }
+
+    #[test]
+    fn sender_accounts_retry_when_dispatcher_is_gone() {
+        // If the dispatcher exited (shutdown deadline) while a non-final attempt is
+        // in flight and it then fails transiently, the sender can't report the
+        // Retry — it must still drop the batch so pending_events doesn't leak.
+        let server = MockServer::start();
+        let fail = server.mock(|when, then| {
+            when.method(POST);
+            then.status(503);
+        });
+        let len = Arc::new(AtomicUsize::new(1));
+        let clock: Arc<dyn Clock> = Arc::new(ManualClock::new());
+        let pipeline = Arc::new(Pipeline::new(
+            &options(server.base_url())
+                .max_capture_attempts(5u32)
+                .build()
+                .unwrap(),
+            Arc::clone(&clock),
+            Arc::clone(&len),
+        ));
+        let batch = pipeline
+            .build(vec![Event::new("E", "user-1")], false)
+            .expect("batch built");
+
+        let (job_tx, job_rx) = unbounded::<SendJob>();
+        let (out_tx, out_rx) = unbounded::<SendResult>();
+        job_tx
+            .send(SendJob {
+                batch,
+                final_attempt: false,
+            })
+            .unwrap();
+        drop(job_tx);
+        drop(out_rx); // dispatcher gone: the outcome send fails
+
+        run_sender(pipeline, job_rx, out_tx, Arc::new(AtomicBool::new(false)));
+
+        fail.assert_hits(1); // the transient attempt happened...
+        assert_eq!(
+            len.load(Ordering::Acquire),
+            0,
+            "...and its retry batch was accounted, not leaked"
         );
     }
 }
