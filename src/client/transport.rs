@@ -556,11 +556,14 @@ impl Dispatcher {
         };
         self.in_flight = self.in_flight.saturating_sub(1);
         if let SendResult::Retry(batch) = result {
-            if self.shutdown_deadline.is_some() {
-                // Tearing down: don't re-queue a failed final attempt.
-                self.pipeline.drop_batch(batch);
-            } else {
-                self.retries.push_back(batch);
+            match self.shutdown_deadline {
+                // Mid-teardown. A final attempt never returns Retry, so this batch
+                // was dispatched before shutdown and failed transiently; it is owed
+                // one final attempt. Give it one while the deadline allows (matching
+                // the pre-pool single-worker behavior); past the deadline, drop it.
+                Some(deadline) if self.clock.now() < deadline => self.dispatch(batch, true),
+                Some(_) => self.pipeline.drop_batch(batch),
+                None => self.retries.push_back(batch),
             }
         }
         if self.in_flight == 0 {
