@@ -302,8 +302,21 @@ enum SendResult {
 }
 
 /// Sender thread body: pull built batches, POST them (blocking), report outcomes.
-fn run_sender(pipeline: Arc<Pipeline>, jobs: Receiver<SendJob>, outcomes: Sender<SendResult>) {
+fn run_sender(
+    pipeline: Arc<Pipeline>,
+    jobs: Receiver<SendJob>,
+    outcomes: Sender<SendResult>,
+    abandon: Arc<AtomicBool>,
+) {
     while let Ok(job) = jobs.recv() {
+        // The shutdown deadline fired: drop jobs still queued for this sender
+        // instead of POSTing them, so a closed client can't keep doing network
+        // work past `shutdown_timeout`. (An already in-flight POST still finishes,
+        // bounded by the request timeout — it can't be cancelled mid-flight.)
+        if abandon.load(Ordering::Acquire) {
+            pipeline.drop_batch(job.batch);
+            continue;
+        }
         let result = pipeline.attempt(job.batch, job.final_attempt);
         if outcomes.send(result).is_err() {
             return; // dispatcher gone
@@ -320,6 +333,9 @@ fn run_sender(pipeline: Arc<Pipeline>, jobs: Receiver<SendJob>, outcomes: Sender
 struct Dispatcher {
     pipeline: Arc<Pipeline>,
     jobs: Sender<SendJob>,
+    /// Shared with the senders: set when the shutdown deadline fires so they drop
+    /// queued jobs instead of POSTing them after the dispatcher has exited.
+    abandon: Arc<AtomicBool>,
     clock: Arc<dyn Clock>,
     flush_at: usize,
     max_batch_size: usize,
@@ -346,6 +362,7 @@ impl Dispatcher {
     fn new(
         pipeline: Arc<Pipeline>,
         jobs: Sender<SendJob>,
+        abandon: Arc<AtomicBool>,
         clock: Arc<dyn Clock>,
         flush_at: usize,
         max_batch_size: usize,
@@ -355,6 +372,7 @@ impl Dispatcher {
         Self {
             pipeline,
             jobs,
+            abandon,
             clock,
             flush_at,
             max_batch_size,
@@ -563,8 +581,10 @@ impl Dispatcher {
             .shutdown_deadline
             .is_some_and(|d| self.clock.now() >= d)
         {
-            // Deadline hit with sends still outstanding: abandon them and exit.
-            // The detached senders finish their in-flight POST and then stop.
+            // Deadline hit with sends still outstanding: tell the senders to drop
+            // their queued jobs (any in-flight POST still finishes, bounded by the
+            // request timeout), signal the waiter, and exit.
+            self.abandon.store(true, Ordering::Release);
             if let Some(c) = self.shutdown_completion.take() {
                 c.signal();
             }
@@ -614,13 +634,15 @@ fn run_worker(
     // they exit when the dispatcher drops `job_tx` at teardown.
     let (job_tx, job_rx) = unbounded::<SendJob>();
     let (outcome_tx, outcome_rx) = unbounded::<SendResult>();
+    let abandon = Arc::new(AtomicBool::new(false));
     for i in 0..sender_pool_size() {
         let pipeline = Arc::clone(&pipeline);
         let jobs = job_rx.clone();
         let outcomes = outcome_tx.clone();
+        let abandon = Arc::clone(&abandon);
         let _ = thread::Builder::new()
             .name(format!("posthog-sender-{i}"))
-            .spawn(move || run_sender(pipeline, jobs, outcomes));
+            .spawn(move || run_sender(pipeline, jobs, outcomes, abandon));
     }
     drop(job_rx);
     drop(outcome_tx);
@@ -628,6 +650,7 @@ fn run_worker(
     let mut dispatcher = Dispatcher::new(
         pipeline,
         job_tx,
+        Arc::clone(&abandon),
         clock,
         flush_at,
         max_batch_size,
@@ -1276,5 +1299,43 @@ mod tests {
         mock.assert_hits(5);
         assert_eq!(handle.pending(), 0, "all batches delivered after flush");
         handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn sender_abandons_queued_jobs_without_posting() {
+        // With the abandon flag set (shutdown deadline passed), a sender drops
+        // queued jobs and accounts for them instead of POSTing, so a closed client
+        // stops doing network work even with batches still queued.
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+        let len = Arc::new(AtomicUsize::new(1));
+        let clock: Arc<dyn Clock> = Arc::new(ManualClock::new());
+        let pipeline = Arc::new(Pipeline::new(
+            &options(server.base_url()).build().unwrap(),
+            Arc::clone(&clock),
+            Arc::clone(&len),
+        ));
+        let batch = pipeline
+            .build(vec![Event::new("E", "user-1")], false)
+            .expect("batch built");
+
+        let (job_tx, job_rx) = unbounded::<SendJob>();
+        let (out_tx, _out_rx) = unbounded::<SendResult>();
+        job_tx
+            .send(SendJob {
+                batch,
+                final_attempt: true,
+            })
+            .unwrap();
+        drop(job_tx); // sender's recv ends once the queue drains
+
+        run_sender(pipeline, job_rx, out_tx, Arc::new(AtomicBool::new(true)));
+
+        mock.assert_hits(0);
+        assert_eq!(
+            len.load(Ordering::Acquire),
+            0,
+            "abandoned batch is dropped from in-flight, not sent"
+        );
     }
 }
