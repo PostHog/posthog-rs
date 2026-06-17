@@ -210,6 +210,13 @@ pub struct ClientOptions {
     #[builder(default = "10000")]
     pub(crate) max_queue_size: usize,
 
+    /// Maximum time `shutdown()` and `Drop` spend draining buffered and
+    /// retrying events before abandoning the rest, in milliseconds (default:
+    /// 30000). Bounds how long process teardown can block on a slow or
+    /// unreachable endpoint; `flush()` is unaffected.
+    #[builder(default = "30000")]
+    pub(crate) shutdown_timeout_ms: u64,
+
     /// Optional request-body compression. When `None` (default), bodies are
     /// sent uncompressed. The V0 pipeline supports `Gzip` only; V1 supports all
     /// variants.

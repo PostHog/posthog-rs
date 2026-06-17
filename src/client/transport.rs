@@ -288,6 +288,7 @@ fn run_worker(
     let flush_at = options.flush_at.max(1);
     let max_batch_size = options.max_batch_size.max(1);
     let flush_interval = Duration::from_millis(options.flush_interval_ms);
+    let shutdown_timeout = Duration::from_millis(options.shutdown_timeout_ms);
     let mut pipeline = Pipeline::new(&options, Arc::clone(&clock), len);
 
     let mut buffer: Vec<Event> = Vec::new();
@@ -329,7 +330,7 @@ fn run_worker(
                         &mut buffer,
                         buffer_hist,
                         max_batch_size,
-                        false,
+                        None,
                     );
                     buffer_since = None;
                 }
@@ -344,7 +345,7 @@ fn run_worker(
                         &mut buffer,
                         buffer_hist,
                         max_batch_size,
-                        false,
+                        None,
                     );
                     buffer_since = None;
                 }
@@ -354,27 +355,29 @@ fn run_worker(
                 // batches first, then the freshly buffered ones. Failures from
                 // either are held for the next cycle (so a single 503 leaves the
                 // event queued rather than being re-attempted in this same call).
-                pipeline.flush_retries(false);
+                pipeline.flush_retries(None);
                 send_buffer(
                     &mut pipeline,
                     &mut buffer,
                     buffer_hist,
                     max_batch_size,
-                    false,
+                    None,
                 );
                 buffer_since = None;
                 completion.signal();
             }
             Wake::Msg(Control::Shutdown(completion)) => {
-                // FIFO delivery means every pre-shutdown Capture has already been
-                // buffered, so one final attempt per batch is sufficient.
-                pipeline.flush_retries(true);
+                // Drain held retries then buffered events, one final attempt each,
+                // bounded by `shutdown_timeout`: once the deadline passes the rest
+                // is dropped so teardown can't hang on a slow/unreachable endpoint.
+                let deadline = clock.now() + shutdown_timeout;
+                pipeline.flush_retries(Some(deadline));
                 send_buffer(
                     &mut pipeline,
                     &mut buffer,
                     buffer_hist,
                     max_batch_size,
-                    true,
+                    Some(deadline),
                 );
                 completion.signal();
                 return;
@@ -389,7 +392,7 @@ fn run_worker(
                         &mut buffer,
                         buffer_hist,
                         max_batch_size,
-                        false,
+                        None,
                     );
                     buffer_since = None;
                 }
@@ -405,7 +408,7 @@ fn run_worker(
                         &mut buffer,
                         buffer_hist,
                         max_batch_size,
-                        false,
+                        None,
                     );
                     buffer_since = None;
                 }
@@ -413,15 +416,16 @@ fn run_worker(
             }
             Wake::Disconnected => {
                 // All client handles dropped without an explicit shutdown — best
-                // effort drain, then exit.
+                // effort drain bounded by `shutdown_timeout`, then exit.
+                let deadline = clock.now() + shutdown_timeout;
                 send_buffer(
                     &mut pipeline,
                     &mut buffer,
                     buffer_hist,
                     max_batch_size,
-                    true,
+                    Some(deadline),
                 );
-                pipeline.flush_retries(true);
+                pipeline.flush_retries(Some(deadline));
                 return;
             }
         }
@@ -429,16 +433,28 @@ fn run_worker(
 }
 
 /// Drain `buffer` into batches of at most `max_batch_size`, FIFO from the front,
-/// attempting each once. `final_attempt` warns-and-drops on transient failure
-/// (shutdown) instead of scheduling a retry.
+/// attempting each once. `deadline` is `Some` only on the shutdown/disconnect
+/// path: those attempts are final (warn-and-drop on transient failure instead of
+/// scheduling a retry), and once the deadline passes the rest of the buffer is
+/// dropped so teardown can't hang on a slow endpoint.
 fn send_buffer(
     pipeline: &mut Pipeline,
     buffer: &mut Vec<Event>,
     historical_migration: bool,
     max_batch_size: usize,
-    final_attempt: bool,
+    deadline: Option<Instant>,
 ) {
+    let final_attempt = deadline.is_some();
     while !buffer.is_empty() {
+        if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
+            warn!(
+                "posthog-rs: shutdown timeout reached; dropping {} buffered event(s)",
+                buffer.len()
+            );
+            dec_len(&pipeline.len, buffer.len());
+            buffer.clear();
+            return;
+        }
         let take = buffer.len().min(max_batch_size);
         let chunk: Vec<Event> = buffer.drain(..take).collect();
         pipeline.send_batch(chunk, historical_migration, final_attempt);
@@ -621,12 +637,21 @@ impl Pipeline {
         }
     }
 
-    fn flush_retries(&mut self, final_attempt: bool) {
+    fn flush_retries(&mut self, deadline: Option<Instant>) {
+        // `Some` is the shutdown/disconnect path: attempts are final (drop on
+        // failure), and any batch still pending once the deadline passes is
+        // dropped rather than attempted.
+        let final_attempt = deadline.is_some();
         for batch in std::mem::take(&mut self.retries) {
-            self.attempt(batch, final_attempt);
-        }
-        if final_attempt && !self.retries.is_empty() {
-            warn!("posthog-rs: shutdown completed with undelivered events");
+            if deadline.is_some_and(|d| self.clock.now() >= d) {
+                warn!(
+                    "posthog-rs: shutdown timeout reached; dropping {} undelivered event(s)",
+                    batch.pending.len()
+                );
+                dec_len(&self.len, batch.pending.len());
+            } else {
+                self.attempt(batch, final_attempt);
+            }
         }
     }
 }
@@ -778,12 +803,21 @@ impl Pipeline {
         }
     }
 
-    fn flush_retries(&mut self, final_attempt: bool) {
+    fn flush_retries(&mut self, deadline: Option<Instant>) {
+        // `Some` is the shutdown/disconnect path: attempts are final (drop on
+        // failure), and any batch still pending once the deadline passes is
+        // dropped rather than attempted.
+        let final_attempt = deadline.is_some();
         for batch in std::mem::take(&mut self.retries) {
-            self.attempt(batch, final_attempt);
-        }
-        if final_attempt && !self.retries.is_empty() {
-            warn!("posthog-rs: shutdown completed with undelivered events");
+            if deadline.is_some_and(|d| self.clock.now() >= d) {
+                warn!(
+                    "posthog-rs: shutdown timeout reached; dropping {} undelivered event(s)",
+                    batch.count
+                );
+                dec_len(&self.len, batch.count);
+            } else {
+                self.attempt(batch, final_attempt);
+            }
         }
     }
 }
@@ -1031,5 +1065,32 @@ mod tests {
 
         mock.assert_hits(1);
         handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn shutdown_timeout_drops_undelivered_without_blocking() {
+        // shutdown_timeout = 0: the drain deadline is already past when the worker
+        // handles Shutdown, so a buffered event is dropped (not sent) and teardown
+        // returns instead of blocking on the endpoint.
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .shutdown_timeout_ms(0u64)
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        handle.enqueue(Event::new("Dropped", "user-1"), false);
+        handle.shutdown_blocking(); // deadline already past -> drop, do not send
+
+        mock.assert_hits(0);
+        assert_eq!(
+            handle.pending(),
+            0,
+            "dropped events leave nothing in flight"
+        );
     }
 }
