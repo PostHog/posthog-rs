@@ -550,7 +550,15 @@ impl Dispatcher {
             Control::Flush(completion) => {
                 // One attempt per pending batch (held retries + buffered events);
                 // failures are held for a future cycle. Completes once those sends
-                // report back.
+                // report back (in_flight returns to zero).
+                //
+                // Known limitation: the barrier waits on the *global* in-flight
+                // count, and captures arriving mid-drain are deferred then replayed.
+                // With concurrent flush() calls from multiple threads, a later flush
+                // can complete based on the shared drain rather than strictly the
+                // events captured before that specific call. Single-threaded use
+                // (the common case) is exact. A fully precise fix needs per-flush
+                // generation tracking; tracked as a follow-up.
                 self.dispatch_all_retries(false);
                 self.dispatch_buffer(false);
                 self.register_barrier(completion);
