@@ -318,8 +318,15 @@ fn run_sender(
             continue;
         }
         let result = pipeline.attempt(job.batch, job.final_attempt);
-        if outcomes.send(result).is_err() {
-            return; // dispatcher gone
+        if let Err(crossbeam_channel::SendError(undelivered)) = outcomes.send(result) {
+            // Dispatcher gone (e.g. the shutdown deadline already fired). A `Retry`
+            // result still owns its events — `attempt` only decremented terminal
+            // outcomes — so account for them before stopping, or `pending_events`
+            // would leak.
+            if let SendResult::Retry(batch) = undelivered {
+                pipeline.drop_batch(batch);
+            }
+            return;
         }
     }
 }
@@ -344,6 +351,9 @@ struct Dispatcher {
     buffer: Vec<Event>,
     buffer_hist: bool,
     buffer_since: Option<Instant>,
+    /// Captures received while a barrier is pending; replayed once it clears so a
+    /// flush only waits for work queued before it.
+    deferred: Vec<(Box<Event>, bool)>,
     retries: VecDeque<RetryBatch>,
     /// Batches dispatched to the pool but not yet reported back.
     in_flight: usize,
@@ -381,6 +391,7 @@ impl Dispatcher {
             buffer: Vec::new(),
             buffer_hist: false,
             buffer_since: None,
+            deferred: Vec::new(),
             retries: VecDeque::new(),
             in_flight: 0,
             flush_waiters: Vec::new(),
@@ -472,6 +483,39 @@ impl Dispatcher {
         }
     }
 
+    /// Buffer one capture: flush first to keep each batch homogeneous in
+    /// historical_migration, then dispatch on the size threshold. Only reached
+    /// outside a barrier (captures arriving during one are deferred).
+    fn buffer_capture(&mut self, event: Box<Event>, historical_migration: bool) {
+        if !self.buffer.is_empty() && historical_migration != self.buffer_hist {
+            self.dispatch_buffer(false);
+        }
+        if self.buffer.is_empty() {
+            self.buffer_hist = historical_migration;
+            self.buffer_since = Some(self.clock.now());
+        }
+        self.buffer.push(*event);
+        if self.buffer.len() >= self.flush_at {
+            self.dispatch_buffer(false);
+        }
+    }
+
+    /// Replay captures held while a barrier was pending.
+    fn replay_deferred(&mut self) {
+        for (event, historical_migration) in std::mem::take(&mut self.deferred) {
+            self.buffer_capture(event, historical_migration);
+        }
+    }
+
+    /// Drop held captures (zero-grace shutdown), accounting for them in `len`.
+    fn drop_deferred(&mut self) {
+        let n = self.deferred.len();
+        if n > 0 {
+            self.deferred.clear();
+            dec_len(&self.pipeline.len, n);
+        }
+    }
+
     /// Register a flush/tick completion, or signal it now if nothing is in flight.
     fn register_barrier(&mut self, completion: Completion) {
         if self.in_flight == 0 {
@@ -494,18 +538,13 @@ impl Dispatcher {
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole lifecycle (channel + buffer + sends + retries) and is
                 // adjusted by the pipeline once a batch is delivered or dropped.
-                // Keep each batch homogeneous in historical_migration: flush the
-                // current buffer before mixing in an event with a different flag.
-                if !self.buffer.is_empty() && historical_migration != self.buffer_hist {
-                    self.dispatch_buffer(false);
-                }
-                if self.buffer.is_empty() {
-                    self.buffer_hist = historical_migration;
-                    self.buffer_since = Some(self.clock.now());
-                }
-                self.buffer.push(*event);
-                if !self.draining() && self.buffer.len() >= self.flush_at {
-                    self.dispatch_buffer(false);
+                // While a barrier is pending, hold the capture so the barrier only
+                // waits for work queued before it; it's replayed once the barrier
+                // clears (and folded back in on shutdown).
+                if self.draining() {
+                    self.deferred.push((event, historical_migration));
+                } else {
+                    self.buffer_capture(event, historical_migration);
                 }
             }
             Control::Flush(completion) => {
@@ -520,9 +559,13 @@ impl Dispatcher {
                 let deadline = self.clock.now() + self.shutdown_timeout;
                 if self.clock.now() >= deadline {
                     // Zero/elapsed grace: drop without attempting.
+                    self.drop_deferred();
                     self.drop_all_retries();
                     self.drop_buffer();
                 } else {
+                    // Fold captures held during an in-progress flush back in so
+                    // they get a final attempt too.
+                    self.replay_deferred();
                     self.dispatch_all_retries(true);
                     self.dispatch_buffer(true);
                 }
@@ -575,6 +618,9 @@ impl Dispatcher {
                     c.signal();
                 }
                 self.done = true;
+            } else {
+                // Flush barrier cleared; process captures held during it.
+                self.replay_deferred();
             }
         }
     }
@@ -610,6 +656,7 @@ impl Dispatcher {
         // drain bounded by `shutdown_timeout`, then exit.
         self.disconnected = true;
         let deadline = self.clock.now() + self.shutdown_timeout;
+        self.replay_deferred();
         self.dispatch_all_retries(true);
         self.dispatch_buffer(true);
         if self.in_flight == 0 {
@@ -1339,6 +1386,51 @@ mod tests {
             len.load(Ordering::Acquire),
             0,
             "abandoned batch is dropped from in-flight, not sent"
+        );
+    }
+
+    #[test]
+    fn sender_accounts_retry_when_dispatcher_is_gone() {
+        // If the dispatcher exited (shutdown deadline) while a non-final attempt is
+        // in flight and it then fails transiently, the sender can't report the
+        // Retry — it must still drop the batch so pending_events doesn't leak.
+        let server = MockServer::start();
+        let fail = server.mock(|when, then| {
+            when.method(POST);
+            then.status(503);
+        });
+        let len = Arc::new(AtomicUsize::new(1));
+        let clock: Arc<dyn Clock> = Arc::new(ManualClock::new());
+        let pipeline = Arc::new(Pipeline::new(
+            &options(server.base_url())
+                .max_capture_attempts(5u32)
+                .build()
+                .unwrap(),
+            Arc::clone(&clock),
+            Arc::clone(&len),
+        ));
+        let batch = pipeline
+            .build(vec![Event::new("E", "user-1")], false)
+            .expect("batch built");
+
+        let (job_tx, job_rx) = unbounded::<SendJob>();
+        let (out_tx, out_rx) = unbounded::<SendResult>();
+        job_tx
+            .send(SendJob {
+                batch,
+                final_attempt: false,
+            })
+            .unwrap();
+        drop(job_tx);
+        drop(out_rx); // dispatcher gone: the outcome send fails
+
+        run_sender(pipeline, job_rx, out_tx, Arc::new(AtomicBool::new(false)));
+
+        fail.assert_hits(1); // the transient attempt happened...
+        assert_eq!(
+            len.load(Ordering::Acquire),
+            0,
+            "...and its retry batch was accounted, not leaked"
         );
     }
 }
