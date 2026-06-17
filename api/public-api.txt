@@ -146,6 +146,7 @@ pub fn posthog_rs::ClientOptionsBuilder::poll_interval_seconds(&mut self, u64) -
 pub fn posthog_rs::ClientOptionsBuilder::request_timeout_seconds(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::retry_initial_backoff_ms(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::retry_max_backoff_ms(&mut self, u64) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::shutdown_timeout_ms(&mut self, u64) -> &mut Self
 impl posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog_rs::Event) -> core::option::Option<posthog_rs::Event> + core::marker::Send + 'static
 pub fn posthog_rs::ClientOptionsBuilder::build(&self) -> core::result::Result<posthog_rs::ClientOptions, posthog_rs::ClientOptionsBuilderError>
