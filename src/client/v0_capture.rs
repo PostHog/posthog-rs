@@ -4,14 +4,12 @@
 
 // The transport worker is always blocking reqwest, even for the async client,
 // so the v0 request helpers operate on the blocking RequestBuilder.
-use chrono::{DateTime, Utc};
 use reqwest::blocking::RequestBuilder;
 
 use super::{
     common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
     BeforeSendHook, CaptureDefaults, ClientOptions,
 };
-use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
 // ---------------------------------------------------------------------------
@@ -37,10 +35,9 @@ pub(crate) fn build_batch_payload(
     events: Vec<Event>,
     api_key: String,
     historical_migration: bool,
-    sent_at: DateTime<Utc>,
     defaults: &CaptureDefaults,
     before_send: &[BeforeSendHook],
-) -> Result<Option<String>, Error> {
+) -> Option<BatchRequest> {
     let inner_events: Vec<InnerEvent> = events
         .into_iter()
         .filter_map(|mut event| {
@@ -51,18 +48,18 @@ pub(crate) fn build_batch_payload(
         .collect();
 
     if inner_events.is_empty() {
-        return Ok(None);
+        return None;
     }
 
-    let batch_request = BatchRequest {
+    // `sent_at` is stamped per HTTP attempt by the pipeline, not here, so a retried
+    // batch reflects when it was actually sent (for server-side clock-skew
+    // correction) rather than when it was first built.
+    Some(BatchRequest {
         api_key,
         historical_migration,
-        sent_at: sent_at.to_rfc3339(),
+        sent_at: String::new(),
         batch: inner_events,
-    };
-    serde_json::to_string(&batch_request)
-        .map(Some)
-        .map_err(|e| Error::Serialization(e.to_string()))
+    })
 }
 
 /// Encode the V0 JSON body, compressing when configured. Returns the bytes and

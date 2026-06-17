@@ -915,8 +915,9 @@ impl Pipeline {
 
 #[cfg(not(feature = "capture-v1"))]
 struct RetryBatch {
-    body: Vec<u8>,
-    encoding: Option<&'static str>,
+    /// Structured so `sent_at` can be re-stamped and the body re-serialized on
+    /// each attempt; `count` is the original event count for `len` accounting.
+    request: crate::event::BatchRequest,
     count: usize,
     attempt: u32,
     next_at: Instant,
@@ -955,34 +956,25 @@ impl Pipeline {
     fn build(&self, events: Vec<Event>, historical_migration: bool) -> Option<RetryBatch> {
         let defaults = self.options.capture_defaults();
         let count = events.len();
-        let payload = match super::v0_capture::build_batch_payload(
+        match super::v0_capture::build_batch_payload(
             events,
             self.options.api_key.clone(),
             historical_migration,
-            self.clock.now_utc(),
             &defaults,
             &self.options.before_send,
         ) {
-            Ok(Some(p)) => p,
-            Ok(None) => {
+            Some(request) => Some(RetryBatch {
+                request,
+                count,
+                attempt: 1,
+                next_at: self.clock.now(),
+            }),
+            None => {
                 // Every event dropped by before_send (terminal).
                 dec_len(&self.len, count);
-                return None;
+                None
             }
-            Err(e) => {
-                warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
-                dec_len(&self.len, count);
-                return None;
-            }
-        };
-        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
-        Some(RetryBatch {
-            body,
-            encoding,
-            count,
-            attempt: 1,
-            next_at: self.clock.now(),
-        })
+        }
     }
 
     /// Sender-side: one blocking HTTP attempt. Terminal outcomes adjust `len` and
@@ -992,8 +984,22 @@ impl Pipeline {
         use super::retry::{v0_after_response, v0_after_transport_error, Step};
         use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 
+        // Stamp sent_at at the actual send time, per attempt, so a retried batch
+        // carries when it was really sent (for server-side clock-skew correction).
+        batch.request.sent_at = self.clock.now_utc().to_rfc3339();
+        let (body, encoding) = match serde_json::to_string(&batch.request) {
+            Ok(json) => super::v0_capture::encode_body(&self.options, json),
+            Err(e) => {
+                warn!(
+                    "posthog-rs: dropping {} event(s), serialization failed: {e}",
+                    batch.count
+                );
+                dec_len(&self.len, batch.count);
+                return SendResult::Done;
+            }
+        };
         // v0 capture reads the compression hint from the query param, not the header.
-        let url = match batch.encoding {
+        let url = match encoding {
             Some(token) => format!("{}?compression={token}", self.url_base),
             None => self.url_base.clone(),
         };
@@ -1002,8 +1008,8 @@ impl Pipeline {
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
             .header(USER_AGENT, get_default_user_agent())
-            .body(batch.body.clone());
-        if let Some(token) = batch.encoding {
+            .body(body);
+        if let Some(token) = encoding {
             request = request.header(reqwest::header::CONTENT_ENCODING, token);
         }
         let request = super::v0_capture::apply_extra_headers(&self.options, request);
