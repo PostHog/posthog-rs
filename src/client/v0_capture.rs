@@ -4,6 +4,7 @@
 
 // The transport worker is always blocking reqwest, even for the async client,
 // so the v0 request helpers operate on the blocking RequestBuilder.
+use chrono::{DateTime, Utc};
 use reqwest::blocking::RequestBuilder;
 
 use super::{
@@ -36,6 +37,7 @@ pub(crate) fn build_batch_payload(
     events: Vec<Event>,
     api_key: String,
     historical_migration: bool,
+    sent_at: DateTime<Utc>,
     defaults: &CaptureDefaults,
     before_send: &[BeforeSendHook],
 ) -> Result<Option<String>, Error> {
@@ -55,6 +57,7 @@ pub(crate) fn build_batch_payload(
     let batch_request = BatchRequest {
         api_key,
         historical_migration,
+        sent_at: sent_at.to_rfc3339(),
         batch: inner_events,
     };
     serde_json::to_string(&batch_request)

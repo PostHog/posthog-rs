@@ -160,6 +160,16 @@ impl Event {
         Ok(())
     }
 
+    /// Stamp the capture (enqueue) time when the caller hasn't set an explicit
+    /// timestamp. Done on the producer side before the event is queued, so a
+    /// batched or retried event records when it *occurred*, not when the worker
+    /// finally sent it.
+    pub(crate) fn ensure_timestamp(&mut self, now: DateTime<Utc>) {
+        if self.timestamp.is_none() {
+            self.timestamp = Some(now.naive_utc());
+        }
+    }
+
     /// Override the auto-generated UUID for this event.
     ///
     /// Useful for deduplication when re-importing historical data.
@@ -318,6 +328,8 @@ impl Event {
 pub struct BatchRequest {
     pub api_key: String,
     pub historical_migration: bool,
+    /// Time the batch left the client, for server-side clock-skew correction.
+    pub sent_at: String,
     pub batch: Vec<InnerEvent>,
 }
 
@@ -393,6 +405,7 @@ pub mod tests {
         let batch = BatchRequest {
             api_key: "test_api_key".to_string(),
             historical_migration: false,
+            sent_at: "2026-01-01T00:00:00Z".to_string(),
             batch: vec![
                 build_v0(Event::new("e1", "user1")),
                 build_v0(Event::new("e2", "user2")),
@@ -518,5 +531,26 @@ mod test {
             .expect_err("Date is in the future, should be rejected");
 
         assert!(event.timestamp.is_none())
+    }
+
+    #[test]
+    fn ensure_timestamp_stamps_only_when_unset() {
+        let now = DateTime::parse_from_rfc3339("2026-06-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // Unset -> stamped with the provided capture time.
+        let mut event = Event::new("test", "user1");
+        event.ensure_timestamp(now);
+        assert_eq!(event.timestamp, Some(now.naive_utc()));
+
+        // Caller's explicit timestamp wins; ensure is a no-op.
+        let mut event = Event::new("test", "user1");
+        let caller = DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        event.set_timestamp(caller).unwrap();
+        event.ensure_timestamp(now);
+        assert_eq!(event.timestamp, Some(caller.naive_utc()));
     }
 }

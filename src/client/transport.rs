@@ -101,6 +101,8 @@ pub(crate) struct TransportHandle {
     /// Latches the single "queue full" warning so a full queue doesn't spam logs.
     full_warned: AtomicBool,
     max_queue_size: usize,
+    /// Shares the worker's clock; used to stamp capture (enqueue) time.
+    clock: Arc<dyn Clock>,
 }
 
 impl TransportHandle {
@@ -114,9 +116,10 @@ impl TransportHandle {
         let len = Arc::new(AtomicUsize::new(0));
         let max_queue_size = options.max_queue_size;
         let worker_len = len.clone();
+        let worker_clock = Arc::clone(&clock);
         let worker = thread::Builder::new()
             .name("posthog-transport".to_string())
-            .spawn(move || run_worker(options, rx, worker_len, clock))
+            .spawn(move || run_worker(options, rx, worker_len, worker_clock))
             .ok();
         Self {
             tx,
@@ -125,18 +128,22 @@ impl TransportHandle {
             worker: Mutex::new(worker),
             full_warned: AtomicBool::new(false),
             max_queue_size,
+            clock,
         }
     }
 
     /// Non-blocking enqueue. Drops (with a single warning) when the queue is full
     /// or the client is closed.
-    pub(crate) fn enqueue(&self, event: Event, historical_migration: bool) {
+    pub(crate) fn enqueue(&self, mut event: Event, historical_migration: bool) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
         if !try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
             return;
         }
+        // Stamp capture (enqueue) time on the producer side so a batched or
+        // retried event records when it occurred, not when it was finally sent.
+        event.ensure_timestamp(self.clock.now_utc());
         if self
             .tx
             .send(Control::Capture {
@@ -674,6 +681,7 @@ impl Pipeline {
             events,
             self.options.api_key.clone(),
             historical_migration,
+            self.clock.now_utc(),
             &defaults,
             &self.options.before_send,
         ) {
@@ -962,6 +970,66 @@ mod tests {
         handle.tick(); // due -> retried, delivered
         ok.assert_hits(1);
 
+        handle.shutdown_blocking();
+    }
+
+    /// Parse either an RFC3339 string (v1 timestamps / v0 `sent_at`) or a naive
+    /// datetime (v0 event timestamps serialize without an offset) as UTC.
+    fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(s)
+            .map(|d| d.with_timezone(&Utc))
+            .ok()
+            .or_else(|| {
+                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+                    .map(|n| n.and_utc())
+                    .ok()
+            })
+    }
+
+    #[test]
+    fn event_timestamp_is_capture_time_not_publish_time() {
+        // An event captured at T0 but flushed 10s later must carry T0 as its
+        // event `timestamp` (when it occurred), while the batch envelope carries
+        // the publish time (v1 `created_at` / v0 `sent_at`). The check is encoded
+        // in the matcher: the request only matches when publish - timestamp ~= 10s,
+        // proving the stamp happens at enqueue, not at send. Holds for both wire
+        // shapes (both nest the event under `batch[0]`).
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST).matches(|req| {
+                let Some(bytes) = req.body.as_deref() else {
+                    return false;
+                };
+                let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+                    return false;
+                };
+                let event_ts = json["batch"][0]["timestamp"].as_str().and_then(parse_ts);
+                let publish_ts = json
+                    .get("created_at")
+                    .or_else(|| json.get("sent_at"))
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_ts);
+                match (event_ts, publish_ts) {
+                    (Some(e), Some(p)) => (9_900..=10_100).contains(&(p - e).num_milliseconds()),
+                    _ => false,
+                }
+            });
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "results": {} }));
+        });
+
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url()).build().unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        handle.enqueue(Event::new("Captured", "user-1"), false); // stamped at T0
+        clock.advance(Duration::from_secs(10)); // ...delivered 10s later
+        handle.flush_blocking();
+
+        mock.assert_hits(1);
         handle.shutdown_blocking();
     }
 }
