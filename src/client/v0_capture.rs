@@ -50,8 +50,7 @@ pub(crate) fn build_batch_payload(
         .into_iter()
         .filter_map(|mut event| {
             prepare_event(&mut event, defaults);
-            apply_before_send_hooks(before_send, event)
-                .map(|event| InnerEvent::new(event, api_key.clone()))
+            apply_before_send_hooks(before_send, event).map(InnerEvent::new_for_batch)
         })
         .collect();
 

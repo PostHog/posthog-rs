@@ -321,12 +321,12 @@ pub struct BatchRequest {
     pub batch: Vec<InnerEvent>,
 }
 
-// This exists so that the client doesn't have to specify the API key over and over
 // With `capture-v1` enabled nothing outside tests builds the V0 wire format.
 #[cfg_attr(feature = "capture-v1", allow(dead_code))]
 #[derive(Serialize)]
 pub struct InnerEvent {
-    api_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
     uuid: Uuid,
     event: String,
     distinct_id: String,
@@ -335,10 +335,22 @@ pub struct InnerEvent {
 }
 
 impl InnerEvent {
-    /// Construct the V0 wire event. Expects that [`Event::prepare_for_v0`] has
-    /// already been called so properties are fully decorated.
+    /// Construct a V0 single-event wire event. Expects that
+    /// [`Event::prepare_for_v0`] has already been called so properties are fully
+    /// decorated.
     #[cfg_attr(feature = "capture-v1", allow(dead_code))]
     pub fn new(event: Event, api_key: String) -> Self {
+        Self::from_event(event, Some(api_key))
+    }
+
+    /// Construct a V0 batch wire event. The `/batch/` root `api_key` has
+    /// precedence on the backend, so per-event keys are intentionally omitted.
+    #[cfg(not(feature = "capture-v1"))]
+    pub(crate) fn new_for_batch(event: Event) -> Self {
+        Self::from_event(event, None)
+    }
+
+    fn from_event(event: Event, api_key: Option<String>) -> Self {
         Self {
             api_key,
             uuid: event.uuid,
@@ -360,6 +372,12 @@ pub mod tests {
     fn build_v0(mut event: Event) -> InnerEvent {
         event.prepare_for_v0();
         InnerEvent::new(event, "test_api_key".to_string())
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    fn build_v0_batch_event(mut event: Event) -> InnerEvent {
+        event.prepare_for_v0();
+        InnerEvent::new_for_batch(event)
     }
 
     #[test]
@@ -394,16 +412,19 @@ pub mod tests {
             api_key: "test_api_key".to_string(),
             historical_migration: false,
             batch: vec![
-                build_v0(Event::new("e1", "user1")),
-                build_v0(Event::new("e2", "user2")),
+                build_v0_batch_event(Event::new("e1", "user1")),
+                build_v0_batch_event(Event::new("e2", "user2")),
             ],
         };
         let json = serde_json::to_value(&batch).unwrap();
+
+        assert_eq!(json["api_key"], "test_api_key");
 
         let events = json["batch"].as_array().expect("batch is an array");
         for (event, expected_id) in events.iter().zip(["user1", "user2"]) {
             assert_eq!(event["distinct_id"], expected_id);
             assert!(event.get("$distinct_id").is_none());
+            assert!(event.get("api_key").is_none());
         }
     }
 
