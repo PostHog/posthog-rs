@@ -282,6 +282,26 @@ fn dec_len(len: &AtomicUsize, n: usize) {
     }
 }
 
+/// Per-request timeout for a send. On the shutdown/disconnect path (`deadline`
+/// is `Some`) the request is capped at the time left before the deadline — never
+/// more than the configured request timeout — so a stalled endpoint that accepts
+/// but never responds can't push teardown past `shutdown_timeout_ms`. Off that
+/// path it keeps the full configured timeout.
+fn bound_request(
+    request: reqwest::blocking::RequestBuilder,
+    deadline: Option<Instant>,
+    now: Instant,
+    request_timeout_seconds: u64,
+) -> reqwest::blocking::RequestBuilder {
+    match deadline {
+        Some(d) => request.timeout(
+            d.saturating_duration_since(now)
+                .min(Duration::from_secs(request_timeout_seconds)),
+        ),
+        None => request,
+    }
+}
+
 /// Time until the next scheduled wakeup: the buffer's flush-interval deadline or
 /// the earliest retry, whichever is sooner. `None` means nothing is pending, so
 /// the worker should block on `recv` until a message arrives.
@@ -469,7 +489,6 @@ fn send_buffer(
     max_batch_size: usize,
     deadline: Option<Instant>,
 ) {
-    let final_attempt = deadline.is_some();
     while !buffer.is_empty() {
         if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
             warn!(
@@ -484,7 +503,7 @@ fn send_buffer(
         let chunk: Vec<Event> = buffer.drain(..take).collect();
         // The buffer only ever holds live events; historical batches take their
         // own path, so this is always a non-historical send.
-        pipeline.send_batch(chunk, false, final_attempt);
+        pipeline.send_batch(chunk, false, deadline);
     }
 }
 
@@ -496,7 +515,6 @@ fn drain_historical(
     historical: &mut VecDeque<Vec<Event>>,
     deadline: Option<Instant>,
 ) {
-    let final_attempt = deadline.is_some();
     while let Some(chunk) = historical.pop_front() {
         if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
             let dropped = chunk.len() + historical.iter().map(Vec::len).sum::<usize>();
@@ -507,7 +525,7 @@ fn drain_historical(
             }
             return;
         }
-        pipeline.send_batch(chunk, true, final_attempt);
+        pipeline.send_batch(chunk, true, deadline);
     }
 }
 
@@ -561,7 +579,12 @@ impl Pipeline {
         }
     }
 
-    fn send_batch(&mut self, events: Vec<Event>, historical_migration: bool, final_attempt: bool) {
+    fn send_batch(
+        &mut self,
+        events: Vec<Event>,
+        historical_migration: bool,
+        deadline: Option<Instant>,
+    ) {
         use super::common::{apply_before_send_hooks, apply_capture_defaults};
 
         let defaults = self.options.capture_defaults();
@@ -590,10 +613,10 @@ impl Pipeline {
             attempt: 1,
             next_at: now,
         };
-        self.attempt(batch, final_attempt);
+        self.attempt(batch, deadline);
     }
 
-    fn attempt(&mut self, mut batch: RetryBatch, final_attempt: bool) {
+    fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
         use super::v1_capture::{self, Step};
         use crate::event_v1::V1BatchRequestRef;
 
@@ -623,7 +646,13 @@ impl Pipeline {
             v1_capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
 
         let count = batch.pending.len();
-        let step = match self.http.post(&self.url).headers(headers).body(body).send() {
+        let request = bound_request(
+            self.http.post(&self.url).headers(headers).body(body),
+            deadline,
+            self.clock.now(),
+            self.options.request_timeout_seconds,
+        );
+        let step = match request.send() {
             Err(e) => v1_capture::after_transport_error(
                 &self.options,
                 &batch.request_id,
@@ -657,7 +686,7 @@ impl Pipeline {
                 dec_len(&self.len, batch.pending.len());
             }
             Step::Backoff(delay) => {
-                if final_attempt {
+                if deadline.is_some() {
                     warn!(
                         "posthog-rs: dropping {} undelivered event(s) on shutdown",
                         batch.pending.len()
@@ -680,7 +709,7 @@ impl Pipeline {
         let now = self.clock.now();
         for batch in std::mem::take(&mut self.retries) {
             if now >= batch.next_at {
-                self.attempt(batch, false);
+                self.attempt(batch, None);
             } else {
                 self.retries.push_back(batch);
             }
@@ -691,7 +720,6 @@ impl Pipeline {
         // `Some` is the shutdown/disconnect path: attempts are final (drop on
         // failure), and any batch still pending once the deadline passes is
         // dropped rather than attempted.
-        let final_attempt = deadline.is_some();
         for batch in std::mem::take(&mut self.retries) {
             if deadline.is_some_and(|d| self.clock.now() >= d) {
                 warn!(
@@ -700,7 +728,7 @@ impl Pipeline {
                 );
                 dec_len(&self.len, batch.pending.len());
             } else {
-                self.attempt(batch, final_attempt);
+                self.attempt(batch, deadline);
             }
         }
     }
@@ -749,7 +777,12 @@ impl Pipeline {
         }
     }
 
-    fn send_batch(&mut self, events: Vec<Event>, historical_migration: bool, final_attempt: bool) {
+    fn send_batch(
+        &mut self,
+        events: Vec<Event>,
+        historical_migration: bool,
+        deadline: Option<Instant>,
+    ) {
         let defaults = self.options.capture_defaults();
         let count = events.len();
         let (payload, kept) = match super::v0_capture::build_batch_payload(
@@ -783,10 +816,10 @@ impl Pipeline {
             attempt: 1,
             next_at: self.clock.now(),
         };
-        self.attempt(batch, final_attempt);
+        self.attempt(batch, deadline);
     }
 
-    fn attempt(&mut self, mut batch: RetryBatch, final_attempt: bool) {
+    fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
         use super::get_default_user_agent;
         use super::retry::{v0_after_response, v0_after_transport_error, Step};
         use reqwest::header::{CONTENT_TYPE, USER_AGENT};
@@ -806,6 +839,12 @@ impl Pipeline {
             request = request.header(reqwest::header::CONTENT_ENCODING, token);
         }
         let request = super::v0_capture::apply_extra_headers(&self.options, request);
+        let request = bound_request(
+            request,
+            deadline,
+            self.clock.now(),
+            self.options.request_timeout_seconds,
+        );
 
         let step = match request.send() {
             Err(e) => v0_after_transport_error(&self.options, batch.attempt, e.to_string()),
@@ -826,7 +865,7 @@ impl Pipeline {
                 dec_len(&self.len, batch.count);
             }
             Step::Backoff(delay) => {
-                if final_attempt {
+                if deadline.is_some() {
                     warn!(
                         "posthog-rs: dropping {} undelivered event(s) on shutdown",
                         batch.count
@@ -849,7 +888,7 @@ impl Pipeline {
         let now = self.clock.now();
         for batch in std::mem::take(&mut self.retries) {
             if now >= batch.next_at {
-                self.attempt(batch, false);
+                self.attempt(batch, None);
             } else {
                 self.retries.push_back(batch);
             }
@@ -860,7 +899,6 @@ impl Pipeline {
         // `Some` is the shutdown/disconnect path: attempts are final (drop on
         // failure), and any batch still pending once the deadline passes is
         // dropped rather than attempted.
-        let final_attempt = deadline.is_some();
         for batch in std::mem::take(&mut self.retries) {
             if deadline.is_some_and(|d| self.clock.now() >= d) {
                 warn!(
@@ -869,7 +907,7 @@ impl Pipeline {
                 );
                 dec_len(&self.len, batch.count);
             } else {
-                self.attempt(batch, final_attempt);
+                self.attempt(batch, deadline);
             }
         }
     }
@@ -1099,6 +1137,38 @@ mod tests {
         assert_eq!(handle.pending(), 1);
 
         handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn shutdown_timeout_bounds_a_stalled_in_flight_send() {
+        // Endpoint accepts then stalls far past shutdown_timeout_ms. The per-request
+        // timeout must cap the in-flight send at the remaining deadline so teardown
+        // returns near shutdown_timeout_ms rather than blocking for the full
+        // request_timeout_seconds. Real time on purpose: this drives the reqwest
+        // timeout, which the virtual ManualClock cannot.
+        let server = MockServer::start();
+        let _stall = server.mock(|when, then| {
+            when.method(POST);
+            then.status(200).delay(Duration::from_secs(5)).body("{}");
+        });
+        // Real system clock (spawn, not spawn_with_clock) so the deadline and the
+        // reqwest timeout share the same wall clock.
+        let handle = TransportHandle::spawn(
+            options(server.base_url())
+                .shutdown_timeout_ms(200u64)
+                .build()
+                .unwrap(),
+        );
+        handle.enqueue(Event::new("e", "user-1"));
+
+        let start = Instant::now();
+        handle.shutdown_blocking();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "shutdown blocked for {:?}; in-flight send was not bounded by shutdown_timeout_ms",
+            elapsed
+        );
     }
 
     /// Parse either an RFC3339 string (v1 timestamps / v0 `sent_at`) or a naive
