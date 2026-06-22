@@ -110,11 +110,23 @@ pub(crate) struct TransportHandle {
     /// this client's own worker — where capturing would deadlock or recurse.
     #[cfg_attr(not(feature = "error-tracking"), allow(dead_code))]
     worker_id: Option<std::thread::ThreadId>,
+    /// Upper bound on how long `flush_blocking` waits for the worker. This bounds
+    /// the panic hook's flush, which runs on the panicking thread before
+    /// unwinding releases locks: an unbounded wait would hang the process if a
+    /// `before_send` hook needs a lock the panic site still holds (the worker
+    /// would block on it forever). Clamped at spawn (see `MAX_SHUTDOWN_TIMEOUT`).
+    #[cfg_attr(not(any(test, feature = "error-tracking")), allow(dead_code))]
+    shutdown_timeout: Duration,
 }
 
 /// Name of the background worker thread (aids debugging). The panic hook detects
 /// the worker by its thread *id* (see `worker_id`), not this shared name.
 const WORKER_THREAD_NAME: &str = "posthog-transport";
+
+/// Upper bound on `shutdown_timeout_ms`, so an absurd value can't overflow the
+/// `now + shutdown_timeout` deadlines (worker drain) or the `recv_timeout` bound
+/// on `flush_blocking`.
+const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(86_400);
 
 impl TransportHandle {
     /// Spawn the worker with the real system clock.
@@ -126,6 +138,8 @@ impl TransportHandle {
         let (tx, rx) = mpsc::channel::<Control>();
         let len = Arc::new(AtomicUsize::new(0));
         let max_queue_size = options.max_queue_size;
+        let shutdown_timeout =
+            Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT);
         let worker_len = len.clone();
         let worker_clock = Arc::clone(&clock);
         let worker = thread::Builder::new()
@@ -142,6 +156,7 @@ impl TransportHandle {
             max_queue_size,
             clock,
             worker_id,
+            shutdown_timeout,
         }
     }
 
@@ -239,12 +254,18 @@ impl TransportHandle {
 
     /// Blocking flush via an `mpsc` completion — no runtime needed, so it works
     /// from the panic hook (the async client's public `flush` uses a oneshot).
-    /// Returns once the worker has attempted delivery of everything queued.
+    /// Waits up to `shutdown_timeout` for the worker to attempt delivery of
+    /// everything queued, then returns.
+    ///
+    /// The bound exists for the panic hook: it runs on the panicking thread
+    /// before unwinding releases locks, so an unbounded wait would hang the
+    /// dying process if a `before_send` hook (run on the worker) needs a lock
+    /// the panic site still holds — the worker would block on it forever.
     #[cfg(any(test, feature = "error-tracking"))]
     pub(crate) fn flush_blocking(&self) {
         let (tx, rx) = mpsc::channel();
         if self.send_control(Control::Flush(Completion::Blocking(tx))) {
-            let _ = rx.recv();
+            let _ = rx.recv_timeout(self.shutdown_timeout);
         }
     }
 
@@ -380,7 +401,7 @@ fn run_worker(
     // guard `RETRY_BACKOFF_CAP` applies to retry backoff. A day is far beyond any
     // sane teardown budget.
     let shutdown_timeout =
-        Duration::from_millis(options.shutdown_timeout_ms).min(Duration::from_secs(86_400));
+        Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT);
     let mut pipeline = Pipeline::new(&options, Arc::clone(&clock), len);
 
     let mut buffer: Vec<Event> = Vec::new();

@@ -170,9 +170,9 @@ pub fn install_panic_hook(client: Arc<Client>) -> Result<(), Error> {
 }
 
 /// Build the panic `$exception` event and route it through `client`'s transport:
-/// a non-blocking enqueue followed by a synchronous flush, so the event is
-/// attempted before the process potentially exits. `before_send` and the HTTP
-/// send run on the worker thread.
+/// a non-blocking enqueue followed by a time-bounded synchronous flush, so the
+/// event is attempted before the process potentially exits without ever hanging
+/// the dying process. `before_send` and the HTTP send run on the worker thread.
 #[allow(deprecated)]
 fn capture_panic(client: &Client, panic_info: &panic::PanicInfo<'_>) -> Result<(), Error> {
     // A panic on this client's own transport worker thread is almost always a
@@ -186,6 +186,9 @@ fn capture_panic(client: &Client, panic_info: &panic::PanicInfo<'_>) -> Result<(
     }
     let event = build_panic_event(panic_info, client.error_tracking_options())?;
     client.capture(event);
+    // Bounded flush (see `TransportHandle::flush_blocking`): this runs on the
+    // panicking thread before unwinding frees locks, so an unbounded wait could
+    // deadlock if a `before_send` hook needs a lock the panic site still holds.
     client.flush_blocking();
     Ok(())
 }
@@ -1183,6 +1186,73 @@ mod tests {
         // The spawned thread is intentionally not joined: on a regression it is
         // stuck in flush_blocking and a join would hang too; on success it has
         // already finished. Dropping the handle detaches it.
+    }
+
+    #[test]
+    fn panic_hook_flush_is_bounded_when_before_send_needs_a_panic_held_lock() {
+        // The panic hook flushes on the *panicking* thread, before unwinding
+        // releases locks held at the panic site. If a `before_send` hook needs
+        // such a lock, the worker blocks on it and the hook would block on the
+        // worker forever — the process hangs instead of crashing. The flush is
+        // bounded by `shutdown_timeout_ms`, so the hook returns and the panic
+        // proceeds. A short timeout keeps the test fast; the watchdog turns a
+        // regression (unbounded wait) into a failure instead of a hang.
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        panic::set_hook(Box::new(|_| {}));
+
+        // A lock the application holds across its panic and that `before_send`
+        // also wants — the classic shape that would deadlock an unbounded flush.
+        static SHARED: Mutex<()> = Mutex::new(());
+
+        let server = MockServer::start();
+        let _capture_mock = server.mock(|when, then| {
+            when.method(POST);
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .shutdown_timeout_ms(200u64)
+            .before_send(|event| {
+                let _held = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+                Some(event)
+            })
+            .build()
+            .unwrap();
+        let client = build_test_client(options);
+        install_panic_hook(Arc::clone(&client)).unwrap();
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_for_panicker = Arc::clone(&finished);
+        let _panicker = std::thread::spawn(move || {
+            {
+                // Hold SHARED across the panic so the hook fires while it is
+                // locked. Release it (end of scope) *before* signalling, so test
+                // teardown can drain the worker without blocking on the lock.
+                let _held = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+                    panic!("boom while holding a before_send lock")
+                }));
+            }
+            finished_for_panicker.store(true, Ordering::Release);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !finished.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        reset.restore();
+
+        assert!(
+            finished.load(Ordering::Acquire),
+            "panic hook flush hung on a before_send that needed a panic-held lock"
+        );
+        // Not joined: on a regression the thread is stuck in the hook's flush and
+        // a join would hang too; on success it has already finished.
     }
 
     #[test]
