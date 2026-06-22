@@ -339,7 +339,12 @@ fn run_worker(
     let flush_at = options.flush_at.max(1);
     let max_batch_size = options.max_batch_size.max(1);
     let flush_interval = Duration::from_millis(options.flush_interval_ms);
-    let shutdown_timeout = Duration::from_millis(options.shutdown_timeout_ms);
+    // Clamp so an absurd `shutdown_timeout_ms` can't overflow the `now +
+    // shutdown_timeout` deadlines below and panic the worker — the same class of
+    // guard `RETRY_BACKOFF_CAP` applies to retry backoff. A day is far beyond any
+    // sane teardown budget.
+    let shutdown_timeout =
+        Duration::from_millis(options.shutdown_timeout_ms).min(Duration::from_secs(86_400));
     let mut pipeline = Pipeline::new(&options, Arc::clone(&clock), len);
 
     let mut buffer: Vec<Event> = Vec::new();
