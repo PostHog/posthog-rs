@@ -320,14 +320,29 @@ fn run_worker(
 
     let mut buffer: Vec<Event> = Vec::new();
     let mut buffer_since: Option<Instant> = None;
+    // Caller-formed historical batches awaiting their own (chunked) send. Queued
+    // rather than sent inline, and timed on the flush interval like the live
+    // buffer, so the worker is blocked on `recv` when a Shutdown arrives and can
+    // bound/abandon them under the deadline instead of racing the send.
+    let mut historical: VecDeque<Vec<Event>> = VecDeque::new();
+    let mut historical_since: Option<Instant> = None;
 
     loop {
-        let wait = compute_wait(
-            clock.now(),
-            buffer_since,
-            flush_interval,
-            pipeline.earliest_retry(),
-        );
+        let wait = {
+            let base = compute_wait(
+                clock.now(),
+                buffer_since,
+                flush_interval,
+                pipeline.earliest_retry(),
+            );
+            match historical_since {
+                Some(since) => {
+                    let hwait = (since + flush_interval).saturating_duration_since(clock.now());
+                    Some(base.map_or(hwait, |w| w.min(hwait)))
+                }
+                None => base,
+            }
+        };
         let wake = match wait {
             None => match rx.recv() {
                 Ok(msg) => Wake::Msg(msg),
@@ -355,32 +370,39 @@ fn run_worker(
                 }
             }
             Wake::Msg(Control::HistoricalBatch { mut events }) => {
-                // Caller-formed historical-migration batch: send immediately,
-                // chunked, bypassing the live buffer. Because historical events
-                // never enter the buffer, the buffer is always non-historical —
-                // no per-event flag and no homogeneity flush needed.
+                // Queue the chunks (kept off the live buffer, which stays
+                // non-historical — no per-event flag, no homogeneity flush). Not
+                // sent inline so a Shutdown queued behind this batch is observed
+                // first and these events are bounded/abandoned under
+                // `shutdown_timeout` like buffered ones. Flushed on the interval.
                 while !events.is_empty() {
                     let take = events.len().min(max_batch_size);
-                    let chunk: Vec<Event> = events.drain(..take).collect();
-                    pipeline.send_batch(chunk, true, false);
+                    historical.push_back(events.drain(..take).collect());
+                }
+                if historical_since.is_none() {
+                    historical_since = Some(clock.now());
                 }
             }
             Wake::Msg(Control::Flush(completion)) => {
                 // One delivery attempt per pending batch: retry the already-held
-                // batches first, then the freshly buffered ones. Failures from
-                // either are held for the next cycle (so a single 503 leaves the
-                // event queued rather than being re-attempted in this same call).
+                // batches first, then queued historical batches and the freshly
+                // buffered ones. Failures are held for the next cycle (so a single
+                // 503 leaves the event queued rather than re-attempted right away).
                 pipeline.flush_retries(None);
+                drain_historical(&mut pipeline, &mut historical, None);
+                historical_since = None;
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                 buffer_since = None;
                 completion.signal();
             }
             Wake::Msg(Control::Shutdown(completion)) => {
-                // Drain held retries then buffered events, one final attempt each,
-                // bounded by `shutdown_timeout`: once the deadline passes the rest
-                // is dropped so teardown can't hang on a slow/unreachable endpoint.
+                // Drain held retries, queued historical batches, then buffered
+                // events — one final attempt each, bounded by `shutdown_timeout`:
+                // once the deadline passes the rest is dropped so teardown can't
+                // hang on a slow/unreachable endpoint.
                 let deadline = clock.now() + shutdown_timeout;
                 pipeline.flush_retries(Some(deadline));
+                drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
                 completion.signal();
                 return;
@@ -393,6 +415,8 @@ fn run_worker(
                     send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                     buffer_since = None;
                 }
+                drain_historical(&mut pipeline, &mut historical, None);
+                historical_since = None;
                 pipeline.attempt_due();
                 completion.signal();
             }
@@ -403,12 +427,15 @@ fn run_worker(
                     send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                     buffer_since = None;
                 }
+                drain_historical(&mut pipeline, &mut historical, None);
+                historical_since = None;
                 pipeline.attempt_due();
             }
             Wake::Disconnected => {
                 // All client handles dropped without an explicit shutdown — best
                 // effort drain bounded by `shutdown_timeout`, then exit.
                 let deadline = clock.now() + shutdown_timeout;
+                drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
                 pipeline.flush_retries(Some(deadline));
                 return;
@@ -444,6 +471,29 @@ fn send_buffer(
         // The buffer only ever holds live events; historical batches take their
         // own path, so this is always a non-historical send.
         pipeline.send_batch(chunk, false, final_attempt);
+    }
+}
+
+/// Drain queued historical-migration batches, FIFO. `deadline` is `Some` only on
+/// the shutdown/disconnect path: those attempts are final, and once the deadline
+/// passes the remaining queued batches are dropped so teardown can't hang.
+fn drain_historical(
+    pipeline: &mut Pipeline,
+    historical: &mut VecDeque<Vec<Event>>,
+    deadline: Option<Instant>,
+) {
+    let final_attempt = deadline.is_some();
+    while let Some(chunk) = historical.pop_front() {
+        if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
+            let dropped = chunk.len() + historical.iter().map(Vec::len).sum::<usize>();
+            warn!("posthog-rs: shutdown timeout reached; dropping {dropped} historical event(s)");
+            dec_len(&pipeline.len, chunk.len());
+            for rest in historical.drain(..) {
+                dec_len(&pipeline.len, rest.len());
+            }
+            return;
+        }
+        pipeline.send_batch(chunk, true, final_attempt);
     }
 }
 
@@ -1081,9 +1131,9 @@ mod tests {
     }
 
     #[test]
-    fn historical_batch_sends_immediately_chunked() {
-        // A historical batch takes its own path: it's sent right away (no buffer
-        // wait), chunked by max_batch_size, without touching the live buffer.
+    fn historical_batch_sends_chunked() {
+        // A historical batch takes its own path: queued off the live buffer and
+        // sent in its own chunks (driven here by the tick), never via the buffer.
         let server = MockServer::start();
         let mock = ok_mock(&server);
         let clock = ManualClock::new();
@@ -1105,5 +1155,33 @@ mod tests {
         mock.assert_hits(2); // 3 events / max_batch_size 2 -> two requests
         assert_eq!(handle.pending(), 0, "all historical events delivered");
         handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn historical_batch_respects_shutdown_timeout() {
+        // A historical batch queued before a zero-timeout shutdown is abandoned
+        // (not POSTed) like buffered live events — it can't bypass shutdown_timeout
+        // by being sent eagerly. The worker waits on the interval, so the Shutdown
+        // is observed before the historical batch would be drained.
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .shutdown_timeout_ms(0u64)
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        handle.enqueue_historical(vec![Event::new("H", "user-1")]);
+        handle.shutdown_blocking(); // deadline already past -> drop, do not send
+
+        mock.assert_hits(0);
+        assert_eq!(
+            handle.pending(),
+            0,
+            "historical events abandoned under a zero shutdown timeout"
+        );
     }
 }
