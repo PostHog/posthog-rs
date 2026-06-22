@@ -323,13 +323,16 @@ impl Client {
         let Some(transport) = &self.transport else {
             return;
         };
-        if !transport.begin_close() {
-            return;
+        if transport.begin_close() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if transport.send_control(Control::Shutdown(Completion::Async(tx))) {
+                let _ = rx.await;
+            }
         }
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if transport.send_control(Control::Shutdown(Completion::Async(tx))) {
-            let _ = rx.await;
-        }
+        // Always join — even if this caller lost the `begin_close` race or its
+        // shutdown wait was cancelled — so every shutdown/drop path waits for the
+        // worker and the flush stays durable. The winner has already sent the
+        // Shutdown (synchronously, before any await), so the worker will exit.
         transport.join();
     }
 
@@ -988,13 +991,16 @@ impl Drop for Client {
         let Some(transport) = &self.transport else {
             return;
         };
-        if !transport.begin_close() {
-            return;
+        if transport.begin_close() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            if transport.send_control(Control::Shutdown(Completion::Blocking(tx))) {
+                let _ = rx.recv();
+            }
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        if transport.send_control(Control::Shutdown(Completion::Blocking(tx))) {
-            let _ = rx.recv();
-        }
+        // Always join — even if this caller lost the `begin_close` race or its
+        // shutdown wait was cancelled — so every shutdown/drop path waits for the
+        // worker and the flush stays durable. The winner has already sent the
+        // Shutdown (synchronously, before any await), so the worker will exit.
         transport.join();
     }
 }
