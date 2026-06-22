@@ -108,6 +108,11 @@ pub(crate) struct TransportHandle {
     clock: Arc<dyn Clock>,
 }
 
+/// Name of the background worker thread. Used to detect when code (e.g. the
+/// panic hook firing on a `before_send` panic) is running on the worker itself,
+/// where a synchronous self-flush would deadlock.
+const WORKER_THREAD_NAME: &str = "posthog-transport";
+
 impl TransportHandle {
     /// Spawn the worker with the real system clock.
     pub(crate) fn spawn(options: ClientOptions) -> Self {
@@ -121,7 +126,7 @@ impl TransportHandle {
         let worker_len = len.clone();
         let worker_clock = Arc::clone(&clock);
         let worker = thread::Builder::new()
-            .name("posthog-transport".to_string())
+            .name(WORKER_THREAD_NAME.to_string())
             .spawn(move || run_worker(options, rx, worker_len, worker_clock))
             .ok();
         Self {
@@ -232,6 +237,13 @@ impl TransportHandle {
     /// Returns once the worker has attempted delivery of everything queued.
     #[cfg(any(test, feature = "error-tracking"))]
     pub(crate) fn flush_blocking(&self) {
+        // A flush from the worker thread itself — e.g. the panic hook firing on
+        // a `before_send` panic the worker is running — would deadlock: the
+        // worker can't process the Flush while it's executing this call. The
+        // event is already enqueued and ships on the worker's next cycle.
+        if std::thread::current().name() == Some(WORKER_THREAD_NAME) {
+            return;
+        }
         let (tx, rx) = mpsc::channel();
         if self.send_control(Control::Flush(Completion::Blocking(tx))) {
             let _ = rx.recv();

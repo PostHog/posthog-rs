@@ -1126,6 +1126,68 @@ mod tests {
     }
 
     #[test]
+    fn panic_in_before_send_on_worker_thread_does_not_deadlock() {
+        // A `before_send` hook that panics fires the panic hook ON the transport
+        // worker thread. The hook must not synchronously self-flush there — the
+        // worker can't process its own Flush mid-hook — or it deadlocks. A
+        // watchdog bounds the wait so a regression fails instead of hanging.
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        panic::set_hook(Box::new(|_| {}));
+
+        let server = MockServer::start();
+        let _capture_mock = server.mock(|when, then| {
+            when.method(POST);
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            // Panic only on the marked event, never on the `$exception` event the
+            // hook produces, so the worker doesn't loop on its own panic capture.
+            .before_send(|event| {
+                if event.properties().get("__panic_in_before_send").is_some() {
+                    panic!("before_send boom");
+                }
+                Some(event)
+            })
+            .build()
+            .unwrap();
+        let client = build_test_client(options);
+        install_panic_hook(Arc::clone(&client)).unwrap();
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_for_worker = Arc::clone(&finished);
+        let work_client = Arc::clone(&client);
+        let _worker = std::thread::spawn(move || {
+            let mut event = Event::new("boom", "user-1");
+            event.insert_prop("__panic_in_before_send", true).unwrap();
+            work_client.capture(event);
+            // From this (non-worker) thread this is a real blocking flush; it
+            // returns only if the worker survived the in-hook panic undeadlocked.
+            work_client.flush_blocking();
+            finished_for_worker.store(true, Ordering::Release);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !finished.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        reset.restore();
+
+        assert!(
+            finished.load(Ordering::Acquire),
+            "panic in before_send on the worker thread deadlocked the transport"
+        );
+        // The spawned thread is intentionally not joined: on a regression it is
+        // stuck in flush_blocking and a join would hang too; on success it has
+        // already finished. Dropping the handle detaches it.
+    }
+
+    #[test]
     fn is_internal_panic_frame_strips_panic_and_capture_machinery() {
         for internal in [
             "std::panicking::begin_panic_handler",
