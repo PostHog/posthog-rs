@@ -442,7 +442,7 @@ fn run_worker(
                 completion.signal();
                 // A flush/shutdown that raced in behind this Shutdown is still queued;
                 // signal those completions so their callers don't block forever.
-                drain_pending_completions(&rx);
+                drain_pending_completions(&rx, &pipeline.len);
                 return;
             }
             #[cfg(test)]
@@ -489,15 +489,16 @@ fn run_worker(
 
 /// Signal any flush/shutdown completions still queued when the worker exits, so a
 /// caller whose control message raced in behind the `Shutdown` doesn't block forever
-/// on a completion that will never be processed. Queued captures are dropped — the
-/// client is closing.
-fn drain_pending_completions(rx: &mpsc::Receiver<Control>) {
+/// on a completion that will never be processed. Queued captures are dropped, but
+/// their reserved in-flight slots are released so `pending_events()` settles to 0.
+fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
     while let Ok(control) = rx.try_recv() {
         match control {
             Control::Flush(c) | Control::Shutdown(c) => c.signal(),
             #[cfg(test)]
             Control::Tick(c) => c.signal(),
-            Control::Capture { .. } | Control::HistoricalBatch { .. } => {}
+            Control::Capture { .. } => dec_len(len, 1),
+            Control::HistoricalBatch { events } => dec_len(len, events.len()),
         }
     }
 }
@@ -1056,12 +1057,14 @@ mod tests {
     }
 
     #[test]
-    fn drain_pending_completions_signals_queued_controls() {
+    fn drain_pending_completions_signals_and_releases_queued_controls() {
         // Flush/Shutdown completions still queued when the worker exits must be
-        // signaled so their callers don't hang; queued captures are just dropped.
+        // signaled so their callers don't hang; queued captures/batches are dropped
+        // but must release their reserved in-flight slots.
         let (tx, rx) = mpsc::channel::<Control>();
         let (ftx, frx) = mpsc::channel::<()>();
         let (stx, srx) = mpsc::channel::<()>();
+        let len = AtomicUsize::new(3); // 1 capture + 2 historical events reserved
         tx.send(Control::Flush(Completion::Blocking(ftx))).unwrap();
         tx.send(Control::Shutdown(Completion::Blocking(stx)))
             .unwrap();
@@ -1069,12 +1072,21 @@ mod tests {
             event: Box::new(Event::new("dropped", "user-1")),
         })
         .unwrap();
+        tx.send(Control::HistoricalBatch {
+            events: vec![Event::new("h1", "user-1"), Event::new("h2", "user-1")],
+        })
+        .unwrap();
         drop(tx);
 
-        drain_pending_completions(&rx);
+        drain_pending_completions(&rx, &len);
 
         assert!(frx.recv().is_ok(), "flush completion was not signaled");
         assert!(srx.recv().is_ok(), "shutdown completion was not signaled");
+        assert_eq!(
+            len.load(Ordering::Acquire),
+            0,
+            "dropped events left counted as pending"
+        );
     }
 
     // -- virtual-clock worker tests (no real sleeps) -------------------------
