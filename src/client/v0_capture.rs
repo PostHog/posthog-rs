@@ -33,6 +33,11 @@ pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
 // ---------------------------------------------------------------------------
 
 /// Build the JSON body for a V0 batch capture request.
+///
+/// Returns the serialized body together with the number of events that survived
+/// `before_send` filtering, so the caller can account for filtered-out events as
+/// terminal and track only what is actually in flight. `Ok(None)` means every
+/// event was dropped by `before_send`.
 pub(crate) fn build_batch_payload(
     events: Vec<Event>,
     api_key: String,
@@ -40,7 +45,7 @@ pub(crate) fn build_batch_payload(
     sent_at: DateTime<Utc>,
     defaults: &CaptureDefaults,
     before_send: &[BeforeSendHook],
-) -> Result<Option<String>, Error> {
+) -> Result<Option<(String, usize)>, Error> {
     let inner_events: Vec<InnerEvent> = events
         .into_iter()
         .filter_map(|mut event| {
@@ -54,6 +59,7 @@ pub(crate) fn build_batch_payload(
         return Ok(None);
     }
 
+    let kept = inner_events.len();
     let batch_request = BatchRequest {
         api_key,
         historical_migration,
@@ -61,7 +67,7 @@ pub(crate) fn build_batch_payload(
         batch: inner_events,
     };
     serde_json::to_string(&batch_request)
-        .map(Some)
+        .map(|json| Some((json, kept)))
         .map_err(|e| Error::Serialization(e.to_string()))
 }
 

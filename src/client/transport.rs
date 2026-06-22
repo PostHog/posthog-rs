@@ -752,7 +752,7 @@ impl Pipeline {
     fn send_batch(&mut self, events: Vec<Event>, historical_migration: bool, final_attempt: bool) {
         let defaults = self.options.capture_defaults();
         let count = events.len();
-        let payload = match super::v0_capture::build_batch_payload(
+        let (payload, kept) = match super::v0_capture::build_batch_payload(
             events,
             self.options.api_key.clone(),
             historical_migration,
@@ -760,7 +760,7 @@ impl Pipeline {
             &defaults,
             &self.options.before_send,
         ) {
-            Ok(Some(p)) => p,
+            Ok(Some(pair)) => pair,
             Ok(None) => {
                 // Every event dropped by before_send (terminal).
                 dec_len(&self.len, count);
@@ -772,11 +772,14 @@ impl Pipeline {
                 return;
             }
         };
+        // Events dropped by before_send are terminal; account for them now so the
+        // batch tracks (and logs) only what is actually in flight.
+        dec_len(&self.len, count - kept);
         let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
         let batch = RetryBatch {
             body,
             encoding,
-            count,
+            count: kept,
             attempt: 1,
             next_at: self.clock.now(),
         };
@@ -1053,6 +1056,47 @@ mod tests {
         clock.advance(Duration::from_secs(1)); // now >= next_at
         handle.tick(); // due -> retried, delivered
         ok.assert_hits(1);
+
+        handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn before_send_dropped_events_are_not_counted_in_flight() {
+        // before_send drops one of two events; a 503 holds the batch for retry.
+        // pending() must reflect only the surviving event: the dropped one is
+        // terminal at build time, so counting it as in-flight would inflate the
+        // bounded-queue depth (and the drop/retry logs) for the batch's lifetime.
+        let server = MockServer::start();
+        let fail = server.mock(|when, then| {
+            when.method(POST);
+            then.status(503);
+        });
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .before_send(|event| {
+                    if event.properties().get("__drop").is_some() {
+                        None
+                    } else {
+                        Some(event)
+                    }
+                })
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        handle.enqueue(Event::new("keep", "user-1"));
+        let mut dropped = Event::new("drop", "user-1");
+        dropped.insert_prop("__drop", true).unwrap();
+        handle.enqueue(dropped);
+        assert_eq!(handle.pending(), 2); // both reserved in the bounded queue
+
+        handle.flush_blocking(); // 1 kept + 1 filtered by before_send; 503 holds the kept one
+
+        fail.assert_hits(1);
+        // Only the surviving event remains in flight; the filtered one is terminal.
+        assert_eq!(handle.pending(), 1);
 
         handle.shutdown_blocking();
     }
