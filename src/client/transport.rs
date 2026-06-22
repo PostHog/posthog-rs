@@ -184,8 +184,12 @@ impl TransportHandle {
         }
     }
 
-    /// Send a flush/shutdown control message. Returns `false` if closed or the
-    /// worker is gone, so a caller's wait becomes a no-op instead of hanging.
+    /// Send a flush/shutdown control message. Returns `false` once the worker has
+    /// exited (the channel is disconnected), so a caller's wait is skipped rather
+    /// than hanging. A control that races in just before the worker exits is still
+    /// unblocked: the worker signals queued completions on the way out (see
+    /// `drain_pending_completions`), and any it doesn't reach are dropped with the
+    /// channel — which wakes the caller's wait with a recv error.
     pub(crate) fn send_control(&self, control: Control) -> bool {
         self.tx.send(control).is_ok()
     }
