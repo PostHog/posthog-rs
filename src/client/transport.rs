@@ -348,6 +348,8 @@ fn run_worker(
     let mut historical_since: Option<Instant> = None;
 
     loop {
+        #[cfg(test)]
+        let mut tick_completion: Option<Completion> = None;
         let wait = {
             let base = compute_wait(
                 clock.now(),
@@ -440,36 +442,13 @@ fn run_worker(
             }
             #[cfg(test)]
             Wake::Msg(Control::Tick(completion)) => {
-                if buffer_since
-                    .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
-                {
-                    send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
-                    buffer_since = None;
-                }
-                if historical_since
-                    .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
-                {
-                    drain_historical(&mut pipeline, &mut historical, None);
-                    historical_since = None;
-                }
-                pipeline.attempt_due();
-                completion.signal();
+                // Defer the signal until after the shared servicing block below,
+                // so a test sees the tick's interval/retry effects on return.
+                tick_completion = Some(completion);
             }
-            Wake::Timeout => {
-                if buffer_since
-                    .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
-                {
-                    send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
-                    buffer_since = None;
-                }
-                if historical_since
-                    .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
-                {
-                    drain_historical(&mut pipeline, &mut historical, None);
-                    historical_since = None;
-                }
-                pipeline.attempt_due();
-            }
+            // Nothing arm-specific: the shared servicing block after the match
+            // handles the interval flush and due retries for an idle timeout too.
+            Wake::Timeout => {}
             Wake::Disconnected => {
                 // All client handles dropped without an explicit shutdown — best
                 // effort drain bounded by `shutdown_timeout`, then exit.
@@ -479,6 +458,26 @@ fn run_worker(
                 pipeline.flush_retries(Some(deadline));
                 return;
             }
+        }
+
+        // Service due timers after every wake, not only on the idle timeout:
+        // under sustained capture traffic `recv` keeps returning a message and
+        // never times out, so the interval flush and scheduled retries would
+        // otherwise be postponed until producers pause. (Shutdown/Disconnected
+        // return above, keeping their drain deadline-bounded.)
+        if buffer_since.is_some_and(|since| clock.now().duration_since(since) >= flush_interval) {
+            send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
+            buffer_since = None;
+        }
+        if historical_since.is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
+        {
+            drain_historical(&mut pipeline, &mut historical, None);
+            historical_since = None;
+        }
+        pipeline.attempt_due();
+        #[cfg(test)]
+        if let Some(completion) = tick_completion {
+            completion.signal();
         }
     }
 }
