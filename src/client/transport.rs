@@ -431,9 +431,10 @@ fn run_worker(
                 // Drain held retries, queued historical batches, then buffered
                 // events — one final attempt each, bounded by `shutdown_timeout`:
                 // once the deadline passes the rest is dropped so the drain can't
-                // hang on a slow endpoint. (A send already in flight when this
-                // Shutdown arrives first runs to `request_timeout_seconds`, since
-                // the single worker can't preempt it — see `shutdown_timeout_ms`.)
+                // hang on a slow endpoint. (An automatic flush/drain in progress
+                // when this Shutdown arrives runs to completion first — up to
+                // `request_timeout_seconds` per in-flight batch — since the single
+                // worker can't preempt it; see `shutdown_timeout_ms`.)
                 let deadline = clock.now() + shutdown_timeout;
                 pipeline.flush_retries(Some(deadline));
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));
