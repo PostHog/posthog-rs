@@ -431,6 +431,9 @@ fn run_worker(
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
                 completion.signal();
+                // A flush/shutdown that raced in behind this Shutdown is still queued;
+                // signal those completions so their callers don't block forever.
+                drain_pending_completions(&rx);
                 return;
             }
             #[cfg(test)]
@@ -474,6 +477,21 @@ fn run_worker(
                 pipeline.flush_retries(Some(deadline));
                 return;
             }
+        }
+    }
+}
+
+/// Signal any flush/shutdown completions still queued when the worker exits, so a
+/// caller whose control message raced in behind the `Shutdown` doesn't block forever
+/// on a completion that will never be processed. Queued captures are dropped — the
+/// client is closing.
+fn drain_pending_completions(rx: &mpsc::Receiver<Control>) {
+    while let Ok(control) = rx.try_recv() {
+        match control {
+            Control::Flush(c) | Control::Shutdown(c) => c.signal(),
+            #[cfg(test)]
+            Control::Tick(c) => c.signal(),
+            Control::Capture { .. } | Control::HistoricalBatch { .. } => {}
         }
     }
 }
@@ -1029,6 +1047,28 @@ mod tests {
             compute_wait(base, None, interval, Some(retry_at)),
             Some(Duration::from_secs(2))
         );
+    }
+
+    #[test]
+    fn drain_pending_completions_signals_queued_controls() {
+        // Flush/Shutdown completions still queued when the worker exits must be
+        // signaled so their callers don't hang; queued captures are just dropped.
+        let (tx, rx) = mpsc::channel::<Control>();
+        let (ftx, frx) = mpsc::channel::<()>();
+        let (stx, srx) = mpsc::channel::<()>();
+        tx.send(Control::Flush(Completion::Blocking(ftx))).unwrap();
+        tx.send(Control::Shutdown(Completion::Blocking(stx)))
+            .unwrap();
+        tx.send(Control::Capture {
+            event: Box::new(Event::new("dropped", "user-1")),
+        })
+        .unwrap();
+        drop(tx);
+
+        drain_pending_completions(&rx);
+
+        assert!(frx.recv().is_ok(), "flush completion was not signaled");
+        assert!(srx.recv().is_ok(), "shutdown completion was not signaled");
     }
 
     // -- virtual-clock worker tests (no real sleeps) -------------------------
