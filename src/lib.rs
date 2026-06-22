@@ -104,7 +104,7 @@ pub use error::Error;
 // Error Tracking
 #[cfg(feature = "error-tracking")]
 pub use error_tracking::{
-    CaptureExceptionOptions, ErrorTrackingOptions, ErrorTrackingOptionsBuilder,
+    install_panic_hook, CaptureExceptionOptions, ErrorTrackingOptions, ErrorTrackingOptionsBuilder,
     ErrorTrackingOptionsBuilderError,
 };
 

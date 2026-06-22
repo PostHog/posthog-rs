@@ -294,6 +294,29 @@ impl Client {
         }
     }
 
+    /// Whether the client is disabled (no transport; capture is a no-op). Used
+    /// by the panic hook to skip building an event it could never send.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn is_disabled(&self) -> bool {
+        self.options.is_disabled()
+    }
+
+    /// The client's Error Tracking options, used by the panic hook to build
+    /// panic exception events with the client's configured policy.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn error_tracking_options(&self) -> &crate::error_tracking::ErrorTrackingOptions {
+        self.options.error_tracking()
+    }
+
+    /// Synchronous flush for the panic hook: blocks until the worker has
+    /// attempted delivery of everything queued. A no-op for disabled clients.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn flush_blocking(&self) {
+        if let Some(transport) = &self.transport {
+            transport.flush_blocking();
+        }
+    }
+
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
     /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
     /// disabled clients.

@@ -35,6 +35,7 @@ pub posthog_rs::Error::Connection(alloc::string::String)
 pub posthog_rs::Error::InconclusiveMatch(alloc::string::String)
 pub posthog_rs::Error::InvalidTimestamp(alloc::string::String)
 pub posthog_rs::Error::NotInitialized
+pub posthog_rs::Error::PanicHookAlreadyInstalled
 pub posthog_rs::Error::RateLimit
 pub posthog_rs::Error::Serialization(alloc::string::String)
 pub posthog_rs::Error::ServerError
@@ -320,6 +321,7 @@ pub fn posthog_rs::disable_global()
 pub async fn posthog_rs::flush()
 pub fn posthog_rs::global_is_disabled() -> bool
 pub async fn posthog_rs::init_global<C: core::convert::Into<posthog_rs::ClientOptions>>(C) -> core::result::Result<(), posthog_rs::Error>
+pub fn posthog_rs::install_panic_hook(alloc::sync::Arc<posthog_rs::Client>) -> core::result::Result<(), posthog_rs::Error>
 pub fn posthog_rs::match_feature_flag(&posthog_rs::FeatureFlag, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::InconclusiveMatchError>
 pub fn posthog_rs::match_feature_flag_with_context(&posthog_rs::FeatureFlag, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &posthog_rs::EvaluationContext<'_>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::InconclusiveMatchError>
 pub fn posthog_rs::match_property_with_context(&posthog_rs::Property, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &posthog_rs::EvaluationContext<'_>) -> core::result::Result<bool, posthog_rs::InconclusiveMatchError>

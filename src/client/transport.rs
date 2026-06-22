@@ -227,9 +227,11 @@ impl TransportHandle {
         }
     }
 
-    /// Test helper: blocking flush (the async client uses a oneshot instead).
-    #[cfg(test)]
-    fn flush_blocking(&self) {
+    /// Blocking flush via an `mpsc` completion — no runtime needed, so it works
+    /// from the panic hook (the async client's public `flush` uses a oneshot).
+    /// Returns once the worker has attempted delivery of everything queued.
+    #[cfg(any(test, feature = "error-tracking"))]
+    pub(crate) fn flush_blocking(&self) {
         let (tx, rx) = mpsc::channel();
         if self.send_control(Control::Flush(Completion::Blocking(tx))) {
             let _ = rx.recv();
