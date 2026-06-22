@@ -424,8 +424,10 @@ fn run_worker(
             Wake::Msg(Control::Shutdown(completion)) => {
                 // Drain held retries, queued historical batches, then buffered
                 // events — one final attempt each, bounded by `shutdown_timeout`:
-                // once the deadline passes the rest is dropped so teardown can't
-                // hang on a slow/unreachable endpoint.
+                // once the deadline passes the rest is dropped so the drain can't
+                // hang on a slow endpoint. (A send already in flight when this
+                // Shutdown arrives first runs to `request_timeout_seconds`, since
+                // the single worker can't preempt it — see `shutdown_timeout_ms`.)
                 let deadline = clock.now() + shutdown_timeout;
                 pipeline.flush_retries(Some(deadline));
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));

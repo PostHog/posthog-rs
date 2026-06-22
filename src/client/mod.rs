@@ -212,8 +212,11 @@ pub struct ClientOptions {
 
     /// Maximum time `shutdown()` and `Drop` spend draining buffered and
     /// retrying events before abandoning the rest, in milliseconds (default:
-    /// 30000). Bounds how long process teardown can block on a slow or
-    /// unreachable endpoint; `flush()` is unaffected.
+    /// 30000). This bounds the drain itself, including any delivery the drain
+    /// starts. The single background worker performs one blocking send at a
+    /// time, so a send already in flight when shutdown is requested first runs
+    /// to `request_timeout_seconds`; worst-case teardown is that plus this
+    /// timeout. `flush()` is unaffected.
     #[builder(default = "30000")]
     pub(crate) shutdown_timeout_ms: u64,
 
