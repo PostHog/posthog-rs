@@ -370,17 +370,23 @@ fn run_worker(
                 }
             }
             Wake::Msg(Control::HistoricalBatch { mut events }) => {
-                // Queue the chunks (kept off the live buffer, which stays
-                // non-historical — no per-event flag, no homogeneity flush). Not
-                // sent inline so a Shutdown queued behind this batch is observed
-                // first and these events are bounded/abandoned under
-                // `shutdown_timeout` like buffered ones. Flushed on the interval.
+                // Queue the chunks off the live buffer (which stays non-historical
+                // — no per-event flag, no homogeneity flush). Below `flush_at` they
+                // wait rather than being sent inline, so a Shutdown queued behind
+                // this batch is observed first and bounds/abandons them under
+                // `shutdown_timeout` like buffered events; once `flush_at` have
+                // queued they're sent right away, mirroring the live buffer's size
+                // threshold. Anything left is flushed on the interval.
                 while !events.is_empty() {
                     let take = events.len().min(max_batch_size);
                     historical.push_back(events.drain(..take).collect());
                 }
                 if historical_since.is_none() {
                     historical_since = Some(clock.now());
+                }
+                if historical.iter().map(Vec::len).sum::<usize>() >= flush_at {
+                    drain_historical(&mut pipeline, &mut historical, None);
+                    historical_since = None;
                 }
             }
             Wake::Msg(Control::Flush(completion)) => {
@@ -1191,5 +1197,31 @@ mod tests {
             0,
             "historical events abandoned under a zero shutdown timeout"
         );
+    }
+
+    #[test]
+    fn historical_batch_flushes_at_size_threshold() {
+        // Historical honors `flush_at` like the live buffer: once enough events
+        // have queued they're sent right away (here, on enqueue), not held until
+        // the interval. `options()` uses a long interval, so only the threshold
+        // can drive this send.
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url()).flush_at(2usize).build().unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        handle.enqueue_historical(vec![Event::new("H1", "user-1"), Event::new("H2", "user-1")]);
+        handle.tick(); // sync only; the size threshold already drained it on enqueue
+
+        mock.assert_hits(1);
+        assert_eq!(
+            handle.pending(),
+            0,
+            "threshold-sized historical batch delivered"
+        );
+        handle.shutdown_blocking();
     }
 }
