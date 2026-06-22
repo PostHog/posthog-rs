@@ -415,8 +415,12 @@ fn run_worker(
                     send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                     buffer_since = None;
                 }
-                drain_historical(&mut pipeline, &mut historical, None);
-                historical_since = None;
+                if historical_since
+                    .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
+                {
+                    drain_historical(&mut pipeline, &mut historical, None);
+                    historical_since = None;
+                }
                 pipeline.attempt_due();
                 completion.signal();
             }
@@ -427,8 +431,12 @@ fn run_worker(
                     send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                     buffer_since = None;
                 }
-                drain_historical(&mut pipeline, &mut historical, None);
-                historical_since = None;
+                if historical_since
+                    .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
+                {
+                    drain_historical(&mut pipeline, &mut historical, None);
+                    historical_since = None;
+                }
                 pipeline.attempt_due();
             }
             Wake::Disconnected => {
@@ -1133,7 +1141,7 @@ mod tests {
     #[test]
     fn historical_batch_sends_chunked() {
         // A historical batch takes its own path: queued off the live buffer and
-        // sent in its own chunks (driven here by the tick), never via the buffer.
+        // sent in its own chunks (forced out here by a flush), never via the buffer.
         let server = MockServer::start();
         let mock = ok_mock(&server);
         let clock = ManualClock::new();
@@ -1150,7 +1158,7 @@ mod tests {
             Event::new("H2", "user-1"),
             Event::new("H3", "user-1"),
         ]);
-        handle.tick(); // drive the worker past the HistoricalBatch it processes first
+        handle.flush_blocking(); // flush forces the queued historical batch out
 
         mock.assert_hits(2); // 3 events / max_batch_size 2 -> two requests
         assert_eq!(handle.pending(), 0, "all historical events delivered");
