@@ -317,6 +317,15 @@ impl Client {
         }
     }
 
+    /// True when the calling thread is this client's transport worker thread —
+    /// the panic hook skips capturing there.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn on_transport_worker(&self) -> bool {
+        self.transport
+            .as_ref()
+            .is_some_and(|t| t.on_worker_thread())
+    }
+
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
     /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
     /// disabled clients.

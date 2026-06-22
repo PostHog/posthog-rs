@@ -175,7 +175,13 @@ pub fn install_panic_hook(client: Arc<Client>) -> Result<(), Error> {
 /// send run on the worker thread.
 #[allow(deprecated)]
 fn capture_panic(client: &Client, panic_info: &panic::PanicInfo<'_>) -> Result<(), Error> {
-    if client.is_disabled() {
+    // A panic on this client's own transport worker thread is almost always a
+    // panicking `before_send` (which the worker already catches and logs).
+    // Capturing it there would deadlock — a synchronous flush can't be serviced
+    // by the worker that's busy running this hook — and would recurse: the
+    // captured `$exception` re-enters `before_send` on the worker and panics
+    // again. Skip it.
+    if client.is_disabled() || client.on_transport_worker() {
         return Ok(());
     }
     let event = build_panic_event(panic_info, client.error_tracking_options())?;
@@ -1126,11 +1132,12 @@ mod tests {
     }
 
     #[test]
-    fn panic_in_before_send_on_worker_thread_does_not_deadlock() {
-        // A `before_send` hook that panics fires the panic hook ON the transport
-        // worker thread. The hook must not synchronously self-flush there — the
-        // worker can't process its own Flush mid-hook — or it deadlocks. A
-        // watchdog bounds the wait so a regression fails instead of hanging.
+    fn panic_in_before_send_on_worker_neither_deadlocks_nor_recurses() {
+        // A `before_send` hook that panics unconditionally fires the panic hook
+        // ON the transport worker thread. Capturing there must be skipped: a
+        // synchronous self-flush would deadlock the worker, and routing the
+        // `$exception` back through `before_send` (which panics again) would
+        // recurse forever. A watchdog turns either regression into a failure.
         let _guard = panic_hook_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1146,14 +1153,7 @@ mod tests {
         let options = ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
-            // Panic only on the marked event, never on the `$exception` event the
-            // hook produces, so the worker doesn't loop on its own panic capture.
-            .before_send(|event| {
-                if event.properties().get("__panic_in_before_send").is_some() {
-                    panic!("before_send boom");
-                }
-                Some(event)
-            })
+            .before_send(|_event| panic!("before_send boom"))
             .build()
             .unwrap();
         let client = build_test_client(options);
@@ -1163,11 +1163,9 @@ mod tests {
         let finished_for_worker = Arc::clone(&finished);
         let work_client = Arc::clone(&client);
         let _worker = std::thread::spawn(move || {
-            let mut event = Event::new("boom", "user-1");
-            event.insert_prop("__panic_in_before_send", true).unwrap();
-            work_client.capture(event);
+            work_client.capture(Event::new("boom", "user-1"));
             // From this (non-worker) thread this is a real blocking flush; it
-            // returns only if the worker survived the in-hook panic undeadlocked.
+            // returns only if the worker neither deadlocked nor spun on recursion.
             work_client.flush_blocking();
             finished_for_worker.store(true, Ordering::Release);
         });
@@ -1180,7 +1178,7 @@ mod tests {
 
         assert!(
             finished.load(Ordering::Acquire),
-            "panic in before_send on the worker thread deadlocked the transport"
+            "panic in before_send on the worker thread deadlocked or recursed"
         );
         // The spawned thread is intentionally not joined: on a regression it is
         // stuck in flush_blocking and a join would hang too; on success it has

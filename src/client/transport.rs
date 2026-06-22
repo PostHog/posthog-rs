@@ -106,11 +106,14 @@ pub(crate) struct TransportHandle {
     max_queue_size: usize,
     /// Shares the worker's clock; used to stamp capture (enqueue) time.
     clock: Arc<dyn Clock>,
+    /// The worker thread's id, so the panic hook can tell when it is running on
+    /// this client's own worker — where capturing would deadlock or recurse.
+    #[cfg_attr(not(feature = "error-tracking"), allow(dead_code))]
+    worker_id: Option<std::thread::ThreadId>,
 }
 
-/// Name of the background worker thread. Used to detect when code (e.g. the
-/// panic hook firing on a `before_send` panic) is running on the worker itself,
-/// where a synchronous self-flush would deadlock.
+/// Name of the background worker thread (aids debugging). The panic hook detects
+/// the worker by its thread *id* (see `worker_id`), not this shared name.
 const WORKER_THREAD_NAME: &str = "posthog-transport";
 
 impl TransportHandle {
@@ -129,6 +132,7 @@ impl TransportHandle {
             .name(WORKER_THREAD_NAME.to_string())
             .spawn(move || run_worker(options, rx, worker_len, worker_clock))
             .ok();
+        let worker_id = worker.as_ref().map(|handle| handle.thread().id());
         Self {
             tx,
             len,
@@ -137,6 +141,7 @@ impl TransportHandle {
             full_warned: AtomicBool::new(false),
             max_queue_size,
             clock,
+            worker_id,
         }
     }
 
@@ -237,17 +242,19 @@ impl TransportHandle {
     /// Returns once the worker has attempted delivery of everything queued.
     #[cfg(any(test, feature = "error-tracking"))]
     pub(crate) fn flush_blocking(&self) {
-        // A flush from the worker thread itself — e.g. the panic hook firing on
-        // a `before_send` panic the worker is running — would deadlock: the
-        // worker can't process the Flush while it's executing this call. The
-        // event is already enqueued and ships on the worker's next cycle.
-        if std::thread::current().name() == Some(WORKER_THREAD_NAME) {
-            return;
-        }
         let (tx, rx) = mpsc::channel();
         if self.send_control(Control::Flush(Completion::Blocking(tx))) {
             let _ = rx.recv();
         }
+    }
+
+    /// True when the calling thread is this transport's worker thread. The panic
+    /// hook skips capturing there: a synchronous self-flush would deadlock the
+    /// worker, and routing the `$exception` back through `before_send` would
+    /// recurse if a `before_send` hook panicked.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn on_worker_thread(&self) -> bool {
+        self.worker_id == Some(std::thread::current().id())
     }
 
     /// Test helper: flush + stop + join, mirroring the client's shutdown.
