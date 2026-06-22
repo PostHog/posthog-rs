@@ -42,22 +42,30 @@ pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
         .and_then(|v| v.parse::<u64>().ok())
 }
 
+/// Hard cap on any scheduled retry delay. Guards the worker's `Instant + delay`
+/// from overflowing — which would panic the worker thread and silently drop all
+/// later captures — on a hostile/buggy `Retry-After` (or an extreme
+/// `retry_max_backoff_ms`). A day is far beyond any sane retry delay.
+const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(86_400);
+
 /// Backoff before `attempt`: honor `Retry-After` when present, otherwise
 /// exponential growth from `retry_initial_backoff_ms`, clamped to
-/// `retry_max_backoff_ms`.
+/// `retry_max_backoff_ms`. The result is capped at [`RETRY_BACKOFF_CAP`] so an
+/// absurd value can't overflow the worker's `next_at` computation.
 pub(crate) fn backoff_duration(
     opts: &ClientOptions,
     attempt: u32,
     retry_after_secs: Option<u64>,
 ) -> Duration {
-    if let Some(secs) = retry_after_secs {
+    let delay = if let Some(secs) = retry_after_secs {
         Duration::from_secs(secs)
     } else {
         let base_ms = opts.retry_initial_backoff_ms;
         let max_ms = opts.retry_max_backoff_ms;
         let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
         Duration::from_millis(backoff_ms.min(max_ms))
-    }
+    };
+    delay.min(RETRY_BACKOFF_CAP)
 }
 
 /// Sans-IO decision for a completed V0 capture response. `attempt` is the
@@ -199,6 +207,16 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(backoff_duration(&opts, 3, None), Duration::from_millis(150));
+    }
+
+    #[test]
+    fn backoff_caps_absurd_retry_after() {
+        // A hostile `Retry-After` must be capped, not overflow `Instant` later.
+        let opts = test_opts();
+        assert_eq!(
+            backoff_duration(&opts, 1, Some(u64::MAX)),
+            RETRY_BACKOFF_CAP
+        );
     }
 
     // -- v0 sans-IO decisions ------------------------------------------------
