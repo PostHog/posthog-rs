@@ -349,6 +349,17 @@ impl Client {
             .is_some_and(|t| t.on_worker_thread())
     }
 
+    /// Enqueue a panic `$exception` without the tracing `capture` performs:
+    /// `capture` is `#[instrument]` and its enqueue warns once on a full queue,
+    /// both of which run subscriber code — unsafe on the already-panicking
+    /// thread. The send still happens on the worker thread.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn enqueue_panic_event(&self, event: Event) {
+        if let Some(transport) = &self.transport {
+            transport.enqueue_panic(event);
+        }
+    }
+
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
     /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
     /// disabled clients.

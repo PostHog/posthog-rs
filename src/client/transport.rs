@@ -162,15 +162,34 @@ impl TransportHandle {
 
     /// Non-blocking enqueue. Drops (with a single warning) when the queue is full
     /// or the client is closed.
-    pub(crate) fn enqueue(&self, mut event: Event) {
+    pub(crate) fn enqueue(&self, event: Event) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        if !try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
+        if try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
+            self.send_reserved(event);
+        }
+    }
+
+    /// Like `enqueue`, but never logs — no full-queue `warn!`. The panic hook
+    /// enqueues through this on the *panicking* thread, which must not run
+    /// arbitrary tracing-subscriber code (a subscriber could panic or wait on a
+    /// lock the panic site holds). A full queue silently drops the `$exception`.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn enqueue_panic(&self, event: Event) {
+        if self.closed.load(Ordering::Acquire) {
             return;
         }
-        // Stamp capture (enqueue) time on the producer side so a batched or
-        // retried event records when it occurred, not when it was finally sent.
+        if reserve_slot(&self.len, self.max_queue_size).is_some() {
+            self.send_reserved(event);
+        }
+    }
+
+    /// Stamp the capture (enqueue) time on the producer side — so a batched or
+    /// retried event records when it occurred, not when it was finally sent —
+    /// then hand it to the worker, releasing the reserved slot if the worker is
+    /// gone. The slot must already be reserved by the caller.
+    fn send_reserved(&self, mut event: Event) {
         event.ensure_timestamp(self.clock.now_utc());
         if self
             .tx
@@ -292,28 +311,42 @@ impl TransportHandle {
     }
 }
 
-/// Reserve a queue slot under the bounded-capacity cap. Returns `false` (and
-/// warns once) when full. A CAS keeps the count exact under concurrent producers.
-fn try_reserve(len: &AtomicUsize, max: usize, warned: &AtomicBool) -> bool {
+/// Reserve a queue slot under the bounded-capacity cap, returning
+/// `Some(prev_count)` on success or `None` when full. A CAS keeps the count
+/// exact under concurrent producers. Pure (no logging), so the panic path can
+/// reserve a slot without running any tracing; `try_reserve` layers the
+/// full-queue warning on top.
+fn reserve_slot(len: &AtomicUsize, max: usize) -> Option<usize> {
     loop {
         let current = len.load(Ordering::Acquire);
         if current >= max {
-            if !warned.swap(true, Ordering::AcqRel) {
-                warn!("posthog-rs: event queue full (capacity {max}); dropping events");
-            }
-            return false;
+            return None;
         }
         if len
             .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            // Re-arm the full-queue warning once the queue has fully drained, so a
-            // service that repeatedly fills then drains warns once per episode
-            // instead of only on the very first overflow.
+            return Some(current);
+        }
+    }
+}
+
+/// Reserve a queue slot, warning once when full. Re-arms that warning once the
+/// queue has fully drained, so a service that repeatedly fills then drains warns
+/// once per episode instead of only on the very first overflow.
+fn try_reserve(len: &AtomicUsize, max: usize, warned: &AtomicBool) -> bool {
+    match reserve_slot(len, max) {
+        Some(current) => {
             if current == 0 {
                 warned.store(false, Ordering::Release);
             }
-            return true;
+            true
+        }
+        None => {
+            if !warned.swap(true, Ordering::AcqRel) {
+                warn!("posthog-rs: event queue full (capacity {max}); dropping events");
+            }
+            false
         }
     }
 }

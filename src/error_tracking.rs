@@ -185,7 +185,11 @@ fn capture_panic(client: &Client, panic_info: &panic::PanicInfo<'_>) -> Result<(
         return Ok(());
     }
     let event = build_panic_event(panic_info, client.error_tracking_options())?;
-    client.capture(event);
+    // Enqueue through the tracing-free path: `capture` is `#[instrument]` and
+    // warns on a full queue, both of which run subscriber code that's unsafe on
+    // the panicking thread (it could panic again -> abort, or wait on a lock the
+    // panic site holds -> hang before the previous hook runs).
+    client.enqueue_panic_event(event);
     // Bounded flush (see `TransportHandle::flush_blocking`): this runs on the
     // panicking thread before unwinding frees locks, so an unbounded wait could
     // deadlock if a `before_send` hook needs a lock the panic site still holds.
