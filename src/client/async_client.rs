@@ -985,8 +985,10 @@ impl Client {
 
 impl Drop for Client {
     /// Best-effort flush and worker join on drop. A blocking drain (the async
-    /// `shutdown` can't run in a destructor); an explicit `shutdown().await`
-    /// beforehand makes this a no-op.
+    /// `shutdown` can't run in a destructor), so dropping a `Client` inside an
+    /// async task blocks that executor thread until the drain completes (up to
+    /// `shutdown_timeout_ms` plus any in-flight request) — prefer an explicit
+    /// `shutdown().await` first, which makes this a no-op.
     fn drop(&mut self) {
         let Some(transport) = &self.transport else {
             return;
