@@ -303,7 +303,7 @@ impl Client {
     #[instrument(skip(self, event), level = "debug")]
     pub async fn capture(&self, event: Event) -> Result<(), Error> {
         if let Some(transport) = &self.transport {
-            transport.enqueue(event, false);
+            transport.enqueue(event);
         }
         Ok(())
     }
@@ -442,8 +442,12 @@ impl Client {
         historical_migration: bool,
     ) -> Result<(), Error> {
         if let Some(transport) = &self.transport {
-            for event in events {
-                transport.enqueue(event, historical_migration);
+            if historical_migration {
+                transport.enqueue_historical(events);
+            } else {
+                for event in events {
+                    transport.enqueue(event);
+                }
             }
         }
         Ok(())

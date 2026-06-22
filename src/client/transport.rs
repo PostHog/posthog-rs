@@ -34,7 +34,11 @@ pub(crate) enum Control {
     // shutdown message (clippy::large_enum_variant).
     Capture {
         event: Box<Event>,
-        historical_migration: bool,
+    },
+    /// A caller-formed historical-migration batch, sent as-is (chunked) on its
+    /// own path so the live `Capture` buffer stays non-historical.
+    HistoricalBatch {
+        events: Vec<Event>,
     },
     Flush(Completion),
     Shutdown(Completion),
@@ -134,7 +138,7 @@ impl TransportHandle {
 
     /// Non-blocking enqueue. Drops (with a single warning) when the queue is full
     /// or the client is closed.
-    pub(crate) fn enqueue(&self, mut event: Event, historical_migration: bool) {
+    pub(crate) fn enqueue(&self, mut event: Event) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
@@ -148,12 +152,35 @@ impl TransportHandle {
             .tx
             .send(Control::Capture {
                 event: Box::new(event),
-                historical_migration,
             })
             .is_err()
         {
             // Worker gone; release the slot we reserved.
             self.len.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Enqueue a caller-formed historical-migration batch on its own path, kept
+    /// off the live buffer (which is always non-historical). Reserves a queue
+    /// slot per event up to the bound, dropping any overflow with the usual
+    /// once-per-episode full warning.
+    pub(crate) fn enqueue_historical(&self, mut events: Vec<Event>) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let mut fitted = 0;
+        while fitted < events.len()
+            && try_reserve(&self.len, self.max_queue_size, &self.full_warned)
+        {
+            events[fitted].ensure_timestamp(self.clock.now_utc());
+            fitted += 1;
+        }
+        events.truncate(fitted);
+        if events.is_empty() {
+            return;
+        }
+        if self.tx.send(Control::HistoricalBatch { events }).is_err() {
+            self.len.fetch_sub(fitted, Ordering::AcqRel);
         }
     }
 
@@ -292,7 +319,6 @@ fn run_worker(
     let mut pipeline = Pipeline::new(&options, Arc::clone(&clock), len);
 
     let mut buffer: Vec<Event> = Vec::new();
-    let mut buffer_hist = false;
     let mut buffer_since: Option<Instant> = None;
 
     loop {
@@ -315,39 +341,28 @@ fn run_worker(
         };
 
         match wake {
-            Wake::Msg(Control::Capture {
-                event,
-                historical_migration,
-            }) => {
+            Wake::Msg(Control::Capture { event }) => {
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
                 // decremented by the pipeline once a batch is delivered or dropped.
-                // Keep each batch homogeneous in historical_migration: flush the
-                // current buffer before mixing in an event with a different flag.
-                if !buffer.is_empty() && historical_migration != buffer_hist {
-                    send_buffer(
-                        &mut pipeline,
-                        &mut buffer,
-                        buffer_hist,
-                        max_batch_size,
-                        None,
-                    );
-                    buffer_since = None;
-                }
                 if buffer.is_empty() {
-                    buffer_hist = historical_migration;
                     buffer_since = Some(clock.now());
                 }
                 buffer.push(*event);
                 if buffer.len() >= flush_at {
-                    send_buffer(
-                        &mut pipeline,
-                        &mut buffer,
-                        buffer_hist,
-                        max_batch_size,
-                        None,
-                    );
+                    send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                     buffer_since = None;
+                }
+            }
+            Wake::Msg(Control::HistoricalBatch { mut events }) => {
+                // Caller-formed historical-migration batch: send immediately,
+                // chunked, bypassing the live buffer. Because historical events
+                // never enter the buffer, the buffer is always non-historical —
+                // no per-event flag and no homogeneity flush needed.
+                while !events.is_empty() {
+                    let take = events.len().min(max_batch_size);
+                    let chunk: Vec<Event> = events.drain(..take).collect();
+                    pipeline.send_batch(chunk, true, false);
                 }
             }
             Wake::Msg(Control::Flush(completion)) => {
@@ -356,13 +371,7 @@ fn run_worker(
                 // either are held for the next cycle (so a single 503 leaves the
                 // event queued rather than being re-attempted in this same call).
                 pipeline.flush_retries(None);
-                send_buffer(
-                    &mut pipeline,
-                    &mut buffer,
-                    buffer_hist,
-                    max_batch_size,
-                    None,
-                );
+                send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                 buffer_since = None;
                 completion.signal();
             }
@@ -372,13 +381,7 @@ fn run_worker(
                 // is dropped so teardown can't hang on a slow/unreachable endpoint.
                 let deadline = clock.now() + shutdown_timeout;
                 pipeline.flush_retries(Some(deadline));
-                send_buffer(
-                    &mut pipeline,
-                    &mut buffer,
-                    buffer_hist,
-                    max_batch_size,
-                    Some(deadline),
-                );
+                send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
                 completion.signal();
                 return;
             }
@@ -387,13 +390,7 @@ fn run_worker(
                 if buffer_since
                     .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
                 {
-                    send_buffer(
-                        &mut pipeline,
-                        &mut buffer,
-                        buffer_hist,
-                        max_batch_size,
-                        None,
-                    );
+                    send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                     buffer_since = None;
                 }
                 pipeline.attempt_due();
@@ -403,13 +400,7 @@ fn run_worker(
                 if buffer_since
                     .is_some_and(|since| clock.now().duration_since(since) >= flush_interval)
                 {
-                    send_buffer(
-                        &mut pipeline,
-                        &mut buffer,
-                        buffer_hist,
-                        max_batch_size,
-                        None,
-                    );
+                    send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                     buffer_since = None;
                 }
                 pipeline.attempt_due();
@@ -418,13 +409,7 @@ fn run_worker(
                 // All client handles dropped without an explicit shutdown — best
                 // effort drain bounded by `shutdown_timeout`, then exit.
                 let deadline = clock.now() + shutdown_timeout;
-                send_buffer(
-                    &mut pipeline,
-                    &mut buffer,
-                    buffer_hist,
-                    max_batch_size,
-                    Some(deadline),
-                );
+                send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
                 pipeline.flush_retries(Some(deadline));
                 return;
             }
@@ -440,7 +425,6 @@ fn run_worker(
 fn send_buffer(
     pipeline: &mut Pipeline,
     buffer: &mut Vec<Event>,
-    historical_migration: bool,
     max_batch_size: usize,
     deadline: Option<Instant>,
 ) {
@@ -457,7 +441,9 @@ fn send_buffer(
         }
         let take = buffer.len().min(max_batch_size);
         let chunk: Vec<Event> = buffer.drain(..take).collect();
-        pipeline.send_batch(chunk, historical_migration, final_attempt);
+        // The buffer only ever holds live events; historical batches take their
+        // own path, so this is always a non-historical send.
+        pipeline.send_batch(chunk, false, final_attempt);
     }
 }
 
@@ -952,7 +938,7 @@ mod tests {
             Arc::new(clock.clone()),
         );
 
-        handle.enqueue(Event::new("Delayed", "user-1"), false);
+        handle.enqueue(Event::new("Delayed", "user-1"));
         handle.tick(); // interval not yet elapsed
         mock.assert_hits(0);
         assert_eq!(
@@ -991,7 +977,7 @@ mod tests {
             Arc::new(clock.clone()),
         );
 
-        handle.enqueue(Event::new("Save", "user-1"), false);
+        handle.enqueue(Event::new("Save", "user-1"));
         handle.flush_blocking(); // attempt 1 -> 503, held with next_at = now + 1s
         fail.assert_hits(1);
 
@@ -1059,7 +1045,7 @@ mod tests {
             Arc::new(clock.clone()),
         );
 
-        handle.enqueue(Event::new("Captured", "user-1"), false); // stamped at T0
+        handle.enqueue(Event::new("Captured", "user-1")); // stamped at T0
         clock.advance(Duration::from_secs(10)); // ...delivered 10s later
         handle.flush_blocking();
 
@@ -1083,7 +1069,7 @@ mod tests {
             Arc::new(clock.clone()),
         );
 
-        handle.enqueue(Event::new("Dropped", "user-1"), false);
+        handle.enqueue(Event::new("Dropped", "user-1"));
         handle.shutdown_blocking(); // deadline already past -> drop, do not send
 
         mock.assert_hits(0);
@@ -1092,5 +1078,32 @@ mod tests {
             0,
             "dropped events leave nothing in flight"
         );
+    }
+
+    #[test]
+    fn historical_batch_sends_immediately_chunked() {
+        // A historical batch takes its own path: it's sent right away (no buffer
+        // wait), chunked by max_batch_size, without touching the live buffer.
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .max_batch_size(2usize)
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        handle.enqueue_historical(vec![
+            Event::new("H1", "user-1"),
+            Event::new("H2", "user-1"),
+            Event::new("H3", "user-1"),
+        ]);
+        handle.tick(); // drive the worker past the HistoricalBatch it processes first
+
+        mock.assert_hits(2); // 3 events / max_batch_size 2 -> two requests
+        assert_eq!(handle.pending(), 0, "all historical events delivered");
+        handle.shutdown_blocking();
     }
 }
