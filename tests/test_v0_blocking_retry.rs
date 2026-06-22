@@ -32,11 +32,9 @@ fn create_v0_client(base_url: String, max_attempts: u32) -> Client {
 /// same worker and send through `/batch/`.
 fn capture(client: &Client, batch: bool) {
     if batch {
-        client
-            .capture_batch(vec![Event::new("e", "user-1")], false)
-            .unwrap();
+        client.capture_batch(vec![Event::new("e", "user-1")], false);
     } else {
-        client.capture(Event::new("e", "user-1")).unwrap();
+        client.capture(Event::new("e", "user-1"));
     }
 }
 
@@ -130,7 +128,7 @@ fn retries_resend_identical_event() {
     let client = create_v0_client(server.base_url(), 3);
     let mut event = Event::new("e", "user-1");
     event.set_uuid(uuid::Uuid::parse_str(FIXED_UUID).unwrap());
-    client.capture(event).unwrap();
+    client.capture(event);
     client.flush();
     client.flush();
     client.flush();
@@ -169,7 +167,7 @@ fn gzip_sets_header_query_param_and_compresses_body() {
         .build()
         .unwrap();
     let client = posthog_rs::client(options);
-    client.capture(Event::new("test_event", "user1")).unwrap();
+    client.capture(Event::new("test_event", "user1"));
     client.flush();
 
     mock.assert();
@@ -187,7 +185,7 @@ fn honors_retry_after_header() {
     });
 
     let client = create_v0_client(server.base_url(), 2);
-    client.capture(Event::new("e", "user-1")).unwrap();
+    client.capture(Event::new("e", "user-1"));
 
     let start = Instant::now();
     client.flush();

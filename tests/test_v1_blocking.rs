@@ -64,7 +64,7 @@ fn v1_blocking_capture_success() {
     });
 
     let client = create_v1_client(server.base_url());
-    client.capture(Event::new("test_event", "user-1")).unwrap();
+    client.capture(Event::new("test_event", "user-1"));
     client.flush();
     mock.assert();
 }
@@ -93,7 +93,7 @@ fn v1_blocking_retries_on_server_error() {
     });
 
     let client = create_v1_client(server.base_url());
-    client.capture(Event::new("test", "user-1")).unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // First flush hits the 500 (attempt 1) and keeps the batch queued; the second
     // flush re-attempts it (attempt 2) against the recovered endpoint.
@@ -114,7 +114,7 @@ fn v1_blocking_does_not_retry_on_401() {
     });
 
     let client = create_v1_client(server.base_url());
-    client.capture(Event::new("test", "user-1")).unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // 401 is terminal: one attempt on flush, then dropped (not returned to the
     // caller). A second flush proves there is no retry.
@@ -172,7 +172,7 @@ fn v1_blocking_partial_batch_retry() {
     });
 
     let client = create_v1_client(server.base_url());
-    client.capture_batch(vec![event1, event2], false).unwrap();
+    client.capture_batch(vec![event1, event2], false);
 
     // First flush (attempt 1) sends both events; the response marks one `ok` and
     // one `retry`, so the worker keeps only the retry event. The second flush
@@ -215,9 +215,7 @@ fn v1_blocking_does_not_retry_terminal_results() {
     });
 
     let client = create_v1_client(server.base_url());
-    client
-        .capture_batch(vec![ev_ok, ev_drop, ev_warning], false)
-        .unwrap();
+    client.capture_batch(vec![ev_ok, ev_drop, ev_warning], false);
 
     // All three per-event results are terminal (ok / drop / warning), so one
     // flush finalizes the batch. A second flush has nothing left to re-send.
@@ -282,7 +280,7 @@ fn v1_blocking_whole_batch_resent_on_retryable_status() {
         });
 
         let client = create_v1_client(server.base_url());
-        client.capture_batch(vec![event1, event2], false).unwrap();
+        client.capture_batch(vec![event1, event2], false);
 
         // First flush hits the retryable status (attempt 1) and keeps the whole
         // batch queued; the second flush resends every event (attempt 2).
@@ -341,9 +339,7 @@ fn v1_blocking_prunes_terminal_events_on_partial_retry() {
     });
 
     let client = create_v1_client(server.base_url());
-    client
-        .capture_batch(vec![ev_retry, ev_drop], false)
-        .unwrap();
+    client.capture_batch(vec![ev_retry, ev_drop], false);
 
     // First flush (attempt 1) sends both events; the response marks one `retry`
     // and one `drop` (terminal), so the worker keeps only the retry event. The
@@ -377,7 +373,7 @@ fn v1_blocking_partial_retry_exhausts_attempts() {
     });
 
     let client = create_v1_client(server.base_url());
-    client.capture(event).unwrap();
+    client.capture(event);
 
     // Every 200 response marks the event `retry`, so each flush re-attempts it
     // (attempts 1, 2, 3) until the budget is spent and the event is dropped.
@@ -436,7 +432,7 @@ fn v1_blocking_request_id_stable_across_retries() {
     });
 
     let client = create_v1_client(server.base_url());
-    client.capture(Event::new("test", "user-1")).unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // First flush sends attempt 1 (503, kept queued); the second flush re-attempts
     // it (attempt 2). Both requests must carry the same posthog-request-id.
@@ -469,7 +465,7 @@ fn v1_blocking_does_not_retry_on_402() {
     });
 
     let client = create_v1_client(server.base_url());
-    client.capture(Event::new("test", "user-1")).unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // 402 (billing limit) is terminal: one attempt on flush, then dropped. The
     // billing error is logged, not returned to the caller. A second flush proves
@@ -495,7 +491,7 @@ fn v1_blocking_exhausts_retries() {
     });
 
     let client = create_v1_client(server.base_url());
-    client.capture(Event::new("test", "user-1")).unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // 500 is retryable: one attempt per flush (attempts 1, 2, 3) until the budget
     // is spent and the event is dropped — the error is logged, not returned.
@@ -528,7 +524,7 @@ fn v1_blocking_sends_event_options() {
     event.set_option("cookieless_mode", true).unwrap();
     event.set_option("process_person_profile", false).unwrap();
 
-    client.capture(event).unwrap();
+    client.capture(event);
     client.flush();
     mock.assert();
 }
@@ -554,7 +550,7 @@ fn v1_blocking_injects_geoip_disable_when_configured() {
         .unwrap();
     let client = posthog_rs::client(options);
 
-    client.capture(Event::new("test", "user-1")).unwrap();
+    client.capture(Event::new("test", "user-1"));
     client.flush();
     mock.assert();
 }
@@ -573,7 +569,7 @@ fn v1_blocking_injects_is_server_by_default() {
     });
 
     let client = create_v1_client(server.base_url());
-    client.capture(Event::new("test", "user-1")).unwrap();
+    client.capture(Event::new("test", "user-1"));
     client.flush();
     mock.assert();
 }
@@ -594,7 +590,7 @@ fn v1_blocking_caller_override_wins_for_is_server() {
     let client = create_v1_client(server.base_url());
     let mut event = Event::new("test", "user-1");
     event.insert_prop("$is_server", false).unwrap();
-    client.capture(event).unwrap();
+    client.capture(event);
     client.flush();
     mock.assert();
 }
@@ -614,7 +610,7 @@ fn v1_blocking_batch_sets_historical_migration() {
 
     let client = create_v1_client(server.base_url());
     let events = vec![Event::new("a", "user-1"), Event::new("b", "user-1")];
-    client.capture_batch(events, true).unwrap();
+    client.capture_batch(events, true);
     client.flush();
     mock.assert();
 }
@@ -657,7 +653,7 @@ fn v1_blocking_sends_gzip_content_encoding() {
         .unwrap();
     let client = posthog_rs::client(options);
 
-    client.capture(Event::new("test", "user-1")).unwrap();
+    client.capture(Event::new("test", "user-1"));
     client.flush();
     mock.assert();
 }
@@ -696,7 +692,7 @@ fn v1_blocking_preserves_uuid_and_timestamp_across_retries() {
         .set_timestamp(chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap())
         .unwrap();
 
-    client.capture(event).unwrap();
+    client.capture(event);
     // First flush sends attempt 1 (503, kept queued); second flush re-sends the
     // same bytes as attempt 2 — proving uuid + timestamp survive the retry.
     client.flush();
@@ -717,7 +713,7 @@ fn v1_blocking_capture_batch_empty_is_noop() {
     });
 
     let client = create_v1_client(server.base_url());
-    client.capture_batch(vec![], false).unwrap();
+    client.capture_batch(vec![], false);
     client.flush();
 
     // An empty batch enqueues nothing, so flushing sends no request.
@@ -733,6 +729,5 @@ fn v1_blocking_disabled_client_noop() {
         .unwrap();
     let client = posthog_rs::client(options);
 
-    let result = client.capture(Event::new("test", "user-1"));
-    assert!(result.is_ok());
+    client.capture(Event::new("test", "user-1"));
 }

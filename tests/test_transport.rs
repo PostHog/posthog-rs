@@ -62,14 +62,8 @@ async fn flush_immediately_sends_queued_events() {
     });
 
     let client = client_with(server.base_url(), 100, 3).await;
-    client
-        .capture(Event::new("First", "user-123"))
-        .await
-        .unwrap();
-    client
-        .capture(Event::new("Second", "user-123"))
-        .await
-        .unwrap();
+    client.capture(Event::new("First", "user-123"));
+    client.capture(Event::new("Second", "user-123"));
     client.flush().await;
 
     // Both events arrive in a single batch request.
@@ -99,10 +93,7 @@ async fn flush_keeps_events_retryable_then_delivers_after_success() {
     });
 
     let client = client_with(server.base_url(), 100, 5).await;
-    client
-        .capture(Event::new("Save", "user-123"))
-        .await
-        .unwrap();
+    client.capture(Event::new("Save", "user-123"));
 
     // First flush attempts once; the 503 keeps the event queued for retry.
     client.flush().await;
@@ -135,18 +126,12 @@ async fn shutdown_flushes_and_disables_future_capture() {
     });
 
     let client = client_with(server.base_url(), 100, 3).await;
-    client
-        .capture(Event::new("Save", "user-123"))
-        .await
-        .unwrap();
+    client.capture(Event::new("Save", "user-123"));
     client.shutdown().await;
     mock.assert_hits(1);
 
     // Captures after shutdown are dropped, not enqueued.
-    client
-        .capture(Event::new("After Shutdown", "user-123"))
-        .await
-        .unwrap();
+    client.capture(Event::new("After Shutdown", "user-123"));
     client.flush().await;
     mock.assert_hits(1);
 }
@@ -173,10 +158,7 @@ async fn shutdown_does_not_throw_on_delivery_failure() {
     });
 
     let client = client_with(server.base_url(), 100, 3).await;
-    client
-        .capture(Event::new("Save", "user-123"))
-        .await
-        .unwrap();
+    client.capture(Event::new("Save", "user-123"));
     client.shutdown().await; // best-effort: attempts once, drops, does not panic
     mock.assert_hits(1);
 }
@@ -194,14 +176,8 @@ async fn batcher_flushes_when_size_threshold_reached() {
     // flush_at = 2: the second capture triggers an automatic flush (no explicit
     // flush() call).
     let client = client_with(server.base_url(), 2, 3).await;
-    client
-        .capture(Event::new("First", "user-123"))
-        .await
-        .unwrap();
-    client
-        .capture(Event::new("Second", "user-123"))
-        .await
-        .unwrap();
+    client.capture(Event::new("First", "user-123"));
+    client.capture(Event::new("Second", "user-123"));
 
     wait_for_hits(&mock, 1);
 }
@@ -224,18 +200,9 @@ async fn batcher_preserves_fifo_order_within_a_batch() {
     });
 
     let client = client_with(server.base_url(), 3, 3).await;
-    client
-        .capture(Event::new("First", "user-123"))
-        .await
-        .unwrap();
-    client
-        .capture(Event::new("Second", "user-123"))
-        .await
-        .unwrap();
-    client
-        .capture(Event::new("Third", "user-123"))
-        .await
-        .unwrap();
+    client.capture(Event::new("First", "user-123"));
+    client.capture(Event::new("Second", "user-123"));
+    client.capture(Event::new("Third", "user-123"));
 
     wait_for_hits(&mock, 1);
 }
@@ -251,10 +218,7 @@ async fn successful_status_drains_the_queue() {
     });
 
     let client = client_with(server.base_url(), 100, 3).await;
-    client
-        .capture(Event::new("Save", "user-123"))
-        .await
-        .unwrap();
+    client.capture(Event::new("Save", "user-123"));
     client.flush().await;
     mock.assert_hits(1);
 

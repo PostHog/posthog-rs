@@ -27,7 +27,7 @@
 //!     // Capture an analytics event.
 //!     let mut event = Event::new("signed_up", distinct_id);
 //!     event.insert_prop("plan", "pro")?;
-//!     posthog.capture(event).await?;
+//!     posthog.capture(event);
 //!
 //!     // Evaluate feature flags once, then read from the snapshot.
 //!     let flags = posthog
@@ -37,7 +37,7 @@
 //!     if flags.is_enabled("new-onboarding") {
 //!         let mut event = Event::new("onboarding_step_completed", distinct_id);
 //!         event.with_flags(&flags.only_accessed());
-//!         posthog.capture(event).await?;
+//!         posthog.capture(event);
 //!     }
 //!
 //!     Ok(())
@@ -54,7 +54,7 @@
 //!     // Capture an analytics event.
 //!     let mut event = Event::new("signed_up", distinct_id);
 //!     event.insert_prop("plan", "pro")?;
-//!     posthog.capture(event)?;
+//!     posthog.capture(event);
 //!
 //!     // Evaluate feature flags once, then read from the snapshot.
 //!     let flags = posthog.evaluate_flags(distinct_id, EvaluateFlagsOptions::default())?;
@@ -62,7 +62,7 @@
 //!     if flags.is_enabled("new-onboarding") {
 //!         let mut event = Event::new("onboarding_step_completed", distinct_id);
 //!         event.with_flags(&flags.only_accessed());
-//!         posthog.capture(event)?;
+//!         posthog.capture(event);
 //!     }
 //!
 //!     Ok(())

@@ -250,9 +250,7 @@ async fn capture_event(
 
     // capture_batch carries the historical_migration flag through to the worker;
     // a single-event vec is just a non-blocking enqueue.
-    let _ = client
-        .capture_batch(vec![event], historical_migration)
-        .await;
+    client.capture_batch(vec![event], historical_migration);
 
     let uuid = uuid::Uuid::now_v7().to_string();
     Json(serde_json::json!({ "success": true, "uuid": uuid })).into_response()

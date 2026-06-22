@@ -81,14 +81,14 @@ pub fn is_disabled() -> bool {
 
 /// Capture the provided event using the global client.
 ///
-/// # Errors
+/// # Remarks
 ///
-/// Returns [`Error::NotInitialized`] if `init_global` has not successfully run,
-/// or any error returned by [`Client::capture`].
-#[cfg(feature = "async-client")]
-pub async fn capture(event: Event) -> Result<(), Error> {
-    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
-    client.capture(event).await
+/// Fire-and-forget, like [`Client::capture`]. No-op if `init_global` has not
+/// run.
+pub fn capture(event: Event) {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.capture(event);
+    }
 }
 
 /// Flush the global client's queued events, awaiting the worker's next delivery
@@ -134,18 +134,6 @@ where
 {
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
     client.capture_exception_with(error, options).await
-}
-
-/// Capture the provided event using the global client.
-///
-/// # Errors
-///
-/// Returns [`Error::NotInitialized`] if `init_global` has not successfully run,
-/// or any error returned by [`Client::capture`].
-#[cfg(not(feature = "async-client"))]
-pub fn capture(event: Event) -> Result<(), Error> {
-    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
-    client.capture(event)
 }
 
 /// Flush the global client's queued events, blocking until the worker's next

@@ -36,12 +36,9 @@ async fn create_v0_client(base_url: String, max_attempts: u32) -> Client {
 /// same worker and send through `/batch/`.
 async fn capture(client: &Client, batch: bool) {
     if batch {
-        client
-            .capture_batch(vec![Event::new("e", "user-1")], false)
-            .await
-            .unwrap();
+        client.capture_batch(vec![Event::new("e", "user-1")], false);
     } else {
-        client.capture(Event::new("e", "user-1")).await.unwrap();
+        client.capture(Event::new("e", "user-1"));
     }
 }
 
@@ -137,7 +134,7 @@ async fn retries_resend_identical_event() {
     let client = create_v0_client(server.base_url(), 3).await;
     let mut event = Event::new("e", "user-1");
     event.set_uuid(uuid::Uuid::parse_str(FIXED_UUID).unwrap());
-    client.capture(event).await.unwrap();
+    client.capture(event);
     client.flush().await;
     client.flush().await;
     client.flush().await;
@@ -176,10 +173,7 @@ async fn gzip_sets_header_query_param_and_compresses_body() {
         .build()
         .unwrap();
     let client = posthog_rs::client(options).await;
-    client
-        .capture(Event::new("test_event", "user1"))
-        .await
-        .unwrap();
+    client.capture(Event::new("test_event", "user1"));
     client.flush().await;
 
     mock.assert();
@@ -198,7 +192,7 @@ async fn honors_retry_after_header() {
     });
 
     let client = create_v0_client(server.base_url(), 2).await;
-    client.capture(Event::new("e", "user-1")).await.unwrap();
+    client.capture(Event::new("e", "user-1"));
 
     // First attempt happens immediately on flush (429 + Retry-After schedules the
     // resend ~1s out); the second attempt is left to the worker's timer.

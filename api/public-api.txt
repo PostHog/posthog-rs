@@ -101,8 +101,8 @@ pub struct posthog_rs::CaptureResponse
 pub posthog_rs::CaptureResponse::results: std::collections::hash::map::HashMap<uuid::Uuid, posthog_rs::EventResult>
 pub struct posthog_rs::Client
 impl posthog_rs::Client
-pub async fn posthog_rs::Client::capture(&self, posthog_rs::Event) -> core::result::Result<(), posthog_rs::Error>
-pub async fn posthog_rs::Client::capture_batch(&self, alloc::vec::Vec<posthog_rs::Event>, bool) -> core::result::Result<(), posthog_rs::Error>
+pub fn posthog_rs::Client::capture(&self, posthog_rs::Event)
+pub fn posthog_rs::Client::capture_batch(&self, alloc::vec::Vec<posthog_rs::Event>, bool)
 pub async fn posthog_rs::Client::capture_exception<E>(&self, &E) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub async fn posthog_rs::Client::capture_exception_with<E>(&self, &E, posthog_rs::CaptureExceptionOptions) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub fn posthog_rs::Client::evaluate_feature_flag_locally(&self, &posthog_rs::FeatureFlag, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::Error>
@@ -320,7 +320,7 @@ pub posthog_rs::Property::value: serde_json::value::Value
 pub const posthog_rs::DEFAULT_HOST: &str
 pub const posthog_rs::EU_INGESTION_ENDPOINT: &str
 pub const posthog_rs::US_INGESTION_ENDPOINT: &str
-pub async fn posthog_rs::capture(posthog_rs::Event) -> core::result::Result<(), posthog_rs::Error>
+pub fn posthog_rs::capture(posthog_rs::Event)
 pub async fn posthog_rs::capture_exception<E>(&E) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub async fn posthog_rs::capture_exception_with<E>(&E, posthog_rs::CaptureExceptionOptions) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub async fn posthog_rs::client<C: core::convert::Into<posthog_rs::ClientOptions>>(C) -> posthog_rs::Client

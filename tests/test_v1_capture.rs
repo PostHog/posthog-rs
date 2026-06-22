@@ -89,7 +89,7 @@ async fn v1_capture_single_event_success() {
     let mut event = Event::new("test_event", "user-1");
     event.set_uuid(uuid);
 
-    client.capture(event).await.unwrap();
+    client.capture(event);
     client.flush().await;
     mock.assert();
 }
@@ -110,7 +110,7 @@ async fn v1_capture_bearer_auth_header() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
     client.flush().await;
     mock.assert();
 }
@@ -144,7 +144,7 @@ async fn v1_capture_retries_on_server_error() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // First flush hits the 503 (attempt 1) and keeps the batch queued; the second
     // flush re-attempts it (attempt 2) against the recovered endpoint.
@@ -170,7 +170,7 @@ async fn v1_capture_does_not_retry_on_401() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // 401 is terminal: one attempt on flush, then dropped (not returned to the
     // caller). A second flush proves there is no retry.
@@ -195,7 +195,7 @@ async fn v1_capture_does_not_retry_on_402() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // 402 (billing limit) is terminal: one attempt on flush, then dropped. The
     // billing error is logged, not returned to the caller. A second flush proves
@@ -254,10 +254,7 @@ async fn v1_capture_partial_batch_retry() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client
-        .capture_batch(vec![event1, event2], false)
-        .await
-        .unwrap();
+    client.capture_batch(vec![event1, event2], false);
 
     // First flush (attempt 1) sends both events; the response marks one `ok` and
     // one `retry`, so the worker keeps only the retry event. The second flush
@@ -300,10 +297,7 @@ async fn v1_capture_does_not_retry_terminal_results() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client
-        .capture_batch(vec![ev_ok, ev_drop, ev_warning], false)
-        .await
-        .unwrap();
+    client.capture_batch(vec![ev_ok, ev_drop, ev_warning], false);
 
     // All three per-event results are terminal (ok / drop / warning), so one
     // flush finalizes the batch. A second flush has nothing left to re-send.
@@ -368,10 +362,7 @@ async fn v1_capture_whole_batch_resent_on_retryable_status() {
         });
 
         let client = create_v1_client(server.base_url()).await;
-        client
-            .capture_batch(vec![event1, event2], false)
-            .await
-            .unwrap();
+        client.capture_batch(vec![event1, event2], false);
 
         // First flush hits the retryable status (attempt 1) and keeps the whole
         // batch queued; the second flush resends every event (attempt 2).
@@ -404,7 +395,7 @@ async fn v1_capture_partial_retry_exhausts_attempts() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture(event).await.unwrap();
+    client.capture(event);
 
     // Every 200 response marks the event `retry`, so each flush re-attempts it
     // (attempts 1, 2, 3) until the budget is spent and the event is dropped.
@@ -433,7 +424,7 @@ async fn v1_capture_exhausts_retries() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // 500 is retryable: one attempt per flush (attempts 1, 2, 3) until the budget
     // is spent and the event is dropped — the error is logged, not returned.
@@ -468,7 +459,7 @@ async fn v1_capture_sends_event_options() {
     event.set_option("cookieless_mode", true).unwrap();
     event.set_option("process_person_profile", false).unwrap();
 
-    client.capture(event).await.unwrap();
+    client.capture(event);
     client.flush().await;
     mock.assert();
 }
@@ -494,7 +485,7 @@ async fn v1_capture_injects_geoip_disable_when_configured() {
         .unwrap();
     let client = posthog_rs::client(options).await;
 
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
     client.flush().await;
     mock.assert();
 }
@@ -513,7 +504,7 @@ async fn v1_capture_injects_is_server_by_default() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
     client.flush().await;
     mock.assert();
 }
@@ -546,7 +537,7 @@ async fn v1_capture_applies_runtime_context_defaults_and_preserves_caller_values
             event.insert_prop("$os", os).unwrap();
             event.insert_prop("$os_version", os_version).unwrap();
         }
-        client.capture(event).await.unwrap();
+        client.capture(event);
         client.flush().await;
         mock.assert();
     }
@@ -568,7 +559,7 @@ async fn v1_capture_caller_override_wins_for_is_server() {
     let client = create_v1_client(server.base_url()).await;
     let mut event = Event::new("test", "user-1");
     event.insert_prop("$is_server", false).unwrap();
-    client.capture(event).await.unwrap();
+    client.capture(event);
     client.flush().await;
     mock.assert();
 }
@@ -602,7 +593,7 @@ async fn v1_before_send_runs_after_capture_defaults() {
         .unwrap();
     let client = posthog_rs::client(options).await;
 
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
     client.flush().await;
     mock.assert();
 }
@@ -636,10 +627,7 @@ async fn v1_batch_before_send_runs_after_capture_defaults() {
         .unwrap();
     let client = posthog_rs::client(options).await;
 
-    client
-        .capture_batch(vec![Event::new("test", "user-1")], false)
-        .await
-        .unwrap();
+    client.capture_batch(vec![Event::new("test", "user-1")], false);
     client.flush().await;
     mock.assert();
 }
@@ -659,7 +647,7 @@ async fn v1_capture_batch_sets_historical_migration() {
 
     let client = create_v1_client(server.base_url()).await;
     let events = vec![Event::new("a", "user-1"), Event::new("b", "user-1")];
-    client.capture_batch(events, true).await.unwrap();
+    client.capture_batch(events, true);
     client.flush().await;
     mock.assert();
 }
@@ -698,7 +686,7 @@ async fn v1_capture_preserves_uuid_and_timestamp_across_retries() {
         .set_timestamp(chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap())
         .unwrap();
 
-    client.capture(event).await.unwrap();
+    client.capture(event);
     // First flush sends attempt 1 (503, kept queued); second flush re-sends the
     // same bytes as attempt 2 — proving uuid + timestamp survive the retry.
     client.flush().await;
@@ -747,7 +735,7 @@ async fn v1_capture_sends_gzip_content_encoding() {
         .unwrap();
     let client = posthog_rs::client(options).await;
 
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
     client.flush().await;
     mock.assert();
 }
@@ -778,7 +766,7 @@ async fn v1_capture_honors_retry_after_header() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // First attempt happens immediately on flush (503 + Retry-After schedules the
     // resend ~1s out); the second attempt is left to the worker's timer, so the
@@ -846,10 +834,7 @@ async fn v1_capture_prunes_terminal_events_on_partial_retry() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client
-        .capture_batch(vec![ev_retry, ev_drop], false)
-        .await
-        .unwrap();
+    client.capture_batch(vec![ev_retry, ev_drop], false);
 
     // First flush (attempt 1) sends both events; the response marks one `retry`
     // and one `drop` (terminal), so the worker keeps only the retry event. The
@@ -907,7 +892,7 @@ async fn v1_capture_request_id_stable_across_retries() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
 
     // First flush sends attempt 1 (503, kept queued); the second flush re-attempts
     // it (attempt 2). Both requests must carry the same posthog-request-id.
@@ -948,7 +933,7 @@ async fn v1_capture_accepts_alternate_2xx_status() {
 
     // A 201 (alternate 2xx) is treated as success, not a connection error, so the
     // batch is finalized after a single attempt.
-    client.capture(event).await.unwrap();
+    client.capture(event);
     client.flush().await;
     mock.assert_hits(1);
     client.flush().await;
@@ -973,7 +958,7 @@ async fn v1_capture_sends_canonical_sdk_info_header() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture(Event::new("test", "user-1")).await.unwrap();
+    client.capture(Event::new("test", "user-1"));
     client.flush().await;
     mock.assert();
 }
@@ -990,7 +975,7 @@ async fn v1_capture_batch_empty_is_noop() {
     });
 
     let client = create_v1_client(server.base_url()).await;
-    client.capture_batch(vec![], false).await.unwrap();
+    client.capture_batch(vec![], false);
     client.flush().await;
 
     // An empty batch enqueues nothing, so flushing sends no request.
@@ -1006,6 +991,5 @@ async fn v1_capture_disabled_client_noop() {
         .unwrap();
     let client = posthog_rs::client(options).await;
 
-    let result = client.capture(Event::new("test", "user-1")).await;
-    assert!(result.is_ok());
+    client.capture(Event::new("test", "user-1"));
 }

@@ -292,8 +292,8 @@ fn assert_disabled_client_is_noop(api_key: Option<&str>) {
     let client = posthog_rs::client(options);
     let event = posthog_rs::Event::new("test_event", "user1");
 
-    assert!(client.capture(event.clone()).is_ok());
-    assert!(client.capture_batch(vec![event], false).is_ok());
+    client.capture(event.clone());
+    client.capture_batch(vec![event], false);
 
     let (feature_flags, payloads) = client
         .get_feature_flags("test-user".to_string(), None, None, None)
@@ -333,9 +333,8 @@ fn test_capture_batch_empty_is_noop() {
     });
 
     let client = create_test_client(server.base_url());
-    let result = client.capture_batch(vec![], false);
+    client.capture_batch(vec![], false);
 
-    assert!(result.is_ok());
     batch_mock.assert_hits(0);
 }
 
@@ -355,7 +354,7 @@ fn test_capture_batch_sends_to_batch_endpoint() {
     let client = create_test_client(server.base_url());
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    client.capture_batch(vec![event], false).unwrap();
+    client.capture_batch(vec![event], false);
     client.flush();
 
     batch_mock.assert();
@@ -376,7 +375,7 @@ fn test_capture_batch_historical_migration() {
     let client = create_test_client(server.base_url());
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    client.capture_batch(vec![event], true).unwrap();
+    client.capture_batch(vec![event], true);
     client.flush();
 
     batch_mock.assert();
@@ -397,7 +396,7 @@ fn test_capture_batch_rate_limit() {
     let event = posthog_rs::Event::new("test_event", "user1");
     // Capture is now infallible; a terminal 429 is attempted once on flush and
     // then dropped (the rate-limit is logged, not returned to the caller).
-    client.capture_batch(vec![event], true).unwrap();
+    client.capture_batch(vec![event], true);
     client.flush();
 
     batch_mock.assert();
@@ -418,7 +417,7 @@ fn test_capture_batch_bad_request() {
     let event = posthog_rs::Event::new("test_event", "user1");
     // Capture is now infallible; a terminal 400 is attempted once on flush and
     // then dropped (the bad-request is logged, not returned to the caller).
-    client.capture_batch(vec![event], false).unwrap();
+    client.capture_batch(vec![event], false);
     client.flush();
 
     batch_mock.assert();
@@ -439,7 +438,7 @@ fn v0_capture_injects_is_server_by_default() {
 
     let client = create_test_client(server.base_url());
     let event = posthog_rs::Event::new("test_event", "user-1");
-    client.capture(event).unwrap();
+    client.capture(event);
     client.flush();
     mock.assert();
 }
@@ -459,7 +458,7 @@ fn v0_capture_caller_override_wins_for_is_server() {
     let client = create_test_client(server.base_url());
     let mut event = posthog_rs::Event::new("test_event", "user-1");
     event.insert_prop("$is_server", false).unwrap();
-    client.capture(event).unwrap();
+    client.capture(event);
     client.flush();
     mock.assert();
 }

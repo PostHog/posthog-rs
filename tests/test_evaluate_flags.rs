@@ -350,7 +350,7 @@ mod blocking {
             .unwrap();
         let mut event = Event::new("checkout-started", "user-1");
         event.with_flags(&snapshot);
-        client.capture(event).expect("capture should succeed");
+        client.capture(event);
         client.flush();
         // One /flags request, one capture request — no second flag fetch.
         flags_mock.assert_hits(1);
@@ -812,7 +812,7 @@ mod async_tests {
             .unwrap();
         let mut event = Event::new("checkout-started", "user-1");
         event.with_flags(&snapshot);
-        client.capture(event).await.unwrap();
+        client.capture(event);
         client.flush().await;
         flags_mock.assert_hits(1);
         capture_mock.assert_hits(1);

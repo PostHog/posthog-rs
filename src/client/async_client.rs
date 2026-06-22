@@ -286,26 +286,18 @@ impl Client {
     /// - `event`: Event name, distinct ID, properties, timestamp, groups, and
     ///   optional feature flag state to send.
     ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Serialization`] if the event cannot be serialized,
-    /// [`Error::Connection`] for transport or unexpected HTTP failures,
-    /// [`Error::RateLimit`] for HTTP 429, [`Error::BadRequest`] for HTTP 400 or
-    /// 413, and [`Error::ServerError`] for HTTP 5xx.
-    ///
     /// # Remarks
     ///
-    /// Disabled clients skip the request and return `Ok(())`.
-    /// Enqueue `event` for delivery. Non-blocking: the event is handed to the
-    /// background worker, which batches, sends, and retries it. Returns once the
-    /// event is queued — not once it is delivered. Disabled clients and a full
-    /// queue drop the event (the latter with a single warning).
+    /// Fire-and-forget: the event is handed to the background worker, which
+    /// batches, sends, and retries it. Returns once the event is queued — not
+    /// once it is delivered, and delivery failures are not surfaced to the
+    /// caller. Disabled clients and a full queue drop the event (the latter
+    /// with a single warning).
     #[instrument(skip(self, event), level = "debug")]
-    pub async fn capture(&self, event: Event) -> Result<(), Error> {
+    pub fn capture(&self, event: Event) {
         if let Some(transport) = &self.transport {
             transport.enqueue(event);
         }
-        Ok(())
     }
 
     /// Flush queued events, returning once the worker has attempted delivery of
@@ -419,8 +411,8 @@ impl Client {
             error,
             options,
             self.options.error_tracking(),
-        )?)
-        .await
+        )?);
+        Ok(())
     }
 
     /// Capture a collection of events with a single request.
@@ -433,14 +425,10 @@ impl Client {
     /// - `historical_migration`: Set to `true` to route events to the
     ///   historical ingestion topic, bypassing the main pipeline.
     ///
-    /// # Errors
+    /// # Remarks
     ///
-    /// Returns the same error categories as [`Client::capture`].
-    pub async fn capture_batch(
-        &self,
-        events: Vec<Event>,
-        historical_migration: bool,
-    ) -> Result<(), Error> {
+    /// Fire-and-forget, like [`Client::capture`].
+    pub fn capture_batch(&self, events: Vec<Event>, historical_migration: bool) {
         if let Some(transport) = &self.transport {
             if historical_migration {
                 transport.enqueue_historical(events);
@@ -450,7 +438,6 @@ impl Client {
                 }
             }
         }
-        Ok(())
     }
 
     /// Number of events accepted but not yet delivered or dropped — those still
