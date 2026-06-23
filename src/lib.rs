@@ -109,8 +109,6 @@ pub use error_tracking::{
 
 // Event
 pub use event::Event;
-#[cfg(feature = "capture-v1")]
-pub use event::EventOptions;
 
 // V1 Capture types
 #[cfg(feature = "capture-v1")]

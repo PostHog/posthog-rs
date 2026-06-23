@@ -2,30 +2,12 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::client::CRATE_VERSION;
 use crate::feature_flag_evaluations::FeatureFlagEvaluations;
 use crate::Error;
-
-/// Per-event V1 capture options. Known fields are typed; unknown keys go into
-/// `extra` via `#[serde(flatten)]` for forward compatibility with new backend
-/// options without requiring an SDK update.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct EventOptions {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cookieless_mode: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disable_skew_correction: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub product_tour_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_person_profile: Option<bool>,
-
-    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
-    pub extra: HashMap<String, serde_json::Value>,
-}
 
 /// An [`Event`] represents an interaction a user has with your app or
 /// website. Examples include button clicks, pageviews, query completions, and signups.
@@ -39,8 +21,6 @@ pub struct Event {
     groups: HashMap<String, String>,
     timestamp: Option<NaiveDateTime>,
     uuid: Uuid,
-    #[serde(skip)]
-    options: EventOptions,
 }
 
 impl Event {
@@ -61,7 +41,6 @@ impl Event {
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
-            options: EventOptions::default(),
         }
     }
 
@@ -78,17 +57,18 @@ impl Event {
     /// Generates a random distinct ID and sets `$process_person_profile` to
     /// `false` so PostHog does not create a person profile for the event.
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
+        let mut properties = HashMap::new();
+        properties.insert(
+            "$process_person_profile".into(),
+            serde_json::Value::Bool(false),
+        );
         Self {
             event: event.into(),
             distinct_id: Uuid::now_v7().to_string(),
-            properties: HashMap::new(),
+            properties,
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
-            options: EventOptions {
-                process_person_profile: Some(false),
-                ..EventOptions::default()
-            },
         }
     }
 
@@ -133,7 +113,10 @@ impl Event {
     /// include person profile processing if they were anonymous. This might lead
     /// to "empty" person profiles being created.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
-        self.options.process_person_profile = Some(true);
+        self.properties.insert(
+            "$process_person_profile".into(),
+            serde_json::Value::Bool(true),
+        );
         self.groups.insert(group_name.into(), group_id.into());
     }
 
@@ -185,29 +168,6 @@ impl Event {
         self
     }
 
-    /// Set or reset a V1 capture option by key. Known keys route to typed
-    /// fields; unknown keys go into the forward-compatible overflow map.
-    #[cfg(feature = "capture-v1")]
-    pub fn set_option<V: Serialize>(&mut self, key: &str, value: V) -> Result<(), Error> {
-        let val = serde_json::to_value(value).map_err(|e| Error::Serialization(e.to_string()))?;
-        match key {
-            "cookieless_mode" => self.options.cookieless_mode = val.as_bool(),
-            "disable_skew_correction" => self.options.disable_skew_correction = val.as_bool(),
-            "process_person_profile" => self.options.process_person_profile = val.as_bool(),
-            "product_tour_id" => self.options.product_tour_id = val.as_str().map(|s| s.to_string()),
-            _ => {
-                self.options.extra.insert(key.to_owned(), val);
-            }
-        }
-        Ok(())
-    }
-
-    /// Access the event options.
-    #[cfg(feature = "capture-v1")]
-    pub fn options(&self) -> &EventOptions {
-        &self.options
-    }
-
     /// Return the event name.
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub fn event_name(&self) -> &str {
@@ -254,9 +214,12 @@ impl Event {
         &self.groups
     }
 
-    /// Translate `options` and `groups` into V0 properties and inject SDK
-    /// metadata. Call this before constructing [`InnerEvent`] so that the
-    /// wire payload matches what the V0 `/capture` and `/batch` endpoints expect.
+    /// Inject SDK metadata and `$groups` into V0 properties.
+    /// Call before constructing [`InnerEvent`] so that the wire payload matches
+    /// what the V0 `/capture` and `/batch` endpoints expect.
+    ///
+    /// `$process_person_profile` is already in `properties` when set by
+    /// constructors (`new_anon`, `add_group`) or explicit `insert_prop`.
     #[cfg_attr(feature = "capture-v1", allow(dead_code))]
     pub(crate) fn prepare_for_v0(&mut self) {
         if !self.properties.contains_key("$lib") {
@@ -289,12 +252,6 @@ impl Event {
                     serde_json::Value::Number(version.patch.into()),
                 );
             }
-        }
-
-        if let Some(ppp) = self.options.process_person_profile {
-            self.properties
-                .entry("$process_person_profile".into())
-                .or_insert_with(|| serde_json::Value::Bool(ppp));
         }
 
         if !self.groups.is_empty() {
@@ -502,8 +459,9 @@ pub mod tests {
     }
 
     #[test]
-    fn v0_user_property_wins_over_options_injection() {
+    fn v0_user_property_wins_over_constructor_default() {
         let mut event = Event::new_anon("test");
+        // new_anon sets $process_person_profile=false; explicit insert overwrites.
         event.insert_prop("$process_person_profile", true).unwrap();
         let inner = build_v0(event);
         assert_eq!(

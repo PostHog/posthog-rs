@@ -284,7 +284,18 @@ async fn capture_event(
         if let Some(opts_val) = req.options {
             if let Some(obj) = opts_val.as_object() {
                 for (k, v) in obj {
-                    let _ = event.set_option(k, v.clone());
+                    // Translate option keys to the magic property keys that the
+                    // SDK extracts into V1 wire options during capture.
+                    let prop_key = match k.as_str() {
+                        "disable_skew_correction" => "$ignore_sent_at",
+                        other => {
+                            // Most option keys map to $<key>.
+                            let owned = format!("${other}");
+                            let _ = event.insert_prop(owned, v.clone());
+                            continue;
+                        }
+                    };
+                    let _ = event.insert_prop(prop_key, v.clone());
                 }
             }
         }

@@ -468,8 +468,10 @@ fn v1_blocking_sends_event_options() {
 
     let client = create_v1_client(server.base_url());
     let mut event = Event::new("test", "user-1");
-    event.set_option("cookieless_mode", true).unwrap();
-    event.set_option("process_person_profile", false).unwrap();
+    event.insert_prop("$cookieless_mode", true).unwrap();
+    event
+        .insert_prop("$process_person_profile", false)
+        .unwrap();
 
     client.capture(event).unwrap();
     mock.assert();
