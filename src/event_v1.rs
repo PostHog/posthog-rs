@@ -4,16 +4,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::constants::{OPTIONS_EXTRACTION_TABLE, SESSION_ID_PROP, WINDOW_ID_PROP};
 use crate::event::Event;
-
-/// Property keys that are lifted out of `event.properties` and placed into the
-/// V1 wire `options` map. The tuple is (property_key, wire_option_key).
-const OPTIONS_EXTRACTION_TABLE: &[(&str, &str)] = &[
-    ("$cookieless_mode", "cookieless_mode"),
-    ("$ignore_sent_at", "disable_skew_correction"),
-    ("$product_tour_id", "product_tour_id"),
-    ("$process_person_profile", "process_person_profile"),
-];
 
 /// Crate-internal V1 capture options, derived from `event.properties`.
 /// Serializes as a JSON object; an empty map produces `"options":{}`.
@@ -65,10 +57,10 @@ impl V1Event {
         }
 
         let session_id = properties
-            .remove("$session_id")
+            .remove(SESSION_ID_PROP)
             .and_then(|v| v.as_str().map(String::from));
         let window_id = properties
-            .remove("$window_id")
+            .remove(WINDOW_ID_PROP)
             .and_then(|v| v.as_str().map(String::from));
 
         Self {

@@ -59,7 +59,7 @@ impl Event {
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
         let mut properties = HashMap::new();
         properties.insert(
-            "$process_person_profile".into(),
+            crate::constants::PROCESS_PERSON_PROFILE_PROP.into(),
             serde_json::Value::Bool(false),
         );
         Self {
@@ -114,7 +114,7 @@ impl Event {
     /// to "empty" person profiles being created.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
         self.properties.insert(
-            "$process_person_profile".into(),
+            crate::constants::PROCESS_PERSON_PROFILE_PROP.into(),
             serde_json::Value::Bool(true),
         );
         self.groups.insert(group_name.into(), group_id.into());

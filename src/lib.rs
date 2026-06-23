@@ -70,6 +70,7 @@
 //! ```
 mod client;
 mod compression;
+mod constants;
 mod endpoints;
 mod error;
 #[cfg(feature = "error-tracking")]

@@ -23,6 +23,18 @@ struct AppState {
 
 const DEFAULT_TEST_ID: &str = "_global";
 
+/// Harness wire-option key -> the magic property the SDK re-lifts into V1
+/// options. Mirrors (in inverse) the SDK's internal `OPTIONS_EXTRACTION_TABLE`;
+/// agreement is enforced by the capture_v1 compliance suite (`assert_event_option`),
+/// so any drift fails CI rather than shipping silently.
+#[cfg(feature = "capture-v1")]
+const HARNESS_OPTION_TO_PROP: &[(&str, &str)] = &[
+    ("cookieless_mode", "$cookieless_mode"),
+    ("disable_skew_correction", "$ignore_sent_at"),
+    ("product_tour_id", "$product_tour_id"),
+    ("process_person_profile", "$process_person_profile"),
+];
+
 #[derive(Default)]
 struct AdapterState {
     client: Option<Arc<Client>>,
@@ -284,18 +296,21 @@ async fn capture_event(
         if let Some(opts_val) = req.options {
             if let Some(obj) = opts_val.as_object() {
                 for (k, v) in obj {
-                    // Translate option keys to the magic property keys that the
-                    // SDK extracts into V1 wire options during capture.
-                    let prop_key = match k.as_str() {
-                        "disable_skew_correction" => "$ignore_sent_at",
-                        other => {
-                            // Most option keys map to $<key>.
-                            let owned = format!("${other}");
-                            let _ = event.insert_prop(owned, v.clone());
-                            continue;
+                    // Translate the harness wire-option key to the magic property
+                    // the SDK re-lifts into V1 options. Unknown keys fall back to
+                    // $<key>. Agreement with the SDK's extraction is enforced by
+                    // the capture_v1 compliance suite, so drift fails CI.
+                    match HARNESS_OPTION_TO_PROP
+                        .iter()
+                        .find(|(opt, _)| *opt == k.as_str())
+                    {
+                        Some((_, prop_key)) => {
+                            let _ = event.insert_prop(*prop_key, v.clone());
                         }
-                    };
-                    let _ = event.insert_prop(prop_key, v.clone());
+                        None => {
+                            let _ = event.insert_prop(format!("${k}"), v.clone());
+                        }
+                    }
                 }
             }
         }
