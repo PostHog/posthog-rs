@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.13.3 — 2026-06-23
+
+### Patch changes
+
+- [911ceae](https://github.com/posthog/posthog-rs/commit/911ceae82b421ac1c0b1a96f73999638a1240f6b) Internal changes to the `capture-v1` feature path. No effect on default (v0) capture behavior. — Thanks @eli-r-ph!
+
 ## 0.13.2 — 2026-06-18
 
 ### Patch changes
