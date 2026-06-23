@@ -330,13 +330,23 @@ impl Client {
         self.options.error_tracking()
     }
 
-    /// Synchronous flush for the panic hook: blocks (no runtime needed) until the
-    /// worker has attempted delivery of everything queued. A no-op for disabled
-    /// clients.
-    #[cfg(feature = "error-tracking")]
+    /// Unbounded synchronous flush: blocks until the worker has attempted
+    /// delivery of everything queued. Test-only; the panic hook uses
+    /// `flush_blocking_timeout`.
+    #[cfg(test)]
     pub(crate) fn flush_blocking(&self) {
         if let Some(transport) = &self.transport {
             transport.flush_blocking();
+        }
+    }
+
+    /// Synchronous, time-bounded flush for the panic hook: blocks (no runtime
+    /// needed) up to `timeout` for the worker to attempt delivery, then returns.
+    /// A no-op for disabled clients.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn flush_blocking_timeout(&self, timeout: Duration) {
+        if let Some(transport) = &self.transport {
+            transport.flush_blocking_timeout(timeout);
         }
     }
 

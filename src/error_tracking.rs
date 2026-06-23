@@ -62,6 +62,14 @@ pub struct ErrorTrackingOptions {
     /// includes and defaults. Same matching rules as `in_app_include_paths`
     /// — e.g. `"other_crate::"` excludes every frame of that crate.
     in_app_exclude_paths: Vec<String>,
+    /// How long the installed panic hook blocks the panicking thread waiting for
+    /// the `$exception` to be sent before letting the panic proceed (default:
+    /// 2000 ms). Deliberately short and separate from `shutdown_timeout_ms`: the
+    /// hook runs on the dying thread, so a long wait would freeze the crash —
+    /// and delay the panic message, which only prints after the flush — whenever
+    /// PostHog is slow or unreachable. Only consulted when the panic hook is
+    /// installed via [`install_panic_hook`].
+    panic_flush_timeout_ms: u64,
 }
 
 impl Default for ErrorTrackingOptions {
@@ -70,6 +78,7 @@ impl Default for ErrorTrackingOptions {
             capture_stacktrace: true,
             in_app_include_paths: Vec::new(),
             in_app_exclude_paths: Vec::new(),
+            panic_flush_timeout_ms: 2000,
         }
     }
 }
@@ -77,6 +86,11 @@ impl Default for ErrorTrackingOptions {
 impl ErrorTrackingOptions {
     fn capture_stacktrace(&self) -> bool {
         self.capture_stacktrace
+    }
+
+    /// The panic-flush budget as a `Duration` (see `panic_flush_timeout_ms`).
+    fn panic_flush_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.panic_flush_timeout_ms)
     }
 
     fn is_in_app_path(&self, filename: &str) -> bool {
@@ -184,16 +198,19 @@ fn capture_panic(client: &Client, panic_info: &panic::PanicInfo<'_>) -> Result<(
     if client.is_disabled() || client.on_transport_worker() {
         return Ok(());
     }
-    let event = build_panic_event(panic_info, client.error_tracking_options())?;
+    let et_options = client.error_tracking_options();
+    let event = build_panic_event(panic_info, et_options)?;
     // Enqueue through the tracing-free path: `capture` is `#[instrument]` and
     // warns on a full queue, both of which run subscriber code that's unsafe on
     // the panicking thread (it could panic again -> abort, or wait on a lock the
     // panic site holds -> hang before the previous hook runs).
     client.enqueue_panic_event(event);
-    // Bounded flush (see `TransportHandle::flush_blocking`): this runs on the
-    // panicking thread before unwinding frees locks, so an unbounded wait could
-    // deadlock if a `before_send` hook needs a lock the panic site still holds.
-    client.flush_blocking();
+    // Time-bounded flush on the panicking thread (before unwinding frees locks).
+    // The bound (default 2s, `panic_flush_timeout_ms`) keeps the dying process
+    // from hanging — and the panic message, which prints only after this returns,
+    // from being delayed — when PostHog is slow/unreachable or a `before_send`
+    // hook needs a lock the panic site still holds.
+    client.flush_blocking_timeout(et_options.panic_flush_timeout());
     Ok(())
 }
 
@@ -1198,7 +1215,7 @@ mod tests {
         // releases locks held at the panic site. If a `before_send` hook needs
         // such a lock, the worker blocks on it and the hook would block on the
         // worker forever — the process hangs instead of crashing. The flush is
-        // bounded by `shutdown_timeout_ms`, so the hook returns and the panic
+        // bounded by `panic_flush_timeout_ms`, so the hook returns and the panic
         // proceeds. A short timeout keeps the test fast; the watchdog turns a
         // regression (unbounded wait) into a failure instead of a hang.
         let _guard = panic_hook_test_lock()
@@ -1220,7 +1237,12 @@ mod tests {
         let options = ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
-            .shutdown_timeout_ms(200u64)
+            .error_tracking(
+                ErrorTrackingOptionsBuilder::default()
+                    .panic_flush_timeout_ms(200u64)
+                    .build()
+                    .unwrap(),
+            )
             .before_send(|event| {
                 let _held = SHARED.lock().unwrap_or_else(|e| e.into_inner());
                 Some(event)

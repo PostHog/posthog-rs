@@ -182,6 +182,7 @@ pub fn posthog_rs::ErrorTrackingOptionsBuilder::build(&self) -> core::result::Re
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::capture_stacktrace(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::in_app_exclude_paths(&mut self, alloc::vec::Vec<alloc::string::String>) -> &mut Self
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::in_app_include_paths(&mut self, alloc::vec::Vec<alloc::string::String>) -> &mut Self
+pub fn posthog_rs::ErrorTrackingOptionsBuilder::panic_flush_timeout_ms(&mut self, u64) -> &mut Self
 impl core::default::Default for posthog_rs::ErrorTrackingOptionsBuilder
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::default() -> Self
 pub struct posthog_rs::EvaluateFlagsOptions
