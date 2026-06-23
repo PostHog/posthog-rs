@@ -469,6 +469,31 @@ pub mod tests {
             Some(&serde_json::Value::Bool(true)),
         );
     }
+
+    #[test]
+    fn v0_identified_event_with_explicit_personless() {
+        let mut event = Event::new("test", "user1");
+        event.insert_prop("$process_person_profile", false).unwrap();
+        let inner = build_v0(event);
+        assert_eq!(
+            inner.properties.get("$process_person_profile"),
+            Some(&serde_json::Value::Bool(false)),
+        );
+    }
+
+    #[test]
+    fn v0_add_group_overrides_anon_person_profile() {
+        let mut event = Event::new_anon("test");
+        // new_anon sets $process_person_profile=false; add_group forces true.
+        event.add_group("company", "acme");
+        let inner = build_v0(event);
+        assert_eq!(
+            inner.properties.get("$process_person_profile"),
+            Some(&serde_json::Value::Bool(true)),
+        );
+        let groups = inner.properties.get("$groups").unwrap().as_object().unwrap();
+        assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
+    }
 }
 
 #[cfg(test)]

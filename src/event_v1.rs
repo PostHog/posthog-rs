@@ -444,4 +444,39 @@ mod tests {
         let props = v1.properties.as_object().unwrap();
         assert!(!props.contains_key("$process_person_profile"));
     }
+
+    #[test]
+    fn v1_identified_event_with_explicit_personless() {
+        let mut event = Event::new("test", "user-1");
+        event
+            .insert_prop("$process_person_profile", false)
+            .unwrap();
+        let v1 = V1Event::from_event(&event);
+        let json = serde_json::to_value(&v1).unwrap();
+        let options = json.get("options").unwrap().as_object().unwrap();
+        assert_eq!(
+            options.get("process_person_profile"),
+            Some(&serde_json::json!(false))
+        );
+        let props = v1.properties.as_object().unwrap();
+        assert!(!props.contains_key("$process_person_profile"));
+    }
+
+    #[test]
+    fn v1_add_group_overrides_anon_person_profile() {
+        let mut event = Event::new_anon("test");
+        // new_anon sets $process_person_profile=false; add_group forces true.
+        event.add_group("company", "acme");
+        let v1 = V1Event::from_event(&event);
+        let json = serde_json::to_value(&v1).unwrap();
+        let options = json.get("options").unwrap().as_object().unwrap();
+        assert_eq!(
+            options.get("process_person_profile"),
+            Some(&serde_json::json!(true))
+        );
+        let props = v1.properties.as_object().unwrap();
+        assert!(!props.contains_key("$process_person_profile"));
+        let groups = props.get("$groups").unwrap().as_object().unwrap();
+        assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
+    }
 }
