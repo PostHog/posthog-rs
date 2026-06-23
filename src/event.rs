@@ -491,7 +491,12 @@ pub mod tests {
             inner.properties.get("$process_person_profile"),
             Some(&serde_json::Value::Bool(true)),
         );
-        let groups = inner.properties.get("$groups").unwrap().as_object().unwrap();
+        let groups = inner
+            .properties
+            .get("$groups")
+            .unwrap()
+            .as_object()
+            .unwrap();
         assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
     }
 }

@@ -185,12 +185,8 @@ mod tests {
     fn v1_event_extracts_magic_keys_to_options() {
         let mut event = Event::new("test_event", "user-1");
         event.insert_prop("$cookieless_mode", true).unwrap();
-        event
-            .insert_prop("$process_person_profile", false)
-            .unwrap();
-        event
-            .insert_prop("$product_tour_id", "tour-42")
-            .unwrap();
+        event.insert_prop("$process_person_profile", false).unwrap();
+        event.insert_prop("$product_tour_id", "tour-42").unwrap();
 
         let v1 = V1Event::from_event(&event);
         let json = serde_json::to_value(&v1).unwrap();
@@ -377,9 +373,7 @@ mod tests {
         let mut event = Event::new("test", "user-1");
         event.insert_prop("$cookieless_mode", true).unwrap();
         event.insert_prop("custom_metric", 42).unwrap();
-        event
-            .insert_prop("future_backend_flag", "hello")
-            .unwrap();
+        event.insert_prop("future_backend_flag", "hello").unwrap();
 
         let v1 = V1Event::from_event(&event);
         let json = serde_json::to_value(&v1).unwrap();
@@ -448,9 +442,7 @@ mod tests {
     #[test]
     fn v1_identified_event_with_explicit_personless() {
         let mut event = Event::new("test", "user-1");
-        event
-            .insert_prop("$process_person_profile", false)
-            .unwrap();
+        event.insert_prop("$process_person_profile", false).unwrap();
         let v1 = V1Event::from_event(&event);
         let json = serde_json::to_value(&v1).unwrap();
         let options = json.get("options").unwrap().as_object().unwrap();
