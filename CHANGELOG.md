@@ -1,5 +1,17 @@
 # posthog-rs
 
+## 0.13.3 — 2026-06-23
+
+### Patch changes
+
+- [911ceae](https://github.com/posthog/posthog-rs/commit/911ceae82b421ac1c0b1a96f73999638a1240f6b) Internal changes to the `capture-v1` feature path. No effect on default (v0) capture behavior. — Thanks @eli-r-ph!
+
+## 0.13.2 — 2026-06-18
+
+### Patch changes
+
+- [a4d9724](https://github.com/posthog/posthog-rs/commit/a4d9724bfcdf5ab8167f48541fb4f6205bd2727d) Remove duplicated per-event API keys from v0 batch payloads. — Thanks @marandaneto!
+
 ## 0.13.1 — 2026-06-15
 
 ### Patch changes

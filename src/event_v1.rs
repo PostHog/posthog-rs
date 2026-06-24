@@ -4,7 +4,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::event::{Event, EventOptions};
+use crate::constants::{OPTIONS_EXTRACTION_TABLE, SESSION_ID_PROP, WINDOW_ID_PROP};
+use crate::event::Event;
+
+/// Crate-internal V1 capture options, derived from `event.properties`.
+/// Serializes as a JSON object; an empty map produces `"options":{}`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Options(serde_json::Map<String, serde_json::Value>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct V1Event {
@@ -16,7 +22,7 @@ pub struct V1Event {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
-    pub options: EventOptions,
+    pub(crate) options: Options,
     pub properties: serde_json::Value,
 }
 
@@ -52,17 +58,19 @@ impl V1Event {
             .map(|ts| ts.and_utc().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
             .unwrap_or_else(|| now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
 
-        // V1 carries process_person_profile in options; strip the property
-        // duplicate in case a caller manually inserted it.
-        if event.options().process_person_profile.is_some() {
-            properties.remove("$process_person_profile");
+        // Extract magic keys from properties into the V1 options map.
+        let mut options_map = serde_json::Map::new();
+        for &(prop_key, wire_key) in OPTIONS_EXTRACTION_TABLE {
+            if let Some(val) = properties.remove(prop_key) {
+                options_map.insert(wire_key.to_string(), val);
+            }
         }
 
         let session_id = properties
-            .remove("$session_id")
+            .remove(SESSION_ID_PROP)
             .and_then(|v| v.as_str().map(String::from));
         let window_id = properties
-            .remove("$window_id")
+            .remove(WINDOW_ID_PROP)
             .and_then(|v| v.as_str().map(String::from));
 
         Self {
@@ -72,7 +80,7 @@ impl V1Event {
             timestamp,
             session_id,
             window_id,
-            options: event.options().clone(),
+            options: Options(options_map),
             properties: serde_json::to_value(properties)
                 .unwrap_or(serde_json::Value::Object(Default::default())),
         }
@@ -140,6 +148,8 @@ mod tests {
     use super::*;
     use crate::Event;
 
+    // -- from_event basics ---------------------------------------------------
+
     #[test]
     fn v1_event_from_event_basic() {
         let event = Event::new("test_event", "user-1");
@@ -147,11 +157,12 @@ mod tests {
 
         assert_eq!(v1.event, "test_event");
         assert_eq!(v1.distinct_id, "user-1");
-        assert_eq!(v1.options.process_person_profile, None);
-        assert_eq!(v1.options.cookieless_mode, None);
-        assert_eq!(v1.options.disable_skew_correction, None);
         assert!(v1.session_id.is_none());
         assert!(v1.window_id.is_none());
+        // No magic keys -> empty options map on the wire.
+        let json = serde_json::to_value(&v1).unwrap();
+        let options = json.get("options").unwrap().as_object().unwrap();
+        assert!(options.is_empty());
     }
 
     #[test]
@@ -160,17 +171,24 @@ mod tests {
         let v1 = V1Event::from_event(&event);
 
         assert_eq!(v1.event, "anon_event");
-        assert_eq!(v1.options.process_person_profile, Some(false));
+        let json = serde_json::to_value(&v1).unwrap();
+        let options = json.get("options").unwrap().as_object().unwrap();
+        assert_eq!(
+            options.get("process_person_profile"),
+            Some(&serde_json::json!(false))
+        );
         let props = v1.properties.as_object().unwrap();
         assert!(!props.contains_key("$process_person_profile"));
     }
 
+    // -- property -> options extraction --------------------------------------
+
     #[test]
-    fn v1_event_options_overrides_serialize_and_unset_are_omitted() {
+    fn v1_event_extracts_magic_keys_to_options() {
         let mut event = Event::new("test_event", "user-1");
-        event.set_option("cookieless_mode", true).unwrap();
-        event.set_option("process_person_profile", false).unwrap();
-        event.set_option("product_tour_id", "tour-42").unwrap();
+        event.insert_prop("$cookieless_mode", true).unwrap();
+        event.insert_prop("$process_person_profile", false).unwrap();
+        event.insert_prop("$product_tour_id", "tour-42").unwrap();
 
         let v1 = V1Event::from_event(&event);
         let json = serde_json::to_value(&v1).unwrap();
@@ -188,8 +206,32 @@ mod tests {
             options.get("product_tour_id"),
             Some(&serde_json::json!("tour-42"))
         );
+        // disable_skew_correction not set -> absent.
         assert!(!options.contains_key("disable_skew_correction"));
+        // Extracted keys removed from properties.
+        let props = v1.properties.as_object().unwrap();
+        assert!(!props.contains_key("$cookieless_mode"));
+        assert!(!props.contains_key("$process_person_profile"));
+        assert!(!props.contains_key("$product_tour_id"));
     }
+
+    #[test]
+    fn v1_event_extracts_ignore_sent_at_as_disable_skew_correction() {
+        let mut event = Event::new("test", "user-1");
+        event.insert_prop("$ignore_sent_at", true).unwrap();
+
+        let v1 = V1Event::from_event(&event);
+        let json = serde_json::to_value(&v1).unwrap();
+        let options = json.get("options").unwrap().as_object().unwrap();
+        assert_eq!(
+            options.get("disable_skew_correction"),
+            Some(&serde_json::json!(true))
+        );
+        let props = v1.properties.as_object().unwrap();
+        assert!(!props.contains_key("$ignore_sent_at"));
+    }
+
+    // -- session/window extraction -------------------------------------------
 
     #[test]
     fn v1_event_extracts_session_window_from_properties() {
@@ -206,6 +248,8 @@ mod tests {
         assert!(!props.contains_key("$window_id"));
     }
 
+    // -- groups --------------------------------------------------------------
+
     #[test]
     fn v1_event_groups_in_properties() {
         let mut event = Event::new("test", "user-1");
@@ -216,8 +260,16 @@ mod tests {
         let props = v1.properties.as_object().unwrap();
         let groups = props.get("$groups").unwrap().as_object().unwrap();
         assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
-        assert_eq!(v1.options.process_person_profile, Some(true));
+        // add_group forces process_person_profile=true.
+        let json = serde_json::to_value(&v1).unwrap();
+        let options = json.get("options").unwrap().as_object().unwrap();
+        assert_eq!(
+            options.get("process_person_profile"),
+            Some(&serde_json::json!(true))
+        );
     }
+
+    // -- batch / response serialization (unchanged) --------------------------
 
     #[test]
     fn v1_batch_request_serializes() {
@@ -316,70 +368,109 @@ mod tests {
         );
     }
 
+    // -- unknown properties are NOT lifted -----------------------------------
+
     #[test]
-    fn v1_extra_options_serialize_as_top_level_keys() {
+    fn v1_unknown_properties_stay_in_properties() {
         let mut event = Event::new("test", "user-1");
-        event.set_option("cookieless_mode", true).unwrap();
-        event.set_option("future_flag", true).unwrap();
-        event.set_option("routing_key", "us-east").unwrap();
+        event.insert_prop("$cookieless_mode", true).unwrap();
+        event.insert_prop("custom_metric", 42).unwrap();
+        event.insert_prop("future_backend_flag", "hello").unwrap();
 
         let v1 = V1Event::from_event(&event);
         let json = serde_json::to_value(&v1).unwrap();
         let options = json.get("options").unwrap().as_object().unwrap();
 
+        // Known key extracted.
         assert_eq!(
             options.get("cookieless_mode"),
             Some(&serde_json::json!(true))
         );
-        assert_eq!(options.get("future_flag"), Some(&serde_json::json!(true)));
+        // Unknown keys NOT lifted — stay in properties.
+        assert!(!options.contains_key("custom_metric"));
+        assert!(!options.contains_key("future_backend_flag"));
+        let props = v1.properties.as_object().unwrap();
+        assert_eq!(props.get("custom_metric"), Some(&serde_json::json!(42)));
         assert_eq!(
-            options.get("routing_key"),
-            Some(&serde_json::json!("us-east"))
+            props.get("future_backend_flag"),
+            Some(&serde_json::json!("hello"))
         );
-        assert!(!options.contains_key("disable_skew_correction"));
     }
 
+    // -- empty options map renders as {} on the wire -------------------------
+
     #[test]
-    fn v1_extra_options_empty_map_omitted_from_wire() {
+    fn v1_empty_options_serializes_as_empty_object() {
         let event = Event::new("test", "user-1");
         let v1 = V1Event::from_event(&event);
         let json_str = serde_json::to_string(&v1).unwrap();
-        assert!(!json_str.contains("extra"));
+        assert!(json_str.contains("\"options\":{}"));
     }
 
-    #[test]
-    fn v1_set_option_routes_unknown_keys_to_extra() {
-        let mut event = Event::new("test", "user-1");
-        event.set_option("new_backend_flag", true).unwrap();
-        event.set_option("batch_priority", 5u32).unwrap();
+    // -- anon event: property extracted, not in properties -------------------
 
+    #[test]
+    fn v1_anon_event_process_person_profile_in_options_not_properties() {
+        let event = Event::new_anon("test");
         let v1 = V1Event::from_event(&event);
         let json = serde_json::to_value(&v1).unwrap();
         let options = json.get("options").unwrap().as_object().unwrap();
-
         assert_eq!(
-            options.get("new_backend_flag"),
+            options.get("process_person_profile"),
+            Some(&serde_json::json!(false))
+        );
+        let props = v1.properties.as_object().unwrap();
+        assert!(!props.contains_key("$process_person_profile"));
+    }
+
+    // -- explicit insert_prop wins over constructor default ------------------
+
+    #[test]
+    fn v1_explicit_insert_prop_wins_over_anon_default() {
+        let mut event = Event::new_anon("test");
+        // new_anon sets $process_person_profile=false; explicit insert overwrites.
+        event.insert_prop("$process_person_profile", true).unwrap();
+        let v1 = V1Event::from_event(&event);
+        let json = serde_json::to_value(&v1).unwrap();
+        let options = json.get("options").unwrap().as_object().unwrap();
+        assert_eq!(
+            options.get("process_person_profile"),
             Some(&serde_json::json!(true))
         );
-        assert_eq!(options.get("batch_priority"), Some(&serde_json::json!(5)));
-    }
-
-    #[test]
-    fn v1_anon_event_no_process_person_profile_in_properties() {
-        let event = Event::new_anon("test");
-        let v1 = V1Event::from_event(&event);
-        assert_eq!(v1.options.process_person_profile, Some(false));
         let props = v1.properties.as_object().unwrap();
         assert!(!props.contains_key("$process_person_profile"));
     }
 
     #[test]
-    fn v1_strips_duplicate_process_person_profile_property() {
-        let mut event = Event::new_anon("test");
+    fn v1_identified_event_with_explicit_personless() {
+        let mut event = Event::new("test", "user-1");
         event.insert_prop("$process_person_profile", false).unwrap();
         let v1 = V1Event::from_event(&event);
-        assert_eq!(v1.options.process_person_profile, Some(false));
+        let json = serde_json::to_value(&v1).unwrap();
+        let options = json.get("options").unwrap().as_object().unwrap();
+        assert_eq!(
+            options.get("process_person_profile"),
+            Some(&serde_json::json!(false))
+        );
         let props = v1.properties.as_object().unwrap();
         assert!(!props.contains_key("$process_person_profile"));
+    }
+
+    #[test]
+    fn v1_add_group_overrides_anon_person_profile() {
+        let mut event = Event::new_anon("test");
+        // new_anon sets $process_person_profile=false; add_group forces true.
+        event.add_group("company", "acme");
+        let v1 = V1Event::from_event(&event);
+        let json = serde_json::to_value(&v1).unwrap();
+        let options = json.get("options").unwrap().as_object().unwrap();
+        assert_eq!(
+            options.get("process_person_profile"),
+            Some(&serde_json::json!(true))
+        );
+        let props = v1.properties.as_object().unwrap();
+        assert!(!props.contains_key("$process_person_profile"));
+        let groups = props.get("$groups").unwrap().as_object().unwrap();
+        assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
     }
 }

@@ -205,19 +205,11 @@ pub fn posthog_rs::Event::event_name(&self) -> &str
 pub fn posthog_rs::Event::insert_prop<K: core::convert::Into<alloc::string::String>, P: serde_core::ser::Serialize>(&mut self, K, P) -> core::result::Result<(), posthog_rs::Error>
 pub fn posthog_rs::Event::new<S: core::convert::Into<alloc::string::String>>(S, S) -> Self
 pub fn posthog_rs::Event::new_anon<S: core::convert::Into<alloc::string::String>>(S) -> Self
-pub fn posthog_rs::Event::options(&self) -> &posthog_rs::EventOptions
 pub fn posthog_rs::Event::properties(&self) -> &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub fn posthog_rs::Event::remove_prop(&mut self, &str) -> core::option::Option<serde_json::value::Value>
-pub fn posthog_rs::Event::set_option<V: serde_core::ser::Serialize>(&mut self, &str, V) -> core::result::Result<(), posthog_rs::Error>
 pub fn posthog_rs::Event::set_timestamp<Tz>(&mut self, chrono::datetime::DateTime<Tz>) -> core::result::Result<(), posthog_rs::Error> where Tz: chrono::offset::TimeZone
 pub fn posthog_rs::Event::set_uuid(&mut self, uuid::Uuid)
 pub fn posthog_rs::Event::with_flags(&mut self, &posthog_rs::FeatureFlagEvaluations) -> &mut Self
-pub struct posthog_rs::EventOptions
-pub posthog_rs::EventOptions::cookieless_mode: core::option::Option<bool>
-pub posthog_rs::EventOptions::disable_skew_correction: core::option::Option<bool>
-pub posthog_rs::EventOptions::extra: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
-pub posthog_rs::EventOptions::process_person_profile: core::option::Option<bool>
-pub posthog_rs::EventOptions::product_tour_id: core::option::Option<alloc::string::String>
 pub struct posthog_rs::EventResult
 pub posthog_rs::EventResult::details: core::option::Option<alloc::string::String>
 pub posthog_rs::EventResult::result: posthog_rs::EventStatus
