@@ -27,7 +27,7 @@
 //!     // Capture an analytics event.
 //!     let mut event = Event::new("signed_up", distinct_id);
 //!     event.insert_prop("plan", "pro")?;
-//!     posthog.capture(event).await?;
+//!     posthog.capture(event);
 //!
 //!     // Evaluate feature flags once, then read from the snapshot.
 //!     let flags = posthog
@@ -37,7 +37,7 @@
 //!     if flags.is_enabled("new-onboarding") {
 //!         let mut event = Event::new("onboarding_step_completed", distinct_id);
 //!         event.with_flags(&flags.only_accessed());
-//!         posthog.capture(event).await?;
+//!         posthog.capture(event);
 //!     }
 //!
 //!     Ok(())
@@ -54,7 +54,7 @@
 //!     // Capture an analytics event.
 //!     let mut event = Event::new("signed_up", distinct_id);
 //!     event.insert_prop("plan", "pro")?;
-//!     posthog.capture(event)?;
+//!     posthog.capture(event);
 //!
 //!     // Evaluate feature flags once, then read from the snapshot.
 //!     let flags = posthog.evaluate_flags(distinct_id, EvaluateFlagsOptions::default())?;
@@ -62,7 +62,7 @@
 //!     if flags.is_enabled("new-onboarding") {
 //!         let mut event = Event::new("onboarding_step_completed", distinct_id);
 //!         event.with_flags(&flags.only_accessed());
-//!         posthog.capture(event)?;
+//!         posthog.capture(event);
 //!     }
 //!
 //!     Ok(())
@@ -132,12 +132,16 @@ pub use local_evaluation::{
 #[cfg(feature = "async-client")]
 pub use local_evaluation::AsyncFlagPoller;
 
-// We expose a global capture function as a convenience, that uses a global client
+// We expose global convenience functions (capture/flush/shutdown) that use a
+// global client. flush/shutdown matter because the global singleton lives in a
+// `static`, whose `Drop` never runs — they must be called to drain on exit.
 pub use global::capture;
 #[cfg(feature = "error-tracking")]
 pub use global::capture_exception;
 #[cfg(feature = "error-tracking")]
 pub use global::capture_exception_with;
 pub use global::disable as disable_global;
+pub use global::flush;
 pub use global::init_global_client as init_global;
 pub use global::is_disabled as global_is_disabled;
+pub use global::shutdown;

@@ -25,7 +25,7 @@ async fn get_client_async() {
     event.insert_prop("key2", vec!["a", "b"]).unwrap();
     event.insert_prop("key3", child_map).unwrap();
 
-    client.capture(event).await.unwrap();
+    client.capture(event);
 }
 
 #[cfg(all(feature = "e2e-test", not(feature = "async-client")))]
@@ -55,7 +55,7 @@ fn get_client_blocking() {
     event.insert_prop("key2", vec!["a", "b"]).unwrap();
     event.insert_prop("key3", child_map).unwrap();
 
-    client.capture(event).unwrap();
+    client.capture(event);
 }
 
 #[cfg(all(feature = "e2e-test", feature = "capture-v1", feature = "async-client"))]
@@ -89,5 +89,5 @@ async fn get_client_v1_async() {
     event.insert_prop("key2", vec!["a", "b"]).unwrap();
     event.insert_prop("key3", child_map).unwrap();
 
-    client.capture(event).await.unwrap();
+    client.capture(event);
 }

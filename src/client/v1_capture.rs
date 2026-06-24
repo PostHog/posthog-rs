@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 pub(crate) const V1_CAPTURE_PATH: &str = "/i/v1/analytics/events";
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use tracing::debug;
 use uuid::Uuid;
@@ -25,12 +25,22 @@ use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse
 // ---------------------------------------------------------------------------
 
 pub(crate) fn build_events(events: &[Event], defaults: &CaptureDefaults) -> Vec<V1Event> {
+    build_events_at(events, defaults, Utc::now())
+}
+
+/// Like [`build_events`] but with an injected `now` so the transport worker can
+/// stamp deterministic event timestamps from its clock.
+pub(crate) fn build_events_at(
+    events: &[Event],
+    defaults: &CaptureDefaults,
+    now: DateTime<Utc>,
+) -> Vec<V1Event> {
     events
         .iter()
         .map(|event| {
             let mut event = event.clone();
             apply_runtime_context(&mut event);
-            let mut v1 = V1Event::from_event(&event);
+            let mut v1 = V1Event::from_event_at(&event, now);
             if let serde_json::Value::Object(ref mut map) = v1.properties {
                 if defaults.disable_geoip {
                     map.entry("$geoip_disable")
@@ -47,6 +57,17 @@ pub(crate) fn build_events(events: &[Event], defaults: &CaptureDefaults) -> Vec<
 }
 
 pub(crate) fn build_headers(opts: &ClientOptions, request_id: &Uuid, attempt: u32) -> HeaderMap {
+    build_headers_at(opts, request_id, attempt, Utc::now())
+}
+
+/// Like [`build_headers`] but with an injected `now` for a deterministic
+/// `posthog-request-timestamp` (used by the transport worker via its clock).
+pub(crate) fn build_headers_at(
+    opts: &ClientOptions,
+    request_id: &Uuid,
+    attempt: u32,
+    now: DateTime<Utc>,
+) -> HeaderMap {
     let sdk_info = get_default_user_agent();
 
     let mut headers = HeaderMap::new();
@@ -76,7 +97,7 @@ pub(crate) fn build_headers(opts: &ClientOptions, request_id: &Uuid, attempt: u3
     );
     headers.insert(
         "posthog-request-timestamp",
-        HeaderValue::from_str(&Utc::now().to_rfc3339())
+        HeaderValue::from_str(&now.to_rfc3339())
             .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
     );
     #[cfg(feature = "test-harness")]

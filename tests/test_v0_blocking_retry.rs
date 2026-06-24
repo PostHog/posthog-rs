@@ -1,5 +1,11 @@
 #![cfg(all(not(feature = "async-client"), not(feature = "capture-v1")))]
 
+//! V0 retry behavior (blocking client) under the background transport. `capture`
+//! is a non-blocking enqueue, so these tests drive delivery with `flush()` (each
+//! flush makes one attempt per pending batch, ignoring backoff). Exhausting the
+//! attempt budget takes `max_attempts` flushes; the Retry-After test instead
+//! lets the worker retry on its own schedule so the header delay is observable.
+
 use std::io::Read;
 use std::time::{Duration, Instant};
 
@@ -15,8 +21,6 @@ fn create_v0_client(base_url: String, max_attempts: u32) -> Client {
         .api_key("phc_test_token".to_string())
         .host(base_url)
         .max_capture_attempts(max_attempts)
-        // Tiny backoffs keep the retry tests fast; the retry-after test below
-        // relies on these being far smaller than the header value it asserts.
         .retry_initial_backoff_ms(1u64)
         .retry_max_backoff_ms(5u64)
         .build()
@@ -24,18 +28,30 @@ fn create_v0_client(base_url: String, max_attempts: u32) -> Client {
     posthog_rs::client(options)
 }
 
-/// Drive whichever v0 path (single `/i/v0/e/` vs `/batch/`) the test wants,
-/// so coverage of both stays DRY.
-fn capture(client: &Client, batch: bool) -> Result<(), posthog_rs::Error> {
+/// Drive whichever capture entry point the test wants. Both now enqueue onto the
+/// same worker and send through `/batch/`.
+fn capture(client: &Client, batch: bool) {
     if batch {
-        client.capture_batch(vec![Event::new("e", "user-1")], false)
+        client.capture_batch(vec![Event::new("e", "user-1")], false);
     } else {
-        client.capture(Event::new("e", "user-1"))
+        client.capture(Event::new("e", "user-1"));
     }
 }
 
+/// Poll until a mock has been hit `want` times (for the autonomous retry path
+/// that isn't driven by `flush()`).
+fn wait_for_hits(mock: &httpmock::Mock, want: usize) {
+    for _ in 0..400 {
+        if mock.hits() >= want {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(mock.hits(), want, "timed out waiting for {want} hits");
+}
+
 #[test]
-fn retryable_status_exhausts_attempts() {
+fn retryable_status_keeps_retrying_until_attempts_exhausted() {
     for status in [408u16, 500, 502, 503, 504] {
         for batch in [false, true] {
             let server = MockServer::start();
@@ -45,14 +61,15 @@ fn retryable_status_exhausts_attempts() {
             });
 
             let client = create_v0_client(server.base_url(), 3);
-            let result = capture(&client, batch);
+            capture(&client, batch);
+            client.flush();
+            client.flush();
+            client.flush();
 
-            assert!(
-                result.is_err(),
-                "status {} (batch={}) should error after exhausting retries",
-                status,
-                batch
-            );
+            mock.assert_hits(3);
+
+            // Budget exhausted: the event is dropped, so a further flush is a no-op.
+            client.flush();
             mock.assert_hits(3);
         }
     }
@@ -60,8 +77,8 @@ fn retryable_status_exhausts_attempts() {
 
 #[test]
 fn terminal_status_sends_once() {
-    // 429 here carries no Retry-After, so it is terminal (RateLimit), not
-    // retried — see `honors_retry_after_header` for the 429 + Retry-After case.
+    // 429 here carries no Retry-After, so it is terminal, not retried — see
+    // `honors_retry_after_header` for the 429 + Retry-After case.
     for status in [400u16, 401, 402, 403, 413, 415, 429] {
         for batch in [false, true] {
             let server = MockServer::start();
@@ -71,16 +88,12 @@ fn terminal_status_sends_once() {
             });
 
             let client = create_v0_client(server.base_url(), 3);
-            let result = capture(&client, batch);
+            capture(&client, batch);
+            client.flush();
+            mock.assert_hits(1);
 
-            let err = result.expect_err(&format!("status {status} should be terminal"));
-            if status == 429 {
-                assert!(
-                    matches!(err, posthog_rs::Error::RateLimit),
-                    "429 should map to RateLimit, got {:?}",
-                    err
-                );
-            }
+            // Terminal: dropped, not retried.
+            client.flush();
             mock.assert_hits(1);
         }
     }
@@ -96,7 +109,8 @@ fn success_sends_once() {
         });
 
         let client = create_v0_client(server.base_url(), 3);
-        capture(&client, batch).unwrap();
+        capture(&client, batch);
+        client.flush();
         mock.assert_hits(1);
     }
 }
@@ -114,7 +128,10 @@ fn retries_resend_identical_event() {
     let client = create_v0_client(server.base_url(), 3);
     let mut event = Event::new("e", "user-1");
     event.set_uuid(uuid::Uuid::parse_str(FIXED_UUID).unwrap());
-    let _ = client.capture(event);
+    client.capture(event);
+    client.flush();
+    client.flush();
+    client.flush();
 
     mock.assert_hits(3);
 }
@@ -150,7 +167,8 @@ fn gzip_sets_header_query_param_and_compresses_body() {
         .build()
         .unwrap();
     let client = posthog_rs::client(options);
-    client.capture(Event::new("test_event", "user1")).unwrap();
+    client.capture(Event::new("test_event", "user1"));
+    client.flush();
 
     mock.assert();
 }
@@ -158,25 +176,27 @@ fn gzip_sets_header_query_param_and_compresses_body() {
 #[test]
 fn honors_retry_after_header() {
     let server = MockServer::start();
-    // Mirrors the contract's `respects_retry_after_header`: a 429 carrying
-    // Retry-After must delay the resend by the header value, not the (tiny)
-    // exponential backoff.
+    // A 429 carrying Retry-After must delay the resend by the header value.
+    // `flush()` forces an immediate attempt and would bypass the backoff, so we
+    // let the worker retry on its own schedule and observe the gap.
     let mock = server.mock(|when, then| {
         when.method(POST);
         then.status(429).header("retry-after", "1");
     });
 
     let client = create_v0_client(server.base_url(), 2);
+    client.capture(Event::new("e", "user-1"));
+
     let start = Instant::now();
-    let _ = client.capture(Event::new("e", "user-1"));
+    client.flush();
+    mock.assert_hits(1);
+    wait_for_hits(&mock, 2);
     let elapsed = start.elapsed();
 
     mock.assert_hits(2);
-    // Exponential backoff here would be ~1ms; only an honored Retry-After: 1
-    // produces a gap this large.
     assert!(
         elapsed >= Duration::from_millis(900),
-        "Retry-After header not honored: waited only {:?}",
+        "Retry-After header not honored: second attempt after only {:?}",
         elapsed
     );
 }

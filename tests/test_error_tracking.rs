@@ -1,5 +1,9 @@
 // These tests assert the V0 wire shape; their capture-v1 twins live in
 // `test_error_tracking_v1.rs`.
+//
+// Capture is now a non-blocking enqueue drained by the background worker, which
+// always sends through the `/batch/` endpoint, so exceptions arrive nested under
+// the batch array (`/batch/0/...`) and tests `flush()` before asserting.
 #![cfg(all(feature = "error-tracking", not(feature = "capture-v1")))]
 
 use httpmock::prelude::*;
@@ -64,14 +68,15 @@ fn request_has_no_stacktrace(req: &HttpMockRequest) -> bool {
         return false;
     };
 
-    body.pointer("/properties/$exception_list/0").is_some()
+    body.pointer("/batch/0/properties/$exception_list/0")
+        .is_some()
         && body
-            .pointer("/properties/$exception_list/0/stacktrace")
+            .pointer("/batch/0/properties/$exception_list/0/stacktrace")
             .is_none()
 }
 
 fn first_exception_stack_function(body: &serde_json::Value) -> &str {
-    body.pointer("/properties/$exception_list/0/stacktrace/frames")
+    body.pointer("/batch/0/properties/$exception_list/0/stacktrace/frames")
         .and_then(|value| value.as_array())
         .and_then(|frames| frames.first())
         .and_then(|frame| frame.get("function"))
@@ -94,7 +99,7 @@ mod blocking {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/i/v0/e/")
+                .path("/batch/")
                 .body_contains(r#""event":"$exception""#)
                 .body_contains(r#""$process_person_profile":false"#)
                 .body_contains(r#""$exception_level":"error""#)
@@ -107,6 +112,7 @@ mod blocking {
 
         let client = create_test_client(server.base_url());
         client.capture_exception(&TestError).unwrap();
+        client.flush();
 
         capture_mock.assert_hits(1);
     }
@@ -116,7 +122,7 @@ mod blocking {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/i/v0/e/")
+                .path("/batch/")
                 .body_contains(r#""event":"$exception""#)
                 .body_contains(r#""distinct_id":"user-1""#)
                 .body_contains(r#""route":"/checkout""#)
@@ -140,6 +146,7 @@ mod blocking {
                     .level("warning"),
             )
             .unwrap();
+        client.flush();
 
         capture_mock.assert_hits(1);
     }
@@ -168,7 +175,7 @@ mod blocking {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/i/v0/e/")
+                .path("/batch/")
                 .body_contains(r#""event":"$exception""#)
                 .body_contains(r#""value":"payment failed""#)
                 .matches(request_has_no_stacktrace);
@@ -189,6 +196,7 @@ mod blocking {
         let client = posthog_rs::client(options);
 
         client.capture_exception(&TestError).unwrap();
+        client.flush();
 
         capture_mock.assert_hits(1);
     }
@@ -209,7 +217,7 @@ mod async_client {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/i/v0/e/")
+                .path("/batch/")
                 .body_contains(r#""event":"$exception""#)
                 .body_contains(r#""$process_person_profile":false"#)
                 .body_contains(r#""$exception_level":"error""#)
@@ -222,6 +230,7 @@ mod async_client {
 
         let client = create_test_client(server.base_url()).await;
         client.capture_exception(&TestError).await.unwrap();
+        client.flush().await;
 
         capture_mock.assert_hits(1);
     }
@@ -231,7 +240,7 @@ mod async_client {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/i/v0/e/")
+                .path("/batch/")
                 .body_contains(r#""event":"$exception""#)
                 .body_contains(r#""distinct_id":"user-1""#)
                 .body_contains(r#""route":"/checkout""#)
@@ -256,6 +265,7 @@ mod async_client {
             )
             .await
             .unwrap();
+        client.flush().await;
 
         capture_mock.assert_hits(1);
     }
@@ -285,7 +295,7 @@ mod async_client {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/i/v0/e/")
+                .path("/batch/")
                 .body_contains(r#""event":"$exception""#)
                 .body_contains(r#""value":"payment failed""#)
                 .matches(request_has_no_stacktrace);
@@ -306,6 +316,7 @@ mod async_client {
         let client = posthog_rs::client(options).await;
 
         client.capture_exception(&TestError).await.unwrap();
+        client.flush().await;
 
         capture_mock.assert_hits(1);
     }
