@@ -1,5 +1,15 @@
 # posthog-rs
 
+## 0.14.0 — 2026-06-24
+
+### Minor changes
+
+- [155d00a](https://github.com/posthog/posthog-rs/commit/155d00aa05019dd4a56412f7a432f55475e0b2f6) Runtime-independent background event transport. `capture` and `capture_batch` are now non-blocking enqueues onto a background worker — a plain `std::thread` with a blocking HTTP client, independent of any async runtime — that batches events, retries transient failures with backoff (honoring `Retry-After`), and sends them. They no longer block on the network or return delivery errors.
+  
+  New public API: `flush()` (awaited on the async client, blocking on the blocking client), `shutdown()` (flush + stop the worker + join; idempotent; drops further captures), and flush-on-`Drop`. New `ClientOptions`: `flush_at`, `max_batch_size`, `flush_interval_ms`, `max_queue_size` (a bounded queue that drops with a single warning when full), and `shutdown_timeout_ms` (bounds the shutdown/`Drop` drain). `before_send` hooks now run on the worker thread, so they apply to every queued event.
+  
+  Breaking change (0.x): `capture` and `capture_batch` no longer return a `Result` — and are no longer `async` on the async client. They enqueue the event and return immediately (infallibly) instead of awaiting delivery; transient HTTP failures surface as logged warnings rather than `Err`. Call `flush()` or `shutdown()` before process exit to ensure queued events are delivered. — Thanks @cat-ph!
+
 ## 0.13.3 — 2026-06-23
 
 ### Patch changes
