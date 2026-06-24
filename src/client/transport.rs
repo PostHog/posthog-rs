@@ -76,9 +76,8 @@ impl Completion {
 pub(crate) trait Clock: Send + Sync + 'static {
     /// Monotonic time, for batching/retry scheduling.
     fn now(&self) -> Instant;
-    /// Wall-clock time, for v1 `created_at` / event timestamps / request headers.
-    /// Unused by the v0 pipeline, which takes its timestamp from the event itself.
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    /// Wall-clock time: stamps each event's capture (enqueue) timestamp, plus the
+    /// v0 batch `sent_at` and v1 `created_at` / request headers.
     fn now_utc(&self) -> DateTime<Utc>;
 }
 
