@@ -155,7 +155,7 @@ impl TransportHandle {
             .is_err()
         {
             // Worker gone; release the slot we reserved.
-            self.len.fetch_sub(1, Ordering::AcqRel);
+            dec_len(&self.len, 1);
         }
     }
 
@@ -179,7 +179,7 @@ impl TransportHandle {
             return;
         }
         if self.tx.send(Control::HistoricalBatch { events }).is_err() {
-            self.len.fetch_sub(fitted, Ordering::AcqRel);
+            dec_len(&self.len, fitted);
         }
     }
 
@@ -279,10 +279,26 @@ fn try_reserve(len: &AtomicUsize, max: usize, warned: &AtomicBool) -> bool {
 /// Decrement the in-flight counter by `n` (no-op for 0). Called when events reach
 /// a terminal outcome (delivered or dropped) so `pending()` reflects everything
 /// still in flight: channel + worker buffer + retry queue.
+///
+/// Saturates at 0 instead of a plain `fetch_sub`. The accounting spans several
+/// paths (before_send drops, partial v1 results, terminal outcomes, shutdown
+/// drops, channel drain); a double-decrement bug would otherwise underflow this
+/// `AtomicUsize` and wrap to a huge value, making the bounded queue look
+/// permanently full and silently dropping every later event. A `debug_assert`
+/// still surfaces such a bug in tests; release builds clamp rather than wrap.
 fn dec_len(len: &AtomicUsize, n: usize) {
-    if n > 0 {
-        len.fetch_sub(n, Ordering::AcqRel);
+    if n == 0 {
+        return;
     }
+    let _ = len.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        debug_assert!(
+            current >= n,
+            "posthog-rs: in-flight counter underflow ({} - {})",
+            current,
+            n
+        );
+        Some(current.saturating_sub(n))
+    });
 }
 
 /// Per-request timeout for a send. On the shutdown/disconnect path (`deadline`
