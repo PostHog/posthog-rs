@@ -172,8 +172,20 @@ impl ErrorTrackingOptions {
 /// where the panic count is zero, so a panic there is a joinable thread panic
 /// rather than the process abort a panic on the hook thread would cause.
 ///
-/// Installing the hook twice returns [`Error::PanicHookAlreadyInstalled`].
+/// Delivery is best-effort. The flush is bounded by
+/// [`ErrorTrackingOptions`]'s `panic_flush_timeout_ms` (default 2s), and the
+/// event rides the normal transport: the just-captured `$exception` is flushed
+/// ahead of queued retries, but under sustained backpressure — a slow or
+/// unreachable endpoint, or a large capture backlog — it may not be sent before
+/// the process exits.
+///
+/// Installing the hook twice returns [`Error::PanicHookAlreadyInstalled`]. A
+/// disabled client installs nothing and returns `Ok(())` — it can't send, so it
+/// must not latch the single process-wide hook and block a later enabled install.
 pub fn install_panic_hook(client: Arc<Client>) -> Result<(), Error> {
+    if client.is_disabled() {
+        return Ok(());
+    }
     install_hook(move |panic_info| capture_panic(&client, panic_info))
 }
 
@@ -1407,6 +1419,34 @@ mod tests {
                 .unwrap(),
         );
         assert!(!should_capture_global_panics(&opted_out));
+    }
+
+    #[test]
+    fn install_panic_hook_on_disabled_client_does_not_latch() {
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+
+        let disabled = build_test_client(
+            ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .disabled(true)
+                .build()
+                .unwrap(),
+        );
+        let result = install_panic_hook(disabled);
+        let latched = PANIC_HOOK_INSTALLED.load(Ordering::Acquire);
+
+        // Restore before asserting so a regression (which would install) can't
+        // leave a hook dangling for other tests.
+        reset.restore();
+        assert!(result.is_ok(), "installing on a disabled client returns Ok");
+        assert!(
+            !latched,
+            "a disabled client must not latch the process-wide hook"
+        );
     }
 
     #[test]

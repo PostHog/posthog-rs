@@ -7,3 +7,5 @@ Panic autocapture, on by default. When the global client is initialized with `in
 Set `ErrorTrackingOptions::capture_panics` to `false` to opt out of the automatic global install. To capture panics through a *standalone* (non-global) `Client`, call `install_panic_hook(Arc<Client>)` yourself — the hook is `'static`, so it takes an `Arc` to keep the client alive for the process.
 
 New `ErrorTrackingOptions`: `capture_panics` (default `true`) and `panic_flush_timeout_ms` (default 2000) — the latter bounds how long the hook blocks the panicking thread waiting for the event to flush before letting the panic proceed, kept short and separate from `shutdown_timeout_ms` so a slow or unreachable PostHog can't freeze the crashing process or delay its panic message.
+
+Delivery is best-effort: the just-captured `$exception` is flushed ahead of queued retries, but under sustained backpressure (a slow/unreachable endpoint or a large capture backlog) it may not be sent within the bound before the process exits.
