@@ -177,15 +177,15 @@ pub fn install_panic_hook(client: Arc<Client>) -> Result<(), Error> {
     install_hook(move |panic_info| capture_panic(&client, panic_info))
 }
 
-/// If the global client has `capture_panics` enabled (the default), install the
-/// panic hook against it. Best-effort and idempotent: a hook installed earlier
-/// (e.g. a manual [`install_panic_hook`]) is left in place. Called by
-/// `init_global` once the global client is set.
+/// If the global client has `capture_panics` enabled (the default) and can
+/// actually send, install the panic hook against it. Best-effort and idempotent:
+/// a hook installed earlier (e.g. a manual [`install_panic_hook`]) is left in
+/// place. Called by `init_global` once the global client is set.
 pub(crate) fn maybe_install_global_panic_hook() {
     let Some(client) = crate::global::global_client() else {
         return;
     };
-    if !client.error_tracking_options().capture_panics() {
+    if !should_capture_global_panics(client) {
         return;
     }
     // The hook reads the global client at panic time — it lives in a process
@@ -194,6 +194,14 @@ pub(crate) fn maybe_install_global_panic_hook() {
         Some(client) => capture_panic(client, panic_info),
         None => Ok(()),
     });
+}
+
+/// Whether `init_global` should auto-install the panic hook for this client.
+/// A disabled client can't send, so it must not latch the single process-wide
+/// hook — that would block a later [`install_panic_hook`] on an enabled
+/// standalone client.
+fn should_capture_global_panics(client: &Client) -> bool {
+    !client.is_disabled() && client.error_tracking_options().capture_panics()
 }
 
 /// Latch the single process-wide panic hook, then install one that runs
@@ -1361,6 +1369,44 @@ mod tests {
             !opted_out.capture_panics(),
             "capture_panics is configurable"
         );
+    }
+
+    #[test]
+    fn should_capture_global_panics_gates_on_enabled_and_flag() {
+        let enabled = build_test_client(
+            ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .build()
+                .unwrap(),
+        );
+        assert!(should_capture_global_panics(&enabled));
+
+        // A disabled client can't send, so it must not latch the single hook.
+        let disabled = build_test_client(
+            ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .disabled(true)
+                .build()
+                .unwrap(),
+        );
+        assert!(
+            !should_capture_global_panics(&disabled),
+            "a disabled client must not latch the process-wide hook"
+        );
+
+        let opted_out = build_test_client(
+            ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .error_tracking(
+                    ErrorTrackingOptionsBuilder::default()
+                        .capture_panics(false)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        );
+        assert!(!should_capture_global_panics(&opted_out));
     }
 
     #[test]

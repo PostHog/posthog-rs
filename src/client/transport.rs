@@ -41,6 +41,11 @@ pub(crate) enum Control {
         events: Vec<Event>,
     },
     Flush(Completion),
+    /// Like [`Control::Flush`], but sends the freshly captured live buffer
+    /// *before* older held retries. Used by the panic hook so a retry backlog
+    /// behind a slow endpoint can't starve the just-enqueued `$exception` within
+    /// the hook's short bounded wait.
+    FlushCaptures(Completion),
     Shutdown(Completion),
     /// Test-only: re-evaluate the (virtual) clock and flush/retry whatever is now
     /// due, so interval and backoff timing can be driven without real sleeps.
@@ -282,7 +287,7 @@ impl TransportHandle {
     #[cfg(feature = "error-tracking")]
     pub(crate) fn flush_blocking_timeout(&self, timeout: Duration) {
         let (tx, rx) = mpsc::channel();
-        if self.send_control(Control::Flush(Completion::Blocking(tx))) {
+        if self.send_control(Control::FlushCaptures(Completion::Blocking(tx))) {
             let _ = rx.recv_timeout(timeout.min(MAX_SHUTDOWN_TIMEOUT));
         }
     }
@@ -521,6 +526,18 @@ fn run_worker(
                 buffer_since = None;
                 completion.signal();
             }
+            Wake::Msg(Control::FlushCaptures(completion)) => {
+                // Panic-hook flush: send the freshly captured live buffer (the
+                // `$exception`) FIRST, so a retry backlog behind a slow endpoint
+                // can't starve it within the hook's bounded wait. Older retries
+                // and historical batches follow, best-effort, on the way out.
+                send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
+                buffer_since = None;
+                pipeline.flush_retries(None);
+                drain_historical(&mut pipeline, &mut historical, None);
+                historical_since = None;
+                completion.signal();
+            }
             Wake::Msg(Control::Shutdown(completion)) => {
                 // Drain held retries, queued historical batches, then buffered
                 // events — one final attempt each, bounded by `shutdown_timeout`:
@@ -588,7 +605,7 @@ fn run_worker(
 fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
     while let Ok(control) = rx.try_recv() {
         match control {
-            Control::Flush(c) | Control::Shutdown(c) => c.signal(),
+            Control::Flush(c) | Control::FlushCaptures(c) | Control::Shutdown(c) => c.signal(),
             #[cfg(test)]
             Control::Tick(c) => c.signal(),
             Control::Capture { .. } => dec_len(len, 1),
