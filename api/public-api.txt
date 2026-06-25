@@ -97,6 +97,13 @@ pub fn posthog_rs::CaptureExceptionOptions::group<N: core::convert::Into<alloc::
 pub fn posthog_rs::CaptureExceptionOptions::level<S: core::convert::Into<alloc::string::String>>(self, S) -> Self
 pub fn posthog_rs::CaptureExceptionOptions::new() -> Self
 pub fn posthog_rs::CaptureExceptionOptions::property<K: core::convert::Into<alloc::string::String>, V: serde_core::ser::Serialize>(self, K, V) -> core::result::Result<Self, posthog_rs::Error>
+#[non_exhaustive] pub struct posthog_rs::CaptureFailure<'a>
+impl<'a> posthog_rs::CaptureFailure<'a>
+pub fn posthog_rs::CaptureFailure<'a>::attempt(&self) -> u32
+pub fn posthog_rs::CaptureFailure<'a>::error(&self) -> core::option::Option<&posthog_rs::Error>
+pub fn posthog_rs::CaptureFailure<'a>::event_count(&self) -> usize
+pub fn posthog_rs::CaptureFailure<'a>::event_results(&self) -> &std::collections::hash::map::HashMap<uuid::Uuid, posthog_rs::EventResult>
+pub fn posthog_rs::CaptureFailure<'a>::historical_migration(&self) -> bool
 pub struct posthog_rs::CaptureResponse
 pub posthog_rs::CaptureResponse::results: std::collections::hash::map::HashMap<uuid::Uuid, posthog_rs::EventResult>
 pub struct posthog_rs::Client
@@ -150,6 +157,7 @@ pub fn posthog_rs::ClientOptionsBuilder::shutdown_timeout_ms(&mut self, u64) -> 
 impl posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog_rs::Event) -> core::option::Option<posthog_rs::Event> + core::marker::Send + 'static
 pub fn posthog_rs::ClientOptionsBuilder::build(&self) -> core::result::Result<posthog_rs::ClientOptions, posthog_rs::ClientOptionsBuilderError>
+pub fn posthog_rs::ClientOptionsBuilder::on_error<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(&posthog_rs::CaptureFailure<'_>) + core::marker::Send + 'static
 impl core::default::Default for posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::default() -> Self
 pub struct posthog_rs::Cohort
@@ -304,6 +312,9 @@ pub posthog_rs::MultivariateFilter::variants: alloc::vec::Vec<posthog_rs::Multiv
 pub struct posthog_rs::MultivariateVariant
 pub posthog_rs::MultivariateVariant::key: alloc::string::String
 pub posthog_rs::MultivariateVariant::rollout_percentage: f64
+pub struct posthog_rs::OnErrorHook(_)
+impl posthog_rs::OnErrorHook
+pub fn posthog_rs::OnErrorHook::new<F>(F) -> Self where F: core::ops::function::FnMut(&posthog_rs::CaptureFailure<'_>) + core::marker::Send + 'static
 pub struct posthog_rs::Property
 pub posthog_rs::Property::key: alloc::string::String
 pub posthog_rs::Property::operator: alloc::string::String

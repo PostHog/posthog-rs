@@ -226,3 +226,45 @@ async fn successful_status_drains_the_queue() {
     client.flush().await;
     mock.assert_hits(1);
 }
+
+// --- on_error hook (public API) --------------------------------------------
+
+#[tokio::test]
+async fn on_error_hook_observes_permanent_failure() {
+    use std::sync::{Arc, Mutex};
+
+    let server = MockServer::start();
+    let reject = server.mock(|when, then| {
+        when.method(POST);
+        then.status(400)
+            .header("content-type", "application/json")
+            .json_body(serde_json::json!({ "error": "bad" }));
+    });
+
+    let seen = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let sink = Arc::clone(&seen);
+    let options = ClientOptionsBuilder::default()
+        .api_key("phc_test".to_string())
+        .host(server.base_url())
+        .flush_interval_ms(600_000u64)
+        .on_error(move |failure| {
+            assert!(
+                failure.error().is_some(),
+                "a rejected batch carries an error"
+            );
+            sink.lock().unwrap().push(failure.event_count());
+        })
+        .build()
+        .unwrap();
+
+    let client = posthog_rs::client(options).await;
+    client.capture(Event::new("e", "user-1"));
+    client.flush().await;
+
+    reject.assert_hits(1);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![1],
+        "the public on_error hook observed the dropped batch"
+    );
+}

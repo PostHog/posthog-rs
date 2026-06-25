@@ -88,10 +88,12 @@ mod local_evaluation;
 pub use client::client;
 pub use client::BeforeSendHook;
 pub use client::CaptureCompression;
+pub use client::CaptureFailure;
 pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
+pub use client::OnErrorHook;
 
 // Endpoints
 pub use endpoints::{

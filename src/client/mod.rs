@@ -1,11 +1,18 @@
 use std::sync::{Arc, Mutex};
 
 use crate::endpoints::{EndpointManager, DEFAULT_HOST};
+use crate::error::Error;
 #[cfg(feature = "error-tracking")]
 use crate::error_tracking::ErrorTrackingOptions;
 use crate::event::Event;
+#[cfg(feature = "capture-v1")]
+use crate::event_v1::EventResult;
 use derive_builder::Builder;
+#[cfg(feature = "capture-v1")]
+use std::collections::HashMap;
 use tracing::warn;
+#[cfg(feature = "capture-v1")]
+use uuid::Uuid;
 
 mod common;
 
@@ -84,6 +91,100 @@ impl BeforeSendHook {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         (hook)(event)
+    }
+}
+
+type OnErrorFn = dyn FnMut(&CaptureFailure<'_>) + Send + 'static;
+type SharedOnErrorHook = Arc<Mutex<Box<OnErrorFn>>>;
+
+/// Hook invoked once per terminal batch that fails delivery.
+///
+/// Registered via [`ClientOptionsBuilder::on_error`]. The hook runs on the
+/// background transport thread, so keep it cheap and non-blocking, and never
+/// call [`Client::flush`] or `shutdown` from it (the worker would deadlock on
+/// itself). It is observability-only: the events are already gone and cannot be
+/// re-queued. Hook panics are caught and ignored.
+#[derive(Clone)]
+pub struct OnErrorHook(SharedOnErrorHook);
+
+impl OnErrorHook {
+    /// Create a new on-error hook.
+    pub fn new<F>(hook: F) -> Self
+    where
+        F: FnMut(&CaptureFailure<'_>) + Send + 'static,
+    {
+        Self(Arc::new(Mutex::new(Box::new(hook))))
+    }
+
+    pub(crate) fn apply(&self, failure: &CaptureFailure<'_>) {
+        let mut hook = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (hook)(failure)
+    }
+}
+
+/// Details of a terminal batch delivery failure, passed by reference to each
+/// registered [`OnErrorHook`].
+///
+/// A batch fails terminally when the SDK gives up delivering it: a permanent
+/// rejection (e.g. 400/402), or transient transport/HTTP failures that exhaust
+/// the retry budget. [`error`](Self::error) carries the cause and
+/// [`event_count`](Self::event_count) how many events were dropped.
+///
+/// Fields are read through accessors; the struct is `#[non_exhaustive]` so more
+/// detail can be added without breaking callers.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct CaptureFailure<'a> {
+    error: Option<&'a Error>,
+    event_count: usize,
+    attempt: u32,
+    historical_migration: bool,
+    #[cfg(feature = "capture-v1")]
+    results: &'a HashMap<Uuid, EventResult>,
+}
+
+impl<'a> CaptureFailure<'a> {
+    /// The batch-level cause of this failure (a permanent reject, or exhausted
+    /// transport/HTTP retries).
+    #[cfg_attr(
+        not(feature = "capture-v1"),
+        doc = "\nAlways present: every failure surfaced to the hook carries a cause."
+    )]
+    #[cfg_attr(
+        feature = "capture-v1",
+        doc = "\n`None` only when the request itself succeeded (2xx) but some events were not\npersisted after the retry budget — inspect [`event_results`](Self::event_results)."
+    )]
+    pub fn error(&self) -> Option<&Error> {
+        self.error
+    }
+
+    /// Number of events this failure dropped.
+    pub fn event_count(&self) -> usize {
+        self.event_count
+    }
+
+    /// The failing attempt number (equals the configured maximum on exhaustion).
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    /// Whether the batch was a historical-migration batch.
+    pub fn historical_migration(&self) -> bool {
+        self.historical_migration
+    }
+
+    /// Per-event server verdicts for the batch (V1 capture pipeline only).
+    ///
+    /// Maps event UUID to its [`EventResult`] (`retry`/`drop`/`warning`/… plus a
+    /// `details` reason). Complete when [`error`](Self::error) is `None` (a 2xx
+    /// where events weren't persisted after retries); possibly partial on a
+    /// batch-level failure (only verdicts collected from earlier attempts).
+    #[cfg(feature = "capture-v1")]
+    pub fn event_results(&self) -> &HashMap<Uuid, EventResult> {
+        self.results
     }
 }
 
@@ -232,6 +333,12 @@ pub struct ClientOptions {
     #[builder(default, setter(custom))]
     pub(crate) before_send: Vec<BeforeSendHook>,
 
+    /// Hooks invoked once per terminal batch delivery failure. Observability
+    /// only; registering at least one also silences the default WARN logged for
+    /// terminal batch rejects/exhaustion (the caller now owns that signal).
+    #[builder(default, setter(custom))]
+    pub(crate) on_error: Vec<OnErrorHook>,
+
     /// Extra HTTP headers injected into every outbound capture request.
     /// Used by the SDK test harness adapter to attach `X-Test-Id` for
     /// parallel test isolation.
@@ -332,6 +439,24 @@ impl ClientOptionsBuilder {
         self.before_send
             .get_or_insert_with(Vec::new)
             .push(BeforeSendHook::new(hook));
+        self
+    }
+
+    /// Add a hook invoked once per terminal batch that fails delivery.
+    ///
+    /// Fires on a permanent rejection or after the retry budget is exhausted,
+    /// with the cause in [`CaptureFailure::error`]. The hook runs on the
+    /// background transport thread: keep it cheap, do not call `flush`/`shutdown`
+    /// from it, and expect panics to be caught and ignored. Registering a hook
+    /// silences the default WARN for terminal batch rejects/exhaustion; other
+    /// drop warnings (shutdown, serialization, queue-full) are unaffected.
+    pub fn on_error<F>(&mut self, hook: F) -> &mut Self
+    where
+        F: FnMut(&CaptureFailure<'_>) + Send + 'static,
+    {
+        self.on_error
+            .get_or_insert_with(Vec::new)
+            .push(OnErrorHook::new(hook));
         self
     }
 

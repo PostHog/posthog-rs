@@ -50,6 +50,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _perf = posthog_rs::client(performance_config).await;
     println!("   → Evaluates flags locally (100x faster)\n");
 
+    // 6. OBSERVABILITY: Get notified when a batch fails to deliver
+    println!("6. On-error hook:");
+    let observable_config = ClientOptionsBuilder::default()
+        .api_key("phc_project_key".to_string())
+        // Runs on the background worker for every batch the SDK gives up on (a
+        // permanent reject, or once the retry budget is exhausted). Keep it
+        // cheap and non-blocking, and never call flush()/shutdown() from it.
+        .on_error(|failure| {
+            eprintln!(
+                "   posthog: dropped {} event(s) on attempt {}: {:?}",
+                failure.event_count(),
+                failure.attempt(),
+                failure.error(),
+            );
+        })
+        .build()?;
+
+    let _observable = posthog_rs::client(observable_config).await;
+    println!("   → Surfaces terminal delivery failures for logging/metrics\n");
+
     println!("Configuration examples complete!");
     println!("\nTip: Check out 'feature_flags' example for flag usage");
     println!("     and 'local_evaluation' for performance optimization.");

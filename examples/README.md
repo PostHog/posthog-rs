@@ -55,6 +55,7 @@ Shows:
 - Self-hosted instance configuration
 - Production settings with timeouts and geoip configuration
 - High-performance local evaluation setup
+- On-error hook for observing terminal batch delivery failures
 
 ### 4. Error Tracking Example
 

@@ -3,6 +3,8 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::client::BeforeSendHook;
 use crate::client::CaptureDefaults;
+use crate::client::CaptureFailure;
+use crate::client::OnErrorHook;
 use crate::feature_flag_evaluations::{EvaluatedFlagRecord, FlagCalledEventParams};
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
 use crate::Event;
@@ -69,6 +71,20 @@ pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) ->
     }
 
     current
+}
+
+/// Invoke each `on_error` hook with the failure, catching panics so a misbehaving
+/// hook can't wedge the transport worker thread. No-op when no hooks are
+/// registered, keeping the common (hookless) failure path free.
+pub(super) fn apply_on_error_hooks(hooks: &[OnErrorHook], failure: &CaptureFailure<'_>) {
+    if hooks.is_empty() {
+        return;
+    }
+    for hook in hooks {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.apply(failure))).is_err() {
+            error!("panic in PostHog on_error hook; ignoring");
+        }
+    }
 }
 
 /// Returns `true` when the helper has already shipped this
@@ -265,6 +281,7 @@ fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
 
     fn groups(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -416,5 +433,38 @@ mod tests {
         assert!(
             apply_before_send_hooks(&options.before_send, Event::new("test", "user-1")).is_none()
         );
+    }
+
+    #[test]
+    fn on_error_hooks_fire_in_registration_order_and_isolate_panics() {
+        let order = Arc::new(Mutex::new(Vec::<i32>::new()));
+        let (o1, o2, o3) = (Arc::clone(&order), Arc::clone(&order), Arc::clone(&order));
+        let options = crate::ClientOptionsBuilder::default()
+            .api_key("test-key".to_string())
+            .on_error(move |_f| o1.lock().unwrap().push(1))
+            .on_error(move |_f| {
+                o2.lock().unwrap().push(2);
+                panic!("boom");
+            })
+            .on_error(move |_f| o3.lock().unwrap().push(3))
+            .build()
+            .unwrap();
+
+        let err = crate::Error::BadRequest("x".to_string());
+        #[cfg(feature = "capture-v1")]
+        let results = HashMap::new();
+        let failure = CaptureFailure {
+            error: Some(&err),
+            event_count: 1,
+            attempt: 1,
+            historical_migration: false,
+            #[cfg(feature = "capture-v1")]
+            results: &results,
+        };
+        apply_on_error_hooks(&options.on_error, &failure);
+
+        // All three ran in registration order; the middle hook's panic was caught
+        // and did not stop the third from running.
+        assert_eq!(*order.lock().unwrap(), vec![1, 2, 3]);
     }
 }

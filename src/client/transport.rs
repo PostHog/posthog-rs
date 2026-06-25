@@ -25,7 +25,11 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use tracing::warn;
 
+use super::common::apply_on_error_hooks;
+use super::CaptureFailure;
 use super::ClientOptions;
+#[cfg(feature = "capture-v1")]
+use crate::event_v1::EventStatus;
 use crate::Event;
 
 /// Messages sent from producers (`capture`/`flush`/`shutdown`) to the worker.
@@ -725,10 +729,50 @@ impl Pipeline {
         dec_len(&self.len, count - batch.pending.len());
 
         match step {
-            Step::Done => {}
+            Step::Done => {
+                // A 2xx can still leave events undelivered: on the final attempt
+                // `after_response` finalizes any still-`retry` (exhausted) verdicts
+                // into `final_results`, and `drop` verdicts land there on any
+                // attempt. Surface those terminal non-deliveries — there's no
+                // batch-level error here, so `error` is `None`.
+                if !self.options.on_error.is_empty() {
+                    let undelivered = batch
+                        .final_results
+                        .values()
+                        .filter(|r| matches!(r.result, EventStatus::Retry | EventStatus::Drop))
+                        .count();
+                    if undelivered > 0 {
+                        apply_on_error_hooks(
+                            &self.options.on_error,
+                            &CaptureFailure {
+                                error: None,
+                                event_count: undelivered,
+                                attempt: batch.attempt,
+                                historical_migration: batch.historical_migration,
+                                results: &batch.final_results,
+                            },
+                        );
+                    }
+                }
+            }
             Step::Fail(e) => {
-                warn!("posthog-rs: dropping {} event(s): {e}", batch.pending.len());
-                dec_len(&self.len, batch.pending.len());
+                let count = batch.pending.len();
+                // The hook owns this signal when registered; otherwise warn so
+                // silent data loss is still visible.
+                if self.options.on_error.is_empty() {
+                    warn!("posthog-rs: dropping {count} event(s): {e}");
+                }
+                apply_on_error_hooks(
+                    &self.options.on_error,
+                    &CaptureFailure {
+                        error: Some(&e),
+                        event_count: count,
+                        attempt: batch.attempt,
+                        historical_migration: batch.historical_migration,
+                        results: &batch.final_results,
+                    },
+                );
+                dec_len(&self.len, count);
             }
             Step::Backoff(delay) => {
                 if deadline.is_some() {
@@ -788,6 +832,7 @@ struct RetryBatch {
     body: Vec<u8>,
     encoding: Option<&'static str>,
     count: usize,
+    historical_migration: bool,
     attempt: u32,
     next_at: Instant,
 }
@@ -858,6 +903,7 @@ impl Pipeline {
             body,
             encoding,
             count: kept,
+            historical_migration,
             attempt: 1,
             next_at: self.clock.now(),
         };
@@ -906,7 +952,20 @@ impl Pipeline {
         match step {
             Step::Done => dec_len(&self.len, batch.count),
             Step::Fail(e) => {
-                warn!("posthog-rs: dropping {} event(s): {e}", batch.count);
+                // The hook owns this signal when registered; otherwise warn so
+                // silent data loss is still visible.
+                if self.options.on_error.is_empty() {
+                    warn!("posthog-rs: dropping {} event(s): {e}", batch.count);
+                }
+                apply_on_error_hooks(
+                    &self.options.on_error,
+                    &CaptureFailure {
+                        error: Some(&e),
+                        event_count: batch.count,
+                        attempt: batch.attempt,
+                        historical_migration: batch.historical_migration,
+                    },
+                );
                 dec_len(&self.len, batch.count);
             }
             Step::Backoff(delay) => {
@@ -1413,6 +1472,322 @@ mod tests {
             handle.pending(),
             0,
             "threshold-sized historical batch delivered"
+        );
+        handle.shutdown_blocking();
+    }
+
+    // -- on_error hook -------------------------------------------------------
+
+    /// Owned, assertable view of a `CaptureFailure` recorded from inside a hook
+    /// (the failure itself only borrows, so we snapshot what we assert on).
+    #[derive(Clone, PartialEq, Debug)]
+    enum ErrTag {
+        BadRequest,
+        ServerError(u16),
+        Other,
+    }
+
+    struct FailureSnapshot {
+        event_count: usize,
+        attempt: u32,
+        error: Option<ErrTag>,
+        #[cfg(feature = "capture-v1")]
+        statuses: Vec<(EventStatus, Option<String>)>,
+    }
+
+    impl FailureSnapshot {
+        fn capture(f: &CaptureFailure<'_>) -> Self {
+            let error = f.error().map(|e| match e {
+                crate::Error::BadRequest(_) => ErrTag::BadRequest,
+                crate::Error::ServerError { status, .. } => ErrTag::ServerError(*status),
+                _ => ErrTag::Other,
+            });
+            FailureSnapshot {
+                event_count: f.event_count(),
+                attempt: f.attempt(),
+                error,
+                #[cfg(feature = "capture-v1")]
+                statuses: {
+                    let mut s: Vec<(EventStatus, Option<String>)> = f
+                        .event_results()
+                        .values()
+                        .map(|r| (r.result.clone(), r.details.clone()))
+                        .collect();
+                    s.sort_by_key(|(st, _)| format!("{st:?}"));
+                    s
+                },
+            }
+        }
+    }
+
+    type Calls = Arc<Mutex<Vec<FailureSnapshot>>>;
+
+    /// Spawn a transport whose `on_error` records each failure into the returned sink.
+    fn recording_handle(
+        mut builder: ClientOptionsBuilder,
+        clock: ManualClock,
+    ) -> (TransportHandle, Calls) {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&calls);
+        builder.on_error(move |f| {
+            sink.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(FailureSnapshot::capture(f))
+        });
+        let handle = TransportHandle::spawn_with_clock(builder.build().unwrap(), Arc::new(clock));
+        (handle, calls)
+    }
+
+    fn reject_mock(server: &MockServer, status: u16) -> httpmock::Mock<'_> {
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(status)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "error": "nope" }));
+        })
+    }
+
+    fn retrying_opts(base_url: String) -> ClientOptionsBuilder {
+        let mut b = options(base_url);
+        b.max_capture_attempts(3u32)
+            .retry_initial_backoff_ms(1_000u64)
+            .retry_max_backoff_ms(60_000u64);
+        b
+    }
+
+    #[test]
+    fn on_error_fires_once_on_permanent_reject() {
+        let server = MockServer::start();
+        let reject = reject_mock(&server, 400);
+        let (handle, calls) = recording_handle(options(server.base_url()), ManualClock::new());
+
+        handle.enqueue(Event::new("e", "user-1"));
+        handle.flush_blocking();
+
+        reject.assert_hits(1);
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "a permanent reject fires on_error exactly once"
+        );
+        assert_eq!(calls[0].event_count, 1);
+        assert_eq!(calls[0].error, Some(ErrTag::BadRequest));
+        drop(calls);
+        handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn on_error_fires_once_after_retry_exhaustion() {
+        let server = MockServer::start();
+        let fail = reject_mock(&server, 500);
+        let clock = ManualClock::new();
+        let (handle, calls) = recording_handle(retrying_opts(server.base_url()), clock.clone());
+
+        handle.enqueue(Event::new("e", "user-1"));
+        handle.flush_blocking(); // attempt 1 -> 500, held
+        clock.advance(Duration::from_secs(60));
+        handle.tick(); // attempt 2 -> 500, held
+        clock.advance(Duration::from_secs(60));
+        handle.tick(); // attempt 3 -> 500 -> Fail
+
+        fail.assert_hits(3);
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "exhausted retries fire on_error exactly once"
+        );
+        assert_eq!(
+            calls[0].attempt, 3,
+            "fires on the final (budget-exhausting) attempt"
+        );
+        assert_eq!(calls[0].error, Some(ErrTag::ServerError(500)));
+        assert_eq!(calls[0].event_count, 1);
+        drop(calls);
+        handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn on_error_not_fired_on_success() {
+        let server = MockServer::start();
+        let ok = ok_mock(&server);
+        let (handle, calls) = recording_handle(options(server.base_url()), ManualClock::new());
+
+        handle.enqueue(Event::new("e", "user-1"));
+        handle.flush_blocking();
+
+        ok.assert_hits(1);
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "successful delivery must not fire on_error"
+        );
+        handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn on_error_not_fired_when_retry_eventually_succeeds() {
+        let server = MockServer::start();
+        let mut fail = reject_mock(&server, 503);
+        let clock = ManualClock::new();
+        let (handle, calls) = recording_handle(retrying_opts(server.base_url()), clock.clone());
+
+        handle.enqueue(Event::new("e", "user-1"));
+        handle.flush_blocking(); // attempt 1 -> 503, held
+        fail.assert_hits(1);
+
+        fail.delete();
+        let ok = ok_mock(&server);
+        clock.advance(Duration::from_secs(60));
+        handle.tick(); // retry -> 200
+
+        ok.assert_hits(1);
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "a retry that ultimately succeeds must not fire on_error"
+        );
+        handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn on_error_hook_panic_is_caught_and_worker_survives() {
+        let server = MockServer::start();
+        let mut reject = reject_mock(&server, 400);
+        let mut builder = options(server.base_url());
+        builder.on_error(|_f| panic!("boom"));
+        let handle = TransportHandle::spawn_with_clock(
+            builder.build().unwrap(),
+            Arc::new(ManualClock::new()),
+        );
+
+        handle.enqueue(Event::new("e1", "user-1"));
+        handle.flush_blocking(); // 400 -> Fail -> hook panics -> caught
+        reject.assert_hits(1);
+
+        reject.delete();
+        let ok = ok_mock(&server);
+        handle.enqueue(Event::new("e2", "user-1"));
+        handle.flush_blocking(); // worker still alive -> delivers
+
+        ok.assert_hits(1);
+        assert_eq!(
+            handle.pending(),
+            0,
+            "worker survived the hook panic and delivered the next batch"
+        );
+        handle.shutdown_blocking();
+    }
+
+    #[cfg(feature = "capture-v1")]
+    fn results_mock(server: &MockServer, results: serde_json::Value) -> httpmock::Mock<'_> {
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "results": results }));
+        })
+    }
+
+    #[cfg(feature = "capture-v1")]
+    fn event_with_uuid(name: &str, uuid: uuid::Uuid) -> Event {
+        let mut event = Event::new(name, "user-1");
+        event.set_uuid(uuid);
+        event
+    }
+
+    #[cfg(feature = "capture-v1")]
+    #[test]
+    fn on_error_v1_fires_on_drop_within_2xx() {
+        let server = MockServer::start();
+        let u = uuid::Uuid::now_v7();
+        let mock = results_mock(
+            &server,
+            serde_json::json!({ u.to_string(): { "result": "drop", "details": "billing_limit_exceeded" } }),
+        );
+        let (handle, calls) = recording_handle(options(server.base_url()), ManualClock::new());
+
+        handle.enqueue(event_with_uuid("e", u));
+        handle.flush_blocking();
+
+        mock.assert_hits(1);
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "a per-event drop inside a 2xx fires on_error once"
+        );
+        assert_eq!(calls[0].error, None, "a 2xx has no batch-level error");
+        assert_eq!(calls[0].event_count, 1);
+        assert_eq!(
+            calls[0].statuses,
+            vec![(
+                EventStatus::Drop,
+                Some("billing_limit_exceeded".to_string())
+            )]
+        );
+        drop(calls);
+        handle.shutdown_blocking();
+    }
+
+    #[cfg(feature = "capture-v1")]
+    #[test]
+    fn on_error_v1_fires_on_exhausted_retry_within_2xx() {
+        let server = MockServer::start();
+        let u = uuid::Uuid::now_v7();
+        let mock = results_mock(
+            &server,
+            serde_json::json!({ u.to_string(): { "result": "retry", "details": "not_persisted" } }),
+        );
+        let clock = ManualClock::new();
+        let (handle, calls) = recording_handle(retrying_opts(server.base_url()), clock.clone());
+
+        handle.enqueue(event_with_uuid("e", u));
+        handle.flush_blocking(); // attempt 1 -> retry, held
+        clock.advance(Duration::from_secs(60));
+        handle.tick(); // attempt 2 -> retry, held
+        clock.advance(Duration::from_secs(60));
+        handle.tick(); // attempt 3 final -> Done with leftover retry -> fire
+
+        mock.assert_hits(3);
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "an exhausted retry inside a 2xx fires on_error exactly once"
+        );
+        assert_eq!(calls[0].error, None, "the request itself succeeded (2xx)");
+        assert_eq!(calls[0].attempt, 3);
+        assert_eq!(
+            calls[0].statuses,
+            vec![(EventStatus::Retry, Some("not_persisted".to_string()))]
+        );
+        drop(calls);
+        handle.shutdown_blocking();
+    }
+
+    #[cfg(feature = "capture-v1")]
+    #[test]
+    fn on_error_v1_not_fired_on_ok_or_warning_within_2xx() {
+        let server = MockServer::start();
+        let u_ok = uuid::Uuid::now_v7();
+        let u_warn = uuid::Uuid::now_v7();
+        let mock = results_mock(
+            &server,
+            serde_json::json!({
+                u_ok.to_string(): { "result": "ok" },
+                u_warn.to_string(): { "result": "warning", "details": "person_processing_disabled" },
+            }),
+        );
+        let (handle, calls) = recording_handle(options(server.base_url()), ManualClock::new());
+
+        handle.enqueue(event_with_uuid("ok", u_ok));
+        handle.enqueue(event_with_uuid("warn", u_warn));
+        handle.flush_blocking();
+
+        mock.assert_hits(1);
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "ok/warning verdicts are not data loss and must not fire on_error"
         );
         handle.shutdown_blocking();
     }
