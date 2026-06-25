@@ -2000,7 +2000,10 @@ mod tests {
         assert_eq!(debug_id_from_gnu_build_id(&build_id).as_deref(), Some(full));
 
         // Short build ids are zero-padded to 16 bytes
-        assert_eq!(debug_id_from_gnu_build_id(&[0xab, 0xcd]).as_deref(), Some(short));
+        assert_eq!(
+            debug_id_from_gnu_build_id(&[0xab, 0xcd]).as_deref(),
+            Some(short)
+        );
         assert_eq!(debug_id_from_gnu_build_id(&[]), None);
     }
 
