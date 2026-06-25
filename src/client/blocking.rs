@@ -25,6 +25,27 @@ use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
+fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
+    if err.is_timeout() {
+        return true;
+    }
+
+    let mut source = std::error::Error::source(err);
+    while let Some(error) = source {
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::UnexpectedEof
+            );
+        }
+        source = std::error::Error::source(error);
+    }
+
+    !err.to_string().to_lowercase().contains("connection refused")
+}
+
 #[cfg(not(feature = "capture-v1"))]
 use super::common::apply_before_send_hooks;
 use super::common::{
@@ -906,7 +927,7 @@ impl Client {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     let err_msg = e.to_string();
-                    if attempt >= self.options.max_capture_attempts {
+                    if attempt >= self.options.max_capture_attempts || !is_retryable_feature_flags_error(&e) {
                         return Err(Error::Connection(err_msg));
                     }
                     std::thread::sleep(super::retry::backoff_duration(
