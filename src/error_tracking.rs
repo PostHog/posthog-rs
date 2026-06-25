@@ -910,15 +910,10 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
         let resolvable = module.is_some_and(|m| !m.image.debug_id.is_empty());
 
         // One physical frame resolves to multiple symbols when the compiler
-        // inlined functions into it; emit each inlined layer as its own frame
-        // so the logical call chain survives. The resolver yields layers
-        // innermost-first, which matches this stack's current-first order.
-        //
-        // The inlined layers of one physical frame share its instruction_addr.
-        // Expanding inlines client-side is a deliberate v2 choice (locked by
-        // `inlined_functions_become_separate_frames`); this native-capture
-        // change only attaches addresses, it does not revisit that frame shape.
-        let mut pushed = false;
+        // inlined functions into it; `resolve_frame` yields those layers
+        // innermost-first. Collect them so we can choose how to emit based on
+        // whether the server can symbolicate this address.
+        let mut layers: Vec<(Option<String>, Option<u32>, String)> = Vec::new();
         backtrace::resolve_frame(frame, |symbol| {
             let filename = symbol.filename().map(path_to_string);
             let function = symbol
@@ -929,36 +924,38 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                 return;
             }
 
-            // The resolver's symbol.addr() is the actual symbol entry; the
-            // frame's symbol_address() can fall back to the instruction
-            // pointer on some platforms. The entry address is what the
-            // pinned-function stripping compares against.
-            let symbol_addr = symbol
-                .addr()
-                .map(|a| a as u64)
-                .filter(|a| *a != 0)
-                .unwrap_or(frame_symbol_addr);
+            layers.push((filename, symbol.lineno(), function.unwrap_or_default()));
+        });
 
+        if resolvable {
+            // The server can symbolicate this address, so emit ONE frame per
+            // physical frame carrying the raw `instruction_addr` and let the
+            // resolver expand the inline chain from the symcache. Expanding
+            // inlines client-side as well would double them after server-side
+            // resolution (the resolver re-expands every address-bearing native
+            // frame). This matches posthog-ios, which sends one frame per
+            // return address. The outermost (physical) layer's name is a
+            // client-side placeholder until the server resolves the address;
+            // frame.symbol_address() is the physical entry the pinned-frame
+            // stripping matches against.
+            let physical = layers.last();
             frames.push(StackFrame {
-                filename,
-                line_no: symbol.lineno(),
-                function: function.unwrap_or_default(),
+                filename: physical.and_then(|(file, _, _)| file.clone()),
+                line_no: physical.and_then(|(_, line, _)| *line),
+                function: physical
+                    .map(|(_, _, function)| function.clone())
+                    .unwrap_or_default(),
                 lang: "rust".to_string(),
                 in_app: false,
                 synthetic: false,
                 platform: "native".to_string(),
-                instruction_addr: resolvable.then(|| format!("0x{instruction_addr:x}")),
-                symbol_addr: (resolvable && symbol_addr != 0).then(|| format!("0x{symbol_addr:x}")),
-                image_addr: resolvable
-                    .then(|| module.map(|m| m.image.image_addr.clone()))
-                    .flatten(),
+                instruction_addr: Some(format!("0x{instruction_addr:x}")),
+                symbol_addr: (frame_symbol_addr != 0).then(|| format!("0x{frame_symbol_addr:x}")),
+                image_addr: module.map(|m| m.image.image_addr.clone()),
             });
-            pushed = true;
-        });
-
-        if !pushed {
-            // No symbol information (e.g. stripped binary): keep the frame as
-            // an address-only entry for server-side symbolication. In-app
+        } else if layers.is_empty() {
+            // No symbols and no uploadable debug image (e.g. a stripped library
+            // we can't symbolicate either side): keep a bare entry. In-app
             // classification has no names to work with, so default by module:
             // the main executable is application code, shared libraries aren't.
             frames.push(StackFrame {
@@ -969,13 +966,29 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                 in_app: module.is_some_and(|m| m.is_main),
                 synthetic: false,
                 platform: "native".to_string(),
-                instruction_addr: resolvable.then(|| format!("0x{instruction_addr:x}")),
-                symbol_addr: (resolvable && frame_symbol_addr != 0)
-                    .then(|| format!("0x{frame_symbol_addr:x}")),
-                image_addr: resolvable
-                    .then(|| module.map(|m| m.image.image_addr.clone()))
-                    .flatten(),
+                instruction_addr: None,
+                symbol_addr: None,
+                image_addr: None,
             });
+        } else {
+            // We resolved symbols locally but there's no uploadable debug image,
+            // so the server can't symbolicate this address. Keep the client-side
+            // inline expansion (one frame per layer, no native addresses) — it's
+            // the only way these inlined calls survive.
+            for (filename, line_no, function) in layers {
+                frames.push(StackFrame {
+                    filename,
+                    line_no,
+                    function,
+                    lang: "rust".to_string(),
+                    in_app: false,
+                    synthetic: false,
+                    platform: "native".to_string(),
+                    instruction_addr: None,
+                    symbol_addr: None,
+                    image_addr: None,
+                });
+            }
         }
 
         true
@@ -2307,10 +2320,14 @@ mod tests {
     }
 
     #[test]
-    fn inlined_functions_become_separate_frames() {
-        // inline(always) is honored in debug builds, so the two helpers share
-        // the test function's physical frame and must surface as their own
-        // logical frames, innermost first.
+    fn inlined_frames_collapse_for_server_side_expansion() {
+        // inline(always) is honored in debug builds, so these helpers share
+        // their caller's physical frame. When the server can symbolicate the
+        // address we emit ONE frame for that physical frame and let the resolver
+        // expand the inline chain from the symcache; emitting the inline layers
+        // here as well would double them, since the resolver re-expands every
+        // address-bearing native frame. Only a frame the server can't resolve
+        // keeps the client-side inline expansion.
         #[inline(always)]
         fn inline_leaf() -> Vec<StackFrame> {
             capture_raw_application_frames().0
@@ -2324,19 +2341,51 @@ mod tests {
         let frames = inline_mid();
         let functions: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
 
-        let leaf_index = functions
+        // No two frames may carry the same instruction_addr: that duplicate is
+        // exactly the double-expansion the resolver would inflict if we
+        // pre-expanded inlines onto a shared address.
+        let mut addrs: Vec<&str> = frames
             .iter()
-            .position(|function| function.contains("inline_leaf"))
-            .unwrap_or_else(|| panic!("expected inline_leaf frame, got {:?}", functions));
-        let mid_index = functions
-            .iter()
-            .position(|function| function.contains("inline_mid"))
-            .unwrap_or_else(|| panic!("expected inline_mid frame, got {:?}", functions));
-        assert!(
-            leaf_index < mid_index,
-            "expected innermost inlined layer first, got {:?}",
-            functions
+            .filter_map(|frame| frame.instruction_addr.as_deref())
+            .collect();
+        let emitted = addrs.len();
+        addrs.sort_unstable();
+        addrs.dedup();
+        assert_eq!(
+            addrs.len(),
+            emitted,
+            "instruction_addr duplicated across frames: {:?}",
+            frames
         );
+
+        let leaf = functions
+            .iter()
+            .filter(|f| f.contains("inline_leaf"))
+            .count();
+        let mid = functions
+            .iter()
+            .filter(|f| f.contains("inline_mid"))
+            .count();
+
+        if frames.iter().any(|frame| frame.instruction_addr.is_some()) {
+            // Resolvable: the inlined layers collapse into their physical frame,
+            // which carries the address for the server to expand.
+            assert!(
+                leaf == 0 && mid == 0,
+                "expected inlined layers collapsed for server-side expansion, got {:?}",
+                functions
+            );
+        } else {
+            // Not resolvable: client-side expansion preserves the inline chain,
+            // innermost first.
+            let leaf_index = functions.iter().position(|f| f.contains("inline_leaf"));
+            let mid_index = functions.iter().position(|f| f.contains("inline_mid"));
+            assert!(
+                matches!((leaf_index, mid_index), (Some(l), Some(m)) if l < m),
+                "expected client-side inline expansion innermost first, got {:?}",
+                functions
+            );
+        }
     }
 
     #[test]
