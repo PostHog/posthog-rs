@@ -1074,8 +1074,8 @@ fn referenced_images(modules: Vec<LoadedModule>, frames: &[StackFrame]) -> Vec<D
 #[inline(never)]
 fn capture_raw_application_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
     let pinned = [
-        capture_frames_current_first as usize as u64,
-        capture_raw_application_frames as usize as u64,
+        capture_frames_current_first as *const () as u64,
+        capture_raw_application_frames as *const () as u64,
     ];
     capture_raw_frames(is_internal_capture_frame, &pinned)
 }
@@ -1083,8 +1083,8 @@ fn capture_raw_application_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
 #[inline(never)]
 fn capture_raw_panic_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
     let pinned = [
-        capture_frames_current_first as usize as u64,
-        capture_raw_panic_frames as usize as u64,
+        capture_frames_current_first as *const () as u64,
+        capture_raw_panic_frames as *const () as u64,
     ];
     capture_raw_frames(is_internal_panic_frame, &pinned)
 }
@@ -1983,16 +1983,24 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        assert_eq!(
-            debug_id_from_gnu_build_id(&build_id).as_deref(),
-            Some("eb985355-1cd0-2890-5a3d-85138a19cbf9")
-        );
+        // symbolic swaps the first three GUID fields on little-endian ELF and
+        // leaves them as-is on big-endian; debug_id_from_gnu_build_id mirrors
+        // that, so the expected ids differ by host endianness.
+        let (full, short) = if cfg!(target_endian = "little") {
+            (
+                "eb985355-1cd0-2890-5a3d-85138a19cbf9",
+                "0000cdab-0000-0000-0000-000000000000",
+            )
+        } else {
+            (
+                "555398eb-d01c-9028-5a3d-85138a19cbf9",
+                "abcd0000-0000-0000-0000-000000000000",
+            )
+        };
+        assert_eq!(debug_id_from_gnu_build_id(&build_id).as_deref(), Some(full));
 
         // Short build ids are zero-padded to 16 bytes
-        assert_eq!(
-            debug_id_from_gnu_build_id(&[0xab, 0xcd]).as_deref(),
-            Some("0000cdab-0000-0000-0000-000000000000")
-        );
+        assert_eq!(debug_id_from_gnu_build_id(&[0xab, 0xcd]).as_deref(), Some(short));
         assert_eq!(debug_id_from_gnu_build_id(&[]), None);
     }
 
@@ -2047,15 +2055,26 @@ mod tests {
             .as_array()
             .expect("expected stack frames");
 
-        // Every frame carries a parseable instruction address
+        // instruction_addr is set only for frames whose module has a debug id;
+        // it's omitted otherwise (e.g. system libraries without a GNU build id,
+        // common on Linux). Assert the format wherever present, and that at
+        // least one frame carries it.
+        let mut saw_instruction_addr = false;
         for frame in frames {
-            let addr = frame["instruction_addr"].as_str().unwrap_or_default();
+            let Some(addr) = frame["instruction_addr"].as_str() else {
+                continue;
+            };
+            saw_instruction_addr = true;
             assert!(
                 addr.starts_with("0x") && u64::from_str_radix(&addr[2..], 16).is_ok(),
                 "expected hex instruction_addr, got {:?}",
                 frame["instruction_addr"]
             );
         }
+        assert!(
+            saw_instruction_addr,
+            "expected at least one frame to carry an instruction_addr"
+        );
 
         // The test binary itself is a loaded module with a debug id on the
         // platforms we capture modules on, so $debug_images must be present
