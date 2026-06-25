@@ -162,6 +162,10 @@ impl<'a> CaptureFailure<'a> {
     }
 
     /// Number of events this failure dropped.
+    #[cfg_attr(
+        feature = "capture-v1",
+        doc = "\nCounts only undelivered events (`retry`/`drop`). This can be smaller than\n[`event_results`](Self::event_results)`.len()`, which also reports persisted\n`ok`/`warning` verdicts — filter by status before treating an entry as lost."
+    )]
     pub fn event_count(&self) -> usize {
         self.event_count
     }
@@ -178,9 +182,12 @@ impl<'a> CaptureFailure<'a> {
 
     /// Per-event server verdicts for the batch (V1 capture pipeline only).
     ///
-    /// Maps event UUID to its [`EventResult`] (`retry`/`drop`/`warning`/… plus a
-    /// `details` reason). Complete when [`error`](Self::error) is `None` (a 2xx
-    /// where events weren't persisted after retries); possibly partial on a
+    /// Maps event UUID to its [`EventResult`]. Includes **all** verdicts the
+    /// batch collected — persisted (`ok`/`warning`) as well as lost
+    /// (`retry`/`drop`) — so this map can be larger than
+    /// [`event_count`](Self::event_count); filter by [`EventStatus`](crate::EventStatus)
+    /// to isolate the failures. Complete when [`error`](Self::error) is `None` (a 2xx where
+    /// events weren't persisted after retries); possibly partial on a
     /// batch-level failure (only verdicts collected from earlier attempts).
     #[cfg(feature = "capture-v1")]
     pub fn event_results(&self) -> &HashMap<Uuid, EventResult> {

@@ -1556,56 +1556,66 @@ mod tests {
     }
 
     #[test]
-    fn on_error_fires_once_on_permanent_reject() {
-        let server = MockServer::start();
-        let reject = reject_mock(&server, 400);
-        let (handle, calls) = recording_handle(options(server.base_url()), ManualClock::new());
+    fn on_error_fires_once_on_terminal_failure() {
+        struct Case {
+            name: &'static str,
+            status: u16,
+            // clock-advance + tick cycles after the initial flush before the
+            // batch goes terminal (0 = fails on the first attempt).
+            retries_after_flush: usize,
+            expected_attempt: u32,
+            expected_error: ErrTag,
+        }
+        let cases = [
+            Case {
+                name: "permanent reject (not retryable)",
+                status: 400,
+                retries_after_flush: 0,
+                expected_attempt: 1,
+                expected_error: ErrTag::BadRequest,
+            },
+            Case {
+                name: "exhausted retry budget",
+                status: 500,
+                retries_after_flush: 2,
+                expected_attempt: 3,
+                expected_error: ErrTag::ServerError(500),
+            },
+        ];
 
-        handle.enqueue(Event::new("e", "user-1"));
-        handle.flush_blocking();
+        for case in cases {
+            let server = MockServer::start();
+            // retrying_opts is harmless for the non-retryable case (it still
+            // fails on attempt 1) and required for the exhaustion case.
+            let fail = reject_mock(&server, case.status);
+            let clock = ManualClock::new();
+            let (handle, calls) = recording_handle(retrying_opts(server.base_url()), clock.clone());
 
-        reject.assert_hits(1);
-        let calls = calls.lock().unwrap();
-        assert_eq!(
-            calls.len(),
-            1,
-            "a permanent reject fires on_error exactly once"
-        );
-        assert_eq!(calls[0].event_count, 1);
-        assert_eq!(calls[0].error, Some(ErrTag::BadRequest));
-        drop(calls);
-        handle.shutdown_blocking();
-    }
+            handle.enqueue(Event::new("e", "user-1"));
+            handle.flush_blocking();
+            for _ in 0..case.retries_after_flush {
+                clock.advance(Duration::from_secs(60));
+                handle.tick();
+            }
 
-    #[test]
-    fn on_error_fires_once_after_retry_exhaustion() {
-        let server = MockServer::start();
-        let fail = reject_mock(&server, 500);
-        let clock = ManualClock::new();
-        let (handle, calls) = recording_handle(retrying_opts(server.base_url()), clock.clone());
-
-        handle.enqueue(Event::new("e", "user-1"));
-        handle.flush_blocking(); // attempt 1 -> 500, held
-        clock.advance(Duration::from_secs(60));
-        handle.tick(); // attempt 2 -> 500, held
-        clock.advance(Duration::from_secs(60));
-        handle.tick(); // attempt 3 -> 500 -> Fail
-
-        fail.assert_hits(3);
-        let calls = calls.lock().unwrap();
-        assert_eq!(
-            calls.len(),
-            1,
-            "exhausted retries fire on_error exactly once"
-        );
-        assert_eq!(
-            calls[0].attempt, 3,
-            "fires on the final (budget-exhausting) attempt"
-        );
-        assert_eq!(calls[0].error, Some(ErrTag::ServerError(500)));
-        assert_eq!(calls[0].event_count, 1);
-        drop(calls);
-        handle.shutdown_blocking();
+            fail.assert_hits(1 + case.retries_after_flush);
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "{}: fires on_error exactly once", case.name);
+            assert_eq!(
+                calls[0].attempt, case.expected_attempt,
+                "{}: fires on the terminal attempt",
+                case.name
+            );
+            assert_eq!(
+                calls[0].error,
+                Some(case.expected_error.clone()),
+                "{}",
+                case.name
+            );
+            assert_eq!(calls[0].event_count, 1, "{}", case.name);
+            drop(calls);
+            handle.shutdown_blocking();
+        }
     }
 
     #[test]
@@ -1789,6 +1799,56 @@ mod tests {
             calls.lock().unwrap().is_empty(),
             "ok/warning verdicts are not data loss and must not fire on_error"
         );
+        handle.shutdown_blocking();
+    }
+
+    #[cfg(feature = "capture-v1")]
+    #[test]
+    fn on_error_v1_event_results_includes_persisted_verdicts() {
+        // A mixed batch (ok + warning + drop): the hook fires for the one lost
+        // event, but event_results() reports every verdict — so event_count is
+        // smaller than event_results().len() and callers must filter by status.
+        let server = MockServer::start();
+        let u_ok = uuid::Uuid::now_v7();
+        let u_warn = uuid::Uuid::now_v7();
+        let u_drop = uuid::Uuid::now_v7();
+        let mock = results_mock(
+            &server,
+            serde_json::json!({
+                u_ok.to_string(): { "result": "ok" },
+                u_warn.to_string(): { "result": "warning", "details": "person_processing_disabled" },
+                u_drop.to_string(): { "result": "drop", "details": "billing_limit_exceeded" },
+            }),
+        );
+        let (handle, calls) = recording_handle(options(server.base_url()), ManualClock::new());
+
+        handle.enqueue(event_with_uuid("ok", u_ok));
+        handle.enqueue(event_with_uuid("warn", u_warn));
+        handle.enqueue(event_with_uuid("drop", u_drop));
+        handle.flush_blocking();
+
+        mock.assert_hits(1);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "the dropped event fires on_error once");
+        assert_eq!(calls[0].error, None);
+        assert_eq!(calls[0].event_count, 1, "only the drop counts as lost");
+        // event_results() carries all three verdicts (sorted Drop, Ok, Warning).
+        assert_eq!(
+            calls[0].statuses,
+            vec![
+                (
+                    EventStatus::Drop,
+                    Some("billing_limit_exceeded".to_string())
+                ),
+                (EventStatus::Ok, None),
+                (
+                    EventStatus::Warning,
+                    Some("person_processing_disabled".to_string())
+                ),
+            ],
+            "event_results reports persisted verdicts too, not just losses"
+        );
+        drop(calls);
         handle.shutdown_blocking();
     }
 }
