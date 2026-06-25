@@ -525,17 +525,8 @@ impl Client {
         }
 
         let response = self
-            .client
-            .post(&flags_endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .send_feature_flags_request(&flags_endpoint, &payload)
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -926,6 +917,44 @@ impl Client {
             .clone()
     }
 
+    async fn send_feature_flags_request(
+        &self,
+        flags_endpoint: &str,
+        payload: &serde_json::Value,
+    ) -> Result<reqwest::Response, Error> {
+        let mut attempt = 1;
+        loop {
+            let result = self
+                .client
+                .post(flags_endpoint)
+                .header(CONTENT_TYPE, "application/json")
+                .header(USER_AGENT, get_default_user_agent())
+                .json(payload)
+                .timeout(Duration::from_secs(
+                    self.options.feature_flags_request_timeout_seconds,
+                ))
+                .send()
+                .await;
+
+            match result {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if attempt >= self.options.max_capture_attempts {
+                        return Err(Error::Connection(err_msg));
+                    }
+                    tokio::time::sleep(super::retry::backoff_duration(
+                        &self.options,
+                        attempt,
+                        None,
+                    ))
+                    .await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
     async fn fetch_flag_details(
         &self,
         distinct_id: &str,
@@ -955,17 +984,8 @@ impl Client {
         }
 
         let response = self
-            .client
-            .post(&flags_endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .send_feature_flags_request(&flags_endpoint, &payload)
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();

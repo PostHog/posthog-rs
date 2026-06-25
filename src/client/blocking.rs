@@ -499,17 +499,7 @@ impl Client {
             payload["disable_geoip"] = json!(true);
         }
 
-        let response = self
-            .client
-            .post(&flags_endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        let response = self.send_feature_flags_request(&flags_endpoint, &payload)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -894,6 +884,42 @@ impl Client {
             .clone()
     }
 
+    fn send_feature_flags_request(
+        &self,
+        flags_endpoint: &str,
+        payload: &serde_json::Value,
+    ) -> Result<reqwest::blocking::Response, Error> {
+        let mut attempt = 1;
+        loop {
+            let result = self
+                .client
+                .post(flags_endpoint)
+                .header(CONTENT_TYPE, "application/json")
+                .header(USER_AGENT, get_default_user_agent())
+                .json(payload)
+                .timeout(Duration::from_secs(
+                    self.options.feature_flags_request_timeout_seconds,
+                ))
+                .send();
+
+            match result {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if attempt >= self.options.max_capture_attempts {
+                        return Err(Error::Connection(err_msg));
+                    }
+                    std::thread::sleep(super::retry::backoff_duration(
+                        &self.options,
+                        attempt,
+                        None,
+                    ));
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
     fn fetch_flag_details(
         &self,
         distinct_id: &str,
@@ -922,17 +948,7 @@ impl Client {
             payload["flag_keys_to_evaluate"] = json!(flag_keys);
         }
 
-        let response = self
-            .client
-            .post(&flags_endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        let response = self.send_feature_flags_request(&flags_endpoint, &payload)?;
 
         if !response.status().is_success() {
             let status = response.status();
