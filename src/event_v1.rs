@@ -111,10 +111,10 @@ fn coerce_option(kind: OptionKind, val: Value) -> Option<Value> {
     }
 }
 
-/// Coerce a value to bool using the same truthiness rules the backend would
-/// accept: native bool passes through; common string/numeric forms are
-/// accepted (`"true"`/`"1"`/`1`/`1.0` → true, `"false"`/`"0"`/`0` → false).
-/// Returns `None` when the value is not interpretable as a boolean.
+/// Coerce a value to bool, mirroring posthog-go: native bool passes through;
+/// the strings `"true"`/`"1"` (and `"false"`/`"0"`), trimmed and
+/// case-insensitive, are accepted; any non-zero number is true and zero is
+/// false. Returns `None` when the value is not interpretable as a boolean.
 fn coerce_bool(val: Value) -> Option<bool> {
     match val {
         Value::Bool(b) => Some(b),
@@ -340,24 +340,35 @@ mod tests {
         }
 
         // All three bool option keys behave identically: a non-coercible value
-        // is dropped, a coercible one is normalized.
+        // is dropped, a coercible one is normalized — and either way the magic
+        // key is stripped from properties (it must never reach v1 backend props).
         for (prop_key, wire_key) in [
             ("$cookieless_mode", "cookieless_mode"),
             ("$ignore_sent_at", "disable_skew_correction"),
             ("$process_person_profile", "process_person_profile"),
         ] {
-            let (bad, _) = lift_one(prop_key, serde_json::json!(["nope"]));
+            let (bad, bad_props) = lift_one(prop_key, serde_json::json!(["nope"]));
             assert!(
                 !bad.contains_key(wire_key),
                 "{}: array must be dropped",
                 wire_key
             );
-            let (good, _) = lift_one(prop_key, serde_json::json!("1"));
+            assert!(
+                !bad_props.contains_key(prop_key),
+                "{}: magic key must be stripped even when coercion fails",
+                prop_key
+            );
+            let (good, good_props) = lift_one(prop_key, serde_json::json!("1"));
             assert_eq!(
                 good.get(wire_key),
                 Some(&serde_json::json!(true)),
                 "{}: \"1\" must coerce to true",
                 wire_key
+            );
+            assert!(
+                !good_props.contains_key(prop_key),
+                "{}: magic key must be stripped on coercion success",
+                prop_key
             );
         }
     }
