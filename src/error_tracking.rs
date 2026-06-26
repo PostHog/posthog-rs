@@ -530,7 +530,9 @@ impl Exception {
                 None
             },
             fingerprint: None,
-            level: "error".to_string(),
+            // Panics are unrecoverable (the process is unwinding/aborting), so
+            // they are reported at `fatal`, not `error`.
+            level: "fatal".to_string(),
         }
     }
 
@@ -1098,6 +1100,7 @@ mod tests {
             // in the typed `options` object.
             && (event["properties"]["$process_person_profile"] == false
                 || event["options"]["process_person_profile"] == false)
+            && event["properties"]["$exception_level"] == "fatal"
             && exception["type"] == "Panic"
             && exception["value"] == "panic hook boom"
             && exception["mechanism"]["type"] == "panic"
