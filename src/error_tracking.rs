@@ -721,7 +721,12 @@ fn capture_raw_application_frames() -> Vec<StackFrame> {
 }
 
 fn capture_raw_panic_frames() -> Vec<StackFrame> {
-    capture_raw_frames(is_internal_panic_frame)
+    // Unlike the manual-capture path, keep *every* frame — including the panic
+    // and capture machinery — and let in-app classification mark the SDK/runtime
+    // frames as `in_app = false`. Dropping by function name was brittle (the list
+    // drifted as internals were renamed/inlined) and threw away data the UI can
+    // collapse on its own via the in-app flag.
+    capture_frames_current_first(0)
 }
 
 fn is_internal_capture_frame(function: &str) -> bool {
@@ -734,39 +739,6 @@ fn is_internal_capture_frame(function: &str) -> bool {
         || function.contains("build_exception_event")
         || function.contains("Client::capture_exception")
         || function.contains("global::capture_exception")
-}
-
-/// Internal frames to strip from a panic stacktrace: the shared capture frames
-/// plus the panic-hook and unwinding machinery.
-fn is_internal_panic_frame(function: &str) -> bool {
-    is_internal_capture_frame(function)
-        || function.contains("capture_panic")
-        || function.contains("capture_raw_panic_frames")
-        || function.contains("build_panic_event")
-        // The shared installer's hook closure plus each entry point's capture
-        // closure (standalone `install_panic_hook`, global
-        // `maybe_install_global_panic_hook`) sit between the unwinder and
-        // `capture_panic`; none of these names is a substring of another.
-        || function.contains("install_hook")
-        || function.contains("install_panic_hook")
-        || function.contains("maybe_install_global_panic_hook")
-        || function.contains("Exception::from_panic_info")
-        || function.contains("AssertUnwindSafe")
-        || function.starts_with("core::ops::function::FnOnce::call_once")
-        // std::panic::catch_unwind is an #[inline] wrapper that surfaces as a
-        // logical frame inside the hook closure's physical frame.
-        || function.starts_with("std::panic::")
-        || function.starts_with("std::panicking::")
-        || function.starts_with("core::panicking::")
-        || function.starts_with("std::sys::backtrace::")
-        // The boxed hook dispatch frame names the hook argument type;
-        // `PanicInfo` covers binaries built before the 1.82 `PanicHookInfo` rename.
-        || function.contains("PanicHookInfo")
-        || function.contains("PanicInfo")
-        // The unwind shim symbol is `__rust_try` on ELF and `___rust_try`
-        // under Mach-O's extra leading underscore.
-        || function.ends_with("__rust_try")
-        || function.contains("rust_begin_unwind")
 }
 
 /// The panic payload as a string, falling back to a generic message.
@@ -924,7 +896,16 @@ fn default_in_app_path(filename: &str) -> bool {
 }
 
 fn default_in_app_function(function: &str) -> bool {
-    if function.is_empty() || function == "_main" {
+    // Bare runtime/unwind symbols that carry no `crate::` prefix (so the segment
+    // match below can't catch them). `rust_begin_unwind` is the panic entry; the
+    // `__rust`/`___rust` shims are the unwind glue (the extra underscore is
+    // Mach-O's).
+    if function.is_empty()
+        || function == "_main"
+        || function == "rust_begin_unwind"
+        || function.starts_with("__rust")
+        || function.starts_with("___rust")
+    {
         return false;
     }
 
@@ -934,7 +915,15 @@ fn default_in_app_function(function: &str) -> bool {
             .split("::")
             .next()
             .unwrap_or_default(),
-        "alloc" | "backtrace" | "core" | "posthog_rs" | "reqwest" | "std" | "tokio"
+        "alloc"
+            | "backtrace"
+            | "core"
+            | "futures_core"
+            | "futures_util"
+            | "posthog_rs"
+            | "reqwest"
+            | "std"
+            | "tokio"
     )
 }
 
@@ -1091,9 +1080,27 @@ mod tests {
         };
         let event = &body["batch"][0];
         let exception = &event["properties"]["$exception_list"][0];
-        let first_function = exception["stacktrace"]["frames"][0]["function"]
-            .as_str()
-            .unwrap_or_default();
+        let frames = exception["stacktrace"]["frames"].as_array();
+
+        // The user's panic site is captured (no longer forced to frame 0 — we
+        // keep the machinery frames now instead of stripping them).
+        let has_panic_site = frames.is_some_and(|frames| {
+            frames.iter().any(|frame| {
+                frame["function"]
+                    .as_str()
+                    .is_some_and(|name| name.contains("panic_hook_test_panic_site"))
+            })
+        });
+        // Panic/unwind machinery is kept and marked out of app rather than
+        // dropped by name.
+        let has_machinery_not_in_app = frames.is_some_and(|frames| {
+            frames.iter().any(|frame| {
+                frame["in_app"] == false
+                    && frame["function"].as_str().is_some_and(|name| {
+                        name.contains("panicking") || name == "rust_begin_unwind"
+                    })
+            })
+        });
 
         event["event"] == "$exception"
             // V0 injects `$process_person_profile` into properties; V1 keeps it
@@ -1114,9 +1121,8 @@ mod tests {
             && event["properties"]["$exception_panic_column"]
                 .as_u64()
                 .is_some_and(|column| column > 0)
-            && first_function.contains("panic_hook_test_panic_site")
-            && !first_function.contains("std::panicking")
-            && !first_function.contains("install_panic_hook")
+            && has_panic_site
+            && has_machinery_not_in_app
     }
 
     #[test]
@@ -1492,36 +1498,40 @@ mod tests {
     }
 
     #[test]
-    fn is_internal_panic_frame_strips_panic_and_capture_machinery() {
-        for internal in [
+    fn panic_machinery_frames_classify_out_of_app() {
+        // Panic/unwind/SDK machinery is kept in the stacktrace now (not stripped
+        // by name) and classified out of app by the default in-app rules, so the
+        // UI can collapse it while the user's frames stay in-app.
+        let options = ErrorTrackingOptions::default();
+        for not_in_app in [
             "std::panicking::begin_panic_handler",
             "core::panicking::panic_fmt",
             "std::panic::catch_unwind",
             "std::sys::backtrace::__rust_begin_short_backtrace",
             "rust_begin_unwind",
+            "__rust_try",
             "backtrace::backtrace::trace",
-            "posthog_rs::error_tracking::install_hook::{{closure}}",
-            "posthog_rs::error_tracking::install_panic_hook::{{closure}}",
-            "posthog_rs::error_tracking::maybe_install_global_panic_hook::{{closure}}",
             "posthog_rs::error_tracking::capture_panic",
-            "posthog_rs::error_tracking::build_panic_event",
+            "posthog_rs::error_tracking::install_hook::{{closure}}",
             "core::ops::function::FnOnce::call_once",
+            "tokio::runtime::task::raw::poll",
+            "futures_util::future::FutureExt::poll",
         ] {
             assert!(
-                is_internal_panic_frame(internal),
-                "{} should be treated as internal",
-                internal
+                !options.is_in_app_frame(None, Some(not_in_app)),
+                "{} should classify as not in-app",
+                not_in_app
             );
         }
 
-        for app in [
+        for in_app in [
             "my_app::checkout::process_payment",
-            "core::array::<impl [u8; 32]>::map",
+            "checkout_service::submit",
         ] {
             assert!(
-                !is_internal_panic_frame(app),
-                "{} should not be treated as internal",
-                app
+                options.is_in_app_frame(None, Some(in_app)),
+                "{} should classify as in-app",
+                in_app
             );
         }
     }
