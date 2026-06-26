@@ -163,6 +163,11 @@ pub struct ClientOptions {
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
 
+    /// Maximum number of retries after a transient network error for remote `/flags` requests.
+    /// Defaults to `1`. Set to `0` to disable retries.
+    #[builder(default = "1")]
+    pub(crate) feature_flags_request_max_retries: u32,
+
     /// Error tracking stacktrace and frame classification options
     #[cfg(feature = "error-tracking")]
     #[builder(default)]

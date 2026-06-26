@@ -927,7 +927,7 @@ impl Client {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     let err_msg = e.to_string();
-                    if attempt >= self.options.max_capture_attempts || !is_retryable_feature_flags_error(&e) {
+                    if attempt > self.options.feature_flags_request_max_retries || !is_retryable_feature_flags_error(&e) {
                         return Err(Error::Connection(err_msg));
                     }
                     std::thread::sleep(super::retry::backoff_duration(
