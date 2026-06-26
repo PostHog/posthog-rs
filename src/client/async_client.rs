@@ -192,22 +192,15 @@ impl AsyncFlagEventHost {
         };
         let http_client = self.http_client.clone();
         let url = self.capture_url.clone();
-        #[cfg(feature = "test-harness")]
-        let extra_headers = self.options.extra_capture_headers.clone();
         self.runtime.spawn(async move {
-            #[cfg_attr(not(feature = "test-harness"), allow(unused_mut))]
-            let mut request = http_client
+            let response = match http_client
                 .post(&url)
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, get_default_user_agent())
-                .body(payload);
-            #[cfg(feature = "test-harness")]
-            if let Some(extra) = extra_headers {
-                for (k, v) in extra {
-                    request = request.header(k, v);
-                }
-            }
-            let response = match request.send().await {
+                .body(payload)
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(send_err) => {
                     let message = send_err.to_string();
@@ -533,7 +526,7 @@ impl Client {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
         let mut payload = json!({
-            "token": self.options.api_key,
+            "api_key": self.options.api_key,
             "distinct_id": distinct_id.into(),
         });
 
@@ -549,7 +542,10 @@ impl Client {
             payload["group_properties"] = json!(group_properties);
         }
 
-        payload["geoip_disable"] = json!(self.options.disable_geoip);
+        // Add geoip disable parameter if configured
+        if self.options.disable_geoip {
+            payload["disable_geoip"] = json!(true);
+        }
 
         let response = self
             .send_feature_flags_request(&flags_endpoint, &payload)
@@ -737,11 +733,14 @@ impl Client {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
         let mut payload = json!({
-            "token": self.options.api_key,
+            "api_key": self.options.api_key,
             "distinct_id": distinct_id.into(),
         });
 
-        payload["geoip_disable"] = json!(self.options.disable_geoip);
+        // Add geoip disable parameter if configured
+        if self.options.disable_geoip {
+            payload["disable_geoip"] = json!(true);
+        }
 
         let response = self
             .client
@@ -948,8 +947,7 @@ impl Client {
     ) -> Result<reqwest::Response, Error> {
         let mut attempt = 1;
         loop {
-            #[cfg_attr(not(feature = "test-harness"), allow(unused_mut))]
-            let mut request = self
+            let result = self
                 .client
                 .post(flags_endpoint)
                 .header(CONTENT_TYPE, "application/json")
@@ -957,14 +955,9 @@ impl Client {
                 .json(payload)
                 .timeout(Duration::from_secs(
                     self.options.feature_flags_request_timeout_seconds,
-                ));
-            #[cfg(feature = "test-harness")]
-            if let Some(ref extra) = self.options.extra_capture_headers {
-                for (k, v) in extra {
-                    request = request.header(k.as_str(), v.as_str());
-                }
-            }
-            let result = request.send().await;
+                ))
+                .send()
+                .await;
 
             match result {
                 Ok(response) => return Ok(response),
@@ -998,7 +991,7 @@ impl Client {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
         let mut payload = json!({
-            "token": self.options.api_key,
+            "api_key": self.options.api_key,
             "distinct_id": distinct_id,
         });
         if let Some(groups) = &options.groups {
@@ -1011,7 +1004,9 @@ impl Client {
             payload["group_properties"] = json!(group_properties);
         }
         let effective_disable_geoip = options.disable_geoip.unwrap_or(self.options.disable_geoip);
-        payload["geoip_disable"] = json!(effective_disable_geoip);
+        if effective_disable_geoip {
+            payload["disable_geoip"] = json!(true);
+        }
         if let Some(flag_keys) = &options.flag_keys {
             payload["flag_keys_to_evaluate"] = json!(flag_keys);
         }

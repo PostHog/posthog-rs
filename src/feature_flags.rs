@@ -293,7 +293,7 @@ pub struct MultivariateVariant {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FeatureFlagsResponse {
-    /// v2 API format from `/flags?v=2` endpoint
+    /// v2 API format from `/flags/?v=2` endpoint
     V2 {
         /// Map of flag keys to their detailed evaluation results
         flags: HashMap<String, FlagDetail>,
@@ -377,7 +377,7 @@ impl FeatureFlagsResponse {
 
 /// Detailed information about a feature flag evaluation result.
 ///
-/// Returned by the `/flags?v=2` endpoint with extended information about why a
+/// Returned by the `/flags/?v=2` endpoint with extended information about why a
 /// flag evaluated to a particular value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlagDetail {

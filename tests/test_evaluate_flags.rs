@@ -145,7 +145,7 @@ fn start_flaky_flags_server(success_body: String) -> FlakyFlagsServer {
                             Err(_) => break,
                         }
                     }
-                    if String::from_utf8_lossy(&request).contains("POST /flags?v=2") {
+                    if String::from_utf8_lossy(&request).contains("POST /flags/?v=2") {
                         thread_saw_flags_path.store(true, Ordering::SeqCst);
                     }
 
@@ -236,7 +236,7 @@ mod blocking {
     fn evaluate_flags_returns_snapshot_with_one_request() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags").query_param("v", "2");
+            when.method(POST).path("/flags/").query_param("v", "2");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
@@ -299,7 +299,7 @@ mod blocking {
     fn evaluate_flags_does_not_retry_500_status() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(500).body("boom");
         });
         let options = posthog_rs::ClientOptionsBuilder::default()
@@ -325,7 +325,7 @@ mod blocking {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/flags")
+                .path("/flags/")
                 .header(USER_AGENT.to_string(), default_user_agent());
             then.status(200).json_body(flags_response_fixture());
         });
@@ -340,7 +340,7 @@ mod blocking {
     fn unaccessed_flags_do_not_fire_events() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
@@ -356,7 +356,7 @@ mod blocking {
     fn is_enabled_fires_event_with_full_metadata_and_dedupes() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
@@ -384,7 +384,7 @@ mod blocking {
     fn get_flag_payload_does_not_fire_event() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
@@ -404,7 +404,7 @@ mod blocking {
     ) {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
@@ -455,7 +455,7 @@ mod blocking {
         // Calling is_enabled multiple times on the same snapshot fires only once.
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
@@ -498,7 +498,7 @@ mod blocking {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/flags")
+                .path("/flags/")
                 .json_body_partial(json!({"flag_keys_to_evaluate": ["alpha", "beta"]}).to_string());
             then.status(200).json_body(flags_response_fixture());
         });
@@ -515,7 +515,7 @@ mod blocking {
     fn empty_distinct_id_returns_empty_snapshot_without_request_or_events() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
@@ -534,7 +534,7 @@ mod blocking {
     fn event_with_flags_attaches_properties_without_extra_request() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = server.mock(|when, then| {
@@ -560,7 +560,7 @@ mod blocking {
     fn only_filters_to_named_keys() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let client = create_test_client(server.base_url());
@@ -575,7 +575,7 @@ mod blocking {
     fn only_accessed_returns_only_accessed_subset() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         capture_path_mock(&server);
@@ -592,7 +592,7 @@ mod blocking {
     fn only_accessed_returns_empty_when_nothing_accessed() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let client = create_test_client(server.base_url());
@@ -609,7 +609,7 @@ mod blocking {
         let mut response = flags_response_fixture();
         response["errorsWhileComputingFlags"] = json!(true);
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(response);
         });
         capture_path_mock(&server);
@@ -633,7 +633,7 @@ mod blocking {
     fn legacy_response_shape_still_yields_a_snapshot() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(json!({
                 "featureFlags": {"alpha": true, "beta": false},
                 "featureFlagPayloads": {}
@@ -669,7 +669,7 @@ mod blocking {
             "requestId": "req-x"
         });
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(response);
         });
         let client = create_test_client(server.base_url());
@@ -688,7 +688,7 @@ mod blocking {
     fn flag_called_event_routes_to_v1_endpoint() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let v1_mock = server.mock(|when, then| {
@@ -724,7 +724,7 @@ mod blocking {
     fn flag_called_event_v1_failure_is_single_attempt_and_silent() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let v1_mock = server.mock(|when, then| {
@@ -746,7 +746,7 @@ mod blocking {
     fn disabled_client_returns_empty_snapshot() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let options = posthog_rs::ClientOptionsBuilder::default()
@@ -789,7 +789,7 @@ mod async_tests {
     async fn evaluate_flags_returns_snapshot_with_one_request() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let client = create_test_client(server.base_url()).await;
@@ -851,7 +851,7 @@ mod async_tests {
     async fn evaluate_flags_does_not_retry_500_status() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(500).body("boom");
         });
         let options = posthog_rs::ClientOptionsBuilder::default()
@@ -878,7 +878,7 @@ mod async_tests {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/flags")
+                .path("/flags/")
                 .header(USER_AGENT.to_string(), default_user_agent());
             then.status(200).json_body(flags_response_fixture());
         });
@@ -894,7 +894,7 @@ mod async_tests {
     async fn is_enabled_fires_event_and_dedupes() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
@@ -918,7 +918,7 @@ mod async_tests {
     async fn flag_called_event_contains_is_server_and_lib() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = server.mock(|when, then| {
@@ -942,7 +942,7 @@ mod async_tests {
     async fn get_flag_payload_does_not_fire_event() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
@@ -964,7 +964,7 @@ mod async_tests {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/flags")
+                .path("/flags/")
                 .json_body_partial(json!({"flag_keys_to_evaluate": ["alpha"]}).to_string());
             then.status(200).json_body(flags_response_fixture());
         });
@@ -981,7 +981,7 @@ mod async_tests {
     async fn empty_distinct_id_returns_empty_snapshot_without_events() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
@@ -1002,7 +1002,7 @@ mod async_tests {
     async fn flag_called_event_routes_to_v1_endpoint() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let v1_mock = server.mock(|when, then| {
@@ -1040,7 +1040,7 @@ mod async_tests {
     async fn flag_called_event_v1_failure_is_single_attempt_and_silent() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let v1_mock = server.mock(|when, then| {
@@ -1065,7 +1065,7 @@ mod async_tests {
     async fn event_with_flags_attaches_properties_without_extra_request() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags");
+            when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = server.mock(|when, then| {

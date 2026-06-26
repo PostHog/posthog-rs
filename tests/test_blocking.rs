@@ -41,12 +41,11 @@ fn test_get_all_feature_flags() {
 
     let flags_mock = server.mock(|when, then| {
         when.method(POST)
-            .path("/flags")
+            .path("/flags/")
             .query_param("v", "2")
             .json_body(json!({
-                "token": "test_api_key",
-                "distinct_id": "test-user",
-                "geoip_disable": false
+                "api_key": "test_api_key",
+                "distinct_id": "test-user"
             }));
         then.status(200)
             .header("content-type", "application/json")
@@ -86,7 +85,7 @@ fn test_sends_default_useragent() {
 
     let flags_mock = server.mock(|when, then| {
         when.method(POST)
-            .path("/flags")
+            .path("/flags/")
             .header(USER_AGENT.to_string(), default_user_agent())
             .query_param("v", "2");
 
@@ -106,7 +105,7 @@ fn test_is_feature_enabled() {
     let server = MockServer::start();
 
     let flags_mock = server.mock(|when, then| {
-        when.method(POST).path("/flags").query_param("v", "2");
+        when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
             "featureFlags": {
                 "enabled-flag": true,
@@ -155,13 +154,12 @@ fn test_get_feature_flag_with_properties() {
 
     let flags_mock = server.mock(|when, then| {
         when.method(POST)
-            .path("/flags")
+            .path("/flags/")
             .query_param("v", "2")
             .json_body(json!({
-                "token": "test_api_key",
+                "api_key": "test_api_key",
                 "distinct_id": "test-user",
-                "person_properties": person_properties,
-                "geoip_disable": false
+                "person_properties": person_properties
             }));
         then.status(200).json_body(json!({
             "featureFlags": {
@@ -197,7 +195,7 @@ fn test_multivariate_flag() {
     let server = MockServer::start();
 
     let flags_mock = server.mock(|when, then| {
-        when.method(POST).path("/flags").query_param("v", "2");
+        when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
             "featureFlags": {
                 "experiment": "variant-b"
@@ -241,7 +239,7 @@ fn test_api_error_handling() {
     let server = MockServer::start();
 
     let error_mock = server.mock(|when, then| {
-        when.method(POST).path("/flags").query_param("v", "2");
+        when.method(POST).path("/flags/").query_param("v", "2");
         then.status(500).body("Internal Server Error");
     });
 
@@ -277,7 +275,7 @@ fn assert_disabled_client_is_noop(api_key: Option<&str>) {
         then.status(200);
     });
     let flags_mock = server.mock(|when, then| {
-        when.method(POST).path("/flags").query_param("v", "2");
+        when.method(POST).path("/flags/").query_param("v", "2");
         then.status(200).json_body(json!({
             "featureFlags": {},
             "featureFlagPayloads": {}
