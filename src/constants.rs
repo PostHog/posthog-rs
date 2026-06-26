@@ -29,11 +29,32 @@ mod v1 {
     pub(crate) const PRODUCT_TOUR_ID_OPT: &str = "product_tour_id";
     pub(crate) const PROCESS_PERSON_PROFILE_OPT: &str = "process_person_profile";
 
-    /// (property key, wire option key) pairs lifted into the V1 `options` map.
-    pub(crate) const OPTIONS_EXTRACTION_TABLE: &[(&str, &str)] = &[
-        (COOKIELESS_MODE_PROP, COOKIELESS_MODE_OPT),
-        (IGNORE_SENT_AT_PROP, DISABLE_SKEW_CORRECTION_OPT),
-        (PRODUCT_TOUR_ID_PROP, PRODUCT_TOUR_ID_OPT),
-        (PROCESS_PERSON_PROFILE_PROP, PROCESS_PERSON_PROFILE_OPT),
+    /// The type the backend's `Options` struct expects for a lifted key. Drives
+    /// the coercion in `V1Event::from_event_at`: a caller value that can't be
+    /// coerced to this type is dropped rather than shipped (a mistyped option
+    /// otherwise 400s the whole batch, since the backend `Options` is strict
+    /// serde — see `rust/capture/src/v1/analytics/types.rs`).
+    #[derive(Clone, Copy)]
+    pub(crate) enum OptionKind {
+        Bool,
+        Str,
+    }
+
+    /// (property key, wire option key, expected type) tuples lifted into the V1
+    /// `options` map. The type tag selects the coercion applied before the value
+    /// is placed on the wire.
+    pub(crate) const OPTIONS_EXTRACTION_TABLE: &[(&str, &str, OptionKind)] = &[
+        (COOKIELESS_MODE_PROP, COOKIELESS_MODE_OPT, OptionKind::Bool),
+        (
+            IGNORE_SENT_AT_PROP,
+            DISABLE_SKEW_CORRECTION_OPT,
+            OptionKind::Bool,
+        ),
+        (PRODUCT_TOUR_ID_PROP, PRODUCT_TOUR_ID_OPT, OptionKind::Str),
+        (
+            PROCESS_PERSON_PROFILE_PROP,
+            PROCESS_PERSON_PROFILE_OPT,
+            OptionKind::Bool,
+        ),
     ];
 }
