@@ -132,6 +132,7 @@ pub fn posthog_rs::ClientOptionsBuilder::disabled(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::enable_local_evaluation(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::error_tracking(&mut self, posthog_rs::ErrorTrackingOptions) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::extra_capture_headers(&mut self, std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::feature_flags_request_max_retries(&mut self, u32) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::feature_flags_request_timeout_seconds(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::flush_at(&mut self, usize) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::flush_interval_ms(&mut self, u64) -> &mut Self

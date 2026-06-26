@@ -28,7 +28,7 @@ impl Endpoint {
         match self {
             Endpoint::Capture => "/i/v0/e/",
             Endpoint::Batch => "/batch/",
-            Endpoint::Flags => "/flags/?v=2",
+            Endpoint::Flags => "/flags?v=2",
             Endpoint::LocalEvaluation => "/flags/definitions/?send_cohorts",
         }
     }
@@ -178,7 +178,7 @@ mod tests {
 
         assert_eq!(
             manager.build_url(Endpoint::Flags),
-            format!("{}/flags/?v=2", US_INGESTION_ENDPOINT)
+            format!("{}/flags?v=2", US_INGESTION_ENDPOINT)
         );
     }
 

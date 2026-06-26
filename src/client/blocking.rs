@@ -43,7 +43,9 @@ fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
         source = std::error::Error::source(error);
     }
 
-    !err.to_string().to_lowercase().contains("connection refused")
+    !err.to_string()
+        .to_lowercase()
+        .contains("connection refused")
 }
 
 #[cfg(not(feature = "capture-v1"))]
@@ -174,13 +176,20 @@ impl BlockingFlagEventHost {
                 return;
             }
         };
-        let result = self
+        #[cfg_attr(not(feature = "test-harness"), allow(unused_mut))]
+        let mut request = self
             .http_client
             .post(&self.capture_url)
             .header(CONTENT_TYPE, "application/json")
             .header(USER_AGENT, get_default_user_agent())
-            .body(payload)
-            .send();
+            .body(payload);
+        #[cfg(feature = "test-harness")]
+        if let Some(ref extra) = self.options.extra_capture_headers {
+            for (k, v) in extra {
+                request = request.header(k.as_str(), v.as_str());
+            }
+        }
+        let result = request.send();
         match result {
             Ok(response) => {
                 if let Err(e) = check_response(response) {
@@ -499,7 +508,7 @@ impl Client {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
         let mut payload = json!({
-            "api_key": self.options.api_key,
+            "token": self.options.api_key,
             "distinct_id": distinct_id.into(),
         });
 
@@ -515,10 +524,7 @@ impl Client {
             payload["group_properties"] = json!(group_properties);
         }
 
-        // Add geoip disable parameter if configured
-        if self.options.disable_geoip {
-            payload["disable_geoip"] = json!(true);
-        }
+        payload["geoip_disable"] = json!(self.options.disable_geoip);
 
         let response = self.send_feature_flags_request(&flags_endpoint, &payload)?;
 
@@ -700,14 +706,11 @@ impl Client {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
         let mut payload = json!({
-            "api_key": self.options.api_key,
+            "token": self.options.api_key,
             "distinct_id": distinct_id.into(),
         });
 
-        // Add geoip disable parameter if configured
-        if self.options.disable_geoip {
-            payload["disable_geoip"] = json!(true);
-        }
+        payload["geoip_disable"] = json!(self.options.disable_geoip);
 
         let response = self
             .client
@@ -912,7 +915,8 @@ impl Client {
     ) -> Result<reqwest::blocking::Response, Error> {
         let mut attempt = 1;
         loop {
-            let result = self
+            #[cfg_attr(not(feature = "test-harness"), allow(unused_mut))]
+            let mut request = self
                 .client
                 .post(flags_endpoint)
                 .header(CONTENT_TYPE, "application/json")
@@ -920,22 +924,34 @@ impl Client {
                 .json(payload)
                 .timeout(Duration::from_secs(
                     self.options.feature_flags_request_timeout_seconds,
-                ))
-                .send();
+                ));
+            #[cfg(feature = "test-harness")]
+            if let Some(ref extra) = self.options.extra_capture_headers {
+                for (k, v) in extra {
+                    request = request.header(k.as_str(), v.as_str());
+                }
+            }
+            let result = request.send();
 
             match result {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     let err_msg = e.to_string();
-                    if attempt > self.options.feature_flags_request_max_retries || !is_retryable_feature_flags_error(&e) {
-                        return Err(Error::Connection(err_msg));
-                    }
-                    std::thread::sleep(super::retry::backoff_duration(
+                    match super::retry::feature_flags_after_transport_error(
                         &self.options,
                         attempt,
-                        None,
-                    ));
-                    attempt += 1;
+                        is_retryable_feature_flags_error(&e),
+                        err_msg,
+                    ) {
+                        super::retry::Step::Backoff(delay) => {
+                            std::thread::sleep(delay);
+                            attempt += 1;
+                        }
+                        super::retry::Step::Fail(err) => return Err(err),
+                        super::retry::Step::Done => {
+                            unreachable!("feature flag transport errors cannot complete")
+                        }
+                    }
                 }
             }
         }
@@ -949,7 +965,7 @@ impl Client {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
         let mut payload = json!({
-            "api_key": self.options.api_key,
+            "token": self.options.api_key,
             "distinct_id": distinct_id,
         });
         if let Some(groups) = &options.groups {
@@ -962,9 +978,7 @@ impl Client {
             payload["group_properties"] = json!(group_properties);
         }
         let effective_disable_geoip = options.disable_geoip.unwrap_or(self.options.disable_geoip);
-        if effective_disable_geoip {
-            payload["disable_geoip"] = json!(true);
-        }
+        payload["geoip_disable"] = json!(effective_disable_geoip);
         if let Some(flag_keys) = &options.flag_keys {
             payload["flag_keys_to_evaluate"] = json!(flag_keys);
         }
