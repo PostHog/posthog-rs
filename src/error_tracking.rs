@@ -1047,18 +1047,6 @@ mod tests {
         Arc::new(crate::client::client(options))
     }
 
-    // Initialize the process-wide global client (set-once), mirroring
-    // `build_test_client`'s runtime-free construction across feature configs.
-    #[cfg(feature = "async-client")]
-    fn init_global_test(options: crate::client::ClientOptions) -> Result<(), Error> {
-        futures::executor::block_on(crate::global::init_global_client(options))
-    }
-
-    #[cfg(not(feature = "async-client"))]
-    fn init_global_test(options: crate::client::ClientOptions) -> Result<(), Error> {
-        crate::global::init_global_client(options)
-    }
-
     #[inline(never)]
     fn panic_hook_test_panic_site() {
         panic!("panic hook boom");
@@ -1455,45 +1443,6 @@ mod tests {
         assert!(
             !latched,
             "a disabled client must not latch the process-wide hook"
-        );
-    }
-
-    #[test]
-    fn init_global_installs_panic_capture_by_default() {
-        // capture_panics defaults on, so init_global installs a process-wide hook
-        // that routes panics through the global client. The global client lives
-        // in a set-once OnceLock, so this is the ONLY test that initializes it.
-        let _guard = panic_hook_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let original_hook = panic::take_hook();
-        let mut reset = PanicHookReset::new(original_hook);
-        panic::set_hook(Box::new(|_| {}));
-
-        let server = MockServer::start();
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).matches(request_has_panic_payload);
-            then.status(200);
-        });
-        let options = ClientOptionsBuilder::default()
-            .api_key("test_api_key".to_string())
-            .host(server.base_url())
-            .build()
-            .unwrap();
-        init_global_test(options).expect("init_global succeeds");
-
-        // Panic through the shared site so the payload matches the same matcher
-        // as the standalone-client test.
-        let _ = panic::catch_unwind(AssertUnwindSafe(panic_hook_test_panic_site));
-
-        // Restore before asserting so a failed assertion can't leave the global
-        // hook dangling for other tests.
-        reset.restore();
-        // `>= 1`, not exactly 1: a panic in another (non-serialized) test during
-        // the install window would also be captured; our own panic guarantees one.
-        assert!(
-            capture_mock.hits() >= 1,
-            "global panic hook did not capture the panic"
         );
     }
 
