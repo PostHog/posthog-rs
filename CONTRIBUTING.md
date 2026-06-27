@@ -22,6 +22,7 @@ scripts/check-public-api.sh
 `check-public-api.sh` compares the public API in your working tree with the checked-in `api/public-api.txt` snapshot. If an API change is intentional, run `scripts/check-public-api.sh --update` and review the snapshot diff. It requires:
 
 ```bash
+python3 --version
 cargo install cargo-public-api --version 0.52.0 --locked
 rustup toolchain install nightly-2026-06-12 --profile minimal
 ```
