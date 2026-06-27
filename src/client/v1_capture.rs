@@ -1,7 +1,7 @@
 //! Shared, runtime-agnostic helpers for the V1 capture pipeline.
 //! Each client keeps only the I/O; this module owns everything else.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 pub(crate) const V1_CAPTURE_PATH: &str = "/i/v1/analytics/events";
 
@@ -222,7 +222,7 @@ pub(crate) fn after_response(
     request_id: &Uuid,
     attempt: u32,
     status: u16,
-    retry_after: Option<u64>,
+    retry_after: Option<Duration>,
     body: &str,
     pending: &mut Vec<V1Event>,
     final_results: &mut HashMap<Uuid, EventResult>,
@@ -564,7 +564,7 @@ mod tests {
             &rid,
             1,
             503,
-            Some(1),
+            Some(Duration::from_secs(1)),
             body,
             &mut pending,
             &mut final_results,
