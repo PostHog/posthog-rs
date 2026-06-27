@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.14.2 — 2026-06-27
+
+### Patch changes
+
+- [10810b1](https://github.com/posthog/posthog-rs/commit/10810b182d68787b3169d586600594d515c8e02f) Type-coerce `capture-v1` options before placing them on the wire. A caller value whose type doesn't match the backend's strict `Options` schema is now coerced when possible, or dropped (backend applies its default) rather than rejecting the whole batch. No effect on default (v0) capture behavior. — Thanks @eli-r-ph!
+
 ## 0.14.1 — 2026-06-24
 
 ### Patch changes
