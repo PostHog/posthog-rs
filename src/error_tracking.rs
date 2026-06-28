@@ -3,6 +3,9 @@ use std::error::Error as StdError;
 use std::io::Write;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
+// Only the `#[cfg(test)]` standalone-client `install_panic_hook` helper needs
+// `Arc` at module scope; the tests module imports its own.
+#[cfg(test)]
 use std::sync::Arc;
 
 use derive_builder::Builder;
@@ -20,6 +23,14 @@ const MAX_ERROR_SOURCES: usize = 50;
 
 /// Latches the single process-wide panic hook so a second install is rejected.
 static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// How long the panic hook blocks the panicking thread waiting for the
+/// `$exception` to flush before letting the panic proceed. Deliberately short:
+/// the hook runs on the dying thread, so a long wait would freeze the crash (and
+/// delay the panic message, which prints only after the flush) when PostHog is
+/// slow or unreachable. Fixed rather than configurable for now — easy to expose
+/// later if a need arises.
+const PANIC_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Client-level Error Tracking configuration, applied to every exception the
 /// client captures. Set it via [`ErrorTrackingOptionsBuilder`] on
@@ -62,23 +73,14 @@ pub struct ErrorTrackingOptions {
     /// includes and defaults. Same matching rules as `in_app_include_paths`
     /// — e.g. `"other_crate::"` excludes every frame of that crate.
     in_app_exclude_paths: Vec<String>,
-    /// When `true` (the default), [`crate::init_global`] installs a process-wide
-    /// panic hook that captures panics as `$exception` events through the global
-    /// client — crash reporting, on by default. Set `false` to opt out.
+    /// When `true`, [`crate::init_global`] installs a process-wide panic hook
+    /// that captures panics as `$exception` events through the global client.
+    /// Defaults to `false` — panic autocapture is opt-in.
     ///
-    /// This flag only drives the *global* client's automatic install. A
-    /// standalone [`Client`] has no process-static home for a `'static` hook, so
-    /// route its panics by calling [`install_panic_hook`] with an `Arc<Client>`
-    /// yourself; the flag does not affect standalone clients.
+    /// Only the global client installs a hook: a panic hook is process-global
+    /// (`std::panic::set_hook`), so it pairs with the process-global client, and
+    /// there is intentionally no per-`Client` panic API for now.
     capture_panics: bool,
-    /// How long the installed panic hook blocks the panicking thread waiting for
-    /// the `$exception` to be sent before letting the panic proceed (default:
-    /// 2000 ms). Deliberately short and separate from `shutdown_timeout_ms`: the
-    /// hook runs on the dying thread, so a long wait would freeze the crash —
-    /// and delay the panic message, which only prints after the flush — whenever
-    /// PostHog is slow or unreachable. Only consulted when the panic hook is
-    /// installed via [`install_panic_hook`].
-    panic_flush_timeout_ms: u64,
 }
 
 impl Default for ErrorTrackingOptions {
@@ -87,8 +89,7 @@ impl Default for ErrorTrackingOptions {
             capture_stacktrace: true,
             in_app_include_paths: Vec::new(),
             in_app_exclude_paths: Vec::new(),
-            capture_panics: true,
-            panic_flush_timeout_ms: 2000,
+            capture_panics: false,
         }
     }
 }
@@ -100,11 +101,6 @@ impl ErrorTrackingOptions {
 
     fn capture_panics(&self) -> bool {
         self.capture_panics
-    }
-
-    /// The panic-flush budget as a `Duration` (see `panic_flush_timeout_ms`).
-    fn panic_flush_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.panic_flush_timeout_ms)
     }
 
     fn is_in_app_path(&self, filename: &str) -> bool {
@@ -153,46 +149,23 @@ impl ErrorTrackingOptions {
     }
 }
 
-/// Install process-wide panic autocapture, capturing through `client`.
-///
-/// Most callers don't need this: the global client installs the hook
-/// automatically (see [`ErrorTrackingOptions`]'s `capture_panics`, on by
-/// default, via [`crate::init_global`]). Use this to capture panics through a
-/// *standalone* [`Client`] instead — it takes an `Arc<Client>` because the hook
-/// is `'static` and must keep the client alive for the rest of the process.
-///
-/// On a panic, a personless `$exception` event is built — the panic payload as
-/// the exception value, panic-site `$exception_panic_file`/`_line`/`_column`
-/// from [`std::panic::Location`], and a call-site stacktrace honoring the
-/// client's `capture_stacktrace` — enqueued on `client`'s transport and flushed
-/// (time-bounded), then the previously installed hook runs.
-///
-/// On the panicking thread the hook only enqueues and flushes; the actual HTTP
-/// send and any `before_send` hooks run on the transport's background worker,
-/// where the panic count is zero, so a panic there is a joinable thread panic
-/// rather than the process abort a panic on the hook thread would cause.
-///
-/// Delivery is best-effort. The flush is bounded by
-/// [`ErrorTrackingOptions`]'s `panic_flush_timeout_ms` (default 2s), and the
-/// event rides the normal transport: the just-captured `$exception` is flushed
-/// ahead of queued retries, but under sustained backpressure — a slow or
-/// unreachable endpoint, or a large capture backlog — it may not be sent before
-/// the process exits.
-///
-/// Installing the hook twice returns [`Error::PanicHookAlreadyInstalled`]. A
-/// disabled client installs nothing and returns `Ok(())` — it can't send, so it
-/// must not latch the single process-wide hook and block a later enabled install.
-pub fn install_panic_hook(client: Arc<Client>) -> Result<(), Error> {
+/// Install the panic hook against a specific `client`. Internal/test-only: the
+/// public entry point is the global client's `capture_panics` option (via
+/// [`crate::init_global`]), since a panic hook is process-global. Kept to
+/// exercise the shared hook path against a standalone client in tests. A
+/// disabled client installs nothing and returns `Ok(())`.
+#[cfg(test)]
+fn install_panic_hook(client: Arc<Client>) -> Result<(), Error> {
     if client.is_disabled() {
         return Ok(());
     }
     install_hook(move |panic_info| capture_panic(&client, panic_info))
 }
 
-/// If the global client has `capture_panics` enabled (the default) and can
-/// actually send, install the panic hook against it. Best-effort and idempotent:
-/// a hook installed earlier (e.g. a manual [`install_panic_hook`]) is left in
-/// place. Called by `init_global` once the global client is set.
+/// If the global client has `capture_panics` enabled (opt-in) and can actually
+/// send, install the panic hook against it. Best-effort and idempotent: a hook
+/// installed earlier is left in place. Called by `init_global` once the global
+/// client is set.
 pub(crate) fn maybe_install_global_panic_hook() {
     let Some(client) = crate::global::global_client() else {
         return;
@@ -210,8 +183,7 @@ pub(crate) fn maybe_install_global_panic_hook() {
 
 /// Whether `init_global` should auto-install the panic hook for this client.
 /// A disabled client can't send, so it must not latch the single process-wide
-/// hook — that would block a later [`install_panic_hook`] on an enabled
-/// standalone client.
+/// hook.
 fn should_capture_global_panics(client: &Client) -> bool {
     !client.is_disabled() && client.error_tracking_options().capture_panics()
 }
@@ -274,11 +246,11 @@ fn capture_panic(client: &Client, panic_info: &panic::PanicInfo<'_>) -> Result<(
     // panic site holds -> hang before the previous hook runs).
     client.enqueue_panic_event(event);
     // Time-bounded flush on the panicking thread (before unwinding frees locks).
-    // The bound (default 2s, `panic_flush_timeout_ms`) keeps the dying process
-    // from hanging — and the panic message, which prints only after this returns,
+    // The fixed bound (`PANIC_FLUSH_TIMEOUT`) keeps the dying process from
+    // hanging — and the panic message, which prints only after this returns,
     // from being delayed — when PostHog is slow/unreachable or a `before_send`
     // hook needs a lock the panic site still holds.
-    client.flush_blocking_timeout(et_options.panic_flush_timeout());
+    client.flush_blocking_timeout(PANIC_FLUSH_TIMEOUT);
     Ok(())
 }
 
@@ -1298,9 +1270,9 @@ mod tests {
         // releases locks held at the panic site. If a `before_send` hook needs
         // such a lock, the worker blocks on it and the hook would block on the
         // worker forever — the process hangs instead of crashing. The flush is
-        // bounded by `panic_flush_timeout_ms`, so the hook returns and the panic
-        // proceeds. A short timeout keeps the test fast; the watchdog turns a
-        // regression (unbounded wait) into a failure instead of a hang.
+        // time-bounded (`PANIC_FLUSH_TIMEOUT`), so the hook returns (after ~2s)
+        // and the panic proceeds; the watchdog turns a regression (an unbounded
+        // wait) into a failure instead of a hang.
         let _guard = panic_hook_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1320,12 +1292,6 @@ mod tests {
         let options = ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
-            .error_tracking(
-                ErrorTrackingOptionsBuilder::default()
-                    .panic_flush_timeout_ms(200u64)
-                    .build()
-                    .unwrap(),
-            )
             .before_send(|event| {
                 let _held = SHARED.lock().unwrap_or_else(|e| e.into_inner());
                 Some(event)
@@ -1365,19 +1331,16 @@ mod tests {
     }
 
     #[test]
-    fn global_capture_panics_defaults_on_and_is_configurable() {
+    fn global_capture_panics_defaults_off_and_is_configurable() {
         assert!(
-            ErrorTrackingOptions::default().capture_panics(),
-            "panic autocapture is on by default"
+            !ErrorTrackingOptions::default().capture_panics(),
+            "panic autocapture is opt-in (off by default)"
         );
-        let opted_out = ErrorTrackingOptionsBuilder::default()
-            .capture_panics(false)
+        let enabled = ErrorTrackingOptionsBuilder::default()
+            .capture_panics(true)
             .build()
             .unwrap();
-        assert!(
-            !opted_out.capture_panics(),
-            "capture_panics is configurable"
-        );
+        assert!(enabled.capture_panics(), "capture_panics is configurable");
     }
 
     #[test]
@@ -1385,16 +1348,28 @@ mod tests {
         let enabled = build_test_client(
             ClientOptionsBuilder::default()
                 .api_key("test_api_key".to_string())
+                .error_tracking(
+                    ErrorTrackingOptionsBuilder::default()
+                        .capture_panics(true)
+                        .build()
+                        .unwrap(),
+                )
                 .build()
                 .unwrap(),
         );
         assert!(should_capture_global_panics(&enabled));
 
-        // A disabled client can't send, so it must not latch the single hook.
+        // Disabled gates it even with capture_panics on.
         let disabled = build_test_client(
             ClientOptionsBuilder::default()
                 .api_key("test_api_key".to_string())
                 .disabled(true)
+                .error_tracking(
+                    ErrorTrackingOptionsBuilder::default()
+                        .capture_panics(true)
+                        .build()
+                        .unwrap(),
+                )
                 .build()
                 .unwrap(),
         );
@@ -1403,19 +1378,14 @@ mod tests {
             "a disabled client must not latch the process-wide hook"
         );
 
-        let opted_out = build_test_client(
+        // Default options leave capture_panics off, so nothing installs.
+        let default_off = build_test_client(
             ClientOptionsBuilder::default()
                 .api_key("test_api_key".to_string())
-                .error_tracking(
-                    ErrorTrackingOptionsBuilder::default()
-                        .capture_panics(false)
-                        .build()
-                        .unwrap(),
-                )
                 .build()
                 .unwrap(),
         );
-        assert!(!should_capture_global_panics(&opted_out));
+        assert!(!should_capture_global_panics(&default_off));
     }
 
     #[test]

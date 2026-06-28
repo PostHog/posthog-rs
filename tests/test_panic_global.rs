@@ -1,4 +1,5 @@
-//! End-to-end check that `init_global` installs panic autocapture by default.
+//! End-to-end check that `init_global` installs panic autocapture when
+//! `capture_panics` is enabled.
 //!
 //! This lives in its own integration-test binary on purpose: it initializes the
 //! real process-wide global client (a set-once `OnceLock`) and installs the
@@ -41,7 +42,7 @@ fn init_global_for_test(options: posthog_rs::ClientOptions) -> Result<(), postho
 }
 
 #[test]
-fn init_global_installs_panic_capture_by_default() {
+fn init_global_installs_panic_capture_when_enabled() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
         when.method(POST).matches(is_panic_exception);
@@ -55,14 +56,19 @@ fn init_global_installs_panic_capture_by_default() {
     let options = posthog_rs::ClientOptionsBuilder::default()
         .api_key("test_api_key".to_string())
         .host(server.base_url())
+        .error_tracking(
+            posthog_rs::ErrorTrackingOptionsBuilder::default()
+                .capture_panics(true)
+                .build()
+                .unwrap(),
+        )
         .build()
         .unwrap();
     init_global_for_test(options).expect("init_global should succeed");
 
-    // `capture_panics` is on by default, so the installed hook routes this panic
-    // through the global client. `catch_unwind` keeps the test process alive; the
-    // hook's flush is synchronous, so the event has been sent by the time it
-    // returns.
+    // With `capture_panics` enabled, the installed hook routes this panic through
+    // the global client. `catch_unwind` keeps the test process alive; the hook's
+    // flush is synchronous, so the event has been sent by the time it returns.
     let _ = panic::catch_unwind(AssertUnwindSafe(|| panic!("integration panic boom")));
 
     mock.assert_hits(1);
