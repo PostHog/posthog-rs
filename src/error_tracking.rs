@@ -888,14 +888,18 @@ fn default_in_app_function(function: &str) -> bool {
             .next()
             .unwrap_or_default(),
         "alloc"
+            | "anyhow"
             | "backtrace"
             | "core"
             | "futures_core"
             | "futures_util"
+            | "log"
             | "posthog_rs"
             | "reqwest"
             | "std"
             | "tokio"
+            | "tracing"
+            | "tracing_core"
     )
 }
 
@@ -1435,6 +1439,10 @@ mod tests {
             "core::ops::function::FnOnce::call_once",
             "tokio::runtime::task::raw::poll",
             "futures_util::future::FutureExt::poll",
+            "anyhow::error::Error::msg",
+            "tracing::span::Span::record",
+            "tracing_core::dispatcher::get_default",
+            "log::__private_api::log",
         ] {
             assert!(
                 !options.is_in_app_frame(None, Some(not_in_app)),
