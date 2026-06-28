@@ -30,7 +30,13 @@ static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// delay the panic message, which prints only after the flush) when PostHog is
 /// slow or unreachable. Fixed rather than configurable for now — easy to expose
 /// later if a need arises.
+#[cfg(not(test))]
 const PANIC_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Shortened under test: the bounded-flush tests deliberately deadlock
+/// `before_send`, so they wait the full budget — only its boundedness matters
+/// there, not the production duration.
+#[cfg(test)]
+const PANIC_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Client-level Error Tracking configuration, applied to every exception the
 /// client captures. Set it via [`ErrorTrackingOptionsBuilder`] on
@@ -1274,9 +1280,9 @@ mod tests {
         // releases locks held at the panic site. If a `before_send` hook needs
         // such a lock, the worker blocks on it and the hook would block on the
         // worker forever — the process hangs instead of crashing. The flush is
-        // time-bounded (`PANIC_FLUSH_TIMEOUT`), so the hook returns (after ~2s)
-        // and the panic proceeds; the watchdog turns a regression (an unbounded
-        // wait) into a failure instead of a hang.
+        // time-bounded (`PANIC_FLUSH_TIMEOUT`), so the hook returns and the panic
+        // proceeds; the watchdog turns a regression (an unbounded wait) into a
+        // failure instead of a hang.
         let _guard = panic_hook_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
