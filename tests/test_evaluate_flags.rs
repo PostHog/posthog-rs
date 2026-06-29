@@ -3,22 +3,20 @@ mod common;
 use common::default_user_agent;
 use httpmock::prelude::*;
 use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener};
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::{Duration, Instant};
 
-#[cfg(feature = "async-client")]
-use std::time::Duration;
-
-/// Where `$feature_flag_called` ships: V1 analytics with `capture-v1`, else v0.
+/// Where the background worker ships analytics captures.
 #[cfg(feature = "capture-v1")]
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
 #[cfg(not(feature = "capture-v1"))]
-const CAPTURE_PATH: &str = "/i/v0/e/";
-
-/// Where the background worker ships analytics captures on v0: the batch
-/// endpoint (single captures are batched too now). Used only by the v0-gated
-/// `event_with_flags` tests below; `$feature_flag_called` still ships via the
-/// fire-and-forget `/i/v0/e/` host path (`CAPTURE_PATH`).
-#[cfg(not(feature = "capture-v1"))]
-const WORKER_CAPTURE_PATH: &str = "/batch/";
+const CAPTURE_PATH: &str = "/batch/";
 
 /// Feature-aware capture mock; the JSON body is required by V1, ignored by v0.
 fn capture_path_mock(server: &MockServer) -> httpmock::Mock<'_> {
@@ -87,12 +85,141 @@ fn flags_response_fixture() -> Value {
     })
 }
 
+struct FlakyFlagsServer {
+    base_url: String,
+    attempts: Arc<AtomicUsize>,
+    saw_flags_path: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl FlakyFlagsServer {
+    fn assert_retry_succeeded(self) {
+        self.handle.join().expect("flaky flags server thread");
+        assert_eq!(self.attempts.load(Ordering::SeqCst), 2);
+        assert!(self.saw_flags_path.load(Ordering::SeqCst));
+    }
+}
+
+fn start_flaky_flags_server(success_body: String) -> FlakyFlagsServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind flaky flags server");
+    listener
+        .set_nonblocking(true)
+        .expect("set flaky flags server nonblocking");
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let saw_flags_path = Arc::new(AtomicBool::new(false));
+    let thread_attempts = attempts.clone();
+    let thread_saw_flags_path = saw_flags_path.clone();
+    let handle = thread::spawn(move || {
+        let started = Instant::now();
+        while thread_attempts.load(Ordering::SeqCst) < 2
+            && started.elapsed() < Duration::from_secs(5)
+        {
+            match listener.accept() {
+                Ok((mut stream, _addr)) => {
+                    let attempt = thread_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    if attempt == 1 {
+                        let _ = stream.shutdown(Shutdown::Both);
+                        continue;
+                    }
+
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                    let mut request = Vec::new();
+                    let mut buf = [0; 1024];
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                request.extend_from_slice(&buf[..n]);
+                                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if String::from_utf8_lossy(&request).contains("POST /flags/?v=2") {
+                        thread_saw_flags_path.store(true, Ordering::SeqCst);
+                    }
+
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        success_body.len(),
+                        success_body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    FlakyFlagsServer {
+        base_url,
+        attempts,
+        saw_flags_path,
+        handle,
+    }
+}
+
+struct ResettingFlagsServer {
+    base_url: String,
+    attempts: Arc<AtomicUsize>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl ResettingFlagsServer {
+    fn assert_attempts(self, expected: usize) {
+        self.handle.join().expect("resetting flags server thread");
+        assert_eq!(self.attempts.load(Ordering::SeqCst), expected);
+    }
+}
+
+fn start_resetting_flags_server(expected_attempts: usize) -> ResettingFlagsServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind resetting flags server");
+    listener
+        .set_nonblocking(true)
+        .expect("set resetting flags server nonblocking");
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let thread_attempts = attempts.clone();
+    let handle = thread::spawn(move || {
+        let started = Instant::now();
+        while thread_attempts.load(Ordering::SeqCst) < expected_attempts
+            && started.elapsed() < Duration::from_secs(5)
+        {
+            match listener.accept() {
+                Ok((stream, _addr)) => {
+                    thread_attempts.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    ResettingFlagsServer {
+        base_url,
+        attempts,
+        handle,
+    }
+}
+
 // ---------- blocking ----------
 
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, Event, FlagValue};
+    #[cfg(not(feature = "capture-v1"))]
+    use posthog_rs::Event;
+    use posthog_rs::{EvaluateFlagsOptions, FlagValue};
     use reqwest::header::USER_AGENT;
 
     fn create_test_client(base_url: String) -> posthog_rs::Client {
@@ -119,6 +246,73 @@ mod blocking {
         assert_eq!(keys, vec!["alpha", "beta", "variant-flag"]);
         flags_mock.assert_hits(1);
         capture_mock.assert_hits(0);
+    }
+
+    #[test]
+    fn get_feature_flags_retries_transport_error_then_succeeds() {
+        let server = start_flaky_flags_server(flags_response_fixture().to_string());
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url.clone())
+            .feature_flags_request_max_retries(1u32)
+            .retry_initial_backoff_ms(1u64)
+            .retry_max_backoff_ms(1u64)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options);
+
+        let (flags, _payloads) = client
+            .get_feature_flags("user-1", None, None, None)
+            .expect("get_feature_flags should retry transport error");
+
+        assert_eq!(flags.get("alpha"), Some(&FlagValue::Boolean(true)));
+        server.assert_retry_succeeded();
+    }
+
+    #[test]
+    fn get_feature_flags_returns_error_after_transport_retry_budget() {
+        let server = start_resetting_flags_server(2);
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url.clone())
+            .feature_flags_request_max_retries(1u32)
+            .retry_initial_backoff_ms(1u64)
+            .retry_max_backoff_ms(1u64)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options);
+
+        let err = client
+            .get_feature_flags("user-1", None, None, None)
+            .expect_err("transport errors should stop after retry budget is exhausted");
+
+        assert!(matches!(err, posthog_rs::Error::Connection(_)));
+        server.assert_attempts(2);
+    }
+
+    #[test]
+    fn evaluate_flags_does_not_retry_500_status() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(500).body("boom");
+        });
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .max_capture_attempts(3u32)
+            .retry_initial_backoff_ms(1u64)
+            .retry_max_backoff_ms(1u64)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options);
+
+        let err = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .expect_err("500 status should be terminal");
+
+        assert!(err.to_string().contains("500"));
+        flags_mock.assert_hits(1);
     }
 
     #[test]
@@ -168,6 +362,7 @@ mod blocking {
 
         assert!(snapshot.is_enabled("alpha"));
         assert!(snapshot.is_enabled("alpha"));
+        client.flush();
         assert_eq!(
             snapshot.get_flag("variant-flag"),
             Some(FlagValue::String("test".into()))
@@ -176,6 +371,7 @@ mod blocking {
             snapshot.get_flag("variant-flag"),
             Some(FlagValue::String("test".into()))
         );
+        client.flush();
 
         // Two unique (flag, value) combos => two events; repeats deduped.
         capture_mock.assert_hits(2);
@@ -230,7 +426,9 @@ mod blocking {
             )
             .unwrap();
         assert!(snap_1.is_enabled("alpha"));
+        client.flush();
         assert!(snap_2.is_enabled("alpha"));
+        client.flush();
         capture_mock.assert_hits(expected_hits);
     }
 
@@ -273,6 +471,7 @@ mod blocking {
         assert!(snap.is_enabled("alpha"));
         assert!(snap.is_enabled("alpha"));
         assert!(snap.is_enabled("alpha"));
+        client.flush();
         capture_mock.assert_hits(1);
     }
 
@@ -339,7 +538,7 @@ mod blocking {
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = server.mock(|when, then| {
-            when.method(POST).path(WORKER_CAPTURE_PATH);
+            when.method(POST).path(CAPTURE_PATH);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(json!({ "results": {} }));
@@ -515,32 +714,45 @@ mod blocking {
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .unwrap();
         assert!(snapshot.is_enabled("alpha"));
+        client.flush();
         v1_mock.assert_hits(1);
         v0_mock.assert_hits(0);
     }
 
-    /// C5: a failed ship is fire-and-forget — one attempt, no surfaced error.
+    /// C5: `$feature_flag_called` uses the normal V1 capture retry path.
     #[cfg(feature = "capture-v1")]
     #[test]
-    fn flag_called_event_v1_failure_is_single_attempt_and_silent() {
+    fn flag_called_event_v1_failure_is_retried() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let v1_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v1/analytics/events");
+        let first_attempt = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v1/analytics/events")
+                .header("posthog-attempt", "1");
             then.status(503)
                 .header("content-type", "application/json")
                 .json_body(json!({ "error": "service_unavailable" }));
+        });
+        let retry_attempt = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v1/analytics/events")
+                .header("posthog-attempt", "2");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "results": {} }));
         });
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .unwrap();
-        // The flag read still succeeds; the ship is attempted exactly once.
         assert!(snapshot.is_enabled("alpha"));
-        v1_mock.assert_hits(1);
+        client.flush();
+        client.flush();
+        first_attempt.assert_hits(1);
+        retry_attempt.assert_hits(1);
     }
 
     #[test]
@@ -580,12 +792,6 @@ mod async_tests {
         posthog_rs::client(options).await
     }
 
-    /// Wait briefly for any `$feature_flag_called` events that the host
-    /// `tokio::spawn`'d in the background to land at the mock.
-    async fn flush_spawned_events() {
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-
     #[tokio::test]
     async fn evaluate_flags_returns_snapshot_with_one_request() {
         let server = MockServer::start();
@@ -601,6 +807,76 @@ mod async_tests {
         let mut keys = snapshot.keys();
         keys.sort();
         assert_eq!(keys, vec!["alpha", "beta", "variant-flag"]);
+        flags_mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn get_feature_flags_retries_transport_error_then_succeeds() {
+        let server = start_flaky_flags_server(flags_response_fixture().to_string());
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url.clone())
+            .feature_flags_request_max_retries(1u32)
+            .retry_initial_backoff_ms(1u64)
+            .retry_max_backoff_ms(1u64)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options).await;
+
+        let (flags, _payloads) = client
+            .get_feature_flags("user-1", None, None, None)
+            .await
+            .expect("get_feature_flags should retry transport error");
+
+        assert_eq!(flags.get("alpha"), Some(&FlagValue::Boolean(true)));
+        server.assert_retry_succeeded();
+    }
+
+    #[tokio::test]
+    async fn get_feature_flags_returns_error_after_transport_retry_budget() {
+        let server = start_resetting_flags_server(2);
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url.clone())
+            .feature_flags_request_max_retries(1u32)
+            .retry_initial_backoff_ms(1u64)
+            .retry_max_backoff_ms(1u64)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options).await;
+
+        let err = client
+            .get_feature_flags("user-1", None, None, None)
+            .await
+            .expect_err("transport errors should stop after retry budget is exhausted");
+
+        assert!(matches!(err, posthog_rs::Error::Connection(_)));
+        server.assert_attempts(2);
+    }
+
+    #[tokio::test]
+    async fn evaluate_flags_does_not_retry_500_status() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(500).body("boom");
+        });
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .max_capture_attempts(3u32)
+            .retry_initial_backoff_ms(1u64)
+            .retry_max_backoff_ms(1u64)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options).await;
+
+        let err = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .expect_err("500 status should be terminal");
+
+        assert!(err.to_string().contains("500"));
         flags_mock.assert_hits(1);
     }
 
@@ -636,11 +912,16 @@ mod async_tests {
             .unwrap();
         assert!(snapshot.is_enabled("alpha"));
         assert!(snapshot.is_enabled("alpha"));
+        client.flush().await;
         assert_eq!(
             snapshot.get_flag("variant-flag"),
             Some(FlagValue::String("test".into()))
         );
-        flush_spawned_events().await;
+        assert_eq!(
+            snapshot.get_flag("variant-flag"),
+            Some(FlagValue::String("test".into()))
+        );
+        client.flush().await;
         capture_mock.assert_hits(2);
     }
 
@@ -654,7 +935,7 @@ mod async_tests {
         });
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/i/v0/e/")
+                .path(CAPTURE_PATH)
                 .body_contains("\"$is_server\":true")
                 .body_contains("\"$lib\":\"posthog-rs\"");
             then.status(200);
@@ -665,7 +946,7 @@ mod async_tests {
             .await
             .unwrap();
         assert!(snapshot.is_enabled("alpha"));
-        flush_spawned_events().await;
+        client.flush().await;
         capture_mock.assert_hits(1);
     }
 
@@ -686,7 +967,7 @@ mod async_tests {
             snapshot.get_flag_payload("variant-flag"),
             Some(json!({"hello": "world"}))
         );
-        flush_spawned_events().await;
+        client.flush().await;
         capture_mock.assert_hits(0);
     }
 
@@ -722,7 +1003,7 @@ mod async_tests {
             .await
             .unwrap();
         assert!(!snapshot.is_enabled("alpha"));
-        flush_spawned_events().await;
+        client.flush().await;
         flags_mock.assert_hits(0);
         capture_mock.assert_hits(0);
     }
@@ -760,35 +1041,46 @@ mod async_tests {
             .await
             .unwrap();
         assert!(snapshot.is_enabled("alpha"));
-        flush_spawned_events().await;
+        client.flush().await;
         v1_mock.assert_hits(1);
         v0_mock.assert_hits(0);
     }
 
-    /// C5: a failed ship is fire-and-forget — one attempt, no surfaced error.
+    /// C5: `$feature_flag_called` uses the normal V1 capture retry path.
     #[cfg(feature = "capture-v1")]
     #[tokio::test]
-    async fn flag_called_event_v1_failure_is_single_attempt_and_silent() {
+    async fn flag_called_event_v1_failure_is_retried() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let v1_mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v1/analytics/events");
+        let first_attempt = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v1/analytics/events")
+                .header("posthog-attempt", "1");
             then.status(503)
                 .header("content-type", "application/json")
                 .json_body(json!({ "error": "service_unavailable" }));
+        });
+        let retry_attempt = server.mock(|when, then| {
+            when.method(POST)
+                .path("/i/v1/analytics/events")
+                .header("posthog-attempt", "2");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "results": {} }));
         });
         let client = create_test_client(server.base_url()).await;
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .await
             .unwrap();
-        // The flag read still succeeds; the ship is attempted exactly once.
         assert!(snapshot.is_enabled("alpha"));
-        flush_spawned_events().await;
-        v1_mock.assert_hits(1);
+        client.flush().await;
+        client.flush().await;
+        first_attempt.assert_hits(1);
+        retry_attempt.assert_hits(1);
     }
 
     #[cfg(not(feature = "capture-v1"))]
@@ -800,7 +1092,7 @@ mod async_tests {
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = server.mock(|when, then| {
-            when.method(POST).path(WORKER_CAPTURE_PATH);
+            when.method(POST).path(CAPTURE_PATH);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(json!({ "results": {} }));

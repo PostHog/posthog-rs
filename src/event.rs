@@ -307,7 +307,7 @@ impl InnerEvent {
     /// Construct a V0 single-event wire event. Expects that
     /// [`Event::prepare_for_v0`] has already been called so properties are fully
     /// decorated.
-    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
+    #[cfg(test)]
     pub fn new(event: Event, api_key: String) -> Self {
         Self::from_event(event, Some(api_key))
     }
@@ -319,6 +319,7 @@ impl InnerEvent {
         Self::from_event(event, None)
     }
 
+    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
     fn from_event(event: Event, api_key: Option<String>) -> Self {
         Self {
             api_key,

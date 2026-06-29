@@ -1,7 +1,8 @@
 //! Runtime-agnostic retry primitives shared by the V0 and V1 capture paths.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use reqwest::header::HeaderMap;
 
 use super::ClientOptions;
@@ -33,13 +34,51 @@ pub(crate) fn should_retry_v0(status: u16, has_retry_after: bool) -> bool {
     is_retryable_status(status) || (status == 429 && has_retry_after)
 }
 
-/// Parse a numeric `Retry-After` (seconds). Ignores HTTP-date form, which the
-/// capture endpoints don't use.
-pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
+/// Parse `Retry-After` as either delay-seconds or an HTTP-date.
+///
+/// Non-positive delays and dates in the past are ignored, matching the HTTP
+/// semantics that `Retry-After` is a minimum delay before the next attempt.
+pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    parse_retry_after_at(headers, SystemTime::now())
+}
+
+fn parse_retry_after_at(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
+    let value = headers.get("retry-after")?.to_str().ok()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Ok(secs) = value.parse::<u64>() {
+        return (secs > 0).then(|| Duration::from_secs(secs));
+    }
+
+    parse_http_date(value)
+        .and_then(|t| t.duration_since(now).ok())
+        .filter(|d| !d.is_zero())
+}
+
+fn parse_http_date(value: &str) -> Option<SystemTime> {
+    if let Ok(dt) = DateTime::parse_from_rfc2822(value) {
+        return datetime_to_system_time(dt.with_timezone(&Utc));
+    }
+
+    // HTTP-date also permits the obsolete RFC 850 and ANSI C asctime forms.
+    // Parse them as GMT/UTC without adding another dependency.
+    for format in ["%A, %d-%b-%y %H:%M:%S GMT", "%a %b %e %H:%M:%S %Y"] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(value, format) {
+            return datetime_to_system_time(Utc.from_utc_datetime(&dt));
+        }
+    }
+
+    None
+}
+
+fn datetime_to_system_time(dt: DateTime<Utc>) -> Option<SystemTime> {
+    let secs = dt.timestamp();
+    if secs < 0 {
+        return None;
+    }
+    SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs as u64, dt.timestamp_subsec_nanos()))
 }
 
 /// Hard cap on any scheduled retry delay. Guards the worker's `Instant + delay`
@@ -48,23 +87,22 @@ pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
 /// `retry_max_backoff_ms`). A day is far beyond any sane retry delay.
 const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(86_400);
 
-/// Backoff before `attempt`: honor `Retry-After` when present, otherwise
-/// exponential growth from `retry_initial_backoff_ms`, clamped to
-/// `retry_max_backoff_ms`. The result is capped at [`RETRY_BACKOFF_CAP`] so an
-/// absurd value can't overflow the worker's `next_at` computation.
+/// Backoff before `attempt`: exponential growth from
+/// `retry_initial_backoff_ms`, clamped to `retry_max_backoff_ms`. When present,
+/// `Retry-After` is treated as a server-provided minimum delay, so the client
+/// waits for the longer of the configured backoff and `Retry-After`. The result
+/// is capped at [`RETRY_BACKOFF_CAP`] so an absurd value can't overflow the
+/// worker's `next_at` computation.
 pub(crate) fn backoff_duration(
     opts: &ClientOptions,
     attempt: u32,
-    retry_after_secs: Option<u64>,
+    retry_after: Option<Duration>,
 ) -> Duration {
-    let delay = if let Some(secs) = retry_after_secs {
-        Duration::from_secs(secs)
-    } else {
-        let base_ms = opts.retry_initial_backoff_ms;
-        let max_ms = opts.retry_max_backoff_ms;
-        let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
-        Duration::from_millis(backoff_ms.min(max_ms))
-    };
+    let base_ms = opts.retry_initial_backoff_ms;
+    let max_ms = opts.retry_max_backoff_ms;
+    let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
+    let configured_delay = Duration::from_millis(backoff_ms.min(max_ms));
+    let delay = retry_after.map_or(configured_delay, |d| configured_delay.max(d));
     delay.min(RETRY_BACKOFF_CAP)
 }
 
@@ -77,7 +115,7 @@ pub(crate) fn v0_after_response(
     opts: &ClientOptions,
     attempt: u32,
     status: u16,
-    retry_after: Option<u64>,
+    retry_after: Option<Duration>,
     body: &str,
 ) -> Step {
     if should_retry_v0(status, retry_after.is_some()) && attempt < opts.max_capture_attempts {
@@ -98,6 +136,21 @@ pub(crate) fn v0_after_transport_error(
     err_msg: String,
 ) -> Step {
     if attempt >= opts.max_capture_attempts {
+        return Step::Fail(Error::Connection(err_msg));
+    }
+    Step::Backoff(backoff_duration(opts, attempt, None))
+}
+
+/// Sans-IO decision for a remote `/flags` transport error. The feature-flags
+/// option counts retries after the initial attempt, so `attempt == 1` is still
+/// allowed when `feature_flags_request_max_retries == 1`.
+pub(crate) fn feature_flags_after_transport_error(
+    opts: &ClientOptions,
+    attempt: u32,
+    retryable: bool,
+    err_msg: String,
+) -> Step {
+    if !retryable || attempt > opts.feature_flags_request_max_retries {
         return Step::Fail(Error::Connection(err_msg));
     }
     Step::Backoff(backoff_duration(opts, attempt, None))
@@ -161,11 +214,28 @@ mod tests {
 
     #[test]
     fn parse_retry_after_cases() {
-        // (header value, expected): numeric parses, missing/non-numeric are None.
-        let cases: [(Option<&str>, Option<u64>); 3] = [
-            (Some("5"), Some(5)),
+        let now = std::time::UNIX_EPOCH;
+
+        // (header value, expected): delay-seconds and all HTTP-date forms parse;
+        // missing, invalid, zero, and past/equal-date values are ignored.
+        let cases: Vec<(Option<&str>, Option<Duration>)> = vec![
+            (Some("5"), Some(Duration::from_secs(5))),
+            (
+                Some("Thu, 01 Jan 1970 00:00:30 GMT"),
+                Some(Duration::from_secs(30)),
+            ),
+            (
+                Some("Thursday, 01-Jan-70 00:00:30 GMT"),
+                Some(Duration::from_secs(30)),
+            ),
+            (
+                Some("Thu Jan  1 00:00:30 1970"),
+                Some(Duration::from_secs(30)),
+            ),
+            (Some("0"), None),
             (None, None),
             (Some("not-a-number"), None),
+            (Some("Thu, 01 Jan 1970 00:00:00 GMT"), None),
         ];
         for (header_val, expected) in cases {
             let mut headers = HeaderMap::new();
@@ -173,7 +243,7 @@ mod tests {
                 headers.insert("retry-after", HeaderValue::from_str(v).unwrap());
             }
             assert_eq!(
-                parse_retry_after(&headers),
+                parse_retry_after_at(&headers, now),
                 expected,
                 "header={:?}",
                 header_val
@@ -182,12 +252,30 @@ mod tests {
     }
 
     #[test]
-    fn backoff_explicit_retry_after_wins() {
-        let opts = test_opts();
-        assert_eq!(
-            backoff_duration(&opts, 1, Some(42)),
-            Duration::from_secs(42)
-        );
+    fn backoff_retry_after_minimum_semantics() {
+        let opts = test_opts(); // initial=100ms, max=5000ms
+                                // (retry_after, attempt, expected): Retry-After is a minimum, so the
+                                // client waits for the longer of the configured backoff and Retry-After.
+        let cases: &[(Option<Duration>, u32, Duration)] = &[
+            (Some(Duration::from_secs(42)), 1, Duration::from_secs(42)),
+            (
+                Some(Duration::from_millis(1)),
+                1,
+                Duration::from_millis(100),
+            ),
+            (
+                Some(Duration::from_millis(100)),
+                1,
+                Duration::from_millis(100),
+            ),
+        ];
+        for &(retry_after, attempt, expected) in cases {
+            assert_eq!(
+                backoff_duration(&opts, attempt, retry_after),
+                expected,
+                "retry_after={retry_after:?} attempt={attempt}"
+            );
+        }
     }
 
     #[test]
@@ -214,7 +302,7 @@ mod tests {
         // A hostile `Retry-After` must be capped, not overflow `Instant` later.
         let opts = test_opts();
         assert_eq!(
-            backoff_duration(&opts, 1, Some(u64::MAX)),
+            backoff_duration(&opts, 1, Some(Duration::from_secs(u64::MAX))),
             RETRY_BACKOFF_CAP
         );
     }
@@ -282,7 +370,7 @@ mod tests {
         ));
         // 429 + Retry-After -> retried.
         assert!(matches!(
-            v0_after_response(&opts, 1, 429, Some(1), ""),
+            v0_after_response(&opts, 1, 429, Some(Duration::from_secs(1)), ""),
             Step::Backoff(_)
         ));
         // Non-retryable 4xx -> terminal.
@@ -309,6 +397,30 @@ mod tests {
         ));
         assert!(matches!(
             v0_after_transport_error(&opts, 3, "timeout".into()),
+            Step::Fail(Error::Connection(_))
+        ));
+    }
+
+    #[test]
+    fn feature_flags_transport_error_uses_retry_budget() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .feature_flags_request_max_retries(1u32)
+            .retry_initial_backoff_ms(1u64)
+            .retry_max_backoff_ms(5u64)
+            .build()
+            .unwrap();
+
+        assert!(matches!(
+            feature_flags_after_transport_error(&opts, 1, true, "reset".into()),
+            Step::Backoff(_)
+        ));
+        assert!(matches!(
+            feature_flags_after_transport_error(&opts, 2, true, "reset".into()),
+            Step::Fail(Error::Connection(_))
+        ));
+        assert!(matches!(
+            feature_flags_after_transport_error(&opts, 1, false, "refused".into()),
             Step::Fail(Error::Connection(_))
         ));
     }
