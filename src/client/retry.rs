@@ -141,6 +141,21 @@ pub(crate) fn v0_after_transport_error(
     Step::Backoff(backoff_duration(opts, attempt, None))
 }
 
+/// Sans-IO decision for a remote `/flags` transport error. The feature-flags
+/// option counts retries after the initial attempt, so `attempt == 1` is still
+/// allowed when `feature_flags_request_max_retries == 1`.
+pub(crate) fn feature_flags_after_transport_error(
+    opts: &ClientOptions,
+    attempt: u32,
+    retryable: bool,
+    err_msg: String,
+) -> Step {
+    if !retryable || attempt > opts.feature_flags_request_max_retries {
+        return Step::Fail(Error::Connection(err_msg));
+    }
+    Step::Backoff(backoff_duration(opts, attempt, None))
+}
+
 #[cfg(test)]
 mod tests {
     use reqwest::header::{HeaderMap, HeaderValue};
@@ -382,6 +397,30 @@ mod tests {
         ));
         assert!(matches!(
             v0_after_transport_error(&opts, 3, "timeout".into()),
+            Step::Fail(Error::Connection(_))
+        ));
+    }
+
+    #[test]
+    fn feature_flags_transport_error_uses_retry_budget() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .feature_flags_request_max_retries(1u32)
+            .retry_initial_backoff_ms(1u64)
+            .retry_max_backoff_ms(5u64)
+            .build()
+            .unwrap();
+
+        assert!(matches!(
+            feature_flags_after_transport_error(&opts, 1, true, "reset".into()),
+            Step::Backoff(_)
+        ));
+        assert!(matches!(
+            feature_flags_after_transport_error(&opts, 2, true, "reset".into()),
+            Step::Fail(Error::Connection(_))
+        ));
+        assert!(matches!(
+            feature_flags_after_transport_error(&opts, 1, false, "refused".into()),
             Step::Fail(Error::Connection(_))
         ));
     }

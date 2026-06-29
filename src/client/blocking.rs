@@ -23,6 +23,29 @@ use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
+fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
+    if err.is_timeout() {
+        return true;
+    }
+
+    let mut source = std::error::Error::source(err);
+    while let Some(error) = source {
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::UnexpectedEof
+            );
+        }
+        source = std::error::Error::source(error);
+    }
+
+    !err.to_string()
+        .to_lowercase()
+        .contains("connection refused")
+}
+
 use super::common::{
     already_reported, build_dedup_key, extract_flag_details, flag_called_event,
     flag_event_dedup_cache, local_record, remote_record_from_detail, DetailedFlagsResponse,
@@ -396,17 +419,7 @@ impl Client {
             payload["disable_geoip"] = json!(true);
         }
 
-        let response = self
-            .client
-            .post(&flags_endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        let response = self.send_feature_flags_request(&flags_endpoint, &payload)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -791,6 +804,48 @@ impl Client {
             .clone()
     }
 
+    fn send_feature_flags_request(
+        &self,
+        flags_endpoint: &str,
+        payload: &serde_json::Value,
+    ) -> Result<reqwest::blocking::Response, Error> {
+        let mut attempt = 1;
+        loop {
+            let result = self
+                .client
+                .post(flags_endpoint)
+                .header(CONTENT_TYPE, "application/json")
+                .header(USER_AGENT, get_default_user_agent())
+                .json(payload)
+                .timeout(Duration::from_secs(
+                    self.options.feature_flags_request_timeout_seconds,
+                ))
+                .send();
+
+            match result {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    match super::retry::feature_flags_after_transport_error(
+                        &self.options,
+                        attempt,
+                        is_retryable_feature_flags_error(&e),
+                        err_msg,
+                    ) {
+                        super::retry::Step::Backoff(delay) => {
+                            std::thread::sleep(delay);
+                            attempt += 1;
+                        }
+                        super::retry::Step::Fail(err) => return Err(err),
+                        super::retry::Step::Done => {
+                            unreachable!("feature flag transport errors cannot complete")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn fetch_flag_details(
         &self,
         distinct_id: &str,
@@ -819,17 +874,7 @@ impl Client {
             payload["flag_keys_to_evaluate"] = json!(flag_keys);
         }
 
-        let response = self
-            .client
-            .post(&flags_endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        let response = self.send_feature_flags_request(&flags_endpoint, &payload)?;
 
         if !response.status().is_success() {
             let status = response.status();
