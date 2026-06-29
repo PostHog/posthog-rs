@@ -24,12 +24,8 @@ use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse
 // Request building
 // ---------------------------------------------------------------------------
 
-pub(crate) fn build_events(events: &[Event], defaults: &CaptureDefaults) -> Vec<V1Event> {
-    build_events_at(events, defaults, Utc::now())
-}
-
-/// Like [`build_events`] but with an injected `now` so the transport worker can
-/// stamp deterministic event timestamps from its clock.
+/// Build V1 events with an injected `now` so the transport worker can stamp
+/// deterministic event timestamps from its clock.
 pub(crate) fn build_events_at(
     events: &[Event],
     defaults: &CaptureDefaults,
@@ -56,6 +52,7 @@ pub(crate) fn build_events_at(
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn build_headers(opts: &ClientOptions, request_id: &Uuid, attempt: u32) -> HeaderMap {
     build_headers_at(opts, request_id, attempt, Utc::now())
 }
@@ -126,29 +123,6 @@ pub(crate) fn maybe_compress(
         }
     }
     payload
-}
-
-/// Headers + (possibly compressed) body for a single-event, fire-and-forget
-/// `$feature_flag_called` ship over the V1 endpoint. Always one attempt:
-/// flag-event loss isn't worth retry traffic, and shipping must never block
-/// flag reads.
-pub(crate) fn build_flag_event_request(
-    opts: &ClientOptions,
-    event: &Event,
-) -> Result<(HeaderMap, Vec<u8>), Error> {
-    use crate::event_v1::V1BatchRequestRef;
-
-    let batch = build_events(std::slice::from_ref(event), &opts.capture_defaults());
-    let created_at = Utc::now().to_rfc3339();
-    let req = V1BatchRequestRef {
-        created_at: &created_at,
-        historical_migration: None,
-        batch: &batch,
-    };
-    let payload = serde_json::to_vec(&req).map_err(|e| Error::Serialization(e.to_string()))?;
-    let mut headers = build_headers(opts, &Uuid::now_v7(), 1);
-    let body = maybe_compress(opts.capture_compression, &mut headers, payload);
-    Ok((headers, body))
 }
 
 // ---------------------------------------------------------------------------
@@ -736,71 +710,5 @@ mod tests {
         // user-agent mirrors the same identity string.
         let ua = headers.get("user-agent").unwrap().to_str().unwrap();
         assert_eq!(ua, expected);
-    }
-
-    // -- build_flag_event_request ----------------------------------------------
-
-    fn flag_called_test_event() -> Event {
-        let mut event = Event::new("$feature_flag_called", "user-1");
-        event.insert_prop("$feature_flag", "my-flag").unwrap();
-        event.insert_prop("$feature_flag_response", true).unwrap();
-        event
-    }
-
-    #[test]
-    fn build_flag_event_request_single_event_batch() {
-        let opts = test_opts();
-        let (headers, body) = build_flag_event_request(&opts, &flag_called_test_event()).unwrap();
-
-        assert_eq!(headers.get("content-type").unwrap(), "application/json");
-        assert_eq!(headers.get("posthog-attempt").unwrap(), "1");
-        assert!(headers.get("posthog-request-id").is_some());
-        assert_eq!(
-            headers.get("authorization").unwrap().to_str().unwrap(),
-            "Bearer phc_test"
-        );
-        assert!(headers.get("content-encoding").is_none());
-
-        let parsed: crate::event_v1::V1BatchRequest = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed.batch.len(), 1);
-        assert_eq!(parsed.batch[0].event, "$feature_flag_called");
-        assert_eq!(parsed.batch[0].distinct_id, "user-1");
-        assert!(parsed.historical_migration.is_none());
-        let props = parsed.batch[0].properties.as_object().unwrap();
-        assert_eq!(props.get("$feature_flag").unwrap(), "my-flag");
-        // V1 carries SDK identity in headers, not properties.
-        assert!(!props.contains_key("$lib"));
-        assert!(!props.contains_key("$lib_version"));
-    }
-
-    #[test]
-    fn build_flag_event_request_applies_capture_defaults() {
-        let opts = ClientOptionsBuilder::default()
-            .api_key("phc_test".to_string())
-            .disable_geoip(true)
-            .is_server(true)
-            .build()
-            .unwrap();
-        let (_, body) = build_flag_event_request(&opts, &flag_called_test_event()).unwrap();
-        let parsed: crate::event_v1::V1BatchRequest = serde_json::from_slice(&body).unwrap();
-        let props = parsed.batch[0].properties.as_object().unwrap();
-        assert_eq!(
-            props.get("$geoip_disable").unwrap(),
-            &serde_json::json!(true)
-        );
-        assert_eq!(props.get("$is_server").unwrap(), &serde_json::json!(true));
-    }
-
-    #[test]
-    fn build_flag_event_request_compresses_when_configured() {
-        let opts = ClientOptionsBuilder::default()
-            .api_key("phc_test".to_string())
-            .capture_compression(CaptureCompression::Gzip)
-            .build()
-            .unwrap();
-        let (headers, body) = build_flag_event_request(&opts, &flag_called_test_event()).unwrap();
-        assert_eq!(headers.get("content-encoding").unwrap(), "gzip");
-        // gzip magic bytes — the body is actually compressed.
-        assert_eq!(&body[..2], &[0x1f, 0x8b]);
     }
 }

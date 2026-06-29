@@ -4,8 +4,7 @@ use std::error::Error as StdError;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use reqwest::header::USER_AGENT;
-use reqwest::{header::CONTENT_TYPE, Client as HttpClient};
+use reqwest::{header::CONTENT_TYPE, header::USER_AGENT, Client as HttpClient};
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
 
@@ -13,8 +12,6 @@ use super::get_default_user_agent;
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
-#[cfg(not(feature = "capture-v1"))]
-use crate::event::InnerEvent;
 use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
     FlagCalledEventParams,
@@ -23,29 +20,13 @@ use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
-#[cfg(not(feature = "capture-v1"))]
-use super::common::apply_before_send_hooks;
 use super::common::{
     already_reported, build_dedup_key, extract_flag_details, flag_called_event,
     flag_event_dedup_cache, local_record, remote_record_from_detail, DetailedFlagsResponse,
     FlagEventDedupCache,
 };
 use super::transport::{Completion, Control, TransportHandle};
-use super::{BeforeSendHook, ClientOptions};
-
-#[cfg(not(feature = "capture-v1"))]
-async fn check_response(response: reqwest::Response) -> Result<(), Error> {
-    let status = response.status().as_u16();
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "Unknown error".to_string());
-
-    match Error::from_http_response(status, body) {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
-}
+use super::ClientOptions;
 
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
@@ -55,141 +36,31 @@ pub struct Client {
     _flag_poller: Option<AsyncFlagPoller>,
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
     /// Background event transport. `None` for disabled clients.
-    transport: Option<TransportHandle>,
+    transport: Option<Arc<TransportHandle>>,
 }
 
 /// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
-/// `$feature_flag_called` events through a clone of the async [`Client`]'s
-/// HTTP transport. The event ship is fire-and-forget: errors are logged at
-/// `debug` level but do not surface to the caller, matching the JS SDK.
-///
-/// With `capture-v1`, events ship to the V1 endpoint (single attempt);
-/// otherwise the legacy v0 `/i/v0/e/` path.
+/// `$feature_flag_called` events through the same background capture transport
+/// as any other event.
 struct AsyncFlagEventHost {
-    http_client: HttpClient,
     options: ClientOptions,
-    capture_url: String,
-    // Read by the v0 ship path only; unused under capture-v1, where the
-    // flag-event path does not currently apply before_send hooks.
-    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
-    before_send: Vec<BeforeSendHook>,
+    transport: Option<Arc<TransportHandle>>,
     dedup_cache: FlagEventDedupCache,
-    /// Tokio runtime handle captured at host construction (which always runs
-    /// inside the runtime that hosts `evaluate_flags`). This lets snapshot
-    /// access methods spawn `$feature_flag_called` shipping from any thread —
-    /// including ones without an entered runtime — by routing through the
-    /// captured handle instead of the free `tokio::spawn` (which would panic).
-    runtime: tokio::runtime::Handle,
 }
 
 impl AsyncFlagEventHost {
-    fn from_options(options: &ClientOptions, http_client: HttpClient) -> Self {
-        #[cfg(feature = "capture-v1")]
-        let capture_url = options
-            .endpoints()
-            .build_custom_url(super::v1_capture::V1_CAPTURE_PATH);
-        #[cfg(not(feature = "capture-v1"))]
-        let capture_url = options.endpoints().build_url(Endpoint::Capture);
+    fn from_options(options: &ClientOptions, transport: Option<Arc<TransportHandle>>) -> Self {
         Self {
-            http_client,
             options: options.clone(),
-            capture_url,
-            before_send: options.before_send.clone(),
+            transport,
             dedup_cache: flag_event_dedup_cache(),
-            runtime: tokio::runtime::Handle::current(),
         }
     }
 
-    fn spawn_ship(&self, event: Event) {
-        if self.options.is_disabled() {
-            return;
+    fn enqueue(&self, event: Event) {
+        if let Some(transport) = &self.transport {
+            transport.enqueue(event);
         }
-        #[cfg(feature = "capture-v1")]
-        self.spawn_ship_v1(event);
-        #[cfg(not(feature = "capture-v1"))]
-        self.spawn_ship_v0(event);
-    }
-
-    /// Single attempt, no retries — matches v0 flag-event semantics: losses
-    /// aren't worth retry traffic and shipping must never slow flag reads.
-    #[cfg(feature = "capture-v1")]
-    fn spawn_ship_v1(&self, event: Event) {
-        let (headers, body) =
-            match super::v1_capture::build_flag_event_request(&self.options, &event) {
-                Ok(parts) => parts,
-                Err(e) => {
-                    debug!(error = %e, "failed to serialize $feature_flag_called event");
-                    return;
-                }
-            };
-        let http_client = self.http_client.clone();
-        let url = self.capture_url.clone();
-        self.runtime.spawn(async move {
-            match http_client
-                .post(&url)
-                .headers(headers)
-                .body(body)
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    if !(200..=299).contains(&status) {
-                        let message = resp
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "Unknown error".to_string());
-                        debug!(
-                            status,
-                            "$feature_flag_called event rejected by server: {message}"
-                        );
-                    }
-                }
-                Err(send_err) => {
-                    let message = send_err.to_string();
-                    debug!("failed to send $feature_flag_called event: {message}");
-                }
-            }
-        });
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    fn spawn_ship_v0(&self, mut event: Event) {
-        event.prepare_for_v0();
-        let Some(event) = apply_before_send_hooks(&self.before_send, event) else {
-            return;
-        };
-        let inner_event = InnerEvent::new(event, self.options.api_key.clone());
-        let payload = match serde_json::to_string(&inner_event) {
-            Ok(p) => p,
-            Err(e) => {
-                debug!(error = %e, "failed to serialize $feature_flag_called event");
-                return;
-            }
-        };
-        let http_client = self.http_client.clone();
-        let url = self.capture_url.clone();
-        self.runtime.spawn(async move {
-            let response = match http_client
-                .post(&url)
-                .header(CONTENT_TYPE, "application/json")
-                .header(USER_AGENT, get_default_user_agent())
-                .body(payload)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(send_err) => {
-                    let message = send_err.to_string();
-                    debug!("failed to send $feature_flag_called event: {message}");
-                    return;
-                }
-            };
-            if let Err(check_err) = check_response(response).await {
-                let message = check_err.to_string();
-                debug!("$feature_flag_called event rejected by server: {message}");
-            }
-        });
     }
 }
 
@@ -203,7 +74,7 @@ impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
         if let Some(event) =
             flag_called_event(params, self.options.disable_geoip, self.options.is_server)
         {
-            self.spawn_ship(event);
+            self.enqueue(event);
         }
     }
 
@@ -265,7 +136,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let transport = if options.is_disabled() {
         None
     } else {
-        Some(TransportHandle::spawn(options.clone()))
+        Some(Arc::new(TransportHandle::spawn(options.clone())))
     };
 
     Client {
@@ -920,7 +791,7 @@ impl Client {
             .get_or_init(|| {
                 Arc::new(AsyncFlagEventHost::from_options(
                     &self.options,
-                    self.client.clone(),
+                    self.transport.clone(),
                 )) as Arc<dyn FeatureFlagEvaluationsHost>
             })
             .clone()
