@@ -11,7 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use posthog_rs::{CaptureCompression, Client, ClientOptionsBuilder, Event};
+use posthog_rs::{CaptureCompression, Client, ClientOptionsBuilder, EvaluateFlagsOptions, Event};
 
 const SUPPORTS_PARALLEL: bool = true;
 
@@ -74,6 +74,23 @@ struct CaptureRequest {
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     #[serde(default)]
     options: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct FeatureFlagRequest {
+    key: String,
+    distinct_id: String,
+    #[serde(default)]
+    person_properties: Option<HashMap<String, serde_json::Value>>,
+    #[serde(default)]
+    groups: Option<HashMap<String, String>>,
+    #[serde(default)]
+    group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
+    #[serde(default)]
+    disable_geoip: Option<bool>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    force_remote: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -282,6 +299,54 @@ async fn capture_event(
     Json(serde_json::json!({ "success": true, "uuid": uuid })).into_response()
 }
 
+async fn get_feature_flag(
+    State(state): State<AppState>,
+    Query(params): Query<TestIdParam>,
+    Json(req): Json<FeatureFlagRequest>,
+) -> impl IntoResponse {
+    let client = {
+        let instances = state.instances.lock().await;
+        match instances.get(params.key()).and_then(|s| s.client.clone()) {
+            Some(c) => c,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "SDK not initialized" })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let key = req.key;
+    let options = EvaluateFlagsOptions {
+        groups: req.groups,
+        person_properties: req.person_properties,
+        group_properties: req.group_properties,
+        only_evaluate_locally: false,
+        disable_geoip: req.disable_geoip,
+        flag_keys: Some(vec![key.clone()]),
+    };
+
+    match client.evaluate_flags(req.distinct_id, options).await {
+        Ok(flags) => {
+            let value = flags.get_flag(&key);
+            Json(serde_json::json!({ "success": true, "value": value })).into_response()
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let mut instances = state.instances.lock().await;
+            let s = instances.entry(params.key().to_string()).or_default();
+            s.last_error = Some(msg.clone());
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn flush(
     State(state): State<AppState>,
     Query(params): Query<TestIdParam>,
@@ -402,6 +467,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/init", post(init))
         .route("/capture", post(capture_event))
+        .route("/get_feature_flag", post(get_feature_flag))
         .route("/flush", post(flush))
         .route("/shutdown", post(shutdown))
         .route("/state", get(get_state))
