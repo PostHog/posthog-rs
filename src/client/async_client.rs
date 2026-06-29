@@ -210,6 +210,60 @@ impl Client {
         }
     }
 
+    /// Whether the client is disabled (no transport; capture is a no-op). Used
+    /// by the panic hook to skip building an event it could never send.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn is_disabled(&self) -> bool {
+        self.options.is_disabled()
+    }
+
+    /// The client's Error Tracking options, used by the panic hook to build
+    /// panic exception events with the client's configured policy.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn error_tracking_options(&self) -> &crate::error_tracking::ErrorTrackingOptions {
+        self.options.error_tracking()
+    }
+
+    /// Unbounded synchronous flush: blocks until the worker has attempted
+    /// delivery of everything queued. Test-only; the panic hook uses
+    /// `flush_blocking_timeout`.
+    #[cfg(test)]
+    pub(crate) fn flush_blocking(&self) {
+        if let Some(transport) = &self.transport {
+            transport.flush_blocking();
+        }
+    }
+
+    /// Synchronous, time-bounded flush for the panic hook: blocks (no runtime
+    /// needed) up to `timeout` for the worker to attempt delivery, then returns.
+    /// A no-op for disabled clients.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn flush_blocking_timeout(&self, timeout: Duration) {
+        if let Some(transport) = &self.transport {
+            transport.flush_blocking_timeout(timeout);
+        }
+    }
+
+    /// True when the calling thread is this client's transport worker thread —
+    /// the panic hook skips capturing there.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn on_transport_worker(&self) -> bool {
+        self.transport
+            .as_ref()
+            .is_some_and(|t| t.on_worker_thread())
+    }
+
+    /// Enqueue a panic `$exception` without the tracing `capture` performs:
+    /// `capture` is `#[instrument]` and its enqueue warns once on a full queue,
+    /// both of which run subscriber code — unsafe on the already-panicking
+    /// thread. The send still happens on the worker thread.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn enqueue_panic_event(&self, event: Event) {
+        if let Some(transport) = &self.transport {
+            transport.enqueue_panic(event);
+        }
+    }
+
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
     /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
     /// disabled clients.

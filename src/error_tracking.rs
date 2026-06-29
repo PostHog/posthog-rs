@@ -1,11 +1,18 @@
 use std::any::{type_name, type_name_of_val};
 use std::error::Error as StdError;
+use std::io::Write;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
+// Only the `#[cfg(test)]` standalone-client `install_panic_hook` helper needs
+// `Arc` at module scope; the tests module imports its own.
+#[cfg(test)]
+use std::sync::Arc;
 
 use derive_builder::Builder;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{Error, Event};
+use crate::{Client, Error, Event};
 
 /// Hard cap on stack frames per exception; frames beyond it are trimmed from
 /// the outermost end.
@@ -13,6 +20,23 @@ const MAX_FRAMES: usize = 64;
 /// Hard cap on the `source()` chain walk, bounding pathological or cyclic
 /// error chains.
 const MAX_ERROR_SOURCES: usize = 50;
+
+/// Latches the single process-wide panic hook so a second install is rejected.
+static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// How long the panic hook blocks the panicking thread waiting for the
+/// `$exception` to flush before letting the panic proceed. Deliberately short:
+/// the hook runs on the dying thread, so a long wait would freeze the crash (and
+/// delay the panic message, which prints only after the flush) when PostHog is
+/// slow or unreachable. Fixed rather than configurable for now — easy to expose
+/// later if a need arises.
+#[cfg(not(test))]
+const PANIC_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Shortened under test: the bounded-flush tests deliberately deadlock
+/// `before_send`, so they wait the full budget — only its boundedness matters
+/// there, not the production duration.
+#[cfg(test)]
+const PANIC_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Client-level Error Tracking configuration, applied to every exception the
 /// client captures. Set it via [`ErrorTrackingOptionsBuilder`] on
@@ -55,6 +79,14 @@ pub struct ErrorTrackingOptions {
     /// includes and defaults. Same matching rules as `in_app_include_paths`
     /// — e.g. `"other_crate::"` excludes every frame of that crate.
     in_app_exclude_paths: Vec<String>,
+    /// When `true`, [`crate::init_global`] installs a process-wide panic hook
+    /// that captures panics as `$exception` events through the global client.
+    /// Defaults to `false` — panic autocapture is opt-in.
+    ///
+    /// Only the global client installs a hook: a panic hook is process-global
+    /// (`std::panic::set_hook`), so it pairs with the process-global client, and
+    /// there is intentionally no per-`Client` panic API for now.
+    capture_panics: bool,
 }
 
 impl Default for ErrorTrackingOptions {
@@ -63,6 +95,7 @@ impl Default for ErrorTrackingOptions {
             capture_stacktrace: true,
             in_app_include_paths: Vec::new(),
             in_app_exclude_paths: Vec::new(),
+            capture_panics: false,
         }
     }
 }
@@ -70,6 +103,10 @@ impl Default for ErrorTrackingOptions {
 impl ErrorTrackingOptions {
     fn capture_stacktrace(&self) -> bool {
         self.capture_stacktrace
+    }
+
+    fn capture_panics(&self) -> bool {
+        self.capture_panics
     }
 
     fn is_in_app_path(&self, filename: &str) -> bool {
@@ -116,6 +153,131 @@ impl ErrorTrackingOptions {
 
         filename.is_some()
     }
+}
+
+/// Install the panic hook against a specific `client`. Internal/test-only: the
+/// public entry point is the global client's `capture_panics` option (via
+/// [`crate::init_global`]), since a panic hook is process-global. Kept to
+/// exercise the shared hook path against a standalone client in tests. A
+/// disabled client installs nothing and returns `Ok(())`.
+#[cfg(test)]
+fn install_panic_hook(client: Arc<Client>) -> Result<(), Error> {
+    if client.is_disabled() {
+        return Ok(());
+    }
+    install_hook(move |panic_info| capture_panic(&client, panic_info))
+}
+
+/// If the global client has `capture_panics` enabled (opt-in) and can actually
+/// send, install the panic hook against it. Best-effort and idempotent: a hook
+/// installed earlier is left in place. Called by `init_global` once the global
+/// client is set.
+pub(crate) fn maybe_install_global_panic_hook() {
+    let Some(client) = crate::global::global_client() else {
+        return;
+    };
+    if !should_capture_global_panics(client) {
+        return;
+    }
+    // The hook reads the global client at panic time — it lives in a process
+    // `static`, so the hook needs no owned handle. `AlreadyInstalled` is benign.
+    let _ = install_hook(|panic_info| match crate::global::global_client() {
+        Some(client) => capture_panic(client, panic_info),
+        None => Ok(()),
+    });
+}
+
+/// Whether `init_global` should auto-install the panic hook for this client.
+/// A disabled client can't send, so it must not latch the single process-wide
+/// hook.
+fn should_capture_global_panics(client: &Client) -> bool {
+    !client.is_disabled() && client.error_tracking_options().capture_panics()
+}
+
+/// Latch the single process-wide panic hook, then install one that runs
+/// `capture` (kept panic-free) and chains the previously installed hook. Returns
+/// [`Error::PanicHookAlreadyInstalled`] if a hook is already installed.
+#[allow(deprecated)]
+fn install_hook<F>(capture: F) -> Result<(), Error>
+where
+    F: Fn(&panic::PanicInfo<'_>) -> Result<(), Error> + Send + Sync + 'static,
+{
+    if PANIC_HOOK_INSTALLED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(Error::PanicHookAlreadyInstalled);
+    }
+
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        // Report capture failures straight to stderr: dispatching through
+        // tracing would run arbitrary subscriber code on the panicking thread.
+        // catch_unwind cannot prevent a nested-panic abort here (the panic count
+        // is already non-zero), so `capture` is kept panic-free — it only
+        // enqueues and flushes; the send happens on the worker thread.
+        if let Ok(Err(error)) = panic::catch_unwind(AssertUnwindSafe(|| capture(panic_info))) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "posthog-rs: failed to capture panic: {error}"
+            );
+        }
+
+        previous_hook(panic_info);
+    }));
+
+    Ok(())
+}
+
+/// Build the panic `$exception` event and route it through `client`'s transport:
+/// a non-blocking enqueue followed by a time-bounded synchronous flush, so the
+/// event is attempted before the process potentially exits without ever hanging
+/// the dying process. `before_send` and the HTTP send run on the worker thread.
+#[allow(deprecated)]
+fn capture_panic(client: &Client, panic_info: &panic::PanicInfo<'_>) -> Result<(), Error> {
+    // A panic on this client's own transport worker thread is almost always a
+    // panicking `before_send` (which the worker already catches and logs).
+    // Capturing it there would deadlock — a synchronous flush can't be serviced
+    // by the worker that's busy running this hook — and would recurse: the
+    // captured `$exception` re-enters `before_send` on the worker and panics
+    // again. Skip it.
+    if client.is_disabled() || client.on_transport_worker() {
+        return Ok(());
+    }
+    let et_options = client.error_tracking_options();
+    let event = build_panic_event(panic_info, et_options)?;
+    // Enqueue through the tracing-free path: `capture` is `#[instrument]` and
+    // warns on a full queue, both of which run subscriber code that's unsafe on
+    // the panicking thread (it could panic again -> abort, or wait on a lock the
+    // panic site holds -> hang before the previous hook runs).
+    client.enqueue_panic_event(event);
+    // Time-bounded flush on the panicking thread (before unwinding frees locks).
+    // The fixed bound (`PANIC_FLUSH_TIMEOUT`) keeps the dying process from
+    // hanging — and the panic message, which prints only after this returns,
+    // from being delayed — when PostHog is slow/unreachable or a `before_send`
+    // hook needs a lock the panic site still holds.
+    client.flush_blocking_timeout(PANIC_FLUSH_TIMEOUT);
+    Ok(())
+}
+
+/// Build a personless `$exception` event from a panic. The panic-site location
+/// is stamped before the reserved `$exception_*` properties so it can't override
+/// them.
+#[allow(deprecated)]
+fn build_panic_event(
+    panic_info: &panic::PanicInfo<'_>,
+    et_options: &ErrorTrackingOptions,
+) -> Result<Event, Error> {
+    let exception = Exception::from_panic_info(panic_info, et_options.capture_stacktrace());
+
+    let mut event = Event::new_anon("$exception");
+    if let Some(location) = panic_info.location() {
+        event.insert_prop("$exception_panic_file", location.file())?;
+        event.insert_prop("$exception_panic_line", location.line())?;
+        event.insert_prop("$exception_panic_column", location.column())?;
+    }
+    exception.write_into(&mut event, et_options)?;
+    Ok(event)
 }
 
 /// Optional context for `capture_exception_with`: person identity, custom
@@ -323,18 +485,32 @@ impl Exception {
         }
     }
 
-    /// Build an exception from normalized exception items.
-    ///
-    /// Caller-provided stacktraces are sent as-is: no stacktrace is captured
-    /// and client-side frame classification is not applied.
-    // Unused until panic autocapture (stacked PR) builds its payloads here.
-    #[allow(dead_code)]
-    pub(crate) fn from_exception_list(items: Vec<ExceptionItem>) -> Self {
+    /// Build an exception from a panic, capturing the current stacktrace when
+    /// `capture_stacktrace` is set.
+    #[allow(deprecated)]
+    fn from_panic_info(panic_info: &panic::PanicInfo<'_>, capture_stacktrace: bool) -> Self {
         Self {
-            items,
-            captured_frames: None,
+            items: vec![ExceptionItem {
+                exception_type: "Panic".to_string(),
+                value: panic_message(panic_info),
+                mechanism: ExceptionMechanism {
+                    mechanism_type: "panic".to_string(),
+                    handled: false,
+                    synthetic: false,
+                    exception_id: None,
+                    parent_id: None,
+                },
+                stacktrace: None,
+            }],
+            captured_frames: if capture_stacktrace {
+                Some(capture_raw_panic_frames())
+            } else {
+                None
+            },
             fingerprint: None,
-            level: "error".to_string(),
+            // Panics are unrecoverable (the process is unwinding/aborting), so
+            // they are reported at `fatal`, not `error`.
+            level: "fatal".to_string(),
         }
     }
 
@@ -503,13 +679,13 @@ fn trim_to_max_frames(frames: &mut Vec<StackFrame>, max_frames: usize) {
     }
 }
 
-/// Capture the current raw stacktrace, dropping the SDK's own capture frames
-/// so the caller's frame comes first.
-fn capture_raw_application_frames() -> Vec<StackFrame> {
+/// Capture the current raw stacktrace, dropping the leading SDK frames matched
+/// by `is_internal` so the caller's frame comes first.
+fn capture_raw_frames(is_internal: impl Fn(&str) -> bool) -> Vec<StackFrame> {
     let mut frames = capture_frames_current_first(0);
     while frames
         .first()
-        .map(|frame| is_internal_capture_frame(&frame.function))
+        .map(|frame| is_internal(&frame.function))
         .unwrap_or(false)
     {
         frames.remove(0);
@@ -518,15 +694,46 @@ fn capture_raw_application_frames() -> Vec<StackFrame> {
     frames
 }
 
+fn capture_raw_application_frames() -> Vec<StackFrame> {
+    capture_raw_frames(is_internal_capture_frame)
+}
+
+fn capture_raw_panic_frames() -> Vec<StackFrame> {
+    // Unlike the manual-capture path, keep *every* frame — including the panic
+    // and capture machinery — and let in-app classification mark the SDK/runtime
+    // frames as `in_app = false`. Dropping by function name was brittle (the list
+    // drifted as internals were renamed/inlined) and threw away data the UI can
+    // collapse on its own via the in-app flag.
+    capture_frames_current_first(0)
+}
+
 fn is_internal_capture_frame(function: &str) -> bool {
     function.starts_with("backtrace::")
         || function.contains("capture_frames_current_first")
+        || function.contains("capture_raw_frames")
         || function.contains("capture_raw_application_frames")
         || function.contains("Exception::from_error")
         || function.contains("Exception::from_message")
         || function.contains("build_exception_event")
         || function.contains("Client::capture_exception")
         || function.contains("global::capture_exception")
+}
+
+/// The panic payload as a string, falling back to a generic message.
+#[allow(deprecated)]
+fn panic_message(panic_info: &panic::PanicInfo<'_>) -> String {
+    let value = panic_info
+        .payload()
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_string())
+        .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic occurred".to_string());
+
+    if value.is_empty() {
+        "panic occurred".to_string()
+    } else {
+        value
+    }
 }
 
 fn path_to_string(path: &std::path::Path) -> String {
@@ -592,11 +799,51 @@ where
     }
 }
 
+/// Demangled symbols carry compiler-internal hashes that vary per platform and
+/// rustc release: legacy mangling appends a trailing `::h<16 hex>`, and v0
+/// mangling tags crate names with `[<hex>]` disambiguators (std ships v0-mangled
+/// on Linux, so std frames demangle as `std[b887e3750a86e3a0]::panicking::…`).
+/// Strip both so internal-frame matching and server-side grouping see stable,
+/// readable names.
 fn normalize_function_name(function: &str) -> String {
+    let function = strip_crate_disambiguators(function);
     match function.rsplit_once("::") {
         Some((prefix, suffix)) if is_rust_symbol_hash(suffix) => prefix.to_string(),
-        _ => function.to_string(),
+        _ => function,
     }
+}
+
+fn strip_crate_disambiguators(function: &str) -> String {
+    let mut out = String::with_capacity(function.len());
+    let mut rest = function;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let bracketed = &rest[open..];
+        match bracketed.find(']') {
+            Some(close) => {
+                let content = &bracketed[1..close];
+                if !is_crate_disambiguator(content) {
+                    out.push_str(&bracketed[..=close]);
+                }
+                rest = &bracketed[close + 1..];
+            }
+            None => {
+                out.push_str(bracketed);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Lowercase-hex bracket contents of disambiguator length; array/slice type
+/// brackets (`[u8; 32]`) never qualify.
+fn is_crate_disambiguator(content: &str) -> bool {
+    content.len() >= 8
+        && content
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
 }
 
 fn is_rust_symbol_hash(segment: &str) -> bool {
@@ -627,7 +874,16 @@ fn default_in_app_path(filename: &str) -> bool {
 }
 
 fn default_in_app_function(function: &str) -> bool {
-    if function.is_empty() || function == "_main" {
+    // Bare runtime/unwind symbols that carry no `crate::` prefix (so the segment
+    // match below can't catch them). `rust_begin_unwind` is the panic entry; the
+    // `__rust`/`___rust` shims are the unwind glue (the extra underscore is
+    // Mach-O's).
+    if function.is_empty()
+        || function == "_main"
+        || function == "rust_begin_unwind"
+        || function.starts_with("__rust")
+        || function.starts_with("___rust")
+    {
         return false;
     }
 
@@ -637,7 +893,19 @@ fn default_in_app_function(function: &str) -> bool {
             .split("::")
             .next()
             .unwrap_or_default(),
-        "alloc" | "backtrace" | "core" | "posthog_rs" | "reqwest" | "std" | "tokio"
+        "alloc"
+            | "anyhow"
+            | "backtrace"
+            | "core"
+            | "futures_core"
+            | "futures_util"
+            | "log"
+            | "posthog_rs"
+            | "reqwest"
+            | "std"
+            | "tokio"
+            | "tracing"
+            | "tracing_core"
     )
 }
 
@@ -645,10 +913,14 @@ fn default_in_app_function(function: &str) -> bool {
 mod tests {
     use std::error::Error as StdError;
     use std::fmt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
 
+    use httpmock::prelude::*;
     use serde_json::{json, Value};
 
     use super::*;
+    use crate::client::ClientOptionsBuilder;
     use crate::event::InnerEvent;
 
     #[derive(Debug)]
@@ -703,6 +975,522 @@ mod tests {
 
     fn event_json(exception: Exception) -> Value {
         event_json_with(exception, &ErrorTrackingOptions::default())
+    }
+
+    #[allow(deprecated)]
+    type PanicHook = Box<dyn Fn(&panic::PanicInfo<'_>) + Sync + Send + 'static>;
+
+    /// Restores the previous panic hook and clears the install latch so the
+    /// panic tests don't leak global state into one another.
+    struct PanicHookReset {
+        previous: Option<PanicHook>,
+    }
+
+    impl PanicHookReset {
+        fn new(previous: PanicHook) -> Self {
+            Self {
+                previous: Some(previous),
+            }
+        }
+
+        fn restore(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                panic::set_hook(previous);
+            }
+            PANIC_HOOK_INSTALLED.store(false, Ordering::Release);
+        }
+    }
+
+    impl Drop for PanicHookReset {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                self.restore();
+            }
+        }
+    }
+
+    /// Serializes the panic tests: they share the process-wide panic hook and
+    /// the install latch.
+    fn panic_hook_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    // The async constructor only awaits when local evaluation is enabled, so a
+    // plain client builds synchronously under a minimal executor — no Tokio
+    // runtime needed to set up the panic-hook tests.
+    #[cfg(feature = "async-client")]
+    fn build_test_client(options: crate::client::ClientOptions) -> Arc<Client> {
+        Arc::new(futures::executor::block_on(crate::client::client(options)))
+    }
+
+    #[cfg(not(feature = "async-client"))]
+    fn build_test_client(options: crate::client::ClientOptions) -> Arc<Client> {
+        Arc::new(crate::client::client(options))
+    }
+
+    #[inline(never)]
+    fn panic_hook_test_panic_site() {
+        panic!("panic hook boom");
+    }
+
+    #[inline(never)]
+    fn panic_hook_disabled_test_panic_site() {
+        panic!("disabled panic hook boom");
+    }
+
+    /// Match the panic `$exception` event inside the transport's batch envelope
+    /// (`batch[0]`) — the same event shape for the V0 and V1 wire formats.
+    fn request_has_panic_payload(req: &HttpMockRequest) -> bool {
+        let Some(body) = req.body.as_deref() else {
+            return false;
+        };
+        let Ok(body) = serde_json::from_slice::<Value>(body) else {
+            return false;
+        };
+        let event = &body["batch"][0];
+        let exception = &event["properties"]["$exception_list"][0];
+        let frames = exception["stacktrace"]["frames"].as_array();
+
+        // The user's panic site is captured (no longer forced to frame 0 — we
+        // keep the machinery frames now instead of stripping them).
+        let has_panic_site = frames.is_some_and(|frames| {
+            frames.iter().any(|frame| {
+                frame["function"]
+                    .as_str()
+                    .is_some_and(|name| name.contains("panic_hook_test_panic_site"))
+            })
+        });
+        // Panic/unwind machinery is kept and marked out of app rather than
+        // dropped by name.
+        let has_machinery_not_in_app = frames.is_some_and(|frames| {
+            frames.iter().any(|frame| {
+                frame["in_app"] == false
+                    && frame["function"].as_str().is_some_and(|name| {
+                        name.contains("panicking") || name == "rust_begin_unwind"
+                    })
+            })
+        });
+
+        event["event"] == "$exception"
+            // V0 injects `$process_person_profile` into properties; V1 keeps it
+            // in the typed `options` object.
+            && (event["properties"]["$process_person_profile"] == false
+                || event["options"]["process_person_profile"] == false)
+            && event["properties"]["$exception_level"] == "fatal"
+            && exception["type"] == "Panic"
+            && exception["value"] == "panic hook boom"
+            && exception["mechanism"]["type"] == "panic"
+            && exception["mechanism"]["handled"] == false
+            && event["properties"]["$exception_panic_file"]
+                .as_str()
+                .is_some_and(|file| file.contains("error_tracking.rs"))
+            && event["properties"]["$exception_panic_line"]
+                .as_u64()
+                .is_some_and(|line| line > 0)
+            && event["properties"]["$exception_panic_column"]
+                .as_u64()
+                .is_some_and(|column| column > 0)
+            && has_panic_site
+            && has_machinery_not_in_app
+    }
+
+    #[test]
+    fn panic_hook_sends_personless_exception_and_calls_previous_hook() {
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        let previous_called = Arc::new(AtomicBool::new(false));
+        let previous_called_for_hook = Arc::clone(&previous_called);
+        panic::set_hook(Box::new(move |_| {
+            previous_called_for_hook.store(true, Ordering::Release);
+        }));
+
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST).matches(request_has_panic_payload);
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .build()
+            .unwrap();
+        let client = build_test_client(options);
+
+        install_panic_hook(Arc::clone(&client)).unwrap();
+        assert!(matches!(
+            install_panic_hook(Arc::clone(&client)),
+            Err(Error::PanicHookAlreadyInstalled)
+        ));
+
+        let result = panic::catch_unwind(panic_hook_test_panic_site);
+        reset.restore();
+
+        assert!(result.is_err());
+        assert!(previous_called.load(Ordering::Acquire));
+        capture_mock.assert_hits(1);
+    }
+
+    #[test]
+    fn disabled_panic_hook_does_not_send() {
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        panic::set_hook(Box::new(|_| {}));
+
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST);
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .disabled(true)
+            .build()
+            .unwrap();
+        let client = build_test_client(options);
+
+        install_panic_hook(client).unwrap();
+        let result = panic::catch_unwind(panic_hook_disabled_test_panic_site);
+        reset.restore();
+
+        assert!(result.is_err());
+        capture_mock.assert_hits(0);
+    }
+
+    /// Panics inside Tokio tasks run the hook on a runtime worker thread; the
+    /// transport's own worker is a separate std::thread, so the enqueue + flush
+    /// still deliver the event rather than re-panicking on a runtime thread.
+    #[cfg(feature = "async-client")]
+    #[test]
+    fn panic_hook_captures_panics_on_tokio_runtime_threads() {
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        panic::set_hook(Box::new(|_| {}));
+
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .body_contains(r#""value":"tokio task boom""#);
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .build()
+            .unwrap();
+        install_panic_hook(build_test_client(options)).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            tokio::spawn(async {
+                panic!("tokio task boom");
+            })
+            .await
+        });
+        drop(runtime);
+
+        // Strictest flavor: the hook fires on the very thread driving block_on
+        // of a current-thread runtime.
+        let current_thread = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let current_result = current_thread.block_on(async {
+            panic::catch_unwind(AssertUnwindSafe(|| panic!("tokio task boom")))
+        });
+        drop(current_thread);
+        reset.restore();
+
+        assert!(result.is_err());
+        assert!(current_result.is_err());
+        capture_mock.assert_hits(2);
+    }
+
+    #[test]
+    fn panic_in_before_send_on_worker_neither_deadlocks_nor_recurses() {
+        // A `before_send` hook that panics unconditionally fires the panic hook
+        // ON the transport worker thread. Capturing there must be skipped: a
+        // synchronous self-flush would deadlock the worker, and routing the
+        // `$exception` back through `before_send` (which panics again) would
+        // recurse forever. A watchdog turns either regression into a failure.
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        panic::set_hook(Box::new(|_| {}));
+
+        let server = MockServer::start();
+        let _capture_mock = server.mock(|when, then| {
+            when.method(POST);
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .before_send(|_event| panic!("before_send boom"))
+            .build()
+            .unwrap();
+        let client = build_test_client(options);
+        install_panic_hook(Arc::clone(&client)).unwrap();
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_for_worker = Arc::clone(&finished);
+        let work_client = Arc::clone(&client);
+        let _worker = std::thread::spawn(move || {
+            work_client.capture(Event::new("boom", "user-1"));
+            // From this (non-worker) thread this is a real blocking flush; it
+            // returns only if the worker neither deadlocked nor spun on recursion.
+            work_client.flush_blocking();
+            finished_for_worker.store(true, Ordering::Release);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !finished.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        reset.restore();
+
+        assert!(
+            finished.load(Ordering::Acquire),
+            "panic in before_send on the worker thread deadlocked or recursed"
+        );
+        // The spawned thread is intentionally not joined: on a regression it is
+        // stuck in flush_blocking and a join would hang too; on success it has
+        // already finished. Dropping the handle detaches it.
+    }
+
+    #[test]
+    fn panic_hook_flush_is_bounded_when_before_send_needs_a_panic_held_lock() {
+        // The panic hook flushes on the *panicking* thread, before unwinding
+        // releases locks held at the panic site. If a `before_send` hook needs
+        // such a lock, the worker blocks on it and the hook would block on the
+        // worker forever — the process hangs instead of crashing. The flush is
+        // time-bounded (`PANIC_FLUSH_TIMEOUT`), so the hook returns and the panic
+        // proceeds; the watchdog turns a regression (an unbounded wait) into a
+        // failure instead of a hang.
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        panic::set_hook(Box::new(|_| {}));
+
+        // A lock the application holds across its panic and that `before_send`
+        // also wants — the classic shape that would deadlock an unbounded flush.
+        static SHARED: Mutex<()> = Mutex::new(());
+
+        let server = MockServer::start();
+        let _capture_mock = server.mock(|when, then| {
+            when.method(POST);
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .before_send(|event| {
+                let _held = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+                Some(event)
+            })
+            .build()
+            .unwrap();
+        let client = build_test_client(options);
+        install_panic_hook(Arc::clone(&client)).unwrap();
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_for_panicker = Arc::clone(&finished);
+        let _panicker = std::thread::spawn(move || {
+            {
+                // Hold SHARED across the panic so the hook fires while it is
+                // locked. Release it (end of scope) *before* signalling, so test
+                // teardown can drain the worker without blocking on the lock.
+                let _held = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+                    panic!("boom while holding a before_send lock")
+                }));
+            }
+            finished_for_panicker.store(true, Ordering::Release);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !finished.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        reset.restore();
+
+        assert!(
+            finished.load(Ordering::Acquire),
+            "panic hook flush hung on a before_send that needed a panic-held lock"
+        );
+        // Not joined: on a regression the thread is stuck in the hook's flush and
+        // a join would hang too; on success it has already finished.
+    }
+
+    #[test]
+    fn global_capture_panics_defaults_off_and_is_configurable() {
+        assert!(
+            !ErrorTrackingOptions::default().capture_panics(),
+            "panic autocapture is opt-in (off by default)"
+        );
+        let enabled = ErrorTrackingOptionsBuilder::default()
+            .capture_panics(true)
+            .build()
+            .unwrap();
+        assert!(enabled.capture_panics(), "capture_panics is configurable");
+    }
+
+    #[test]
+    fn should_capture_global_panics_gates_on_enabled_and_flag() {
+        let enabled = build_test_client(
+            ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .error_tracking(
+                    ErrorTrackingOptionsBuilder::default()
+                        .capture_panics(true)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        );
+        assert!(should_capture_global_panics(&enabled));
+
+        // Disabled gates it even with capture_panics on.
+        let disabled = build_test_client(
+            ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .disabled(true)
+                .error_tracking(
+                    ErrorTrackingOptionsBuilder::default()
+                        .capture_panics(true)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        );
+        assert!(
+            !should_capture_global_panics(&disabled),
+            "a disabled client must not latch the process-wide hook"
+        );
+
+        // Default options leave capture_panics off, so nothing installs.
+        let default_off = build_test_client(
+            ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .build()
+                .unwrap(),
+        );
+        assert!(!should_capture_global_panics(&default_off));
+    }
+
+    #[test]
+    fn install_panic_hook_on_disabled_client_does_not_latch() {
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+
+        let disabled = build_test_client(
+            ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .disabled(true)
+                .build()
+                .unwrap(),
+        );
+        let result = install_panic_hook(disabled);
+        let latched = PANIC_HOOK_INSTALLED.load(Ordering::Acquire);
+
+        // Restore before asserting so a regression (which would install) can't
+        // leave a hook dangling for other tests.
+        reset.restore();
+        assert!(result.is_ok(), "installing on a disabled client returns Ok");
+        assert!(
+            !latched,
+            "a disabled client must not latch the process-wide hook"
+        );
+    }
+
+    #[test]
+    fn panic_machinery_frames_classify_out_of_app() {
+        // Panic/unwind/SDK machinery is kept in the stacktrace now (not stripped
+        // by name) and classified out of app by the default in-app rules, so the
+        // UI can collapse it while the user's frames stay in-app.
+        let options = ErrorTrackingOptions::default();
+        for not_in_app in [
+            "std::panicking::begin_panic_handler",
+            "core::panicking::panic_fmt",
+            "std::panic::catch_unwind",
+            "std::sys::backtrace::__rust_begin_short_backtrace",
+            "rust_begin_unwind",
+            "__rust_try",
+            "backtrace::backtrace::trace",
+            "posthog_rs::error_tracking::capture_panic",
+            "posthog_rs::error_tracking::install_hook::{{closure}}",
+            "core::ops::function::FnOnce::call_once",
+            "tokio::runtime::task::raw::poll",
+            "futures_util::future::FutureExt::poll",
+            "anyhow::error::Error::msg",
+            "tracing::span::Span::record",
+            "tracing_core::dispatcher::get_default",
+            "log::__private_api::log",
+        ] {
+            assert!(
+                !options.is_in_app_frame(None, Some(not_in_app)),
+                "{} should classify as not in-app",
+                not_in_app
+            );
+        }
+
+        for in_app in [
+            "my_app::checkout::process_payment",
+            "checkout_service::submit",
+        ] {
+            assert!(
+                options.is_in_app_frame(None, Some(in_app)),
+                "{} should classify as in-app",
+                in_app
+            );
+        }
+    }
+
+    #[test]
+    fn function_names_strip_v0_crate_disambiguators() {
+        // std ships v0-mangled on Linux; crate names demangle with `[hex]`.
+        assert_eq!(
+            normalize_function_name("std[b887e3750a86e3a0]::panicking::panic_with_hook"),
+            "std::panicking::panic_with_hook"
+        );
+        assert_eq!(
+            normalize_function_name(
+                "<alloc[8a71accd1b3711a1]::boxed::Box<dyn core[e000b89356eb4406]::ops::function::Fn<(&std[b887e3750a86e3a0]::panic::PanicHookInfo,)>> as core[e000b89356eb4406]::ops::function::Fn<(&std[b887e3750a86e3a0]::panic::PanicHookInfo,)>>::call"
+            ),
+            "<alloc::boxed::Box<dyn core::ops::function::Fn<(&std::panic::PanicHookInfo,)>> as core::ops::function::Fn<(&std::panic::PanicHookInfo,)>>::call"
+        );
+        // Array and slice type brackets are not disambiguators.
+        assert_eq!(
+            normalize_function_name("core::array::<impl [u8; 32]>::map"),
+            "core::array::<impl [u8; 32]>::map"
+        );
+        assert_eq!(
+            normalize_function_name("<[u8] as checkout_service::Digest>::digest"),
+            "<[u8] as checkout_service::Digest>::digest"
+        );
     }
 
     #[test]

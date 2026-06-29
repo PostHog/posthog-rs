@@ -36,6 +36,7 @@ pub posthog_rs::Error::Connection(alloc::string::String)
 pub posthog_rs::Error::InconclusiveMatch(alloc::string::String)
 pub posthog_rs::Error::InvalidTimestamp(alloc::string::String)
 pub posthog_rs::Error::NotInitialized
+pub posthog_rs::Error::PanicHookAlreadyInstalled
 pub posthog_rs::Error::RateLimit
 pub posthog_rs::Error::Serialization(alloc::string::String)
 pub posthog_rs::Error::ServerError
@@ -178,6 +179,7 @@ pub fn posthog_rs::ErrorTrackingOptions::default() -> Self
 pub struct posthog_rs::ErrorTrackingOptionsBuilder
 impl posthog_rs::ErrorTrackingOptionsBuilder
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::build(&self) -> core::result::Result<posthog_rs::ErrorTrackingOptions, posthog_rs::ErrorTrackingOptionsBuilderError>
+pub fn posthog_rs::ErrorTrackingOptionsBuilder::capture_panics(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::capture_stacktrace(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::in_app_exclude_paths(&mut self, alloc::vec::Vec<alloc::string::String>) -> &mut Self
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::in_app_include_paths(&mut self, alloc::vec::Vec<alloc::string::String>) -> &mut Self

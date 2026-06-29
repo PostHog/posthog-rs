@@ -41,6 +41,11 @@ pub(crate) enum Control {
         events: Vec<Event>,
     },
     Flush(Completion),
+    /// Like [`Control::Flush`], but sends the freshly captured live buffer
+    /// *before* older held retries. Used by the panic hook so a retry backlog
+    /// behind a slow endpoint can't starve the just-enqueued `$exception` within
+    /// the hook's short bounded wait.
+    FlushCaptures(Completion),
     Shutdown(Completion),
     /// Test-only: re-evaluate the (virtual) clock and flush/retry whatever is now
     /// due, so interval and backoff timing can be driven without real sleeps.
@@ -106,7 +111,20 @@ pub(crate) struct TransportHandle {
     max_queue_size: usize,
     /// Shares the worker's clock; used to stamp capture (enqueue) time.
     clock: Arc<dyn Clock>,
+    /// The worker thread's id, so the panic hook can tell when it is running on
+    /// this client's own worker — where capturing would deadlock or recurse.
+    #[cfg_attr(not(feature = "error-tracking"), allow(dead_code))]
+    worker_id: Option<std::thread::ThreadId>,
 }
+
+/// Name of the background worker thread (aids debugging). The panic hook detects
+/// the worker by its thread *id* (see `worker_id`), not this shared name.
+const WORKER_THREAD_NAME: &str = "posthog-transport";
+
+/// Upper bound on a blocking-flush / shutdown timeout, so an absurd value can't
+/// overflow the `now + timeout` deadlines (worker drain) or the `recv_timeout`
+/// bound on `flush_blocking_timeout`.
+const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(86_400);
 
 impl TransportHandle {
     /// Spawn the worker with the real system clock.
@@ -121,9 +139,10 @@ impl TransportHandle {
         let worker_len = len.clone();
         let worker_clock = Arc::clone(&clock);
         let worker = thread::Builder::new()
-            .name("posthog-transport".to_string())
+            .name(WORKER_THREAD_NAME.to_string())
             .spawn(move || run_worker(options, rx, worker_len, worker_clock))
             .ok();
+        let worker_id = worker.as_ref().map(|handle| handle.thread().id());
         Self {
             tx,
             len,
@@ -132,20 +151,40 @@ impl TransportHandle {
             full_warned: AtomicBool::new(false),
             max_queue_size,
             clock,
+            worker_id,
         }
     }
 
     /// Non-blocking enqueue. Drops (with a single warning) when the queue is full
     /// or the client is closed.
-    pub(crate) fn enqueue(&self, mut event: Event) {
+    pub(crate) fn enqueue(&self, event: Event) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        if !try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
+        if try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
+            self.send_reserved(event);
+        }
+    }
+
+    /// Like `enqueue`, but never logs — no full-queue `warn!`. The panic hook
+    /// enqueues through this on the *panicking* thread, which must not run
+    /// arbitrary tracing-subscriber code (a subscriber could panic or wait on a
+    /// lock the panic site holds). A full queue silently drops the `$exception`.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn enqueue_panic(&self, event: Event) {
+        if self.closed.load(Ordering::Acquire) {
             return;
         }
-        // Stamp capture (enqueue) time on the producer side so a batched or
-        // retried event records when it occurred, not when it was finally sent.
+        if reserve_slot(&self.len, self.max_queue_size).is_some() {
+            self.send_reserved(event);
+        }
+    }
+
+    /// Stamp the capture (enqueue) time on the producer side — so a batched or
+    /// retried event records when it occurred, not when it was finally sent —
+    /// then hand it to the worker, releasing the reserved slot if the worker is
+    /// gone. The slot must already be reserved by the caller.
+    fn send_reserved(&self, mut event: Event) {
         event.ensure_timestamp(self.clock.now_utc());
         if self
             .tx
@@ -227,13 +266,39 @@ impl TransportHandle {
         }
     }
 
-    /// Test helper: blocking flush (the async client uses a oneshot instead).
+    /// Blocking flush via an `mpsc` completion. Waits (unbounded) for the worker
+    /// to attempt delivery of everything queued, then returns. Test-only; the
+    /// panic hook uses `flush_blocking_timeout`.
     #[cfg(test)]
-    fn flush_blocking(&self) {
+    pub(crate) fn flush_blocking(&self) {
         let (tx, rx) = mpsc::channel();
         if self.send_control(Control::Flush(Completion::Blocking(tx))) {
             let _ = rx.recv();
         }
+    }
+
+    /// Blocking flush bounded to at most `timeout` (clamped to
+    /// `MAX_SHUTDOWN_TIMEOUT`) — runtime-free via an `mpsc` completion, so it
+    /// works from the panic hook (the async client's public `flush` uses a
+    /// oneshot). The bound matters there: the hook runs on the panicking thread
+    /// before unwinding releases locks, so an unbounded wait would hang the dying
+    /// process if a `before_send` hook (run on the worker) needs a lock the panic
+    /// site still holds — the worker would block on it forever.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn flush_blocking_timeout(&self, timeout: Duration) {
+        let (tx, rx) = mpsc::channel();
+        if self.send_control(Control::FlushCaptures(Completion::Blocking(tx))) {
+            let _ = rx.recv_timeout(timeout.min(MAX_SHUTDOWN_TIMEOUT));
+        }
+    }
+
+    /// True when the calling thread is this transport's worker thread. The panic
+    /// hook skips capturing there: a synchronous self-flush would deadlock the
+    /// worker, and routing the `$exception` back through `before_send` would
+    /// recurse if a `before_send` hook panicked.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn on_worker_thread(&self) -> bool {
+        self.worker_id == Some(std::thread::current().id())
     }
 
     /// Test helper: flush + stop + join, mirroring the client's shutdown.
@@ -250,28 +315,42 @@ impl TransportHandle {
     }
 }
 
-/// Reserve a queue slot under the bounded-capacity cap. Returns `false` (and
-/// warns once) when full. A CAS keeps the count exact under concurrent producers.
-fn try_reserve(len: &AtomicUsize, max: usize, warned: &AtomicBool) -> bool {
+/// Reserve a queue slot under the bounded-capacity cap, returning
+/// `Some(prev_count)` on success or `None` when full. A CAS keeps the count
+/// exact under concurrent producers. Pure (no logging), so the panic path can
+/// reserve a slot without running any tracing; `try_reserve` layers the
+/// full-queue warning on top.
+fn reserve_slot(len: &AtomicUsize, max: usize) -> Option<usize> {
     loop {
         let current = len.load(Ordering::Acquire);
         if current >= max {
-            if !warned.swap(true, Ordering::AcqRel) {
-                warn!("posthog-rs: event queue full (capacity {max}); dropping events");
-            }
-            return false;
+            return None;
         }
         if len
             .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            // Re-arm the full-queue warning once the queue has fully drained, so a
-            // service that repeatedly fills then drains warns once per episode
-            // instead of only on the very first overflow.
+            return Some(current);
+        }
+    }
+}
+
+/// Reserve a queue slot, warning once when full. Re-arms that warning once the
+/// queue has fully drained, so a service that repeatedly fills then drains warns
+/// once per episode instead of only on the very first overflow.
+fn try_reserve(len: &AtomicUsize, max: usize, warned: &AtomicBool) -> bool {
+    match reserve_slot(len, max) {
+        Some(current) => {
             if current == 0 {
                 warned.store(false, Ordering::Release);
             }
-            return true;
+            true
+        }
+        None => {
+            if !warned.swap(true, Ordering::AcqRel) {
+                warn!("posthog-rs: event queue full (capacity {max}); dropping events");
+            }
+            false
         }
     }
 }
@@ -359,7 +438,7 @@ fn run_worker(
     // guard `RETRY_BACKOFF_CAP` applies to retry backoff. A day is far beyond any
     // sane teardown budget.
     let shutdown_timeout =
-        Duration::from_millis(options.shutdown_timeout_ms).min(Duration::from_secs(86_400));
+        Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT);
     let mut pipeline = Pipeline::new(&options, Arc::clone(&clock), len);
 
     let mut buffer: Vec<Event> = Vec::new();
@@ -447,6 +526,18 @@ fn run_worker(
                 buffer_since = None;
                 completion.signal();
             }
+            Wake::Msg(Control::FlushCaptures(completion)) => {
+                // Panic-hook flush: send the freshly captured live buffer (the
+                // `$exception`) FIRST, so a retry backlog behind a slow endpoint
+                // can't starve it within the hook's bounded wait. Older retries
+                // and historical batches follow, best-effort, on the way out.
+                send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
+                buffer_since = None;
+                pipeline.flush_retries(None);
+                drain_historical(&mut pipeline, &mut historical, None);
+                historical_since = None;
+                completion.signal();
+            }
             Wake::Msg(Control::Shutdown(completion)) => {
                 // Drain held retries, queued historical batches, then buffered
                 // events — one final attempt each, bounded by `shutdown_timeout`:
@@ -514,7 +605,7 @@ fn run_worker(
 fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
     while let Ok(control) = rx.try_recv() {
         match control {
-            Control::Flush(c) | Control::Shutdown(c) => c.signal(),
+            Control::Flush(c) | Control::FlushCaptures(c) | Control::Shutdown(c) => c.signal(),
             #[cfg(test)]
             Control::Tick(c) => c.signal(),
             Control::Capture { .. } => dec_len(len, 1),

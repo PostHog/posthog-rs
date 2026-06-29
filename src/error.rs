@@ -9,6 +9,7 @@ impl Display for Error {
             Error::Serialization(msg) => write!(f, "Serialization Error: {msg}"),
             Error::AlreadyInitialized => write!(f, "Client already initialized"),
             Error::NotInitialized => write!(f, "Client not initialized"),
+            Error::PanicHookAlreadyInstalled => write!(f, "Panic hook already installed"),
             Error::InvalidTimestamp(msg) => write!(f, "Invalid Timestamp: {msg}"),
             Error::InconclusiveMatch(msg) => write!(f, "Inconclusive Match: {msg}"),
             Error::RateLimit => write!(f, "Rate limited"),
@@ -36,6 +37,8 @@ pub enum Error {
     AlreadyInitialized,
     /// Global client was not initialized before use
     NotInitialized,
+    /// Panic autocapture hook was already installed
+    PanicHookAlreadyInstalled,
     /// Timestamp could not be parsed or is invalid
     InvalidTimestamp(String),
     /// Flag evaluation was inconclusive (e.g., missing required properties, unknown operator)
