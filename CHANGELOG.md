@@ -1,5 +1,12 @@
 # posthog-rs
 
+## 0.14.3 — 2026-06-29
+
+### Patch changes
+
+- [447ed07](https://github.com/posthog/posthog-rs/commit/447ed07512b76a471bc4598337cb9f6453b992f0) Respect Retry-After as minimum retry delay — Thanks @marandaneto!
+- [650746c](https://github.com/posthog/posthog-rs/commit/650746cfc7b5169f7955edcffff520a28c484e26) Route feature flag called events through the normal capture transport. — Thanks @marandaneto!
+
 ## 0.14.2 — 2026-06-27
 
 ### Patch changes
