@@ -881,7 +881,7 @@ impl Client {
         let effective_disable_geoip = options.disable_geoip.unwrap_or(self.options.disable_geoip);
 
         let mut payload = json!({
-            "token": self.options.api_key,
+            "api_key": self.options.api_key,
             "distinct_id": distinct_id,
             "groups": groups,
             "person_properties": person_properties,
