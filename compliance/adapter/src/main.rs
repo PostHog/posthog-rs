@@ -88,9 +88,6 @@ struct FeatureFlagRequest {
     group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
     #[serde(default)]
     disable_geoip: Option<bool>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    force_remote: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
