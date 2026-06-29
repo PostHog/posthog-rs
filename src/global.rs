@@ -23,10 +23,10 @@ pub(crate) fn global_client() -> Option<&'static Client> {
 /// Use the crate-level `init_global` re-export when you don't need more than
 /// one client instance and don't need to change client options at runtime.
 ///
-/// With the `error-tracking` feature (on by default), this also installs a
-/// process-wide panic hook that captures panics as `$exception` events through
-/// the global client — crash reporting, on by default. Opt out by setting
-/// `ErrorTrackingOptions`'s `capture_panics` to `false`.
+/// With the `error-tracking` feature (on by default) and
+/// `ErrorTrackingOptions::capture_panics` enabled (opt-in; off by default),
+/// this also installs a process-wide panic hook that captures panics as
+/// `$exception` events through the global client.
 ///
 /// # Parameters
 ///
@@ -56,10 +56,10 @@ pub async fn init_global_client<C: Into<ClientOptions>>(options: C) -> Result<()
 /// Use the crate-level `init_global` re-export when you don't need more than
 /// one client instance and don't need to change client options at runtime.
 ///
-/// With the `error-tracking` feature (on by default), this also installs a
-/// process-wide panic hook that captures panics as `$exception` events through
-/// the global client — crash reporting, on by default. Opt out by setting
-/// `ErrorTrackingOptions`'s `capture_panics` to `false`.
+/// With the `error-tracking` feature (on by default) and
+/// `ErrorTrackingOptions::capture_panics` enabled (opt-in; off by default),
+/// this also installs a process-wide panic hook that captures panics as
+/// `$exception` events through the global client.
 ///
 /// # Parameters
 ///

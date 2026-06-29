@@ -1,5 +1,30 @@
 # posthog-rs
 
+## 0.15.0 — 2026-06-29
+
+### Minor changes
+
+- [4294c51](https://github.com/posthog/posthog-rs/commit/4294c51e3a8f099cbe81b337da0280077f7248c2) Panic autocapture (opt-in). Set `ErrorTrackingOptions::capture_panics` to `true` and initialize the global client with `init_global`, and the SDK installs a process-wide `std::panic` hook that captures panics as personless `$exception` events through the global client, then calls the previously installed hook. Each event carries the panic payload, the panic-site location (`$exception_panic_file`/`_line`/`_column`), and a call-site stack trace honoring `capture_stacktrace`. Capture routes through the background worker thread, so it needs no async runtime and a panicking `before_send` hook can't abort the process. Gated by the default-on `error-tracking` feature.
+  
+  Panic autocapture is **global-only**: a panic hook is process-global (`std::panic::set_hook`), so it pairs with the process-global client. There is intentionally no per-`Client` panic API for now.
+  
+  New `ErrorTrackingOptions`: `capture_panics` (default `false`). The flush the hook performs on the panicking thread is bounded by a fixed, short timeout (2s) so a slow or unreachable PostHog can't freeze the crashing process or delay its panic message.
+  
+  Delivery is best-effort: the just-captured `$exception` is flushed ahead of queued retries, but under sustained backpressure (a slow/unreachable endpoint or a large capture backlog) it may not be sent within the bound before the process exits. — Thanks @cat-ph!
+
+## 0.14.3 — 2026-06-29
+
+### Patch changes
+
+- [447ed07](https://github.com/posthog/posthog-rs/commit/447ed07512b76a471bc4598337cb9f6453b992f0) Respect Retry-After as minimum retry delay — Thanks @marandaneto!
+- [650746c](https://github.com/posthog/posthog-rs/commit/650746cfc7b5169f7955edcffff520a28c484e26) Route feature flag called events through the normal capture transport. — Thanks @marandaneto!
+
+## 0.14.2 — 2026-06-27
+
+### Patch changes
+
+- [10810b1](https://github.com/posthog/posthog-rs/commit/10810b182d68787b3169d586600594d515c8e02f) Type-coerce `capture-v1` options before placing them on the wire. A caller value whose type doesn't match the backend's strict `Options` schema is now coerced when possible, or dropped (backend applies its default) rather than rejecting the whole batch. No effect on default (v0) capture behavior. — Thanks @eli-r-ph!
+
 ## 0.14.1 — 2026-06-24
 
 ### Patch changes
