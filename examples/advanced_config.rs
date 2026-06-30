@@ -3,7 +3,7 @@
 /// Shows different ways to configure the PostHog Rust SDK for various use cases.
 ///
 /// Run with: cargo run --example advanced_config --features async-client
-use posthog_rs::{ClientOptionsBuilder, EU_INGESTION_ENDPOINT};
+use posthog_rs::{ClientOptionsBuilder, PostHogError, EU_INGESTION_ENDPOINT};
 
 #[cfg(feature = "async-client")]
 #[tokio::main]
@@ -49,6 +49,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _perf = posthog_rs::client(performance_config).await;
     println!("   → Evaluates flags locally (100x faster)\n");
+
+    // 6. OBSERVABILITY: react to terminal network failures with `on_error`.
+    //
+    // The hook fires once per terminal failure across the SDK's network
+    // surfaces — a capture batch the SDK gave up delivering, a failed remote
+    // `/flags` request, or a failed local-evaluation poll. Match on the
+    // `PostHogError` variant for the surface you care about.
+    //
+    // IMPORTANT: the hook is observability-only. Never call back into the SDK
+    // from it (no `capture`/`capture_batch`/`capture_exception`, `flush`, or
+    // `shutdown`): emitting an event while handling a capture failure forms an
+    // amplification loop, and re-entering the SDK can deadlock the hook. Keep
+    // it cheap and non-blocking — log, bump a counter, or send on a channel.
+    println!("6. Observability with on_error:");
+    let observable_config = ClientOptionsBuilder::default()
+        .api_key("phc_project_key".to_string())
+        .on_error(|err: &PostHogError<'_>| match err {
+            PostHogError::Capture(f) => {
+                eprintln!(
+                    "posthog: dropped {} event(s) (status {:?})",
+                    f.event_count(),
+                    f.status()
+                );
+            }
+            PostHogError::FeatureFlags(f) => {
+                eprintln!("posthog: /flags request failed: {}", f.error());
+            }
+            PostHogError::LocalEvaluation(f) => {
+                eprintln!("posthog: flag definitions poll failed: {}", f.error());
+            }
+            // `PostHogError` is `#[non_exhaustive]`: more surfaces may gain
+            // hook coverage, so handle the rest without breaking the build.
+            _ => {}
+        })
+        .build()?;
+
+    let _observable = posthog_rs::client(observable_config).await;
+    println!("   → Surfaces terminal capture/flags/poller failures\n");
 
     println!("Configuration examples complete!");
     println!("\nTip: Check out 'feature_flags' example for flag usage");

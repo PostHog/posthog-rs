@@ -3,6 +3,8 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::client::BeforeSendHook;
 use crate::client::CaptureDefaults;
+use crate::client::OnErrorHook;
+use crate::client::PostHogError;
 use crate::feature_flag_evaluations::{EvaluatedFlagRecord, FlagCalledEventParams};
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
 use crate::Event;
@@ -69,6 +71,21 @@ pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) ->
     }
 
     current
+}
+
+/// Invoke each `on_error` hook with the failure, catching panics so a
+/// misbehaving hook can't wedge the caller (the transport worker, a flags
+/// request, or the poller). No-op when no hooks are registered, keeping the
+/// common (hookless) failure path allocation-free.
+pub(crate) fn apply_on_error_hooks(hooks: &[OnErrorHook], failure: &PostHogError<'_>) {
+    if hooks.is_empty() {
+        return;
+    }
+    for hook in hooks {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.apply(failure))).is_err() {
+            error!("panic in PostHog on_error hook; ignoring");
+        }
+    }
 }
 
 /// Returns `true` when the helper has already shipped this
