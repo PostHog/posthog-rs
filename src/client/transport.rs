@@ -771,7 +771,7 @@ impl Pipeline {
                 if !self.options.on_error.is_empty() {
                     let err = Error::Serialization(e.to_string());
                     let lost = count + undelivered_results(&batch.final_results);
-                    self.fire_capture(&batch, Some(&err), None, None, lost);
+                    self.fire_capture(&batch, None, Some(&err), None, None, lost);
                 }
                 dec_len(&self.len, count);
                 return;
@@ -832,13 +832,20 @@ impl Pipeline {
 
         match step {
             Step::Done => {
-                // A 2xx whose per-event verdicts left events unpersisted after
-                // the retry budget: surface them even though the request itself
-                // succeeded (`error` is `None`).
+                // A 2xx whose per-event verdicts include `drop` or `retry`-on-final
+                // (events the backend will not persist): surface them even though
+                // the request itself succeeded (`error` is `None`).
                 if !self.options.on_error.is_empty() {
                     let lost = batch.pending.len() + undelivered_results(&batch.final_results);
                     if lost > 0 {
-                        self.fire_capture(&batch, None, http_status, None, lost);
+                        self.fire_capture(
+                            &batch,
+                            Some(&batch.request_id),
+                            None,
+                            http_status,
+                            None,
+                            lost,
+                        );
                     }
                 }
             }
@@ -850,7 +857,14 @@ impl Pipeline {
                         .as_deref()
                         .and_then(|b| serde_json::from_str::<V1ErrorResponse>(b).ok());
                     let lost = batch.pending.len() + undelivered_results(&batch.final_results);
-                    self.fire_capture(&batch, Some(&e), http_status, error_response.as_ref(), lost);
+                    self.fire_capture(
+                        &batch,
+                        Some(&batch.request_id),
+                        Some(&e),
+                        http_status,
+                        error_response.as_ref(),
+                        lost,
+                    );
                 }
                 dec_len(&self.len, batch.pending.len());
             }
@@ -907,6 +921,7 @@ impl Pipeline {
     fn fire_capture(
         &self,
         batch: &RetryBatch,
+        request_id: Option<&Uuid>,
         error: Option<&Error>,
         status: Option<u16>,
         error_response: Option<&crate::event_v1::V1ErrorResponse>,
@@ -918,7 +933,7 @@ impl Pipeline {
             attempt: batch.attempt,
             event_count,
             historical_migration: batch.historical_migration,
-            request_id: Some(&batch.request_id),
+            request_id,
             results: &batch.final_results,
             error_response,
         });
@@ -1724,5 +1739,72 @@ mod tests {
         assert!(has_request_id, "v1 failures carry the attempt request id");
         assert_eq!(error_kind.as_deref(), Some("invalid_payload"));
         assert!(has_error);
+    }
+
+    #[cfg(feature = "capture-v1")]
+    #[test]
+    fn capture_failure_v1_2xx_counts_dropped_and_final_retry() {
+        // A 2xx whose per-event verdicts leave events un-persisted (a `drop` and
+        // a `retry` on the final attempt) fires the hook once as `Step::Done`
+        // with `error == None`, and `event_count` counts BOTH lost events while
+        // `event_results` carries all verdicts (including the persisted `ok`).
+        // End-to-end through the transport — not a unit test of the helper.
+        let u1 = Uuid::now_v7();
+        let u2 = Uuid::now_v7();
+        let u3 = Uuid::now_v7();
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({
+                    "results": {
+                        u1.to_string(): { "result": "ok" },
+                        u2.to_string(): { "result": "drop", "details": "not_persisted" },
+                        u3.to_string(): { "result": "retry", "details": "not_persisted" }
+                    }
+                }));
+        });
+
+        let recorded = Arc::new(Mutex::new(Vec::<(Option<u16>, bool, usize, usize)>::new()));
+        let sink = recorded.clone();
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .max_capture_attempts(1u32)
+                .on_error(move |failure| {
+                    if let PostHogError::Capture(c) = failure {
+                        sink.lock().unwrap_or_else(|p| p.into_inner()).push((
+                            c.status(),
+                            c.error().is_some(),
+                            c.event_count(),
+                            c.event_results().len(),
+                        ));
+                    }
+                })
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        let mut e1 = Event::new("e1", "user-1");
+        e1.set_uuid(u1);
+        let mut e2 = Event::new("e2", "user-1");
+        e2.set_uuid(u2);
+        let mut e3 = Event::new("e3", "user-1");
+        e3.set_uuid(u3);
+        handle.enqueue(e1);
+        handle.enqueue(e2);
+        handle.enqueue(e3);
+        handle.flush_blocking();
+        handle.shutdown_blocking();
+
+        let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(recorded.len(), 1, "fires exactly once for the lost batch");
+        let (status, has_error, lost, results) = recorded[0];
+        assert_eq!(status, Some(200));
+        assert!(!has_error, "a 2xx is not an error");
+        assert_eq!(lost, 2, "counts the dropped event and the final retry");
+        assert_eq!(results, 3, "all verdicts reported, including the ok");
     }
 }

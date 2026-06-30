@@ -70,6 +70,8 @@ fn local_eval_sink() -> (LocalEvalSink, impl Fn(&PostHogError<'_>) + Send + 'sta
 mod blocking {
     use super::*;
     use posthog_rs::EvaluateFlagsOptions;
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn flags_failure_reports_status_endpoint_and_body() {
@@ -167,13 +169,49 @@ mod blocking {
         assert_eq!(recorded.len(), 1, "initial poll failure reported once");
         assert_eq!(recorded[0], Some(401));
     }
+
+    #[test]
+    fn local_eval_poller_reports_recurring_loop_failures() {
+        // The background poll loop (not just the synchronous initial load) must
+        // fire the hook on each failed poll. With a 1s interval, a second poll
+        // fails after the initial load — assert the hook sees >= 2 failures.
+        let server = MockServer::start();
+        let _defs = server.mock(|when, then| {
+            when.method(GET).path("/flags/definitions/");
+            then.status(401).body("unauthorized");
+        });
+        let (recorded, hook) = local_eval_sink();
+        let _client = posthog_rs::client(
+            posthog_rs::ClientOptionsBuilder::default()
+                .api_key("phc_test".to_string())
+                .host(server.base_url())
+                .personal_api_key("phx_test".to_string())
+                .enable_local_evaluation(true)
+                .poll_interval_seconds(1)
+                .on_error(hook)
+                .build()
+                .unwrap(),
+        );
+
+        // Initial load fails synchronously during construction (1 hit). Wait
+        // for the background loop to fire at least one more poll — the hook
+        // firing is proof the poll ran.
+        thread::sleep(Duration::from_millis(1500));
+
+        let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(
+            recorded.len() >= 2,
+            "recurring poll failures reported, got {}",
+            recorded.len()
+        );
+        assert!(recorded.iter().all(|s| *s == Some(401)));
+    }
 }
 
 #[cfg(feature = "async-client")]
 mod async_tests {
     use super::*;
     use posthog_rs::EvaluateFlagsOptions;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn flags_failure_reports_status_endpoint_and_body() {
@@ -234,7 +272,9 @@ mod async_tests {
                 .unwrap(),
         )
         .await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // AsyncFlagPoller::start() awaits the initial definitions load before
+        // returning, so the cache is populated by the time client().await
+        // resolves — no sleep needed here.
 
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -273,5 +313,43 @@ mod async_tests {
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(recorded.len(), 1, "initial poll failure reported once");
         assert_eq!(recorded[0], Some(401));
+    }
+
+    #[tokio::test]
+    async fn local_eval_poller_reports_recurring_loop_failures() {
+        // The async background poll task (not just the initial load awaited by
+        // start()) must fire the hook on each failed poll. With a 1s interval,
+        // a second poll fails after start() returns — assert >= 2 failures.
+        let server = MockServer::start();
+        let _defs = server.mock(|when, then| {
+            when.method(GET).path("/flags/definitions/");
+            then.status(401).body("unauthorized");
+        });
+        let (recorded, hook) = local_eval_sink();
+        let _client = posthog_rs::client(
+            posthog_rs::ClientOptionsBuilder::default()
+                .api_key("phc_test".to_string())
+                .host(server.base_url())
+                .personal_api_key("phx_test".to_string())
+                .enable_local_evaluation(true)
+                .poll_interval_seconds(1)
+                .on_error(hook)
+                .build()
+                .unwrap(),
+        )
+        .await;
+
+        // start() awaits the initial load (1 hit). Wait for the background
+        // task's interval to fire at least one more poll — the hook firing is
+        // proof the poll ran.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(
+            recorded.len() >= 2,
+            "recurring poll failures reported, got {}",
+            recorded.len()
+        );
+        assert!(recorded.iter().all(|s| *s == Some(401)));
     }
 }

@@ -3,10 +3,12 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::client::BeforeSendHook;
 use crate::client::CaptureDefaults;
+use crate::client::FlagsFailure;
 use crate::client::OnErrorHook;
 use crate::client::PostHogError;
 use crate::feature_flag_evaluations::{EvaluatedFlagRecord, FlagCalledEventParams};
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
+use crate::Error;
 use crate::Event;
 use tracing::error;
 
@@ -86,6 +88,32 @@ pub(crate) fn apply_on_error_hooks(hooks: &[OnErrorHook], failure: &PostHogError
             error!("panic in PostHog on_error hook; ignoring");
         }
     }
+}
+
+/// Fire the `on_error` hooks for a failed `/flags` request. Each failed request
+/// reports exactly once, from the leaf that finalizes the [`Error`], so a caller
+/// that degrades gracefully (e.g. [`Client::evaluate_flags`](crate::Client::evaluate_flags)
+/// falling back to local results) still surfaces the failure. No-op when no
+/// hooks are registered.
+pub(crate) fn report_flags_error(
+    hooks: &[OnErrorHook],
+    endpoint: &str,
+    distinct_id: Option<&str>,
+    status: Option<u16>,
+    body: Option<&str>,
+    error: &Error,
+) {
+    if hooks.is_empty() {
+        return;
+    }
+    let failure = PostHogError::FeatureFlags(FlagsFailure {
+        error,
+        endpoint,
+        distinct_id,
+        status,
+        body,
+    });
+    apply_on_error_hooks(hooks, &failure);
 }
 
 /// Returns `true` when the helper has already shipped this

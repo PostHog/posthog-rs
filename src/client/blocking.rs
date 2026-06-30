@@ -47,12 +47,12 @@ fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
 }
 
 use super::common::{
-    already_reported, apply_on_error_hooks, build_dedup_key, extract_flag_details,
-    flag_called_event, flag_event_dedup_cache, local_record, remote_record_from_detail,
+    already_reported, build_dedup_key, extract_flag_details, flag_called_event,
+    flag_event_dedup_cache, local_record, remote_record_from_detail, report_flags_error,
     DetailedFlagsResponse, FlagEventDedupCache,
 };
 use super::transport::{Completion, Control, TransportHandle};
-use super::{ClientOptions, FlagsFailure, PostHogError};
+use super::ClientOptions;
 
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
@@ -483,7 +483,8 @@ impl Client {
                 .text()
                 .unwrap_or_else(|_| "Unknown error".to_string());
             let err = Error::Connection(format!("API request failed with status {status}: {text}"));
-            self.report_flags_error(
+            report_flags_error(
+                &self.options.on_error,
                 &flags_endpoint,
                 distinct_id,
                 Some(status.as_u16()),
@@ -499,7 +500,14 @@ impl Client {
             Err(e) => {
                 let err =
                     Error::Serialization(format!("Failed to parse feature flags response: {e}"));
-                self.report_flags_error(&flags_endpoint, distinct_id, Some(status), None, &err);
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    distinct_id,
+                    Some(status),
+                    None,
+                    &err,
+                );
                 return Err(err);
             }
         };
@@ -692,7 +700,14 @@ impl Client {
             Ok(r) => r,
             Err(e) => {
                 let err = Error::Connection(e.to_string());
-                self.report_flags_error(&flags_endpoint, distinct_id, None, None, &err);
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    distinct_id,
+                    None,
+                    None,
+                    &err,
+                );
                 return Err(err);
             }
         };
@@ -706,7 +721,14 @@ impl Client {
             Ok(r) => r,
             Err(e) => {
                 let err = Error::Serialization(format!("Failed to parse response: {e}"));
-                self.report_flags_error(&flags_endpoint, distinct_id, Some(status), None, &err);
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    distinct_id,
+                    Some(status),
+                    None,
+                    &err,
+                );
                 return Err(err);
             }
         };
@@ -896,31 +918,6 @@ impl Client {
             .clone()
     }
 
-    /// Fire the `on_error` hooks for a failed `/flags` request. Each failed
-    /// request reports exactly once, from the leaf that finalizes the [`Error`],
-    /// so a caller that degrades gracefully (e.g. [`Client::evaluate_flags`]
-    /// falling back to local results) still surfaces the failure.
-    fn report_flags_error(
-        &self,
-        endpoint: &str,
-        distinct_id: Option<&str>,
-        status: Option<u16>,
-        body: Option<&str>,
-        error: &Error,
-    ) {
-        if self.options.on_error.is_empty() {
-            return;
-        }
-        let failure = PostHogError::FeatureFlags(FlagsFailure {
-            error,
-            endpoint,
-            distinct_id,
-            status,
-            body,
-        });
-        apply_on_error_hooks(&self.options.on_error, &failure);
-    }
-
     fn send_feature_flags_request(
         &self,
         flags_endpoint: &str,
@@ -964,7 +961,8 @@ impl Client {
                             attempt += 1;
                         }
                         super::retry::Step::Fail(err) => {
-                            self.report_flags_error(
+                            report_flags_error(
+                                &self.options.on_error,
                                 flags_endpoint,
                                 payload.get("distinct_id").and_then(|v| v.as_str()),
                                 None,
@@ -1017,7 +1015,8 @@ impl Client {
                 .text()
                 .unwrap_or_else(|_| "Unknown error".to_string());
             let err = Error::Connection(format!("API request failed with status {status}: {text}"));
-            self.report_flags_error(
+            report_flags_error(
+                &self.options.on_error,
                 &flags_endpoint,
                 Some(distinct_id),
                 Some(status.as_u16()),
@@ -1033,7 +1032,8 @@ impl Client {
             Err(e) => {
                 let err =
                     Error::Serialization(format!("Failed to parse feature flags response: {e}"));
-                self.report_flags_error(
+                report_flags_error(
+                    &self.options.on_error,
                     &flags_endpoint,
                     Some(distinct_id),
                     Some(status),

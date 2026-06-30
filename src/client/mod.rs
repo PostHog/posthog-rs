@@ -368,9 +368,11 @@ impl ClientOptionsBuilder {
     /// the capture hook runs on the background transport thread. Panics are
     /// caught and ignored.
     ///
-    /// Registering a hook silences the default WARN for terminal capture batch
-    /// rejects/exhaustion; other drop warnings (shutdown, serialization,
-    /// queue-full) and the existing `/flags` and poller logs are unaffected.
+    /// Registering a hook silences the default WARN for terminal capture
+    /// reject/exhaustion and serialization failures (the caller now owns that
+    /// signal). Shutdown-timeout, queue-full, and `before_send` drops keep their
+    /// WARN logs and do **not** fire the hook — they are not delivery failures.
+    /// The existing `/flags` and poller WARN logs are unaffected.
     pub fn on_error<F>(&mut self, hook: F) -> &mut Self
     where
         F: FnMut(&PostHogError<'_>) + Send + 'static,

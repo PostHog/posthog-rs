@@ -55,6 +55,7 @@ Shows:
 - Self-hosted instance configuration
 - Production settings with timeouts and geoip configuration
 - High-performance local evaluation setup
+- Observability with `on_error` (terminal capture/flags/poller failures)
 
 ### 4. Error Tracking Example
 

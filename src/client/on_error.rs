@@ -88,6 +88,9 @@ pub enum PostHogError<'a> {
 /// Details of a terminal capture batch failure.
 ///
 /// Fields are read through accessors; the struct is `#[non_exhaustive]`.
+///
+/// Does not fire for shutdown-timeout, queue-full, or `before_send` drops —
+/// those are not delivery failures.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct CaptureFailure<'a> {
@@ -144,7 +147,9 @@ impl<'a> CaptureFailure<'a> {
         self.historical_migration
     }
 
-    /// The V1 capture `posthog-request-id` of the final attempt, if one was sent.
+    /// The V1 capture `posthog-request-id` of the final attempt, when one was
+    /// sent. `None` for a serialization failure (no request reached the wire)
+    /// and on the v0 pipeline (which has no request id).
     #[cfg(feature = "capture-v1")]
     pub fn request_id(&self) -> Option<&Uuid> {
         self.request_id
