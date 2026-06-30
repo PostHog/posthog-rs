@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.15.1 — 2026-06-30
+
+### Patch changes
+
+- [91dfe67](https://github.com/posthog/posthog-rs/commit/91dfe677b9cbb582d4ecd7f36bb693ab340561ed) Include canonical feature flag request fields for remote evaluation, including person/group properties, GeoIP disable, and flag key filtering. — Thanks @marandaneto!
+
 ## 0.15.0 — 2026-06-29
 
 ### Minor changes
