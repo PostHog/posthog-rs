@@ -972,21 +972,27 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
     frames
 }
 
+/// Trim call-ordered (main-first) frames to `max_frames`, dropping from the
+/// outermost end so the crash-site frames survive.
 fn trim_to_max_frames(frames: &mut Vec<StackFrame>, max_frames: usize) {
     if frames.len() > max_frames {
-        frames.truncate(max_frames);
+        frames.drain(..frames.len() - max_frames);
     }
 }
 
-/// Capture the current raw stacktrace, dropping the leading SDK frames so the
-/// caller's frame comes first, and return the loaded modules those frames point
-/// into for the `$debug_images` property.
+/// Capture the current raw stacktrace, dropping the SDK's own frames so the
+/// caller's frame is the crash-site end, and return the loaded modules those
+/// frames point into for the `$debug_images` property. Frames are returned in
+/// call order (main first, crash site last) — the wire order shared with the
+/// other PostHog SDKs, and the orientation cymbal's inline expansion inserts
+/// into.
 ///
-/// Frames are current-first, so the SDK's own frames lead. Two passes drop
-/// them: an address-based pass that matches each frame's symbol entry against
-/// `pinned_entries` (the SDK capture functions), which works even in stripped
-/// builds where there are no names; then the name-based `is_internal` pass for
-/// everything the resolver could name.
+/// The walk itself is current-first, so the SDK's own frames lead. Two passes
+/// drop them: an address-based pass that matches each frame's symbol entry
+/// against `pinned_entries` (the SDK capture functions), which works even in
+/// stripped builds where there are no names; then the name-based `is_internal`
+/// pass for everything the resolver could name. The stripped stack is reversed
+/// into call order before returning.
 ///
 /// inline(never): this generic function sits between the pinned non-generic
 /// wrapper and `capture_frames_current_first`; keeping it a physical frame lets
@@ -1035,6 +1041,7 @@ fn capture_raw_frames(
     }
 
     let images = referenced_images(modules, &frames);
+    frames.reverse();
     (frames, images)
 }
 
@@ -1076,8 +1083,9 @@ fn capture_raw_panic_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
     // collapse on its own via the in-app flag. We still collect the debug images
     // the kept frames point into so the server can symbolicate them.
     let modules = collect_loaded_modules();
-    let frames = capture_frames_current_first(0, &modules);
+    let mut frames = capture_frames_current_first(0, &modules);
     let images = referenced_images(modules, &frames);
+    frames.reverse();
     (frames, images)
 }
 
@@ -1906,25 +1914,26 @@ mod tests {
         let frames = exception_list[0]["stacktrace"]["frames"]
             .as_array()
             .expect("expected stack frames");
-        let top_frame = frames.first().expect("expected top frame");
-        assert_eq!(top_frame["platform"], "native");
-        assert_eq!(top_frame["lang"], "rust");
-        let instruction_addr = top_frame["instruction_addr"].as_str().unwrap_or_default();
+        // Call order: the crash-site frame sits at the end of the list.
+        let crash_frame = frames.last().expect("expected crash-site frame");
+        assert_eq!(crash_frame["platform"], "native");
+        assert_eq!(crash_frame["lang"], "rust");
+        let instruction_addr = crash_frame["instruction_addr"].as_str().unwrap_or_default();
         assert!(
             instruction_addr.starts_with("0x"),
             "expected hex instruction_addr, got {:?}",
             instruction_addr
         );
-        let top_function = top_frame["function"].as_str().unwrap_or_default();
+        let crash_function = crash_frame["function"].as_str().unwrap_or_default();
         assert!(
-            top_function.contains("from_error_builds_exception_list_with_stacktrace"),
-            "expected user frame first, got {:?}",
-            top_function
+            crash_function.contains("from_error_builds_exception_list_with_stacktrace"),
+            "expected the user frame at the crash-site end, got {:?}",
+            crash_function
         );
         assert!(
-            !top_function.contains("Exception::"),
+            !crash_function.contains("Exception::"),
             "expected SDK frames to be skipped, got {:?}",
-            top_function
+            crash_function
         );
     }
 
@@ -2224,16 +2233,19 @@ mod tests {
             .as_array()
             .expect("expected stack frames");
         assert_eq!(frames.len(), MAX_FRAMES);
-        // Trimming drops the outermost tail; the crash-site top frame survives.
-        assert_eq!(frames[0]["function"], "frame_0");
+        // Frames are call-ordered (main first), so trimming drops the
+        // outermost head; the crash-site frame at the end survives.
+        assert_eq!(frames[0]["function"], "frame_5");
+        assert_eq!(
+            frames[MAX_FRAMES - 1]["function"],
+            format!("frame_{}", MAX_FRAMES + 4)
+        );
     }
 
     #[test]
-    fn stacktrace_keeps_top_frame_first() {
+    fn stacktrace_is_call_ordered_with_crash_site_last() {
         fn capture() -> ExceptionStacktrace {
-            // Empty module slice: this test only asserts frame ordering and
-            // names, which are independent of the loaded-module lookup.
-            let mut frames = capture_frames_current_first(0, &[]);
+            let (mut frames, _) = capture_raw_application_frames();
             trim_to_max_frames(&mut frames, 8);
             ExceptionStacktrace::raw(frames)
         }
@@ -2247,16 +2259,16 @@ mod tests {
 
         let capture_index = functions
             .iter()
-            .position(|function| function.contains("stacktrace_keeps_top_frame_first::capture"))
+            .position(|function| function.contains("crash_site_last::capture"))
             .expect("expected capture frame");
         let test_index = functions
             .iter()
-            .position(|function| function.ends_with("stacktrace_keeps_top_frame_first"))
+            .position(|function| function.ends_with("stacktrace_is_call_ordered_with_crash_site_last"))
             .expect("expected test frame");
 
         assert!(
-            capture_index < test_index,
-            "expected top frame before caller, got {:?}",
+            test_index < capture_index,
+            "expected the caller before the crash-site frame, got {:?}",
             functions
         );
     }
