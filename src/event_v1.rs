@@ -185,6 +185,7 @@ pub struct CaptureResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
+#[non_exhaustive]
 pub struct V1ErrorResponse {
     pub error: String,
     #[serde(default)]

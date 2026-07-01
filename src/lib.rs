@@ -92,6 +92,7 @@ pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
+pub use client::{CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError};
 
 // Endpoints
 pub use endpoints::{
@@ -113,7 +114,7 @@ pub use event::Event;
 
 // V1 Capture types
 #[cfg(feature = "capture-v1")]
-pub use event_v1::{CaptureResponse, EventResult, EventStatus};
+pub use event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse};
 
 // Feature Flags
 pub use feature_flag_evaluations::{EvaluateFlagsOptions, FeatureFlagEvaluations};

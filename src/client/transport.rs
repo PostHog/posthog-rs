@@ -25,7 +25,9 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use tracing::warn;
 
-use super::ClientOptions;
+use super::common::apply_on_error_hooks;
+use super::{CaptureFailure, ClientOptions, PostHogError};
+use crate::error::Error;
 use crate::Event;
 
 /// Messages sent from producers (`capture`/`flush`/`shutdown`) to the worker.
@@ -754,7 +756,7 @@ impl Pipeline {
 
     fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
         use super::v1_capture::{self, Step};
-        use crate::event_v1::V1BatchRequestRef;
+        use crate::event_v1::{V1BatchRequestRef, V1ErrorResponse};
 
         let req = V1BatchRequestRef {
             created_at: &batch.created_at,
@@ -764,11 +766,15 @@ impl Pipeline {
         let payload = match serde_json::to_vec(&req) {
             Ok(p) => p,
             Err(e) => {
-                warn!(
-                    "posthog-rs: dropping {} event(s), serialization failed: {e}",
-                    batch.pending.len()
-                );
-                dec_len(&self.len, batch.pending.len());
+                let count = batch.pending.len();
+                if self.options.on_error.is_empty() {
+                    warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
+                } else {
+                    let err = Error::Serialization(e.to_string());
+                    let lost = count + undelivered_results(&batch.final_results);
+                    self.fire_capture(&batch, None, Some(&err), None, None, lost);
+                }
+                dec_len(&self.len, count);
                 return;
             }
         };
@@ -788,6 +794,11 @@ impl Pipeline {
             self.clock.now(),
             self.options.request_timeout_seconds,
         );
+        // The final attempt's status and (on a non-2xx) raw body, kept so the
+        // `on_error` hook can surface them. The body is only retained when a hook
+        // is registered, so the common path stays allocation-neutral.
+        let mut http_status: Option<u16> = None;
+        let mut response_body: Option<String> = None;
         let step = match request.send() {
             Err(e) => v1_capture::after_transport_error(
                 &self.options,
@@ -797,9 +808,10 @@ impl Pipeline {
             ),
             Ok(resp) => {
                 let status = resp.status().as_u16();
+                http_status = Some(status);
                 let retry_after = v1_capture::parse_retry_after(resp.headers());
                 let text = resp.text().unwrap_or_else(|_| "Unknown error".to_string());
-                v1_capture::after_response(
+                let step = v1_capture::after_response(
                     &self.options,
                     &batch.request_id,
                     batch.attempt,
@@ -808,7 +820,11 @@ impl Pipeline {
                     &text,
                     &mut batch.pending,
                     &mut batch.final_results,
-                )
+                );
+                if !self.options.on_error.is_empty() && !(200..=299).contains(&status) {
+                    response_body = Some(text);
+                }
+                step
             }
         };
 
@@ -816,9 +832,41 @@ impl Pipeline {
         dec_len(&self.len, count - batch.pending.len());
 
         match step {
-            Step::Done => {}
+            Step::Done => {
+                // A 2xx whose per-event verdicts include `drop` or `retry`-on-final
+                // (events the backend will not persist): surface them even though
+                // the request itself succeeded (`error` is `None`).
+                if !self.options.on_error.is_empty() {
+                    let lost = batch.pending.len() + undelivered_results(&batch.final_results);
+                    if lost > 0 {
+                        self.fire_capture(
+                            &batch,
+                            Some(&batch.request_id),
+                            None,
+                            http_status,
+                            None,
+                            lost,
+                        );
+                    }
+                }
+            }
             Step::Fail(e) => {
-                warn!("posthog-rs: dropping {} event(s): {e}", batch.pending.len());
+                if self.options.on_error.is_empty() {
+                    warn!("posthog-rs: dropping {} event(s): {e}", batch.pending.len());
+                } else {
+                    let error_response = response_body
+                        .as_deref()
+                        .and_then(|b| serde_json::from_str::<V1ErrorResponse>(b).ok());
+                    let lost = batch.pending.len() + undelivered_results(&batch.final_results);
+                    self.fire_capture(
+                        &batch,
+                        Some(&batch.request_id),
+                        Some(&e),
+                        http_status,
+                        error_response.as_ref(),
+                        lost,
+                    );
+                }
                 dec_len(&self.len, batch.pending.len());
             }
             Step::Backoff(delay) => {
@@ -868,6 +916,41 @@ impl Pipeline {
             }
         }
     }
+
+    /// Fire the `on_error` hooks for a terminal capture outcome. `error` is
+    /// `None` only for a `2xx` whose events weren't persisted after retries.
+    fn fire_capture(
+        &self,
+        batch: &RetryBatch,
+        request_id: Option<&Uuid>,
+        error: Option<&Error>,
+        status: Option<u16>,
+        error_response: Option<&crate::event_v1::V1ErrorResponse>,
+        event_count: usize,
+    ) {
+        let failure = PostHogError::Capture(CaptureFailure {
+            error,
+            status,
+            attempt: batch.attempt,
+            event_count,
+            historical_migration: batch.historical_migration,
+            request_id,
+            results: &batch.final_results,
+            error_response,
+        });
+        apply_on_error_hooks(&self.options.on_error, &failure);
+    }
+}
+
+/// Count events the V1 backend will not persist (`retry`/`drop` verdicts).
+/// `ok`/`warning` were delivered, so they are excluded from the lost tally.
+#[cfg(feature = "capture-v1")]
+fn undelivered_results(results: &HashMap<Uuid, crate::event_v1::EventResult>) -> usize {
+    use crate::event_v1::EventStatus;
+    results
+        .values()
+        .filter(|r| matches!(r.result, EventStatus::Retry | EventStatus::Drop))
+        .count()
 }
 
 // ===========================================================================
@@ -879,6 +962,7 @@ struct RetryBatch {
     body: Vec<u8>,
     encoding: Option<&'static str>,
     count: usize,
+    historical_migration: bool,
     attempt: u32,
     next_at: Instant,
 }
@@ -936,7 +1020,12 @@ impl Pipeline {
                 return;
             }
             Err(e) => {
-                warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
+                if self.options.on_error.is_empty() {
+                    warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
+                } else {
+                    let err = Error::Serialization(e.to_string());
+                    self.fire_capture(Some(&err), None, 1, historical_migration, count);
+                }
                 dec_len(&self.len, count);
                 return;
             }
@@ -949,6 +1038,7 @@ impl Pipeline {
             body,
             encoding,
             count: kept,
+            historical_migration,
             attempt: 1,
             next_at: self.clock.now(),
         };
@@ -982,10 +1072,12 @@ impl Pipeline {
             self.options.request_timeout_seconds,
         );
 
+        let mut http_status: Option<u16> = None;
         let step = match request.send() {
             Err(e) => v0_after_transport_error(&self.options, batch.attempt, e.to_string()),
             Ok(response) => {
                 let status = response.status().as_u16();
+                http_status = Some(status);
                 let retry_after = super::retry::parse_retry_after(response.headers());
                 let body = response
                     .text()
@@ -997,7 +1089,17 @@ impl Pipeline {
         match step {
             Step::Done => dec_len(&self.len, batch.count),
             Step::Fail(e) => {
-                warn!("posthog-rs: dropping {} event(s): {e}", batch.count);
+                if self.options.on_error.is_empty() {
+                    warn!("posthog-rs: dropping {} event(s): {e}", batch.count);
+                } else {
+                    self.fire_capture(
+                        Some(&e),
+                        http_status,
+                        batch.attempt,
+                        batch.historical_migration,
+                        batch.count,
+                    );
+                }
                 dec_len(&self.len, batch.count);
             }
             Step::Backoff(delay) => {
@@ -1046,6 +1148,26 @@ impl Pipeline {
                 self.attempt(batch, deadline);
             }
         }
+    }
+
+    /// Fire the `on_error` hooks for a terminal capture outcome. The V0 pipeline
+    /// has no per-event verdicts, so it reports only the batch-level cause.
+    fn fire_capture(
+        &self,
+        error: Option<&Error>,
+        status: Option<u16>,
+        attempt: u32,
+        historical_migration: bool,
+        event_count: usize,
+    ) {
+        let failure = PostHogError::Capture(CaptureFailure {
+            error,
+            status,
+            attempt,
+            event_count,
+            historical_migration,
+        });
+        apply_on_error_hooks(&self.options.on_error, &failure);
     }
 }
 
@@ -1506,5 +1628,185 @@ mod tests {
             "threshold-sized historical batch delivered"
         );
         handle.shutdown_blocking();
+    }
+
+    // -- on_error capture hook ----------------------------------------------
+
+    #[test]
+    fn capture_failure_hook_fires_on_terminal_reject() {
+        // A non-retryable 400 makes the batch terminal on the first attempt: the
+        // on_error hook fires exactly once carrying the HTTP status, the lost
+        // event count, and the underlying error. Uses only version-agnostic
+        // accessors so it holds for both the v0 (/batch) and v1 wire shapes.
+        let server = MockServer::start();
+        let _bad = server.mock(|when, then| {
+            when.method(POST);
+            then.status(400).body("bad request");
+        });
+        let recorded = Arc::new(Mutex::new(Vec::<(Option<u16>, usize, bool, bool)>::new()));
+        let sink = recorded.clone();
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .on_error(move |failure| {
+                    if let PostHogError::Capture(c) = failure {
+                        sink.lock().unwrap_or_else(|p| p.into_inner()).push((
+                            c.status(),
+                            c.event_count(),
+                            c.historical_migration(),
+                            c.error().is_some(),
+                        ));
+                    }
+                })
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        handle.enqueue(Event::new("e", "user-1"));
+        handle.flush_blocking();
+        handle.shutdown_blocking();
+
+        let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(recorded.len(), 1, "exactly one capture failure expected");
+        let (status, count, historical, has_error) = recorded[0];
+        assert_eq!(status, Some(400));
+        assert_eq!(count, 1);
+        assert!(!historical);
+        assert!(has_error, "a terminal reject carries the underlying error");
+    }
+
+    /// The lost tally must count `retry` and `drop` verdicts (events the backend
+    /// will not persist) while excluding delivered `ok`/`warning` — a batch that
+    /// mixes a drop with a retry must report both, not just whatever remained in
+    /// `pending`. Guards the historical `event_count` under-count.
+    #[cfg(feature = "capture-v1")]
+    #[test]
+    fn undelivered_results_counts_retry_and_drop_only() {
+        use crate::event_v1::{EventResult, EventStatus};
+        let mk = |result| EventResult {
+            result,
+            details: None,
+        };
+        let results = HashMap::from([
+            (Uuid::now_v7(), mk(EventStatus::Ok)),
+            (Uuid::now_v7(), mk(EventStatus::Warning)),
+            (Uuid::now_v7(), mk(EventStatus::Retry)),
+            (Uuid::now_v7(), mk(EventStatus::Drop)),
+        ]);
+        assert_eq!(undelivered_results(&results), 2);
+    }
+
+    #[cfg(feature = "capture-v1")]
+    #[test]
+    fn capture_failure_v1_surfaces_request_id_and_error_response() {
+        // A non-2xx V1 response with a structured error body must reach the hook
+        // as a parsed `error_response`, alongside the request id of the attempt.
+        let server = MockServer::start();
+        let _bad = server.mock(|when, then| {
+            when.method(POST);
+            then.status(400)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({
+                    "error": "invalid_payload",
+                    "error_description": "malformed batch"
+                }));
+        });
+        let recorded = Arc::new(Mutex::new(Vec::<(bool, Option<String>, bool)>::new()));
+        let sink = recorded.clone();
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .on_error(move |failure| {
+                    if let PostHogError::Capture(c) = failure {
+                        sink.lock().unwrap_or_else(|p| p.into_inner()).push((
+                            c.request_id().is_some(),
+                            c.error_response().map(|er| er.error.clone()),
+                            c.error().is_some(),
+                        ));
+                    }
+                })
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        handle.enqueue(Event::new("e", "user-1"));
+        handle.flush_blocking();
+        handle.shutdown_blocking();
+
+        let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(recorded.len(), 1);
+        let (has_request_id, error_kind, has_error) = &recorded[0];
+        assert!(has_request_id, "v1 failures carry the attempt request id");
+        assert_eq!(error_kind.as_deref(), Some("invalid_payload"));
+        assert!(has_error);
+    }
+
+    #[cfg(feature = "capture-v1")]
+    #[test]
+    fn capture_failure_v1_2xx_counts_dropped_and_final_retry() {
+        // A 2xx whose per-event verdicts leave events un-persisted (a `drop` and
+        // a `retry` on the final attempt) fires the hook once as `Step::Done`
+        // with `error == None`, and `event_count` counts BOTH lost events while
+        // `event_results` carries all verdicts (including the persisted `ok`).
+        // End-to-end through the transport — not a unit test of the helper.
+        let u1 = Uuid::now_v7();
+        let u2 = Uuid::now_v7();
+        let u3 = Uuid::now_v7();
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({
+                    "results": {
+                        u1.to_string(): { "result": "ok" },
+                        u2.to_string(): { "result": "drop", "details": "not_persisted" },
+                        u3.to_string(): { "result": "retry", "details": "not_persisted" }
+                    }
+                }));
+        });
+
+        let recorded = Arc::new(Mutex::new(Vec::<(Option<u16>, bool, usize, usize)>::new()));
+        let sink = recorded.clone();
+        let clock = ManualClock::new();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .max_capture_attempts(1u32)
+                .on_error(move |failure| {
+                    if let PostHogError::Capture(c) = failure {
+                        sink.lock().unwrap_or_else(|p| p.into_inner()).push((
+                            c.status(),
+                            c.error().is_some(),
+                            c.event_count(),
+                            c.event_results().len(),
+                        ));
+                    }
+                })
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+
+        let mut e1 = Event::new("e1", "user-1");
+        e1.set_uuid(u1);
+        let mut e2 = Event::new("e2", "user-1");
+        e2.set_uuid(u2);
+        let mut e3 = Event::new("e3", "user-1");
+        e3.set_uuid(u3);
+        handle.enqueue(e1);
+        handle.enqueue(e2);
+        handle.enqueue(e3);
+        handle.flush_blocking();
+        handle.shutdown_blocking();
+
+        let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(recorded.len(), 1, "fires exactly once for the lost batch");
+        let (status, has_error, lost, results) = recorded[0];
+        assert_eq!(status, Some(200));
+        assert!(!has_error, "a 2xx is not an error");
+        assert_eq!(lost, 2, "counts the dropped event and the final retry");
+        assert_eq!(results, 3, "all verdicts reported, including the ok");
     }
 }

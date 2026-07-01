@@ -45,8 +45,8 @@ fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
 
 use super::common::{
     already_reported, build_dedup_key, extract_flag_details, flag_called_event,
-    flag_event_dedup_cache, local_record, remote_record_from_detail, DetailedFlagsResponse,
-    FlagEventDedupCache,
+    flag_event_dedup_cache, local_record, remote_record_from_detail, report_flags_error,
+    DetailedFlagsResponse, FlagEventDedupCache,
 };
 use super::transport::{Completion, Control, TransportHandle};
 use super::ClientOptions;
@@ -145,6 +145,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
             };
 
             let mut poller = AsyncFlagPoller::new(config, cache.clone());
+            poller.set_on_error(options.on_error.clone());
             poller.start().await;
 
             (Some(LocalEvaluator::new(cache)), Some(poller))
@@ -476,20 +477,42 @@ impl Client {
             .send_feature_flags_request(&flags_endpoint, &payload)
             .await?;
 
+        let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
         if !response.status().is_success() {
             let status = response.status();
             let text = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::Connection(format!(
-                "API request failed with status {status}: {text}"
-            )));
+            let err = Error::Connection(format!("API request failed with status {status}: {text}"));
+            report_flags_error(
+                &self.options.on_error,
+                &flags_endpoint,
+                distinct_id,
+                Some(status.as_u16()),
+                Some(&text),
+                &err,
+            );
+            return Err(err);
         }
 
-        let flags_response = response.json::<FeatureFlagsResponse>().await.map_err(|e| {
-            Error::Serialization(format!("Failed to parse feature flags response: {e}"))
-        })?;
+        let status = response.status().as_u16();
+        let flags_response = match response.json::<FeatureFlagsResponse>().await {
+            Ok(r) => r,
+            Err(e) => {
+                let err =
+                    Error::Serialization(format!("Failed to parse feature flags response: {e}"));
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    distinct_id,
+                    Some(status),
+                    None,
+                    &err,
+                );
+                return Err(err);
+            }
+        };
 
         Ok(flags_response.normalize())
     }
@@ -667,7 +690,8 @@ impl Client {
             payload["disable_geoip"] = json!(true);
         }
 
-        let response = self
+        let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
+        let response = match self
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
@@ -678,16 +702,42 @@ impl Client {
             ))
             .send()
             .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let err = Error::Connection(e.to_string());
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    distinct_id,
+                    None,
+                    None,
+                    &err,
+                );
+                return Err(err);
+            }
+        };
 
         if !response.status().is_success() {
             return Ok(None);
         }
 
-        let flags_response: FeatureFlagsResponse = response
-            .json()
-            .await
-            .map_err(|e| Error::Serialization(format!("Failed to parse response: {e}")))?;
+        let status = response.status().as_u16();
+        let flags_response: FeatureFlagsResponse = match response.json().await {
+            Ok(r) => r,
+            Err(e) => {
+                let err = Error::Serialization(format!("Failed to parse response: {e}"));
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    distinct_id,
+                    Some(status),
+                    None,
+                    &err,
+                );
+                return Err(err);
+            }
+        };
 
         let (_flags, payloads) = flags_response.normalize();
         Ok(payloads.get(&key_str).cloned())
@@ -916,7 +966,17 @@ impl Client {
                             tokio::time::sleep(delay).await;
                             attempt += 1;
                         }
-                        super::retry::Step::Fail(err) => return Err(err),
+                        super::retry::Step::Fail(err) => {
+                            report_flags_error(
+                                &self.options.on_error,
+                                flags_endpoint,
+                                payload.get("distinct_id").and_then(|v| v.as_str()),
+                                None,
+                                None,
+                                &err,
+                            );
+                            return Err(err);
+                        }
                         super::retry::Step::Done => {
                             unreachable!("feature flag transport errors cannot complete")
                         }
@@ -963,14 +1023,35 @@ impl Client {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::Connection(format!(
-                "API request failed with status {status}: {text}"
-            )));
+            let err = Error::Connection(format!("API request failed with status {status}: {text}"));
+            report_flags_error(
+                &self.options.on_error,
+                &flags_endpoint,
+                Some(distinct_id),
+                Some(status.as_u16()),
+                Some(&text),
+                &err,
+            );
+            return Err(err);
         }
 
-        let parsed = response.json::<FeatureFlagsResponse>().await.map_err(|e| {
-            Error::Serialization(format!("Failed to parse feature flags response: {e}"))
-        })?;
+        let status = response.status().as_u16();
+        let parsed = match response.json::<FeatureFlagsResponse>().await {
+            Ok(p) => p,
+            Err(e) => {
+                let err =
+                    Error::Serialization(format!("Failed to parse feature flags response: {e}"));
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    Some(distinct_id),
+                    Some(status),
+                    None,
+                    &err,
+                );
+                return Err(err);
+            }
+        };
         Ok(extract_flag_details(parsed))
     }
 }

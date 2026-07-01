@@ -8,6 +8,11 @@ use derive_builder::Builder;
 use tracing::warn;
 
 mod common;
+mod on_error;
+
+pub(crate) use common::apply_on_error_hooks;
+pub(crate) use on_error::OnErrorHook;
+pub use on_error::{CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError};
 
 /// Request-body compression algorithm for the capture pipelines.
 ///
@@ -237,6 +242,14 @@ pub struct ClientOptions {
     #[builder(default, setter(custom))]
     pub(crate) before_send: Vec<BeforeSendHook>,
 
+    /// Hooks invoked once per terminal failure on a network surface (capture
+    /// batch delivery, remote `/flags` requests, the local-evaluation poller).
+    /// Observability only; registering at least one also silences the default
+    /// WARN logged for terminal capture batch rejects/exhaustion (the caller now
+    /// owns that signal).
+    #[builder(default, setter(custom))]
+    pub(crate) on_error: Vec<OnErrorHook>,
+
     /// Extra HTTP headers injected into every outbound capture request.
     /// Used by the SDK test harness adapter to attach `X-Test-Id` for
     /// parallel test isolation.
@@ -337,6 +350,37 @@ impl ClientOptionsBuilder {
         self.before_send
             .get_or_insert_with(Vec::new)
             .push(BeforeSendHook::new(hook));
+        self
+    }
+
+    /// Add a hook invoked once per terminal failure on an SDK network surface.
+    ///
+    /// The hook receives a [`PostHogError`] for a capture batch the SDK gave up
+    /// delivering, a failed remote `/flags` request, or a failed
+    /// local-evaluation poll. Multiple hooks fire in registration order.
+    ///
+    /// # Observability only — never emit from the hook
+    ///
+    /// The hook MUST NOT call back into the SDK (`capture`/`capture_batch`/
+    /// `capture_exception`, `flush`, or `shutdown`): emitting an event while
+    /// handling a capture failure forms an amplification loop. The hook is
+    /// `Fn + Send + Sync` and invoked without holding any SDK lock, so it may
+    /// run concurrently on multiple threads and must be internally thread-safe.
+    /// Keep it cheap and non-blocking; the capture hook runs on the background
+    /// transport thread. Panics are caught and ignored.
+    ///
+    /// Registering a hook silences the default WARN for terminal capture
+    /// reject/exhaustion and serialization failures (the caller now owns that
+    /// signal). Shutdown-timeout, queue-full, and `before_send` drops keep their
+    /// WARN logs and do **not** fire the hook — they are not delivery failures.
+    /// The existing `/flags` and poller WARN logs are unaffected.
+    pub fn on_error<F>(&mut self, hook: F) -> &mut Self
+    where
+        F: Fn(&PostHogError<'_>) + Send + Sync + 'static,
+    {
+        self.on_error
+            .get_or_insert_with(Vec::new)
+            .push(OnErrorHook::new(hook));
         self
     }
 

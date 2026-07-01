@@ -79,6 +79,10 @@ pub posthog_rs::FlagValue::Boolean(bool)
 pub posthog_rs::FlagValue::String(alloc::string::String)
 impl core::default::Default for posthog_rs::FlagValue
 pub fn posthog_rs::FlagValue::default() -> Self
+#[non_exhaustive] pub enum posthog_rs::PostHogError<'a>
+pub posthog_rs::PostHogError::Capture(posthog_rs::CaptureFailure<'a>)
+pub posthog_rs::PostHogError::FeatureFlags(posthog_rs::FlagsFailure<'a>)
+pub posthog_rs::PostHogError::LocalEvaluation(posthog_rs::LocalEvaluationFailure<'a>)
 pub struct posthog_rs::AsyncFlagPoller
 impl posthog_rs::AsyncFlagPoller
 pub async fn posthog_rs::AsyncFlagPoller::is_running(&self) -> bool
@@ -99,6 +103,16 @@ pub fn posthog_rs::CaptureExceptionOptions::group<N: core::convert::Into<alloc::
 pub fn posthog_rs::CaptureExceptionOptions::level<S: core::convert::Into<alloc::string::String>>(self, S) -> Self
 pub fn posthog_rs::CaptureExceptionOptions::new() -> Self
 pub fn posthog_rs::CaptureExceptionOptions::property<K: core::convert::Into<alloc::string::String>, V: serde_core::ser::Serialize>(self, K, V) -> core::result::Result<Self, posthog_rs::Error>
+#[non_exhaustive] pub struct posthog_rs::CaptureFailure<'a>
+impl<'a> posthog_rs::CaptureFailure<'a>
+pub fn posthog_rs::CaptureFailure<'a>::attempt(&self) -> u32
+pub fn posthog_rs::CaptureFailure<'a>::error(&self) -> core::option::Option<&posthog_rs::Error>
+pub fn posthog_rs::CaptureFailure<'a>::error_response(&self) -> core::option::Option<&posthog_rs::V1ErrorResponse>
+pub fn posthog_rs::CaptureFailure<'a>::event_count(&self) -> usize
+pub fn posthog_rs::CaptureFailure<'a>::event_results(&self) -> &std::collections::hash::map::HashMap<uuid::Uuid, posthog_rs::EventResult>
+pub fn posthog_rs::CaptureFailure<'a>::historical_migration(&self) -> bool
+pub fn posthog_rs::CaptureFailure<'a>::request_id(&self) -> core::option::Option<&uuid::Uuid>
+pub fn posthog_rs::CaptureFailure<'a>::status(&self) -> core::option::Option<u16>
 pub struct posthog_rs::CaptureResponse
 pub posthog_rs::CaptureResponse::results: std::collections::hash::map::HashMap<uuid::Uuid, posthog_rs::EventResult>
 pub struct posthog_rs::Client
@@ -151,6 +165,7 @@ pub fn posthog_rs::ClientOptionsBuilder::shutdown_timeout_ms(&mut self, u64) -> 
 impl posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog_rs::Event) -> core::option::Option<posthog_rs::Event> + core::marker::Send + 'static
 pub fn posthog_rs::ClientOptionsBuilder::build(&self) -> core::result::Result<posthog_rs::ClientOptions, posthog_rs::ClientOptionsBuilderError>
+pub fn posthog_rs::ClientOptionsBuilder::on_error<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog_rs::PostHogError<'_>) + core::marker::Send + core::marker::Sync + 'static
 impl core::default::Default for posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::default() -> Self
 pub struct posthog_rs::Cohort
@@ -277,6 +292,13 @@ pub struct posthog_rs::FlagReason
 pub posthog_rs::FlagReason::code: alloc::string::String
 pub posthog_rs::FlagReason::condition_index: core::option::Option<usize>
 pub posthog_rs::FlagReason::description: core::option::Option<alloc::string::String>
+#[non_exhaustive] pub struct posthog_rs::FlagsFailure<'a>
+impl<'a> posthog_rs::FlagsFailure<'a>
+pub fn posthog_rs::FlagsFailure<'a>::body(&self) -> core::option::Option<&str>
+pub fn posthog_rs::FlagsFailure<'a>::distinct_id(&self) -> core::option::Option<&str>
+pub fn posthog_rs::FlagsFailure<'a>::endpoint(&self) -> &str
+pub fn posthog_rs::FlagsFailure<'a>::error(&self) -> &posthog_rs::Error
+pub fn posthog_rs::FlagsFailure<'a>::status(&self) -> core::option::Option<u16>
 pub struct posthog_rs::InconclusiveMatchError
 pub posthog_rs::InconclusiveMatchError::message: alloc::string::String
 impl posthog_rs::InconclusiveMatchError
@@ -290,6 +312,10 @@ pub posthog_rs::LocalEvaluationConfig::personal_api_key: alloc::string::String
 pub posthog_rs::LocalEvaluationConfig::poll_interval: core::time::Duration
 pub posthog_rs::LocalEvaluationConfig::project_api_key: alloc::string::String
 pub posthog_rs::LocalEvaluationConfig::request_timeout: core::time::Duration
+#[non_exhaustive] pub struct posthog_rs::LocalEvaluationFailure<'a>
+impl<'a> posthog_rs::LocalEvaluationFailure<'a>
+pub fn posthog_rs::LocalEvaluationFailure<'a>::error(&self) -> &posthog_rs::Error
+pub fn posthog_rs::LocalEvaluationFailure<'a>::status(&self) -> core::option::Option<u16>
 pub struct posthog_rs::LocalEvaluationResponse
 pub posthog_rs::LocalEvaluationResponse::cohorts: std::collections::hash::map::HashMap<alloc::string::String, posthog_rs::Cohort>
 pub posthog_rs::LocalEvaluationResponse::flags: alloc::vec::Vec<posthog_rs::FeatureFlag>
@@ -311,6 +337,10 @@ pub posthog_rs::Property::key: alloc::string::String
 pub posthog_rs::Property::operator: alloc::string::String
 pub posthog_rs::Property::property_type: core::option::Option<alloc::string::String>
 pub posthog_rs::Property::value: serde_json::value::Value
+#[non_exhaustive] pub struct posthog_rs::V1ErrorResponse
+pub posthog_rs::V1ErrorResponse::error: alloc::string::String
+pub posthog_rs::V1ErrorResponse::error_description: core::option::Option<alloc::string::String>
+pub posthog_rs::V1ErrorResponse::error_uri: core::option::Option<alloc::string::String>
 pub const posthog_rs::DEFAULT_HOST: &str
 pub const posthog_rs::EU_INGESTION_ENDPOINT: &str
 pub const posthog_rs::US_INGESTION_ENDPOINT: &str
