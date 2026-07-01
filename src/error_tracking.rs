@@ -1275,13 +1275,16 @@ fn default_in_app_function(function: &str) -> bool {
         "alloc"
             | "anyhow"
             | "backtrace"
+            | "color_eyre"
             | "core"
+            | "eyre"
             | "futures_core"
             | "futures_util"
             | "log"
             | "posthog_rs"
             | "reqwest"
             | "std"
+            | "stable_eyre"
             | "tokio"
             | "tracing"
             | "tracing_core"
@@ -1825,6 +1828,8 @@ mod tests {
             "tokio::runtime::task::raw::poll",
             "futures_util::future::FutureExt::poll",
             "anyhow::error::Error::msg",
+            "eyre::Report::msg",
+            "color_eyre::config::EyreHook::into_eyre_hook::{{closure}}",
             "tracing::span::Span::record",
             "tracing_core::dispatcher::get_default",
             "log::__private_api::log",
