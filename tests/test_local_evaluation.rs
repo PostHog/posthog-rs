@@ -8,11 +8,10 @@ mod common;
 use common::default_user_agent;
 use httpmock::prelude::*;
 #[cfg(feature = "async-client")]
-use posthog_rs::AsyncFlagPoller;
+use posthog_rs::{AsyncFlagPoller, ClientOptionsBuilder};
 use posthog_rs::{
-    ClientOptionsBuilder, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache,
-    FlagPoller, FlagValue, LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator,
-    Property,
+    FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache, FlagPoller, FlagValue,
+    LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator, Property,
 };
 use reqwest::header::USER_AGENT;
 use serde_json::json;
@@ -232,6 +231,72 @@ async fn test_local_evaluation_with_mock_server() {
     assert!(result.unwrap() == Some(FlagValue::Boolean(true)));
 
     eval_mock.assert();
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_client_adds_distinct_id_for_local_evaluation_only() {
+    let server = MockServer::start();
+
+    let mock_flags = json!({
+        "flags": [
+            {
+                "key": "distinct-id-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        {
+                            "properties": [
+                                {
+                                    "key": "distinct_id",
+                                    "value": "user-123",
+                                    "operator": "exact"
+                                }
+                            ],
+                            "rollout_percentage": 100.0,
+                            "variant": null
+                        }
+                    ],
+                    "multivariate": null,
+                    "payloads": {}
+                }
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    let eval_mock = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(mock_flags);
+    });
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {"distinct-id-flag": false},
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let options = ClientOptionsBuilder::default()
+        .host(server.base_url())
+        .api_key("test_project_key".to_string())
+        .personal_api_key("test_personal_key".to_string())
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(60)
+        .build()
+        .unwrap();
+
+    let client = posthog_rs::client(options).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = client
+        .get_feature_flag("distinct-id-flag", "user-123", None, None, None)
+        .await;
+
+    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    eval_mock.assert();
+    flags_mock.assert_hits(0);
 }
 
 #[cfg(feature = "async-client")]

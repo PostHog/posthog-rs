@@ -539,7 +539,18 @@ impl Client {
             let empty_groups: HashMap<String, String> = HashMap::new();
             let empty_group_props: HashMap<String, HashMap<String, serde_json::Value>> =
                 HashMap::new();
-            let props = person_properties.as_ref().unwrap_or(&empty_props);
+            let mut local_props;
+            let props = if let Some(props) = person_properties.as_ref() {
+                local_props = props.clone();
+                local_props
+                    .entry("distinct_id".to_string())
+                    .or_insert_with(|| json!(distinct_id_str.clone()));
+                &local_props
+            } else {
+                local_props = empty_props;
+                local_props.insert("distinct_id".to_string(), json!(distinct_id_str.clone()));
+                &local_props
+            };
             let groups_ref = groups.as_ref().unwrap_or(&empty_groups);
             let group_props_ref = group_properties.as_ref().unwrap_or(&empty_group_props);
             match evaluator.evaluate_flag(
