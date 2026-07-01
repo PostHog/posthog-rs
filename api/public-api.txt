@@ -165,7 +165,7 @@ pub fn posthog_rs::ClientOptionsBuilder::shutdown_timeout_ms(&mut self, u64) -> 
 impl posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog_rs::Event) -> core::option::Option<posthog_rs::Event> + core::marker::Send + 'static
 pub fn posthog_rs::ClientOptionsBuilder::build(&self) -> core::result::Result<posthog_rs::ClientOptions, posthog_rs::ClientOptionsBuilderError>
-pub fn posthog_rs::ClientOptionsBuilder::on_error<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(&posthog_rs::PostHogError<'_>) + core::marker::Send + 'static
+pub fn posthog_rs::ClientOptionsBuilder::on_error<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog_rs::PostHogError<'_>) + core::marker::Send + core::marker::Sync + 'static
 impl core::default::Default for posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::default() -> Self
 pub struct posthog_rs::Cohort
@@ -337,7 +337,7 @@ pub posthog_rs::Property::key: alloc::string::String
 pub posthog_rs::Property::operator: alloc::string::String
 pub posthog_rs::Property::property_type: core::option::Option<alloc::string::String>
 pub posthog_rs::Property::value: serde_json::value::Value
-pub struct posthog_rs::V1ErrorResponse
+#[non_exhaustive] pub struct posthog_rs::V1ErrorResponse
 pub posthog_rs::V1ErrorResponse::error: alloc::string::String
 pub posthog_rs::V1ErrorResponse::error_description: core::option::Option<alloc::string::String>
 pub posthog_rs::V1ErrorResponse::error_uri: core::option::Option<alloc::string::String>

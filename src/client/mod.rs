@@ -362,11 +362,12 @@ impl ClientOptionsBuilder {
     /// # Observability only — never emit from the hook
     ///
     /// The hook MUST NOT call back into the SDK (`capture`/`capture_batch`/
-    /// `capture_exception`, `flush`, or `shutdown`). Emitting an event while
-    /// handling a capture failure forms an amplification loop, and re-entering
-    /// the SDK can deadlock the hook's mutex. Keep it cheap and non-blocking;
-    /// the capture hook runs on the background transport thread. Panics are
-    /// caught and ignored.
+    /// `capture_exception`, `flush`, or `shutdown`): emitting an event while
+    /// handling a capture failure forms an amplification loop. The hook is
+    /// `Fn + Send + Sync` and invoked without holding any SDK lock, so it may
+    /// run concurrently on multiple threads and must be internally thread-safe.
+    /// Keep it cheap and non-blocking; the capture hook runs on the background
+    /// transport thread. Panics are caught and ignored.
     ///
     /// Registering a hook silences the default WARN for terminal capture
     /// reject/exhaustion and serialization failures (the caller now owns that
@@ -375,7 +376,7 @@ impl ClientOptionsBuilder {
     /// The existing `/flags` and poller WARN logs are unaffected.
     pub fn on_error<F>(&mut self, hook: F) -> &mut Self
     where
-        F: FnMut(&PostHogError<'_>) + Send + 'static,
+        F: Fn(&PostHogError<'_>) + Send + Sync + 'static,
     {
         self.on_error
             .get_or_insert_with(Vec::new)

@@ -171,6 +171,76 @@ mod blocking {
     }
 
     #[test]
+    fn on_error_hook_reentering_flags_path_does_not_deadlock() {
+        // Regression guard for the hook's concurrency design. `on_error` is an
+        // `Arc<dyn Fn + Send + Sync>` invoked without holding any SDK lock; an
+        // earlier `Arc<Mutex<Box<FnMut>>>` design would re-lock the hook's own
+        // mutex on the same thread if the hook re-entered a client method that
+        // fires `on_error` again, deadlocking the caller. Re-entering the SDK
+        // from a hook is unsupported (see the docs) — this only proves the SDK
+        // itself can't self-deadlock, and locks in the `Fn`-not-`Mutex` design.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::sync::{OnceLock, Weak};
+
+        let server = MockServer::start();
+        let _flags = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(500).body("boom");
+        });
+
+        // The hook needs a handle to the client that owns it; a `Weak` cell
+        // breaks the ownership cycle (Client -> hook -> cell -> Client) so the
+        // client still drops normally at end of test.
+        let cell: Arc<OnceLock<Weak<posthog_rs::Client>>> = Arc::new(OnceLock::new());
+        let depth = Arc::new(AtomicUsize::new(0));
+        let cell_for_hook = cell.clone();
+        let depth_for_hook = depth.clone();
+        let hook = move |failure: &PostHogError<'_>| {
+            if let PostHogError::FeatureFlags(_) = failure {
+                // Re-enter exactly once to bound the recursion.
+                if depth_for_hook.fetch_add(1, Ordering::SeqCst) == 0 {
+                    if let Some(client) = cell_for_hook.get().and_then(Weak::upgrade) {
+                        let _ = client.evaluate_flags("user-2", EvaluateFlagsOptions::default());
+                    }
+                }
+            }
+        };
+
+        let client = Arc::new(posthog_rs::client(
+            posthog_rs::ClientOptionsBuilder::default()
+                .api_key("phc_test".to_string())
+                .host(server.base_url())
+                .on_error(hook)
+                .build()
+                .unwrap(),
+        ));
+        cell.set(Arc::downgrade(&client)).ok();
+
+        // Drive the re-entrant sequence on a worker thread so a regression fails
+        // fast (watchdog) instead of hanging the whole test binary.
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let err = client
+                .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+                .expect_err("a 500 with no local results propagates");
+            tx.send(err.to_string()).ok();
+        });
+
+        let msg = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("evaluate_flags re-entry deadlocked (on_error hook self-deadlock regression)");
+        assert!(msg.contains("500"));
+        worker.join().unwrap();
+
+        assert_eq!(
+            depth.load(Ordering::SeqCst),
+            2,
+            "hook fired for the outer failure and the one re-entered failure"
+        );
+    }
+
+    #[test]
     fn local_eval_poller_reports_recurring_loop_failures() {
         // The background poll loop (not just the synchronous initial load) must
         // fire the hook on each failed poll. With a 1s interval, a second poll

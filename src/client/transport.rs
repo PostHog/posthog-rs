@@ -767,8 +767,9 @@ impl Pipeline {
             Ok(p) => p,
             Err(e) => {
                 let count = batch.pending.len();
-                warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
-                if !self.options.on_error.is_empty() {
+                if self.options.on_error.is_empty() {
+                    warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
+                } else {
                     let err = Error::Serialization(e.to_string());
                     let lost = count + undelivered_results(&batch.final_results);
                     self.fire_capture(&batch, None, Some(&err), None, None, lost);
@@ -1019,8 +1020,9 @@ impl Pipeline {
                 return;
             }
             Err(e) => {
-                warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
-                if !self.options.on_error.is_empty() {
+                if self.options.on_error.is_empty() {
+                    warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
+                } else {
                     let err = Error::Serialization(e.to_string());
                     self.fire_capture(Some(&err), None, 1, historical_migration, count);
                 }

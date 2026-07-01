@@ -60,8 +60,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // IMPORTANT: the hook is observability-only. Never call back into the SDK
     // from it (no `capture`/`capture_batch`/`capture_exception`, `flush`, or
     // `shutdown`): emitting an event while handling a capture failure forms an
-    // amplification loop, and re-entering the SDK can deadlock the hook. Keep
-    // it cheap and non-blocking — log, bump a counter, or send on a channel.
+    // amplification loop. It is `Fn + Send + Sync` and may run concurrently on
+    // multiple threads, so keep it cheap, non-blocking, and thread-safe — log,
+    // bump a counter, or send on a channel.
     println!("6. Observability with on_error:");
     let observable_config = ClientOptionsBuilder::default()
         .api_key("phc_project_key".to_string())

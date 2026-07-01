@@ -13,14 +13,15 @@
 //! `capture_exception`, and do not `flush`/`shutdown`. Emitting an event from
 //! the hook while handling a *capture* failure forms an amplification loop — a
 //! transport incident that drops one batch would have the hook enqueue more
-//! events, which fail, which fire the hook again. The hook also runs while the
-//! SDK holds the hook's own mutex, so re-entering the SDK in a way that fires
-//! `on_error` again on the same thread would deadlock. Filter for the signal
-//! you care about and surface it (log, counter, channel) — nothing more.
+//! events, which fail, which fire the hook again. Because the hook is `Fn +
+//! Send + Sync` and invoked without holding any SDK lock, it may run
+//! concurrently on multiple threads and must be internally thread-safe. Filter
+//! for the signal you care about and surface it (log, counter, channel) —
+//! nothing more.
 //!
 //! [`ClientOptionsBuilder::on_error`]: crate::ClientOptionsBuilder::on_error
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::error::Error;
 
@@ -32,8 +33,8 @@ use uuid::Uuid;
 #[cfg(feature = "capture-v1")]
 use crate::event_v1::{EventResult, V1ErrorResponse};
 
-type OnErrorFn = dyn FnMut(&PostHogError<'_>) + Send + 'static;
-type SharedOnErrorHook = Arc<Mutex<Box<OnErrorFn>>>;
+type OnErrorFn = dyn Fn(&PostHogError<'_>) + Send + Sync + 'static;
+type SharedOnErrorHook = Arc<OnErrorFn>;
 
 /// A registered `on_error` hook.
 ///
@@ -48,19 +49,14 @@ pub(crate) struct OnErrorHook(SharedOnErrorHook);
 impl OnErrorHook {
     pub(crate) fn new<F>(hook: F) -> Self
     where
-        F: FnMut(&PostHogError<'_>) + Send + 'static,
+        F: Fn(&PostHogError<'_>) + Send + Sync + 'static,
     {
-        Self(Arc::new(Mutex::new(Box::new(hook))))
+        Self(Arc::new(hook))
     }
 
-    /// Invoke the hook. Recovers a poisoned mutex (a prior hook panic) so one
-    /// bad invocation doesn't permanently wedge the hook.
+    /// Invoke the hook.
     pub(crate) fn apply(&self, failure: &PostHogError<'_>) {
-        let mut hook = self
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (hook)(failure)
+        (self.0)(failure)
     }
 }
 
