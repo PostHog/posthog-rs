@@ -26,10 +26,10 @@ permissions:
 
 jobs:
   test-rust-sdk-v1:
-    uses: PostHog/posthog-sdk-test-harness/.github/workflows/test-sdk-action.yml@main
+    uses: PostHog/posthog-sdk-test-harness/.github/workflows/test-sdk-action.yml@68498bcf3ae95ac941476e6ca3d42d6086e1c7fd
     with:
       adapter-dockerfile: compliance/v1/Dockerfile
       adapter-context: .
-      test-harness-version: latest
+      test-harness-version: "0.9.0"
       report-name: rust-sdk-compliance-report-v1
       concurrency: 10

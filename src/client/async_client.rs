@@ -771,6 +771,15 @@ impl Client {
             return Ok(FeatureFlagEvaluations::empty(host));
         }
 
+        let mut options = options;
+        options
+            .person_properties
+            .get_or_insert_with(HashMap::new)
+            .entry("distinct_id".to_string())
+            .or_insert_with(|| json!(distinct_id.clone()));
+        options.groups.get_or_insert_with(HashMap::new);
+        options.group_properties.get_or_insert_with(HashMap::new);
+
         let mut records: HashMap<String, EvaluatedFlagRecord> = HashMap::new();
         let mut locally_evaluated_keys: HashSet<String> = HashSet::new();
 
@@ -872,7 +881,7 @@ impl Client {
     ) -> Result<reqwest::Response, Error> {
         let mut attempt = 1;
         loop {
-            let result = self
+            let request = self
                 .client
                 .post(flags_endpoint)
                 .header(CONTENT_TYPE, "application/json")
@@ -880,9 +889,18 @@ impl Client {
                 .json(payload)
                 .timeout(Duration::from_secs(
                     self.options.feature_flags_request_timeout_seconds,
-                ))
-                .send()
-                .await;
+                ));
+            #[cfg(feature = "test-harness")]
+            let request = {
+                let mut request = request;
+                if let Some(ref extra) = self.options.extra_capture_headers {
+                    for (k, v) in extra {
+                        request = request.header(k.as_str(), v.as_str());
+                    }
+                }
+                request
+            };
+            let result = request.send().await;
 
             match result {
                 Ok(response) => return Ok(response),
@@ -915,23 +933,22 @@ impl Client {
     ) -> Result<DetailedFlagsResponse, Error> {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
+        let mut person_properties = options.person_properties.clone().unwrap_or_default();
+        person_properties
+            .entry("distinct_id".to_string())
+            .or_insert_with(|| json!(distinct_id));
+        let groups = options.groups.clone().unwrap_or_default();
+        let group_properties = options.group_properties.clone().unwrap_or_default();
+        let effective_disable_geoip = options.disable_geoip.unwrap_or(self.options.disable_geoip);
+
         let mut payload = json!({
             "api_key": self.options.api_key,
             "distinct_id": distinct_id,
+            "groups": groups,
+            "person_properties": person_properties,
+            "group_properties": group_properties,
+            "geoip_disable": effective_disable_geoip,
         });
-        if let Some(groups) = &options.groups {
-            payload["groups"] = json!(groups);
-        }
-        if let Some(person_properties) = &options.person_properties {
-            payload["person_properties"] = json!(person_properties);
-        }
-        if let Some(group_properties) = &options.group_properties {
-            payload["group_properties"] = json!(group_properties);
-        }
-        let effective_disable_geoip = options.disable_geoip.unwrap_or(self.options.disable_geoip);
-        if effective_disable_geoip {
-            payload["disable_geoip"] = json!(true);
-        }
         if let Some(flag_keys) = &options.flag_keys {
             payload["flag_keys_to_evaluate"] = json!(flag_keys);
         }
