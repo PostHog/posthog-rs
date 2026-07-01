@@ -27,6 +27,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Personless capture.
     client.capture_exception(&error).await?;
 
+    // Capturing an `eyre::Report`
+    let result: eyre::Result<()> = do_work();
+    if let Err(err) = result {
+        // `eyre::Report` implements `AsRef` for both `dyn Error` and
+        // `dyn Error + Send + Sync`, so annotate which one we want.
+        let source: &dyn std::error::Error = err.as_ref();
+        client.capture_exception(source).await?;
+    }
+
+    Ok(())
+}
+
+/// Dummy for real application logic that fails with an `eyre::Report`.
+#[cfg(all(feature = "async-client", feature = "error-tracking"))]
+fn do_work() -> eyre::Result<()> {
+    use eyre::WrapErr;
+
+    std::fs::read_to_string("/nonexistent/config.toml")
+        .wrap_err("while attempting to load the checkout service config")?;
     Ok(())
 }
 
