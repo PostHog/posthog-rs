@@ -40,8 +40,22 @@ jobs:
 
           skip_heavy = "false"
           reason = "Run heavy CI by default."
-          changed_files = []
-          run_heavy_files = []
+          changed_paths = []
+          run_heavy_paths = []
+
+          SAFE_WORKFLOW_NAMES = {
+              "release",
+              "publish",
+              "stale",
+              "lint-pr",
+              "call-flags-project-board",
+              "changeset-hygiene",
+              "dependabot-changeset",
+              "validate-versioning",
+              "new-pr",
+              "generated-files-notice",
+              "posthog-upgrade",
+          }
 
           def write_outputs():
               with open(output_path, "a", encoding="utf-8") as output:
@@ -52,69 +66,43 @@ jobs:
                   f"- skip_heavy: `{skip_heavy}`",
                   f"- reason: {reason}",
               ]
-              if changed_files:
-                  lines.extend(["", "Changed files:"])
-                  lines.extend(f"- `{path}`" for path in changed_files[:100])
-                  if len(changed_files) > 100:
-                      lines.append(f"- ... and {len(changed_files) - 100} more")
+              if changed_paths:
+                  lines.extend(["", "Changed paths:"])
+                  lines.extend(f"- `{path}`" for path in changed_paths[:100])
+                  if len(changed_paths) > 100:
+                      lines.append(f"- ... and {len(changed_paths) - 100} more")
+              if run_heavy_paths:
+                  lines.extend(["", "Paths requiring heavy CI:"])
+                  lines.extend(f"- `{path}`" for path in run_heavy_paths[:100])
+                  if len(run_heavy_paths) > 100:
+                      lines.append(f"- ... and {len(run_heavy_paths) - 100} more")
               if summary_path:
                   with open(summary_path, "a", encoding="utf-8") as summary:
                       summary.write("\n".join(lines) + "\n")
               print("\n".join(lines))
 
-          def matches_any(path, prefixes):
-              return any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in prefixes)
-
-          def is_cargo_file(path):
-              return path == "Cargo.toml" or path == "Cargo.lock" or path.endswith("/Cargo.toml") or path.endswith("/Cargo.lock")
-
-          def is_meaningful(path):
-              if path in {
-                  ".github/workflows/ci.yaml",
-                  ".github/workflows/ci.yml",
-                  ".github/workflows/codeql.yml",
-                  ".github/workflows/sdk-compliance-tests-v0.yml",
-                  ".github/workflows/sdk-compliance-tests-v1.yml",
-                  "README.md",
-                  "LICENSE",
-                  "LICENSE.md",
-                  "COPYING",
-                  "NOTICE",
-                  "rust-toolchain",
-                  "rust-toolchain.toml",
-                  "rustfmt.toml",
-                  "clippy.toml",
-                  ".clippy.toml",
-                  "deny.toml",
-                  "Cross.toml",
-                  "Makefile",
-                  "justfile",
-                  "Justfile",
-              }:
-                  return True
-              if is_cargo_file(path):
-                  return True
-              if matches_any(path, ("src/", "tests/", "examples/", "compliance/", "scripts/", "api/", ".cargo/", ".github/actions/")):
-                  return True
-              return False
+          def is_safe_workflow(path):
+              prefix = ".github/workflows/"
+              if not path.startswith(prefix) or not path.endswith((".yml", ".yaml")):
+                  return False
+              name = path[len(prefix):].rsplit(".", 1)[0]
+              return name in SAFE_WORKFLOW_NAMES or name.startswith("posthog-watcher-")
 
           def is_safe_non_impacting(path):
+              if path.endswith(".md"):
+                  return True
+              if path.startswith("docs/"):
+                  return True
+              if path.startswith((".github/ISSUE_TEMPLATE/", ".github/PULL_REQUEST_TEMPLATE/")):
+                  return True
               if path in {
-                  ".github/workflows/release.yml",
-                  ".github/workflows/release.yaml",
-                  ".github/workflows/stale.yml",
-                  ".github/workflows/stale.yaml",
                   ".github/pull_request_template.md",
-                  ".github/PULL_REQUEST_TEMPLATE.md",
+                  ".github/CODEOWNERS",
+                  "CODEOWNERS",
+                  ".github/dependabot.yml",
               }:
                   return True
-              if matches_any(path, (".github/ISSUE_TEMPLATE/", ".github/PULL_REQUEST_TEMPLATE/")):
-                  return True
-              if path.startswith(".sampo/changesets/") and path.endswith(".md"):
-                  return True
-              if path.startswith("docs/") and path.endswith((".md", ".mdx", ".markdown")):
-                  return True
-              if path.endswith((".md", ".mdx", ".markdown")) and path != "README.md":
+              if is_safe_workflow(path):
                   return True
               return False
 
@@ -158,29 +146,28 @@ jobs:
                   )
                   with urllib.request.urlopen(request, timeout=30) as response:
                       page = json.loads(response.read().decode("utf-8"))
-                      changed_files.extend(item["filename"] for item in page)
+                      for item in page:
+                          changed_paths.append(item.get("filename") or "")
+                          if "previous_filename" in item:
+                              changed_paths.append(item.get("previous_filename") or "")
                       url = next_link(response.headers)
-                  if len(changed_files) > 1000:
-                      reason = "Large pull request changed more than 1000 files; run heavy CI."
+                  if len(changed_paths) > 1000:
+                      reason = "Large pull request changed more than 1000 paths; run heavy CI."
                       write_outputs()
                       sys.exit(0)
 
-              if not changed_files:
-                  reason = "No changed files found; run heavy CI."
+              if not changed_paths:
+                  reason = "No changed paths found; run heavy CI."
                   write_outputs()
                   sys.exit(0)
 
-              for path in changed_files:
-                  if is_meaningful(path):
-                      run_heavy_files.append(path)
-                  elif not is_safe_non_impacting(path):
-                      run_heavy_files.append(path)
+              run_heavy_paths = [path for path in changed_paths if not is_safe_non_impacting(path)]
 
-              if run_heavy_files:
-                  reason = "Meaningful or unknown files changed; run heavy CI."
+              if run_heavy_paths:
+                  reason = "Source, test, build, CI, package, lockfile, unknown, or otherwise non-safe files changed; run heavy CI."
                   skip_heavy = "false"
               else:
-                  reason = "Only docs, release metadata, stale/release workflow, or issue/PR template files changed."
+                  reason = "Only globally safe documentation, template, CODEOWNERS, dependabot, or auxiliary workflow paths changed."
                   skip_heavy = "true"
 
               write_outputs()
@@ -197,7 +184,7 @@ jobs:
     steps:
       - name: Skip heavy CI
         if: needs.changes.outputs.skip_heavy == 'true'
-        run: echo "Skipping Format for non-impacting docs/release/template-only changes."
+        run: echo "Skipping Format for globally safe metadata-only changes."
 
       - name: Checkout code
         if: needs.changes.outputs.skip_heavy != 'true'
@@ -221,7 +208,7 @@ jobs:
     steps:
       - name: Skip heavy CI
         if: needs.changes.outputs.skip_heavy == 'true'
-        run: echo "Skipping Clippy for non-impacting docs/release/template-only changes."
+        run: echo "Skipping Clippy for globally safe metadata-only changes."
 
       - name: Checkout code
         if: needs.changes.outputs.skip_heavy != 'true'
@@ -258,7 +245,7 @@ jobs:
     steps:
       - name: Skip heavy CI
         if: needs.changes.outputs.skip_heavy == 'true'
-        run: echo "Skipping Public API for non-impacting docs/release/template-only changes."
+        run: echo "Skipping Public API for globally safe metadata-only changes."
 
       - name: Checkout code
         if: needs.changes.outputs.skip_heavy != 'true'
@@ -293,7 +280,7 @@ jobs:
     steps:
       - name: Skip heavy CI
         if: needs.changes.outputs.skip_heavy == 'true'
-        run: echo "Skipping Build (${{ matrix.name }}) for non-impacting docs/release/template-only changes."
+        run: echo "Skipping Build (${{ matrix.name }}) for globally safe metadata-only changes."
 
       - name: Checkout code
         if: needs.changes.outputs.skip_heavy != 'true'
@@ -333,7 +320,7 @@ jobs:
     steps:
       - name: Skip heavy CI
         if: needs.changes.outputs.skip_heavy == 'true'
-        run: echo "Skipping Cargo publish dry run for non-impacting docs/release/template-only changes."
+        run: echo "Skipping Cargo publish dry run for globally safe metadata-only changes."
 
       - name: Checkout code
         if: needs.changes.outputs.skip_heavy != 'true'
@@ -393,7 +380,7 @@ jobs:
     steps:
       - name: Skip heavy CI
         if: needs.changes.outputs.skip_heavy == 'true'
-        run: echo "Skipping ${{ matrix.name }} for non-impacting docs/release/template-only changes."
+        run: echo "Skipping ${{ matrix.name }} for globally safe metadata-only changes."
 
       - name: Checkout code
         if: needs.changes.outputs.skip_heavy != 'true'
