@@ -705,7 +705,6 @@ pub(crate) struct DebugImage {
 struct LoadedModule {
     base: u64,
     end: u64,
-    is_main: bool,
     image: DebugImage,
 }
 
@@ -799,16 +798,13 @@ fn collect_loaded_modules() -> Vec<LoadedModule> {
     use findshlibs::{IterationControl, SharedLibrary, TargetSharedLibrary};
 
     let mut modules = Vec::new();
-    let mut is_first = true;
 
     TargetSharedLibrary::each(|shlib| {
         let base = shlib.actual_load_addr().0 as u64;
         let size = shlib.len() as u64;
-        // The first module reported is the main executable on all supported
-        // platforms; its name can be empty on Linux.
-        let is_main = is_first;
-        is_first = false;
 
+        // The main executable's name can be empty on Linux; the code_file
+        // fallback below covers that.
         let name = shlib.name().to_string_lossy().into_owned();
         let code_file = if name.is_empty() {
             std::env::current_exe()
@@ -836,7 +832,6 @@ fn collect_loaded_modules() -> Vec<LoadedModule> {
         modules.push(LoadedModule {
             base,
             end: base.saturating_add(size),
-            is_main,
             image: DebugImage {
                 image_type: native_image_type().to_string(),
                 debug_id,
@@ -933,24 +928,7 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                 symbol_addr: (frame_symbol_addr != 0).then(|| format!("0x{frame_symbol_addr:x}")),
                 image_addr: module.map(|m| m.image.image_addr.clone()),
             });
-        } else if layers.is_empty() {
-            // No symbols and no uploadable debug image (e.g. a stripped library
-            // we can't symbolicate either side): keep a bare entry. In-app
-            // classification has no names to work with, so default by module:
-            // the main executable is application code, shared libraries aren't.
-            frames.push(StackFrame {
-                filename: None,
-                line_no: None,
-                function: String::new(),
-                lang: "rust".to_string(),
-                in_app: module.is_some_and(|m| m.is_main),
-                synthetic: false,
-                platform: "native".to_string(),
-                instruction_addr: None,
-                symbol_addr: None,
-                image_addr: None,
-            });
-        } else {
+        } else if !layers.is_empty() {
             // We resolved symbols locally but there's no uploadable debug image,
             // so the server can't symbolicate this address. Keep the client-side
             // inline expansion (one frame per layer, no native addresses) — it's
@@ -961,6 +939,8 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                     line_no,
                     function,
                     lang: "rust".to_string(),
+                    // Placeholder: these frames carry a name, so `write_into`
+                    // reclassifies in_app from the path/function before sending.
                     in_app: false,
                     synthetic: false,
                     platform: "native".to_string(),
@@ -970,6 +950,9 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                 });
             }
         }
+        // A non-resolvable frame with no local symbols is dropped: with no name
+        // and no address, neither the client nor the server can resolve it, so a
+        // bare entry would be pure noise.
 
         true
     });
@@ -1981,10 +1964,9 @@ mod tests {
 
     #[test]
     fn find_module_matches_address_ranges() {
-        let module_at = |base: u64, size: u64, is_main: bool| LoadedModule {
+        let module_at = |base: u64, size: u64| LoadedModule {
             base,
             end: base + size,
-            is_main,
             image: DebugImage {
                 image_type: "elf".to_string(),
                 debug_id: "test".to_string(),
@@ -1997,13 +1979,10 @@ mod tests {
             },
         };
 
-        let modules = vec![
-            module_at(0x1000, 0x1000, true),
-            module_at(0x4000, 0x1000, false),
-        ];
+        let modules = vec![module_at(0x1000, 0x1000), module_at(0x4000, 0x1000)];
 
-        assert!(find_module(&modules, 0x1500).is_some_and(|m| m.is_main));
-        assert!(find_module(&modules, 0x4000).is_some_and(|m| !m.is_main));
+        assert_eq!(find_module(&modules, 0x1500).map(|m| m.base), Some(0x1000));
+        assert_eq!(find_module(&modules, 0x4000).map(|m| m.base), Some(0x4000));
         assert!(find_module(&modules, 0x2000).is_none()); // gap between modules
         assert!(find_module(&modules, 0x500).is_none()); // before first module
         assert!(find_module(&modules, 0x5000).is_none()); // past the last module
