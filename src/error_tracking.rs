@@ -675,6 +675,12 @@ pub(crate) struct StackFrame {
     /// Load address of the module containing the instruction, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_addr: Option<String>,
+    /// Whether the SDK already resolved this frame's symbol client-side. When
+    /// `true`, the server must not re-symbolicate the `instruction_addr`: the
+    /// client already expanded any inline frames and the server would duplicate
+    /// them. When `false`, the server resolves the address against uploaded
+    /// debug symbols. Not consumed by the backend yet — sent ahead of support.
+    pub client_resolved: bool,
 }
 
 /// A loaded module (binary image) referenced by captured stack frames. Sent as
@@ -927,6 +933,9 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                 instruction_addr: Some(format!("0x{instruction_addr:x}")),
                 symbol_addr: (frame_symbol_addr != 0).then(|| format!("0x{frame_symbol_addr:x}")),
                 image_addr: module.map(|m| m.image.image_addr.clone()),
+                // We deliberately did not expand inlines here — the server
+                // resolves this address and expands its inline chain.
+                client_resolved: false,
             });
         } else if !layers.is_empty() {
             // We resolved symbols locally but there's no uploadable debug image,
@@ -947,6 +956,9 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                     instruction_addr: None,
                     symbol_addr: None,
                     image_addr: None,
+                    // Resolved client-side (no debug image for the server to
+                    // use), so the server must not re-expand these.
+                    client_resolved: true,
                 });
             }
         }
@@ -2192,6 +2204,7 @@ mod tests {
             instruction_addr: None,
             symbol_addr: None,
             image_addr: None,
+            client_resolved: false,
         };
         let exception = Exception {
             items: vec![ExceptionItem {
@@ -2284,6 +2297,17 @@ mod tests {
             addrs.len(),
             emitted,
             "instruction_addr duplicated across frames: {:?}",
+            frames
+        );
+
+        // client_resolved is the inverse of carrying an address: an addressed
+        // frame is left for the server to resolve (false); an address-less frame
+        // was resolved client-side (true).
+        assert!(
+            frames
+                .iter()
+                .all(|f| f.client_resolved == f.instruction_addr.is_none()),
+            "client_resolved must be the inverse of instruction_addr presence: {:?}",
             frames
         );
 
