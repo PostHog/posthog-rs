@@ -7,42 +7,235 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      skip_heavy: ${{ steps.classify.outputs.skip_heavy }}
+    steps:
+      - name: Classify changed files
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+          event_path = os.environ.get("GITHUB_EVENT_PATH")
+          api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+          token = os.environ.get("GH_TOKEN", "")
+          output_path = os.environ["GITHUB_OUTPUT"]
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          skip_heavy = "false"
+          reason = "Run heavy CI by default."
+          changed_files = []
+          run_heavy_files = []
+
+          def write_outputs():
+              with open(output_path, "a", encoding="utf-8") as output:
+                  output.write(f"skip_heavy={skip_heavy}\n")
+              lines = [
+                  "### CI change classification",
+                  "",
+                  f"- skip_heavy: `{skip_heavy}`",
+                  f"- reason: {reason}",
+              ]
+              if changed_files:
+                  lines.extend(["", "Changed files:"])
+                  lines.extend(f"- `{path}`" for path in changed_files[:100])
+                  if len(changed_files) > 100:
+                      lines.append(f"- ... and {len(changed_files) - 100} more")
+              if summary_path:
+                  with open(summary_path, "a", encoding="utf-8") as summary:
+                      summary.write("\n".join(lines) + "\n")
+              print("\n".join(lines))
+
+          def matches_any(path, prefixes):
+              return any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in prefixes)
+
+          def is_cargo_file(path):
+              return path == "Cargo.toml" or path == "Cargo.lock" or path.endswith("/Cargo.toml") or path.endswith("/Cargo.lock")
+
+          def is_meaningful(path):
+              if path in {
+                  ".github/workflows/ci.yaml",
+                  ".github/workflows/ci.yml",
+                  ".github/workflows/codeql.yml",
+                  ".github/workflows/sdk-compliance-tests-v0.yml",
+                  ".github/workflows/sdk-compliance-tests-v1.yml",
+                  "README.md",
+                  "LICENSE",
+                  "LICENSE.md",
+                  "COPYING",
+                  "NOTICE",
+                  "rust-toolchain",
+                  "rust-toolchain.toml",
+                  "rustfmt.toml",
+                  "clippy.toml",
+                  ".clippy.toml",
+                  "deny.toml",
+                  "Cross.toml",
+                  "Makefile",
+                  "justfile",
+                  "Justfile",
+              }:
+                  return True
+              if is_cargo_file(path):
+                  return True
+              if matches_any(path, ("src/", "tests/", "examples/", "compliance/", "scripts/", "api/", ".cargo/", ".github/actions/")):
+                  return True
+              return False
+
+          def is_safe_non_impacting(path):
+              if path in {
+                  ".github/workflows/release.yml",
+                  ".github/workflows/release.yaml",
+                  ".github/workflows/stale.yml",
+                  ".github/workflows/stale.yaml",
+                  ".github/pull_request_template.md",
+                  ".github/PULL_REQUEST_TEMPLATE.md",
+              }:
+                  return True
+              if matches_any(path, (".github/ISSUE_TEMPLATE/", ".github/PULL_REQUEST_TEMPLATE/")):
+                  return True
+              if path.startswith(".sampo/changesets/") and path.endswith(".md"):
+                  return True
+              if path.startswith("docs/") and path.endswith((".md", ".mdx", ".markdown")):
+                  return True
+              if path.endswith((".md", ".mdx", ".markdown")) and path != "README.md":
+                  return True
+              return False
+
+          def next_link(headers):
+              link = headers.get("Link", "")
+              for part in link.split(","):
+                  section = part.strip().split(";")
+                  if len(section) < 2:
+                      continue
+                  url_part = section[0].strip()
+                  rel_part = ";".join(section[1:])
+                  if 'rel="next"' in rel_part and url_part.startswith("<") and url_part.endswith(">"):
+                      return url_part[1:-1]
+              return None
+
+          try:
+              if event_name != "pull_request":
+                  reason = f"{event_name or 'unknown'} event: run heavy CI."
+                  write_outputs()
+                  sys.exit(0)
+
+              with open(event_path, encoding="utf-8") as event_file:
+                  event = json.load(event_file)
+              repo = event.get("repository", {}).get("full_name")
+              pr_number = event.get("pull_request", {}).get("number")
+              if not repo or not pr_number or not token:
+                  reason = "Missing pull request metadata or token; run heavy CI."
+                  write_outputs()
+                  sys.exit(0)
+
+              url = f"{api_url}/repos/{repo}/pulls/{pr_number}/files?per_page=100"
+              while url:
+                  request = urllib.request.Request(
+                      url,
+                      headers={
+                          "Accept": "application/vnd.github+json",
+                          "Authorization": f"Bearer {token}",
+                          "X-GitHub-Api-Version": "2022-11-28",
+                          "User-Agent": "posthog-rs-ci-change-classifier",
+                      },
+                  )
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      page = json.loads(response.read().decode("utf-8"))
+                      changed_files.extend(item["filename"] for item in page)
+                      url = next_link(response.headers)
+                  if len(changed_files) > 1000:
+                      reason = "Large pull request changed more than 1000 files; run heavy CI."
+                      write_outputs()
+                      sys.exit(0)
+
+              if not changed_files:
+                  reason = "No changed files found; run heavy CI."
+                  write_outputs()
+                  sys.exit(0)
+
+              for path in changed_files:
+                  if is_meaningful(path):
+                      run_heavy_files.append(path)
+                  elif not is_safe_non_impacting(path):
+                      run_heavy_files.append(path)
+
+              if run_heavy_files:
+                  reason = "Meaningful or unknown files changed; run heavy CI."
+                  skip_heavy = "false"
+              else:
+                  reason = "Only docs, release metadata, stale/release workflow, or issue/PR template files changed."
+                  skip_heavy = "true"
+
+              write_outputs()
+          except Exception as exc:
+              skip_heavy = "false"
+              reason = f"Change classification failed ({exc!r}); run heavy CI."
+              write_outputs()
+          PY
+
   fmt:
     name: Format
+    needs: changes
     runs-on: ubuntu-latest
     steps:
+      - name: Skip heavy CI
+        if: needs.changes.outputs.skip_heavy == 'true'
+        run: echo "Skipping Format for non-impacting docs/release/template-only changes."
+
       - name: Checkout code
+        if: needs.changes.outputs.skip_heavy != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Rust
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           rustup update stable
           rustup default stable
           rustup component add rustfmt
 
       - name: Check formatting
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: cargo fmt -- --check
 
   clippy:
     name: Clippy
+    needs: changes
     runs-on: ubuntu-latest
     steps:
+      - name: Skip heavy CI
+        if: needs.changes.outputs.skip_heavy == 'true'
+        run: echo "Skipping Clippy for non-impacting docs/release/template-only changes."
+
       - name: Checkout code
+        if: needs.changes.outputs.skip_heavy != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Rust
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           rustup update stable
           rustup default stable
           rustup component add clippy
 
       - name: Cache cargo
+        if: needs.changes.outputs.skip_heavy != 'true'
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
@@ -54,26 +247,36 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Clippy
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: cargo clippy -- -D warnings
 
   public-api:
     name: Public API
     if: github.event_name == 'pull_request'
+    needs: changes
     runs-on: ubuntu-latest
     steps:
+      - name: Skip heavy CI
+        if: needs.changes.outputs.skip_heavy == 'true'
+        run: echo "Skipping Public API for non-impacting docs/release/template-only changes."
+
       - name: Checkout code
+        if: needs.changes.outputs.skip_heavy != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install public API tooling
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           rustup toolchain install nightly-2026-06-12 --profile minimal
           cargo install cargo-public-api --version 0.52.0 --locked
 
       - name: Check public API snapshot
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: scripts/check-public-api.sh
 
   build:
     name: Build (${{ matrix.name }})
+    needs: changes
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -88,18 +291,26 @@ jobs:
             cache-key: capture-v1
             command: cargo build --verbose --features capture-v1
     steps:
+      - name: Skip heavy CI
+        if: needs.changes.outputs.skip_heavy == 'true'
+        run: echo "Skipping Build (${{ matrix.name }}) for non-impacting docs/release/template-only changes."
+
       - name: Checkout code
+        if: needs.changes.outputs.skip_heavy != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Rust ${{ matrix.toolchain }}
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           rustup toolchain install ${{ matrix.toolchain }} --profile minimal
           rustup default ${{ matrix.toolchain }}
 
       - name: Print Rust version
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: rustc --version
 
       - name: Cache cargo
+        if: needs.changes.outputs.skip_heavy != 'true'
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
@@ -112,21 +323,30 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: ${{ matrix.command }}
 
   package:
     name: Cargo publish dry run
+    needs: changes
     runs-on: ubuntu-latest
     steps:
+      - name: Skip heavy CI
+        if: needs.changes.outputs.skip_heavy == 'true'
+        run: echo "Skipping Cargo publish dry run for non-impacting docs/release/template-only changes."
+
       - name: Checkout code
+        if: needs.changes.outputs.skip_heavy != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Rust
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           rustup update stable
           rustup default stable
 
       - name: Cache cargo
+        if: needs.changes.outputs.skip_heavy != 'true'
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
@@ -138,10 +358,12 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Publish dry run
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: cargo publish --dry-run --locked
 
   test:
     name: ${{ matrix.name }}
+    needs: changes
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -169,15 +391,22 @@ jobs:
             cache-key: e2e
             command: cargo test --verbose --features e2e-test --no-default-features
     steps:
+      - name: Skip heavy CI
+        if: needs.changes.outputs.skip_heavy == 'true'
+        run: echo "Skipping ${{ matrix.name }} for non-impacting docs/release/template-only changes."
+
       - name: Checkout code
+        if: needs.changes.outputs.skip_heavy != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Rust
+        if: needs.changes.outputs.skip_heavy != 'true'
         run: |
           rustup update stable
           rustup default stable
 
       - name: Cache cargo
+        if: needs.changes.outputs.skip_heavy != 'true'
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
@@ -190,11 +419,11 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        if: matrix.cache-key != 'e2e'
+        if: needs.changes.outputs.skip_heavy != 'true' && matrix.cache-key != 'e2e'
         run: ${{ matrix.command }}
 
       - name: Run E2E tests
-        if: matrix.cache-key == 'e2e'
+        if: needs.changes.outputs.skip_heavy != 'true' && matrix.cache-key == 'e2e'
         run: ${{ matrix.command }}
         env:
           POSTHOG_RS_E2E_TEST_API_KEY: ${{ secrets.POSTHOG_RS_E2E_TEST_API_KEY }}
