@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.16.0 — 2026-07-01
+
+### Minor changes
+
+- [c2766cd](https://github.com/posthog/posthog-rs/commit/c2766cd72f861d4b7e9f5eaef831bebfb72ceb04) Native symbolication for error tracking: captured exceptions and panics now attach each frame's `instruction_addr` and an event-level `$debug_images` list, so PostHog can symbolicate native (Rust/C/C++) stack frames server-side against symbols uploaded with `posthog-cli`. Debug ids match the server/CLI convention (GNU build id on ELF, `LC_UUID` on Mach-O, GUID+age on Windows PDB). Behind the default-on `error-tracking` feature. — Thanks @cat-ph!
+
 ## 0.15.1 — 2026-06-30
 
 ### Patch changes
