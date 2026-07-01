@@ -413,6 +413,10 @@ pub(crate) struct Exception {
     // and trimming), applied in write_into and attached to items[0]. None when
     // stacktrace capture is disabled.
     captured_frames: Option<Vec<StackFrame>>,
+    // Loaded modules referenced by captured_frames; becomes the event-level
+    // $debug_images property after trimming. Empty when stacktrace capture is
+    // disabled or no frame points into a module with an uploadable debug id.
+    captured_images: Vec<DebugImage>,
     fingerprint: Option<String>,
     level: String,
 }
@@ -447,13 +451,17 @@ impl Exception {
 
         link_exception_chain(&mut items);
 
+        let (captured_frames, captured_images) = if capture_stacktrace {
+            let (frames, images) = capture_raw_application_frames();
+            (Some(frames), images)
+        } else {
+            (None, Vec::new())
+        };
+
         Self {
             items,
-            captured_frames: if capture_stacktrace {
-                Some(capture_raw_application_frames())
-            } else {
-                None
-            },
+            captured_frames,
+            captured_images,
             fingerprint: None,
             level: "error".to_string(),
         }
@@ -468,6 +476,13 @@ impl Exception {
         value: V,
         capture_stacktrace: bool,
     ) -> Self {
+        let (captured_frames, captured_images) = if capture_stacktrace {
+            let (frames, images) = capture_raw_application_frames();
+            (Some(frames), images)
+        } else {
+            (None, Vec::new())
+        };
+
         Self {
             items: vec![ExceptionItem {
                 exception_type: exception_type.into(),
@@ -475,11 +490,8 @@ impl Exception {
                 mechanism: ExceptionMechanism::default(),
                 stacktrace: None,
             }],
-            captured_frames: if capture_stacktrace {
-                Some(capture_raw_application_frames())
-            } else {
-                None
-            },
+            captured_frames,
+            captured_images,
             fingerprint: None,
             level: "error".to_string(),
         }
@@ -489,6 +501,13 @@ impl Exception {
     /// `capture_stacktrace` is set.
     #[allow(deprecated)]
     fn from_panic_info(panic_info: &panic::PanicInfo<'_>, capture_stacktrace: bool) -> Self {
+        let (captured_frames, captured_images) = if capture_stacktrace {
+            let (frames, images) = capture_raw_panic_frames();
+            (Some(frames), images)
+        } else {
+            (None, Vec::new())
+        };
+
         Self {
             items: vec![ExceptionItem {
                 exception_type: "Panic".to_string(),
@@ -502,11 +521,8 @@ impl Exception {
                 },
                 stacktrace: None,
             }],
-            captured_frames: if capture_stacktrace {
-                Some(capture_raw_panic_frames())
-            } else {
-                None
-            },
+            captured_frames,
+            captured_images,
             fingerprint: None,
             // Panics are unrecoverable (the process is unwinding/aborting), so
             // they are reported at `fatal`, not `error`.
@@ -531,6 +547,7 @@ impl Exception {
         let Exception {
             mut items,
             captured_frames,
+            captured_images,
             fingerprint,
             level,
         } = self;
@@ -538,18 +555,36 @@ impl Exception {
             return Ok(());
         }
 
+        let mut debug_images = Vec::new();
         if let Some(mut frames) = captured_frames {
             for frame in frames.iter_mut() {
                 let function = (!frame.function.is_empty()).then_some(frame.function.as_str());
-                frame.in_app = options.is_in_app_frame(frame.filename.as_deref(), function);
+                // Frames without any symbol information keep their capture-time
+                // image-based classification; the path/function rules have
+                // nothing to act on.
+                if function.is_some() || frame.filename.is_some() {
+                    frame.in_app = options.is_in_app_frame(frame.filename.as_deref(), function);
+                }
             }
             trim_to_max_frames(&mut frames, MAX_FRAMES);
+            // Only report modules still referenced after trimming.
+            debug_images = captured_images
+                .into_iter()
+                .filter(|image| {
+                    frames
+                        .iter()
+                        .any(|f| f.image_addr.as_deref() == Some(image.image_addr.as_str()))
+                })
+                .collect();
             items[0].stacktrace = Some(ExceptionStacktrace::raw(frames));
         }
 
         event.insert_prop("$exception_level", level)?;
         if let Some(fingerprint) = fingerprint {
             event.insert_prop("$exception_fingerprint", fingerprint)?;
+        }
+        if !debug_images.is_empty() {
+            event.insert_prop("$debug_images", debug_images)?;
         }
         event.insert_prop("$exception_list", items)?;
         Ok(())
@@ -613,6 +648,11 @@ impl ExceptionStacktrace {
 }
 
 /// A normalized stack frame.
+///
+/// Frames carry the raw `instruction_addr` for server-side symbolication
+/// against uploaded debug symbols (`posthog-cli debug-symbols upload`), plus
+/// best-effort client-side enrichment (`function`/`filename`/`lineno`) used
+/// for display when no debug symbols are available.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StackFrame {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -620,18 +660,219 @@ pub(crate) struct StackFrame {
     #[serde(rename = "lineno")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_no: Option<u32>,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub function: String,
     pub lang: String,
     pub in_app: bool,
     pub synthetic: bool,
-    pub resolved: bool,
     pub platform: String,
+    /// Absolute address of the instruction, as a hex string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_addr: Option<String>,
+    /// Start address of the enclosing symbol, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_addr: Option<String>,
+    /// Load address of the module containing the instruction, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_addr: Option<String>,
+    /// Whether the SDK already resolved this frame's symbol client-side. When
+    /// `true`, the server must not re-symbolicate the `instruction_addr`: the
+    /// client already expanded any inline frames and the server would duplicate
+    /// them. When `false`, the server resolves the address against uploaded
+    /// debug symbols. Not consumed by the backend yet — sent ahead of support.
+    pub client_resolved: bool,
+}
+
+/// A loaded module (binary image) referenced by captured stack frames. Sent as
+/// the event-level `$debug_images` property so the server can map instruction
+/// addresses onto uploaded debug symbols.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DebugImage {
+    #[serde(rename = "type")]
+    pub image_type: String,
+    /// The debug identifier matching the uploaded symbol set (derived from
+    /// the GNU build id on ELF, `LC_UUID` on Mach-O).
+    pub debug_id: String,
+    /// The full code identifier (e.g. complete GNU build id), when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_id: Option<String>,
+    pub image_addr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_vmaddr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_file: Option<String>,
+    pub arch: String,
+}
+
+/// A module mapped into the process, used to attach load addresses to frames
+/// and build the `$debug_images` list.
+struct LoadedModule {
+    base: u64,
+    end: u64,
+    image: DebugImage,
+}
+
+const fn native_image_type() -> &'static str {
+    if cfg!(any(target_os = "macos", target_os = "ios")) {
+        "macho"
+    } else if cfg!(target_os = "windows") {
+        "pe"
+    } else {
+        "elf"
+    }
+}
+
+/// Normalize a CPU architecture name to the shared native vocabulary used by
+/// the other PostHog SDKs (informational; image matching is by debug_id and
+/// address). `std::env::consts::ARCH` already uses most of these names.
+fn normalize_arch(arch: &str) -> String {
+    match arch {
+        "aarch64" => "arm64".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Render 16 bytes laid out as a little-endian GUID (Microsoft convention:
+/// the first three fields are stored byte-swapped) as a canonical UUID string.
+///
+/// Used for PDB signatures, whose GUID is always stored little-endian on disk;
+/// the swap is therefore unconditional, matching `symbolic`'s PE/PDB path at
+/// upload time. (The ELF GNU-build-id path is endianness-aware instead — see
+/// `debug_id_from_gnu_build_id`.)
+fn guid_le_to_uuid(mut data: [u8; 16]) -> String {
+    data[0..4].reverse();
+    data[4..6].reverse();
+    data[6..8].reverse();
+    uuid::Uuid::from_bytes(data).to_string()
+}
+
+/// Derive a debug id from a GNU build id: the first 16 bytes interpreted as a
+/// GUID, zero-padded when the build id is shorter.
+///
+/// This must match `symbolic`'s `ElfObject::compute_debug_id` (used by the
+/// server and `posthog-cli` at upload time), which byte-swaps the first three
+/// GUID fields *only for little-endian ELF objects*. The SDK enumerates its own
+/// process, so the object endianness is this target's endianness — hence the
+/// swap is gated on `target_endian` rather than applied unconditionally (a
+/// big-endian ELF binary on s390x/powerpc64 must not swap, or its debug id
+/// won't match the uploaded symbol set).
+fn debug_id_from_gnu_build_id(build_id: &[u8]) -> Option<String> {
+    if build_id.is_empty() {
+        return None;
+    }
+    let mut data = [0u8; 16];
+    let len = build_id.len().min(16);
+    data[..len].copy_from_slice(&build_id[..len]);
+    if cfg!(target_endian = "little") {
+        data[0..4].reverse();
+        data[4..6].reverse();
+        data[6..8].reverse();
+    }
+    Some(uuid::Uuid::from_bytes(data).to_string())
+}
+
+fn debug_id_for(id: &findshlibs::SharedLibraryId) -> Option<String> {
+    use findshlibs::SharedLibraryId;
+
+    match id {
+        SharedLibraryId::GnuBuildId(bytes) => debug_id_from_gnu_build_id(bytes),
+        // Uppercase to match the chunk_ids stored by `posthog-cli dsym
+        // upload`, which takes them verbatim from dwarfdump output.
+        SharedLibraryId::Uuid(bytes) => {
+            Some(uuid::Uuid::from_bytes(*bytes).to_string().to_uppercase())
+        }
+        SharedLibraryId::PdbSignature(guid, age) => {
+            let uuid = guid_le_to_uuid(*guid);
+            Some(if *age > 0 {
+                format!("{uuid}-{age:x}")
+            } else {
+                uuid
+            })
+        }
+        // PE timestamp/size signatures carry no debug id we can match symbols to.
+        _ => None,
+    }
+}
+
+/// Enumerate the modules currently mapped into the process, sorted by load
+/// address. Modules without a usable debug id are kept for address matching
+/// (frames still get an `image_addr`) but marked so they're never reported
+/// in `$debug_images`.
+fn collect_loaded_modules() -> Vec<LoadedModule> {
+    use findshlibs::{IterationControl, SharedLibrary, TargetSharedLibrary};
+
+    let mut modules = Vec::new();
+
+    TargetSharedLibrary::each(|shlib| {
+        let base = shlib.actual_load_addr().0 as u64;
+        let size = shlib.len() as u64;
+
+        // The main executable's name can be empty on Linux; the code_file
+        // fallback below covers that.
+        let name = shlib.name().to_string_lossy().into_owned();
+        let code_file = if name.is_empty() {
+            std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        } else {
+            Some(name)
+        };
+
+        // debug_id() (PDB GUID+age on Windows, same as id() elsewhere) is the
+        // identifier that matches uploaded symbols; id() supplies the full
+        // code identifier (e.g. complete GNU build id).
+        let debug_id = shlib
+            .debug_id()
+            .as_ref()
+            .and_then(debug_id_for)
+            .unwrap_or_default();
+        let code_id = match shlib.id() {
+            Some(findshlibs::SharedLibraryId::GnuBuildId(bytes)) => {
+                Some(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+            }
+            _ => None,
+        };
+
+        modules.push(LoadedModule {
+            base,
+            end: base.saturating_add(size),
+            image: DebugImage {
+                image_type: native_image_type().to_string(),
+                debug_id,
+                code_id,
+                image_addr: format!("0x{base:x}"),
+                image_size: Some(size),
+                image_vmaddr: Some(format!("0x{:x}", shlib.stated_load_addr().0 as u64)),
+                code_file,
+                arch: normalize_arch(std::env::consts::ARCH),
+            },
+        });
+
+        IterationControl::Continue
+    });
+
+    modules.sort_by_key(|m| m.base);
+    modules
+}
+
+fn find_module(modules: &[LoadedModule], addr: u64) -> Option<&LoadedModule> {
+    let idx = modules.partition_point(|m| m.base <= addr);
+    let module = modules[..idx].last()?;
+    (addr < module.end).then_some(module)
 }
 
 // Captures raw Rust stack traces for Error Tracking. Frames are unclassified
 // at this point: in-app classification and trimming are client policy, applied
-// when the exception event is built.
-fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
+// when the exception event is built. Every frame carries its instruction
+// address; function/file/line enrichment is best-effort and missing entirely
+// in stripped release builds.
+//
+// inline(never): the entry address of this function identifies the SDK's own
+// frames for address-based stripping, which must survive symbol-less builds.
+#[inline(never)]
+fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<StackFrame> {
     let mut frames = Vec::new();
     let mut skipped = 0usize;
 
@@ -641,10 +882,19 @@ fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
             return true;
         }
 
+        let instruction_addr = frame.ip() as u64;
+        let frame_symbol_addr = frame.symbol_address() as u64;
+        let module = find_module(modules, instruction_addr);
+        // Only send addresses the server can actually resolve: without a
+        // module carrying a debug id there is no `$debug_images` entry to
+        // match, and the frame should pass through as purely client-resolved.
+        let resolvable = module.is_some_and(|m| !m.image.debug_id.is_empty());
+
         // One physical frame resolves to multiple symbols when the compiler
-        // inlined functions into it; emit each inlined layer as its own frame
-        // so the logical call chain survives. The resolver yields layers
-        // innermost-first, which matches this stack's current-first order.
+        // inlined functions into it; `resolve_frame` yields those layers
+        // innermost-first. Collect them so we can choose how to emit based on
+        // whether the server can symbolicate this address.
+        let mut layers: Vec<(Option<String>, Option<u32>, String)> = Vec::new();
         backtrace::resolve_frame(frame, |symbol| {
             let filename = symbol.filename().map(path_to_string);
             let function = symbol
@@ -655,17 +905,66 @@ fn capture_frames_current_first(skip: usize) -> Vec<StackFrame> {
                 return;
             }
 
+            layers.push((filename, symbol.lineno(), function.unwrap_or_default()));
+        });
+
+        if resolvable {
+            // The server can symbolicate this address, so emit ONE frame per
+            // physical frame carrying the raw `instruction_addr` and let the
+            // resolver expand the inline chain from the symcache. Expanding
+            // inlines client-side as well would double them after server-side
+            // resolution (the resolver re-expands every address-bearing native
+            // frame). This matches posthog-ios, which sends one frame per
+            // return address. The outermost (physical) layer's name is a
+            // client-side placeholder until the server resolves the address;
+            // frame.symbol_address() is the physical entry the pinned-frame
+            // stripping matches against.
+            let physical = layers.last();
             frames.push(StackFrame {
-                filename,
-                line_no: symbol.lineno(),
-                function: function.unwrap_or_default(),
+                filename: physical.and_then(|(file, _, _)| file.clone()),
+                line_no: physical.and_then(|(_, line, _)| *line),
+                function: physical
+                    .map(|(_, _, function)| function.clone())
+                    .unwrap_or_default(),
                 lang: "rust".to_string(),
                 in_app: false,
                 synthetic: false,
-                resolved: true,
-                platform: "rust".to_string(),
+                platform: "native".to_string(),
+                instruction_addr: Some(format!("0x{instruction_addr:x}")),
+                symbol_addr: (frame_symbol_addr != 0).then(|| format!("0x{frame_symbol_addr:x}")),
+                image_addr: module.map(|m| m.image.image_addr.clone()),
+                // We deliberately did not expand inlines here — the server
+                // resolves this address and expands its inline chain.
+                client_resolved: false,
             });
-        });
+        } else if !layers.is_empty() {
+            // We resolved symbols locally but there's no uploadable debug image,
+            // so the server can't symbolicate this address. Keep the client-side
+            // inline expansion (one frame per layer, no native addresses) — it's
+            // the only way these inlined calls survive.
+            for (filename, line_no, function) in layers {
+                frames.push(StackFrame {
+                    filename,
+                    line_no,
+                    function,
+                    lang: "rust".to_string(),
+                    // Placeholder: these frames carry a name, so `write_into`
+                    // reclassifies in_app from the path/function before sending.
+                    in_app: false,
+                    synthetic: false,
+                    platform: "native".to_string(),
+                    instruction_addr: None,
+                    symbol_addr: None,
+                    image_addr: None,
+                    // Resolved client-side (no debug image for the server to
+                    // use), so the server must not re-expand these.
+                    client_resolved: true,
+                });
+            }
+        }
+        // A non-resolvable frame with no local symbols is dropped: with no name
+        // and no address, neither the client nor the server can resolve it, so a
+        // bare entry would be pure noise.
 
         true
     });
@@ -679,10 +978,54 @@ fn trim_to_max_frames(frames: &mut Vec<StackFrame>, max_frames: usize) {
     }
 }
 
-/// Capture the current raw stacktrace, dropping the leading SDK frames matched
-/// by `is_internal` so the caller's frame comes first.
-fn capture_raw_frames(is_internal: impl Fn(&str) -> bool) -> Vec<StackFrame> {
-    let mut frames = capture_frames_current_first(0);
+/// Capture the current raw stacktrace, dropping the leading SDK frames so the
+/// caller's frame comes first, and return the loaded modules those frames point
+/// into for the `$debug_images` property.
+///
+/// Frames are current-first, so the SDK's own frames lead. Two passes drop
+/// them: an address-based pass that matches each frame's symbol entry against
+/// `pinned_entries` (the SDK capture functions), which works even in stripped
+/// builds where there are no names; then the name-based `is_internal` pass for
+/// everything the resolver could name.
+///
+/// inline(never): this generic function sits between the pinned non-generic
+/// wrapper and `capture_frames_current_first`; keeping it a physical frame lets
+/// the name-based pass match it (its monomorphized address can't be pinned),
+/// and draining through the outermost pinned wrapper sweeps it out in stripped
+/// builds.
+#[inline(never)]
+fn capture_raw_frames(
+    is_internal: impl Fn(&str) -> bool,
+    pinned_entries: &[u64],
+) -> (Vec<StackFrame>, Vec<DebugImage>) {
+    let modules = collect_loaded_modules();
+    let mut frames = capture_frames_current_first(0, &modules);
+
+    // Address-based stripping first: identify the SDK's own capture frames by
+    // function entry address, which works even in stripped builds where the
+    // name-based check below has nothing to match. The SDK frames sit at the
+    // front (current-first), so dropping through the last match removes the
+    // whole prefix, including the unwinder frames before our innermost one.
+    //
+    // Platform caveat: this only works where the frame's symbol address is the
+    // runtime function entry (Linux/glibc via `_Unwind_FindEnclosingFunction`).
+    // On macOS the symbolization backend reports the queried address rather
+    // than the function entry, so the address pass never matches there and the
+    // name-based pass below does the stripping instead; fully stripped
+    // Apple/Windows builds keep the SDK prefix as address-only frames, which
+    // regain names through server-side symbolication.
+    let scan = frames.len().min(16);
+    let matches_pinned = |frame: &StackFrame| {
+        frame
+            .symbol_addr
+            .as_deref()
+            .and_then(|addr| u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok())
+            .is_some_and(|addr| pinned_entries.contains(&addr))
+    };
+    if let Some(last_sdk) = frames[..scan].iter().rposition(matches_pinned) {
+        frames.drain(..=last_sdk);
+    }
+
     while frames
         .first()
         .map(|frame| is_internal(&frame.function))
@@ -691,20 +1034,51 @@ fn capture_raw_frames(is_internal: impl Fn(&str) -> bool) -> Vec<StackFrame> {
         frames.remove(0);
     }
 
-    frames
+    let images = referenced_images(modules, &frames);
+    (frames, images)
 }
 
-fn capture_raw_application_frames() -> Vec<StackFrame> {
-    capture_raw_frames(is_internal_capture_frame)
+/// Only report modules that frames actually point into, and only those with a
+/// usable debug id; the final filtering against the trimmed frame list happens
+/// in `write_into`.
+fn referenced_images(modules: Vec<LoadedModule>, frames: &[StackFrame]) -> Vec<DebugImage> {
+    modules
+        .into_iter()
+        .filter(|m| !m.image.debug_id.is_empty())
+        .map(|m| m.image)
+        .filter(|image| {
+            frames
+                .iter()
+                .any(|f| f.image_addr.as_deref() == Some(image.image_addr.as_str()))
+        })
+        .collect()
 }
 
-fn capture_raw_panic_frames() -> Vec<StackFrame> {
+// inline(never): this non-generic wrapper sits on the stack directly below the
+// constructor and its entry address anchors the address-based stripping in
+// stripped builds (the generic `capture_raw_frames` between it and
+// `capture_frames_current_first` is matched by name instead — its monomorphized
+// address isn't nameable as a single fn pointer).
+#[inline(never)]
+fn capture_raw_application_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
+    let pinned = [
+        capture_frames_current_first as *const () as u64,
+        capture_raw_application_frames as *const () as u64,
+    ];
+    capture_raw_frames(is_internal_capture_frame, &pinned)
+}
+
+fn capture_raw_panic_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
     // Unlike the manual-capture path, keep *every* frame — including the panic
     // and capture machinery — and let in-app classification mark the SDK/runtime
     // frames as `in_app = false`. Dropping by function name was brittle (the list
     // drifted as internals were renamed/inlined) and threw away data the UI can
-    // collapse on its own via the in-app flag.
-    capture_frames_current_first(0)
+    // collapse on its own via the in-app flag. We still collect the debug images
+    // the kept frames point into so the server can symbolicate them.
+    let modules = collect_loaded_modules();
+    let frames = capture_frames_current_first(0, &modules);
+    let images = referenced_images(modules, &frames);
+    (frames, images)
 }
 
 fn is_internal_capture_frame(function: &str) -> bool {
@@ -1533,13 +1907,18 @@ mod tests {
             .as_array()
             .expect("expected stack frames");
         let top_frame = frames.first().expect("expected top frame");
-        assert_eq!(top_frame["platform"], "rust");
+        assert_eq!(top_frame["platform"], "native");
         assert_eq!(top_frame["lang"], "rust");
-        assert_eq!(top_frame["resolved"], true);
+        let instruction_addr = top_frame["instruction_addr"].as_str().unwrap_or_default();
+        assert!(
+            instruction_addr.starts_with("0x"),
+            "expected hex instruction_addr, got {:?}",
+            instruction_addr
+        );
         let top_function = top_frame["function"].as_str().unwrap_or_default();
         assert!(
             top_function.contains("from_error_builds_exception_list_with_stacktrace"),
-            "expected user frame last, got {:?}",
+            "expected user frame first, got {:?}",
             top_function
         );
         assert!(
@@ -1547,6 +1926,144 @@ mod tests {
             "expected SDK frames to be skipped, got {:?}",
             top_function
         );
+    }
+
+    #[test]
+    fn gnu_build_ids_convert_to_debug_ids_like_the_server() {
+        // Vector verified against symbolic's ElfObject::debug_id (which the
+        // server and CLI use): the first 16 bytes as a little-endian GUID.
+        let build_id: Vec<u8> = (0..20)
+            .map(|i| {
+                u8::from_str_radix(
+                    &"555398ebd01c90285a3d85138a19cbf9bbcec352"[i * 2..i * 2 + 2],
+                    16,
+                )
+                .unwrap()
+            })
+            .collect();
+        // symbolic swaps the first three GUID fields on little-endian ELF and
+        // leaves them as-is on big-endian; debug_id_from_gnu_build_id mirrors
+        // that, so the expected ids differ by host endianness.
+        let (full, short) = if cfg!(target_endian = "little") {
+            (
+                "eb985355-1cd0-2890-5a3d-85138a19cbf9",
+                "0000cdab-0000-0000-0000-000000000000",
+            )
+        } else {
+            (
+                "555398eb-d01c-9028-5a3d-85138a19cbf9",
+                "abcd0000-0000-0000-0000-000000000000",
+            )
+        };
+        assert_eq!(debug_id_from_gnu_build_id(&build_id).as_deref(), Some(full));
+
+        // Short build ids are zero-padded to 16 bytes
+        assert_eq!(
+            debug_id_from_gnu_build_id(&[0xab, 0xcd]).as_deref(),
+            Some(short)
+        );
+        assert_eq!(debug_id_from_gnu_build_id(&[]), None);
+    }
+
+    #[test]
+    fn arch_normalizes_to_the_shared_native_vocabulary() {
+        // aarch64 is reported as arm64 to match the other native SDKs; every
+        // other name passes through unchanged.
+        assert_eq!(normalize_arch("aarch64"), "arm64");
+        assert_eq!(normalize_arch("x86_64"), "x86_64");
+        assert_eq!(normalize_arch("arm"), "arm");
+    }
+
+    #[test]
+    fn find_module_matches_address_ranges() {
+        let module_at = |base: u64, size: u64| LoadedModule {
+            base,
+            end: base + size,
+            image: DebugImage {
+                image_type: "elf".to_string(),
+                debug_id: "test".to_string(),
+                code_id: None,
+                image_addr: format!("0x{base:x}"),
+                image_size: Some(size),
+                image_vmaddr: None,
+                code_file: None,
+                arch: "x86_64".to_string(),
+            },
+        };
+
+        let modules = vec![module_at(0x1000, 0x1000), module_at(0x4000, 0x1000)];
+
+        assert_eq!(find_module(&modules, 0x1500).map(|m| m.base), Some(0x1000));
+        assert_eq!(find_module(&modules, 0x4000).map(|m| m.base), Some(0x4000));
+        assert!(find_module(&modules, 0x2000).is_none()); // gap between modules
+        assert!(find_module(&modules, 0x500).is_none()); // before first module
+        assert!(find_module(&modules, 0x5000).is_none()); // past the last module
+    }
+
+    #[test]
+    fn captured_stacks_reference_loaded_debug_images() {
+        let json = event_json(Exception::from_message(
+            "AddrCheck",
+            "captures addresses",
+            true,
+        ));
+
+        let frames = json["properties"]["$exception_list"][0]["stacktrace"]["frames"]
+            .as_array()
+            .expect("expected stack frames");
+
+        // instruction_addr is set only for frames whose module has a debug id;
+        // it's omitted otherwise (e.g. system libraries without a GNU build id,
+        // common on Linux). Assert the format wherever present, and that at
+        // least one frame carries it.
+        let mut saw_instruction_addr = false;
+        for frame in frames {
+            let Some(addr) = frame["instruction_addr"].as_str() else {
+                continue;
+            };
+            saw_instruction_addr = true;
+            assert!(
+                addr.starts_with("0x") && u64::from_str_radix(&addr[2..], 16).is_ok(),
+                "expected hex instruction_addr, got {:?}",
+                frame["instruction_addr"]
+            );
+        }
+        assert!(
+            saw_instruction_addr,
+            "expected at least one frame to carry an instruction_addr"
+        );
+
+        // The test binary itself is a loaded module with a debug id on the
+        // platforms we capture modules on, so $debug_images must be present
+        // and every entry must be referenced by at least one frame.
+        let images = json["properties"]["$debug_images"]
+            .as_array()
+            .expect("expected $debug_images");
+        assert!(!images.is_empty());
+        let expected_type = super::native_image_type();
+        let expected_arch = super::normalize_arch(std::env::consts::ARCH);
+        for image in images {
+            assert_eq!(image["type"].as_str(), Some(expected_type));
+            assert_eq!(
+                image["arch"].as_str(),
+                Some(expected_arch.as_str()),
+                "arch should match the running process"
+            );
+            let debug_id = image["debug_id"].as_str().unwrap_or_default();
+            assert!(
+                debug_id.len() >= 36,
+                "expected uuid-shaped debug_id, got {:?}",
+                debug_id
+            );
+            let image_addr = image["image_addr"].as_str().unwrap_or_default();
+            assert!(
+                frames
+                    .iter()
+                    .any(|f| f["image_addr"].as_str() == Some(image_addr)),
+                "image {} not referenced by any frame",
+                image_addr
+            );
+        }
     }
 
     #[test]
@@ -1683,8 +2200,11 @@ mod tests {
             lang: "rust".to_string(),
             in_app: true,
             synthetic: false,
-            resolved: true,
-            platform: "rust".to_string(),
+            platform: "native".to_string(),
+            instruction_addr: None,
+            symbol_addr: None,
+            image_addr: None,
+            client_resolved: false,
         };
         let exception = Exception {
             items: vec![ExceptionItem {
@@ -1694,6 +2214,7 @@ mod tests {
                 stacktrace: None,
             }],
             captured_frames: Some((0..MAX_FRAMES + 5).map(synthetic_frame).collect()),
+            captured_images: Vec::new(),
             fingerprint: None,
             level: "error".to_string(),
         };
@@ -1710,7 +2231,9 @@ mod tests {
     #[test]
     fn stacktrace_keeps_top_frame_first() {
         fn capture() -> ExceptionStacktrace {
-            let mut frames = capture_frames_current_first(0);
+            // Empty module slice: this test only asserts frame ordering and
+            // names, which are independent of the loaded-module lookup.
+            let mut frames = capture_frames_current_first(0, &[]);
             trim_to_max_frames(&mut frames, 8);
             ExceptionStacktrace::raw(frames)
         }
@@ -1739,13 +2262,17 @@ mod tests {
     }
 
     #[test]
-    fn inlined_functions_become_separate_frames() {
-        // inline(always) is honored in debug builds, so the two helpers share
-        // the test function's physical frame and must surface as their own
-        // logical frames, innermost first.
+    fn inlined_frames_collapse_for_server_side_expansion() {
+        // inline(always) is honored in debug builds, so these helpers share
+        // their caller's physical frame. When the server can symbolicate the
+        // address we emit ONE frame for that physical frame and let the resolver
+        // expand the inline chain from the symcache; emitting the inline layers
+        // here as well would double them, since the resolver re-expands every
+        // address-bearing native frame. Only a frame the server can't resolve
+        // keeps the client-side inline expansion.
         #[inline(always)]
         fn inline_leaf() -> Vec<StackFrame> {
-            capture_raw_application_frames()
+            capture_raw_application_frames().0
         }
 
         #[inline(always)]
@@ -1756,19 +2283,62 @@ mod tests {
         let frames = inline_mid();
         let functions: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
 
-        let leaf_index = functions
+        // No two frames may carry the same instruction_addr: that duplicate is
+        // exactly the double-expansion the resolver would inflict if we
+        // pre-expanded inlines onto a shared address.
+        let mut addrs: Vec<&str> = frames
             .iter()
-            .position(|function| function.contains("inline_leaf"))
-            .unwrap_or_else(|| panic!("expected inline_leaf frame, got {:?}", functions));
-        let mid_index = functions
-            .iter()
-            .position(|function| function.contains("inline_mid"))
-            .unwrap_or_else(|| panic!("expected inline_mid frame, got {:?}", functions));
-        assert!(
-            leaf_index < mid_index,
-            "expected innermost inlined layer first, got {:?}",
-            functions
+            .filter_map(|frame| frame.instruction_addr.as_deref())
+            .collect();
+        let emitted = addrs.len();
+        addrs.sort_unstable();
+        addrs.dedup();
+        assert_eq!(
+            addrs.len(),
+            emitted,
+            "instruction_addr duplicated across frames: {:?}",
+            frames
         );
+
+        // client_resolved is the inverse of carrying an address: an addressed
+        // frame is left for the server to resolve (false); an address-less frame
+        // was resolved client-side (true).
+        assert!(
+            frames
+                .iter()
+                .all(|f| f.client_resolved == f.instruction_addr.is_none()),
+            "client_resolved must be the inverse of instruction_addr presence: {:?}",
+            frames
+        );
+
+        let leaf = functions
+            .iter()
+            .filter(|f| f.contains("inline_leaf"))
+            .count();
+        let mid = functions
+            .iter()
+            .filter(|f| f.contains("inline_mid"))
+            .count();
+
+        if frames.iter().any(|frame| frame.instruction_addr.is_some()) {
+            // Resolvable: the inlined layers collapse into their physical frame,
+            // which carries the address for the server to expand.
+            assert!(
+                leaf == 0 && mid == 0,
+                "expected inlined layers collapsed for server-side expansion, got {:?}",
+                functions
+            );
+        } else {
+            // Not resolvable: client-side expansion preserves the inline chain,
+            // innermost first.
+            let leaf_index = functions.iter().position(|f| f.contains("inline_leaf"));
+            let mid_index = functions.iter().position(|f| f.contains("inline_mid"));
+            assert!(
+                matches!((leaf_index, mid_index), (Some(l), Some(m)) if l < m),
+                "expected client-side inline expansion innermost first, got {:?}",
+                functions
+            );
+        }
     }
 
     #[test]
