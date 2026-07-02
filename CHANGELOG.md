@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.17.1 — 2026-07-02
+
+### Patch changes
+
+- [c7e2533](https://github.com/posthog/posthog-rs/commit/c7e2533cf7ccda39a05da5d6bd138b7cf51da4e2) Retry remote feature flag requests after transient 502 and 504 responses. — Thanks @marandaneto!
+
 ## 0.17.0 — 2026-07-02
 
 ### Minor changes
