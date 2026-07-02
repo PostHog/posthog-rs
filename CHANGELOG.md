@@ -1,5 +1,17 @@
 # posthog-rs
 
+## 0.17.0 — 2026-07-02
+
+### Minor changes
+
+- [f00e91b](https://github.com/posthog/posthog-rs/commit/f00e91b578972002fa8e995d1353a0177470220e) General `on_error` observability hook. Register one or more hooks with `ClientOptionsBuilder::on_error` to observe terminal failures across every SDK network surface without giving up the non-blocking API: a capture batch the SDK gave up delivering (permanent reject, exhausted retries, serialization failure, or — on the `capture-v1` pipeline — a `2xx` whose per-event verdicts left events unpersisted), a failed remote `/flags` request, and a failed local-evaluation definitions poll. Hooks fire in registration order and may be invoked from whichever thread reaches the failure (the background transport worker, a flags request, or the poller).
+  
+  Each hook receives a `&PostHogError<'_>`, a `#[non_exhaustive]` enum with one variant per surface (`Capture`, `FeatureFlags`, `LocalEvaluation`), each carrying an enriched, `#[non_exhaustive]` failure struct read through accessors: `CaptureFailure` (cause, HTTP status, attempt, lost-event count, historical-migration flag, and — under `capture-v1` — request id, per-event `event_results`, and the parsed `V1ErrorResponse`), `FlagsFailure` (cause, endpoint, distinct id, status, body), and `LocalEvaluationFailure` (cause, status; the personal API key is never surfaced). The failure is passed by reference and borrows from the caller, so the common (hookless) path stays allocation-free. New public exports: `PostHogError`, `CaptureFailure`, `FlagsFailure`, `LocalEvaluationFailure`, and (under `capture-v1`) `V1ErrorResponse`.
+  
+  The hook is observability-only and MUST NOT call back into the SDK (no `capture`/`capture_batch`/`capture_exception`, `flush`, or `shutdown`): emitting an event while handling a capture failure forms an amplification loop. The hook is `Fn + Send + Sync` and invoked without holding any SDK lock, so it may run concurrently on multiple threads and must be internally thread-safe. Hook panics are caught and ignored. Registering at least one hook silences the default WARN logged for terminal capture batch rejects/exhaustion, since the caller now owns that signal; other drop warnings and the existing `/flags` and poller logs are unaffected.
+  
+  Also makes the blocking local-evaluation poller's background thread shut down promptly: it now wakes to check the stop signal in short steps instead of sleeping the full poll interval, so `stop`/`Drop` no longer blocks for up to a whole interval (previously up to the configured `poll_interval_seconds`). — Thanks @eli-r-ph!
+
 ## 0.16.0 — 2026-07-01
 
 ### Minor changes
