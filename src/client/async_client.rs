@@ -953,7 +953,20 @@ impl Client {
             let result = request.send().await;
 
             match result {
-                Ok(response) => return Ok(response),
+                Ok(response) => match super::retry::feature_flags_after_response(
+                    &self.options,
+                    attempt,
+                    response.status().as_u16(),
+                ) {
+                    super::retry::Step::Backoff(delay) => {
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                    }
+                    super::retry::Step::Done => return Ok(response),
+                    super::retry::Step::Fail(_) => {
+                        unreachable!("feature flag response handling cannot fail without a body")
+                    }
+                },
                 Err(e) => {
                     let err_msg = e.to_string();
                     match super::retry::feature_flags_after_transport_error(

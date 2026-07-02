@@ -141,6 +141,25 @@ pub(crate) fn v0_after_transport_error(
     Step::Backoff(backoff_duration(opts, attempt, None))
 }
 
+fn is_retryable_feature_flags_status(status: u16) -> bool {
+    matches!(status, 502 | 504)
+}
+
+/// Sans-IO decision for a completed remote `/flags` response. Only 502 and 504
+/// are retried here; other HTTP statuses remain terminal for the caller.
+pub(crate) fn feature_flags_after_response(
+    opts: &ClientOptions,
+    attempt: u32,
+    status: u16,
+) -> Step {
+    if is_retryable_feature_flags_status(status)
+        && attempt <= opts.feature_flags_request_max_retries
+    {
+        return Step::Backoff(backoff_duration(opts, attempt, None));
+    }
+    Step::Done
+}
+
 /// Sans-IO decision for a remote `/flags` transport error. The feature-flags
 /// option counts retries after the initial attempt, so `attempt == 1` is still
 /// allowed when `feature_flags_request_max_retries == 1`.
@@ -399,6 +418,34 @@ mod tests {
             v0_after_transport_error(&opts, 3, "timeout".into()),
             Step::Fail(Error::Connection(_))
         ));
+    }
+
+    #[test]
+    fn feature_flags_http_status_uses_retry_budget_for_502_and_504_only() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .feature_flags_request_max_retries(1u32)
+            .retry_initial_backoff_ms(1u64)
+            .retry_max_backoff_ms(5u64)
+            .build()
+            .unwrap();
+
+        for status in [502, 504] {
+            assert!(matches!(
+                feature_flags_after_response(&opts, 1, status),
+                Step::Backoff(_)
+            ));
+            assert!(matches!(
+                feature_flags_after_response(&opts, 2, status),
+                Step::Done
+            ));
+        }
+        for status in [500, 503, 429] {
+            assert!(matches!(
+                feature_flags_after_response(&opts, 1, status),
+                Step::Done
+            ));
+        }
     }
 
     #[test]

@@ -168,8 +168,9 @@ pub struct ClientOptions {
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
 
-    /// Maximum number of retries after a transient network error for remote `/flags` requests.
-    /// Defaults to `1`. Set to `0` to disable retries.
+    /// Maximum number of retries after a transient remote `/flags` failure
+    /// (transport error or HTTP 502/504). Defaults to `1`. Set to `0` to
+    /// disable retries.
     #[builder(default = "1")]
     pub(crate) feature_flags_request_max_retries: u32,
 

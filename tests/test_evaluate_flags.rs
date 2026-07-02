@@ -212,6 +212,90 @@ fn start_resetting_flags_server(expected_attempts: usize) -> ResettingFlagsServe
     }
 }
 
+struct StatusThenSuccessFlagsServer {
+    base_url: String,
+    attempts: Arc<AtomicUsize>,
+    saw_flags_path: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl StatusThenSuccessFlagsServer {
+    fn assert_retry_succeeded(self) {
+        self.handle.join().expect("status flags server thread");
+        assert_eq!(self.attempts.load(Ordering::SeqCst), 2);
+        assert!(self.saw_flags_path.load(Ordering::SeqCst));
+    }
+}
+
+fn start_status_then_success_flags_server(
+    first_status: u16,
+    success_body: String,
+) -> StatusThenSuccessFlagsServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind status flags server");
+    listener
+        .set_nonblocking(true)
+        .expect("set status flags server nonblocking");
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let saw_flags_path = Arc::new(AtomicBool::new(false));
+    let thread_attempts = attempts.clone();
+    let thread_saw_flags_path = saw_flags_path.clone();
+    let handle = thread::spawn(move || {
+        let started = Instant::now();
+        while thread_attempts.load(Ordering::SeqCst) < 2
+            && started.elapsed() < Duration::from_secs(5)
+        {
+            match listener.accept() {
+                Ok((mut stream, _addr)) => {
+                    let attempt = thread_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                    let mut request = Vec::new();
+                    let mut buf = [0; 1024];
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                request.extend_from_slice(&buf[..n]);
+                                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if String::from_utf8_lossy(&request).contains("POST /flags/?v=2") {
+                        thread_saw_flags_path.store(true, Ordering::SeqCst);
+                    }
+
+                    let (status, body) = if attempt == 1 {
+                        (first_status, "transient flags error".to_string())
+                    } else {
+                        (200, success_body.clone())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status} Status\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    StatusThenSuccessFlagsServer {
+        base_url,
+        attempts,
+        saw_flags_path,
+        handle,
+    }
+}
+
 // ---------- blocking ----------
 
 #[cfg(not(feature = "async-client"))]
@@ -288,6 +372,32 @@ mod blocking {
 
         assert!(matches!(err, posthog_rs::Error::Connection(_)));
         server.assert_attempts(2);
+    }
+
+    #[test]
+    fn evaluate_flags_retries_502_and_504_status_then_succeeds() {
+        for status in [502, 504] {
+            let server = start_status_then_success_flags_server(
+                status,
+                flags_response_fixture().to_string(),
+            );
+            let options = posthog_rs::ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .host(server.base_url.clone())
+                .feature_flags_request_max_retries(1u32)
+                .retry_initial_backoff_ms(1u64)
+                .retry_max_backoff_ms(1u64)
+                .build()
+                .unwrap();
+            let client = posthog_rs::client(options);
+
+            let snapshot = client
+                .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+                .expect("evaluate_flags should retry retryable status");
+
+            assert_eq!(snapshot.get_flag("alpha"), Some(FlagValue::Boolean(true)));
+            server.assert_retry_succeeded();
+        }
     }
 
     #[test]
@@ -852,6 +962,33 @@ mod async_tests {
 
         assert!(matches!(err, posthog_rs::Error::Connection(_)));
         server.assert_attempts(2);
+    }
+
+    #[tokio::test]
+    async fn evaluate_flags_retries_502_and_504_status_then_succeeds() {
+        for status in [502, 504] {
+            let server = start_status_then_success_flags_server(
+                status,
+                flags_response_fixture().to_string(),
+            );
+            let options = posthog_rs::ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .host(server.base_url.clone())
+                .feature_flags_request_max_retries(1u32)
+                .retry_initial_backoff_ms(1u64)
+                .retry_max_backoff_ms(1u64)
+                .build()
+                .unwrap();
+            let client = posthog_rs::client(options).await;
+
+            let snapshot = client
+                .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+                .await
+                .expect("evaluate_flags should retry retryable status");
+
+            assert_eq!(snapshot.get_flag("alpha"), Some(FlagValue::Boolean(true)));
+            server.assert_retry_succeeded();
+        }
     }
 
     #[tokio::test]
