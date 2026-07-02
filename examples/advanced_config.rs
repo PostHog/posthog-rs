@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("5. High-performance with local evaluation:");
     let performance_config = ClientOptionsBuilder::default()
         .api_key("phc_project_key".to_string())
-        .personal_api_key("phx_personal_key") // Required for local eval
+        .secret_key("phx_personal_key") // Required for local eval
         .enable_local_evaluation(true) // Cache flags locally
         .poll_interval_seconds(30) // Update cache every 30s
         .feature_flags_request_timeout_seconds(3)

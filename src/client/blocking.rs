@@ -221,11 +221,11 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let (local_evaluator, flag_poller) = if options.enable_local_evaluation
         && !options.is_disabled()
     {
-        if let Some(ref personal_key) = options.personal_api_key {
+        if let Some(ref secret_key) = options.secret_key {
             let cache = FlagCache::new();
 
             let config = LocalEvaluationConfig {
-                personal_api_key: personal_key.clone(),
+                personal_api_key: secret_key.clone(),
                 project_api_key: options.api_key.clone(),
                 api_host: options.endpoints().api_host(),
                 poll_interval: Duration::from_secs(options.poll_interval_seconds),
