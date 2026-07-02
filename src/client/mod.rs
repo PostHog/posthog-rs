@@ -459,35 +459,28 @@ mod tests {
     #[test]
     #[allow(deprecated)]
     fn resolves_secret_key_over_personal_api_key() {
-        let secret_only = ClientOptionsBuilder::default()
-            .api_key("test-api-key".to_string())
-            .secret_key("phs_secret")
-            .build()
-            .unwrap();
-        assert_eq!(secret_only.secret_key.as_deref(), Some("phs_secret"));
+        let cases: [(Option<&str>, Option<&str>, Option<&str>); 3] = [
+            (Some("phs_secret"), None, Some("phs_secret")),
+            (None, Some("phx_personal"), Some("phx_personal")),
+            (Some("phs_secret"), Some("phx_personal"), Some("phs_secret")),
+        ];
 
-        let personal_only = ClientOptionsBuilder::default()
-            .api_key("test-api-key".to_string())
-            .personal_api_key("phx_personal")
-            .build()
-            .unwrap();
-        assert_eq!(personal_only.secret_key.as_deref(), Some("phx_personal"));
-
-        let both = ClientOptionsBuilder::default()
-            .api_key("test-api-key".to_string())
-            .personal_api_key("phx_personal")
-            .secret_key("phs_secret")
-            .build()
-            .unwrap();
-        assert_eq!(both.secret_key.as_deref(), Some("phs_secret"));
-
-        let both_reversed = ClientOptionsBuilder::default()
-            .api_key("test-api-key".to_string())
-            .secret_key("phs_secret")
-            .personal_api_key("phx_personal")
-            .build()
-            .unwrap();
-        assert_eq!(both_reversed.secret_key.as_deref(), Some("phs_secret"));
+        for (secret, personal, expected) in cases {
+            let mut builder = ClientOptionsBuilder::default();
+            builder.api_key("test-api-key".to_string());
+            if let Some(personal) = personal {
+                builder.personal_api_key(personal);
+            }
+            if let Some(secret) = secret {
+                builder.secret_key(secret);
+            }
+            let options = builder.build().unwrap();
+            assert_eq!(
+                options.secret_key.as_deref(),
+                expected,
+                "{secret:?} {personal:?}"
+            );
+        }
     }
 
     #[test]
