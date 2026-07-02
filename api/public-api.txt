@@ -115,10 +115,18 @@ pub fn posthog_rs::CaptureFailure<'a>::request_id(&self) -> core::option::Option
 pub fn posthog_rs::CaptureFailure<'a>::status(&self) -> core::option::Option<u16>
 pub struct posthog_rs::CaptureResponse
 pub posthog_rs::CaptureResponse::results: std::collections::hash::map::HashMap<uuid::Uuid, posthog_rs::EventResult>
+#[non_exhaustive] pub struct posthog_rs::CaptureSummary
+impl posthog_rs::CaptureSummary
+pub fn posthog_rs::CaptureSummary::all_persisted(&self) -> bool
+pub fn posthog_rs::CaptureSummary::event_results(&self) -> &std::collections::hash::map::HashMap<uuid::Uuid, posthog_rs::EventResult>
+pub fn posthog_rs::CaptureSummary::not_persisted(&self) -> usize
+pub fn posthog_rs::CaptureSummary::submitted(&self) -> usize
 pub struct posthog_rs::Client
 impl posthog_rs::Client
 pub fn posthog_rs::Client::capture(&self, posthog_rs::Event)
 pub fn posthog_rs::Client::capture_batch(&self, alloc::vec::Vec<posthog_rs::Event>, bool)
+pub async fn posthog_rs::Client::capture_batch_confirmed(&self, alloc::vec::Vec<posthog_rs::Event>, bool) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
+pub async fn posthog_rs::Client::capture_confirmed(&self, posthog_rs::Event) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
 pub async fn posthog_rs::Client::capture_exception<E>(&self, &E) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub async fn posthog_rs::Client::capture_exception_with<E>(&self, &E, posthog_rs::CaptureExceptionOptions) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub fn posthog_rs::Client::evaluate_feature_flag_locally(&self, &posthog_rs::FeatureFlag, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::Error>

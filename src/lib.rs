@@ -68,6 +68,24 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! # Capture is fire-and-forget
+//!
+//! [`Client::capture`] and [`Client::capture_batch`] are the primary API: they
+//! hand the event to a background worker that batches, sends, and retries it,
+//! and return immediately. Delivery failures are not surfaced to the caller —
+//! register [`ClientOptionsBuilder::on_error`] to observe them. This is the
+//! right choice for essentially all analytics.
+//!
+//! ## Confirmed delivery (advanced)
+//!
+//! [`Client::capture_confirmed`] and [`Client::capture_batch_confirmed`] send
+//! inline and return a [`CaptureSummary`] once the request reaches a terminal
+//! outcome (or an [`Error`] if the retry budget is spent). They bypass the
+//! background worker and do not fire `on_error` — the returned value is the
+//! signal. Reach for them only when the caller must know a batch persisted
+//! before advancing its own durable state (for example, a server-side importer
+//! committing an upstream offset); prefer fire-and-forget everywhere else.
 mod client;
 mod compression;
 mod constants;
@@ -88,6 +106,7 @@ mod local_evaluation;
 pub use client::client;
 pub use client::BeforeSendHook;
 pub use client::CaptureCompression;
+pub use client::CaptureSummary;
 pub use client::Client;
 pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
