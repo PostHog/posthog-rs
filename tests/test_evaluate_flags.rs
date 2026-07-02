@@ -401,6 +401,33 @@ mod blocking {
     }
 
     #[test]
+    fn evaluate_flags_returns_error_after_502_and_504_retry_budget() {
+        for status in [502, 504] {
+            let server = MockServer::start();
+            let flags_mock = server.mock(|when, then| {
+                when.method(POST).path("/flags/");
+                then.status(status).body("transient flags error");
+            });
+            let options = posthog_rs::ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .host(server.base_url())
+                .feature_flags_request_max_retries(1u32)
+                .retry_initial_backoff_ms(1u64)
+                .retry_max_backoff_ms(1u64)
+                .build()
+                .unwrap();
+            let client = posthog_rs::client(options);
+
+            let err = client
+                .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+                .expect_err("retryable status should error after retry budget is exhausted");
+
+            assert!(err.to_string().contains(&status.to_string()));
+            flags_mock.assert_hits(2);
+        }
+    }
+
+    #[test]
     fn evaluate_flags_does_not_retry_500_status() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
@@ -988,6 +1015,34 @@ mod async_tests {
 
             assert_eq!(snapshot.get_flag("alpha"), Some(FlagValue::Boolean(true)));
             server.assert_retry_succeeded();
+        }
+    }
+
+    #[tokio::test]
+    async fn evaluate_flags_returns_error_after_502_and_504_retry_budget() {
+        for status in [502, 504] {
+            let server = MockServer::start();
+            let flags_mock = server.mock(|when, then| {
+                when.method(POST).path("/flags/");
+                then.status(status).body("transient flags error");
+            });
+            let options = posthog_rs::ClientOptionsBuilder::default()
+                .api_key("test_api_key".to_string())
+                .host(server.base_url())
+                .feature_flags_request_max_retries(1u32)
+                .retry_initial_backoff_ms(1u64)
+                .retry_max_backoff_ms(1u64)
+                .build()
+                .unwrap();
+            let client = posthog_rs::client(options).await;
+
+            let err = client
+                .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+                .await
+                .expect_err("retryable status should error after retry budget is exhausted");
+
+            assert!(err.to_string().contains(&status.to_string()));
+            flags_mock.assert_hits(2);
         }
     }
 

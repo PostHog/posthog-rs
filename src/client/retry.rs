@@ -18,6 +18,18 @@ pub(crate) enum Step {
     Fail(Error),
 }
 
+#[derive(Debug)]
+pub(crate) enum FeatureFlagsResponseStep {
+    Done,
+    Backoff(Duration),
+}
+
+#[derive(Debug)]
+pub(crate) enum FeatureFlagsTransportStep {
+    Backoff(Duration),
+    Fail(Error),
+}
+
 /// Statuses worth retrying. Everything else (including 429) is terminal so the
 /// caller surfaces it without burning the attempt budget.
 pub(crate) fn is_retryable_status(status: u16) -> bool {
@@ -151,13 +163,13 @@ pub(crate) fn feature_flags_after_response(
     opts: &ClientOptions,
     attempt: u32,
     status: u16,
-) -> Step {
+) -> FeatureFlagsResponseStep {
     if is_retryable_feature_flags_status(status)
         && attempt <= opts.feature_flags_request_max_retries
     {
-        return Step::Backoff(backoff_duration(opts, attempt, None));
+        return FeatureFlagsResponseStep::Backoff(backoff_duration(opts, attempt, None));
     }
-    Step::Done
+    FeatureFlagsResponseStep::Done
 }
 
 /// Sans-IO decision for a remote `/flags` transport error. The feature-flags
@@ -168,11 +180,11 @@ pub(crate) fn feature_flags_after_transport_error(
     attempt: u32,
     retryable: bool,
     err_msg: String,
-) -> Step {
+) -> FeatureFlagsTransportStep {
     if !retryable || attempt > opts.feature_flags_request_max_retries {
-        return Step::Fail(Error::Connection(err_msg));
+        return FeatureFlagsTransportStep::Fail(Error::Connection(err_msg));
     }
-    Step::Backoff(backoff_duration(opts, attempt, None))
+    FeatureFlagsTransportStep::Backoff(backoff_duration(opts, attempt, None))
 }
 
 #[cfg(test)]
@@ -433,17 +445,17 @@ mod tests {
         for status in [502, 504] {
             assert!(matches!(
                 feature_flags_after_response(&opts, 1, status),
-                Step::Backoff(_)
+                FeatureFlagsResponseStep::Backoff(_)
             ));
             assert!(matches!(
                 feature_flags_after_response(&opts, 2, status),
-                Step::Done
+                FeatureFlagsResponseStep::Done
             ));
         }
         for status in [500, 503, 429] {
             assert!(matches!(
                 feature_flags_after_response(&opts, 1, status),
-                Step::Done
+                FeatureFlagsResponseStep::Done
             ));
         }
     }
@@ -460,15 +472,15 @@ mod tests {
 
         assert!(matches!(
             feature_flags_after_transport_error(&opts, 1, true, "reset".into()),
-            Step::Backoff(_)
+            FeatureFlagsTransportStep::Backoff(_)
         ));
         assert!(matches!(
             feature_flags_after_transport_error(&opts, 2, true, "reset".into()),
-            Step::Fail(Error::Connection(_))
+            FeatureFlagsTransportStep::Fail(Error::Connection(_))
         ));
         assert!(matches!(
             feature_flags_after_transport_error(&opts, 1, false, "refused".into()),
-            Step::Fail(Error::Connection(_))
+            FeatureFlagsTransportStep::Fail(Error::Connection(_))
         ));
     }
 }
