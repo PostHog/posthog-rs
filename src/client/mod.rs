@@ -135,10 +135,12 @@ pub struct ClientOptions {
     #[builder(default = "30")]
     request_timeout_seconds: u64,
 
-    /// Personal API key for fetching flag definitions. Required when
-    /// `enable_local_evaluation` is `true`.
+    /// Secret key used for local feature flag evaluation and remote config.
+    ///
+    /// Accepts either a Personal API Key (`phx_...`) or a Project Secret API
+    /// Key (`phs_...`). Required when `enable_local_evaluation` is `true`.
     #[builder(setter(into, strip_option), default)]
-    personal_api_key: Option<String>,
+    secret_key: Option<String>,
 
     /// Enable local evaluation of feature flags using a background definitions
     /// poller.
@@ -321,8 +323,8 @@ impl ClientOptions {
             }
             None => DEFAULT_HOST.to_string(),
         });
-        self.personal_api_key = self.personal_api_key.and_then(|personal_api_key| {
-            let normalized = personal_api_key.trim().to_string();
+        self.secret_key = self.secret_key.and_then(|secret_key| {
+            let normalized = secret_key.trim().to_string();
             if normalized.is_empty() {
                 None
             } else {
@@ -398,6 +400,19 @@ impl ClientOptionsBuilder {
     pub fn build(&self) -> Result<ClientOptions, ClientOptionsBuilderError> {
         Ok(self.build_unchecked()?.sanitize())
     }
+
+    /// Deprecated alias for [`secret_key`](Self::secret_key).
+    ///
+    /// Kept for backwards compatibility. When both are set, `secret_key` wins.
+    #[deprecated(
+        note = "use `secret_key` instead; it accepts a Personal API Key or a Project Secret API Key"
+    )]
+    pub fn personal_api_key(&mut self, value: impl Into<String>) -> &mut Self {
+        if self.secret_key.is_none() {
+            self.secret_key = Some(Some(value.into()));
+        }
+        self
+    }
 }
 
 impl From<&str> for ClientOptions {
@@ -431,14 +446,41 @@ mod tests {
         let options = ClientOptionsBuilder::default()
             .api_key(" \n test-api-key\t ".to_string())
             .host(" \nhttps://eu.posthog.com/\t ")
-            .personal_api_key(" \n\t ")
+            .secret_key(" \n\t ")
             .build()
             .unwrap();
 
         assert_eq!(options.api_key, "test-api-key");
         assert_eq!(options.host.as_deref(), Some("https://eu.posthog.com/"));
-        assert_eq!(options.personal_api_key, None);
+        assert_eq!(options.secret_key, None);
         assert_eq!(options.endpoints().api_host(), EU_INGESTION_ENDPOINT);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn resolves_secret_key_over_personal_api_key() {
+        let cases: [(Option<&str>, Option<&str>, Option<&str>); 3] = [
+            (Some("phs_secret"), None, Some("phs_secret")),
+            (None, Some("phx_personal"), Some("phx_personal")),
+            (Some("phs_secret"), Some("phx_personal"), Some("phs_secret")),
+        ];
+
+        for (secret, personal, expected) in cases {
+            let mut builder = ClientOptionsBuilder::default();
+            builder.api_key("test-api-key".to_string());
+            if let Some(personal) = personal {
+                builder.personal_api_key(personal);
+            }
+            if let Some(secret) = secret {
+                builder.secret_key(secret);
+            }
+            let options = builder.build().unwrap();
+            assert_eq!(
+                options.secret_key.as_deref(),
+                expected,
+                "{secret:?} {personal:?}"
+            );
+        }
     }
 
     #[test]

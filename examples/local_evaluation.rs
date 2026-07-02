@@ -53,7 +53,7 @@ async fn main() {
     let local_client = {
         let options = ClientOptionsBuilder::default()
             .api_key(api_key.clone())
-            .personal_api_key(personal_key)
+            .secret_key(personal_key)
             .enable_local_evaluation(true)
             .poll_interval_seconds(30) // Poll for updates every 30 seconds
             .build()

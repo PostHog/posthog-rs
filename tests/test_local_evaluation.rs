@@ -209,7 +209,7 @@ async fn test_local_evaluation_with_mock_server() {
     let options = ClientOptionsBuilder::default()
         .host(server.base_url())
         .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
+        .secret_key("test_personal_key".to_string())
         .enable_local_evaluation(true)
         .poll_interval_seconds(60)
         .build()
