@@ -562,7 +562,18 @@ impl Client {
             let empty_groups: HashMap<String, String> = HashMap::new();
             let empty_group_props: HashMap<String, HashMap<String, serde_json::Value>> =
                 HashMap::new();
-            let props = person_properties.as_ref().unwrap_or(&empty_props);
+            let mut local_props;
+            let props = if let Some(props) = person_properties.as_ref() {
+                local_props = props.clone();
+                local_props
+                    .entry("distinct_id".to_string())
+                    .or_insert_with(|| json!(distinct_id_str.clone()));
+                &local_props
+            } else {
+                local_props = empty_props;
+                local_props.insert("distinct_id".to_string(), json!(distinct_id_str.clone()));
+                &local_props
+            };
             let groups_ref = groups.as_ref().unwrap_or(&empty_groups);
             let group_props_ref = group_properties.as_ref().unwrap_or(&empty_group_props);
             match evaluator.evaluate_flag(
@@ -822,11 +833,6 @@ impl Client {
         }
 
         let mut options = options;
-        options
-            .person_properties
-            .get_or_insert_with(HashMap::new)
-            .entry("distinct_id".to_string())
-            .or_insert_with(|| json!(distinct_id.clone()));
         options.groups.get_or_insert_with(HashMap::new);
         options.group_properties.get_or_insert_with(HashMap::new);
 
@@ -834,7 +840,10 @@ impl Client {
         let mut locally_evaluated_keys: HashSet<String> = HashSet::new();
 
         if let Some(evaluator) = &self.local_evaluator {
-            let person_props_owned = options.person_properties.clone().unwrap_or_default();
+            let mut person_props_owned = options.person_properties.clone().unwrap_or_default();
+            person_props_owned
+                .entry("distinct_id".to_string())
+                .or_insert_with(|| json!(distinct_id.clone()));
             let groups_owned = options.groups.clone().unwrap_or_default();
             let group_props_owned = options.group_properties.clone().unwrap_or_default();
             let local_results = evaluator.evaluate_all_flags(
@@ -1000,10 +1009,7 @@ impl Client {
     ) -> Result<DetailedFlagsResponse, Error> {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
-        let mut person_properties = options.person_properties.clone().unwrap_or_default();
-        person_properties
-            .entry("distinct_id".to_string())
-            .or_insert_with(|| json!(distinct_id));
+        let person_properties = options.person_properties.clone().unwrap_or_default();
         let groups = options.groups.clone().unwrap_or_default();
         let group_properties = options.group_properties.clone().unwrap_or_default();
         let effective_disable_geoip = options.disable_geoip.unwrap_or(self.options.disable_geoip);
