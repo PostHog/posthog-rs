@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.17.2 — 2026-07-02
+
+### Patch changes
+
+- [7ee049c](https://github.com/posthog/posthog-rs/commit/7ee049c5020cca2ae9cfb943d78fd9fe047c902e) Stop duplicating distinct_id inside /flags person properties — Thanks @marandaneto!
+
 ## 0.17.1 — 2026-07-02
 
 ### Patch changes
