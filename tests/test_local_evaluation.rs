@@ -3,14 +3,17 @@
 // during the transition window.
 #![allow(deprecated)]
 
+mod common;
+
+use common::default_user_agent;
 use httpmock::prelude::*;
 #[cfg(feature = "async-client")]
-use posthog_rs::AsyncFlagPoller;
+use posthog_rs::{AsyncFlagPoller, ClientOptionsBuilder};
 use posthog_rs::{
-    ClientOptionsBuilder, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache,
-    FlagPoller, FlagValue, LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator,
-    Property,
+    FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache, FlagPoller, FlagValue,
+    LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator, Property,
 };
+use reqwest::header::USER_AGENT;
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -35,6 +38,7 @@ fn test_local_evaluation_basic() {
             multivariate: None,
             payloads: HashMap::new(),
             aggregation_group_type_index: None,
+            early_exit: false,
         },
     };
 
@@ -84,6 +88,7 @@ fn test_local_evaluation_with_properties() {
             multivariate: None,
             payloads: HashMap::new(),
             aggregation_group_type_index: None,
+            early_exit: false,
         },
     };
 
@@ -228,6 +233,151 @@ async fn test_local_evaluation_with_mock_server() {
     eval_mock.assert();
 }
 
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_client_adds_distinct_id_for_local_evaluation_only() {
+    let server = MockServer::start();
+
+    let mock_flags = json!({
+        "flags": [
+            {
+                "key": "distinct-id-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        {
+                            "properties": [
+                                {
+                                    "key": "distinct_id",
+                                    "value": "user-123",
+                                    "operator": "exact"
+                                }
+                            ],
+                            "rollout_percentage": 100.0,
+                            "variant": null
+                        }
+                    ],
+                    "multivariate": null,
+                    "payloads": {}
+                }
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    let eval_mock = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(mock_flags);
+    });
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {"distinct-id-flag": false},
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let options = ClientOptionsBuilder::default()
+        .host(server.base_url())
+        .api_key("test_project_key".to_string())
+        .personal_api_key("test_personal_key".to_string())
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(60)
+        .build()
+        .unwrap();
+
+    let client = posthog_rs::client(options).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = client
+        .get_feature_flag("distinct-id-flag", "user-123", None, None, None)
+        .await;
+
+    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    eval_mock.assert();
+    flags_mock.assert_hits(0);
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_local_evaluation_with_mock_server_sends_default_user_agent() {
+    let server = MockServer::start();
+
+    // Mock the local evaluation endpoint
+    let mock_flags = json!({
+        "flags": [],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    let eval_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/flags/definitions/")
+            .header("Authorization", "Bearer test_personal_key")
+            .header("X-PostHog-Project-Api-Key", "test_project_key")
+            .header(USER_AGENT.to_string(), default_user_agent())
+            .query_param("send_cohorts", "");
+        then.status(200).json_body(mock_flags);
+    });
+
+    // Create client with local evaluation enabled
+    let options = ClientOptionsBuilder::default()
+        .host(server.base_url())
+        .api_key("test_project_key".to_string())
+        .personal_api_key("test_personal_key".to_string())
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(60)
+        .build()
+        .unwrap();
+
+    let client = posthog_rs::client(options).await;
+
+    // Give it a moment to load initial flags
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let _ = client
+        .get_feature_flag("feature-b", "", None, None, None)
+        .await;
+
+    eval_mock.assert();
+}
+
+#[test]
+fn test_sync_local_evaluation_with_mock_server_sends_default_user_agent() {
+    let server = MockServer::start();
+
+    let mock_flags = json!({
+        "flags": [],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    let eval_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/flags/definitions/")
+            .header("Authorization", "Bearer test_personal_key")
+            .header("X-PostHog-Project-Api-Key", "test_project_key")
+            .header(USER_AGENT.to_string(), default_user_agent())
+            .query_param("send_cohorts", "");
+        then.status(200).json_body(mock_flags);
+    });
+
+    let cache = FlagCache::new();
+    let config = LocalEvaluationConfig {
+        personal_api_key: "test_personal_key".to_string(),
+        project_api_key: "test_project_key".to_string(),
+        api_host: server.base_url(),
+        poll_interval: Duration::from_secs(60),
+        request_timeout: Duration::from_secs(5),
+    };
+
+    let poller = FlagPoller::new(config, cache);
+    poller.load_flags().unwrap();
+
+    eval_mock.assert();
+}
+
 #[test]
 fn test_cache_operations() {
     let cache = FlagCache::new();
@@ -242,6 +392,7 @@ fn test_cache_operations() {
                 multivariate: None,
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
+                early_exit: false,
             },
         },
         FeatureFlag {
@@ -252,6 +403,7 @@ fn test_cache_operations() {
                 multivariate: None,
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
+                early_exit: false,
             },
         },
     ];
@@ -770,6 +922,7 @@ fn mixed_flag() -> FeatureFlag {
             multivariate: None,
             payloads: HashMap::new(),
             aggregation_group_type_index: None, // null = mixed
+            early_exit: false,
         },
     }
 }
@@ -794,6 +947,7 @@ fn only_group_flag() -> FeatureFlag {
             payloads: HashMap::new(),
             // Pure group flag at the flag level
             aggregation_group_type_index: Some(0),
+            early_exit: false,
         },
     }
 }
@@ -923,6 +1077,7 @@ fn test_mixed_flag_only_group_condition_no_groups_returns_false() {
             multivariate: None,
             payloads: HashMap::new(),
             aggregation_group_type_index: None,
+            early_exit: false,
         },
     };
     let evaluator = LocalEvaluator::new(cache_with(flag));
@@ -957,6 +1112,7 @@ fn test_group_condition_uses_group_key_for_bucketing() {
             multivariate: None,
             payloads: HashMap::new(),
             aggregation_group_type_index: Some(0),
+            early_exit: false,
         },
     };
     let evaluator = LocalEvaluator::new(cache_with(flag));

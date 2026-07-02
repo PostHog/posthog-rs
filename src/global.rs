@@ -1,14 +1,32 @@
+#[cfg(feature = "error-tracking")]
+use std::error::Error as StdError;
 use std::sync::OnceLock;
+
+#[cfg(feature = "error-tracking")]
+use crate::error_tracking::CaptureExceptionOptions;
 
 use crate::{client, Client, ClientOptions, Error, Event};
 
 static GLOBAL_CLIENT: OnceLock<Client> = OnceLock::new();
 static GLOBAL_DISABLE: OnceLock<bool> = OnceLock::new();
 
+/// The initialized global client, if any. `'static` because it lives in the
+/// process-wide `OnceLock` — which is what lets the panic hook reference it
+/// without an owned handle.
+#[cfg(feature = "error-tracking")]
+pub(crate) fn global_client() -> Option<&'static Client> {
+    GLOBAL_CLIENT.get()
+}
+
 /// Initialize the global client singleton.
 ///
 /// Use the crate-level `init_global` re-export when you don't need more than
 /// one client instance and don't need to change client options at runtime.
+///
+/// With the `error-tracking` feature (on by default) and
+/// `ErrorTrackingOptions::capture_panics` enabled (opt-in; off by default),
+/// this also installs a process-wide panic hook that captures panics as
+/// `$exception` events through the global client.
 ///
 /// # Parameters
 ///
@@ -27,13 +45,21 @@ pub async fn init_global_client<C: Into<ClientOptions>>(options: C) -> Result<()
     let client = client(options).await;
     GLOBAL_CLIENT
         .set(client)
-        .map_err(|_| Error::AlreadyInitialized)
+        .map_err(|_| Error::AlreadyInitialized)?;
+    #[cfg(feature = "error-tracking")]
+    crate::error_tracking::maybe_install_global_panic_hook();
+    Ok(())
 }
 
 /// Initialize the global client singleton.
 ///
 /// Use the crate-level `init_global` re-export when you don't need more than
 /// one client instance and don't need to change client options at runtime.
+///
+/// With the `error-tracking` feature (on by default) and
+/// `ErrorTrackingOptions::capture_panics` enabled (opt-in; off by default),
+/// this also installs a process-wide panic hook that captures panics as
+/// `$exception` events through the global client.
 ///
 /// # Parameters
 ///
@@ -52,7 +78,10 @@ pub fn init_global_client<C: Into<ClientOptions>>(options: C) -> Result<(), Erro
     let client = client(options);
     GLOBAL_CLIENT
         .set(client)
-        .map_err(|_| Error::AlreadyInitialized)
+        .map_err(|_| Error::AlreadyInitialized)?;
+    #[cfg(feature = "error-tracking")]
+    crate::error_tracking::maybe_install_global_panic_hook();
+    Ok(())
 }
 
 /// Prevent the global client from being initialized.
@@ -76,24 +105,99 @@ pub fn is_disabled() -> bool {
 
 /// Capture the provided event using the global client.
 ///
-/// # Errors
+/// # Remarks
 ///
-/// Returns [`Error::NotInitialized`] if `init_global` has not successfully run,
-/// or any error returned by [`Client::capture`].
-#[cfg(feature = "async-client")]
-pub async fn capture(event: Event) -> Result<(), Error> {
-    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
-    client.capture(event).await
+/// Fire-and-forget, like [`Client::capture`]. No-op if `init_global` has not
+/// run.
+pub fn capture(event: Event) {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.capture(event);
+    }
 }
 
-/// Capture the provided event using the global client.
+/// Flush the global client's queued events, awaiting the worker's next delivery
+/// attempt. No-op if `init_global` has not run.
 ///
-/// # Errors
-///
-/// Returns [`Error::NotInitialized`] if `init_global` has not successfully run,
-/// or any error returned by [`Client::capture`].
-#[cfg(not(feature = "async-client"))]
-pub fn capture(event: Event) -> Result<(), Error> {
+/// `capture` only enqueues, and the global client lives in a `static` whose
+/// `Drop` never runs at process exit, so call this (or [`shutdown`]) before
+/// exiting to avoid losing buffered events.
+#[cfg(feature = "async-client")]
+pub async fn flush() {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.flush().await;
+    }
+}
+
+/// Flush and stop the global client's background worker. Idempotent; no-op if
+/// `init_global` has not run.
+#[cfg(feature = "async-client")]
+pub async fn shutdown() {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.shutdown().await;
+    }
+}
+
+/// Capture a Rust error personlessly using the global client.
+#[cfg(all(feature = "async-client", feature = "error-tracking"))]
+pub async fn capture_exception<E>(error: &E) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+{
     let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
-    client.capture(event)
+    client.capture_exception(error).await
+}
+
+/// Capture a Rust error with optional context using the global client.
+#[cfg(all(feature = "async-client", feature = "error-tracking"))]
+pub async fn capture_exception_with<E>(
+    error: &E,
+    options: CaptureExceptionOptions,
+) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_exception_with(error, options).await
+}
+
+/// Flush the global client's queued events, blocking until the worker's next
+/// delivery attempt. No-op if `init_global` has not run.
+///
+/// `capture` only enqueues, and the global client lives in a `static` whose
+/// `Drop` never runs at process exit, so call this (or [`shutdown`]) before
+/// exiting to avoid losing buffered events.
+#[cfg(not(feature = "async-client"))]
+pub fn flush() {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.flush();
+    }
+}
+
+/// Flush and stop the global client's background worker. Idempotent; no-op if
+/// `init_global` has not run.
+#[cfg(not(feature = "async-client"))]
+pub fn shutdown() {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.shutdown();
+    }
+}
+
+/// Capture a Rust error personlessly using the global client.
+#[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
+pub fn capture_exception<E>(error: &E) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_exception(error)
+}
+
+/// Capture a Rust error with optional context using the global client.
+#[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
+pub fn capture_exception_with<E>(error: &E, options: CaptureExceptionOptions) -> Result<(), Error>
+where
+    E: StdError + ?Sized,
+{
+    let client = GLOBAL_CLIENT.get().ok_or(Error::NotInitialized)?;
+    client.capture_exception_with(error, options)
 }

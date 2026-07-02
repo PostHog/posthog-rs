@@ -1,17 +1,21 @@
 //! Shared, runtime-agnostic helpers for the V1 capture pipeline.
 //! Each client keeps only the I/O; this module owns everything else.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 pub(crate) const V1_CAPTURE_PATH: &str = "/i/v1/analytics/events";
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use tracing::debug;
 use uuid::Uuid;
 
-use super::{CaptureCompression, CaptureDefaults, ClientOptions};
+use super::retry::{backoff_duration, is_retryable_status};
+// Re-exported so the V1 capture loops in the client modules can reach them as
+// `v1_capture::parse_retry_after` / `v1_capture::Step`.
+pub(crate) use super::retry::{parse_retry_after, Step};
+use super::{common::apply_runtime_context, CaptureCompression, CaptureDefaults, ClientOptions};
+use crate::client::get_default_user_agent;
 use crate::error::Error;
 use crate::event::Event;
 use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse, V1Event};
@@ -20,11 +24,19 @@ use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse
 // Request building
 // ---------------------------------------------------------------------------
 
-pub(crate) fn build_events(events: &[Event], defaults: &CaptureDefaults) -> Vec<V1Event> {
+/// Build V1 events with an injected `now` so the transport worker can stamp
+/// deterministic event timestamps from its clock.
+pub(crate) fn build_events_at(
+    events: &[Event],
+    defaults: &CaptureDefaults,
+    now: DateTime<Utc>,
+) -> Vec<V1Event> {
     events
         .iter()
         .map(|event| {
-            let mut v1 = V1Event::from_event(event);
+            let mut event = event.clone();
+            apply_runtime_context(&mut event);
+            let mut v1 = V1Event::from_event_at(&event, now);
             if let serde_json::Value::Object(ref mut map) = v1.properties {
                 if defaults.disable_geoip {
                     map.entry("$geoip_disable")
@@ -40,9 +52,20 @@ pub(crate) fn build_events(events: &[Event], defaults: &CaptureDefaults) -> Vec<
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn build_headers(opts: &ClientOptions, request_id: &Uuid, attempt: u32) -> HeaderMap {
-    let version = env!("CARGO_PKG_VERSION");
-    let sdk_info = format!("posthog-rust/{version}");
+    build_headers_at(opts, request_id, attempt, Utc::now())
+}
+
+/// Like [`build_headers`] but with an injected `now` for a deterministic
+/// `posthog-request-timestamp` (used by the transport worker via its clock).
+pub(crate) fn build_headers_at(
+    opts: &ClientOptions,
+    request_id: &Uuid,
+    attempt: u32,
+    now: DateTime<Utc>,
+) -> HeaderMap {
+    let sdk_info = get_default_user_agent();
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -53,13 +76,11 @@ pub(crate) fn build_headers(opts: &ClientOptions, request_id: &Uuid, attempt: u3
     );
     headers.insert(
         "user-agent",
-        HeaderValue::from_str(&sdk_info)
-            .unwrap_or_else(|_| HeaderValue::from_static("posthog-rust")),
+        HeaderValue::from_str(&sdk_info).unwrap_or_else(|_| HeaderValue::from_static("posthog-rs")),
     );
     headers.insert(
         "posthog-sdk-info",
-        HeaderValue::from_str(&sdk_info)
-            .unwrap_or_else(|_| HeaderValue::from_static("posthog-rust")),
+        HeaderValue::from_str(&sdk_info).unwrap_or_else(|_| HeaderValue::from_static("posthog-rs")),
     );
     headers.insert(
         "posthog-attempt",
@@ -73,7 +94,7 @@ pub(crate) fn build_headers(opts: &ClientOptions, request_id: &Uuid, attempt: u3
     );
     headers.insert(
         "posthog-request-timestamp",
-        HeaderValue::from_str(&Utc::now().to_rfc3339())
+        HeaderValue::from_str(&now.to_rfc3339())
             .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
     );
     #[cfg(feature = "test-harness")]
@@ -102,36 +123,6 @@ pub(crate) fn maybe_compress(
         }
     }
     payload
-}
-
-// ---------------------------------------------------------------------------
-// Retry helpers
-// ---------------------------------------------------------------------------
-
-pub(crate) fn is_retryable_status(status: u16) -> bool {
-    matches!(status, 408 | 500 | 502 | 503 | 504)
-}
-
-pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-}
-
-pub(crate) fn backoff_duration(
-    opts: &ClientOptions,
-    attempt: u32,
-    retry_after_secs: Option<u64>,
-) -> Duration {
-    if let Some(secs) = retry_after_secs {
-        Duration::from_secs(secs)
-    } else {
-        let base_ms = opts.retry_initial_backoff_ms;
-        let max_ms = opts.retry_max_backoff_ms;
-        let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
-        Duration::from_millis(backoff_ms.min(max_ms))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,12 +172,6 @@ pub(crate) fn process_batch_response(
 // Sans-IO control flow
 // ---------------------------------------------------------------------------
 
-pub(crate) enum Step {
-    Done,
-    Backoff(Duration),
-    Fail(Error),
-}
-
 pub(crate) fn after_transport_error(
     opts: &ClientOptions,
     request_id: &Uuid,
@@ -202,7 +187,7 @@ pub(crate) fn after_transport_error(
         error = %err_msg,
         "V1 capture request failed, will retry"
     );
-    Step::Backoff(backoff_duration(opts, attempt + 1, None))
+    Step::Backoff(backoff_duration(opts, attempt, None))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -211,12 +196,14 @@ pub(crate) fn after_response(
     request_id: &Uuid,
     attempt: u32,
     status: u16,
-    retry_after: Option<u64>,
+    retry_after: Option<Duration>,
     body: &str,
     pending: &mut Vec<V1Event>,
     final_results: &mut HashMap<Uuid, EventResult>,
 ) -> Step {
-    if status == 200 {
+    // The backend sends exactly 200 today; accept the whole 2xx class so a
+    // future 201/202 isn't misclassified as a connection error.
+    if (200..=299).contains(&status) {
         let batch_resp: CaptureResponse = match serde_json::from_str(body) {
             Ok(r) => r,
             Err(e) => return Step::Fail(Error::Serialization(e.to_string())),
@@ -244,7 +231,7 @@ pub(crate) fn after_response(
         if pending.is_empty() || is_final {
             Step::Done
         } else {
-            Step::Backoff(backoff_duration(opts, attempt + 1, retry_after))
+            Step::Backoff(backoff_duration(opts, attempt, retry_after))
         }
     } else if is_retryable_status(status) {
         let error_desc = serde_json::from_str::<V1ErrorResponse>(body)
@@ -266,7 +253,7 @@ pub(crate) fn after_response(
                     .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))),
             )
         } else {
-            Step::Backoff(backoff_duration(opts, attempt + 1, retry_after))
+            Step::Backoff(backoff_duration(opts, attempt, retry_after))
         }
     } else {
         Step::Fail(
@@ -279,9 +266,7 @@ pub(crate) fn after_response(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::time::Duration;
 
-    use reqwest::header::{HeaderMap, HeaderValue};
     use uuid::Uuid;
 
     use super::*;
@@ -316,84 +301,6 @@ mod tests {
             result: status,
             details: details.map(String::from),
         }
-    }
-
-    // -- is_retryable_status -------------------------------------------------
-
-    #[test]
-    fn retryable_statuses() {
-        for code in [408, 500, 502, 503, 504] {
-            assert!(
-                is_retryable_status(code),
-                "expected {} to be retryable",
-                code
-            );
-        }
-    }
-
-    #[test]
-    fn non_retryable_statuses() {
-        for code in [200, 201, 400, 401, 402, 403, 413, 415, 418, 404] {
-            assert!(
-                !is_retryable_status(code),
-                "expected {} to NOT be retryable",
-                code
-            );
-        }
-    }
-
-    // -- parse_retry_after ---------------------------------------------------
-
-    #[test]
-    fn parse_retry_after_valid() {
-        let mut headers = HeaderMap::new();
-        headers.insert("retry-after", HeaderValue::from_static("5"));
-        assert_eq!(parse_retry_after(&headers), Some(5));
-    }
-
-    #[test]
-    fn parse_retry_after_missing() {
-        let headers = HeaderMap::new();
-        assert_eq!(parse_retry_after(&headers), None);
-    }
-
-    #[test]
-    fn parse_retry_after_non_numeric() {
-        let mut headers = HeaderMap::new();
-        headers.insert("retry-after", HeaderValue::from_static("not-a-number"));
-        assert_eq!(parse_retry_after(&headers), None);
-    }
-
-    // -- backoff_duration ----------------------------------------------------
-
-    #[test]
-    fn backoff_explicit_retry_after_wins() {
-        let opts = test_opts();
-        let d = backoff_duration(&opts, 1, Some(42));
-        assert_eq!(d, Duration::from_secs(42));
-    }
-
-    #[test]
-    fn backoff_exponential_growth() {
-        let opts = test_opts();
-        let d1 = backoff_duration(&opts, 1, None);
-        let d2 = backoff_duration(&opts, 2, None);
-        let d3 = backoff_duration(&opts, 3, None);
-        assert_eq!(d1, Duration::from_millis(100));
-        assert_eq!(d2, Duration::from_millis(200));
-        assert_eq!(d3, Duration::from_millis(400));
-    }
-
-    #[test]
-    fn backoff_clamped_to_max() {
-        let opts = ClientOptionsBuilder::default()
-            .api_key("k".to_string())
-            .retry_initial_backoff_ms(100u64)
-            .retry_max_backoff_ms(150u64)
-            .build()
-            .unwrap();
-        let d = backoff_duration(&opts, 3, None);
-        assert_eq!(d, Duration::from_millis(150));
     }
 
     // -- count_results -------------------------------------------------------
@@ -494,6 +401,55 @@ mod tests {
         assert!(final_results.is_empty());
     }
 
+    // -- backoff schedule ----------------------------------------------------
+
+    /// Guards the `attempt + 1` off-by-one on the V1 call sites: the first
+    /// retry must wait exactly `retry_initial_backoff_ms`, not double it.
+    #[test]
+    fn v1_backoff_schedule_starts_at_initial() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .max_capture_attempts(10u32)
+            .retry_initial_backoff_ms(100u64)
+            .retry_max_backoff_ms(1_000_000u64)
+            .build()
+            .unwrap();
+        let rid = Uuid::now_v7();
+        let ms = |step: Step| match step {
+            Step::Backoff(d) => d.as_millis() as u64,
+            _ => panic!("expected Step::Backoff"),
+        };
+        assert_eq!(
+            ms(after_transport_error(&opts, &rid, 1, "timeout".into())),
+            100,
+            "first retry must honor retry_initial_backoff_ms exactly"
+        );
+        assert_eq!(
+            ms(after_transport_error(&opts, &rid, 2, "timeout".into())),
+            200
+        );
+        assert_eq!(
+            ms(after_transport_error(&opts, &rid, 3, "timeout".into())),
+            400
+        );
+
+        // Same schedule via a retryable HTTP response.
+        let body = r#"{"error":"service_unavailable"}"#;
+        let mut pending = vec![dummy_v1_event()];
+        let mut final_results = HashMap::new();
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            503,
+            None,
+            body,
+            &mut pending,
+            &mut final_results,
+        );
+        assert_eq!(ms(step), 100);
+    }
+
     // -- after_transport_error -----------------------------------------------
 
     #[test]
@@ -582,7 +538,7 @@ mod tests {
             &rid,
             1,
             503,
-            Some(1),
+            Some(Duration::from_secs(1)),
             body,
             &mut pending,
             &mut final_results,
@@ -647,5 +603,112 @@ mod tests {
             &mut final_results,
         );
         assert!(matches!(step, Step::Fail(Error::Serialization(_))));
+    }
+
+    /// C3: any 2xx with a well-formed body is success, not a connection error.
+    #[test]
+    fn after_response_alternate_2xx_statuses_succeed() {
+        let opts = test_opts();
+        let rid = Uuid::now_v7();
+        for status in [201u16, 202, 204, 207, 299] {
+            let e = dummy_v1_event();
+            let body = serde_json::json!({
+                "results": { e.uuid.to_string(): { "result": "ok" } }
+            })
+            .to_string();
+            let mut pending = vec![e];
+            let mut final_results = HashMap::new();
+            let step = after_response(
+                &opts,
+                &rid,
+                1,
+                status,
+                None,
+                &body,
+                &mut pending,
+                &mut final_results,
+            );
+            assert!(
+                matches!(step, Step::Done),
+                "HTTP {} should be treated as success",
+                status
+            );
+            assert_eq!(final_results.len(), 1);
+        }
+    }
+
+    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
+    #[test]
+    fn after_response_alternate_2xx_malformed_body_fails() {
+        let opts = test_opts();
+        let rid = Uuid::now_v7();
+        let mut pending = vec![dummy_v1_event()];
+        let mut final_results = HashMap::new();
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            201,
+            None,
+            "not json",
+            &mut pending,
+            &mut final_results,
+        );
+        assert!(matches!(step, Step::Fail(Error::Serialization(_))));
+    }
+
+    /// A body-less 2xx (e.g. 204 from beacon mode) is terminal on the first
+    /// attempt: Serialization error, no retry, final_results left empty.
+    /// posthog-rs never opts into beacon mode, so this is a safety net.
+    #[test]
+    fn after_response_204_empty_body_is_terminal_serialization_error() {
+        let opts = test_opts();
+        let rid = Uuid::now_v7();
+        let mut pending = vec![dummy_v1_event()];
+        let mut final_results = HashMap::new();
+        let step = after_response(
+            &opts,
+            &rid,
+            1,
+            204,
+            None,
+            "",
+            &mut pending,
+            &mut final_results,
+        );
+        assert!(
+            matches!(step, Step::Fail(Error::Serialization(_))),
+            "expected terminal Serialization error, got {:?}",
+            step
+        );
+        assert!(
+            final_results.is_empty(),
+            "no events should be finalized from a body-less 2xx"
+        );
+    }
+
+    // -- build_headers SDK identity -------------------------------------------
+
+    /// C4: pins the wire identity `posthog-rs/<semver>` — the name must equal
+    /// v0's `$lib` so capture's `$lib`/`$lib_version` materialization is correct.
+    #[test]
+    fn build_headers_sdk_info_is_canonical_lib_slash_version() {
+        let opts = test_opts();
+        let rid = Uuid::now_v7();
+        let headers = build_headers(&opts, &rid, 1);
+
+        let sdk_info = headers.get("posthog-sdk-info").unwrap().to_str().unwrap();
+        let expected = format!("posthog-rs/{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(sdk_info, expected);
+
+        // Parse the way capture does: split at the last '/'.
+        let (lib, version) = sdk_info.rsplit_once('/').unwrap();
+        assert_eq!(lib, "posthog-rs");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        assert!(!version.is_empty());
+
+        // user-agent mirrors the same identity string.
+        let ua = headers.get("user-agent").unwrap().to_str().unwrap();
+        assert_eq!(ua, expected);
     }
 }

@@ -1,45 +1,58 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(feature = "error-tracking")]
+use std::error::Error as StdError;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-#[cfg(feature = "capture-v1")]
-use chrono::Utc;
-use reqwest::{blocking::Client as HttpClient, header::CONTENT_TYPE};
+use reqwest::{
+    blocking::Client as HttpClient,
+    header::{CONTENT_TYPE, USER_AGENT},
+};
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
-#[cfg(feature = "capture-v1")]
-use uuid::Uuid;
 
-use crate::endpoints::{Endpoint, EndpointManager};
-#[cfg(feature = "capture-v1")]
-use crate::event_v1::CaptureResponse;
+use super::get_default_user_agent;
+use crate::endpoints::Endpoint;
+#[cfg(feature = "error-tracking")]
+use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
 use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
     FlagCalledEventParams,
 };
-use crate::feature_flags::{
-    match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagDetail, FlagValue,
-};
+use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
-use crate::{event::InnerEvent, Error, Event};
+use crate::{Error, Event};
 
-use super::ClientOptions;
-
-/// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
-/// dedup cache. On overflow the entire map is reset (matches the JS SDK).
-const MAX_FLAG_CALLED_CACHE_SIZE: usize = 50_000;
-
-fn check_response(response: reqwest::blocking::Response) -> Result<(), Error> {
-    let status = response.status().as_u16();
-    let body = response
-        .text()
-        .unwrap_or_else(|_| "Unknown error".to_string());
-
-    match Error::from_http_response(status, body) {
-        Some(err) => Err(err),
-        None => Ok(()),
+fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
+    if err.is_timeout() {
+        return true;
     }
+
+    let mut source = std::error::Error::source(err);
+    while let Some(error) = source {
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::UnexpectedEof
+            );
+        }
+        source = std::error::Error::source(error);
+    }
+
+    !err.to_string()
+        .to_lowercase()
+        .contains("connection refused")
 }
+
+use super::common::{
+    already_reported, build_dedup_key, extract_flag_details, flag_called_event,
+    flag_event_dedup_cache, local_record, remote_record_from_detail, report_flags_error,
+    DetailedFlagsResponse, FlagEventDedupCache,
+};
+use super::transport::{Completion, Control, TransportHandle};
+use super::ClientOptions;
 
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
@@ -48,79 +61,32 @@ pub struct Client {
     local_evaluator: Option<LocalEvaluator>,
     _flag_poller: Option<FlagPoller>,
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
+    /// Background event transport. `None` for disabled clients.
+    transport: Option<Arc<TransportHandle>>,
 }
 
 /// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
-/// `$feature_flag_called` events through a clone of the blocking [`Client`]'s
-/// HTTP transport. Constructed lazily and cached on the [`Client`] so all
+/// `$feature_flag_called` events through the same background capture transport
+/// as any other event. Constructed lazily and cached on the [`Client`] so all
 /// snapshots share a single dedup cache.
 struct BlockingFlagEventHost {
-    http_client: HttpClient,
-    api_key: String,
-    endpoints: EndpointManager,
-    disabled: bool,
-    defaults: super::CaptureDefaults,
-    dedup_cache: Mutex<HashMap<String, HashSet<String>>>,
+    options: ClientOptions,
+    transport: Option<Arc<TransportHandle>>,
+    dedup_cache: FlagEventDedupCache,
 }
 
 impl BlockingFlagEventHost {
-    fn from_options(options: &ClientOptions, http_client: HttpClient) -> Self {
+    fn from_options(options: &ClientOptions, transport: Option<Arc<TransportHandle>>) -> Self {
         Self {
-            http_client,
-            api_key: options.api_key.clone(),
-            endpoints: options.endpoints().clone(),
-            disabled: options.is_disabled(),
-            defaults: options.capture_defaults(),
-            dedup_cache: Mutex::new(HashMap::new()),
+            options: options.clone(),
+            transport,
+            dedup_cache: flag_event_dedup_cache(),
         }
     }
 
-    /// Returns `true` when the helper has already shipped this
-    /// `(distinct_id, key, response)` combination and the caller should skip.
-    fn already_reported(&self, distinct_id: &str, dedup_key: &str) -> bool {
-        let mut cache = self.dedup_cache.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(seen) = cache.get(distinct_id) {
-            if seen.contains(dedup_key) {
-                return true;
-            }
-        }
-        if cache.len() >= MAX_FLAG_CALLED_CACHE_SIZE {
-            cache.clear();
-        }
-        cache
-            .entry(distinct_id.to_string())
-            .or_default()
-            .insert(dedup_key.to_string());
-        false
-    }
-
-    fn ship_event(&self, mut event: Event) {
-        if self.disabled {
-            return;
-        }
-        event.prepare_for_v0();
-        let inner_event = InnerEvent::new(event, self.api_key.clone());
-        let payload = match serde_json::to_string(&inner_event) {
-            Ok(p) => p,
-            Err(e) => {
-                debug!(error = %e, "failed to serialize $feature_flag_called event");
-                return;
-            }
-        };
-        let url = self.endpoints.build_url(Endpoint::Capture);
-        let result = self
-            .http_client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload)
-            .send();
-        match result {
-            Ok(response) => {
-                if let Err(e) = check_response(response) {
-                    debug!(error = %e, "$feature_flag_called event rejected by server");
-                }
-            }
-            Err(e) => debug!(error = %e, "failed to send $feature_flag_called event"),
+    fn enqueue(&self, event: Event) {
+        if let Some(transport) = &self.transport {
+            transport.enqueue(event);
         }
     }
 }
@@ -128,31 +94,15 @@ impl BlockingFlagEventHost {
 impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
     fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
         let dedup_key = build_dedup_key(&params.key, params.response.as_ref(), &params.groups);
-        if self.already_reported(&params.distinct_id, &dedup_key) {
+        if already_reported(&self.dedup_cache, &params.distinct_id, &dedup_key) {
             return;
         }
 
-        let mut event = Event::new(
-            "$feature_flag_called".to_string(),
-            params.distinct_id.clone(),
-        );
-        for (k, v) in params.properties {
-            if event.insert_prop(k, v).is_err() {
-                return;
-            }
+        if let Some(event) =
+            flag_called_event(params, self.options.disable_geoip, self.options.is_server)
+        {
+            self.enqueue(event);
         }
-        for (group_name, group_id) in &params.groups {
-            event.add_group(group_name, group_id);
-        }
-        // Per-call geoip override takes precedence over client default; caller-wins.
-        let effective_geoip = params.disable_geoip.unwrap_or(self.defaults.disable_geoip);
-        if effective_geoip {
-            event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
-        }
-        if self.defaults.is_server {
-            event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
-        }
-        self.ship_event(event);
     }
 
     fn log_warning(&self, message: &str) {
@@ -160,40 +110,6 @@ impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
         // with their tracing-subscriber level filter (e.g. `posthog_rs=error`).
         warn!("{message}");
     }
-}
-
-fn build_dedup_key(
-    flag_key: &str,
-    response: Option<&FlagValue>,
-    groups: &HashMap<String, String>,
-) -> String {
-    let response_repr = match response {
-        Some(FlagValue::Boolean(true)) => "true".to_string(),
-        Some(FlagValue::Boolean(false)) => "false".to_string(),
-        Some(FlagValue::String(s)) => s.clone(),
-        None => "::null::".to_string(),
-    };
-    if groups.is_empty() {
-        format!("{flag_key}_{response_repr}")
-    } else {
-        // Canonicalize so two equal group maps with different insertion orders
-        // produce the same dedup key — necessary for group-scoped flags to fire
-        // exactly once per distinct group context.
-        let mut sorted: Vec<(&String, &String)> = groups.iter().collect();
-        sorted.sort_by(|a, b| a.0.cmp(b.0));
-        let groups_repr: String = sorted
-            .iter()
-            .map(|(k, v)| format!("{}={}", pct(k), pct(v)))
-            .collect::<Vec<_>>()
-            .join(";");
-        format!("{flag_key}_{response_repr}_{groups_repr}")
-    }
-}
-
-fn pct(s: &str) -> String {
-    s.replace('%', "%25")
-        .replace('=', "%3D")
-        .replace(';', "%3B")
 }
 
 /// Construct a blocking PostHog client from an API key or [`ClientOptions`].
@@ -233,6 +149,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
             };
 
             let mut poller = FlagPoller::new(config, cache.clone());
+            poller.set_on_error(options.on_error.clone());
             poller.start();
 
             (Some(LocalEvaluator::new(cache)), Some(poller))
@@ -244,12 +161,19 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         (None, None)
     };
 
+    let transport = if options.is_disabled() {
+        None
+    } else {
+        Some(Arc::new(TransportHandle::spawn(options.clone())))
+    };
+
     Client {
         options,
         client,
         local_evaluator,
         _flag_poller: flag_poller,
         flag_event_host: OnceLock::new(),
+        transport,
     }
 }
 
@@ -261,30 +185,186 @@ impl Client {
     /// - `event`: Event name, distinct ID, properties, timestamp, groups, and
     ///   optional feature flag state to send.
     ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Serialization`] if the event cannot be serialized,
-    /// [`Error::Connection`] for transport or unexpected HTTP failures,
-    /// [`Error::RateLimit`] for HTTP 429, [`Error::BadRequest`] for HTTP 400 or
-    /// 413, and [`Error::ServerError`] for HTTP 5xx.
-    ///
     /// # Remarks
     ///
-    /// Disabled clients skip the request and return `Ok(())`.
+    /// Fire-and-forget: the event is handed to the background worker, which
+    /// batches, sends, and retries it. Returns once the event is queued — not
+    /// once it is delivered, and delivery failures are not surfaced to the
+    /// caller. Disabled clients and a full queue drop the event (the latter
+    /// with a single warning).
     #[instrument(skip(self, event), level = "debug")]
-    pub fn capture(&self, event: Event) -> Result<(), Error> {
+    pub fn capture(&self, event: Event) {
+        if let Some(transport) = &self.transport {
+            transport.enqueue(event);
+        }
+    }
+
+    /// Flush queued events, blocking until the worker has attempted delivery of
+    /// everything queued before this call. Transient failures are kept for retry
+    /// (the call still returns). A no-op for disabled clients.
+    pub fn flush(&self) {
+        let Some(transport) = &self.transport else {
+            return;
+        };
+        if transport.is_closed() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        if transport.send_control(Control::Flush(Completion::Blocking(tx))) {
+            let _ = rx.recv();
+        }
+    }
+
+    /// Whether the client is disabled (no transport; capture is a no-op). Used
+    /// by the panic hook to skip building an event it could never send.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn is_disabled(&self) -> bool {
+        self.options.is_disabled()
+    }
+
+    /// The client's Error Tracking options, used by the panic hook to build
+    /// panic exception events with the client's configured policy.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn error_tracking_options(&self) -> &crate::error_tracking::ErrorTrackingOptions {
+        self.options.error_tracking()
+    }
+
+    /// Unbounded synchronous flush: blocks until the worker has attempted
+    /// delivery of everything queued. Test-only; the panic hook uses
+    /// `flush_blocking_timeout`.
+    #[cfg(test)]
+    pub(crate) fn flush_blocking(&self) {
+        if let Some(transport) = &self.transport {
+            transport.flush_blocking();
+        }
+    }
+
+    /// Synchronous, time-bounded flush for the panic hook: blocks up to
+    /// `timeout` for the worker to attempt delivery, then returns. A no-op for
+    /// disabled clients.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn flush_blocking_timeout(&self, timeout: Duration) {
+        if let Some(transport) = &self.transport {
+            transport.flush_blocking_timeout(timeout);
+        }
+    }
+
+    /// True when the calling thread is this client's transport worker thread —
+    /// the panic hook skips capturing there.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn on_transport_worker(&self) -> bool {
+        self.transport
+            .as_ref()
+            .is_some_and(|t| t.on_worker_thread())
+    }
+
+    /// Enqueue a panic `$exception` without the tracing `capture` performs:
+    /// `capture` is `#[instrument]` and its enqueue warns once on a full queue,
+    /// both of which run subscriber code — unsafe on the already-panicking
+    /// thread. The send still happens on the worker thread.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn enqueue_panic_event(&self, event: Event) {
+        if let Some(transport) = &self.transport {
+            transport.enqueue_panic(event);
+        }
+    }
+
+    /// Flush, stop the background worker, and join it. Idempotent: subsequent
+    /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
+    /// disabled clients.
+    pub fn shutdown(&self) {
+        let Some(transport) = &self.transport else {
+            return;
+        };
+        if transport.begin_close() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            if transport.send_control(Control::Shutdown(Completion::Blocking(tx))) {
+                let _ = rx.recv();
+            }
+        }
+        // Always join — even if this caller lost the `begin_close` race — so every
+        // shutdown/drop path waits for the worker and the flush stays durable. The
+        // winner has already sent the Shutdown, so the worker will exit.
+        transport.join();
+    }
+
+    /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
+    ///
+    /// The error's type, message, and full `source()` chain are sent as
+    /// `$exception_list`, with a stacktrace of the capture site attached to
+    /// the first entry (see `ErrorTrackingOptions::capture_stacktrace`).
+    ///
+    /// Accepts any [`std::error::Error`], including `&dyn Error`. A
+    /// `Box<dyn Error>` does not implement `Error` itself, so pass the
+    /// dereferenced trait object: `capture_exception(&*boxed)`.
+    ///
+    /// To associate the exception with a person or attach custom properties,
+    /// groups, a fingerprint, or a severity level, use
+    /// [`Client::capture_exception_with`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), posthog_rs::Error> {
+    /// let client = posthog_rs::client("phc_project_api_key");
+    /// let error = std::io::Error::other("checkout failed");
+    ///
+    /// client.capture_exception(&error)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "error-tracking")]
+    pub fn capture_exception<E>(&self, error: &E) -> Result<(), Error>
+    where
+        E: StdError + ?Sized,
+    {
+        self.capture_exception_with(error, CaptureExceptionOptions::default())
+    }
+
+    /// Capture a Rust error with optional context, sending it to PostHog
+    /// Error Tracking.
+    ///
+    /// Set [`CaptureExceptionOptions::distinct_id`] to associate the exception
+    /// with a person; without it the exception is captured personlessly.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), posthog_rs::Error> {
+    /// use posthog_rs::CaptureExceptionOptions;
+    ///
+    /// let client = posthog_rs::client("phc_project_api_key");
+    /// let error = std::io::Error::other("checkout failed");
+    ///
+    /// client.capture_exception_with(
+    ///     &error,
+    ///     CaptureExceptionOptions::new()
+    ///         .distinct_id("user-123")
+    ///         .property("route", "/checkout")?,
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "error-tracking")]
+    pub fn capture_exception_with<E>(
+        &self,
+        error: &E,
+        options: CaptureExceptionOptions,
+    ) -> Result<(), Error>
+    where
+        E: StdError + ?Sized,
+    {
         if self.options.is_disabled() {
-            trace!("Client is disabled, skipping capture");
+            trace!("Client is disabled, skipping exception capture");
             return Ok(());
         }
 
-        #[cfg(feature = "capture-v1")]
-        {
-            return self.capture_v1(vec![event], false).map(|_| ());
-        }
-
-        #[cfg(not(feature = "capture-v1"))]
-        self.capture_v0(event)
+        self.capture(build_exception_event(
+            error,
+            options,
+            self.options.error_tracking(),
+        )?);
+        Ok(())
     }
 
     /// Capture a collection of events with a single request.
@@ -297,149 +377,33 @@ impl Client {
     /// - `historical_migration`: Set to `true` to route events to the
     ///   historical ingestion topic, bypassing the main pipeline.
     ///
-    /// # Errors
+    /// # Remarks
     ///
-    /// Returns the same error categories as [`Client::capture`].
+    /// Fire-and-forget, like [`Client::capture`]. The batch is enqueued per event
+    /// rather than atomically, so if the bounded queue fills partway through, the
+    /// remaining events are dropped (with the usual single full-queue warning).
     #[instrument(skip(self, events), fields(event_count = events.len()), level = "debug")]
-    pub fn capture_batch(
-        &self,
-        events: Vec<Event>,
-        historical_migration: bool,
-    ) -> Result<(), Error> {
-        if self.options.is_disabled() {
-            trace!("Client is disabled, skipping batch capture");
-            return Ok(());
-        }
-
-        #[cfg(feature = "capture-v1")]
-        {
-            return self.capture_v1(events, historical_migration).map(|_| ());
-        }
-
-        #[cfg(not(feature = "capture-v1"))]
-        self.capture_batch_v0(events, historical_migration)
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    fn capture_v0(&self, mut event: Event) -> Result<(), Error> {
-        let defaults = self.options.capture_defaults();
-        super::v0_capture::prepare_event(&mut event, &defaults);
-        let payload =
-            super::v0_capture::build_capture_payload(event, self.options.api_key.clone())?;
-
-        let url = self.options.endpoints().build_url(Endpoint::Capture);
-        let request = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload);
-        let request = super::v0_capture::apply_extra_headers(&self.options, request);
-
-        let response = request
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
-
-        check_response(response)
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    fn capture_batch_v0(
-        &self,
-        events: Vec<Event>,
-        historical_migration: bool,
-    ) -> Result<(), Error> {
-        let defaults = self.options.capture_defaults();
-        let payload = super::v0_capture::build_batch_payload(
-            events,
-            self.options.api_key.clone(),
-            historical_migration,
-            &defaults,
-        )?;
-        let url = self.options.endpoints().build_url(Endpoint::Batch);
-        let request = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .body(payload);
-        let request = super::v0_capture::apply_extra_headers(&self.options, request);
-
-        let response = request
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
-
-        check_response(response)
-    }
-
-    #[cfg(feature = "capture-v1")]
-    fn capture_v1(
-        &self,
-        events: Vec<Event>,
-        historical_migration: bool,
-    ) -> Result<CaptureResponse, Error> {
-        use super::v1_capture::{self, Step};
-        use crate::event_v1::V1BatchRequestRef;
-
-        let request_id = Uuid::now_v7();
-        let created_at = Utc::now().to_rfc3339();
-        let mut attempt: u32 = 1;
-        let defaults = self.options.capture_defaults();
-        let mut pending = v1_capture::build_events(&events, &defaults);
-        let mut final_results = HashMap::new();
-        let historical_migration = historical_migration.then_some(true);
-        let url = self
-            .options
-            .endpoints()
-            .build_custom_url(v1_capture::V1_CAPTURE_PATH);
-
-        loop {
-            let req = V1BatchRequestRef {
-                created_at: &created_at,
-                historical_migration,
-                batch: &pending,
-            };
-            let payload =
-                serde_json::to_vec(&req).map_err(|e| Error::Serialization(e.to_string()))?;
-            let mut headers = v1_capture::build_headers(&self.options, &request_id, attempt);
-            let body =
-                v1_capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
-
-            let step = match self.client.post(&url).headers(headers).body(body).send() {
-                Err(e) => v1_capture::after_transport_error(
-                    &self.options,
-                    &request_id,
-                    attempt,
-                    e.to_string(),
-                ),
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let retry_after = v1_capture::parse_retry_after(resp.headers());
-                    let text = resp.text().unwrap_or_else(|_| "Unknown error".to_string());
-                    v1_capture::after_response(
-                        &self.options,
-                        &request_id,
-                        attempt,
-                        status,
-                        retry_after,
-                        &text,
-                        &mut pending,
-                        &mut final_results,
-                    )
-                }
-            };
-
-            match step {
-                Step::Done => break,
-                Step::Fail(e) => return Err(e),
-                Step::Backoff(d) => {
-                    attempt += 1;
-                    std::thread::sleep(d);
+    pub fn capture_batch(&self, events: Vec<Event>, historical_migration: bool) {
+        if let Some(transport) = &self.transport {
+            if historical_migration {
+                transport.enqueue_historical(events);
+            } else {
+                for event in events {
+                    transport.enqueue(event);
                 }
             }
         }
+    }
 
-        Ok(CaptureResponse {
-            results: final_results,
-        })
+    /// Number of events accepted but not yet delivered or dropped — those still
+    /// in the channel, in the worker's current batch, or held for retry. Returns
+    /// 0 for a disabled client.
+    ///
+    /// Gated behind the `test-harness` feature: it exposes internal queue depth
+    /// for the SDK compliance harness and is not part of the normal public API.
+    #[cfg(feature = "test-harness")]
+    pub fn pending_events(&self) -> usize {
+        self.transport.as_ref().map_or(0, |t| t.pending())
     }
 
     /// Get all remote feature flags and payloads for a user.
@@ -510,30 +474,43 @@ impl Client {
             payload["disable_geoip"] = json!(true);
         }
 
-        let response = self
-            .client
-            .post(&flags_endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        let response = self.send_feature_flags_request(&flags_endpoint, &payload)?;
 
+        let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
         if !response.status().is_success() {
             let status = response.status();
             let text = response
                 .text()
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::Connection(format!(
-                "API request failed with status {status}: {text}"
-            )));
+            let err = Error::Connection(format!("API request failed with status {status}: {text}"));
+            report_flags_error(
+                &self.options.on_error,
+                &flags_endpoint,
+                distinct_id,
+                Some(status.as_u16()),
+                Some(&text),
+                &err,
+            );
+            return Err(err);
         }
 
-        let flags_response = response.json::<FeatureFlagsResponse>().map_err(|e| {
-            Error::Serialization(format!("Failed to parse feature flags response: {e}"))
-        })?;
+        let status = response.status().as_u16();
+        let flags_response = match response.json::<FeatureFlagsResponse>() {
+            Ok(r) => r,
+            Err(e) => {
+                let err =
+                    Error::Serialization(format!("Failed to parse feature flags response: {e}"));
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    distinct_id,
+                    Some(status),
+                    None,
+                    &err,
+                );
+                return Err(err);
+            }
+        };
 
         Ok(flags_response.normalize())
     }
@@ -583,7 +560,18 @@ impl Client {
             let empty_groups: HashMap<String, String> = HashMap::new();
             let empty_group_props: HashMap<String, HashMap<String, serde_json::Value>> =
                 HashMap::new();
-            let props = person_properties.as_ref().unwrap_or(&empty_props);
+            let mut local_props;
+            let props = if let Some(props) = person_properties.as_ref() {
+                local_props = props.clone();
+                local_props
+                    .entry("distinct_id".to_string())
+                    .or_insert_with(|| json!(distinct_id_str.clone()));
+                &local_props
+            } else {
+                local_props = empty_props;
+                local_props.insert("distinct_id".to_string(), json!(distinct_id_str.clone()));
+                &local_props
+            };
             let groups_ref = groups.as_ref().unwrap_or(&empty_groups);
             let group_props_ref = group_properties.as_ref().unwrap_or(&empty_group_props);
             match evaluator.evaluate_flag(
@@ -708,24 +696,53 @@ impl Client {
             payload["disable_geoip"] = json!(true);
         }
 
-        let response = self
+        let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
+        let response = match self
             .client
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, get_default_user_agent())
             .json(&payload)
             .timeout(Duration::from_secs(
                 self.options.feature_flags_request_timeout_seconds,
             ))
             .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let err = Error::Connection(e.to_string());
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    distinct_id,
+                    None,
+                    None,
+                    &err,
+                );
+                return Err(err);
+            }
+        };
 
         if !response.status().is_success() {
             return Ok(None);
         }
 
-        let flags_response: FeatureFlagsResponse = response
-            .json()
-            .map_err(|e| Error::Serialization(format!("Failed to parse response: {e}")))?;
+        let status = response.status().as_u16();
+        let flags_response: FeatureFlagsResponse = match response.json() {
+            Ok(r) => r,
+            Err(e) => {
+                let err = Error::Serialization(format!("Failed to parse response: {e}"));
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    distinct_id,
+                    Some(status),
+                    None,
+                    &err,
+                );
+                return Err(err);
+            }
+        };
 
         let (_flags, payloads) = flags_response.normalize();
         Ok(payloads.get(&key_str).cloned())
@@ -809,11 +826,18 @@ impl Client {
             return Ok(FeatureFlagEvaluations::empty(host));
         }
 
+        let mut options = options;
+        options.groups.get_or_insert_with(HashMap::new);
+        options.group_properties.get_or_insert_with(HashMap::new);
+
         let mut records: HashMap<String, EvaluatedFlagRecord> = HashMap::new();
         let mut locally_evaluated_keys: HashSet<String> = HashSet::new();
 
         if let Some(evaluator) = &self.local_evaluator {
-            let person_props_owned = options.person_properties.clone().unwrap_or_default();
+            let mut person_props_owned = options.person_properties.clone().unwrap_or_default();
+            person_props_owned
+                .entry("distinct_id".to_string())
+                .or_insert_with(|| json!(distinct_id.clone()));
             let groups_owned = options.groups.clone().unwrap_or_default();
             let group_props_owned = options.group_properties.clone().unwrap_or_default();
             let local_results = evaluator.evaluate_all_flags(
@@ -897,10 +921,79 @@ impl Client {
             .get_or_init(|| {
                 Arc::new(BlockingFlagEventHost::from_options(
                     &self.options,
-                    self.client.clone(),
+                    self.transport.clone(),
                 )) as Arc<dyn FeatureFlagEvaluationsHost>
             })
             .clone()
+    }
+
+    fn send_feature_flags_request(
+        &self,
+        flags_endpoint: &str,
+        payload: &serde_json::Value,
+    ) -> Result<reqwest::blocking::Response, Error> {
+        let mut attempt = 1;
+        loop {
+            let request = self
+                .client
+                .post(flags_endpoint)
+                .header(CONTENT_TYPE, "application/json")
+                .header(USER_AGENT, get_default_user_agent())
+                .json(payload)
+                .timeout(Duration::from_secs(
+                    self.options.feature_flags_request_timeout_seconds,
+                ));
+            #[cfg(feature = "test-harness")]
+            let request = {
+                let mut request = request;
+                if let Some(ref extra) = self.options.extra_capture_headers {
+                    for (k, v) in extra {
+                        request = request.header(k.as_str(), v.as_str());
+                    }
+                }
+                request
+            };
+            let result = request.send();
+
+            match result {
+                Ok(response) => match super::retry::feature_flags_after_response(
+                    &self.options,
+                    attempt,
+                    response.status().as_u16(),
+                ) {
+                    super::retry::FeatureFlagsResponseStep::Backoff(delay) => {
+                        std::thread::sleep(delay);
+                        attempt += 1;
+                    }
+                    super::retry::FeatureFlagsResponseStep::Done => return Ok(response),
+                },
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    match super::retry::feature_flags_after_transport_error(
+                        &self.options,
+                        attempt,
+                        is_retryable_feature_flags_error(&e),
+                        err_msg,
+                    ) {
+                        super::retry::FeatureFlagsTransportStep::Backoff(delay) => {
+                            std::thread::sleep(delay);
+                            attempt += 1;
+                        }
+                        super::retry::FeatureFlagsTransportStep::Fail(err) => {
+                            report_flags_error(
+                                &self.options.on_error,
+                                flags_endpoint,
+                                payload.get("distinct_id").and_then(|v| v.as_str()),
+                                None,
+                                None,
+                                &err,
+                            );
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn fetch_flag_details(
@@ -910,163 +1003,79 @@ impl Client {
     ) -> Result<DetailedFlagsResponse, Error> {
         let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
 
+        let person_properties = options.person_properties.clone().unwrap_or_default();
+        let groups = options.groups.clone().unwrap_or_default();
+        let group_properties = options.group_properties.clone().unwrap_or_default();
+        let effective_disable_geoip = options.disable_geoip.unwrap_or(self.options.disable_geoip);
+
         let mut payload = json!({
             "api_key": self.options.api_key,
             "distinct_id": distinct_id,
+            "groups": groups,
+            "person_properties": person_properties,
+            "group_properties": group_properties,
+            "geoip_disable": effective_disable_geoip,
         });
-        if let Some(groups) = &options.groups {
-            payload["groups"] = json!(groups);
-        }
-        if let Some(person_properties) = &options.person_properties {
-            payload["person_properties"] = json!(person_properties);
-        }
-        if let Some(group_properties) = &options.group_properties {
-            payload["group_properties"] = json!(group_properties);
-        }
-        let effective_disable_geoip = options.disable_geoip.unwrap_or(self.options.disable_geoip);
-        if effective_disable_geoip {
-            payload["disable_geoip"] = json!(true);
-        }
         if let Some(flag_keys) = &options.flag_keys {
             payload["flag_keys_to_evaluate"] = json!(flag_keys);
         }
 
-        let response = self
-            .client
-            .post(&flags_endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        let response = self.send_feature_flags_request(&flags_endpoint, &payload)?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response
                 .text()
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::Connection(format!(
-                "API request failed with status {status}: {text}"
-            )));
+            let err = Error::Connection(format!("API request failed with status {status}: {text}"));
+            report_flags_error(
+                &self.options.on_error,
+                &flags_endpoint,
+                Some(distinct_id),
+                Some(status.as_u16()),
+                Some(&text),
+                &err,
+            );
+            return Err(err);
         }
 
-        let parsed = response.json::<FeatureFlagsResponse>().map_err(|e| {
-            Error::Serialization(format!("Failed to parse feature flags response: {e}"))
-        })?;
+        let status = response.status().as_u16();
+        let parsed = match response.json::<FeatureFlagsResponse>() {
+            Ok(p) => p,
+            Err(e) => {
+                let err =
+                    Error::Serialization(format!("Failed to parse feature flags response: {e}"));
+                report_flags_error(
+                    &self.options.on_error,
+                    &flags_endpoint,
+                    Some(distinct_id),
+                    Some(status),
+                    None,
+                    &err,
+                );
+                return Err(err);
+            }
+        };
         Ok(extract_flag_details(parsed))
     }
 }
 
-/// Normalised view of a `/flags?v=2` response surfacing the per-flag detail
-/// shape needed by the snapshot path.
-struct DetailedFlagsResponse {
-    flags: HashMap<String, FlagDetail>,
-    request_id: Option<String>,
-    errors_while_computing_flags: bool,
-    quota_limited: bool,
-}
-
-fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFlagsResponse {
-    match response {
-        FeatureFlagsResponse::V2 {
-            flags,
-            request_id,
-            errors_while_computing_flags,
-            quota_limited,
-        } => DetailedFlagsResponse {
-            flags,
-            request_id,
-            errors_while_computing_flags,
-            quota_limited,
-        },
-        // The legacy decide format does not surface metadata; build a synthetic
-        // detail so the snapshot still carries enabled/variant for each flag.
-        FeatureFlagsResponse::Legacy {
-            feature_flags,
-            feature_flag_payloads,
-            errors,
-        } => {
-            let mut flags = HashMap::new();
-            for (key, value) in feature_flags {
-                let (enabled, variant) = match value {
-                    FlagValue::Boolean(b) => (b, None),
-                    FlagValue::String(s) => (true, Some(s)),
-                };
-                let payload = feature_flag_payloads.get(&key).cloned();
-                flags.insert(
-                    key.clone(),
-                    FlagDetail {
-                        key,
-                        enabled,
-                        variant,
-                        reason: None,
-                        metadata: payload.map(|payload| crate::feature_flags::FlagMetadata {
-                            id: 0,
-                            version: 0,
-                            description: None,
-                            payload: Some(payload),
-                        }),
-                    },
-                );
-            }
-            DetailedFlagsResponse {
-                flags,
-                request_id: None,
-                errors_while_computing_flags: errors.is_some_and(|e| !e.is_empty()),
-                quota_limited: false,
+impl Drop for Client {
+    /// Best-effort flush and worker join on drop. An explicit `shutdown()`
+    /// beforehand makes this a no-op.
+    fn drop(&mut self) {
+        let Some(transport) = &self.transport else {
+            return;
+        };
+        if transport.begin_close() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            if transport.send_control(Control::Shutdown(Completion::Blocking(tx))) {
+                let _ = rx.recv();
             }
         }
-    }
-}
-
-fn local_record(value: FlagValue) -> EvaluatedFlagRecord {
-    let (enabled, variant) = match value {
-        FlagValue::Boolean(b) => (b, None),
-        FlagValue::String(s) => (true, Some(s)),
-    };
-    EvaluatedFlagRecord {
-        enabled,
-        variant,
-        // Local definitions do not surface a payload through the poller today.
-        payload: None,
-        id: None,
-        version: None,
-        reason: Some("Evaluated locally".to_string()),
-        locally_evaluated: true,
-    }
-}
-
-fn remote_record_from_detail(detail: FlagDetail) -> EvaluatedFlagRecord {
-    let metadata = detail.metadata;
-    let reason = detail
-        .reason
-        .and_then(|r| r.description.or(Some(r.code)))
-        .filter(|s| !s.is_empty());
-    let id = metadata.as_ref().map(|m| m.id);
-    let version = metadata.as_ref().map(|m| m.version);
-    let payload = metadata.and_then(|m| m.payload).map(normalize_payload);
-    EvaluatedFlagRecord {
-        enabled: detail.enabled,
-        variant: detail.variant,
-        payload,
-        id,
-        version,
-        reason,
-        locally_evaluated: false,
-    }
-}
-
-/// `metadata.payload` from `/flags?v=2` is sometimes a JSON-encoded string
-/// (e.g. `"{\"color\":\"blue\"}"`) rather than already-parsed JSON. Try to
-/// parse a `String` payload as JSON and fall back to the raw string on
-/// failure so users can branch on a uniform [`serde_json::Value`].
-fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
-    match payload {
-        serde_json::Value::String(raw) => {
-            serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))
-        }
-        other => other,
+        // Always join — even if this caller lost the `begin_close` race — so every
+        // shutdown/drop path waits for the worker and the flush stays durable. The
+        // winner has already sent the Shutdown, so the worker will exit.
+        transport.join();
     }
 }

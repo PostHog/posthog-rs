@@ -2,12 +2,15 @@
 //! Each client keeps only the I/O; this module owns event preparation and
 //! payload construction.
 
-#[cfg(not(feature = "async-client"))]
+// The transport worker is always blocking reqwest, even for the async client,
+// so the v0 request helpers operate on the blocking RequestBuilder.
+use chrono::{DateTime, Utc};
 use reqwest::blocking::RequestBuilder;
-#[cfg(feature = "async-client")]
-use reqwest::RequestBuilder;
 
-use super::{CaptureDefaults, ClientOptions};
+use super::{
+    common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
+    BeforeSendHook, CaptureDefaults, ClientOptions,
+};
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
@@ -20,12 +23,8 @@ use crate::event::{BatchRequest, Event, InnerEvent};
 /// Uses `insert_prop_default` so a caller who explicitly set a property on the
 /// event before calling `capture()` keeps their value.
 pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
-    if defaults.disable_geoip {
-        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
-    }
-    if defaults.is_server {
-        event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
-    }
+    apply_capture_defaults(event, defaults);
+    apply_runtime_context(event);
     event.prepare_for_v0();
 }
 
@@ -33,33 +32,60 @@ pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
 // Payload building
 // ---------------------------------------------------------------------------
 
-/// Build the JSON body for a single-event V0 capture request.
-pub(crate) fn build_capture_payload(event: Event, api_key: String) -> Result<String, Error> {
-    let inner_event = InnerEvent::new(event, api_key);
-    serde_json::to_string(&inner_event).map_err(|e| Error::Serialization(e.to_string()))
-}
-
 /// Build the JSON body for a V0 batch capture request.
+///
+/// Returns the serialized body together with the number of events that survived
+/// `before_send` filtering, so the caller can account for filtered-out events as
+/// terminal and track only what is actually in flight. `Ok(None)` means every
+/// event was dropped by `before_send`.
 pub(crate) fn build_batch_payload(
     events: Vec<Event>,
     api_key: String,
     historical_migration: bool,
+    sent_at: DateTime<Utc>,
     defaults: &CaptureDefaults,
-) -> Result<String, Error> {
+    before_send: &[BeforeSendHook],
+) -> Result<Option<(String, usize)>, Error> {
     let inner_events: Vec<InnerEvent> = events
         .into_iter()
-        .map(|mut event| {
+        .filter_map(|mut event| {
             prepare_event(&mut event, defaults);
-            InnerEvent::new(event, api_key.clone())
+            apply_before_send_hooks(before_send, event).map(InnerEvent::new_for_batch)
         })
         .collect();
 
+    if inner_events.is_empty() {
+        return Ok(None);
+    }
+
+    let kept = inner_events.len();
     let batch_request = BatchRequest {
         api_key,
         historical_migration,
+        sent_at: sent_at.to_rfc3339(),
         batch: inner_events,
     };
-    serde_json::to_string(&batch_request).map_err(|e| Error::Serialization(e.to_string()))
+    serde_json::to_string(&batch_request)
+        .map(|json| Some((json, kept)))
+        .map_err(|e| Error::Serialization(e.to_string()))
+}
+
+/// Encode the V0 JSON body, compressing when configured. Returns the bytes and
+/// the `Content-Encoding` token to advertise (`Some(token)` when compressed,
+/// `None` when sent uncompressed). Routes through the shared `compress()`, so a
+/// V0 build is gzip-only by construction; a non-gzip algorithm or a compression
+/// failure falls back to uncompressed.
+pub(crate) fn encode_body(
+    options: &ClientOptions,
+    json: String,
+) -> (Vec<u8>, Option<&'static str>) {
+    match options.capture_compression {
+        Some(algo) => match crate::compression::compress(algo, json.as_bytes()) {
+            Some((bytes, encoding)) => (bytes, Some(encoding)),
+            None => (json.into_bytes(), None),
+        },
+        None => (json.into_bytes(), None),
+    }
 }
 
 // ---------------------------------------------------------------------------

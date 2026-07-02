@@ -1,6 +1,6 @@
 # PostHog Rust SDK Examples
 
-This directory contains example applications demonstrating how to use the PostHog Rust SDK, particularly the feature flags functionality.
+This directory contains example applications demonstrating how to use the PostHog Rust SDK, including feature flags, local evaluation, configuration, and manual error tracking.
 
 ## Running the Examples
 
@@ -55,6 +55,21 @@ Shows:
 - Self-hosted instance configuration
 - Production settings with timeouts and geoip configuration
 - High-performance local evaluation setup
+- Observability with `on_error` (terminal capture/flags/poller failures)
+
+### 4. Error Tracking Example
+
+Demonstrates manual error tracking capture:
+
+```bash
+export POSTHOG_API_KEY=phc_your_project_key
+cargo run --example error_tracking
+```
+
+Shows:
+- Capturing a Rust error as a PostHog Error Tracking event
+- Attaching a distinct ID
+- Adding custom exception properties
 
 ## Key Concepts
 

@@ -3,13 +3,15 @@ services:
     build:
       context: ../..
       dockerfile: compliance/v0/Dockerfile
+    environment:
+      - COMPRESSION=gzip
     ports:
       - "8080:8080"
     networks:
       - test-network
 
   test-harness:
-    image: posthog-sdk-test-harness:debug
+    image: ghcr.io/posthog/sdk-test-harness:0.10.0
     command: ["run", "--adapter-url", "http://sdk-adapter:8080", "--mock-url", "http://test-harness:8081", "--concurrency", "10", "--suite", "capture"]
     networks:
       - test-network

@@ -1,12 +1,25 @@
+use std::sync::{Arc, Mutex};
+
 use crate::endpoints::{EndpointManager, DEFAULT_HOST};
+#[cfg(feature = "error-tracking")]
+use crate::error_tracking::ErrorTrackingOptions;
+use crate::event::Event;
 use derive_builder::Builder;
 use tracing::warn;
 
-/// Request-body compression algorithm for the V1 capture pipeline.
+mod common;
+mod on_error;
+
+pub(crate) use common::apply_on_error_hooks;
+pub(crate) use on_error::OnErrorHook;
+pub use on_error::{CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError};
+
+/// Request-body compression algorithm for the capture pipelines.
 ///
-/// When set on [`ClientOptions`], V1 capture requests are compressed and the
+/// When set on [`ClientOptions`], capture requests are compressed and the
 /// matching `Content-Encoding` header is sent. The variant string matches the
-/// HTTP `Content-Encoding` token the server expects.
+/// HTTP `Content-Encoding` token the server expects. The V0 pipeline supports
+/// `Gzip` only; V1 supports all variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureCompression {
     Gzip,
@@ -17,7 +30,6 @@ pub enum CaptureCompression {
 
 impl CaptureCompression {
     /// The HTTP `Content-Encoding` token for this algorithm.
-    #[cfg(feature = "capture-v1")]
     pub(crate) fn content_encoding(self) -> &'static str {
         match self {
             CaptureCompression::Gzip => "gzip",
@@ -30,6 +42,8 @@ impl CaptureCompression {
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+mod retry;
+mod transport;
 #[cfg(not(feature = "capture-v1"))]
 mod v0_capture;
 #[cfg(feature = "capture-v1")]
@@ -45,6 +59,45 @@ mod async_client;
 pub use async_client::client;
 #[cfg(feature = "async-client")]
 pub use async_client::Client;
+
+type BeforeSendFn = dyn FnMut(Event) -> Option<Event> + Send + 'static;
+type SharedBeforeSendHook = Arc<Mutex<Box<BeforeSendFn>>>;
+
+/// Hook that can modify or discard events before they are sent.
+///
+/// Hooks run before serialization. Return `Some(event)` to continue sending the
+/// event, or `None` to drop it.
+///
+/// Hook panics are caught and cause the current event to be dropped. If a hook
+/// keeps mutable state, a panic can leave that state partially updated; the SDK
+/// recovers the hook mutex and subsequent events continue through the same hook.
+#[derive(Clone)]
+pub struct BeforeSendHook(SharedBeforeSendHook);
+
+impl BeforeSendHook {
+    /// Create a new before-send hook.
+    pub fn new<F>(hook: F) -> Self
+    where
+        F: FnMut(Event) -> Option<Event> + Send + 'static,
+    {
+        Self(Arc::new(Mutex::new(Box::new(hook))))
+    }
+
+    pub(crate) fn apply(&self, event: Event) -> Option<Event> {
+        let mut hook = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (hook)(event)
+    }
+}
+
+pub(crate) const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SDK_USERAGENT_NAME: &str = "posthog-rs";
+
+pub(crate) fn get_default_user_agent() -> String {
+    format!("{}/{}", SDK_USERAGENT_NAME, CRATE_VERSION)
+}
 
 /// Configuration options for the PostHog client.
 ///
@@ -117,6 +170,17 @@ pub struct ClientOptions {
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
 
+    /// Maximum number of retries after a transient remote `/flags` failure
+    /// (transport error or HTTP 502/504). Defaults to `1`. Set to `0` to
+    /// disable retries.
+    #[builder(default = "1")]
+    pub(crate) feature_flags_request_max_retries: u32,
+
+    /// Error tracking stacktrace and frame classification options
+    #[cfg(feature = "error-tracking")]
+    #[builder(default)]
+    error_tracking: ErrorTrackingOptions,
+
     /// When true, never fall back to the remote API for flag evaluation. If local
     /// evaluation is inconclusive (flag not cached or missing properties), the SDK
     /// returns `Ok(None)` instead of making a network call. Only meaningful when
@@ -140,12 +204,54 @@ pub struct ClientOptions {
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) retry_max_backoff_ms: u64,
 
-    /// Optional request-body compression for the V1 capture pipeline. When
-    /// `None` (default), bodies are sent uncompressed. Requires the
-    /// `capture-v1` crate feature to take effect.
+    /// Number of buffered events that triggers an automatic flush (default: 100).
+    #[builder(default = "100")]
+    pub(crate) flush_at: usize,
+
+    /// Maximum number of events sent in a single batch request (default: 100).
+    /// A flush of more than this many events is split into multiple requests.
+    #[builder(default = "100")]
+    pub(crate) max_batch_size: usize,
+
+    /// Interval between automatic time-based flushes, in milliseconds
+    /// (default: 5000).
+    #[builder(default = "5000")]
+    pub(crate) flush_interval_ms: u64,
+
+    /// Maximum number of events buffered before new events are dropped
+    /// (default: 10000). A single warning is logged while the queue is full.
+    #[builder(default = "10000")]
+    pub(crate) max_queue_size: usize,
+
+    /// Maximum time `shutdown()` and `Drop` spend draining buffered and
+    /// retrying events before abandoning the rest, in milliseconds (default:
+    /// 30000). This bounds the drain itself, including any delivery the drain
+    /// starts. It does not bound work already underway: the single background
+    /// worker performs one blocking send at a time, so an automatic flush or
+    /// drain in progress when shutdown is requested runs to completion first —
+    /// up to `request_timeout_seconds` per in-flight batch, so a large
+    /// auto-drain can delay teardown by several request timeouts. `flush()` is
+    /// unaffected.
+    #[builder(default = "30000")]
+    pub(crate) shutdown_timeout_ms: u64,
+
+    /// Optional request-body compression. When `None` (default), bodies are
+    /// sent uncompressed. The V0 pipeline supports `Gzip` only; V1 supports all
+    /// variants.
     #[builder(default, setter(strip_option))]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) capture_compression: Option<CaptureCompression>,
+
+    /// Hooks to modify, filter, or sample events before they are sent.
+    #[builder(default, setter(custom))]
+    pub(crate) before_send: Vec<BeforeSendHook>,
+
+    /// Hooks invoked once per terminal failure on a network surface (capture
+    /// batch delivery, remote `/flags` requests, the local-evaluation poller).
+    /// Observability only; registering at least one also silences the default
+    /// WARN logged for terminal capture batch rejects/exhaustion (the caller now
+    /// owns that signal).
+    #[builder(default, setter(custom))]
+    pub(crate) on_error: Vec<OnErrorHook>,
 
     /// Extra HTTP headers injected into every outbound capture request.
     /// Used by the SDK test harness adapter to attach `X-Test-Id` for
@@ -184,6 +290,12 @@ impl ClientOptions {
     /// Get the endpoint manager
     pub(crate) fn endpoints(&self) -> &EndpointManager {
         &self.endpoint_manager
+    }
+
+    /// Get error tracking options.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn error_tracking(&self) -> &ErrorTrackingOptions {
+        &self.error_tracking
     }
 
     /// Check whether the client is disabled.
@@ -229,6 +341,52 @@ impl ClientOptions {
 }
 
 impl ClientOptionsBuilder {
+    /// Add a hook that can modify or discard events before they are sent.
+    ///
+    /// Hooks should avoid panicking. Panics are caught and drop the current event,
+    /// but any mutable state captured by the hook may be left partially updated
+    /// and will be reused on subsequent calls.
+    pub fn before_send<F>(&mut self, hook: F) -> &mut Self
+    where
+        F: FnMut(Event) -> Option<Event> + Send + 'static,
+    {
+        self.before_send
+            .get_or_insert_with(Vec::new)
+            .push(BeforeSendHook::new(hook));
+        self
+    }
+
+    /// Add a hook invoked once per terminal failure on an SDK network surface.
+    ///
+    /// The hook receives a [`PostHogError`] for a capture batch the SDK gave up
+    /// delivering, a failed remote `/flags` request, or a failed
+    /// local-evaluation poll. Multiple hooks fire in registration order.
+    ///
+    /// # Observability only — never emit from the hook
+    ///
+    /// The hook MUST NOT call back into the SDK (`capture`/`capture_batch`/
+    /// `capture_exception`, `flush`, or `shutdown`): emitting an event while
+    /// handling a capture failure forms an amplification loop. The hook is
+    /// `Fn + Send + Sync` and invoked without holding any SDK lock, so it may
+    /// run concurrently on multiple threads and must be internally thread-safe.
+    /// Keep it cheap and non-blocking; the capture hook runs on the background
+    /// transport thread. Panics are caught and ignored.
+    ///
+    /// Registering a hook silences the default WARN for terminal capture
+    /// reject/exhaustion and serialization failures (the caller now owns that
+    /// signal). Shutdown-timeout, queue-full, and `before_send` drops keep their
+    /// WARN logs and do **not** fire the hook — they are not delivery failures.
+    /// The existing `/flags` and poller WARN logs are unaffected.
+    pub fn on_error<F>(&mut self, hook: F) -> &mut Self
+    where
+        F: Fn(&PostHogError<'_>) + Send + Sync + 'static,
+    {
+        self.on_error
+            .get_or_insert_with(Vec::new)
+            .push(OnErrorHook::new(hook));
+        self
+    }
+
     /// Build sanitized [`ClientOptions`].
     ///
     /// Missing or whitespace-only API keys are allowed and disable the client so

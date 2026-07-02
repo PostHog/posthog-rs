@@ -1,9 +1,10 @@
+use crate::client::{apply_on_error_hooks, get_default_user_agent, OnErrorHook};
 use crate::feature_flags::{
     match_feature_flag, match_feature_flag_with_context, CohortDefinition, EvaluationContext,
     FeatureFlag, FlagValue, InconclusiveMatchError,
 };
-use crate::Error;
-use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH};
+use crate::{Error, LocalEvaluationFailure, PostHogError};
+use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH, USER_AGENT};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,6 +21,35 @@ fn extract_etag(headers: &HeaderMap) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
+}
+
+/// Sleep up to `duration`, waking early when `stop_signal` is set. Returns
+/// `true` if a stop was requested (either already pending or observed while
+/// waiting). Polling in short steps keeps shutdown latency bounded even when
+/// the poll interval is large — a plain `sleep(poll_interval)` would make
+/// `stop`/`Drop` block for the remainder of the current interval.
+fn sleep_until_stop(stop_signal: &AtomicBool, duration: Duration) -> bool {
+    const STEP: Duration = Duration::from_millis(200);
+    let mut remaining = duration;
+    while !remaining.is_zero() {
+        if stop_signal.load(Ordering::Relaxed) {
+            return true;
+        }
+        let step = remaining.min(STEP);
+        std::thread::sleep(step);
+        remaining -= step;
+    }
+    stop_signal.load(Ordering::Relaxed)
+}
+
+/// Fire the `on_error` hooks for a failed definitions poll. The personal API
+/// key is never included — only the cause and HTTP status are surfaced.
+fn report_local_eval_error(hooks: &[OnErrorHook], status: Option<u16>, error: &Error) {
+    if hooks.is_empty() {
+        return;
+    }
+    let failure = PostHogError::LocalEvaluation(LocalEvaluationFailure { error, status });
+    apply_on_error_hooks(hooks, &failure);
 }
 
 /// Response from the PostHog local evaluation API.
@@ -186,6 +216,10 @@ pub struct FlagPoller {
     client: reqwest::blocking::Client,
     stop_signal: Arc<AtomicBool>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
+    /// Observability hooks, injected by the client builder before `start`.
+    /// Kept here rather than on `LocalEvaluationConfig` so the public config
+    /// struct stays unchanged.
+    on_error: Vec<OnErrorHook>,
 }
 
 impl FlagPoller {
@@ -207,7 +241,16 @@ impl FlagPoller {
             client,
             stop_signal: Arc::new(AtomicBool::new(false)),
             thread_handle: None,
+            on_error: Vec::new(),
         }
+    }
+
+    /// Register `on_error` hooks. Called by the client builder before
+    /// [`FlagPoller::start`]; not part of the public flag-poller API.
+    // Only the blocking client (built when `async-client` is off) injects hooks.
+    #[cfg_attr(feature = "async-client", allow(dead_code))]
+    pub(crate) fn set_on_error(&mut self, hooks: Vec<OnErrorHook>) {
+        self.on_error = hooks;
     }
 
     /// Start the polling thread.
@@ -229,6 +272,7 @@ impl FlagPoller {
         let config = self.config.clone();
         let cache = self.cache.clone();
         let stop_signal = self.stop_signal.clone();
+        let on_error = self.on_error.clone();
 
         let handle = std::thread::spawn(move || {
             let client = reqwest::blocking::Client::builder()
@@ -239,9 +283,7 @@ impl FlagPoller {
             let mut last_etag: Option<String> = None;
 
             loop {
-                std::thread::sleep(config.poll_interval);
-
-                if stop_signal.load(Ordering::Relaxed) {
+                if sleep_until_stop(&stop_signal, config.poll_interval) {
                     debug!("Flag poller received stop signal");
                     break;
                 }
@@ -257,7 +299,8 @@ impl FlagPoller {
                         "Authorization",
                         format!("Bearer {}", config.personal_api_key),
                     )
-                    .header("X-PostHog-Project-Api-Key", &config.project_api_key);
+                    .header("X-PostHog-Project-Api-Key", &config.project_api_key)
+                    .header(USER_AGENT, get_default_user_agent());
 
                 if let Some(ref etag) = last_etag {
                     request = request.header(IF_NONE_MATCH, etag.as_str());
@@ -265,9 +308,10 @@ impl FlagPoller {
 
                 match request.send() {
                     Ok(response) => {
-                        if response.status() == StatusCode::NOT_MODIFIED {
+                        let status = response.status();
+                        if status == StatusCode::NOT_MODIFIED {
                             debug!("Flag definitions unchanged (304 Not Modified)");
-                        } else if response.status().is_success() {
+                        } else if status.is_success() {
                             // Extract ETag before consuming the response body
                             let new_etag = extract_etag(response.headers());
 
@@ -279,14 +323,20 @@ impl FlagPoller {
                                 }
                                 Err(e) => {
                                     warn!(error = %e, "Failed to parse flag response");
+                                    let err = Error::Serialization(e.to_string());
+                                    report_local_eval_error(&on_error, Some(status.as_u16()), &err);
                                 }
                             }
                         } else {
-                            warn!(status = %response.status(), "Failed to fetch flags");
+                            warn!(status = %status, "Failed to fetch flags");
+                            let err = Error::Connection(format!("HTTP {}", status));
+                            report_local_eval_error(&on_error, Some(status.as_u16()), &err);
                         }
                     }
                     Err(e) => {
                         warn!(error = %e, "Failed to fetch flags");
+                        let err = Error::Connection(e.to_string());
+                        report_local_eval_error(&on_error, None, &err);
                     }
                 }
             }
@@ -309,7 +359,7 @@ impl FlagPoller {
             self.config.api_host.trim_end_matches('/')
         );
 
-        let response = self
+        let response = match self
             .client
             .get(&url)
             .header(
@@ -317,22 +367,36 @@ impl FlagPoller {
                 format!("Bearer {}", self.config.personal_api_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
+            .header(USER_AGENT, get_default_user_agent())
             .send()
-            .map_err(|e| {
+        {
+            Ok(r) => r,
+            Err(e) => {
                 error!(error = %e, "Connection error loading flags");
-                Error::Connection(e.to_string())
-            })?;
+                let err = Error::Connection(e.to_string());
+                report_local_eval_error(&self.on_error, None, &err);
+                return Err(err);
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();
             error!(status = %status, "HTTP error loading flags");
-            return Err(Error::Connection(format!("HTTP {}", status)));
+            let err = Error::Connection(format!("HTTP {}", status));
+            report_local_eval_error(&self.on_error, Some(status.as_u16()), &err);
+            return Err(err);
         }
 
-        let data = response.json::<LocalEvaluationResponse>().map_err(|e| {
-            error!(error = %e, "Failed to parse flag response");
-            Error::Serialization(e.to_string())
-        })?;
+        let status = response.status().as_u16();
+        let data = match response.json::<LocalEvaluationResponse>() {
+            Ok(d) => d,
+            Err(e) => {
+                error!(error = %e, "Failed to parse flag response");
+                let err = Error::Serialization(e.to_string());
+                report_local_eval_error(&self.on_error, Some(status), &err);
+                return Err(err);
+            }
+        };
 
         self.cache.update(data);
         Ok(())
@@ -367,6 +431,10 @@ pub struct AsyncFlagPoller {
     stop_signal: Arc<AtomicBool>,
     task_handle: Option<tokio::task::JoinHandle<()>>,
     is_running: Arc<tokio::sync::RwLock<bool>>,
+    /// Observability hooks, injected by the client builder before `start`.
+    /// Kept here rather than on `LocalEvaluationConfig` so the public config
+    /// struct stays unchanged.
+    on_error: Vec<OnErrorHook>,
 }
 
 #[cfg(feature = "async-client")]
@@ -390,7 +458,14 @@ impl AsyncFlagPoller {
             stop_signal: Arc::new(AtomicBool::new(false)),
             task_handle: None,
             is_running: Arc::new(tokio::sync::RwLock::new(false)),
+            on_error: Vec::new(),
         }
+    }
+
+    /// Register `on_error` hooks. Called by the client builder before
+    /// [`AsyncFlagPoller::start`]; not part of the public flag-poller API.
+    pub(crate) fn set_on_error(&mut self, hooks: Vec<OnErrorHook>) {
+        self.on_error = hooks;
     }
 
     /// Start the polling task.
@@ -425,6 +500,7 @@ impl AsyncFlagPoller {
         let stop_signal = self.stop_signal.clone();
         let is_running = self.is_running.clone();
         let client = self.client.clone();
+        let on_error = self.on_error.clone();
 
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(config.poll_interval);
@@ -448,7 +524,8 @@ impl AsyncFlagPoller {
                         let mut request = client
                             .get(&url)
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
-                            .header("X-PostHog-Project-Api-Key", &config.project_api_key);
+                            .header("X-PostHog-Project-Api-Key", &config.project_api_key)
+                            .header(USER_AGENT, get_default_user_agent());
 
                         if let Some(ref etag) = last_etag {
                             request = request.header(IF_NONE_MATCH, etag.as_str());
@@ -456,9 +533,10 @@ impl AsyncFlagPoller {
 
                         match request.send().await {
                             Ok(response) => {
-                                if response.status() == StatusCode::NOT_MODIFIED {
+                                let status = response.status();
+                                if status == StatusCode::NOT_MODIFIED {
                                     debug!("Flag definitions unchanged (304 Not Modified)");
-                                } else if response.status().is_success() {
+                                } else if status.is_success() {
                                     // Extract ETag before consuming the response body
                                     let new_etag = extract_etag(response.headers());
 
@@ -470,14 +548,20 @@ impl AsyncFlagPoller {
                                         }
                                         Err(e) => {
                                             warn!(error = %e, "Failed to parse flag response");
+                                            let err = Error::Serialization(e.to_string());
+                                            report_local_eval_error(&on_error, Some(status.as_u16()), &err);
                                         }
                                     }
                                 } else {
-                                    warn!(status = %response.status(), "Failed to fetch flags");
+                                    warn!(status = %status, "Failed to fetch flags");
+                                    let err = Error::Connection(format!("HTTP {}", status));
+                                    report_local_eval_error(&on_error, Some(status.as_u16()), &err);
                                 }
                             }
                             Err(e) => {
                                 warn!(error = %e, "Failed to fetch flags");
+                                let err = Error::Connection(e.to_string());
+                                report_local_eval_error(&on_error, None, &err);
                             }
                         }
                     }
@@ -505,7 +589,7 @@ impl AsyncFlagPoller {
             self.config.api_host.trim_end_matches('/')
         );
 
-        let response = self
+        let response = match self
             .client
             .get(&url)
             .header(
@@ -513,26 +597,37 @@ impl AsyncFlagPoller {
                 format!("Bearer {}", self.config.personal_api_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
+            .header(USER_AGENT, get_default_user_agent())
             .send()
             .await
-            .map_err(|e| {
+        {
+            Ok(r) => r,
+            Err(e) => {
                 error!(error = %e, "Connection error loading flags");
-                Error::Connection(e.to_string())
-            })?;
+                let err = Error::Connection(e.to_string());
+                report_local_eval_error(&self.on_error, None, &err);
+                return Err(err);
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();
             error!(status = %status, "HTTP error loading flags");
-            return Err(Error::Connection(format!("HTTP {}", status)));
+            let err = Error::Connection(format!("HTTP {}", status));
+            report_local_eval_error(&self.on_error, Some(status.as_u16()), &err);
+            return Err(err);
         }
 
-        let data = response
-            .json::<LocalEvaluationResponse>()
-            .await
-            .map_err(|e| {
+        let status = response.status().as_u16();
+        let data = match response.json::<LocalEvaluationResponse>().await {
+            Ok(d) => d,
+            Err(e) => {
                 error!(error = %e, "Failed to parse flag response");
-                Error::Serialization(e.to_string())
-            })?;
+                let err = Error::Serialization(e.to_string());
+                report_local_eval_error(&self.on_error, Some(status), &err);
+                return Err(err);
+            }
+        };
 
         self.cache.update(data);
         Ok(())

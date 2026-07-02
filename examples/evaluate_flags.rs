@@ -52,14 +52,12 @@ async fn main() {
     // /flags round-trip happens here.
     let mut event = Event::new("checkout-started", user_id);
     event.with_flags(&snapshot);
-    if let Err(e) = client.capture(event).await {
-        println!("capture failed: {e}");
-    }
+    client.capture(event);
 
     // Optional: only attach the flags actually consulted on this request path.
     let mut narrow = Event::new("checkout-completed", user_id);
     narrow.with_flags(&snapshot.only_accessed());
-    let _ = client.capture(narrow).await;
+    client.capture(narrow);
 }
 
 #[cfg(not(feature = "async-client"))]
