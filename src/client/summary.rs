@@ -75,6 +75,13 @@ impl CaptureSummary {
     }
 
     /// Whether every submitted event was persisted (`not_persisted() == 0`).
+    ///
+    /// Note this is **vacuously true when nothing was sent** (`submitted() == 0`),
+    /// which is what a disabled client or a fully `before_send`-filtered batch
+    /// returns. Callers that advance durable state on the strength of a confirmed
+    /// delivery (e.g. committing an upstream offset) must therefore also check
+    /// `submitted()` against the number of events they intended to send — do not
+    /// gate durability on `all_persisted()` alone.
     pub fn all_persisted(&self) -> bool {
         self.not_persisted() == 0
     }
