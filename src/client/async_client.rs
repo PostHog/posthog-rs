@@ -953,7 +953,17 @@ impl Client {
             let result = request.send().await;
 
             match result {
-                Ok(response) => return Ok(response),
+                Ok(response) => match super::retry::feature_flags_after_response(
+                    &self.options,
+                    attempt,
+                    response.status().as_u16(),
+                ) {
+                    super::retry::FeatureFlagsResponseStep::Backoff(delay) => {
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                    }
+                    super::retry::FeatureFlagsResponseStep::Done => return Ok(response),
+                },
                 Err(e) => {
                     let err_msg = e.to_string();
                     match super::retry::feature_flags_after_transport_error(
@@ -962,11 +972,11 @@ impl Client {
                         is_retryable_feature_flags_error(&e),
                         err_msg,
                     ) {
-                        super::retry::Step::Backoff(delay) => {
+                        super::retry::FeatureFlagsTransportStep::Backoff(delay) => {
                             tokio::time::sleep(delay).await;
                             attempt += 1;
                         }
-                        super::retry::Step::Fail(err) => {
+                        super::retry::FeatureFlagsTransportStep::Fail(err) => {
                             report_flags_error(
                                 &self.options.on_error,
                                 flags_endpoint,
@@ -976,9 +986,6 @@ impl Client {
                                 &err,
                             );
                             return Err(err);
-                        }
-                        super::retry::Step::Done => {
-                            unreachable!("feature flag transport errors cannot complete")
                         }
                     }
                 }
