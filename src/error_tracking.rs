@@ -675,12 +675,20 @@ pub(crate) struct StackFrame {
     /// Load address of the module containing the instruction, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_addr: Option<String>,
-    /// Whether the SDK already resolved this frame's symbol client-side. When
-    /// `true`, the server must not re-symbolicate the `instruction_addr`: the
-    /// client already expanded any inline frames and the server would duplicate
-    /// them. When `false`, the server resolves the address against uploaded
-    /// debug symbols. Not consumed by the backend yet — sent ahead of support.
+    /// Whether the SDK resolved this frame's `function`/`filename`/`lineno`
+    /// from debug info in the running process. Address-less client-resolved
+    /// frames pass through the server untouched; addressed ones still get
+    /// symbolicated server-side — group-wise when `inline` markers are
+    /// present — with the client fields kept as the fallback.
     pub client_resolved: bool,
+    /// Marks a frame the SDK synthesized by expanding the inline chain of the
+    /// group's physical frame, which precedes its members and carries the same
+    /// `instruction_addr`. The server resolves the group's address once and
+    /// either replaces the whole group with its own expansion or keeps the
+    /// client's frames verbatim — so inline data survives without symbols
+    /// uploaded, and doesn't duplicate with them. Serialized only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub inline: bool,
 }
 
 /// A loaded module (binary image) referenced by captured stack frames. Sent as
@@ -909,34 +917,60 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
         });
 
         if resolvable {
-            // The server can symbolicate this address, so emit ONE frame per
-            // physical frame carrying the raw `instruction_addr` and let the
-            // resolver expand the inline chain from the symcache. Expanding
-            // inlines client-side as well would double them after server-side
-            // resolution (the resolver re-expands every address-bearing native
-            // frame). This matches posthog-ios, which sends one frame per
-            // return address. The outermost (physical) layer's name is a
-            // client-side placeholder until the server resolves the address;
+            let wire_instruction_addr = Some(format!("0x{instruction_addr:x}"));
             // frame.symbol_address() is the physical entry the pinned-frame
-            // stripping matches against.
-            let physical = layers.last();
-            frames.push(StackFrame {
-                filename: physical.and_then(|(file, _, _)| file.clone()),
-                line_no: physical.and_then(|(_, line, _)| *line),
-                function: physical
-                    .map(|(_, _, function)| function.clone())
-                    .unwrap_or_default(),
-                lang: "rust".to_string(),
-                in_app: false,
-                synthetic: false,
-                platform: "native".to_string(),
-                instruction_addr: Some(format!("0x{instruction_addr:x}")),
-                symbol_addr: (frame_symbol_addr != 0).then(|| format!("0x{frame_symbol_addr:x}")),
-                image_addr: module.map(|m| m.image.image_addr.clone()),
-                // We deliberately did not expand inlines here — the server
-                // resolves this address and expands its inline chain.
-                client_resolved: false,
-            });
+            // stripping matches against; group members carry it too, so the
+            // rposition drain sweeps whole SDK groups.
+            let wire_symbol_addr =
+                (frame_symbol_addr != 0).then(|| format!("0x{frame_symbol_addr:x}"));
+            let wire_image_addr = module.map(|m| m.image.image_addr.clone());
+
+            if layers.is_empty() {
+                // Stripped build: no local symbols to offer, so send the bare
+                // address for the server to symbolicate and expand.
+                frames.push(StackFrame {
+                    filename: None,
+                    line_no: None,
+                    function: String::new(),
+                    lang: "rust".to_string(),
+                    in_app: false,
+                    synthetic: false,
+                    platform: "native".to_string(),
+                    instruction_addr: wire_instruction_addr,
+                    symbol_addr: wire_symbol_addr,
+                    image_addr: wire_image_addr,
+                    client_resolved: false,
+                    inline: false,
+                });
+            } else {
+                // Client-expanded inline group: one frame per logical layer,
+                // every layer carrying the physical address. The physical
+                // (outermost) layer is the group's non-inline frame; the
+                // resolver symbolicates its address once and atomically
+                // replaces the group with its own expansion — or keeps these
+                // frames verbatim when no debug symbols are uploaded. That
+                // preserves inline data in every case without duplicating it.
+                // Layers are innermost-first, matching the current-first walk;
+                // the final reversal puts the physical frame ahead of its
+                // members on the wire.
+                let physical_index = layers.len() - 1;
+                for (index, (filename, line_no, function)) in layers.into_iter().enumerate() {
+                    frames.push(StackFrame {
+                        filename,
+                        line_no,
+                        function,
+                        lang: "rust".to_string(),
+                        in_app: false,
+                        synthetic: false,
+                        platform: "native".to_string(),
+                        instruction_addr: wire_instruction_addr.clone(),
+                        symbol_addr: wire_symbol_addr.clone(),
+                        image_addr: wire_image_addr.clone(),
+                        client_resolved: true,
+                        inline: index != physical_index,
+                    });
+                }
+            }
         } else if !layers.is_empty() {
             // We resolved symbols locally but there's no uploadable debug image,
             // so the server can't symbolicate this address. Keep the client-side
@@ -957,8 +991,9 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
                     symbol_addr: None,
                     image_addr: None,
                     // Resolved client-side (no debug image for the server to
-                    // use), so the server must not re-expand these.
+                    // use); address-less frames pass through untouched.
                     client_resolved: true,
+                    inline: false,
                 });
             }
         }
@@ -972,21 +1007,35 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
     frames
 }
 
+/// Trim call-ordered (main-first) frames to `max_frames`, dropping from the
+/// outermost end so the crash-site frames survive.
 fn trim_to_max_frames(frames: &mut Vec<StackFrame>, max_frames: usize) {
-    if frames.len() > max_frames {
-        frames.truncate(max_frames);
+    if frames.len() <= max_frames {
+        return;
     }
+    let mut cut = frames.len() - max_frames;
+    // Never cut into the middle of a client-expanded inline group: members
+    // without their physical frame can't be grouped server-side. Drop the
+    // orphaned members along with their lead.
+    while frames.get(cut).is_some_and(|frame| frame.inline) {
+        cut += 1;
+    }
+    frames.drain(..cut);
 }
 
-/// Capture the current raw stacktrace, dropping the leading SDK frames so the
-/// caller's frame comes first, and return the loaded modules those frames point
-/// into for the `$debug_images` property.
+/// Capture the current raw stacktrace, dropping the SDK's own frames so the
+/// caller's frame is the crash-site end, and return the loaded modules those
+/// frames point into for the `$debug_images` property. Frames are returned in
+/// call order (main first, crash site last) — the wire order shared with the
+/// other PostHog SDKs, and the orientation cymbal's inline expansion inserts
+/// into.
 ///
-/// Frames are current-first, so the SDK's own frames lead. Two passes drop
-/// them: an address-based pass that matches each frame's symbol entry against
-/// `pinned_entries` (the SDK capture functions), which works even in stripped
-/// builds where there are no names; then the name-based `is_internal` pass for
-/// everything the resolver could name.
+/// The walk itself is current-first, so the SDK's own frames lead. Two passes
+/// drop them: an address-based pass that matches each frame's symbol entry
+/// against `pinned_entries` (the SDK capture functions), which works even in
+/// stripped builds where there are no names; then the name-based `is_internal`
+/// pass for everything the resolver could name. The stripped stack is reversed
+/// into call order before returning.
 ///
 /// inline(never): this generic function sits between the pinned non-generic
 /// wrapper and `capture_frames_current_first`; keeping it a physical frame lets
@@ -1014,7 +1063,9 @@ fn capture_raw_frames(
     // name-based pass below does the stripping instead; fully stripped
     // Apple/Windows builds keep the SDK prefix as address-only frames, which
     // regain names through server-side symbolication.
-    let scan = frames.len().min(16);
+    // The window bounds the pinned scan to the SDK prefix; inline-group
+    // expansion can multiply those prefix entries, so it's sized generously.
+    let scan = frames.len().min(32);
     let matches_pinned = |frame: &StackFrame| {
         frame
             .symbol_addr
@@ -1035,6 +1086,7 @@ fn capture_raw_frames(
     }
 
     let images = referenced_images(modules, &frames);
+    frames.reverse();
     (frames, images)
 }
 
@@ -1076,8 +1128,9 @@ fn capture_raw_panic_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
     // collapse on its own via the in-app flag. We still collect the debug images
     // the kept frames point into so the server can symbolicate them.
     let modules = collect_loaded_modules();
-    let frames = capture_frames_current_first(0, &modules);
+    let mut frames = capture_frames_current_first(0, &modules);
     let images = referenced_images(modules, &frames);
+    frames.reverse();
     (frames, images)
 }
 
@@ -1906,25 +1959,26 @@ mod tests {
         let frames = exception_list[0]["stacktrace"]["frames"]
             .as_array()
             .expect("expected stack frames");
-        let top_frame = frames.first().expect("expected top frame");
-        assert_eq!(top_frame["platform"], "native");
-        assert_eq!(top_frame["lang"], "rust");
-        let instruction_addr = top_frame["instruction_addr"].as_str().unwrap_or_default();
+        // Call order: the crash-site frame sits at the end of the list.
+        let crash_frame = frames.last().expect("expected crash-site frame");
+        assert_eq!(crash_frame["platform"], "native");
+        assert_eq!(crash_frame["lang"], "rust");
+        let instruction_addr = crash_frame["instruction_addr"].as_str().unwrap_or_default();
         assert!(
             instruction_addr.starts_with("0x"),
             "expected hex instruction_addr, got {:?}",
             instruction_addr
         );
-        let top_function = top_frame["function"].as_str().unwrap_or_default();
+        let crash_function = crash_frame["function"].as_str().unwrap_or_default();
         assert!(
-            top_function.contains("from_error_builds_exception_list_with_stacktrace"),
-            "expected user frame first, got {:?}",
-            top_function
+            crash_function.contains("from_error_builds_exception_list_with_stacktrace"),
+            "expected the user frame at the crash-site end, got {:?}",
+            crash_function
         );
         assert!(
-            !top_function.contains("Exception::"),
+            !crash_function.contains("Exception::"),
             "expected SDK frames to be skipped, got {:?}",
-            top_function
+            crash_function
         );
     }
 
@@ -2205,6 +2259,7 @@ mod tests {
             symbol_addr: None,
             image_addr: None,
             client_resolved: false,
+            inline: false,
         };
         let exception = Exception {
             items: vec![ExceptionItem {
@@ -2224,16 +2279,19 @@ mod tests {
             .as_array()
             .expect("expected stack frames");
         assert_eq!(frames.len(), MAX_FRAMES);
-        // Trimming drops the outermost tail; the crash-site top frame survives.
-        assert_eq!(frames[0]["function"], "frame_0");
+        // Frames are call-ordered (main first), so trimming drops the
+        // outermost head; the crash-site frame at the end survives.
+        assert_eq!(frames[0]["function"], "frame_5");
+        assert_eq!(
+            frames[MAX_FRAMES - 1]["function"],
+            format!("frame_{}", MAX_FRAMES + 4)
+        );
     }
 
     #[test]
-    fn stacktrace_keeps_top_frame_first() {
+    fn stacktrace_is_call_ordered_with_crash_site_last() {
         fn capture() -> ExceptionStacktrace {
-            // Empty module slice: this test only asserts frame ordering and
-            // names, which are independent of the loaded-module lookup.
-            let mut frames = capture_frames_current_first(0, &[]);
+            let (mut frames, _) = capture_raw_application_frames();
             trim_to_max_frames(&mut frames, 8);
             ExceptionStacktrace::raw(frames)
         }
@@ -2247,29 +2305,31 @@ mod tests {
 
         let capture_index = functions
             .iter()
-            .position(|function| function.contains("stacktrace_keeps_top_frame_first::capture"))
+            .position(|function| function.contains("crash_site_last::capture"))
             .expect("expected capture frame");
         let test_index = functions
             .iter()
-            .position(|function| function.ends_with("stacktrace_keeps_top_frame_first"))
+            .position(|function| {
+                function.ends_with("stacktrace_is_call_ordered_with_crash_site_last")
+            })
             .expect("expected test frame");
 
         assert!(
-            capture_index < test_index,
-            "expected top frame before caller, got {:?}",
+            test_index < capture_index,
+            "expected the caller before the crash-site frame, got {:?}",
             functions
         );
     }
 
     #[test]
-    fn inlined_frames_collapse_for_server_side_expansion() {
+    fn inlined_frames_emit_expanded_groups() {
         // inline(always) is honored in debug builds, so these helpers share
-        // their caller's physical frame. When the server can symbolicate the
-        // address we emit ONE frame for that physical frame and let the resolver
-        // expand the inline chain from the symcache; emitting the inline layers
-        // here as well would double them, since the resolver re-expands every
-        // address-bearing native frame. Only a frame the server can't resolve
-        // keeps the client-side inline expansion.
+        // their caller's physical frame. Every logical layer is emitted; when
+        // the address is resolvable the layers form a marked group (physical
+        // frame first, inline members after, all sharing the address) that the
+        // server replaces atomically with its own expansion — so the inline
+        // chain survives without uploaded symbols and doesn't duplicate with
+        // them.
         #[inline(always)]
         fn inline_leaf() -> Vec<StackFrame> {
             capture_raw_application_frames().0
@@ -2283,62 +2343,110 @@ mod tests {
         let frames = inline_mid();
         let functions: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
 
-        // No two frames may carry the same instruction_addr: that duplicate is
-        // exactly the double-expansion the resolver would inflict if we
-        // pre-expanded inlines onto a shared address.
-        let mut addrs: Vec<&str> = frames
-            .iter()
-            .filter_map(|frame| frame.instruction_addr.as_deref())
-            .collect();
-        let emitted = addrs.len();
-        addrs.sort_unstable();
-        addrs.dedup();
-        assert_eq!(
-            addrs.len(),
-            emitted,
-            "instruction_addr duplicated across frames: {:?}",
-            frames
-        );
-
-        // client_resolved is the inverse of carrying an address: an addressed
-        // frame is left for the server to resolve (false); an address-less frame
-        // was resolved client-side (true).
+        // client_resolved means exactly "this frame carries locally-resolved
+        // symbols"; stripped addressed frames stay false.
         assert!(
             frames
                 .iter()
-                .all(|f| f.client_resolved == f.instruction_addr.is_none()),
-            "client_resolved must be the inverse of instruction_addr presence: {:?}",
+                .all(|f| f.client_resolved == (!f.function.is_empty() || f.filename.is_some())),
+            "client_resolved must mirror locally-resolved symbol presence: {:?}",
             frames
         );
 
-        let leaf = functions
-            .iter()
-            .filter(|f| f.contains("inline_leaf"))
-            .count();
-        let mid = functions
-            .iter()
-            .filter(|f| f.contains("inline_mid"))
-            .count();
+        // Inline members always follow a physical frame carrying the same
+        // address — a shared address is only ever expressed as a marked group.
+        let mut group_addr: Option<&str> = None;
+        for frame in &frames {
+            if frame.inline {
+                assert!(
+                    frame.instruction_addr.is_some()
+                        && frame.instruction_addr.as_deref() == group_addr,
+                    "inline member must carry its physical frame's address: {:?}",
+                    frames
+                );
+            } else {
+                group_addr = frame.instruction_addr.as_deref();
+            }
+        }
+
+        // Call order: the outer inline layer comes before the inner one.
+        let leaf_index = functions.iter().position(|f| f.contains("inline_leaf"));
+        let mid_index = functions.iter().position(|f| f.contains("inline_mid"));
+        assert!(
+            matches!((leaf_index, mid_index), (Some(l), Some(m)) if m < l),
+            "expected the inline chain outermost-first, got {:?}",
+            functions
+        );
 
         if frames.iter().any(|frame| frame.instruction_addr.is_some()) {
-            // Resolvable: the inlined layers collapse into their physical frame,
-            // which carries the address for the server to expand.
+            // Resolvable: the layers form one group on the test fn's physical
+            // frame — members marked inline, sharing its address.
+            let leaf_frame = &frames[leaf_index.unwrap()];
+            let mid_frame = &frames[mid_index.unwrap()];
             assert!(
-                leaf == 0 && mid == 0,
-                "expected inlined layers collapsed for server-side expansion, got {:?}",
-                functions
+                leaf_frame.inline && mid_frame.inline,
+                "expected inlined layers marked as group members: {:?}",
+                frames
+            );
+            assert!(
+                leaf_frame.instruction_addr.is_some()
+                    && leaf_frame.instruction_addr == mid_frame.instruction_addr,
+                "expected group members to share the physical address: {:?}",
+                frames
+            );
+            let physical_index = frames[..mid_index.unwrap()]
+                .iter()
+                .rposition(|f| !f.inline)
+                .expect("expected a physical frame leading the group");
+            assert_eq!(
+                frames[physical_index].instruction_addr, leaf_frame.instruction_addr,
+                "group must be led by the physical frame that owns the address"
             );
         } else {
-            // Not resolvable: client-side expansion preserves the inline chain,
-            // innermost first.
-            let leaf_index = functions.iter().position(|f| f.contains("inline_leaf"));
-            let mid_index = functions.iter().position(|f| f.contains("inline_mid"));
+            // Not resolvable: the expansion survives as plain client-resolved
+            // frames without addresses or markers.
             assert!(
-                matches!((leaf_index, mid_index), (Some(l), Some(m)) if l < m),
-                "expected client-side inline expansion innermost first, got {:?}",
-                functions
+                frames.iter().all(|f| !f.inline),
+                "address-less frames must not carry inline markers: {:?}",
+                frames
             );
         }
+    }
+
+    #[test]
+    fn trim_drops_whole_inline_groups() {
+        let frame = |function: &str, addr: Option<&str>, inline: bool| StackFrame {
+            filename: None,
+            line_no: None,
+            function: function.to_string(),
+            lang: "rust".to_string(),
+            in_app: true,
+            synthetic: false,
+            platform: "native".to_string(),
+            instruction_addr: addr.map(str::to_string),
+            symbol_addr: None,
+            image_addr: None,
+            client_resolved: true,
+            inline,
+        };
+
+        // Call-ordered: [outer, outer, physical, member, member, inner, inner, inner]
+        let mut frames = vec![
+            frame("outer_0", None, false),
+            frame("outer_1", None, false),
+            frame("lead", Some("0x10"), false),
+            frame("member_0", Some("0x10"), true),
+            frame("member_1", Some("0x10"), true),
+            frame("inner_0", None, false),
+            frame("inner_1", None, false),
+            frame("inner_2", None, false),
+        ];
+
+        // A budget of 5 would cut between the group's members; the whole group
+        // is dropped instead of leaving orphaned inline frames.
+        trim_to_max_frames(&mut frames, 5);
+        let functions: Vec<&str> = frames.iter().map(|f| f.function.as_str()).collect();
+        assert_eq!(functions, ["inner_0", "inner_1", "inner_2"]);
     }
 
     #[test]

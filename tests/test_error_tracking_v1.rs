@@ -37,41 +37,41 @@ fn v1_ok_response() -> serde_json::Value {
     json!({ "results": {} })
 }
 
-fn first_exception_stack_function(body: &serde_json::Value) -> &str {
+fn crash_site_stack_function(body: &serde_json::Value) -> &str {
     body.pointer("/batch/0/properties/$exception_list/0/stacktrace/frames")
         .and_then(|value| value.as_array())
-        .and_then(|frames| frames.first())
+        .and_then(|frames| frames.last())
         .and_then(|frame| frame.get("function"))
         .and_then(|value| value.as_str())
         .unwrap_or_default()
 }
 
-fn request_has_capture_exception_user_frame_first(req: &HttpMockRequest) -> bool {
+fn request_has_capture_exception_user_frame_at_crash_site(req: &HttpMockRequest) -> bool {
     let Some(body) = req.body.as_deref() else {
         return false;
     };
     let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
     };
-    let first_function = first_exception_stack_function(&body);
+    let crash_function = crash_site_stack_function(&body);
 
-    first_function.contains("capture_exception_sends_exception_event")
-        && !first_function.contains("Client::capture_exception")
-        && !first_function.contains("build_exception_event")
+    crash_function.contains("capture_exception_sends_exception_event")
+        && !crash_function.contains("Client::capture_exception")
+        && !crash_function.contains("build_exception_event")
 }
 
-fn request_has_capture_exception_with_user_frame_first(req: &HttpMockRequest) -> bool {
+fn request_has_capture_exception_with_user_frame_at_crash_site(req: &HttpMockRequest) -> bool {
     let Some(body) = req.body.as_deref() else {
         return false;
     };
     let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
     };
-    let first_function = first_exception_stack_function(&body);
+    let crash_function = crash_site_stack_function(&body);
 
-    first_function.contains("capture_exception_with_attaches_identity_and_context")
-        && !first_function.contains("Client::capture_exception")
-        && !first_function.contains("build_exception_event")
+    crash_function.contains("capture_exception_with_attaches_identity_and_context")
+        && !crash_function.contains("Client::capture_exception")
+        && !crash_function.contains("build_exception_event")
 }
 
 #[cfg(not(feature = "async-client"))]
@@ -100,7 +100,7 @@ mod blocking {
                 .body_contains(r#""$exception_level":"error""#)
                 .body_contains(r#""value":"payment failed""#)
                 .body_contains(r#""platform":"native""#)
-                .matches(request_has_capture_exception_user_frame_first);
+                .matches(request_has_capture_exception_user_frame_at_crash_site);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(v1_ok_response());
@@ -125,7 +125,7 @@ mod blocking {
                 .body_contains(r#""$groups":{"company":"company-1"}"#)
                 .body_contains(r#""$exception_fingerprint":"checkout-error""#)
                 .body_contains(r#""$exception_level":"warning""#)
-                .matches(request_has_capture_exception_with_user_frame_first);
+                .matches(request_has_capture_exception_with_user_frame_at_crash_site);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(v1_ok_response());
@@ -195,7 +195,7 @@ mod async_client {
                 .body_contains(r#""$exception_level":"error""#)
                 .body_contains(r#""value":"payment failed""#)
                 .body_contains(r#""platform":"native""#)
-                .matches(request_has_capture_exception_user_frame_first);
+                .matches(request_has_capture_exception_user_frame_at_crash_site);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(v1_ok_response());
@@ -220,7 +220,7 @@ mod async_client {
                 .body_contains(r#""$groups":{"company":"company-1"}"#)
                 .body_contains(r#""$exception_fingerprint":"checkout-error""#)
                 .body_contains(r#""$exception_level":"warning""#)
-                .matches(request_has_capture_exception_with_user_frame_first);
+                .matches(request_has_capture_exception_with_user_frame_at_crash_site);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(v1_ok_response());
