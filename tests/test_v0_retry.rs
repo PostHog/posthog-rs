@@ -23,10 +23,11 @@ async fn create_v0_client(base_url: String, max_attempts: u32) -> Client {
         .api_key("phc_test_token".to_string())
         .host(base_url)
         .max_capture_attempts(max_attempts)
-        // Tiny backoffs keep the scheduled-retry test fast; the retry-after test
-        // relies on these being far smaller than the header value it asserts.
+        // Tiny initial backoff keeps the scheduled-retry test fast; the max is
+        // kept above the 1s Retry-After the retry-after test asserts, since
+        // Retry-After is now clamped to retry_max_backoff_ms.
         .retry_initial_backoff_ms(1u64)
-        .retry_max_backoff_ms(5u64)
+        .retry_max_backoff_ms(2000u64)
         .build()
         .unwrap();
     posthog_rs::client(options).await

@@ -21,8 +21,10 @@ fn create_v0_client(base_url: String, max_attempts: u32) -> Client {
         .api_key("phc_test_token".to_string())
         .host(base_url)
         .max_capture_attempts(max_attempts)
+        // Tiny initial backoff keeps retries fast; max kept above the 1s
+        // Retry-After the retry-after test asserts (Retry-After is clamped to it).
         .retry_initial_backoff_ms(1u64)
-        .retry_max_backoff_ms(5u64)
+        .retry_max_backoff_ms(2000u64)
         .build()
         .unwrap();
     posthog_rs::client(options)

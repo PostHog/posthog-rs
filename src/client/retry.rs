@@ -93,18 +93,13 @@ fn datetime_to_system_time(dt: DateTime<Utc>) -> Option<SystemTime> {
     SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs as u64, dt.timestamp_subsec_nanos()))
 }
 
-/// Hard cap on any scheduled retry delay. Guards the worker's `Instant + delay`
-/// from overflowing — which would panic the worker thread and silently drop all
-/// later captures — on a hostile/buggy `Retry-After` (or an extreme
-/// `retry_max_backoff_ms`). A day is far beyond any sane retry delay.
-const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(86_400);
-
 /// Backoff before `attempt`: exponential growth from
 /// `retry_initial_backoff_ms`, clamped to `retry_max_backoff_ms`. When present,
 /// `Retry-After` is treated as a server-provided minimum delay, so the client
-/// waits for the longer of the configured backoff and `Retry-After`. The result
-/// is capped at [`RETRY_BACKOFF_CAP`] so an absurd value can't overflow the
-/// worker's `next_at` computation.
+/// waits for the longer of the configured backoff and `Retry-After` — but the
+/// `Retry-After` is itself clamped to `retry_max_backoff_ms`, so a hostile/buggy
+/// server header can't push a single wait past the ceiling the caller already
+/// configured (default 30s). The configured backoff is never truncated.
 pub(crate) fn backoff_duration(
     opts: &ClientOptions,
     attempt: u32,
@@ -114,8 +109,9 @@ pub(crate) fn backoff_duration(
     let max_ms = opts.retry_max_backoff_ms;
     let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
     let configured_delay = Duration::from_millis(backoff_ms.min(max_ms));
-    let delay = retry_after.map_or(configured_delay, |d| configured_delay.max(d));
-    delay.min(RETRY_BACKOFF_CAP)
+    let max_backoff = Duration::from_millis(max_ms);
+    let clamped_retry_after = retry_after.map(|d| d.min(max_backoff));
+    clamped_retry_after.map_or(configured_delay, |d| configured_delay.max(d))
 }
 
 /// Sans-IO decision for a completed V0 capture response. `attempt` is the
@@ -286,9 +282,15 @@ mod tests {
     fn backoff_retry_after_minimum_semantics() {
         let opts = test_opts(); // initial=100ms, max=5000ms
                                 // (retry_after, attempt, expected): Retry-After is a minimum, so the
-                                // client waits for the longer of the configured backoff and Retry-After.
+                                // client waits for the longer of the configured backoff and Retry-After,
+                                // but Retry-After is clamped to retry_max_backoff_ms (5000ms here).
         let cases: &[(Option<Duration>, u32, Duration)] = &[
-            (Some(Duration::from_secs(42)), 1, Duration::from_secs(42)),
+            // Above the ceiling -> clamped to retry_max_backoff_ms.
+            (
+                Some(Duration::from_secs(42)),
+                1,
+                Duration::from_millis(5000),
+            ),
             (
                 Some(Duration::from_millis(1)),
                 1,
@@ -329,12 +331,18 @@ mod tests {
     }
 
     #[test]
-    fn backoff_caps_absurd_retry_after() {
-        // A hostile `Retry-After` must be capped, not overflow `Instant` later.
+    fn backoff_clamps_retry_after_to_max_backoff() {
+        // A hostile `Retry-After` is clamped to the configured max backoff
+        // (`retry_max_backoff_ms`, 5000ms in test_opts) rather than honored.
         let opts = test_opts();
         assert_eq!(
             backoff_duration(&opts, 1, Some(Duration::from_secs(u64::MAX))),
-            RETRY_BACKOFF_CAP
+            Duration::from_millis(opts.retry_max_backoff_ms)
+        );
+        // A Retry-After above the ceiling is also clamped to it.
+        assert_eq!(
+            backoff_duration(&opts, 1, Some(Duration::from_secs(600))),
+            Duration::from_millis(opts.retry_max_backoff_ms)
         );
     }
 
