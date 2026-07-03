@@ -24,7 +24,9 @@ fn integration_panic_site() {
 
 /// True when the request body carries a personless panic `$exception` event in
 /// the transport's batch envelope (same shape for the V0 and V1 wire formats),
-/// and the user's panic-site frame is kept and marked `in_app = true`.
+/// the user's panic-site frame is kept and marked `in_app = true`, and the
+/// frames obey the canonical wire order (outermost first, crash site last) with
+/// the SDK's own capture plumbing stripped from the crash-site tail.
 fn is_panic_exception(req: &HttpMockRequest) -> bool {
     let Some(body) = req.body.as_deref() else {
         return false;
@@ -37,18 +39,49 @@ fn is_panic_exception(req: &HttpMockRequest) -> bool {
             .pointer("/batch/0/properties/$exception_list/0/type")
             .and_then(|v| v.as_str())
             == Some("Panic");
-    let panic_site_in_app = body
+    let Some(frames) = body
         .pointer("/batch/0/properties/$exception_list/0/stacktrace/frames")
         .and_then(|v| v.as_array())
-        .is_some_and(|frames| {
-            frames.iter().any(|frame| {
-                frame["function"]
-                    .as_str()
-                    .is_some_and(|name| name.contains("integration_panic_site"))
-                    && frame["in_app"] == true
-            })
-        });
-    is_panic && panic_site_in_app
+    else {
+        return false;
+    };
+    let function_names: Vec<&str> = frames
+        .iter()
+        .map(|frame| frame["function"].as_str().unwrap_or_default())
+        .collect();
+    let panic_site_in_app = frames.iter().any(|frame| {
+        frame["function"]
+            .as_str()
+            .is_some_and(|name| name.contains("integration_panic_site"))
+            && frame["in_app"] == true
+    });
+    // Canonical wire order puts the crash site last. The panic hook fires nested
+    // inside the panic runtime, so a naive reverse would leave the SDK's own hook
+    // plumbing (`posthog_rs::error_tracking::*`) as the tail. We strip everything
+    // innermost of the panic dispatcher, so no posthog_rs frame survives at all,
+    // and the tail is the crash-side panic runtime rather than an SDK frame.
+    let no_sdk_frames = !function_names
+        .iter()
+        .any(|name| name.contains("posthog_rs::error_tracking"));
+    let tail_is_panic_runtime = function_names
+        .last()
+        .is_some_and(|name| name.contains("panicking::") || name.contains("panic_with_hook"));
+    // The user's panic site must come *before* (outermore than) the crash-side
+    // panic runtime that follows it — i.e. it is not left innermost/first.
+    let panic_site_before_runtime = function_names
+        .iter()
+        .position(|name| name.contains("integration_panic_site"))
+        .zip(
+            function_names
+                .iter()
+                .rposition(|name| name.contains("panic_with_hook")),
+        )
+        .is_some_and(|(site, runtime)| site < runtime);
+    is_panic
+        && panic_site_in_app
+        && no_sdk_frames
+        && tail_is_panic_runtime
+        && panic_site_before_runtime
 }
 
 #[cfg(feature = "async-client")]
