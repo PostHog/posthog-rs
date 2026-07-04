@@ -291,15 +291,23 @@ mod tests {
                 1,
                 Duration::from_millis(5000),
             ),
+            // Below configured_delay -> configured_delay wins.
             (
                 Some(Duration::from_millis(1)),
                 1,
                 Duration::from_millis(100),
             ),
+            // Equal to configured_delay -> same either way.
             (
                 Some(Duration::from_millis(100)),
                 1,
                 Duration::from_millis(100),
+            ),
+            // Between configured_delay and max -> un-clamped Retry-After wins.
+            (
+                Some(Duration::from_millis(500)),
+                1,
+                Duration::from_millis(500),
             ),
         ];
         for &(retry_after, attempt, expected) in cases {
