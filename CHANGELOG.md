@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.17.3 — 2026-07-05
+
+### Patch changes
+
+- [9d94264](https://github.com/posthog/posthog-rs/commit/9d9426412bf171468c5ed5736599674ac1858127) Clamp a server `Retry-After` to `retry_max_backoff_ms` (default 30s) instead of an internal 1-day cap, so a single retry wait never exceeds the configured max backoff. `Retry-After` still acts as a minimum and the configured backoff itself is never truncated. This unifies the default retry-wait ceiling (30s) with posthog-go and posthog-python. — Thanks @eli-r-ph!
+
 ## 0.17.2 — 2026-07-02
 
 ### Patch changes
