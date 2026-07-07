@@ -403,14 +403,13 @@ impl ClientOptionsBuilder {
 
     /// Deprecated alias for [`secret_key`](Self::secret_key).
     ///
-    /// Kept for backwards compatibility. When both are set, `secret_key` wins.
+    /// Kept for backwards compatibility; forwards to `secret_key`. The last
+    /// builder call wins if both are set.
     #[deprecated(
         note = "use `secret_key` instead; it accepts a Personal API Key or a Project Secret API Key"
     )]
-    pub fn personal_api_key(&mut self, value: impl Into<String>) -> &mut Self {
-        if self.secret_key.is_none() {
-            self.secret_key = Some(Some(value.into()));
-        }
+    pub fn personal_api_key<VALUE: Into<String>>(&mut self, value: VALUE) -> &mut Self {
+        self.secret_key = Some(Some(value.into()));
         self
     }
 }
@@ -458,29 +457,35 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
-    fn resolves_secret_key_over_personal_api_key() {
-        let cases: [(Option<&str>, Option<&str>, Option<&str>); 3] = [
-            (Some("phs_secret"), None, Some("phs_secret")),
-            (None, Some("phx_personal"), Some("phx_personal")),
-            (Some("phs_secret"), Some("phx_personal"), Some("phs_secret")),
-        ];
-
-        for (secret, personal, expected) in cases {
+    fn personal_api_key_forwards_to_secret_key_last_call_wins() {
+        let resolve = |calls: &[(&str, &str)]| {
             let mut builder = ClientOptionsBuilder::default();
             builder.api_key("test-api-key".to_string());
-            if let Some(personal) = personal {
-                builder.personal_api_key(personal);
+            for (which, val) in calls {
+                match *which {
+                    "secret" => builder.secret_key(*val),
+                    _ => builder.personal_api_key(*val),
+                };
             }
-            if let Some(secret) = secret {
-                builder.secret_key(secret);
-            }
-            let options = builder.build().unwrap();
-            assert_eq!(
-                options.secret_key.as_deref(),
-                expected,
-                "{secret:?} {personal:?}"
-            );
-        }
+            builder.build().unwrap().secret_key
+        };
+
+        assert_eq!(
+            resolve(&[("secret", "phs_secret")]).as_deref(),
+            Some("phs_secret")
+        );
+        assert_eq!(
+            resolve(&[("personal", "phx_personal")]).as_deref(),
+            Some("phx_personal")
+        );
+        assert_eq!(
+            resolve(&[("personal", "phx_personal"), ("secret", "phs_secret")]).as_deref(),
+            Some("phs_secret")
+        );
+        assert_eq!(
+            resolve(&[("secret", "phs_secret"), ("personal", "phx_personal")]).as_deref(),
+            Some("phx_personal")
+        );
     }
 
     #[test]

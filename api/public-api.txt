@@ -166,7 +166,7 @@ impl posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog_rs::Event) -> core::option::Option<posthog_rs::Event> + core::marker::Send + 'static
 pub fn posthog_rs::ClientOptionsBuilder::build(&self) -> core::result::Result<posthog_rs::ClientOptions, posthog_rs::ClientOptionsBuilderError>
 pub fn posthog_rs::ClientOptionsBuilder::on_error<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog_rs::PostHogError<'_>) + core::marker::Send + core::marker::Sync + 'static
-pub fn posthog_rs::ClientOptionsBuilder::personal_api_key(&mut self, impl core::convert::Into<alloc::string::String>) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::personal_api_key<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 impl core::default::Default for posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::default() -> Self
 pub struct posthog_rs::Cohort

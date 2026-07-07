@@ -150,7 +150,9 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
             (Some(LocalEvaluator::new(cache)), Some(poller))
         } else {
-            warn!("Local evaluation enabled but personal_api_key not set, falling back to API evaluation");
+            warn!(
+                "Local evaluation enabled but secret_key not set, falling back to API evaluation"
+            );
             (None, None)
         }
     } else {
