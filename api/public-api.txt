@@ -125,10 +125,10 @@ pub struct posthog_rs::Client
 impl posthog_rs::Client
 pub fn posthog_rs::Client::capture(&self, posthog_rs::Event)
 pub fn posthog_rs::Client::capture_batch(&self, alloc::vec::Vec<posthog_rs::Event>, bool)
-pub async fn posthog_rs::Client::capture_batch_confirmed(&self, alloc::vec::Vec<posthog_rs::Event>, bool) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
-pub async fn posthog_rs::Client::capture_confirmed(&self, posthog_rs::Event) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
+pub async fn posthog_rs::Client::capture_batch_immediate(&self, alloc::vec::Vec<posthog_rs::Event>, bool) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
 pub async fn posthog_rs::Client::capture_exception<E>(&self, &E) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub async fn posthog_rs::Client::capture_exception_with<E>(&self, &E, posthog_rs::CaptureExceptionOptions) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
+pub async fn posthog_rs::Client::capture_immediate(&self, posthog_rs::Event) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
 pub fn posthog_rs::Client::evaluate_feature_flag_locally(&self, &posthog_rs::FeatureFlag, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::Error>
 pub async fn posthog_rs::Client::evaluate_flags<S: core::convert::Into<alloc::string::String>>(&self, S, posthog_rs::EvaluateFlagsOptions) -> core::result::Result<posthog_rs::FeatureFlagEvaluations, posthog_rs::Error>
 pub async fn posthog_rs::Client::flush(&self)

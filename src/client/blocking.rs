@@ -51,15 +51,10 @@ use super::common::{
     flag_event_dedup_cache, local_record, remote_record_from_detail, report_flags_error,
     DetailedFlagsResponse, FlagEventDedupCache,
 };
-#[cfg(feature = "capture-v1")]
-use super::common::{apply_before_send_hooks, apply_capture_defaults};
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
-use chrono::Utc;
 #[cfg(not(feature = "capture-v1"))]
 use reqwest::header::CONTENT_ENCODING;
-#[cfg(feature = "capture-v1")]
-use uuid::Uuid;
 
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
@@ -402,10 +397,10 @@ impl Client {
         }
     }
 
-    // ----- Confirmed-delivery capture -------------------------------------
+    // ----- Immediate (inline) capture -------------------------------------
     //
     // `capture`/`capture_batch` above are fire-and-forget: they enqueue onto the
-    // background worker and never report the outcome. The `*_confirmed` variants
+    // background worker and never report the outcome. The `*_immediate` variants
     // send inline and block until a terminal result, for the rare caller that
     // must know a batch persisted before advancing its own durable state (e.g.
     // committing an upstream offset). They bypass the worker queue and do NOT fire
@@ -413,18 +408,18 @@ impl Client {
 
     /// Capture a single event and block until the request completes.
     ///
-    /// The confirmed-delivery counterpart to [`Client::capture`]. This is a
-    /// convenience wrapper over [`Client::capture_batch_confirmed`] with a
+    /// The immediate-delivery counterpart to [`Client::capture`]. This is a
+    /// convenience wrapper over [`Client::capture_batch_immediate`] with a
     /// one-event batch; see it for full semantics.
     #[must_use = "the delivery outcome should be inspected"]
-    pub fn capture_confirmed(&self, event: Event) -> Result<CaptureSummary, Error> {
-        self.capture_batch_confirmed(vec![event], false)
+    pub fn capture_immediate(&self, event: Event) -> Result<CaptureSummary, Error> {
+        self.capture_batch_immediate(vec![event], false)
     }
 
     /// Capture a batch of events and block until the request completes,
     /// returning a [`CaptureSummary`] describing the outcome.
     ///
-    /// The confirmed-delivery counterpart to [`Client::capture_batch`]. Prefer
+    /// The immediate-delivery counterpart to [`Client::capture_batch`]. Prefer
     /// the fire-and-forget [`Client::capture`]/[`Client::capture_batch`] for
     /// normal analytics; reach for this only when the caller must know the batch
     /// persisted before advancing its own durable state.
@@ -453,7 +448,7 @@ impl Client {
         fields(event_count = events.len(), historical_migration),
         level = "debug"
     )]
-    pub fn capture_batch_confirmed(
+    pub fn capture_batch_immediate(
         &self,
         events: Vec<Event>,
         historical_migration: bool,
@@ -461,62 +456,48 @@ impl Client {
         if self.options.is_disabled() || events.is_empty() {
             return Ok(CaptureSummary::default());
         }
-        self.send_confirmed(events, historical_migration)
+        self.send_immediate(events, historical_migration)
     }
 
-    /// Inline confirmed V1 capture: build events, then loop send/classify using
-    /// the shared sans-IO helpers, sleeping on the calling thread between retries.
+    /// Inline V1 capture: prepare once via the shared sans-IO helpers, then loop
+    /// send/classify, sleeping on the calling thread between retries. The setup and
+    /// classification are shared with the async client; only this loop differs.
     #[cfg(feature = "capture-v1")]
-    fn send_confirmed(
+    fn send_immediate(
         &self,
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureSummary, Error> {
         use super::v1_capture::{self, Step};
-        use crate::event_v1::V1BatchRequestRef;
 
-        let defaults = self.options.capture_defaults();
-        let events: Vec<Event> = events
-            .into_iter()
-            .filter_map(|mut event| {
-                apply_capture_defaults(&mut event, &defaults);
-                apply_before_send_hooks(&self.options.before_send, event)
-            })
-            .collect();
-        if events.is_empty() {
+        let Some(mut prep) =
+            v1_capture::prepare_immediate(&self.options, events, historical_migration)
+        else {
             return Ok(CaptureSummary::default());
-        }
-
-        let request_id = Uuid::now_v7();
-        let created_at = Utc::now().to_rfc3339();
-        let historical_migration = historical_migration.then_some(true);
-        let url = self
-            .options
-            .endpoints()
-            .build_custom_url(v1_capture::V1_CAPTURE_PATH);
-
-        let mut pending = v1_capture::build_events_at(&events, &defaults, Utc::now());
-        let submitted = pending.len();
+        };
         let mut final_results = HashMap::new();
         let mut attempt: u32 = 1;
 
         loop {
-            let request = V1BatchRequestRef {
-                created_at: &created_at,
-                historical_migration,
-                batch: &pending,
-            };
-            let payload =
-                serde_json::to_vec(&request).map_err(|e| Error::Serialization(e.to_string()))?;
-            let mut headers =
-                v1_capture::build_headers_at(&self.options, &request_id, attempt, Utc::now());
-            let body =
-                v1_capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
+            let (headers, body) = v1_capture::build_attempt_parts(
+                &self.options,
+                &prep.request_id,
+                attempt,
+                &prep.created_at,
+                prep.historical_migration,
+                &prep.pending,
+            )?;
 
-            let step = match self.client.post(&url).headers(headers).body(body).send() {
+            let step = match self
+                .client
+                .post(&prep.url)
+                .headers(headers)
+                .body(body)
+                .send()
+            {
                 Err(e) => v1_capture::after_transport_error(
                     &self.options,
-                    &request_id,
+                    &prep.request_id,
                     attempt,
                     e.to_string(),
                 ),
@@ -528,19 +509,21 @@ impl Client {
                         .unwrap_or_else(|_| "Unknown error".to_string());
                     v1_capture::after_response(
                         &self.options,
-                        &request_id,
+                        &prep.request_id,
                         attempt,
                         status,
                         retry_after,
                         &text,
-                        &mut pending,
+                        &mut prep.pending,
                         &mut final_results,
                     )
                 }
             };
 
             match step {
-                Step::Done => return Ok(CaptureSummary::from_results(submitted, final_results)),
+                Step::Done => {
+                    return Ok(CaptureSummary::from_results(prep.submitted, final_results))
+                }
                 Step::Fail(e) => return Err(e),
                 Step::Backoff(delay) => {
                     attempt += 1;
@@ -550,10 +533,10 @@ impl Client {
         }
     }
 
-    /// Inline confirmed V0 capture: build the batch body, then loop send/classify
-    /// using the shared sans-IO retry helpers. A `2xx` persists the whole batch.
+    /// Inline V0 capture: prepare the batch body once via the shared sans-IO
+    /// helpers, then loop send/classify. A `2xx` persists the whole batch.
     #[cfg(not(feature = "capture-v1"))]
-    fn send_confirmed(
+    fn send_immediate(
         &self,
         events: Vec<Event>,
         historical_migration: bool,
@@ -561,36 +544,21 @@ impl Client {
         use super::retry::{self, v0_after_response, v0_after_transport_error, Step};
         use super::v0_capture;
 
-        let defaults = self.options.capture_defaults();
-        let Some((json, kept)) = v0_capture::build_batch_payload(
-            events,
-            self.options.api_key.clone(),
-            historical_migration,
-            Utc::now(),
-            &defaults,
-            &self.options.before_send,
-        )?
+        let Some(prep) =
+            v0_capture::prepare_immediate(&self.options, events, historical_migration)?
         else {
             return Ok(CaptureSummary::default());
-        };
-
-        let base_url = self.options.endpoints().build_url(Endpoint::Batch);
-        let (body, encoding) = v0_capture::encode_body(&self.options, json);
-        // v0 capture reads the compression hint from the query param, not the header.
-        let url = match encoding {
-            Some(token) => format!("{base_url}?compression={token}"),
-            None => base_url,
         };
 
         let mut attempt: u32 = 1;
         loop {
             let mut request = self
                 .client
-                .post(&url)
+                .post(&prep.url)
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, get_default_user_agent())
-                .body(body.clone());
-            if let Some(token) = encoding {
+                .body(prep.body.clone());
+            if let Some(token) = prep.encoding {
                 request = request.header(CONTENT_ENCODING, token);
             }
             let request = v0_capture::apply_extra_headers(&self.options, request);
@@ -608,7 +576,7 @@ impl Client {
             };
 
             match step {
-                Step::Done => return Ok(CaptureSummary::delivered(kept)),
+                Step::Done => return Ok(CaptureSummary::delivered(prep.kept)),
                 Step::Fail(e) => return Err(e),
                 Step::Backoff(delay) => {
                     attempt += 1;

@@ -1,4 +1,4 @@
-//! Outcome of a confirmed-delivery capture call.
+//! Outcome of an immediate-delivery capture call.
 
 #[cfg(feature = "capture-v1")]
 use std::collections::HashMap;
@@ -9,8 +9,8 @@ use uuid::Uuid;
 #[cfg(feature = "capture-v1")]
 use crate::event_v1::{EventResult, EventStatus};
 
-/// The outcome of a confirmed capture ([`Client::capture_confirmed`] /
-/// [`Client::capture_batch_confirmed`]), returned once the SDK has a terminal
+/// The outcome of an immediate capture ([`Client::capture_immediate`] /
+/// [`Client::capture_batch_immediate`]), returned once the SDK has a terminal
 /// result for the batch — the request succeeded, or the retry budget was spent
 /// (which is an [`Err`] instead).
 ///
@@ -24,8 +24,8 @@ use crate::event_v1::{EventResult, EventStatus};
 /// `#[non_exhaustive]`: fields are read through accessors so more can be added
 /// without breaking callers.
 ///
-/// [`Client::capture_confirmed`]: crate::Client::capture_confirmed
-/// [`Client::capture_batch_confirmed`]: crate::Client::capture_batch_confirmed
+/// [`Client::capture_immediate`]: crate::Client::capture_immediate
+/// [`Client::capture_batch_immediate`]: crate::Client::capture_batch_immediate
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct CaptureSummary {
@@ -78,7 +78,7 @@ impl CaptureSummary {
     ///
     /// Note this is **vacuously true when nothing was sent** (`submitted() == 0`),
     /// which is what a disabled client or a fully `before_send`-filtered batch
-    /// returns. Callers that advance durable state on the strength of a confirmed
+    /// returns. Callers that advance durable state on the strength of an immediate
     /// delivery (e.g. committing an upstream offset) must therefore also check
     /// `submitted()` against the number of events they intended to send — do not
     /// gate durability on `all_persisted()` alone.

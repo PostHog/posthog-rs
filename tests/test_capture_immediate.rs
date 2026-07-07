@@ -1,7 +1,7 @@
-//! Confirmed-delivery capture: `capture_confirmed` / `capture_batch_confirmed`.
+//! Immediate-delivery capture: `capture_immediate` / `capture_batch_immediate`.
 //!
 //! Unlike fire-and-forget `capture`/`capture_batch` (which enqueue onto the
-//! background worker and are driven with `flush()`), the `*_confirmed` methods
+//! background worker and are driven with `flush()`), the `*_immediate` methods
 //! send inline and return a terminal [`CaptureSummary`] (or an `Err`). These
 //! tests call them directly and assert on both the returned outcome and the
 //! wire, with no `flush()` in the loop. Tiny backoffs keep the inline retry
@@ -35,7 +35,7 @@ mod async_v1 {
         .await
     }
 
-    /// An `on_error` hook plus the counter it increments, to prove confirmed
+    /// An `on_error` hook plus the counter it increments, to prove immediate
     /// methods never fire it (the returned `Result` is the only signal).
     fn error_sink() -> (
         Arc<Mutex<usize>>,
@@ -61,7 +61,7 @@ mod async_v1 {
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
 
-        let summary = client.capture_confirmed(event).await.unwrap();
+        let summary = client.capture_immediate(event).await.unwrap();
         mock.assert_hits(1);
         assert_eq!(summary.submitted(), 1);
         assert_eq!(summary.not_persisted(), 0);
@@ -89,7 +89,7 @@ mod async_v1 {
 
         let client = v1_client(server.base_url()).await;
         let summary = client
-            .capture_batch_confirmed(vec![ok, dropped], false)
+            .capture_batch_immediate(vec![ok, dropped], false)
             .await
             .unwrap();
         mock.assert_hits(1);
@@ -119,14 +119,17 @@ mod async_v1 {
 
         let client = v1_client(server.base_url()).await;
         let summary = client
-            .capture_confirmed(Event::new("test", "user-1"))
+            .capture_immediate(Event::new("test", "user-1"))
             .await
             .unwrap();
         fail.assert_hits(1);
         ok.assert_hits(1);
         // 200 with an empty results map: nothing was reported unpersisted, but
-        // the one submitted event has no ok/warning verdict either.
+        // the one submitted event has no ok/warning verdict either, so it counts
+        // as not-persisted and the batch is not fully durable.
         assert_eq!(summary.submitted(), 1);
+        assert_eq!(summary.not_persisted(), 1);
+        assert!(!summary.all_persisted());
     }
 
     #[tokio::test]
@@ -153,7 +156,7 @@ mod async_v1 {
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
 
-        let summary = client.capture_confirmed(event).await.unwrap();
+        let summary = client.capture_immediate(event).await.unwrap();
         retry.assert_hits(1);
         ok.assert_hits(1);
         assert!(summary.all_persisted());
@@ -162,38 +165,43 @@ mod async_v1 {
 
     #[tokio::test]
     async fn exhausting_retryable_status_returns_err() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v1/analytics/events");
-            then.status(500)
-                .json_body(json!({ "error": "internal_error" }));
-        });
+        // Every shared-retryable status burns the full attempt budget (3) then
+        // surfaces an error. max_capture_attempts = 3 → 3 inline attempts.
+        for status in [408, 500, 502, 503, 504] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(POST).path("/i/v1/analytics/events");
+                then.status(status).json_body(json!({ "error": "boom" }));
+            });
 
-        let client = v1_client(server.base_url()).await;
-        let err = client
-            .capture_confirmed(Event::new("test", "user-1"))
-            .await
-            .expect_err("exhausted retry budget must surface an error");
-        // max_capture_attempts = 3 → 3 inline attempts before giving up.
-        mock.assert_hits(3);
-        assert!(
-            err.to_string().contains("500") || err.to_string().to_lowercase().contains("server")
-        );
+            let client = v1_client(server.base_url()).await;
+            let result = client.capture_immediate(Event::new("test", "user-1")).await;
+            assert!(
+                result.is_err(),
+                "status {} should exhaust and error",
+                status
+            );
+            mock.assert_hits(3);
+        }
     }
 
     #[tokio::test]
-    async fn terminal_billing_status_returns_err_without_retry() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v1/analytics/events");
-            then.status(402)
-                .json_body(json!({ "error": "billing_limit_exceeded" }));
-        });
+    async fn terminal_status_returns_err_without_retry() {
+        // Non-retryable statuses (incl. billing 402) fail on the first attempt,
+        // without burning the retry budget.
+        for status in [400, 401, 402, 403] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(POST).path("/i/v1/analytics/events");
+                then.status(status)
+                    .json_body(json!({ "error": "terminal" }));
+            });
 
-        let client = v1_client(server.base_url()).await;
-        let result = client.capture_confirmed(Event::new("test", "user-1")).await;
-        assert!(result.is_err());
-        mock.assert_hits(1);
+            let client = v1_client(server.base_url()).await;
+            let result = client.capture_immediate(Event::new("test", "user-1")).await;
+            assert!(result.is_err(), "status {} must be terminal", status);
+            mock.assert_hits(1);
+        }
     }
 
     #[tokio::test]
@@ -208,7 +216,7 @@ mod async_v1 {
 
         let client = v1_client(server.base_url()).await;
         client
-            .capture_batch_confirmed(vec![Event::new("a", "u"), Event::new("b", "u")], true)
+            .capture_batch_immediate(vec![Event::new("a", "u"), Event::new("b", "u")], true)
             .await
             .unwrap();
         mock.assert_hits(1);
@@ -237,11 +245,11 @@ mod async_v1 {
         )
         .await;
 
-        let _ = client.capture_confirmed(Event::new("test", "user-1")).await;
+        let _ = client.capture_immediate(Event::new("test", "user-1")).await;
         assert_eq!(
             *count.lock().unwrap(),
             0,
-            "confirmed capture must not fire on_error; the Result is the signal"
+            "immediate capture must not fire on_error; the Result is the signal"
         );
     }
 
@@ -257,7 +265,7 @@ mod async_v1 {
         )
         .await;
         let summary = disabled
-            .capture_confirmed(Event::new("test", "user-1"))
+            .capture_immediate(Event::new("test", "user-1"))
             .await
             .unwrap();
         assert_eq!(summary.submitted(), 0);
@@ -270,7 +278,7 @@ mod async_v1 {
             then.status(200).json_body(json!({ "results": {} }));
         });
         let client = v1_client(server.base_url()).await;
-        let summary = client.capture_batch_confirmed(vec![], false).await.unwrap();
+        let summary = client.capture_batch_immediate(vec![], false).await.unwrap();
         assert_eq!(summary.submitted(), 0);
         mock.assert_hits(0);
     }
@@ -321,7 +329,7 @@ mod async_v0 {
 
         let client = v0_client(server.base_url()).await;
         let summary = client
-            .capture_batch_confirmed(vec![Event::new("a", "u"), Event::new("b", "u")], false)
+            .capture_batch_immediate(vec![Event::new("a", "u"), Event::new("b", "u")], false)
             .await
             .unwrap();
         mock.assert_hits(1);
@@ -333,33 +341,41 @@ mod async_v0 {
 
     #[tokio::test]
     async fn exhausting_retryable_status_returns_err() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST).path("/batch/");
-            then.status(503);
-        });
+        // The shared retryable set burns the full attempt budget (3) then errs.
+        for status in [408, 500, 502, 503, 504] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(POST).path("/batch/");
+                then.status(status);
+            });
 
-        let client = v0_client(server.base_url()).await;
-        let err = client
-            .capture_confirmed(Event::new("test", "user-1"))
-            .await
-            .expect_err("exhausted retry budget must surface an error");
-        mock.assert_hits(3);
-        assert!(!err.to_string().is_empty());
+            let client = v0_client(server.base_url()).await;
+            let result = client.capture_immediate(Event::new("test", "user-1")).await;
+            assert!(
+                result.is_err(),
+                "status {} should exhaust and error",
+                status
+            );
+            mock.assert_hits(3);
+        }
     }
 
     #[tokio::test]
     async fn terminal_status_returns_err_without_retry() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST).path("/batch/");
-            then.status(401);
-        });
+        // Non-retryable statuses, including a bare 429 (no Retry-After), fail on
+        // the first attempt without retrying.
+        for status in [400, 401, 402, 403, 429] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(POST).path("/batch/");
+                then.status(status);
+            });
 
-        let client = v0_client(server.base_url()).await;
-        let result = client.capture_confirmed(Event::new("test", "user-1")).await;
-        assert!(result.is_err());
-        mock.assert_hits(1);
+            let client = v0_client(server.base_url()).await;
+            let result = client.capture_immediate(Event::new("test", "user-1")).await;
+            assert!(result.is_err(), "status {} must be terminal", status);
+            mock.assert_hits(1);
+        }
     }
 
     #[tokio::test]
@@ -374,7 +390,7 @@ mod async_v0 {
 
         let client = v0_client(server.base_url()).await;
         client
-            .capture_batch_confirmed(vec![Event::new("a", "u")], true)
+            .capture_batch_immediate(vec![Event::new("a", "u")], true)
             .await
             .unwrap();
         mock.assert_hits(1);
@@ -414,7 +430,7 @@ mod async_v0 {
         )
         .await;
         client
-            .capture_confirmed(Event::new("test_event", "user1"))
+            .capture_immediate(Event::new("test_event", "user1"))
             .await
             .unwrap();
         mock.assert_hits(1);
@@ -442,7 +458,7 @@ mod async_v0 {
         )
         .await;
 
-        let _ = client.capture_confirmed(Event::new("test", "user-1")).await;
+        let _ = client.capture_immediate(Event::new("test", "user-1")).await;
         assert_eq!(*count.lock().unwrap(), 0);
     }
 
@@ -457,7 +473,7 @@ mod async_v0 {
         )
         .await;
         let summary = disabled
-            .capture_confirmed(Event::new("test", "user-1"))
+            .capture_immediate(Event::new("test", "user-1"))
             .await
             .unwrap();
         assert_eq!(summary.submitted(), 0);
@@ -502,7 +518,7 @@ mod blocking_v1 {
         let client = v1_client(server.base_url());
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
-        let summary = client.capture_confirmed(event).unwrap();
+        let summary = client.capture_immediate(event).unwrap();
         mock.assert_hits(1);
         assert!(summary.all_persisted());
         assert_eq!(summary.submitted(), 1);
@@ -528,7 +544,7 @@ mod blocking_v1 {
 
         let client = v1_client(server.base_url());
         let summary = client
-            .capture_batch_confirmed(vec![ok, dropped], false)
+            .capture_batch_immediate(vec![ok, dropped], false)
             .unwrap();
         mock.assert_hits(1);
         assert_eq!(summary.not_persisted(), 1);
@@ -537,17 +553,41 @@ mod blocking_v1 {
 
     #[test]
     fn exhausting_retryable_status_returns_err() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST).path("/i/v1/analytics/events");
-            then.status(500)
-                .json_body(json!({ "error": "internal_error" }));
-        });
+        // The shared retryable set burns the full attempt budget (3) then errs.
+        for status in [408, 500, 502, 503, 504] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(POST).path("/i/v1/analytics/events");
+                then.status(status).json_body(json!({ "error": "boom" }));
+            });
 
-        let client = v1_client(server.base_url());
-        let result = client.capture_confirmed(Event::new("test", "user-1"));
-        assert!(result.is_err());
-        mock.assert_hits(3);
+            let client = v1_client(server.base_url());
+            let result = client.capture_immediate(Event::new("test", "user-1"));
+            assert!(
+                result.is_err(),
+                "status {} should exhaust and error",
+                status
+            );
+            mock.assert_hits(3);
+        }
+    }
+
+    #[test]
+    fn terminal_status_returns_err_without_retry() {
+        // Non-retryable statuses fail on the first attempt, no budget burned.
+        for status in [400, 401, 402, 403] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(POST).path("/i/v1/analytics/events");
+                then.status(status)
+                    .json_body(json!({ "error": "terminal" }));
+            });
+
+            let client = v1_client(server.base_url());
+            let result = client.capture_immediate(Event::new("test", "user-1"));
+            assert!(result.is_err(), "status {} must be terminal", status);
+            mock.assert_hits(1);
+        }
     }
 
     #[test]
@@ -572,7 +612,7 @@ mod blocking_v1 {
                 .build()
                 .unwrap(),
         );
-        let _ = client.capture_confirmed(Event::new("test", "user-1"));
+        let _ = client.capture_immediate(Event::new("test", "user-1"));
         assert_eq!(*count.lock().unwrap(), 0);
     }
 }
@@ -610,7 +650,7 @@ mod blocking_v0 {
 
         let client = v0_client(server.base_url());
         let summary = client
-            .capture_batch_confirmed(vec![Event::new("a", "u"), Event::new("b", "u")], false)
+            .capture_batch_immediate(vec![Event::new("a", "u"), Event::new("b", "u")], false)
             .unwrap();
         mock.assert_hits(1);
         assert_eq!(summary.submitted(), 2);
@@ -619,30 +659,41 @@ mod blocking_v0 {
 
     #[test]
     fn exhausting_retryable_status_returns_err() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST).path("/batch/");
-            then.status(503);
-        });
+        // The shared retryable set burns the full attempt budget (3) then errs.
+        for status in [408, 500, 502, 503, 504] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(POST).path("/batch/");
+                then.status(status);
+            });
 
-        let client = v0_client(server.base_url());
-        let result = client.capture_confirmed(Event::new("test", "user-1"));
-        assert!(result.is_err());
-        mock.assert_hits(3);
+            let client = v0_client(server.base_url());
+            let result = client.capture_immediate(Event::new("test", "user-1"));
+            assert!(
+                result.is_err(),
+                "status {} should exhaust and error",
+                status
+            );
+            mock.assert_hits(3);
+        }
     }
 
     #[test]
     fn terminal_status_returns_err_without_retry() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST).path("/batch/");
-            then.status(401);
-        });
+        // Non-retryable statuses, including a bare 429 (no Retry-After), fail on
+        // the first attempt without retrying.
+        for status in [400, 401, 402, 403, 429] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(POST).path("/batch/");
+                then.status(status);
+            });
 
-        let client = v0_client(server.base_url());
-        let result = client.capture_confirmed(Event::new("test", "user-1"));
-        assert!(result.is_err());
-        mock.assert_hits(1);
+            let client = v0_client(server.base_url());
+            let result = client.capture_immediate(Event::new("test", "user-1"));
+            assert!(result.is_err(), "status {} must be terminal", status);
+            mock.assert_hits(1);
+        }
     }
 
     #[test]
@@ -666,7 +717,7 @@ mod blocking_v0 {
                 .build()
                 .unwrap(),
         );
-        let _ = client.capture_confirmed(Event::new("test", "user-1"));
+        let _ = client.capture_immediate(Event::new("test", "user-1"));
         assert_eq!(*count.lock().unwrap(), 0);
     }
 }

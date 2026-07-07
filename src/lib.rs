@@ -77,9 +77,9 @@
 //! register [`ClientOptionsBuilder::on_error`] to observe them. This is the
 //! right choice for essentially all analytics.
 //!
-//! ## Confirmed delivery (advanced)
+//! ## Immediate delivery (advanced)
 //!
-//! [`Client::capture_confirmed`] and [`Client::capture_batch_confirmed`] send
+//! [`Client::capture_immediate`] and [`Client::capture_batch_immediate`] send
 //! inline and return a [`CaptureSummary`] once the request reaches a terminal
 //! outcome (or an [`Error`] if the retry budget is spent). They bypass the
 //! background worker and do not fire `on_error` — the returned value is the
