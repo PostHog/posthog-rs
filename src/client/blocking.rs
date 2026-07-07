@@ -134,34 +134,33 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         .build()
         .unwrap(); // Unwrap here is as safe as `HttpClient::new`
 
-    let (local_evaluator, flag_poller) = if options.enable_local_evaluation
-        && !options.is_disabled()
-    {
-        if let Some(ref secret_key) = options.secret_key {
-            let cache = FlagCache::new();
+    let (local_evaluator, flag_poller) =
+        if options.enable_local_evaluation && !options.is_disabled() {
+            if let Some(ref secret_key) = options.secret_key {
+                let cache = FlagCache::new();
 
-            let config = LocalEvaluationConfig {
-                personal_api_key: secret_key.clone(),
-                project_api_key: options.api_key.clone(),
-                api_host: options.endpoints().api_host(),
-                poll_interval: Duration::from_secs(options.poll_interval_seconds),
-                request_timeout: Duration::from_secs(options.request_timeout_seconds),
-            };
+                let config = LocalEvaluationConfig {
+                    personal_api_key: secret_key.clone(),
+                    project_api_key: options.api_key.clone(),
+                    api_host: options.endpoints().api_host(),
+                    poll_interval: Duration::from_secs(options.poll_interval_seconds),
+                    request_timeout: Duration::from_secs(options.request_timeout_seconds),
+                };
 
-            let mut poller = FlagPoller::new(config, cache.clone());
-            poller.set_on_error(options.on_error.clone());
-            poller.start();
+                let mut poller = FlagPoller::new(config, cache.clone());
+                poller.set_on_error(options.on_error.clone());
+                poller.start();
 
-            (Some(LocalEvaluator::new(cache)), Some(poller))
-        } else {
-            warn!(
+                (Some(LocalEvaluator::new(cache)), Some(poller))
+            } else {
+                warn!(
                 "Local evaluation enabled but secret_key not set, falling back to API evaluation"
             );
+                (None, None)
+            }
+        } else {
             (None, None)
-        }
-    } else {
-        (None, None)
-    };
+        };
 
     let transport = if options.is_disabled() {
         None
