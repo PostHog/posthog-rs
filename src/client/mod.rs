@@ -9,10 +9,12 @@ use tracing::warn;
 
 mod common;
 mod on_error;
+mod summary;
 
 pub(crate) use common::apply_on_error_hooks;
 pub(crate) use on_error::OnErrorHook;
 pub use on_error::{CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError};
+pub use summary::CaptureSummary;
 
 /// Request-body compression algorithm for the capture pipelines.
 ///

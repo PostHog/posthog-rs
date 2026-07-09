@@ -49,7 +49,9 @@ use super::common::{
     DetailedFlagsResponse, FlagEventDedupCache,
 };
 use super::transport::{Completion, Control, TransportHandle};
-use super::ClientOptions;
+use super::{CaptureSummary, ClientOptions};
+#[cfg(not(feature = "capture-v1"))]
+use reqwest::header::CONTENT_ENCODING;
 
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
@@ -390,6 +392,203 @@ impl Client {
             } else {
                 for event in events {
                     transport.enqueue(event);
+                }
+            }
+        }
+    }
+
+    // ----- Immediate (inline) capture -------------------------------------
+    //
+    // `capture`/`capture_batch` above are fire-and-forget: they enqueue onto the
+    // background worker and never report the outcome. The `*_immediate` variants
+    // send inline and await a terminal result, for the rare caller that must know
+    // a batch persisted before advancing its own durable state (e.g. committing
+    // an upstream offset). They bypass the worker queue and do NOT fire `on_error`
+    // hooks — the returned `Result`/`CaptureSummary` is the delivery signal.
+
+    /// Capture a single event and await confirmation that the request completed.
+    ///
+    /// The immediate-delivery counterpart to [`Client::capture`]. This is a
+    /// convenience wrapper over [`Client::capture_batch_immediate`] with a
+    /// one-event batch; see it for full semantics.
+    #[must_use = "the delivery outcome should be inspected"]
+    pub async fn capture_immediate(&self, event: Event) -> Result<CaptureSummary, Error> {
+        self.capture_batch_immediate(vec![event], false).await
+    }
+
+    /// Capture a batch of events and await confirmation that the request
+    /// completed, returning a [`CaptureSummary`] describing the outcome.
+    ///
+    /// The immediate-delivery counterpart to [`Client::capture_batch`]. Prefer
+    /// the fire-and-forget [`Client::capture`]/[`Client::capture_batch`] for
+    /// normal analytics; reach for this only when the caller must know the batch
+    /// persisted before advancing its own durable state.
+    ///
+    /// # Parameters
+    ///
+    /// - `events`: Events to send in a single request.
+    /// - `historical_migration`: Route events to the historical ingestion topic.
+    ///
+    /// # Behavior
+    ///
+    /// Sends inline (bypassing the background worker) and retries transient
+    /// failures per the client's retry configuration. On the `capture-v1`
+    /// pipeline a returned `Ok` can still report unpersisted events — inspect
+    /// [`CaptureSummary::all_persisted`]. Does NOT fire `on_error` hooks: the
+    /// returned `Result` is the delivery signal. Disabled clients and an empty
+    /// (or fully `before_send`-filtered) batch return a default `CaptureSummary`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] when the request is rejected with a terminal status or
+    /// the retry budget is exhausted without a successful response.
+    #[must_use = "the delivery outcome should be inspected"]
+    #[instrument(
+        skip(self, events),
+        fields(event_count = events.len(), historical_migration),
+        level = "debug"
+    )]
+    pub async fn capture_batch_immediate(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<CaptureSummary, Error> {
+        if self.options.is_disabled() || events.is_empty() {
+            return Ok(CaptureSummary::default());
+        }
+        self.send_immediate(events, historical_migration).await
+    }
+
+    /// Inline V1 capture: prepare once via the shared sans-IO helpers, then loop
+    /// send/classify, awaiting `tokio::time::sleep` between retries. The setup and
+    /// classification are shared with the blocking client; only this loop differs.
+    #[cfg(feature = "capture-v1")]
+    async fn send_immediate(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<CaptureSummary, Error> {
+        use super::v1_capture::{self, Step};
+
+        let Some(mut prep) =
+            v1_capture::prepare_immediate(&self.options, events, historical_migration)
+        else {
+            return Ok(CaptureSummary::default());
+        };
+        let mut final_results = HashMap::new();
+        let mut attempt: u32 = 1;
+
+        loop {
+            let (headers, body) = v1_capture::build_attempt_parts(
+                &self.options,
+                &prep.request_id,
+                attempt,
+                &prep.created_at,
+                prep.historical_migration,
+                &prep.pending,
+            )?;
+
+            let step = match self
+                .client
+                .post(&prep.url)
+                .headers(headers)
+                .body(body)
+                .send()
+                .await
+            {
+                Err(e) => v1_capture::after_transport_error(
+                    &self.options,
+                    &prep.request_id,
+                    attempt,
+                    e.to_string(),
+                ),
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let retry_after = v1_capture::parse_retry_after(response.headers());
+                    let text = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    v1_capture::after_response(
+                        &self.options,
+                        &prep.request_id,
+                        attempt,
+                        status,
+                        retry_after,
+                        &text,
+                        &mut prep.pending,
+                        &mut final_results,
+                    )
+                }
+            };
+
+            match step {
+                Step::Done => {
+                    return Ok(CaptureSummary::from_results(prep.submitted, final_results))
+                }
+                Step::Fail(e) => return Err(e),
+                Step::Backoff(delay) => {
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    /// Inline V0 capture: prepare the batch body once via the shared sans-IO
+    /// helpers, then loop send/classify. A `2xx` persists the whole batch.
+    #[cfg(not(feature = "capture-v1"))]
+    async fn send_immediate(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<CaptureSummary, Error> {
+        use super::retry::{self, v0_after_response, v0_after_transport_error, Step};
+        use super::v0_capture;
+
+        let Some(prep) =
+            v0_capture::prepare_immediate(&self.options, events, historical_migration)?
+        else {
+            return Ok(CaptureSummary::default());
+        };
+
+        let mut attempt: u32 = 1;
+        loop {
+            let mut request = self
+                .client
+                .post(&prep.url)
+                .header(CONTENT_TYPE, "application/json")
+                .header(USER_AGENT, get_default_user_agent())
+                .body(prep.body.clone());
+            if let Some(token) = prep.encoding {
+                request = request.header(CONTENT_ENCODING, token);
+            }
+            #[cfg(feature = "test-harness")]
+            if let Some(ref extra) = self.options.extra_capture_headers {
+                for (k, v) in extra {
+                    request = request.header(k.as_str(), v.as_str());
+                }
+            }
+
+            let step = match request.send().await {
+                Err(e) => v0_after_transport_error(&self.options, attempt, e.to_string()),
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let retry_after = retry::parse_retry_after(response.headers());
+                    let text = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    v0_after_response(&self.options, attempt, status, retry_after, &text)
+                }
+            };
+
+            match step {
+                Step::Done => return Ok(CaptureSummary::delivered(prep.kept)),
+                Step::Fail(e) => return Err(e),
+                Step::Backoff(delay) => {
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
                 }
             }
         }

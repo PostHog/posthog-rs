@@ -14,11 +14,16 @@ use super::retry::{backoff_duration, is_retryable_status};
 // Re-exported so the V1 capture loops in the client modules can reach them as
 // `v1_capture::parse_retry_after` / `v1_capture::Step`.
 pub(crate) use super::retry::{parse_retry_after, Step};
-use super::{common::apply_runtime_context, CaptureCompression, CaptureDefaults, ClientOptions};
+use super::{
+    common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
+    CaptureCompression, CaptureDefaults, ClientOptions,
+};
 use crate::client::get_default_user_agent;
 use crate::error::Error;
 use crate::event::Event;
-use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse, V1Event};
+use crate::event_v1::{
+    CaptureResponse, EventResult, EventStatus, V1BatchRequestRef, V1ErrorResponse, V1Event,
+};
 
 // ---------------------------------------------------------------------------
 // Request building
@@ -123,6 +128,82 @@ pub(crate) fn maybe_compress(
         }
     }
     payload
+}
+
+// ---------------------------------------------------------------------------
+// Inline (immediate) capture preparation
+// ---------------------------------------------------------------------------
+
+/// Everything an inline immediate V1 capture needs after event preparation:
+/// built once, then reused across retry attempts. The async and blocking
+/// clients share this (it is I/O-free) and keep only the send loop.
+pub(crate) struct PreparedV1 {
+    pub(crate) url: String,
+    pub(crate) request_id: Uuid,
+    pub(crate) created_at: String,
+    pub(crate) historical_migration: Option<bool>,
+    pub(crate) pending: Vec<V1Event>,
+    pub(crate) submitted: usize,
+}
+
+/// Prepare an inline immediate V1 capture: apply client defaults + `before_send`,
+/// then build the wire events and the per-request identity (request id,
+/// `created_at`, URL). Returns `None` when nothing survives filtering (an empty
+/// or fully `before_send`-dropped batch), so the caller returns a default
+/// summary without sending.
+pub(crate) fn prepare_immediate(
+    opts: &ClientOptions,
+    events: Vec<Event>,
+    historical_migration: bool,
+) -> Option<PreparedV1> {
+    let defaults = opts.capture_defaults();
+    let events: Vec<Event> = events
+        .into_iter()
+        .filter_map(|mut event| {
+            apply_capture_defaults(&mut event, &defaults);
+            apply_before_send_hooks(&opts.before_send, event)
+        })
+        .collect();
+    if events.is_empty() {
+        return None;
+    }
+
+    let request_id = Uuid::now_v7();
+    let created_at = Utc::now().to_rfc3339();
+    let historical_migration = historical_migration.then_some(true);
+    let url = opts.endpoints().build_custom_url(V1_CAPTURE_PATH);
+    let pending = build_events_at(&events, &defaults, Utc::now());
+    let submitted = pending.len();
+    Some(PreparedV1 {
+        url,
+        request_id,
+        created_at,
+        historical_migration,
+        pending,
+        submitted,
+    })
+}
+
+/// Build the headers and (optionally compressed) body for one immediate V1
+/// attempt. Kept separate from [`prepare_immediate`] because `pending` is pruned
+/// and the attempt number advances between retries. I/O-free.
+pub(crate) fn build_attempt_parts(
+    opts: &ClientOptions,
+    request_id: &Uuid,
+    attempt: u32,
+    created_at: &str,
+    historical_migration: Option<bool>,
+    pending: &[V1Event],
+) -> Result<(HeaderMap, Vec<u8>), Error> {
+    let request = V1BatchRequestRef {
+        created_at,
+        historical_migration,
+        batch: pending,
+    };
+    let payload = serde_json::to_vec(&request).map_err(|e| Error::Serialization(e.to_string()))?;
+    let mut headers = build_headers_at(opts, request_id, attempt, Utc::now());
+    let body = maybe_compress(opts.capture_compression, &mut headers, payload);
+    Ok((headers, body))
 }
 
 // ---------------------------------------------------------------------------

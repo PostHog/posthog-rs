@@ -11,6 +11,7 @@ use super::{
     common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
     BeforeSendHook, CaptureDefaults, ClientOptions,
 };
+use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::event::{BatchRequest, Event, InnerEvent};
 
@@ -86,6 +87,58 @@ pub(crate) fn encode_body(
         },
         None => (json.into_bytes(), None),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Inline (immediate) capture preparation
+// ---------------------------------------------------------------------------
+
+/// Everything an inline immediate V0 capture needs after payload building: the
+/// target URL (already carrying the `?compression=` query param when compressed),
+/// the encoded body, the `Content-Encoding` token to advertise, and the number
+/// of events kept after `before_send`. I/O-free, so both clients share it.
+pub(crate) struct PreparedV0 {
+    pub(crate) url: String,
+    pub(crate) body: Vec<u8>,
+    pub(crate) encoding: Option<&'static str>,
+    pub(crate) kept: usize,
+}
+
+/// Prepare an inline immediate V0 capture: build the batch payload (applying
+/// defaults + `before_send`), encode/compress it, and resolve the target URL.
+/// Returns `Ok(None)` when every event was dropped by `before_send`, so the
+/// caller returns a default summary without sending.
+pub(crate) fn prepare_immediate(
+    options: &ClientOptions,
+    events: Vec<Event>,
+    historical_migration: bool,
+) -> Result<Option<PreparedV0>, Error> {
+    let defaults = options.capture_defaults();
+    let Some((json, kept)) = build_batch_payload(
+        events,
+        options.api_key.clone(),
+        historical_migration,
+        Utc::now(),
+        &defaults,
+        &options.before_send,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let base_url = options.endpoints().build_url(Endpoint::Batch);
+    let (body, encoding) = encode_body(options, json);
+    // v0 capture reads the compression hint from the query param, not the header.
+    let url = match encoding {
+        Some(token) => format!("{base_url}?compression={token}"),
+        None => base_url,
+    };
+    Ok(Some(PreparedV0 {
+        url,
+        body,
+        encoding,
+        kept,
+    }))
 }
 
 // ---------------------------------------------------------------------------
