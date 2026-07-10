@@ -148,7 +148,15 @@ impl ErrorTrackingOptions {
         }
 
         if let Some(function) = function {
-            return default_in_app_function(function);
+            if !default_in_app_function(function) {
+                return false;
+            }
+            // A frame with no source file whose name carries no `::` path is
+            // thread/process bootstrap glue (`__clone`, `start_thread`,
+            // `_start`) or a foreign-library symbol: app code resolved by name
+            // always demangles with its `crate::` path, and DWARF-derived
+            // names come with file info.
+            return filename.is_some() || strip_generic_args(function).contains("::");
         }
 
         filename.is_some()
@@ -1327,8 +1335,10 @@ fn is_rust_symbol_hash(segment: &str) -> bool {
 
 fn default_in_app_path(filename: &str) -> bool {
     let normalized = filename.replace('\\', "/");
-    if normalized.contains("/.cargo/registry/")
-        || normalized.contains("/.cargo/git/")
+    // No leading `/.` on the cargo patterns: CARGO_HOME isn't always `~/.cargo`
+    // — the official Rust Docker images use `/usr/local/cargo`.
+    if normalized.contains("cargo/registry/")
+        || normalized.contains("cargo/git/")
         || normalized.contains("/rustc/")
         || normalized.contains("/rustc-")
         || normalized.contains("/library/alloc/src/")
@@ -1346,6 +1356,22 @@ fn default_in_app_path(filename: &str) -> bool {
     true
 }
 
+/// Strip trailing generic arguments from a function name so the crate-segment
+/// checks see the path, not the instantiation. DWARF-derived names carry the
+/// bare method name with its generic arguments
+/// (`poll_future<tokio::runtime::blocking::task::BlockingTask<...>>`), where a
+/// naive `::` split would yield a garbage first segment (`poll_future<tokio`).
+/// A *leading* `<` is a qualified-path rendering
+/// (`<alloc::boxed::Box<F> as core::ops::function::FnOnce<Args>>::call_once`),
+/// not generic arguments, so the name is kept whole for the existing
+/// `trim_start_matches('<')` handling.
+fn strip_generic_args(function: &str) -> &str {
+    match function.find('<') {
+        Some(idx) if idx > 0 => &function[..idx],
+        _ => function,
+    }
+}
+
 fn default_in_app_function(function: &str) -> bool {
     // Bare runtime/unwind symbols that carry no `crate::` prefix (so the segment
     // match below can't catch them). `rust_begin_unwind` is the panic entry; the
@@ -1361,7 +1387,7 @@ fn default_in_app_function(function: &str) -> bool {
     }
 
     !matches!(
-        function
+        strip_generic_args(function)
             .trim_start_matches('<')
             .split("::")
             .next()
@@ -2267,6 +2293,46 @@ mod tests {
         assert!(!options.is_in_app_path("/service/vendor/lib.rs"));
         assert!(options.is_in_app_frame(None, Some("my_service::checkout")));
         assert!(!options.is_in_app_frame(None, Some("other_service::checkout")));
+    }
+
+    #[test]
+    fn in_app_defaults_cover_docker_cargo_home_and_dwarf_names() {
+        let options = ErrorTrackingOptions::default();
+
+        // CARGO_HOME isn't always `~/.cargo`: the official Rust Docker images
+        // put the registry under /usr/local/cargo.
+        assert!(!options.is_in_app_path(
+            "/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.52.1/src/runtime/task/harness.rs"
+        ));
+        assert!(!options.is_in_app_path("/usr/local/cargo/git/checkouts/somecrate/src/lib.rs"));
+
+        // DWARF-derived names hide the crate behind generic arguments
+        // (`poll_future<tokio::...>`); the frame is still classified out of
+        // app by its registry path, and the garbage `poll_future<tokio`
+        // segment must not make the name override that.
+        assert!(!options.is_in_app_frame(
+            Some("/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.52.1/src/runtime/task/harness.rs"),
+            Some("poll_future<tokio::runtime::blocking::task::BlockingTask<tokio::runtime::scheduler::multi_thread::worker::{impl#0}::launch::{closure_env#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>"),
+        ));
+        // An app function generic over a vendor type stays in-app: only the
+        // base name (path before `<`) feeds the crate check.
+        assert!(
+            options.is_in_app_frame(Some("/app/src/worker.rs"), Some("run<tokio::time::Sleep>"),)
+        );
+        // Qualified-path renderings keep their leading `<` and still resolve
+        // the crate segment.
+        assert!(!options.is_in_app_frame(
+            None,
+            Some("<alloc::boxed::Box<F,A> as core::ops::function::FnOnce<Args>>::call_once"),
+        ));
+
+        // Bare thread/process bootstrap symbols with no source file are not
+        // app code, even though no crate denylist entry can match them.
+        assert!(!options.is_in_app_frame(None, Some("__clone")));
+        assert!(!options.is_in_app_frame(None, Some("start_thread")));
+        assert!(!options.is_in_app_frame(None, Some("main")));
+        // ...but a pathless name backed by a source file keeps the path verdict.
+        assert!(options.is_in_app_frame(Some("/app/src/main.rs"), Some("main")));
     }
 
     #[test]
