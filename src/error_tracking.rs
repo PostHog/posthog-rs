@@ -941,7 +941,11 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
             // We resolved symbols locally but there's no uploadable debug image,
             // so the server can't symbolicate this address. Keep the client-side
             // inline expansion (one frame per layer, no native addresses) — it's
-            // the only way these inlined calls survive.
+            // the only way these inlined calls survive. Layers are pushed
+            // innermost-first here; the reverse in `capture_raw_frames` /
+            // `capture_raw_panic_frames` later flips them so the outermost
+            // logical layer leads and the inlined leaf is last, matching the
+            // canonical bottom-up wire order.
             for (filename, line_no, function) in layers {
                 frames.push(StackFrame {
                     filename,
@@ -972,21 +976,54 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
     frames
 }
 
+// Frames are in canonical wire order (outermost first, crash-site frame last),
+// so trimming drops the outermost frames from the front and keeps the ones
+// nearest the crash site.
 fn trim_to_max_frames(frames: &mut Vec<StackFrame>, max_frames: usize) {
     if frames.len() > max_frames {
-        frames.truncate(max_frames);
+        frames.drain(..frames.len() - max_frames);
     }
 }
 
-/// Capture the current raw stacktrace, dropping the leading SDK frames so the
-/// caller's frame comes first, and return the loaded modules those frames point
-/// into for the `$debug_images` property.
+/// Drop the innermost (front, current-first) SDK prefix by matching each frame's
+/// symbol entry address against `pinned_entries` (the SDK capture functions).
+/// This works even in stripped builds where there are no names to match. The SDK
+/// frames sit at the front, so dropping through the last match removes the whole
+/// prefix, including the unwinder frames before our innermost one.
 ///
-/// Frames are current-first, so the SDK's own frames lead. Two passes drop
-/// them: an address-based pass that matches each frame's symbol entry against
-/// `pinned_entries` (the SDK capture functions), which works even in stripped
-/// builds where there are no names; then the name-based `is_internal` pass for
-/// everything the resolver could name.
+/// Platform caveat: this only works where the frame's symbol address is the
+/// runtime function entry (Linux/glibc via `_Unwind_FindEnclosingFunction`). On
+/// macOS the symbolization backend reports the queried address rather than the
+/// function entry, so the address pass never matches there and the caller's
+/// name-based pass does the stripping instead; fully stripped Apple/Windows
+/// builds keep the SDK prefix as address-only frames, which regain names through
+/// server-side symbolication.
+fn strip_pinned_prefix(frames: &mut Vec<StackFrame>, pinned_entries: &[u64]) {
+    let scan = frames.len().min(16);
+    let matches_pinned = |frame: &StackFrame| {
+        frame
+            .symbol_addr
+            .as_deref()
+            .and_then(|addr| u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok())
+            .is_some_and(|addr| pinned_entries.contains(&addr))
+    };
+    if let Some(last_sdk) = frames[..scan].iter().rposition(matches_pinned) {
+        frames.drain(..=last_sdk);
+    }
+}
+
+/// Capture the current raw stacktrace, dropping the leading SDK frames, and
+/// return the loaded modules those frames point into for the `$debug_images`
+/// property. The result is in canonical wire order — outermost frame first,
+/// crash/capture-site frame last — matching the other PostHog SDKs.
+///
+/// `capture_frames_current_first` yields innermost-first, so the SDK's own
+/// frames lead. Two passes drop them: an address-based pass that matches each
+/// frame's symbol entry against `pinned_entries` (the SDK capture functions),
+/// which works even in stripped builds where there are no names; then the
+/// name-based `is_internal` pass for everything the resolver could name. Only
+/// after stripping do we reverse into wire order (see the trailing `reverse`),
+/// so both passes keep operating on the front of the innermost-first vec.
 ///
 /// inline(never): this generic function sits between the pinned non-generic
 /// wrapper and `capture_frames_current_first`; keeping it a physical frame lets
@@ -1001,30 +1038,9 @@ fn capture_raw_frames(
     let modules = collect_loaded_modules();
     let mut frames = capture_frames_current_first(0, &modules);
 
-    // Address-based stripping first: identify the SDK's own capture frames by
-    // function entry address, which works even in stripped builds where the
-    // name-based check below has nothing to match. The SDK frames sit at the
-    // front (current-first), so dropping through the last match removes the
-    // whole prefix, including the unwinder frames before our innermost one.
-    //
-    // Platform caveat: this only works where the frame's symbol address is the
-    // runtime function entry (Linux/glibc via `_Unwind_FindEnclosingFunction`).
-    // On macOS the symbolization backend reports the queried address rather
-    // than the function entry, so the address pass never matches there and the
-    // name-based pass below does the stripping instead; fully stripped
-    // Apple/Windows builds keep the SDK prefix as address-only frames, which
-    // regain names through server-side symbolication.
-    let scan = frames.len().min(16);
-    let matches_pinned = |frame: &StackFrame| {
-        frame
-            .symbol_addr
-            .as_deref()
-            .and_then(|addr| u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok())
-            .is_some_and(|addr| pinned_entries.contains(&addr))
-    };
-    if let Some(last_sdk) = frames[..scan].iter().rposition(matches_pinned) {
-        frames.drain(..=last_sdk);
-    }
+    // Address-based stripping first (see `strip_pinned_prefix`): works even in
+    // stripped builds where the name-based pass below has nothing to match.
+    strip_pinned_prefix(&mut frames, pinned_entries);
 
     while frames
         .first()
@@ -1033,6 +1049,16 @@ fn capture_raw_frames(
     {
         frames.remove(0);
     }
+
+    // Flip innermost-first into canonical wire order: outermost frame first,
+    // crash-site frame last. A single reverse of the flattened vec is correct
+    // because `capture_frames_current_first` pushes both the physical frames
+    // and each frame's inline layers innermost-first, so one reverse flips both
+    // levels at once — the outermost physical frame leads, and within a
+    // client-expanded frame the outermost logical layer leads with the inlined
+    // leaf last, exactly the bottom-up input the server-side native contract
+    // expects.
+    frames.reverse();
 
     let images = referenced_images(modules, &frames);
     (frames, images)
@@ -1068,19 +1094,87 @@ fn capture_raw_application_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
     capture_raw_frames(is_internal_capture_frame, &pinned)
 }
 
+// inline(never): anchors the address-based capture-helper strip below, exactly
+// like `capture_raw_application_frames` does for the manual path.
+#[inline(never)]
 fn capture_raw_panic_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
-    // Unlike the manual-capture path, keep *every* frame — including the panic
-    // and capture machinery — and let in-app classification mark the SDK/runtime
-    // frames as `in_app = false`. Dropping by function name was brittle (the list
-    // drifted as internals were renamed/inlined) and threw away data the UI can
-    // collapse on its own via the in-app flag. We still collect the debug images
-    // the kept frames point into so the server can symbolicate them.
+    // We deliberately keep the panic and unwind *runtime* machinery
+    // (`panic_with_hook`, `begin_panic_handler`, `rust_begin_unwind`, ...) — it is
+    // classified out-of-app and the UI collapses it, which is more robust than
+    // dropping runtime internals by an ever-drifting name list. Everything
+    // *innermost of* the panic dispatcher is the SDK's own hook plumbing: the
+    // dispatcher (`rust_panic_with_hook`) synchronously invoked our hook, so our
+    // capture helpers, the `install_hook` closures, and the `catch_unwind` guard
+    // they run under all sit below it. Under the canonical crash-last wire order
+    // the innermost frame becomes the tail, which must be the crash-side runtime
+    // frame — not our hook plumbing — so we strip that inner prefix in three
+    // layers of decreasing robustness:
+    //
+    //   1. Address-based: drop our own `backtrace`/capture-helper frames by
+    //      pinned symbol entry. Works even in stripped builds with no names,
+    //      matching the manual path's first pass.
+    //   2. Dispatcher anchor: if the panic dispatcher is visible by name, drop
+    //      everything up to (but not including) it — a single stable anchor that
+    //      sweeps the whole hook-wrapper chain (closures + `catch_unwind` guard)
+    //      without enumerating its drifting frames.
+    //   3. Name fallback: if the dispatcher isn't nameable, drop the SDK capture
+    //      helpers by name.
+    //
+    // In a fully stripped build only (1) runs; the nameless hook-wrapper frames
+    // then survive as address-only frames that regain names (and normalization)
+    // through server-side symbolication, the same documented limitation the
+    // manual path carries.
     let modules = collect_loaded_modules();
-    let frames = capture_frames_current_first(0, &modules);
+    let mut frames = capture_frames_current_first(0, &modules);
+
+    let pinned = [
+        capture_frames_current_first as *const () as u64,
+        capture_raw_panic_frames as *const () as u64,
+    ];
+    strip_pinned_prefix(&mut frames, &pinned);
+
+    let scan = frames.len().min(24);
+    let dispatcher = frames[..scan]
+        .iter()
+        .position(|frame| is_panic_dispatcher_frame(&frame.function));
+    match dispatcher {
+        Some(index) => {
+            frames.drain(..index);
+        }
+        None => {
+            while frames
+                .first()
+                .map(|frame| is_internal_capture_frame(&frame.function))
+                .unwrap_or(false)
+            {
+                frames.remove(0);
+            }
+        }
+    }
+
+    // Flip innermost-first into canonical wire order: outermost frame first,
+    // panic site last (see `capture_raw_frames` for why one reverse suffices).
+    frames.reverse();
     let images = referenced_images(modules, &frames);
     (frames, images)
 }
 
+// The std panic dispatcher that synchronously invokes the installed hook. Its
+// name has been stable across recent toolchains; everything innermost of it on a
+// panicking thread is our own hook plumbing.
+fn is_panic_dispatcher_frame(function: &str) -> bool {
+    function.contains("rust_panic_with_hook") || function.contains("panicking::panic_with_hook")
+}
+
+// Matches the SDK's own capture-plumbing frames — the ones our capture helpers
+// push onto the innermost end simply by calling `backtrace` from inside
+// themselves. These are always noise and are stripped from the innermost prefix
+// so the canonical tail after the wire-order reverse is the crash site rather
+// than an SDK helper. Only SDK-owned names appear here (stable, we control
+// them); panic/unwind *runtime* frames (`begin_panic_handler`,
+// `rust_begin_unwind`, `panic_with_hook`, ...) are deliberately NOT matched —
+// the strip loop stops at them and they survive, classified out-of-app for the
+// UI to collapse.
 fn is_internal_capture_frame(function: &str) -> bool {
     function.starts_with("backtrace::")
         || function.contains("capture_frames_current_first")
@@ -1906,25 +2000,27 @@ mod tests {
         let frames = exception_list[0]["stacktrace"]["frames"]
             .as_array()
             .expect("expected stack frames");
-        let top_frame = frames.first().expect("expected top frame");
-        assert_eq!(top_frame["platform"], "native");
-        assert_eq!(top_frame["lang"], "rust");
-        let instruction_addr = top_frame["instruction_addr"].as_str().unwrap_or_default();
+        // Canonical wire order is outermost first, so the crash/capture-site
+        // user frame is the last frame.
+        let crash_frame = frames.last().expect("expected crash frame");
+        assert_eq!(crash_frame["platform"], "native");
+        assert_eq!(crash_frame["lang"], "rust");
+        let instruction_addr = crash_frame["instruction_addr"].as_str().unwrap_or_default();
         assert!(
             instruction_addr.starts_with("0x"),
             "expected hex instruction_addr, got {:?}",
             instruction_addr
         );
-        let top_function = top_frame["function"].as_str().unwrap_or_default();
+        let crash_function = crash_frame["function"].as_str().unwrap_or_default();
         assert!(
-            top_function.contains("from_error_builds_exception_list_with_stacktrace"),
-            "expected user frame first, got {:?}",
-            top_function
+            crash_function.contains("from_error_builds_exception_list_with_stacktrace"),
+            "expected user frame last, got {:?}",
+            crash_function
         );
         assert!(
-            !top_function.contains("Exception::"),
+            !crash_function.contains("Exception::"),
             "expected SDK frames to be skipped, got {:?}",
-            top_function
+            crash_function
         );
     }
 
@@ -2192,7 +2288,7 @@ mod tests {
     }
 
     #[test]
-    fn frames_are_trimmed_to_max_frames_keeping_the_top() {
+    fn frames_are_trimmed_to_max_frames_keeping_the_crash_site() {
         let synthetic_frame = |index: usize| StackFrame {
             filename: None,
             line_no: None,
@@ -2224,16 +2320,23 @@ mod tests {
             .as_array()
             .expect("expected stack frames");
         assert_eq!(frames.len(), MAX_FRAMES);
-        // Trimming drops the outermost tail; the crash-site top frame survives.
-        assert_eq!(frames[0]["function"], "frame_0");
+        // Frames arrive in wire order (outermost first, crash site last), so
+        // trimming drops the outermost frames from the front and keeps the
+        // crash-site tail: `frame_0` is gone and the last frame survives.
+        assert_eq!(frames[0]["function"], "frame_5");
+        assert_eq!(
+            frames[MAX_FRAMES - 1]["function"],
+            format!("frame_{}", MAX_FRAMES + 4)
+        );
     }
 
     #[test]
-    fn stacktrace_keeps_top_frame_first() {
+    fn stacktrace_keeps_crash_frame_last() {
         fn capture() -> ExceptionStacktrace {
-            // Empty module slice: this test only asserts frame ordering and
-            // names, which are independent of the loaded-module lookup.
-            let mut frames = capture_frames_current_first(0, &[]);
+            // Go through the real capture path so we assert the wire order the
+            // SDK actually emits (outermost first, crash/capture site last),
+            // not the raw innermost-first order of `capture_frames_current_first`.
+            let mut frames = capture_raw_application_frames().0;
             trim_to_max_frames(&mut frames, 8);
             ExceptionStacktrace::raw(frames)
         }
@@ -2247,16 +2350,16 @@ mod tests {
 
         let capture_index = functions
             .iter()
-            .position(|function| function.contains("stacktrace_keeps_top_frame_first::capture"))
+            .position(|function| function.contains("stacktrace_keeps_crash_frame_last::capture"))
             .expect("expected capture frame");
         let test_index = functions
             .iter()
-            .position(|function| function.ends_with("stacktrace_keeps_top_frame_first"))
+            .position(|function| function.ends_with("stacktrace_keeps_crash_frame_last"))
             .expect("expected test frame");
 
         assert!(
-            capture_index < test_index,
-            "expected top frame before caller, got {:?}",
+            test_index < capture_index,
+            "expected the caller before the innermost (capture-site) frame, got {:?}",
             functions
         );
     }
@@ -2329,13 +2432,15 @@ mod tests {
                 functions
             );
         } else {
-            // Not resolvable: client-side expansion preserves the inline chain,
-            // innermost first.
+            // Not resolvable: client-side expansion preserves the inline chain.
+            // In canonical wire order the outermost logical layer leads and the
+            // inlined leaf is last, so `inline_mid` (the caller) precedes
+            // `inline_leaf` (the inlined callee).
             let leaf_index = functions.iter().position(|f| f.contains("inline_leaf"));
             let mid_index = functions.iter().position(|f| f.contains("inline_mid"));
             assert!(
-                matches!((leaf_index, mid_index), (Some(l), Some(m)) if l < m),
-                "expected client-side inline expansion innermost first, got {:?}",
+                matches!((leaf_index, mid_index), (Some(l), Some(m)) if m < l),
+                "expected client-side inline expansion outermost first, got {:?}",
                 functions
             );
         }
