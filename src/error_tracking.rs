@@ -1360,14 +1360,16 @@ fn default_in_app_path(filename: &str) -> bool {
     // CARGO_HOME isn't always `~/.cargo` — the official Rust Docker images use
     // `/usr/local/cargo`. `/cargo/` keeps a path-component boundary so an app
     // under e.g. `/srv/mycargo/` can't match; `/.cargo/` is spelled out because
-    // its dot breaks that boundary. `/registry/src/index.crates.io-` is the
-    // crates.io registry layout itself ($CARGO_HOME/registry/src/<registry>-<hash>/),
-    // which catches renamed cargo homes the name checks can't.
+    // its dot breaks that boundary. The last two patterns are cargo's own
+    // layouts — `$CARGO_HOME/registry/src/<registry>-<hash>/` and
+    // `$CARGO_HOME/git/checkouts/<repo>-<hash>/` — which catch renamed cargo
+    // homes the name checks can't.
     if normalized.contains("/.cargo/registry/")
         || normalized.contains("/.cargo/git/")
         || normalized.contains("/cargo/registry/")
         || normalized.contains("/cargo/git/")
         || normalized.contains("/registry/src/index.crates.io-")
+        || normalized.contains("/git/checkouts/")
         || normalized.contains("/rustc/")
         || normalized.contains("/rustc-")
         || normalized.contains("/library/alloc/src/")
@@ -2334,10 +2336,12 @@ mod tests {
             "/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.52.1/src/runtime/task/harness.rs"
         ));
         assert!(!options.is_in_app_path("/usr/local/cargo/git/checkouts/somecrate/src/lib.rs"));
-        // A renamed CARGO_HOME is still caught by the registry layout itself.
+        // A renamed CARGO_HOME is still caught by cargo's own layouts.
         assert!(!options.is_in_app_path(
             "/cache/rust-deps/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs"
         ));
+        assert!(!options
+            .is_in_app_path("/cache/rust-deps/git/checkouts/somecrate-9a8b7c6d/0f1e2d/src/lib.rs"));
         // `cargo` must be a whole path component: an app that happens to live
         // under a `*cargo` directory is not dependency code.
         assert!(options.is_in_app_path("/srv/mycargo/registry/src/model.rs"));
