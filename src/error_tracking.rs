@@ -1355,6 +1355,29 @@ fn is_bootstrap_symbol(function: &str) -> bool {
     )
 }
 
+/// A trailing `-<hex hash>` on a cargo registry/checkout directory name, e.g.
+/// `index.crates.io-6f17d22bba15001f` or `somecrate-9a8b7c6d5e4f3a2b`.
+fn has_cargo_hash_suffix(dir: &str) -> bool {
+    dir.rsplit_once('-')
+        .is_some_and(|(_, hash)| hash.len() >= 8 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
+}
+
+/// Matches cargo's registry source layout,
+/// `$CARGO_HOME/registry/src/<registry>-<hex hash>/<crate>-<version>/...`,
+/// regardless of where the cargo home lives. The hash suffix and a crate
+/// directory beneath are required so app paths that merely contain
+/// registry-like names don't match.
+fn is_cargo_registry_src(normalized: &str) -> bool {
+    let Some(idx) = normalized.find("/registry/src/") else {
+        return false;
+    };
+    let rest = &normalized[idx + "/registry/src/".len()..];
+    let Some((registry_dir, rest)) = rest.split_once('/') else {
+        return false;
+    };
+    has_cargo_hash_suffix(registry_dir) && rest.contains('/')
+}
+
 /// Matches cargo's git dependency layout,
 /// `$CARGO_HOME/git/checkouts/<repo>-<hex ident hash>/<short rev>/...`,
 /// regardless of where the cargo home lives. Both the ident-hash suffix and
@@ -1368,9 +1391,7 @@ fn is_cargo_git_checkout(normalized: &str) -> bool {
     let Some((repo_dir, rest)) = rest.split_once('/') else {
         return false;
     };
-    let ident_ok = repo_dir
-        .rsplit_once('-')
-        .is_some_and(|(_, hash)| hash.len() >= 8 && hash.chars().all(|ch| ch.is_ascii_hexdigit()));
+    let ident_ok = has_cargo_hash_suffix(repo_dir);
     let Some((rev_dir, rest)) = rest.split_once('/') else {
         return false;
     };
@@ -1384,12 +1405,12 @@ fn default_in_app_path(filename: &str) -> bool {
     let normalized = filename.replace('\\', "/");
     // CARGO_HOME isn't always `~/.cargo` — the official Rust Docker images use
     // `/usr/local/cargo`. Rather than guessing at cargo-home names, the
-    // registry-layout pattern ($CARGO_HOME/registry/src/<registry>-<hash>/)
-    // and the git checkout check match cargo's own on-disk layouts under any
-    // home; the `/.cargo/` rules stay as the original home-based fallback.
+    // registry-src and git-checkout checks match cargo's own on-disk layouts
+    // under any home; the `/.cargo/` rules stay as the original home-based
+    // fallback.
     if normalized.contains("/.cargo/registry/")
         || normalized.contains("/.cargo/git/")
-        || normalized.contains("/registry/src/index.crates.io-")
+        || is_cargo_registry_src(&normalized)
         || is_cargo_git_checkout(&normalized)
         || normalized.contains("/rustc/")
         || normalized.contains("/rustc-")
@@ -2375,6 +2396,8 @@ mod tests {
         // look cargo-ish stay in-app.
         assert!(options.is_in_app_path("/srv/mycargo/registry/src/model.rs"));
         assert!(options.is_in_app_path("/srv/cargo/registry/my-service/src/main.rs"));
+        assert!(options
+            .is_in_app_path("/srv/registry/src/index.crates.io-local/my-service/src/main.rs"));
 
         // DWARF-derived names hide the crate behind generic arguments
         // (`poll_future<tokio::...>`); the frame is still classified out of
