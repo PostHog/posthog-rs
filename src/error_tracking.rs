@@ -1383,15 +1383,12 @@ fn is_cargo_git_checkout(normalized: &str) -> bool {
 fn default_in_app_path(filename: &str) -> bool {
     let normalized = filename.replace('\\', "/");
     // CARGO_HOME isn't always `~/.cargo` — the official Rust Docker images use
-    // `/usr/local/cargo`. `/cargo/` keeps a path-component boundary so an app
-    // under e.g. `/srv/mycargo/` can't match; `/.cargo/` is spelled out because
-    // its dot breaks that boundary. The registry-layout pattern and the git
-    // checkout check are cargo's own layouts, which catch renamed cargo homes
-    // the name checks can't.
+    // `/usr/local/cargo`. Rather than guessing at cargo-home names, the
+    // registry-layout pattern ($CARGO_HOME/registry/src/<registry>-<hash>/)
+    // and the git checkout check match cargo's own on-disk layouts under any
+    // home; the `/.cargo/` rules stay as the original home-based fallback.
     if normalized.contains("/.cargo/registry/")
         || normalized.contains("/.cargo/git/")
-        || normalized.contains("/cargo/registry/")
-        || normalized.contains("/cargo/git/")
         || normalized.contains("/registry/src/index.crates.io-")
         || is_cargo_git_checkout(&normalized)
         || normalized.contains("/rustc/")
@@ -2359,7 +2356,9 @@ mod tests {
         assert!(!options.is_in_app_path(
             "/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.52.1/src/runtime/task/harness.rs"
         ));
-        assert!(!options.is_in_app_path("/usr/local/cargo/git/checkouts/somecrate/src/lib.rs"));
+        assert!(!options.is_in_app_path(
+            "/usr/local/cargo/git/checkouts/somecrate-9a8b7c6d5e4f3a2b/0f1e2d3/src/lib.rs"
+        ));
         // A renamed CARGO_HOME is still caught by cargo's own layouts.
         assert!(!options.is_in_app_path(
             "/cache/rust-deps/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs"
@@ -2372,9 +2371,10 @@ mod tests {
         // directory stays in-app, even with a hex-looking repo-dir suffix.
         assert!(options.is_in_app_path("/srv/git/checkouts/my-service/src/main.rs"));
         assert!(options.is_in_app_path("/srv/git/checkouts/my-service-deadbeef/src/main.rs"));
-        // `cargo` must be a whole path component: an app that happens to live
-        // under a `*cargo` directory is not dependency code.
+        // Only cargo's real layouts match: apps under directories that merely
+        // look cargo-ish stay in-app.
         assert!(options.is_in_app_path("/srv/mycargo/registry/src/model.rs"));
+        assert!(options.is_in_app_path("/srv/cargo/registry/my-service/src/main.rs"));
 
         // DWARF-derived names hide the crate behind generic arguments
         // (`poll_future<tokio::...>`); the frame is still classified out of
