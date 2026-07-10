@@ -1356,20 +1356,28 @@ fn is_bootstrap_symbol(function: &str) -> bool {
 }
 
 /// Matches cargo's git dependency layout,
-/// `$CARGO_HOME/git/checkouts/<repo>-<hex ident hash>/<rev>/...`, regardless
-/// of where the cargo home lives. The ident-hash suffix is required so an app
-/// that merely lives under a `git/checkouts/` directory doesn't match.
+/// `$CARGO_HOME/git/checkouts/<repo>-<hex ident hash>/<short rev>/...`,
+/// regardless of where the cargo home lives. Both the ident-hash suffix and
+/// the short-rev component are required so an app that merely lives under a
+/// `git/checkouts/` directory (even one named `*-deadbeef`) doesn't match.
 fn is_cargo_git_checkout(normalized: &str) -> bool {
     let Some(idx) = normalized.find("/git/checkouts/") else {
         return false;
     };
     let rest = &normalized[idx + "/git/checkouts/".len()..];
-    let Some((repo_dir, _)) = rest.split_once('/') else {
+    let Some((repo_dir, rest)) = rest.split_once('/') else {
         return false;
     };
-    repo_dir
+    let ident_ok = repo_dir
         .rsplit_once('-')
-        .is_some_and(|(_, hash)| hash.len() >= 8 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .is_some_and(|(_, hash)| hash.len() >= 8 && hash.chars().all(|ch| ch.is_ascii_hexdigit()));
+    let Some((rev_dir, rest)) = rest.split_once('/') else {
+        return false;
+    };
+    let rev_ok = (7..=40).contains(&rev_dir.len())
+        && rev_dir.chars().all(|ch| ch.is_ascii_hexdigit())
+        && !rest.is_empty();
+    ident_ok && rev_ok
 }
 
 fn default_in_app_path(filename: &str) -> bool {
@@ -2357,11 +2365,13 @@ mod tests {
             "/cache/rust-deps/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs"
         ));
         assert!(!options.is_in_app_path(
-            "/cache/rust-deps/git/checkouts/somecrate-9a8b7c6d5e4f3a2b/0f1e2d/src/lib.rs"
+            "/cache/rust-deps/git/checkouts/somecrate-9a8b7c6d5e4f3a2b/0f1e2d3/src/lib.rs"
         ));
-        // ...but only cargo's `<repo>-<hash>` checkout layout: an app that
-        // happens to live under a `git/checkouts/` directory stays in-app.
+        // ...but only cargo's `<repo>-<ident hash>/<short rev>/` checkout
+        // layout: an app that happens to live under a `git/checkouts/`
+        // directory stays in-app, even with a hex-looking repo-dir suffix.
         assert!(options.is_in_app_path("/srv/git/checkouts/my-service/src/main.rs"));
+        assert!(options.is_in_app_path("/srv/git/checkouts/my-service-deadbeef/src/main.rs"));
         // `cargo` must be a whole path component: an app that happens to live
         // under a `*cargo` directory is not dependency code.
         assert!(options.is_in_app_path("/srv/mycargo/registry/src/model.rs"));
