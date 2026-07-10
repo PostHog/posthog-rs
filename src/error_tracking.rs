@@ -1176,6 +1176,11 @@ fn is_panic_dispatcher_frame(function: &str) -> bool {
 // the strip loop stops at them and they survive, classified out-of-app for the
 // UI to collapse.
 fn is_internal_capture_frame(function: &str) -> bool {
+    // Demanglers differ on qualified-path rendering across toolchain versions:
+    // older output is `Exception::from_error`, newer output wraps the type as
+    // `<posthog_rs::error_tracking::Exception>::from_error::<T>`. Strip the
+    // angle brackets before matching so both forms hit.
+    let function: String = function.replace(['<', '>'], "");
     function.starts_with("backtrace::")
         || function.contains("capture_frames_current_first")
         || function.contains("capture_raw_frames")
@@ -1964,6 +1969,24 @@ mod tests {
             normalize_function_name("<[u8] as checkout_service::Digest>::digest"),
             "<[u8] as checkout_service::Digest>::digest"
         );
+    }
+
+    #[test]
+    fn internal_capture_frames_match_both_demangler_renderings() {
+        // Older toolchains demangle as `Type::method`, newer ones as
+        // `<path::Type>::method::<T>` — the strip must catch both, or an SDK
+        // frame survives at the crash-site end of the canonical order.
+        for name in [
+            "posthog_rs::error_tracking::Exception::from_error",
+            "<posthog_rs::error_tracking::Exception>::from_error::<posthog_rs::error_tracking::tests::OuterError>",
+            "<posthog_rs::error_tracking::Exception>::from_message",
+            "<posthog_rs::client::Client>::capture_exception::<E>",
+        ] {
+            assert!(is_internal_capture_frame(name), "should strip {name:?}");
+        }
+        assert!(!is_internal_capture_frame(
+            "my_app::checkout::Exception_from_error_report"
+        ));
     }
 
     #[test]
