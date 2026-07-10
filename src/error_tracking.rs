@@ -151,12 +151,14 @@ impl ErrorTrackingOptions {
             if !default_in_app_function(function) {
                 return false;
             }
-            // A frame with no source file whose name carries no `::` path is
-            // thread/process bootstrap glue (`__clone`, `start_thread`,
-            // `_start`) or a foreign-library symbol: app code resolved by name
-            // always demangles with its `crate::` path, and DWARF-derived
-            // names come with file info.
-            return filename.is_some() || strip_generic_args(function).contains("::");
+            // Only a known-symbol list for fileless bootstrap glue: a broader
+            // "no `::` path and no file" rule would also hide legitimate app
+            // symbols (`#[no_mangle]`/`#[export_name]` functions, C code
+            // linked into the binary) that resolve the same way.
+            if filename.is_none() && is_bootstrap_symbol(function) {
+                return false;
+            }
+            return true;
         }
 
         filename.is_some()
@@ -1333,12 +1335,39 @@ fn is_rust_symbol_hash(segment: &str) -> bool {
         && segment[1..].chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+/// Thread/process entry symbols from libc/libpthread (`__clone`,
+/// `start_thread`) and the C `main` shim. They resolve from the symbol table
+/// with no source file and no `crate::` path, so the crate denylist can't see
+/// them; matched exactly so app symbols of the same bare shape stay in-app.
+fn is_bootstrap_symbol(function: &str) -> bool {
+    matches!(
+        function,
+        "main"
+            | "_start"
+            | "__libc_start_main"
+            | "clone"
+            | "clone3"
+            | "__clone"
+            | "__clone3"
+            | "start_thread"
+            | "_pthread_start"
+            | "thread_start"
+    )
+}
+
 fn default_in_app_path(filename: &str) -> bool {
     let normalized = filename.replace('\\', "/");
-    // No leading `/.` on the cargo patterns: CARGO_HOME isn't always `~/.cargo`
-    // — the official Rust Docker images use `/usr/local/cargo`.
-    if normalized.contains("cargo/registry/")
-        || normalized.contains("cargo/git/")
+    // CARGO_HOME isn't always `~/.cargo` — the official Rust Docker images use
+    // `/usr/local/cargo`. `/cargo/` keeps a path-component boundary so an app
+    // under e.g. `/srv/mycargo/` can't match; `/.cargo/` is spelled out because
+    // its dot breaks that boundary. `/registry/src/index.crates.io-` is the
+    // crates.io registry layout itself ($CARGO_HOME/registry/src/<registry>-<hash>/),
+    // which catches renamed cargo homes the name checks can't.
+    if normalized.contains("/.cargo/registry/")
+        || normalized.contains("/.cargo/git/")
+        || normalized.contains("/cargo/registry/")
+        || normalized.contains("/cargo/git/")
+        || normalized.contains("/registry/src/index.crates.io-")
         || normalized.contains("/rustc/")
         || normalized.contains("/rustc-")
         || normalized.contains("/library/alloc/src/")
@@ -2305,6 +2334,13 @@ mod tests {
             "/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.52.1/src/runtime/task/harness.rs"
         ));
         assert!(!options.is_in_app_path("/usr/local/cargo/git/checkouts/somecrate/src/lib.rs"));
+        // A renamed CARGO_HOME is still caught by the registry layout itself.
+        assert!(!options.is_in_app_path(
+            "/cache/rust-deps/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs"
+        ));
+        // `cargo` must be a whole path component: an app that happens to live
+        // under a `*cargo` directory is not dependency code.
+        assert!(options.is_in_app_path("/srv/mycargo/registry/src/model.rs"));
 
         // DWARF-derived names hide the crate behind generic arguments
         // (`poll_future<tokio::...>`); the frame is still classified out of
@@ -2331,8 +2367,11 @@ mod tests {
         assert!(!options.is_in_app_frame(None, Some("__clone")));
         assert!(!options.is_in_app_frame(None, Some("start_thread")));
         assert!(!options.is_in_app_frame(None, Some("main")));
-        // ...but a pathless name backed by a source file keeps the path verdict.
+        // ...but a pathless name backed by a source file keeps the path verdict,
+        // and other bare symbols (`#[no_mangle]` exports, linked-in C code)
+        // stay in-app.
         assert!(options.is_in_app_frame(Some("/app/src/main.rs"), Some("main")));
+        assert!(options.is_in_app_frame(None, Some("my_exported_callback")));
     }
 
     #[test]
