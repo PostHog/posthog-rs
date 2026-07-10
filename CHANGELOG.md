@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.19.1 — 2026-07-10
+
+### Patch changes
+
+- [31213ee](https://github.com/posthog/posthog-rs/commit/31213ee5d61e36e4228b4e01de13a119a9e012d2) fix: strip SDK capture frames under newer demangler renderings (`<Type>::method::<T>`), which previously survived at the crash-site end of the stack — Thanks @cat-ph!
+
 ## 0.19.0 — 2026-07-10
 
 ### Minor changes
