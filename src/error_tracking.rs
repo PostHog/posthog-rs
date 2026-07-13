@@ -1356,10 +1356,12 @@ fn is_bootstrap_symbol(function: &str) -> bool {
 }
 
 /// A trailing `-<hex hash>` on a cargo registry/checkout directory name, e.g.
-/// `index.crates.io-6f17d22bba15001f` or `somecrate-9a8b7c6d5e4f3a2b`.
+/// `index.crates.io-6f17d22bba15001f` or `somecrate-9a8b7c6d5e4f3a2b`. Cargo's
+/// ident hash is a hex-encoded u64, so exactly 16 chars — requiring that
+/// keeps deploy dirs suffixed with short git SHAs (7–12 chars) from matching.
 fn has_cargo_hash_suffix(dir: &str) -> bool {
     dir.rsplit_once('-')
-        .is_some_and(|(_, hash)| hash.len() >= 8 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .is_some_and(|(_, hash)| hash.len() == 16 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
 }
 
 /// Matches cargo's registry source layout,
@@ -2398,6 +2400,10 @@ mod tests {
         assert!(options.is_in_app_path("/srv/cargo/registry/my-service/src/main.rs"));
         assert!(options
             .is_in_app_path("/srv/registry/src/index.crates.io-local/my-service/src/main.rs"));
+        // Deploy/checkout dirs suffixed with short git SHAs (< 16 hex chars)
+        // don't pass for cargo's u64 ident hash.
+        assert!(options.is_in_app_path("/opt/app/registry/src/service-a1b2c3d4/modules/api.rs"));
+        assert!(options.is_in_app_path("/srv/git/checkouts/service-deadbeef/0f1e2d3/src/main.rs"));
 
         // DWARF-derived names hide the crate behind generic arguments
         // (`poll_future<tokio::...>`); the frame is still classified out of
