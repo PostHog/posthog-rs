@@ -148,7 +148,17 @@ impl ErrorTrackingOptions {
         }
 
         if let Some(function) = function {
-            return default_in_app_function(function);
+            if !default_in_app_function(function) {
+                return false;
+            }
+            // Only a known-symbol list for fileless bootstrap glue: a broader
+            // "no `::` path and no file" rule would also hide legitimate app
+            // symbols (`#[no_mangle]`/`#[export_name]` functions, C code
+            // linked into the binary) that resolve the same way.
+            if filename.is_none() && is_bootstrap_symbol(function) {
+                return false;
+            }
+            return true;
         }
 
         filename.is_some()
@@ -1325,10 +1335,85 @@ fn is_rust_symbol_hash(segment: &str) -> bool {
         && segment[1..].chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+/// Thread/process entry symbols from libc/libpthread (`__clone`,
+/// `start_thread`) and the C `main` shim. They resolve from the symbol table
+/// with no source file and no `crate::` path, so the crate denylist can't see
+/// them; matched exactly so app symbols of the same bare shape stay in-app.
+fn is_bootstrap_symbol(function: &str) -> bool {
+    matches!(
+        function,
+        "main"
+            | "_start"
+            | "__libc_start_main"
+            | "clone"
+            | "clone3"
+            | "__clone"
+            | "__clone3"
+            | "start_thread"
+            | "_pthread_start"
+            | "thread_start"
+    )
+}
+
+/// A trailing `-<hex hash>` on a cargo registry/checkout directory name, e.g.
+/// `index.crates.io-6f17d22bba15001f` or `somecrate-9a8b7c6d5e4f3a2b`. Cargo's
+/// ident hash is a hex-encoded u64, so exactly 16 chars — requiring that
+/// keeps deploy dirs suffixed with short git SHAs (7–12 chars) from matching.
+fn has_cargo_hash_suffix(dir: &str) -> bool {
+    dir.rsplit_once('-')
+        .is_some_and(|(_, hash)| hash.len() == 16 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
+}
+
+/// Matches cargo's registry source layout,
+/// `$CARGO_HOME/registry/src/<registry>-<hex hash>/<crate>-<version>/...`,
+/// regardless of where the cargo home lives. The hash suffix and a crate
+/// directory beneath are required so app paths that merely contain
+/// registry-like names don't match.
+fn is_cargo_registry_src(normalized: &str) -> bool {
+    let Some(idx) = normalized.find("/registry/src/") else {
+        return false;
+    };
+    let rest = &normalized[idx + "/registry/src/".len()..];
+    let Some((registry_dir, rest)) = rest.split_once('/') else {
+        return false;
+    };
+    has_cargo_hash_suffix(registry_dir) && rest.contains('/')
+}
+
+/// Matches cargo's git dependency layout,
+/// `$CARGO_HOME/git/checkouts/<repo>-<hex ident hash>/<short rev>/...`,
+/// regardless of where the cargo home lives. Both the ident-hash suffix and
+/// the short-rev component are required so an app that merely lives under a
+/// `git/checkouts/` directory (even one named `*-deadbeef`) doesn't match.
+fn is_cargo_git_checkout(normalized: &str) -> bool {
+    let Some(idx) = normalized.find("/git/checkouts/") else {
+        return false;
+    };
+    let rest = &normalized[idx + "/git/checkouts/".len()..];
+    let Some((repo_dir, rest)) = rest.split_once('/') else {
+        return false;
+    };
+    let ident_ok = has_cargo_hash_suffix(repo_dir);
+    let Some((rev_dir, rest)) = rest.split_once('/') else {
+        return false;
+    };
+    let rev_ok = (7..=40).contains(&rev_dir.len())
+        && rev_dir.chars().all(|ch| ch.is_ascii_hexdigit())
+        && !rest.is_empty();
+    ident_ok && rev_ok
+}
+
 fn default_in_app_path(filename: &str) -> bool {
     let normalized = filename.replace('\\', "/");
+    // CARGO_HOME isn't always `~/.cargo` — the official Rust Docker images use
+    // `/usr/local/cargo`. Rather than guessing at cargo-home names, the
+    // registry-src and git-checkout checks match cargo's own on-disk layouts
+    // under any home; the `/.cargo/` rules stay as the original home-based
+    // fallback.
     if normalized.contains("/.cargo/registry/")
         || normalized.contains("/.cargo/git/")
+        || is_cargo_registry_src(&normalized)
+        || is_cargo_git_checkout(&normalized)
         || normalized.contains("/rustc/")
         || normalized.contains("/rustc-")
         || normalized.contains("/library/alloc/src/")
@@ -1346,6 +1431,22 @@ fn default_in_app_path(filename: &str) -> bool {
     true
 }
 
+/// Strip trailing generic arguments from a function name so the crate-segment
+/// checks see the path, not the instantiation. DWARF-derived names carry the
+/// bare method name with its generic arguments
+/// (`poll_future<tokio::runtime::blocking::task::BlockingTask<...>>`), where a
+/// naive `::` split would yield a garbage first segment (`poll_future<tokio`).
+/// A *leading* `<` is a qualified-path rendering
+/// (`<alloc::boxed::Box<F> as core::ops::function::FnOnce<Args>>::call_once`),
+/// not generic arguments, so the name is kept whole for the existing
+/// `trim_start_matches('<')` handling.
+fn strip_generic_args(function: &str) -> &str {
+    match function.find('<') {
+        Some(idx) if idx > 0 => &function[..idx],
+        _ => function,
+    }
+}
+
 fn default_in_app_function(function: &str) -> bool {
     // Bare runtime/unwind symbols that carry no `crate::` prefix (so the segment
     // match below can't catch them). `rust_begin_unwind` is the panic entry; the
@@ -1361,7 +1462,7 @@ fn default_in_app_function(function: &str) -> bool {
     }
 
     !matches!(
-        function
+        strip_generic_args(function)
             .trim_start_matches('<')
             .split("::")
             .next()
@@ -2267,6 +2368,82 @@ mod tests {
         assert!(!options.is_in_app_path("/service/vendor/lib.rs"));
         assert!(options.is_in_app_frame(None, Some("my_service::checkout")));
         assert!(!options.is_in_app_frame(None, Some("other_service::checkout")));
+    }
+
+    #[test]
+    fn in_app_defaults_cover_docker_cargo_home_and_dwarf_names() {
+        let options = ErrorTrackingOptions::default();
+
+        // CARGO_HOME isn't always `~/.cargo`: the official Rust Docker images
+        // put the registry under /usr/local/cargo.
+        assert!(!options.is_in_app_path(
+            "/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.52.1/src/runtime/task/harness.rs"
+        ));
+        assert!(!options.is_in_app_path(
+            "/usr/local/cargo/git/checkouts/somecrate-9a8b7c6d5e4f3a2b/0f1e2d3/src/lib.rs"
+        ));
+        // A renamed CARGO_HOME is still caught by cargo's own layouts.
+        assert!(!options.is_in_app_path(
+            "/cache/rust-deps/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs"
+        ));
+        assert!(!options.is_in_app_path(
+            "/cache/rust-deps/git/checkouts/somecrate-9a8b7c6d5e4f3a2b/0f1e2d3/src/lib.rs"
+        ));
+        // ...but only cargo's `<repo>-<ident hash>/<short rev>/` checkout
+        // layout: an app that happens to live under a `git/checkouts/`
+        // directory stays in-app, even with a hex-looking repo-dir suffix.
+        assert!(options.is_in_app_path("/srv/git/checkouts/my-service/src/main.rs"));
+        assert!(options.is_in_app_path("/srv/git/checkouts/my-service-deadbeef/src/main.rs"));
+        // Only cargo's real layouts match: apps under directories that merely
+        // look cargo-ish stay in-app.
+        assert!(options.is_in_app_path("/srv/mycargo/registry/src/model.rs"));
+        assert!(options.is_in_app_path("/srv/cargo/registry/my-service/src/main.rs"));
+        assert!(options
+            .is_in_app_path("/srv/registry/src/index.crates.io-local/my-service/src/main.rs"));
+        // Deploy/checkout dirs suffixed with short git SHAs (< 16 hex chars)
+        // don't pass for cargo's u64 ident hash.
+        assert!(options.is_in_app_path("/opt/app/registry/src/service-a1b2c3d4/modules/api.rs"));
+        assert!(options.is_in_app_path("/srv/git/checkouts/service-deadbeef/0f1e2d3/src/main.rs"));
+
+        // DWARF-derived names hide the crate behind generic arguments
+        // (`poll_future<tokio::...>`); the frame is still classified out of
+        // app by its registry path, and the garbage `poll_future<tokio`
+        // segment must not make the name override that.
+        assert!(!options.is_in_app_frame(
+            Some("/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.52.1/src/runtime/task/harness.rs"),
+            Some("poll_future<tokio::runtime::blocking::task::BlockingTask<tokio::runtime::scheduler::multi_thread::worker::{impl#0}::launch::{closure_env#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>"),
+        ));
+        // An app function generic over a vendor type stays in-app: only the
+        // base name (path before `<`) feeds the crate check.
+        assert!(
+            options.is_in_app_frame(Some("/app/src/worker.rs"), Some("run<tokio::time::Sleep>"),)
+        );
+        // A *fileless* DWARF-style name deliberately fails open to in-app: the
+        // generic arguments are instantiation types, not the defining crate,
+        // so guessing the owner from them would mislabel app functions generic
+        // over vendor types. In practice DWARF-derived names ship with file
+        // info, which classifies them (as above).
+        assert!(options.is_in_app_frame(
+            None,
+            Some("poll_future<tokio::runtime::blocking::task::BlockingTask<T>, S>"),
+        ));
+        // Qualified-path renderings keep their leading `<` and still resolve
+        // the crate segment.
+        assert!(!options.is_in_app_frame(
+            None,
+            Some("<alloc::boxed::Box<F,A> as core::ops::function::FnOnce<Args>>::call_once"),
+        ));
+
+        // Bare thread/process bootstrap symbols with no source file are not
+        // app code, even though no crate denylist entry can match them.
+        assert!(!options.is_in_app_frame(None, Some("__clone")));
+        assert!(!options.is_in_app_frame(None, Some("start_thread")));
+        assert!(!options.is_in_app_frame(None, Some("main")));
+        // ...but a pathless name backed by a source file keeps the path verdict,
+        // and other bare symbols (`#[no_mangle]` exports, linked-in C code)
+        // stay in-app.
+        assert!(options.is_in_app_frame(Some("/app/src/main.rs"), Some("main")));
+        assert!(options.is_in_app_frame(None, Some("my_exported_callback")));
     }
 
     #[test]
