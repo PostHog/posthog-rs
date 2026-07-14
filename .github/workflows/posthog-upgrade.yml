@@ -1,0 +1,144 @@
+name: "PostHog Upgrade"
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        type: choice
+        description: "Package name to upgrade"
+        required: true
+        options:
+          - posthog-rs
+      package_version:
+        description: "Package version to upgrade to"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  posthog-upgrade:
+    name: Upgrade PostHog Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get upgrader token
+        id: upgrader
+        uses: getsentry/action-github-app-token@97c9e23528286821f97fba885c1b1123284b29cc # v2.0.0
+        with:
+          app_id: ${{ secrets.GH_APP_POSTHOG_JS_UPGRADER_APP_ID }}
+          private_key: ${{ secrets.GH_APP_POSTHOG_JS_UPGRADER_PRIVATE_KEY }}
+
+      - name: Check out main repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: "PostHog/posthog"
+          token: ${{ steps.upgrader.outputs.token }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.93.1
+        with:
+          components: cargo
+          toolchain: stable
+
+      - name: Install new package version in main repo
+        shell: bash
+        working-directory: rust
+        env:
+          RETRY_TIMES: 20
+          RETRY_WAIT_SECONDS: 5
+          PACKAGE_NAME: ${{ github.event.inputs.package_name }}
+          PACKAGE_VERSION: ${{ github.event.inputs.package_version }}
+        run: |
+          # posthog-rs is 0.x, so most bumps are semver-incompatible and need
+          # the workspace manifest requirement updated, not just the lockfile.
+          sed -i "s|^${PACKAGE_NAME} = { version = \"[^\"]*\"|${PACKAGE_NAME} = { version = \"${PACKAGE_VERSION}\"|" Cargo.toml
+          if git diff --quiet Cargo.toml; then
+            echo "Failed to update ${PACKAGE_NAME} requirement in rust/Cargo.toml" >&2
+            exit 1
+          fi
+          for i in $(seq 1 "$RETRY_TIMES"); do
+              # Retry loop because the crates.io index is _eventually_ consistent
+              if cargo update --package "$PACKAGE_NAME" --precise "$PACKAGE_VERSION"; then
+                  break
+              else
+                  if [ "$i" -eq "$RETRY_TIMES" ]; then
+                      exit 1
+                  fi
+                  sleep "$RETRY_WAIT_SECONDS"
+              fi
+          done
+
+      - name: Generate branch name
+        id: generate-branch-name
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ github.event.inputs.package_name }}
+          PACKAGE_VERSION: ${{ github.event.inputs.package_version }}
+        run: |
+          echo "branch_name=${PACKAGE_NAME}-$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create main repo pull request
+        id: main-repo-pr
+        uses: peter-evans/create-pull-request@98357b18bf14b5342f975ff684046ec3b2a07725 # v8.0.0
+        env:
+          HUSKY: "0"
+        with:
+          token: ${{ steps.upgrader.outputs.token }}
+          commit-message: "chore(deps): Update ${{ github.event.inputs.package_name }} to ${{ github.event.inputs.package_version }}"
+          branch: ${{ steps.generate-branch-name.outputs.branch_name }}
+          delete-branch: true
+          title: "chore(deps): Update ${{ github.event.inputs.package_name }} to ${{ github.event.inputs.package_version }}"
+          body: |
+            ## Changes
+
+            ${{ github.event.inputs.package_name }} version ${{ github.event.inputs.package_version }} has been released. This updates PostHog to use it.
+
+            [GitHub releases](https://github.com/PostHog/posthog-rs/releases) • [crates.io releases](https://crates.io/crates/${{ github.event.inputs.package_name }}/versions)
+
+      - name: Output pull request result
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ github.event.inputs.package_name }}
+          PACKAGE_VERSION: ${{ github.event.inputs.package_version }}
+          PR_URL: ${{ steps.main-repo-pr.outputs.pull-request-url }}
+        run: |
+          echo "PostHog pull request for $PACKAGE_NAME version $PACKAGE_VERSION ready: $PR_URL"
+
+      - name: Enable automerge
+        env:
+          GH_TOKEN: ${{ steps.upgrader.outputs.token }}
+          PR_NUMBER: ${{ steps.main-repo-pr.outputs.pull-request-number }}
+        run: |
+          gh pr merge "$PR_NUMBER" --repo PostHog/posthog --auto --squash
+
+      - name: Assign reviewers
+        env:
+          GH_TOKEN: ${{ steps.upgrader.outputs.token }}
+          PR_NUMBER: ${{ steps.main-repo-pr.outputs.pull-request-number }}
+        run: |
+          gh pr edit "$PR_NUMBER" --repo PostHog/posthog --add-reviewer PostHog/client-libraries-approvers --add-reviewer PostHog/team-client-libraries
+
+      # https://us.posthog.com/project/11213/functions/019ae9c0-03ee-0000-2f32-971f64be8ffe
+      - name: Send failure event to PostHog
+        if: ${{ failure() }}
+        continue-on-error: true
+        uses: PostHog/posthog-github-action@9a6a19d360820ab4d95ecc4a5a7564062c895f84 # v1.3.0
+        with:
+          posthog-token: "${{ secrets.POSTHOG_PROJECT_API_KEY }}"
+          event: "posthog-sdk-github-release-workflow-failure"
+          properties: >-
+            {
+              "commitSha": "${{ github.sha }}",
+              "jobStatus": "${{ job.status }}",
+              "ref": "${{ github.ref }}",
+              "repository": "PostHog/posthog",
+              "sdk": "posthog-rs",
+              "jobName": "posthog-upgrade",
+              "packageName": "${{ github.event.inputs.package_name }}",
+              "packageVersion": "${{ github.event.inputs.package_version }}",
+              "actionUrl": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "alertText": ":rotating_light: Failed to open the PostHog upgrade PR for posthog-rs@${{ github.event.inputs.package_version }} :rotating_light:",
+              "alertContext": "The posthog-upgrade workflow failed before completion."
+            }
