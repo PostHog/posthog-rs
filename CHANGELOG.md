@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.20.0 — 2026-07-15
+
+### Minor changes
+
+- [8704f78](https://github.com/posthog/posthog-rs/commit/8704f78f67e91c27005f95838099b7945c866754) Resolvable error tracking frames with local debug info now send their full client-side inline expansion as a marked group (the physical frame leads; `inline: true` members share its `instruction_addr`; all carry `client_resolved: true`): PostHog symbolicates the group's address once and replaces the whole group with its own expansion, or keeps the client frames verbatim when no debug symbols were uploaded, so inlined calls survive without symbol uploads and don't duplicate with them. Stripped builds still send bare addressed frames. Grouped replacement requires a PostHog version with client-expanded inline group support (live on PostHog Cloud; self-hosted needs a release that includes cymbal's marker-grouped resolution). Older self-hosted servers keep working, but re-expand group addresses on symbol upload, duplicating inline frames until upgraded. — Thanks @cat-ph!
+
 ## 0.19.2 — 2026-07-14
 
 ### Patch changes
