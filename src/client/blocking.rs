@@ -1049,10 +1049,7 @@ impl Client {
                     }
                 }
                 if let Ok(value) = result {
-                    let has_experiment = evaluator
-                        .cache()
-                        .get_flag(&key)
-                        .and_then(|f| f.has_experiment);
+                    let has_experiment = evaluator.cache().has_experiment(&key);
                     records.insert(
                         key.clone(),
                         local_record(value, has_experiment, local_minimal_gate),
@@ -1289,52 +1286,7 @@ impl Drop for Client {
 #[cfg(test)]
 mod minimal_gate_tests {
     use super::*;
-    use crate::feature_flags::{FeatureFlagCondition, FeatureFlagFilters};
-    use crate::local_evaluation::LocalEvaluationResponse;
-    use std::sync::Mutex;
-
-    #[derive(Default)]
-    struct RecordingHost {
-        captured: Mutex<Vec<FlagCalledEventParams>>,
-    }
-
-    impl FeatureFlagEvaluationsHost for RecordingHost {
-        fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
-            self.captured.lock().unwrap().push(params);
-        }
-        fn log_warning(&self, _message: &str) {}
-    }
-
-    /// A flag that evaluates locally to `true` (active, 100% rollout, no property
-    /// filters), carrying the given experiment signal.
-    fn gated_flag(has_experiment: Option<bool>) -> FeatureFlag {
-        FeatureFlag {
-            key: "gated".into(),
-            active: true,
-            has_experiment,
-            filters: FeatureFlagFilters {
-                groups: vec![FeatureFlagCondition {
-                    properties: vec![],
-                    rollout_percentage: Some(100.0),
-                    variant: None,
-                    aggregation_group_type_index: None,
-                }],
-                multivariate: None,
-                payloads: HashMap::new(),
-                aggregation_group_type_index: None,
-                early_exit: false,
-            },
-        }
-    }
-
-    fn definitions(has_experiment: Option<bool>, gate: bool) -> LocalEvaluationResponse {
-        LocalEvaluationResponse {
-            flags: vec![gated_flag(has_experiment)],
-            group_type_mapping: HashMap::new(),
-            cohorts: HashMap::new(),
-            minimal_flag_called_events: gate,
-        }
-    }
+    use crate::client::minimal_gate_test_support::{definitions, RecordingHost};
 
     fn test_client(cache: FlagCache, host: Arc<dyn FeatureFlagEvaluationsHost>) -> Client {
         let options = ClientOptions::from(("phc_test", "http://localhost:0"));

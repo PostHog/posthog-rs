@@ -49,6 +49,15 @@ pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
     "$os_version",
 ];
 
+/// Whether `key` survives minimization to [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`].
+/// Shared by the V0 (`Event::apply_minimal_flag_called_allowlist`) and V1
+/// (`v1_capture::build_events_at`) capture pipelines so the allowlist check
+/// itself has one implementation even though each pipeline applies it to a
+/// different properties representation.
+pub(crate) fn is_minimal_flag_called_property(key: &str) -> bool {
+    MINIMAL_FLAG_CALLED_EVENT_PROPERTIES.contains(&key)
+}
+
 /// An [`Event`] represents an interaction a user has with your app or
 /// website. Examples include button clicks, pageviews, query completions, and signups.
 /// See the [PostHog documentation](https://posthog.com/docs/data/events)
@@ -292,7 +301,7 @@ impl Event {
     pub(crate) fn apply_minimal_flag_called_allowlist(&mut self) {
         if self.minimal_flag_called {
             self.properties
-                .retain(|key, _| MINIMAL_FLAG_CALLED_EVENT_PROPERTIES.contains(&key.as_str()));
+                .retain(|key, _| is_minimal_flag_called_property(key));
         }
     }
 

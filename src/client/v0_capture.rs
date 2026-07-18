@@ -27,9 +27,6 @@ pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
     apply_capture_defaults(event, defaults);
     apply_runtime_context(event);
     event.prepare_for_v0();
-    // Final step: for minimized `$feature_flag_called` events, drop everything
-    // outside the allowlist now that system context and SDK metadata are stamped.
-    event.apply_minimal_flag_called_allowlist();
 }
 
 // ---------------------------------------------------------------------------
@@ -54,7 +51,13 @@ pub(crate) fn build_batch_payload(
         .into_iter()
         .filter_map(|mut event| {
             prepare_event(&mut event, defaults);
-            apply_before_send_hooks(before_send, event).map(InnerEvent::new_for_batch)
+            apply_before_send_hooks(before_send, event).map(|mut event| {
+                // Final step, after before_send: for minimized `$feature_flag_called`
+                // events, drop everything outside the allowlist so a hook cannot
+                // reintroduce properties it strips.
+                event.apply_minimal_flag_called_allowlist();
+                InnerEvent::new_for_batch(event)
+            })
         })
         .collect();
 
@@ -148,6 +151,20 @@ pub(crate) fn prepare_immediate(
 // Header helpers
 // ---------------------------------------------------------------------------
 
+/// Apply test-harness extra headers to a V0 request.
+pub(crate) fn apply_extra_headers(
+    #[allow(unused_variables)] options: &ClientOptions,
+    #[allow(unused_mut)] mut request: RequestBuilder,
+) -> RequestBuilder {
+    #[cfg(feature = "test-harness")]
+    if let Some(ref extra) = options.extra_capture_headers {
+        for (k, v) in extra {
+            request = request.header(k.as_str(), v.as_str());
+        }
+    }
+    request
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +207,9 @@ mod tests {
                 is_server: true,
             },
         );
+        // Mirrors the no-hooks case in `build_batch_payload`, where the trim runs
+        // right after `prepare_event` since `apply_before_send_hooks` is a no-op.
+        event.apply_minimal_flag_called_allowlist();
 
         let keys: HashSet<&str> = event.properties().keys().map(String::as_str).collect();
         let allow: HashSet<&str> = MINIMAL_FLAG_CALLED_EVENT_PROPERTIES
@@ -253,18 +273,43 @@ mod tests {
         );
         assert!(event.properties().contains_key("$lib_version__major"));
     }
-}
 
-/// Apply test-harness extra headers to a V0 request.
-pub(crate) fn apply_extra_headers(
-    #[allow(unused_variables)] options: &ClientOptions,
-    #[allow(unused_mut)] mut request: RequestBuilder,
-) -> RequestBuilder {
-    #[cfg(feature = "test-harness")]
-    if let Some(ref extra) = options.extra_capture_headers {
-        for (k, v) in extra {
-            request = request.header(k.as_str(), v.as_str());
-        }
+    #[test]
+    fn before_send_hook_cannot_reintroduce_properties_after_minimal_trim() {
+        let mut event = Event::new("$feature_flag_called", "user-1");
+        event.mark_minimal_flag_called();
+        event
+            .insert_prop("$feature_flag", json!("my-flag"))
+            .unwrap();
+
+        // A hook that stamps a non-allowlisted property, the way a real
+        // before_send hook (env tags, app version, user metadata) would.
+        let hooks = vec![BeforeSendHook::new(|mut event| {
+            event.insert_prop("from_hook", json!("leak")).unwrap();
+            Some(event)
+        })];
+
+        let (json_body, kept) = build_batch_payload(
+            vec![event],
+            "phc_test".to_string(),
+            false,
+            Utc::now(),
+            &CaptureDefaults {
+                disable_geoip: true,
+                is_server: true,
+            },
+            &hooks,
+        )
+        .unwrap()
+        .expect("event should not be dropped");
+
+        assert_eq!(kept, 1);
+        let parsed: serde_json::Value = serde_json::from_str(&json_body).unwrap();
+        let properties = &parsed["batch"][0]["properties"];
+        assert!(
+            properties.get("from_hook").is_none(),
+            "before_send hook property survived the minimal-event allowlist trim: {:?}",
+            properties
+        );
     }
-    request
 }

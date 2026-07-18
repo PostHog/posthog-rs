@@ -101,7 +101,7 @@ pub struct FlagCache {
     /// poll. Read once when a local evaluation succeeds and pinned onto that
     /// flag's record, so the minimization decision reflects the definitions
     /// snapshot that produced the value.
-    minimal_flag_called_events: Arc<RwLock<bool>>,
+    minimal_flag_called_events: Arc<AtomicBool>,
 }
 
 impl Default for FlagCache {
@@ -117,7 +117,7 @@ impl FlagCache {
             flags: Arc::new(RwLock::new(HashMap::new())),
             group_type_mapping: Arc::new(RwLock::new(HashMap::new())),
             cohorts: Arc::new(RwLock::new(HashMap::new())),
-            minimal_flag_called_events: Arc::new(RwLock::new(false)),
+            minimal_flag_called_events: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -137,7 +137,8 @@ impl FlagCache {
         let mut cohorts = self.cohorts.write().unwrap();
         *cohorts = response.cohorts;
 
-        *self.minimal_flag_called_events.write().unwrap() = response.minimal_flag_called_events;
+        self.minimal_flag_called_events
+            .store(response.minimal_flag_called_events, Ordering::Relaxed);
 
         debug!(flag_count, "Updated flag cache");
     }
@@ -146,12 +147,22 @@ impl FlagCache {
     /// `$feature_flag_called` events. `false` until definitions load, so a
     /// missing signal always yields full events.
     pub fn minimal_flag_called_events(&self) -> bool {
-        *self.minimal_flag_called_events.read().unwrap()
+        self.minimal_flag_called_events.load(Ordering::Relaxed)
     }
 
     /// Return a cached feature flag by key.
     pub fn get_flag(&self, key: &str) -> Option<FeatureFlag> {
         self.flags.read().unwrap().get(key).cloned()
+    }
+
+    /// Return a flag's `has_experiment` signal without cloning the full
+    /// [`FeatureFlag`] (its filters can hold nested `Vec`s and JSON values).
+    pub(crate) fn has_experiment(&self, key: &str) -> Option<bool> {
+        self.flags
+            .read()
+            .unwrap()
+            .get(key)
+            .and_then(|f| f.has_experiment)
     }
 
     /// Return all cached feature flag definitions.

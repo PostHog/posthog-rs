@@ -20,7 +20,7 @@ use super::{
 };
 use crate::client::get_default_user_agent;
 use crate::error::Error;
-use crate::event::{Event, MINIMAL_FLAG_CALLED_EVENT_PROPERTIES};
+use crate::event::{is_minimal_flag_called_property, Event};
 use crate::event_v1::{
     CaptureResponse, EventResult, EventStatus, V1BatchRequestRef, V1ErrorResponse, V1Event,
 };
@@ -57,9 +57,7 @@ pub(crate) fn build_events_at(
                 // ($session_id/$window_id/$process_person_profile) already moved
                 // off `properties` and are preserved on the event elsewhere.
                 if minimal {
-                    map.retain(|key, _| {
-                        MINIMAL_FLAG_CALLED_EVENT_PROPERTIES.contains(&key.as_str())
-                    });
+                    map.retain(|key, _| is_minimal_flag_called_property(key));
                 }
             }
             v1
@@ -362,6 +360,7 @@ mod tests {
 
     use super::*;
     use crate::client::ClientOptionsBuilder;
+    use crate::event::MINIMAL_FLAG_CALLED_EVENT_PROPERTIES;
     use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1Event};
 
     fn test_opts() -> ClientOptions {
