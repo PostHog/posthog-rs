@@ -70,6 +70,7 @@ pub posthog_rs::FeatureFlagsResponse::Legacy::feature_flags: std::collections::h
 pub posthog_rs::FeatureFlagsResponse::V2
 pub posthog_rs::FeatureFlagsResponse::V2::errors_while_computing_flags: bool
 pub posthog_rs::FeatureFlagsResponse::V2::flags: std::collections::hash::map::HashMap<alloc::string::String, posthog_rs::FlagDetail>
+pub posthog_rs::FeatureFlagsResponse::V2::minimal_flag_called_events: bool
 pub posthog_rs::FeatureFlagsResponse::V2::quota_limited: bool
 pub posthog_rs::FeatureFlagsResponse::V2::request_id: core::option::Option<alloc::string::String>
 impl posthog_rs::FeatureFlagsResponse
@@ -242,6 +243,7 @@ pub posthog_rs::EventResult::result: posthog_rs::EventStatus
 pub struct posthog_rs::FeatureFlag
 pub posthog_rs::FeatureFlag::active: bool
 pub posthog_rs::FeatureFlag::filters: posthog_rs::FeatureFlagFilters
+pub posthog_rs::FeatureFlag::has_experiment: core::option::Option<bool>
 pub posthog_rs::FeatureFlag::key: alloc::string::String
 pub struct posthog_rs::FeatureFlagCondition
 pub posthog_rs::FeatureFlagCondition::aggregation_group_type_index: core::option::Option<i32>
@@ -274,6 +276,7 @@ pub fn posthog_rs::FlagCache::get_cohort_definitions(&self) -> std::collections:
 pub fn posthog_rs::FlagCache::get_flag(&self, &str) -> core::option::Option<posthog_rs::FeatureFlag>
 pub fn posthog_rs::FlagCache::get_flags_map(&self) -> std::collections::hash::map::HashMap<alloc::string::String, posthog_rs::FeatureFlag>
 pub fn posthog_rs::FlagCache::get_group_type_mapping(&self) -> std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
+pub fn posthog_rs::FlagCache::minimal_flag_called_events(&self) -> bool
 pub fn posthog_rs::FlagCache::new() -> Self
 pub fn posthog_rs::FlagCache::update(&self, posthog_rs::LocalEvaluationResponse)
 impl core::default::Default for posthog_rs::FlagCache
@@ -286,6 +289,7 @@ pub posthog_rs::FlagDetail::reason: core::option::Option<posthog_rs::FlagReason>
 pub posthog_rs::FlagDetail::variant: core::option::Option<alloc::string::String>
 pub struct posthog_rs::FlagMetadata
 pub posthog_rs::FlagMetadata::description: core::option::Option<alloc::string::String>
+pub posthog_rs::FlagMetadata::has_experiment: core::option::Option<bool>
 pub posthog_rs::FlagMetadata::id: u64
 pub posthog_rs::FlagMetadata::payload: core::option::Option<serde_json::value::Value>
 pub posthog_rs::FlagMetadata::version: u32
@@ -329,6 +333,7 @@ pub struct posthog_rs::LocalEvaluationResponse
 pub posthog_rs::LocalEvaluationResponse::cohorts: std::collections::hash::map::HashMap<alloc::string::String, posthog_rs::Cohort>
 pub posthog_rs::LocalEvaluationResponse::flags: alloc::vec::Vec<posthog_rs::FeatureFlag>
 pub posthog_rs::LocalEvaluationResponse::group_type_mapping: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
+pub posthog_rs::LocalEvaluationResponse::minimal_flag_called_events: bool
 pub struct posthog_rs::LocalEvaluator
 impl posthog_rs::LocalEvaluator
 pub fn posthog_rs::LocalEvaluator::cache(&self) -> &posthog_rs::FlagCache

@@ -1052,6 +1052,10 @@ impl Client {
                 &groups_owned,
                 &group_props_owned,
             );
+            // Pin the gate from the poller's current definitions snapshot at the
+            // point local evaluation succeeded, so it travels with these records
+            // rather than being re-read from shared state at event time.
+            let local_minimal_gate = evaluator.cache().minimal_flag_called_events();
             for (key, result) in local_results {
                 if let Some(filter) = &options.flag_keys {
                     if !filter.iter().any(|k| k == &key) {
@@ -1059,7 +1063,14 @@ impl Client {
                     }
                 }
                 if let Ok(value) = result {
-                    records.insert(key.clone(), local_record(value));
+                    let has_experiment = evaluator
+                        .cache()
+                        .get_flag(&key)
+                        .and_then(|f| f.has_experiment);
+                    records.insert(
+                        key.clone(),
+                        local_record(value, has_experiment, local_minimal_gate),
+                    );
                     locally_evaluated_keys.insert(key);
                 }
             }
@@ -1088,11 +1099,14 @@ impl Client {
                     request_id = response.request_id;
                     errors_while_computing = response.errors_while_computing_flags;
                     quota_limited = response.quota_limited;
+                    // The remote response is the source of these flags' values,
+                    // so it is also the source of their minimization gate.
+                    let remote_minimal_gate = response.minimal_flag_called_events;
                     for (key, detail) in response.flags {
                         if locally_evaluated_keys.contains(&key) {
                             continue;
                         }
-                        records.insert(key, remote_record_from_detail(detail));
+                        records.insert(key, remote_record_from_detail(detail, remote_minimal_gate));
                     }
                 }
                 Err(e) => {
@@ -1290,5 +1304,146 @@ impl Drop for Client {
         // worker and the flush stays durable. The winner has already sent the
         // Shutdown (synchronously, before any await), so the worker will exit.
         transport.join();
+    }
+}
+
+#[cfg(test)]
+mod minimal_gate_tests {
+    use super::*;
+    use crate::feature_flags::{FeatureFlagCondition, FeatureFlagFilters};
+    use crate::local_evaluation::LocalEvaluationResponse;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingHost {
+        captured: Mutex<Vec<FlagCalledEventParams>>,
+    }
+
+    impl FeatureFlagEvaluationsHost for RecordingHost {
+        fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
+            self.captured.lock().unwrap().push(params);
+        }
+        fn log_warning(&self, _message: &str) {}
+    }
+
+    /// A flag that evaluates locally to `true` (active, 100% rollout, no property
+    /// filters), carrying the given experiment signal.
+    fn gated_flag(has_experiment: Option<bool>) -> FeatureFlag {
+        FeatureFlag {
+            key: "gated".into(),
+            active: true,
+            has_experiment,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        }
+    }
+
+    fn definitions(has_experiment: Option<bool>, gate: bool) -> LocalEvaluationResponse {
+        LocalEvaluationResponse {
+            flags: vec![gated_flag(has_experiment)],
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+            minimal_flag_called_events: gate,
+        }
+    }
+
+    fn test_client(cache: FlagCache, host: Arc<dyn FeatureFlagEvaluationsHost>) -> Client {
+        let options = ClientOptions::from(("phc_test", "http://localhost:0"));
+        let client = Client {
+            options,
+            client: HttpClient::builder().build().unwrap(),
+            local_evaluator: Some(LocalEvaluator::new(cache)),
+            _flag_poller: None,
+            flag_event_host: OnceLock::new(),
+            transport: None,
+        };
+        client
+            .flag_event_host
+            .set(host)
+            .unwrap_or_else(|_| panic!("host already set"));
+        client
+    }
+
+    async fn evaluate(client: &Client) -> FeatureFlagEvaluations {
+        client
+            .evaluate_flags(
+                "user-1",
+                EvaluateFlagsOptions {
+                    only_evaluate_locally: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("local evaluate_flags")
+    }
+
+    /// The minimization gate must be pinned to the definitions snapshot that
+    /// produced the flag value, not re-read from the shared cache when the
+    /// deferred event finally fires. Mutating the cache in the gap between
+    /// evaluation and event capture must not reshape the event.
+    #[tokio::test]
+    async fn local_gate_pinned_at_evaluation_survives_cache_mutation_to_off() {
+        let cache = FlagCache::new();
+        cache.update(definitions(Some(false), true)); // gate ON at evaluation
+        let host = Arc::new(RecordingHost::default());
+        let client = test_client(cache.clone(), Arc::clone(&host) as _);
+
+        let snapshot = evaluate(&client).await;
+        // Poller refresh flips the gate OFF after the snapshot was produced.
+        cache.update(definitions(Some(false), false));
+
+        assert!(snapshot.is_enabled("gated"));
+        let captured = host.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert!(
+            captured[0].minimal,
+            "event must reflect the gate pinned at evaluation (on), not the mutated cache (off)"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_gate_pinned_at_evaluation_survives_cache_mutation_to_on() {
+        let cache = FlagCache::new();
+        cache.update(definitions(Some(false), false)); // gate OFF at evaluation
+        let host = Arc::new(RecordingHost::default());
+        let client = test_client(cache.clone(), Arc::clone(&host) as _);
+
+        let snapshot = evaluate(&client).await;
+        // Poller refresh flips the gate ON after the snapshot was produced.
+        cache.update(definitions(Some(false), true));
+
+        assert!(snapshot.is_enabled("gated"));
+        let captured = host.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert!(
+            !captured[0].minimal,
+            "event must reflect the gate pinned at evaluation (off), not the mutated cache (on)"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_has_experiment_is_threaded_from_definitions() {
+        let cache = FlagCache::new();
+        cache.update(definitions(Some(false), true));
+        let host = Arc::new(RecordingHost::default());
+        let client = test_client(cache, Arc::clone(&host) as _);
+
+        assert!(evaluate(&client).await.is_enabled("gated"));
+        let captured = host.captured.lock().unwrap();
+        assert_eq!(
+            captured[0].properties.get("$feature_flag_has_experiment"),
+            Some(&serde_json::json!(false))
+        );
+        assert!(captured[0].minimal);
     }
 }

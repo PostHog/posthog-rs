@@ -27,6 +27,9 @@ pub(crate) fn prepare_event(event: &mut Event, defaults: &CaptureDefaults) {
     apply_capture_defaults(event, defaults);
     apply_runtime_context(event);
     event.prepare_for_v0();
+    // Final step: for minimized `$feature_flag_called` events, drop everything
+    // outside the allowlist now that system context and SDK metadata are stamped.
+    event.apply_minimal_flag_called_allowlist();
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +147,113 @@ pub(crate) fn prepare_immediate(
 // ---------------------------------------------------------------------------
 // Header helpers
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::MINIMAL_FLAG_CALLED_EVENT_PROPERTIES;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    /// Build a `$feature_flag_called` event carrying the full property set the
+    /// snapshot path would produce, plus a non-allowlisted extra to prove
+    /// nothing leaks past the allowlist.
+    fn full_flag_called_event() -> Event {
+        let mut event = Event::new("$feature_flag_called", "user-1");
+        event.add_group("company", "acme");
+        for (k, v) in [
+            ("$feature_flag", json!("my-flag")),
+            ("$feature_flag_response", json!(true)),
+            ("$feature/my-flag", json!(true)),          // stripped
+            ("$feature_flag_payload", json!({"a": 1})), // stripped
+            ("$feature_flag_has_experiment", json!(false)),
+            ("$feature_flag_id", json!(42)),
+            ("$feature_flag_version", json!(7)),
+            ("$feature_flag_reason", json!("condition match")),
+            ("$feature_flag_request_id", json!("req-1")),
+            ("locally_evaluated", json!(false)),
+            ("custom_super_property", json!("leak")), // stripped
+        ] {
+            event.insert_prop(k, v).unwrap();
+        }
+        event
+    }
+
+    #[test]
+    fn minimal_flag_called_event_keeps_only_allowlisted_properties() {
+        let mut event = full_flag_called_event();
+        event.mark_minimal_flag_called();
+        prepare_event(
+            &mut event,
+            &CaptureDefaults {
+                disable_geoip: true,
+                is_server: true,
+            },
+        );
+
+        let keys: HashSet<&str> = event.properties().keys().map(String::as_str).collect();
+        let allow: HashSet<&str> = MINIMAL_FLAG_CALLED_EVENT_PROPERTIES
+            .iter()
+            .copied()
+            .collect();
+
+        // Every surviving key is on the allowlist — the enrichment step's
+        // `$lib_version__major/minor/patch`, `$feature/<key>`,
+        // `$feature_flag_payload`, and the custom super property are all gone.
+        assert!(
+            keys.is_subset(&allow),
+            "unexpected keys leaked: {:?}",
+            keys.difference(&allow).collect::<Vec<_>>()
+        );
+        // Allowlisted evaluation + system-context props are retained.
+        for expected in [
+            "$feature_flag",
+            "$feature_flag_response",
+            "$feature_flag_has_experiment",
+            "locally_evaluated",
+            "$groups",
+            "$geoip_disable",
+            "$is_server",
+            "$lib",
+            "$lib_version",
+            "$os",
+            "$os_version",
+        ] {
+            assert!(
+                keys.contains(expected),
+                "missing allowlisted key {}",
+                expected
+            );
+        }
+        assert!(!keys.contains("$feature/my-flag"));
+        assert!(!keys.contains("$feature_flag_payload"));
+        assert!(!keys.contains("custom_super_property"));
+        assert!(!keys.contains("$lib_version__major"));
+    }
+
+    #[test]
+    fn non_minimal_flag_called_event_keeps_everything() {
+        let mut event = full_flag_called_event();
+        prepare_event(
+            &mut event,
+            &CaptureDefaults {
+                disable_geoip: true,
+                is_server: true,
+            },
+        );
+        // No minimization marker -> the full shape is preserved, including the
+        // super property and `$feature/<key>`.
+        assert_eq!(
+            event.properties().get("custom_super_property"),
+            Some(&json!("leak"))
+        );
+        assert_eq!(
+            event.properties().get("$feature/my-flag"),
+            Some(&json!(true))
+        );
+        assert!(event.properties().contains_key("$lib_version__major"));
+    }
+}
 
 /// Apply test-harness extra headers to a V0 request.
 pub(crate) fn apply_extra_headers(

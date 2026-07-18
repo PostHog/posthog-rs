@@ -102,6 +102,12 @@ pub struct FeatureFlag {
     /// Targeting rules and rollout configuration
     #[serde(default)]
     pub filters: FeatureFlagFilters,
+    /// Whether the flag is linked to an experiment, as reported by the
+    /// local-evaluation definitions endpoint. Tri-state: `Some(true)`/`Some(false)`
+    /// when the server reports it, `None` when it does not (older server). Drives
+    /// the `$feature_flag_has_experiment` property and event minimization.
+    #[serde(default)]
+    pub has_experiment: Option<bool>,
 }
 
 /// Targeting rules and configuration for a feature flag.
@@ -312,6 +318,12 @@ pub enum FeatureFlagsResponse {
         #[serde(rename = "requestId")]
         #[serde(default)]
         request_id: Option<String>,
+        /// Server-controlled gate: when `true`, `$feature_flag_called` events for
+        /// non-experiment flags evaluated from this response are minimized to a
+        /// strict property allowlist. Absent (older server) fails safe to `false`.
+        #[serde(rename = "minimalFlagCalledEvents")]
+        #[serde(default)]
+        minimal_flag_called_events: bool,
     },
     /// Legacy format from older decide endpoint
     Legacy {
@@ -419,6 +431,12 @@ pub struct FlagMetadata {
     pub description: Option<String>,
     /// Optional JSON payload associated with the flag
     pub payload: Option<serde_json::Value>,
+    /// Whether the flag is linked to an experiment. Tri-state: `Some(true)`/
+    /// `Some(false)` when the `/flags?v=2` metadata reports it, `None` when it is
+    /// absent (older server or degraded response). Drives the
+    /// `$feature_flag_has_experiment` property and event minimization.
+    #[serde(default)]
+    pub has_experiment: Option<bool>,
 }
 
 const LONG_SCALE: f64 = 0xFFFFFFFFFFFFFFFu64 as f64; // Must be exactly 15 F's to match Python SDK
@@ -1374,6 +1392,7 @@ mod tests {
         let flag = FeatureFlag {
             key: "test-flag".to_string(),
             active: true,
+            has_experiment: None,
             filters: FeatureFlagFilters {
                 groups: vec![FeatureFlagCondition {
                     properties: vec![],
@@ -1424,6 +1443,7 @@ mod tests {
         let flag = FeatureFlag {
             key: "test-flag".to_string(),
             active: true,
+            has_experiment: None,
             filters: FeatureFlagFilters {
                 groups: vec![FeatureFlagCondition {
                     properties: vec![],
@@ -1473,6 +1493,7 @@ mod tests {
         let flag = FeatureFlag {
             key: "inactive-flag".to_string(),
             active: false,
+            has_experiment: None,
             filters: FeatureFlagFilters {
                 groups: vec![FeatureFlagCondition {
                     properties: vec![],
@@ -1505,6 +1526,7 @@ mod tests {
         let flag = FeatureFlag {
             key: "rollout-flag".to_string(),
             active: true,
+            has_experiment: None,
             filters: FeatureFlagFilters {
                 groups: vec![FeatureFlagCondition {
                     properties: vec![],
@@ -1646,6 +1668,7 @@ mod tests {
         let flag = FeatureFlag {
             key: "empty-groups".to_string(),
             active: true,
+            has_experiment: None,
             filters: FeatureFlagFilters {
                 groups: vec![],
                 multivariate: None,
@@ -2049,6 +2072,7 @@ mod tests {
             FeatureFlag {
                 key: "prerequisite-flag".to_string(),
                 active: true,
+                has_experiment: None,
                 filters: FeatureFlagFilters {
                     groups: vec![FeatureFlagCondition {
                         properties: vec![],
@@ -2094,6 +2118,7 @@ mod tests {
             FeatureFlag {
                 key: "disabled-flag".to_string(),
                 active: false, // Flag is inactive
+                has_experiment: None,
                 filters: FeatureFlagFilters {
                     groups: vec![],
                     multivariate: None,
@@ -2134,6 +2159,7 @@ mod tests {
             FeatureFlag {
                 key: "ab-test-flag".to_string(),
                 active: true,
+                has_experiment: None,
                 filters: FeatureFlagFilters {
                     groups: vec![FeatureFlagCondition {
                         properties: vec![],
@@ -3247,6 +3273,7 @@ mod tests {
         FeatureFlag {
             key: "early-exit-flag".to_string(),
             active: true,
+            has_experiment: None,
             filters: FeatureFlagFilters {
                 groups: vec![
                     // Group 1: matches on properties (none) but rollout excludes
@@ -3366,6 +3393,7 @@ mod tests {
         let flag = FeatureFlag {
             key: "early-exit-flag".to_string(),
             active: true,
+            has_experiment: None,
             filters: FeatureFlagFilters {
                 groups: vec![
                     FeatureFlagCondition {
@@ -3451,6 +3479,7 @@ mod tests {
         let flag = FeatureFlag {
             key: "early-exit-flag".to_string(),
             active: true,
+            has_experiment: None,
             filters: FeatureFlagFilters {
                 groups: vec![
                     FeatureFlagCondition {

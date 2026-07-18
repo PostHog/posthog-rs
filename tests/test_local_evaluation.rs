@@ -28,6 +28,7 @@ fn test_local_evaluation_basic() {
     let flag = FeatureFlag {
         key: "test-flag".to_string(),
         active: true,
+        has_experiment: None,
         filters: FeatureFlagFilters {
             groups: vec![FeatureFlagCondition {
                 properties: vec![],
@@ -47,6 +48,7 @@ fn test_local_evaluation_basic() {
         flags: vec![flag],
         group_type_mapping: HashMap::new(),
         cohorts: HashMap::new(),
+        minimal_flag_called_events: false,
     };
     cache.update(response);
 
@@ -73,6 +75,7 @@ fn test_local_evaluation_with_properties() {
     let flag = FeatureFlag {
         key: "premium-feature".to_string(),
         active: true,
+        has_experiment: None,
         filters: FeatureFlagFilters {
             groups: vec![FeatureFlagCondition {
                 properties: vec![Property {
@@ -97,6 +100,7 @@ fn test_local_evaluation_with_properties() {
         flags: vec![flag],
         group_type_mapping: HashMap::new(),
         cohorts: HashMap::new(),
+        minimal_flag_called_events: false,
     };
     cache.update(response);
 
@@ -387,6 +391,7 @@ fn test_cache_operations() {
         FeatureFlag {
             key: "flag1".to_string(),
             active: true,
+            has_experiment: None,
             filters: FeatureFlagFilters {
                 groups: vec![],
                 multivariate: None,
@@ -398,6 +403,7 @@ fn test_cache_operations() {
         FeatureFlag {
             key: "flag2".to_string(),
             active: true,
+            has_experiment: None,
             filters: FeatureFlagFilters {
                 groups: vec![],
                 multivariate: None,
@@ -412,6 +418,7 @@ fn test_cache_operations() {
         flags: flags.clone(),
         group_type_mapping: HashMap::new(),
         cohorts: HashMap::new(),
+        minimal_flag_called_events: false,
     };
 
     cache.update(response);
@@ -892,6 +899,7 @@ fn mixed_flag() -> FeatureFlag {
     FeatureFlag {
         key: "mixed-flag".to_string(),
         active: true,
+        has_experiment: None,
         filters: FeatureFlagFilters {
             groups: vec![
                 // Group condition: company plan == enterprise
@@ -931,6 +939,7 @@ fn only_group_flag() -> FeatureFlag {
     FeatureFlag {
         key: "only-group-flag".to_string(),
         active: true,
+        has_experiment: None,
         filters: FeatureFlagFilters {
             groups: vec![FeatureFlagCondition {
                 properties: vec![Property {
@@ -960,6 +969,7 @@ fn cache_with(flag: FeatureFlag) -> FlagCache {
         flags: vec![flag],
         group_type_mapping,
         cohorts: HashMap::new(),
+        minimal_flag_called_events: false,
     });
     cache
 }
@@ -1062,6 +1072,7 @@ fn test_mixed_flag_only_group_condition_no_groups_returns_false() {
     let flag = FeatureFlag {
         key: "mixed-only-group".to_string(),
         active: true,
+        has_experiment: None,
         filters: FeatureFlagFilters {
             groups: vec![FeatureFlagCondition {
                 properties: vec![Property {
@@ -1102,6 +1113,7 @@ fn test_group_condition_uses_group_key_for_bucketing() {
     let flag = FeatureFlag {
         key: "rollout-flag".to_string(),
         active: true,
+        has_experiment: None,
         filters: FeatureFlagFilters {
             groups: vec![FeatureFlagCondition {
                 properties: vec![],

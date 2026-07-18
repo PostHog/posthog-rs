@@ -20,7 +20,7 @@ use super::{
 };
 use crate::client::get_default_user_agent;
 use crate::error::Error;
-use crate::event::Event;
+use crate::event::{Event, MINIMAL_FLAG_CALLED_EVENT_PROPERTIES};
 use crate::event_v1::{
     CaptureResponse, EventResult, EventStatus, V1BatchRequestRef, V1ErrorResponse, V1Event,
 };
@@ -41,6 +41,7 @@ pub(crate) fn build_events_at(
         .map(|event| {
             let mut event = event.clone();
             apply_runtime_context(&mut event);
+            let minimal = event.is_minimal_flag_called();
             let mut v1 = V1Event::from_event_at(&event, now);
             if let serde_json::Value::Object(ref mut map) = v1.properties {
                 if defaults.disable_geoip {
@@ -50,6 +51,15 @@ pub(crate) fn build_events_at(
                 if defaults.is_server {
                     map.entry("$is_server")
                         .or_insert(serde_json::Value::Bool(true));
+                }
+                // Final step for minimized `$feature_flag_called` events: drop
+                // everything outside the allowlist. Wire-lifted keys
+                // ($session_id/$window_id/$process_person_profile) already moved
+                // off `properties` and are preserved on the event elsewhere.
+                if minimal {
+                    map.retain(|key, _| {
+                        MINIMAL_FLAG_CALLED_EVENT_PROPERTIES.contains(&key.as_str())
+                    });
                 }
             }
             v1
@@ -362,6 +372,75 @@ mod tests {
             .retry_max_backoff_ms(5000u64)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn minimal_flag_called_event_v1_keeps_only_allowlisted_properties() {
+        use std::collections::HashSet;
+
+        let mut event = Event::new("$feature_flag_called", "user-1");
+        event.mark_minimal_flag_called();
+        event.add_group("company", "acme");
+        for (k, v) in [
+            ("$feature_flag", serde_json::json!("my-flag")),
+            ("$feature_flag_response", serde_json::json!(true)),
+            ("$feature/my-flag", serde_json::json!(true)), // stripped
+            ("$feature_flag_payload", serde_json::json!({"a": 1})), // stripped
+            ("$feature_flag_has_experiment", serde_json::json!(false)),
+            ("locally_evaluated", serde_json::json!(false)),
+            ("custom_super_property", serde_json::json!("leak")), // stripped
+        ] {
+            event.insert_prop(k, v).unwrap();
+        }
+
+        let defaults = CaptureDefaults {
+            disable_geoip: true,
+            is_server: true,
+        };
+        let built = build_events_at(&[event], &defaults, Utc::now());
+        let map = built[0].properties.as_object().unwrap();
+        let keys: HashSet<&str> = map.keys().map(String::as_str).collect();
+        let allow: HashSet<&str> = MINIMAL_FLAG_CALLED_EVENT_PROPERTIES
+            .iter()
+            .copied()
+            .collect();
+
+        assert!(
+            keys.is_subset(&allow),
+            "unexpected keys leaked: {:?}",
+            keys.difference(&allow).collect::<Vec<_>>()
+        );
+        assert!(keys.contains("$feature_flag"));
+        assert!(keys.contains("$feature_flag_has_experiment"));
+        assert!(keys.contains("$groups"));
+        assert!(keys.contains("$geoip_disable"));
+        assert!(keys.contains("$os"));
+        assert!(!keys.contains("$feature/my-flag"));
+        assert!(!keys.contains("$feature_flag_payload"));
+        assert!(!keys.contains("custom_super_property"));
+    }
+
+    #[test]
+    fn non_minimal_flag_called_event_v1_keeps_everything() {
+        let mut event = Event::new("$feature_flag_called", "user-1");
+        event
+            .insert_prop("$feature/my-flag", serde_json::json!(true))
+            .unwrap();
+        event
+            .insert_prop("custom_super_property", serde_json::json!("keep"))
+            .unwrap();
+
+        let defaults = CaptureDefaults {
+            disable_geoip: false,
+            is_server: false,
+        };
+        let built = build_events_at(&[event], &defaults, Utc::now());
+        let map = built[0].properties.as_object().unwrap();
+        assert_eq!(
+            map.get("custom_super_property"),
+            Some(&serde_json::json!("keep"))
+        );
+        assert_eq!(map.get("$feature/my-flag"), Some(&serde_json::json!(true)));
     }
 
     fn dummy_v1_event() -> V1Event {

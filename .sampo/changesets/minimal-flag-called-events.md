@@ -1,0 +1,9 @@
+---
+posthog-rs: minor
+---
+
+`$feature_flag_called` events now carry a tri-state `$feature_flag_has_experiment` property and are minimized for non-experiment flags when the server enables it. The experiment signal is read from `has_experiment` on each flag — from the `/flags?v=2` `metadata` object (remote evaluation) or the `/flags/definitions` flag definitions (local evaluation) — and is sent as `true`/`false` when reported, omitted entirely when the server does not report it (never fabricated as `false`).
+
+When the server-controlled gate is on — `minimalFlagCalledEvents: true` on the `/flags?v=2` response (remote) or `minimal_flag_called_events: true` on the local-evaluation definitions payload (local) — and the evaluated flag has `has_experiment: false`, the event is rebuilt from a strict allowlist (`$feature_flag`, `$feature_flag_response`, `$feature_flag_has_experiment`, `$feature_flag_id`, `$feature_flag_version`, `$feature_flag_reason`, `$feature_flag_request_id`, `$feature_flag_evaluated_at`, `$feature_flag_error`, `locally_evaluated`, `$groups`, `$process_person_profile`, `$geoip_disable`, `$session_id`, `$window_id`, `$device_id`, `$lib`, `$lib_version`, `$is_server`, `$os`, `$os_version`); everything else — `$feature/<key>`, `$feature_flag_payload`, and any user-supplied properties — is stripped. Any missing signal (gate absent, `has_experiment` unknown, experiment-linked flag, legacy response shapes) keeps today's full event shape. The gate is captured per evaluation source and pinned onto each flag's snapshot record, so a concurrent poller refresh cannot reshape an event after its value was determined. The gate is server-controlled per project; no SDK configuration is added.
+
+Local-evaluation support for the `minimal_flag_called_events` field depends on a PostHog server release that emits it; until then the client defaults to the full event shape.
