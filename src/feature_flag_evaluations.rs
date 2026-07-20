@@ -31,6 +31,16 @@ pub(crate) struct EvaluatedFlagRecord {
     pub version: Option<u32>,
     pub reason: Option<String>,
     pub locally_evaluated: bool,
+    /// Server-reported experiment linkage for this flag. Tri-state: `Some(bool)`
+    /// when reported, `None` when unknown. Drives `$feature_flag_has_experiment`
+    /// and, with the gate below, event minimization.
+    pub has_experiment: Option<bool>,
+    /// The minimal-`$feature_flag_called` gate captured from the source that
+    /// produced this record (the poller's local definitions or the remote
+    /// `/flags` response). Pinned per record so the minimization decision uses
+    /// the value tied to this flag's evaluation, never a later read of shared
+    /// mutable client state.
+    pub minimal_flag_called_events: bool,
 }
 
 /// Parameters dispatched to [`FeatureFlagEvaluationsHost::capture_flag_called_event_if_needed`]
@@ -43,6 +53,10 @@ pub(crate) struct FlagCalledEventParams {
     pub groups: HashMap<String, String>,
     pub disable_geoip: Option<bool>,
     pub properties: HashMap<String, Value>,
+    /// Whether this event should be minimized to the strict property allowlist.
+    /// Decided by [`FeatureFlagEvaluations::record_access`] from the flag's own
+    /// pinned gate and experiment signal, then applied as the final capture step.
+    pub minimal: bool,
 }
 
 /// Dependency-inverted host interface used by [`FeatureFlagEvaluations`] to
@@ -301,6 +315,13 @@ impl FeatureFlagEvaluations {
         let response = flag.map(flag_value_for);
         let properties = self.build_called_event_properties(key, flag, &response);
 
+        // Minimize iff the gate pinned on this flag's record is on AND the flag
+        // is known to have no linked experiment. Any missing signal (gate off,
+        // experiment unknown, experiment-linked, or missing flag) keeps the full
+        // event shape. Read from the per-flag record, never from shared state.
+        let minimal =
+            flag.is_some_and(|f| f.minimal_flag_called_events && f.has_experiment == Some(false));
+
         self.host
             .capture_flag_called_event_if_needed(FlagCalledEventParams {
                 distinct_id: self.distinct_id.clone(),
@@ -309,6 +330,7 @@ impl FeatureFlagEvaluations {
                 groups: self.groups.clone(),
                 disable_geoip: self.disable_geoip,
                 properties,
+                minimal,
             });
     }
 
@@ -329,6 +351,13 @@ impl FeatureFlagEvaluations {
 
         let locally_evaluated = flag.is_some_and(|f| f.locally_evaluated);
         props.insert("locally_evaluated".into(), json!(locally_evaluated));
+
+        // Record the server's experiment signal when known, so minimization's
+        // impact can be segmented by it. Omitted entirely when unknown (never
+        // fabricated as `false`).
+        if let Some(has_experiment) = flag.and_then(|f| f.has_experiment) {
+            props.insert("$feature_flag_has_experiment".into(), json!(has_experiment));
+        }
 
         if let Some(flag) = flag {
             if let Some(payload) = &flag.payload {
@@ -453,6 +482,8 @@ mod tests {
             version: Some(7),
             reason: Some("condition match".into()),
             locally_evaluated,
+            has_experiment: None,
+            minimal_flag_called_events: false,
         }
     }
 
@@ -704,6 +735,173 @@ mod tests {
         let _ = child.is_enabled("alpha");
         // Parent's accessed set is still {"alpha"}, not affected by child reads.
         assert_eq!(snap.snapshot_accessed().len(), 1);
+    }
+
+    /// Build a snapshot holding a single flag with an explicit experiment
+    /// signal and pinned minimization gate, mirroring what `evaluate_flags`
+    /// produces per source.
+    fn snapshot_with_flag(
+        host: Arc<dyn FeatureFlagEvaluationsHost>,
+        has_experiment: Option<bool>,
+        minimal_flag_called_events: bool,
+    ) -> FeatureFlagEvaluations {
+        let mut flags = HashMap::new();
+        flags.insert(
+            "gated".into(),
+            EvaluatedFlagRecord {
+                has_experiment,
+                minimal_flag_called_events,
+                ..record("gated", true, None, false)
+            },
+        );
+        FeatureFlagEvaluations::new(
+            host,
+            "u1".into(),
+            flags,
+            HashMap::new(),
+            None,
+            Some("req-1".into()),
+            Some(1700000000),
+            false,
+            false,
+        )
+    }
+
+    #[test]
+    fn has_experiment_true_sets_property() {
+        let host = Arc::new(RecordingHost::default());
+        let snap = snapshot_with_flag(
+            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+            Some(true),
+            false,
+        );
+        let _ = snap.is_enabled("gated");
+        let captured = host.captured.lock().unwrap();
+        assert_eq!(
+            captured[0].properties.get("$feature_flag_has_experiment"),
+            Some(&json!(true))
+        );
+    }
+
+    #[test]
+    fn has_experiment_false_sets_property() {
+        let host = Arc::new(RecordingHost::default());
+        let snap = snapshot_with_flag(
+            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+            Some(false),
+            false,
+        );
+        let _ = snap.is_enabled("gated");
+        let captured = host.captured.lock().unwrap();
+        assert_eq!(
+            captured[0].properties.get("$feature_flag_has_experiment"),
+            Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn has_experiment_unknown_omits_property() {
+        let host = Arc::new(RecordingHost::default());
+        let snap = snapshot_with_flag(
+            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+            None,
+            true,
+        );
+        let _ = snap.is_enabled("gated");
+        let captured = host.captured.lock().unwrap();
+        // Never fabricated as false when the server did not report it.
+        assert!(!captured[0]
+            .properties
+            .contains_key("$feature_flag_has_experiment"));
+    }
+
+    #[test]
+    fn minimizes_only_when_gate_on_and_no_experiment() {
+        // (has_experiment, gate) -> expected `minimal`
+        let cases = [
+            (Some(false), true, true),   // gate on, no experiment -> minimize
+            (Some(true), true, false),   // experiment-linked -> full
+            (None, true, false),         // experiment unknown -> full
+            (Some(false), false, false), // gate off -> full
+        ];
+        for (has_experiment, gate, expected) in cases {
+            let host = Arc::new(RecordingHost::default());
+            let snap = snapshot_with_flag(
+                Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+                has_experiment,
+                gate,
+            );
+            let _ = snap.is_enabled("gated");
+            let captured = host.captured.lock().unwrap();
+            assert_eq!(
+                captured[0].minimal, expected,
+                "has_experiment={:?} gate={} should minimal={}",
+                has_experiment, gate, expected
+            );
+        }
+    }
+
+    #[test]
+    fn missing_flag_is_never_minimized() {
+        let host = Arc::new(RecordingHost::default());
+        let snap = snapshot_with_flag(
+            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+            Some(false),
+            true,
+        );
+        // A key absent from the snapshot has no pinned gate/experiment signal,
+        // so it always keeps the full shape.
+        let _ = snap.get_flag("not-present");
+        let captured = host.captured.lock().unwrap();
+        assert!(!captured[0].minimal);
+    }
+
+    #[test]
+    fn gate_is_pinned_per_flag_not_shared_across_a_snapshot() {
+        // Two flags in ONE snapshot with different pinned gates: a local flag
+        // whose definitions had the gate on, and a remote flag whose /flags
+        // response had it off. Each event must reflect its own source's gate.
+        // Guards against collapsing the gate into a single shared snapshot field.
+        let host = Arc::new(RecordingHost::default());
+        let mut flags = HashMap::new();
+        flags.insert(
+            "local-gated".into(),
+            EvaluatedFlagRecord {
+                has_experiment: Some(false),
+                minimal_flag_called_events: true,
+                ..record("local-gated", true, None, true)
+            },
+        );
+        flags.insert(
+            "remote-ungated".into(),
+            EvaluatedFlagRecord {
+                has_experiment: Some(false),
+                minimal_flag_called_events: false,
+                ..record("remote-ungated", true, None, false)
+            },
+        );
+        let snap = FeatureFlagEvaluations::new(
+            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+            "u1".into(),
+            flags,
+            HashMap::new(),
+            None,
+            Some("req-1".into()),
+            Some(1700000000),
+            false,
+            false,
+        );
+
+        let _ = snap.is_enabled("local-gated");
+        let _ = snap.is_enabled("remote-ungated");
+
+        let captured = host.captured.lock().unwrap();
+        let by_key: HashMap<&str, bool> = captured
+            .iter()
+            .map(|p| (p.key.as_str(), p.minimal))
+            .collect();
+        assert_eq!(by_key.get("local-gated"), Some(&true));
+        assert_eq!(by_key.get("remote-ungated"), Some(&false));
     }
 
     #[test]

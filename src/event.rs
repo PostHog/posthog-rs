@@ -9,6 +9,55 @@ use crate::client::CRATE_VERSION;
 use crate::feature_flag_evaluations::FeatureFlagEvaluations;
 use crate::Error;
 
+/// The only properties retained on a minimized `$feature_flag_called` event.
+///
+/// A fresh allowlist (rather than a denylist) so nothing added upstream — super
+/// properties, context, user-supplied properties, SDK metadata, system context —
+/// can leak past it. Applied as the final capture-pipeline step, after all
+/// enrichment, so the resulting event carries exactly this set intersected with
+/// what the full event would have had. Beyond the evaluation properties it keeps
+/// cheap, static, low-cardinality identity useful for platform/runtime
+/// breakdowns (`$lib`, `$lib_version`, `$os`, `$os_version`), processing-control
+/// sentinels this SDK sets (`$geoip_disable`, `$process_person_profile`,
+/// `$is_server`), correctness-required `$groups`, and linkage identifiers.
+pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
+    // Identity
+    "$feature_flag",
+    "$feature_flag_response",
+    "$feature_flag_has_experiment",
+    // Evaluation debug
+    "$feature_flag_id",
+    "$feature_flag_version",
+    "$feature_flag_reason",
+    "$feature_flag_request_id",
+    "$feature_flag_evaluated_at",
+    "$feature_flag_error",
+    "locally_evaluated",
+    // Correctness-required / processing-control
+    "$groups",
+    "$process_person_profile",
+    "$geoip_disable",
+    // Linkage / SDK identity
+    "$session_id",
+    "$window_id",
+    "$device_id",
+    "$lib",
+    "$lib_version",
+    "$is_server",
+    // Static platform/runtime identity
+    "$os",
+    "$os_version",
+];
+
+/// Whether `key` survives minimization to [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`].
+/// Shared by the V0 (`Event::apply_minimal_flag_called_allowlist`) and V1
+/// (`v1_capture::build_events_at`) capture pipelines so the allowlist check
+/// itself has one implementation even though each pipeline applies it to a
+/// different properties representation.
+pub(crate) fn is_minimal_flag_called_property(key: &str) -> bool {
+    MINIMAL_FLAG_CALLED_EVENT_PROPERTIES.contains(&key)
+}
+
 /// An [`Event`] represents an interaction a user has with your app or
 /// website. Examples include button clicks, pageviews, query completions, and signups.
 /// See the [PostHog documentation](https://posthog.com/docs/data/events)
@@ -21,6 +70,11 @@ pub struct Event {
     groups: HashMap<String, String>,
     timestamp: Option<NaiveDateTime>,
     uuid: Uuid,
+    /// When set, the capture pipeline trims this event's properties to
+    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] as its final enrichment step.
+    /// Set only for minimized `$feature_flag_called` events; never serialized.
+    #[serde(skip)]
+    minimal_flag_called: bool,
 }
 
 impl Event {
@@ -41,6 +95,7 @@ impl Event {
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
+            minimal_flag_called: false,
         }
     }
 
@@ -69,6 +124,7 @@ impl Event {
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
+            minimal_flag_called: false,
         }
     }
 
@@ -222,6 +278,31 @@ impl Event {
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn groups(&self) -> &HashMap<String, String> {
         &self.groups
+    }
+
+    /// Mark this event as a minimized `$feature_flag_called` event. The capture
+    /// pipeline then trims its properties to
+    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] after all enrichment.
+    pub(crate) fn mark_minimal_flag_called(&mut self) {
+        self.minimal_flag_called = true;
+    }
+
+    /// Whether this event is a minimized `$feature_flag_called` event.
+    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    pub(crate) fn is_minimal_flag_called(&self) -> bool {
+        self.minimal_flag_called
+    }
+
+    /// Trim this event's properties to [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`]
+    /// when it is a minimized `$feature_flag_called` event; a no-op otherwise.
+    /// Called as the final capture step so no property added upstream survives
+    /// outside the allowlist.
+    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
+    pub(crate) fn apply_minimal_flag_called_allowlist(&mut self) {
+        if self.minimal_flag_called {
+            self.properties
+                .retain(|key, _| is_minimal_flag_called_property(key));
+        }
     }
 
     /// Inject SDK metadata and `$groups` into V0 properties.

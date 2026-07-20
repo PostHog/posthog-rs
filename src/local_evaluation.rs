@@ -66,6 +66,11 @@ pub struct LocalEvaluationResponse {
     /// Cohort definitions for evaluating cohort membership
     #[serde(default)]
     pub cohorts: HashMap<String, Cohort>,
+    /// Server-controlled gate: when `true`, `$feature_flag_called` events for
+    /// non-experiment flags evaluated from these definitions are minimized to a
+    /// strict property allowlist. Absent fails safe to `false` (full event).
+    #[serde(default)]
+    pub minimal_flag_called_events: bool,
 }
 
 /// A cohort definition for local evaluation.
@@ -92,6 +97,11 @@ pub struct FlagCache {
     flags: Arc<RwLock<HashMap<String, FeatureFlag>>>,
     group_type_mapping: Arc<RwLock<HashMap<String, String>>>,
     cohorts: Arc<RwLock<HashMap<String, Cohort>>>,
+    /// The `minimal_flag_called_events` gate from the most recent definitions
+    /// poll. Read once when a local evaluation succeeds and pinned onto that
+    /// flag's record, so the minimization decision reflects the definitions
+    /// snapshot that produced the value.
+    minimal_flag_called_events: Arc<AtomicBool>,
 }
 
 impl Default for FlagCache {
@@ -107,6 +117,7 @@ impl FlagCache {
             flags: Arc::new(RwLock::new(HashMap::new())),
             group_type_mapping: Arc::new(RwLock::new(HashMap::new())),
             cohorts: Arc::new(RwLock::new(HashMap::new())),
+            minimal_flag_called_events: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -126,12 +137,32 @@ impl FlagCache {
         let mut cohorts = self.cohorts.write().unwrap();
         *cohorts = response.cohorts;
 
+        self.minimal_flag_called_events
+            .store(response.minimal_flag_called_events, Ordering::Relaxed);
+
         debug!(flag_count, "Updated flag cache");
+    }
+
+    /// Whether the most recent definitions poll enabled minimal
+    /// `$feature_flag_called` events. `false` until definitions load, so a
+    /// missing signal always yields full events.
+    pub fn minimal_flag_called_events(&self) -> bool {
+        self.minimal_flag_called_events.load(Ordering::Relaxed)
     }
 
     /// Return a cached feature flag by key.
     pub fn get_flag(&self, key: &str) -> Option<FeatureFlag> {
         self.flags.read().unwrap().get(key).cloned()
+    }
+
+    /// Return a flag's `has_experiment` signal without cloning the full
+    /// [`FeatureFlag`] (its filters can hold nested `Vec`s and JSON values).
+    pub(crate) fn has_experiment(&self, key: &str) -> Option<bool> {
+        self.flags
+            .read()
+            .unwrap()
+            .get(key)
+            .and_then(|f| f.has_experiment)
     }
 
     /// Return all cached feature flag definitions.

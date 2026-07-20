@@ -179,6 +179,12 @@ pub(super) fn flag_called_event(
     is_server: bool,
 ) -> Option<Event> {
     let mut event = Event::new("$feature_flag_called".to_string(), params.distinct_id);
+    if params.minimal {
+        // Marks the event so the capture pipeline trims it to the minimal
+        // allowlist as its final enrichment step, after system context and SDK
+        // metadata are stamped on.
+        event.mark_minimal_flag_called();
+    }
     for (k, v) in params.properties {
         if event.insert_prop(k, v).is_err() {
             return None;
@@ -203,6 +209,10 @@ pub(super) struct DetailedFlagsResponse {
     pub(super) request_id: Option<String>,
     pub(super) errors_while_computing_flags: bool,
     pub(super) quota_limited: bool,
+    /// The `minimalFlagCalledEvents` gate as reported by this `/flags?v=2`
+    /// response. Pinned here so it travels with the flags it evaluated, rather
+    /// than being re-read from shared state when an event is later captured.
+    pub(super) minimal_flag_called_events: bool,
 }
 
 pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFlagsResponse {
@@ -212,11 +222,13 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
             request_id,
             errors_while_computing_flags,
             quota_limited,
+            minimal_flag_called_events,
         } => DetailedFlagsResponse {
             flags,
             request_id,
             errors_while_computing_flags,
             quota_limited,
+            minimal_flag_called_events,
         },
         FeatureFlagsResponse::Legacy {
             feature_flags,
@@ -242,6 +254,7 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
                             version: 0,
                             description: None,
                             payload: Some(payload),
+                            has_experiment: None,
                         }),
                     },
                 );
@@ -251,12 +264,19 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
                 request_id: None,
                 errors_while_computing_flags: errors.is_some_and(|e| !e.is_empty()),
                 quota_limited: false,
+                // The legacy response shape carries no minimization gate, so it
+                // fails safe to the full event shape.
+                minimal_flag_called_events: false,
             }
         }
     }
 }
 
-pub(super) fn local_record(value: FlagValue) -> EvaluatedFlagRecord {
+pub(super) fn local_record(
+    value: FlagValue,
+    has_experiment: Option<bool>,
+    minimal_flag_called_events: bool,
+) -> EvaluatedFlagRecord {
     let (enabled, variant) = match value {
         FlagValue::Boolean(b) => (b, None),
         FlagValue::String(s) => (true, Some(s)),
@@ -270,10 +290,15 @@ pub(super) fn local_record(value: FlagValue) -> EvaluatedFlagRecord {
         version: None,
         reason: Some("Evaluated locally".to_string()),
         locally_evaluated: true,
+        has_experiment,
+        minimal_flag_called_events,
     }
 }
 
-pub(super) fn remote_record_from_detail(detail: FlagDetail) -> EvaluatedFlagRecord {
+pub(super) fn remote_record_from_detail(
+    detail: FlagDetail,
+    minimal_flag_called_events: bool,
+) -> EvaluatedFlagRecord {
     let metadata = detail.metadata;
     let reason = detail
         .reason
@@ -281,6 +306,7 @@ pub(super) fn remote_record_from_detail(detail: FlagDetail) -> EvaluatedFlagReco
         .filter(|s| !s.is_empty());
     let id = metadata.as_ref().map(|m| m.id);
     let version = metadata.as_ref().map(|m| m.version);
+    let has_experiment = metadata.as_ref().and_then(|m| m.has_experiment);
     let payload = metadata.and_then(|m| m.payload).map(normalize_payload);
     EvaluatedFlagRecord {
         enabled: detail.enabled,
@@ -290,6 +316,8 @@ pub(super) fn remote_record_from_detail(detail: FlagDetail) -> EvaluatedFlagReco
         version,
         reason,
         locally_evaluated: false,
+        has_experiment,
+        minimal_flag_called_events,
     }
 }
 
@@ -330,6 +358,7 @@ mod tests {
             groups,
             disable_geoip,
             properties,
+            minimal: false,
         }
     }
 

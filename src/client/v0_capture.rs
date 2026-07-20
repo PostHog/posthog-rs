@@ -51,7 +51,13 @@ pub(crate) fn build_batch_payload(
         .into_iter()
         .filter_map(|mut event| {
             prepare_event(&mut event, defaults);
-            apply_before_send_hooks(before_send, event).map(InnerEvent::new_for_batch)
+            apply_before_send_hooks(before_send, event).map(|mut event| {
+                // Final step, after before_send: for minimized `$feature_flag_called`
+                // events, drop everything outside the allowlist so a hook cannot
+                // reintroduce properties it strips.
+                event.apply_minimal_flag_called_allowlist();
+                InnerEvent::new_for_batch(event)
+            })
         })
         .collect();
 
@@ -157,4 +163,153 @@ pub(crate) fn apply_extra_headers(
         }
     }
     request
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::MINIMAL_FLAG_CALLED_EVENT_PROPERTIES;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    /// Build a `$feature_flag_called` event carrying the full property set the
+    /// snapshot path would produce, plus a non-allowlisted extra to prove
+    /// nothing leaks past the allowlist.
+    fn full_flag_called_event() -> Event {
+        let mut event = Event::new("$feature_flag_called", "user-1");
+        event.add_group("company", "acme");
+        for (k, v) in [
+            ("$feature_flag", json!("my-flag")),
+            ("$feature_flag_response", json!(true)),
+            ("$feature/my-flag", json!(true)),          // stripped
+            ("$feature_flag_payload", json!({"a": 1})), // stripped
+            ("$feature_flag_has_experiment", json!(false)),
+            ("$feature_flag_id", json!(42)),
+            ("$feature_flag_version", json!(7)),
+            ("$feature_flag_reason", json!("condition match")),
+            ("$feature_flag_request_id", json!("req-1")),
+            ("locally_evaluated", json!(false)),
+            ("custom_super_property", json!("leak")), // stripped
+        ] {
+            event.insert_prop(k, v).unwrap();
+        }
+        event
+    }
+
+    #[test]
+    fn minimal_flag_called_event_keeps_only_allowlisted_properties() {
+        let mut event = full_flag_called_event();
+        event.mark_minimal_flag_called();
+        prepare_event(
+            &mut event,
+            &CaptureDefaults {
+                disable_geoip: true,
+                is_server: true,
+            },
+        );
+        // Mirrors the no-hooks case in `build_batch_payload`, where the trim runs
+        // right after `prepare_event` since `apply_before_send_hooks` is a no-op.
+        event.apply_minimal_flag_called_allowlist();
+
+        let keys: HashSet<&str> = event.properties().keys().map(String::as_str).collect();
+        let allow: HashSet<&str> = MINIMAL_FLAG_CALLED_EVENT_PROPERTIES
+            .iter()
+            .copied()
+            .collect();
+
+        // Every surviving key is on the allowlist — the enrichment step's
+        // `$lib_version__major/minor/patch`, `$feature/<key>`,
+        // `$feature_flag_payload`, and the custom super property are all gone.
+        assert!(
+            keys.is_subset(&allow),
+            "unexpected keys leaked: {:?}",
+            keys.difference(&allow).collect::<Vec<_>>()
+        );
+        // Allowlisted evaluation + system-context props are retained.
+        for expected in [
+            "$feature_flag",
+            "$feature_flag_response",
+            "$feature_flag_has_experiment",
+            "locally_evaluated",
+            "$groups",
+            "$geoip_disable",
+            "$is_server",
+            "$lib",
+            "$lib_version",
+            "$os",
+            "$os_version",
+        ] {
+            assert!(
+                keys.contains(expected),
+                "missing allowlisted key {}",
+                expected
+            );
+        }
+        assert!(!keys.contains("$feature/my-flag"));
+        assert!(!keys.contains("$feature_flag_payload"));
+        assert!(!keys.contains("custom_super_property"));
+        assert!(!keys.contains("$lib_version__major"));
+    }
+
+    #[test]
+    fn non_minimal_flag_called_event_keeps_everything() {
+        let mut event = full_flag_called_event();
+        prepare_event(
+            &mut event,
+            &CaptureDefaults {
+                disable_geoip: true,
+                is_server: true,
+            },
+        );
+        // No minimization marker -> the full shape is preserved, including the
+        // super property and `$feature/<key>`.
+        assert_eq!(
+            event.properties().get("custom_super_property"),
+            Some(&json!("leak"))
+        );
+        assert_eq!(
+            event.properties().get("$feature/my-flag"),
+            Some(&json!(true))
+        );
+        assert!(event.properties().contains_key("$lib_version__major"));
+    }
+
+    #[test]
+    fn before_send_hook_cannot_reintroduce_properties_after_minimal_trim() {
+        let mut event = Event::new("$feature_flag_called", "user-1");
+        event.mark_minimal_flag_called();
+        event
+            .insert_prop("$feature_flag", json!("my-flag"))
+            .unwrap();
+
+        // A hook that stamps a non-allowlisted property, the way a real
+        // before_send hook (env tags, app version, user metadata) would.
+        let hooks = vec![BeforeSendHook::new(|mut event| {
+            event.insert_prop("from_hook", json!("leak")).unwrap();
+            Some(event)
+        })];
+
+        let (json_body, kept) = build_batch_payload(
+            vec![event],
+            "phc_test".to_string(),
+            false,
+            Utc::now(),
+            &CaptureDefaults {
+                disable_geoip: true,
+                is_server: true,
+            },
+            &hooks,
+        )
+        .unwrap()
+        .expect("event should not be dropped");
+
+        assert_eq!(kept, 1);
+        let parsed: serde_json::Value = serde_json::from_str(&json_body).unwrap();
+        let properties = &parsed["batch"][0]["properties"];
+        assert!(
+            properties.get("from_hook").is_none(),
+            "before_send hook property survived the minimal-event allowlist trim: {:?}",
+            properties
+        );
+    }
 }
