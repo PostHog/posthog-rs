@@ -137,8 +137,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Publish dry run
+      - name: posthog-rs publish dry run
         run: cargo publish --dry-run --locked
+
+      - name: posthog mirror publish dry run
+        run: scripts/publish-crate-mirror.sh --dry-run
 
   test:
     name: ${{ matrix.name }}

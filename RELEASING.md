@@ -16,6 +16,8 @@ This repository uses [Sampo](https://github.com/bruits/sampo) for versioning, ch
 
 2. Create a PR with your changes and the changeset file
 3. Merge to `main` (no release label required)
-4. Approve the release in Slack when prompted — this triggers version bump, crates.io publish, git tag, and GitHub Release
+4. Approve the release in Slack when prompted — this triggers the version bump, publishes the same source as both `posthog-rs` and `posthog`, creates the git tag, and creates the GitHub Release
 
 You can also trigger a release manually via the workflow's `workflow_dispatch` trigger (still requires pending changesets).
+
+Both crates must configure crates.io Trusted Publishing for the `posthog/posthog-rs` repository, `release.yml` workflow, and `Release` environment. The single short-lived CI token can then publish both packages.
