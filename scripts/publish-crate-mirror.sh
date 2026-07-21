@@ -9,7 +9,12 @@ if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
     exit 1
 fi
 
-files=(Cargo.toml Cargo.lock compliance/adapter/Cargo.toml)
+scope_files=()
+while IFS= read -r file; do
+    scope_files+=("$file")
+done < <(git grep -l posthog_rs -- src tests examples api/public-api.txt)
+
+files=(Cargo.toml Cargo.lock compliance/adapter/Cargo.toml "${scope_files[@]}")
 backup_dir="$(mktemp -d)"
 for file in "${files[@]}"; do
     mkdir -p "$backup_dir/$(dirname "$file")"
@@ -37,19 +42,21 @@ trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
 # Keep Cargo's generated VCS metadata tied to the clean release commit while
-# staging the package-name-only changes in the working tree.
+# staging the package and crate-scope name changes in the working tree.
 git update-index --assume-unchanged -- "${files[@]}"
 
-python3 - <<'PY'
+python3 - "${scope_files[@]}" <<'PY'
 from pathlib import Path
+import sys
 
 
-def replace(path: str, old: str, new: str, expected: int = 1) -> None:
+def replace(path: str, old: str, new: str, expected=1) -> None:
     file = Path(path)
     contents = file.read_text()
     count = contents.count(old)
-    if count != expected:
-        raise SystemExit(f"expected {expected} occurrence(s) of {old!r} in {path}, found {count}")
+    if count == 0 or (expected is not None and count != expected):
+        wanted = "at least one" if expected is None else str(expected)
+        raise SystemExit(f"expected {wanted} occurrence(s) of {old!r} in {path}, found {count}")
     file.write_text(contents.replace(old, new))
 
 
@@ -60,6 +67,10 @@ replace(
     'posthog-rs = { path = "../..",',
     'posthog-rs = { package = "posthog", path = "../..",',
 )
+for path in sys.argv[1:]:
+    replace(path, "posthog_rs", "posthog", expected=None)
 PY
 
+cargo test --locked --package posthog --all-targets --all-features --no-run
+cargo test --locked --package posthog --doc --all-features
 cargo publish --locked "$@"
