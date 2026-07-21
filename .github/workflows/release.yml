@@ -143,9 +143,13 @@ jobs:
         if: steps.check-changes.outputs.committed == 'true'
         run: git checkout -- . && git pull origin main
 
-      - name: Publish dry-run
+      - name: posthog-rs publish dry-run
         if: steps.check-changes.outputs.committed == 'true'
         run: cargo publish --workspace --dry-run
+
+      - name: posthog mirror publish dry-run
+        if: steps.check-changes.outputs.committed == 'true'
+        run: scripts/publish-crate-mirror.sh --dry-run
 
       - name: Authenticate with crates.io
         if: steps.check-changes.outputs.committed == 'true'
@@ -158,12 +162,18 @@ jobs:
           git config user.name "posthog-rs-releaser[bot]"
           git config user.email "posthog-rs-releaser[bot]@users.noreply.github.com"
 
-      - name: Publish with Sampo
+      - name: Publish posthog-rs with Sampo
         if: steps.check-changes.outputs.committed == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: sampo publish
+
+      - name: Publish posthog mirror
+        if: steps.check-changes.outputs.committed == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+        run: scripts/publish-crate-mirror.sh
 
       - name: Create GitHub Release
         if: steps.check-changes.outputs.committed == 'true'
@@ -209,7 +219,7 @@ jobs:
               "packageName": "posthog-rs",
               "packageVersion": "${{ steps.sampo-release.outputs.new_version || 'unknown' }}",
               "actionUrl": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-              "alertText": ":rotating_light: Failed to release posthog-rs@${{ steps.sampo-release.outputs.new_version }} :rotating_light:",
+              "alertText": ":rotating_light: Failed to release posthog-rs/posthog@${{ steps.sampo-release.outputs.new_version }} :rotating_light:",
               "alertContext": "The release workflow failed before completion."
             }
 
@@ -220,7 +230,7 @@ jobs:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
           thread_ts: ${{ needs.notify-approval-needed.outputs.slack_ts }}
-          message: "❌ Failed to release `posthog-rs@${{ steps.sampo-release.outputs.new_version }}`! <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>"
+          message: "❌ Failed to release `posthog-rs/posthog@${{ steps.sampo-release.outputs.new_version }}`! <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>"
           emoji_reaction: "x"
 
   notify-released:
@@ -238,5 +248,5 @@ jobs:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
           thread_ts: ${{ needs.notify-approval-needed.outputs.slack_ts }}
-          message: "🚀 posthog-rs released successfully!"
+          message: "🚀 posthog-rs and posthog released successfully!"
           emoji_reaction: "rocket"
