@@ -165,7 +165,8 @@ pub struct Property {
     /// The value to compare against
     pub value: serde_json::Value,
     /// Comparison operator. Supported property operators include `"exact"`,
-    /// `"is_not"`, `"icontains"`, `"not_icontains"`, `"regex"`,
+    /// `"is_not"`, `"icontains"`, `"not_icontains"`, `"starts_with"`,
+    /// `"not_starts_with"`, `"ends_with"`, `"not_ends_with"`, `"regex"`,
     /// `"not_regex"`, `"gt"`, `"gte"`, `"lt"`, `"lte"`, `"is_set"`,
     /// `"is_not_set"`, `"is_date_before"`, `"is_date_after"`, and the
     /// `"semver_*"` operators used by PostHog version targeting.
@@ -1225,6 +1226,34 @@ fn match_property(
             let search_str = value_to_string(&property.value);
             !prop_str.to_lowercase().contains(&search_str.to_lowercase())
         }
+        "starts_with" => {
+            let prop_str = value_to_string(value);
+            let search_str = value_to_string(&property.value);
+            prop_str
+                .to_lowercase()
+                .starts_with(&search_str.to_lowercase())
+        }
+        "not_starts_with" => {
+            let prop_str = value_to_string(value);
+            let search_str = value_to_string(&property.value);
+            !prop_str
+                .to_lowercase()
+                .starts_with(&search_str.to_lowercase())
+        }
+        "ends_with" => {
+            let prop_str = value_to_string(value);
+            let search_str = value_to_string(&property.value);
+            prop_str
+                .to_lowercase()
+                .ends_with(&search_str.to_lowercase())
+        }
+        "not_ends_with" => {
+            let prop_str = value_to_string(value);
+            let search_str = value_to_string(&property.value);
+            !prop_str
+                .to_lowercase()
+                .ends_with(&search_str.to_lowercase())
+        }
         "regex" => {
             let prop_str = value_to_string(value);
             let regex_str = value_to_string(&property.value);
@@ -1596,6 +1625,116 @@ mod tests {
 
         properties.insert("name".to_string(), json!("regular_user"));
         assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    #[test]
+    fn test_starts_with_operator() {
+        let prop = Property {
+            key: "name".to_string(),
+            value: json!("Val"),
+            operator: "starts_with".to_string(),
+            property_type: None,
+        };
+
+        // Case-insensitive match anchored to the start.
+        let mut properties = HashMap::new();
+        properties.insert("name".to_string(), json!("value"));
+        assert!(match_property(&prop, &properties).unwrap());
+
+        properties.insert("name".to_string(), json!("VALUE"));
+        assert!(match_property(&prop, &properties).unwrap());
+
+        // Substring present but not at the start.
+        properties.insert("name".to_string(), json!("prevalue"));
+        assert!(!match_property(&prop, &properties).unwrap());
+
+        properties.insert("name".to_string(), json!("Alakazam"));
+        assert!(!match_property(&prop, &properties).unwrap());
+
+        // Numeric property values are stringified before matching.
+        let numeric_prop = Property {
+            key: "name".to_string(),
+            value: json!("3"),
+            operator: "starts_with".to_string(),
+            property_type: None,
+        };
+
+        properties.insert("name".to_string(), json!(323));
+        assert!(match_property(&numeric_prop, &properties).unwrap());
+
+        properties.insert("name".to_string(), json!(123));
+        assert!(!match_property(&numeric_prop, &properties).unwrap());
+
+        let negated_prop = Property {
+            key: "name".to_string(),
+            value: json!("Val"),
+            operator: "not_starts_with".to_string(),
+            property_type: None,
+        };
+
+        properties.insert("name".to_string(), json!("value"));
+        assert!(!match_property(&negated_prop, &properties).unwrap());
+
+        properties.insert("name".to_string(), json!("prevalue"));
+        assert!(match_property(&negated_prop, &properties).unwrap());
+
+        // Missing property is inconclusive.
+        assert!(match_property(&prop, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn test_ends_with_operator() {
+        let prop = Property {
+            key: "name".to_string(),
+            value: json!("lUe"),
+            operator: "ends_with".to_string(),
+            property_type: None,
+        };
+
+        // Case-insensitive match anchored to the end.
+        let mut properties = HashMap::new();
+        properties.insert("name".to_string(), json!("value"));
+        assert!(match_property(&prop, &properties).unwrap());
+
+        properties.insert("name".to_string(), json!("VALUE"));
+        assert!(match_property(&prop, &properties).unwrap());
+
+        // Substring present but not at the end.
+        properties.insert("name".to_string(), json!("value2"));
+        assert!(!match_property(&prop, &properties).unwrap());
+
+        properties.insert("name".to_string(), json!("Alakazam"));
+        assert!(!match_property(&prop, &properties).unwrap());
+
+        // Numeric property values are stringified before matching.
+        let numeric_prop = Property {
+            key: "name".to_string(),
+            value: json!("3"),
+            operator: "ends_with".to_string(),
+            property_type: None,
+        };
+
+        properties.insert("name".to_string(), json!(323));
+        assert!(match_property(&numeric_prop, &properties).unwrap());
+
+        properties.insert("name".to_string(), json!(321));
+        assert!(!match_property(&numeric_prop, &properties).unwrap());
+
+        let negated_prop = Property {
+            key: "name".to_string(),
+            value: json!("lUe"),
+            operator: "not_ends_with".to_string(),
+            property_type: None,
+        };
+
+        properties.insert("name".to_string(), json!("value"));
+        assert!(!match_property(&negated_prop, &properties).unwrap());
+
+        properties.insert("name".to_string(), json!("value2"));
+        assert!(match_property(&negated_prop, &properties).unwrap());
+
+        // Missing property is inconclusive.
+        assert!(match_property(&prop, &HashMap::new()).is_err());
     }
 
     #[test]
