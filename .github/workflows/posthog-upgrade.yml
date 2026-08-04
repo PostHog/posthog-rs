@@ -86,6 +86,10 @@ jobs:
           HUSKY: "0"
         with:
           token: ${{ steps.upgrader.outputs.token }}
+          # PostHog/posthog requires signed commits, so the bump has to be
+          # committed through the GitHub API rather than pushed with git.
+          # This works only because the token above comes from a GitHub App.
+          sign-commits: true
           commit-message: "chore(deps): Update ${{ github.event.inputs.package_name }} to ${{ github.event.inputs.package_version }}"
           branch: ${{ steps.generate-branch-name.outputs.branch_name }}
           delete-branch: true
