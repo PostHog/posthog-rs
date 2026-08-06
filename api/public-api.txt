@@ -209,6 +209,7 @@ pub fn posthog_rs::ErrorTrackingOptionsBuilder::capture_panics(&mut self, bool) 
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::capture_stacktrace(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::in_app_exclude_paths(&mut self, alloc::vec::Vec<alloc::string::String>) -> &mut Self
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::in_app_include_paths(&mut self, alloc::vec::Vec<alloc::string::String>) -> &mut Self
+pub fn posthog_rs::ErrorTrackingOptionsBuilder::trace_context_provider<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn() -> core::option::Option<posthog_rs::TraceContext> + core::marker::Send + core::marker::Sync + 'static
 impl core::default::Default for posthog_rs::ErrorTrackingOptionsBuilder
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::default() -> Self
 pub struct posthog_rs::EvaluateFlagsOptions
@@ -352,6 +353,9 @@ pub posthog_rs::Property::key: alloc::string::String
 pub posthog_rs::Property::operator: alloc::string::String
 pub posthog_rs::Property::property_type: core::option::Option<alloc::string::String>
 pub posthog_rs::Property::value: serde_json::value::Value
+pub struct posthog_rs::TraceContext
+impl posthog_rs::TraceContext
+pub fn posthog_rs::TraceContext::new<T: core::convert::Into<alloc::string::String>, S: core::convert::Into<alloc::string::String>>(T, S) -> Self
 #[non_exhaustive] pub struct posthog_rs::V1ErrorResponse
 pub posthog_rs::V1ErrorResponse::error: alloc::string::String
 pub posthog_rs::V1ErrorResponse::error_description: core::option::Option<alloc::string::String>

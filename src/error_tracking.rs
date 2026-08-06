@@ -3,9 +3,6 @@ use std::error::Error as StdError;
 use std::io::Write;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-// Only the `#[cfg(test)]` standalone-client `install_panic_hook` helper needs
-// `Arc` at module scope; the tests module imports its own.
-#[cfg(test)]
 use std::sync::Arc;
 
 use derive_builder::Builder;
@@ -23,6 +20,60 @@ const MAX_ERROR_SOURCES: usize = 50;
 
 /// Latches the single process-wide panic hook so a second install is rejected.
 static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// An atomic trace/span identifier pair used to correlate an exception with
+/// distributed traces and logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraceContext {
+    trace_id: String,
+    span_id: String,
+}
+
+impl TraceContext {
+    /// Create a trace context from its trace and span identifiers.
+    pub fn new<T: Into<String>, S: Into<String>>(trace_id: T, span_id: S) -> Self {
+        Self {
+            trace_id: trace_id.into(),
+            span_id: span_id.into(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TraceContextProvider(Arc<dyn Fn() -> Option<TraceContext> + Send + Sync>);
+
+impl TraceContextProvider {
+    fn new<F>(provider: F) -> Self
+    where
+        F: Fn() -> Option<TraceContext> + Send + Sync + 'static,
+    {
+        Self(Arc::new(provider))
+    }
+
+    fn provide(&self) -> Option<TraceContext> {
+        match panic::catch_unwind(AssertUnwindSafe(|| (self.0)())) {
+            Ok(context) => context,
+            Err(_) => {
+                tracing::warn!(
+                    "posthog-rs trace context provider panicked; omitting trace context"
+                );
+                None
+            }
+        }
+    }
+}
+
+impl Default for TraceContextProvider {
+    fn default() -> Self {
+        Self::new(|| None)
+    }
+}
+
+impl std::fmt::Debug for TraceContextProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TraceContextProvider(..)")
+    }
+}
 
 /// How long the panic hook blocks the panicking thread waiting for the
 /// `$exception` to flush before letting the panic proceed. Deliberately short:
@@ -45,13 +96,17 @@ const PANIC_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_milli
 /// # Examples
 ///
 /// ```
-/// use posthog_rs::ErrorTrackingOptionsBuilder;
+/// use posthog_rs::{ErrorTrackingOptionsBuilder, TraceContext};
 ///
 /// let options = ErrorTrackingOptionsBuilder::default()
 ///     .capture_stacktrace(true)
 ///     // Substring patterns match file paths and function symbols, so a
 ///     // crate prefix marks that crate's frames as not in-app.
 ///     .in_app_exclude_paths(vec!["other_crate::".to_string()])
+///     // Read IDs from whichever tracing system the application uses.
+///     .trace_context_provider(|| {
+///         Some(TraceContext::new("trace-id", "span-id"))
+///     })
 ///     .build()
 ///     .unwrap();
 /// ```
@@ -87,6 +142,12 @@ pub struct ErrorTrackingOptions {
     /// (`std::panic::set_hook`), so it pairs with the process-global client, and
     /// there is intentionally no per-`Client` panic API for now.
     capture_panics: bool,
+    /// Callback used to read the current distributed trace context at the
+    /// `capture_exception` call site. Keep it fast, non-blocking, and free of
+    /// calls back into the PostHog SDK. Panics are caught and the context is
+    /// omitted.
+    #[builder(setter(custom))]
+    trace_context_provider: TraceContextProvider,
 }
 
 impl Default for ErrorTrackingOptions {
@@ -96,6 +157,7 @@ impl Default for ErrorTrackingOptions {
             in_app_include_paths: Vec::new(),
             in_app_exclude_paths: Vec::new(),
             capture_panics: false,
+            trace_context_provider: TraceContextProvider::default(),
         }
     }
 }
@@ -107,6 +169,10 @@ impl ErrorTrackingOptions {
 
     fn capture_panics(&self) -> bool {
         self.capture_panics
+    }
+
+    fn trace_context(&self) -> Option<TraceContext> {
+        self.trace_context_provider.provide()
     }
 
     fn is_in_app_path(&self, filename: &str) -> bool {
@@ -162,6 +228,22 @@ impl ErrorTrackingOptions {
         }
 
         filename.is_some()
+    }
+}
+
+impl ErrorTrackingOptionsBuilder {
+    /// Set a callback that returns the distributed trace context active at an
+    /// exception's capture site.
+    ///
+    /// The callback runs synchronously during `capture_exception`. It must be
+    /// fast, non-blocking, and must not call back into the PostHog SDK. Panics
+    /// are caught and cause trace context to be omitted from that exception.
+    pub fn trace_context_provider<F>(&mut self, provider: F) -> &mut Self
+    where
+        F: Fn() -> Option<TraceContext> + Send + Sync + 'static,
+    {
+        self.trace_context_provider = Some(TraceContextProvider::new(provider));
+        self
     }
 }
 
@@ -295,9 +377,8 @@ fn build_panic_event(
 ///
 /// All fields are optional. An empty options set (`new()` / `Default`)
 /// captures the exception personlessly with no extra context. With the
-/// optional `opentelemetry` feature enabled, the current OpenTelemetry span's
-/// valid trace and span IDs are attached automatically; values set here take
-/// precedence.
+/// trace-context provider configured on [`ErrorTrackingOptions`], its trace
+/// and span IDs are attached automatically; values set here take precedence.
 ///
 /// # Examples
 ///
@@ -321,7 +402,7 @@ pub struct CaptureExceptionOptions {
     distinct_id: Option<String>,
     properties: Vec<(String, Value)>,
     groups: Vec<(String, String)>,
-    trace_context: Option<(String, String)>,
+    trace_context: Option<TraceContext>,
     fingerprint: Option<String>,
     level: Option<String>,
 }
@@ -358,14 +439,14 @@ impl CaptureExceptionOptions {
     /// Associate the exception with a span in a distributed trace.
     ///
     /// The IDs are accepted together so an exception can never combine a trace
-    /// ID and span ID from different contexts. When the `opentelemetry` feature
-    /// is enabled, this pair overrides the automatically detected context.
+    /// ID and span ID from different contexts. This pair overrides any context
+    /// returned by the client's trace-context provider.
     pub fn trace_context<T: Into<String>, S: Into<String>>(
         mut self,
         trace_id: T,
         span_id: S,
     ) -> Self {
-        self.trace_context = Some((trace_id.into(), span_id.into()));
+        self.trace_context = Some(TraceContext::new(trace_id, span_id));
         self
     }
 
@@ -406,8 +487,7 @@ where
         level,
     } = options;
 
-    #[cfg(feature = "opentelemetry")]
-    let trace_context = trace_context.or_else(current_trace_context);
+    let trace_context = trace_context.or_else(|| et_options.trace_context());
 
     let mut exception = Exception::from_error(error, et_options.capture_stacktrace());
     if let Some(fingerprint) = fingerprint {
@@ -430,34 +510,12 @@ where
 
     // Reserved properties are written after user-set properties so they can't
     // be overridden.
-    if let Some((trace_id, span_id)) = trace_context {
-        event.insert_prop("$trace_id", trace_id)?;
-        event.insert_prop("$span_id", span_id)?;
+    if let Some(trace_context) = trace_context {
+        event.insert_prop("$trace_id", trace_context.trace_id)?;
+        event.insert_prop("$span_id", trace_context.span_id)?;
     }
     exception.write_into(&mut event, et_options)?;
     Ok(event)
-}
-
-#[cfg(feature = "opentelemetry")]
-fn current_trace_context() -> Option<(String, String)> {
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-    let tracing_context = tracing::Span::current().context();
-    context_ids(&tracing_context).or_else(|| context_ids(&opentelemetry::Context::current()))
-}
-
-#[cfg(feature = "opentelemetry")]
-fn context_ids(context: &opentelemetry::Context) -> Option<(String, String)> {
-    use opentelemetry::trace::TraceContextExt;
-
-    let span = context.span();
-    let span_context = span.span_context();
-    span_context.is_valid().then(|| {
-        (
-            span_context.trace_id().to_string(),
-            span_context.span_id().to_string(),
-        )
-    })
 }
 
 /// A PostHog Error Tracking exception payload.
@@ -2844,96 +2902,60 @@ mod tests {
         assert_eq!(json["properties"]["$exception_level"], "warning");
     }
 
-    #[cfg(feature = "opentelemetry")]
     #[test]
-    fn build_exception_event_reads_current_tracing_span() {
-        use opentelemetry::trace::TracerProvider as _;
-        use opentelemetry_sdk::trace::SdkTracerProvider;
-        use tracing_subscriber::layer::SubscriberExt;
-
-        let provider = SdkTracerProvider::builder().build();
-        let tracer = provider.tracer("posthog-rs-test");
-        let subscriber =
-            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
-
-        tracing::subscriber::with_default(subscriber, || {
-            let span = tracing::info_span!("request");
-            let _entered = span.enter();
-            let (trace_id, span_id) = current_trace_context().expect("valid trace context");
-
-            let error = OuterError { source: InnerError };
-            let event = build_exception_event(
-                &error,
-                CaptureExceptionOptions::new(),
-                &ErrorTrackingOptions::default(),
-            )
+    fn build_exception_event_reads_trace_context_provider() {
+        let options = ErrorTrackingOptionsBuilder::default()
+            .trace_context_provider(|| {
+                Some(TraceContext::new("provider-trace-id", "provider-span-id"))
+            })
+            .build()
             .unwrap();
-            let json = built_event_json(event);
+        let error = OuterError { source: InnerError };
+        let event =
+            build_exception_event(&error, CaptureExceptionOptions::new(), &options).unwrap();
+        let json = built_event_json(event);
 
-            assert_eq!(json["properties"]["$trace_id"], trace_id);
-            assert_eq!(json["properties"]["$span_id"], span_id);
-        });
+        assert_eq!(json["properties"]["$trace_id"], "provider-trace-id");
+        assert_eq!(json["properties"]["$span_id"], "provider-span-id");
     }
 
-    #[cfg(feature = "opentelemetry")]
     #[test]
-    fn build_exception_event_reads_attached_opentelemetry_context() {
-        use opentelemetry::trace::{
-            SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
-        };
-
-        let context = opentelemetry::Context::new().with_remote_span_context(SpanContext::new(
-            TraceId::from_hex("00000000000000000000000000000123").unwrap(),
-            SpanId::from_hex("0000000000000456").unwrap(),
-            TraceFlags::SAMPLED,
-            true,
-            TraceState::default(),
-        ));
-        let _guard = context.attach();
-
+    fn explicit_trace_context_takes_precedence_over_provider() {
+        let provider_called = Arc::new(AtomicBool::new(false));
+        let provider_called_in_callback = Arc::clone(&provider_called);
+        let options = ErrorTrackingOptionsBuilder::default()
+            .trace_context_provider(move || {
+                provider_called_in_callback.store(true, Ordering::SeqCst);
+                Some(TraceContext::new("provider-trace-id", "provider-span-id"))
+            })
+            .build()
+            .unwrap();
         let error = OuterError { source: InnerError };
         let event = build_exception_event(
             &error,
-            CaptureExceptionOptions::new(),
-            &ErrorTrackingOptions::default(),
+            CaptureExceptionOptions::new().trace_context("explicit-trace-id", "explicit-span-id"),
+            &options,
         )
         .unwrap();
         let json = built_event_json(event);
 
-        assert_eq!(
-            json["properties"]["$trace_id"],
-            "00000000000000000000000000000123"
-        );
-        assert_eq!(json["properties"]["$span_id"], "0000000000000456");
+        assert_eq!(json["properties"]["$trace_id"], "explicit-trace-id");
+        assert_eq!(json["properties"]["$span_id"], "explicit-span-id");
+        assert!(!provider_called.load(Ordering::SeqCst));
     }
 
-    #[cfg(feature = "opentelemetry")]
     #[test]
-    fn explicit_trace_context_takes_precedence_as_a_pair() {
-        use opentelemetry::trace::TracerProvider as _;
-        use opentelemetry_sdk::trace::SdkTracerProvider;
-        use tracing_subscriber::layer::SubscriberExt;
-
-        let provider = SdkTracerProvider::builder().build();
-        let tracer = provider.tracer("posthog-rs-test");
-        let subscriber =
-            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
-
-        tracing::subscriber::with_default(subscriber, || {
-            let span = tracing::info_span!("request");
-            let _entered = span.enter();
-            let error = OuterError { source: InnerError };
-            let event = build_exception_event(
-                &error,
-                CaptureExceptionOptions::new()
-                    .trace_context("explicit-trace-id", "explicit-span-id"),
-                &ErrorTrackingOptions::default(),
-            )
+    fn panicking_trace_context_provider_is_ignored() {
+        let options = ErrorTrackingOptionsBuilder::default()
+            .trace_context_provider(|| panic!("provider failed"))
+            .build()
             .unwrap();
-            let json = built_event_json(event);
+        let error = OuterError { source: InnerError };
+        let event =
+            build_exception_event(&error, CaptureExceptionOptions::new(), &options).unwrap();
+        let json = built_event_json(event);
 
-            assert_eq!(json["properties"]["$trace_id"], "explicit-trace-id");
-            assert_eq!(json["properties"]["$span_id"], "explicit-span-id");
-        });
+        assert!(json["properties"].get("$trace_id").is_none());
+        assert!(json["properties"].get("$span_id").is_none());
     }
 }
