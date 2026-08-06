@@ -104,6 +104,8 @@ pub fn posthog_rs::CaptureExceptionOptions::group<N: core::convert::Into<alloc::
 pub fn posthog_rs::CaptureExceptionOptions::level<S: core::convert::Into<alloc::string::String>>(self, S) -> Self
 pub fn posthog_rs::CaptureExceptionOptions::new() -> Self
 pub fn posthog_rs::CaptureExceptionOptions::property<K: core::convert::Into<alloc::string::String>, V: serde_core::ser::Serialize>(self, K, V) -> core::result::Result<Self, posthog_rs::Error>
+pub fn posthog_rs::CaptureExceptionOptions::span_id<S: core::convert::Into<alloc::string::String>>(self, S) -> Self
+pub fn posthog_rs::CaptureExceptionOptions::trace_id<S: core::convert::Into<alloc::string::String>>(self, S) -> Self
 #[non_exhaustive] pub struct posthog_rs::CaptureFailure<'a>
 impl<'a> posthog_rs::CaptureFailure<'a>
 pub fn posthog_rs::CaptureFailure<'a>::attempt(&self) -> u32

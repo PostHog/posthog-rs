@@ -291,7 +291,7 @@ fn build_panic_event(
 }
 
 /// Optional context for `capture_exception_with`: person identity, custom
-/// properties, groups, and exception fingerprint/level.
+/// properties, groups, trace context, and exception fingerprint/level.
 ///
 /// All fields are optional. An empty options set (`new()` / `Default`)
 /// captures the exception personlessly with no extra context.
@@ -305,6 +305,8 @@ fn build_panic_event(
 ///     .distinct_id("user-123")
 ///     .property("route", "/checkout")?
 ///     .group("company", "acme")
+///     .trace_id("00000000000000000000000000000123")
+///     .span_id("0000000000000456")
 ///     .fingerprint("checkout-error")
 ///     .level("warning");
 /// # Ok::<(), posthog_rs::Error>(())
@@ -314,6 +316,8 @@ pub struct CaptureExceptionOptions {
     distinct_id: Option<String>,
     properties: Vec<(String, Value)>,
     groups: Vec<(String, String)>,
+    trace_id: Option<String>,
+    span_id: Option<String>,
     fingerprint: Option<String>,
     level: Option<String>,
 }
@@ -344,6 +348,18 @@ impl CaptureExceptionOptions {
     /// Capture the exception as a group event.
     pub fn group<N: Into<String>, I: Into<String>>(mut self, group_name: N, group_id: I) -> Self {
         self.groups.push((group_name.into(), group_id.into()));
+        self
+    }
+
+    /// Associate the exception with a distributed trace.
+    pub fn trace_id<S: Into<String>>(mut self, trace_id: S) -> Self {
+        self.trace_id = Some(trace_id.into());
+        self
+    }
+
+    /// Associate the exception with a span in a distributed trace.
+    pub fn span_id<S: Into<String>>(mut self, span_id: S) -> Self {
+        self.span_id = Some(span_id.into());
         self
     }
 
@@ -379,6 +395,8 @@ where
         distinct_id,
         properties,
         groups,
+        trace_id,
+        span_id,
         fingerprint,
         level,
     } = options;
@@ -402,8 +420,14 @@ where
         event.add_group(&group_name, &group_id);
     }
 
-    // Reserved $exception_* properties are written after user-set properties
-    // so they can't be overridden.
+    // Reserved properties are written after user-set properties so they can't
+    // be overridden.
+    if let Some(trace_id) = trace_id {
+        event.insert_prop("$trace_id", trace_id)?;
+    }
+    if let Some(span_id) = span_id {
+        event.insert_prop("$span_id", span_id)?;
+    }
     exception.write_into(&mut event, et_options)?;
     Ok(event)
 }
@@ -2770,6 +2794,8 @@ mod tests {
             .property("route", "/checkout")
             .unwrap()
             .group("company", "acme")
+            .trace_id("00000000000000000000000000000123")
+            .span_id("0000000000000456")
             .fingerprint("checkout-error")
             .level("warning");
         let event =
@@ -2779,6 +2805,11 @@ mod tests {
         assert_eq!(json["distinct_id"], "user-1");
         assert_eq!(json["properties"]["route"], "/checkout");
         assert_eq!(json["properties"]["$groups"]["company"], "acme");
+        assert_eq!(
+            json["properties"]["$trace_id"],
+            "00000000000000000000000000000123"
+        );
+        assert_eq!(json["properties"]["$span_id"], "0000000000000456");
         assert_eq!(
             json["properties"]["$exception_fingerprint"],
             "checkout-error"
