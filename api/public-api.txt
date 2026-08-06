@@ -179,8 +179,6 @@ pub fn posthog_rs::ClientOptionsBuilder::personal_api_key<VALUE: core::convert::
 impl core::default::Default for posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::default() -> Self
 pub struct posthog_rs::Cohort
-pub posthog_rs::Cohort::id: alloc::string::String
-pub posthog_rs::Cohort::name: alloc::string::String
 pub posthog_rs::Cohort::properties: serde_json::value::Value
 pub struct posthog_rs::CohortDefinition
 pub posthog_rs::CohortDefinition::id: alloc::string::String
