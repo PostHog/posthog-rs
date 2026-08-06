@@ -308,8 +308,10 @@ fn build_panic_event(
 ///     .distinct_id("user-123")
 ///     .property("route", "/checkout")?
 ///     .group("company", "acme")
-///     .trace_id("00000000000000000000000000000123")
-///     .span_id("0000000000000456")
+///     .trace_context(
+///         "00000000000000000000000000000123",
+///         "0000000000000456",
+///     )
 ///     .fingerprint("checkout-error")
 ///     .level("warning");
 /// # Ok::<(), posthog_rs::Error>(())
@@ -319,8 +321,7 @@ pub struct CaptureExceptionOptions {
     distinct_id: Option<String>,
     properties: Vec<(String, Value)>,
     groups: Vec<(String, String)>,
-    trace_id: Option<String>,
-    span_id: Option<String>,
+    trace_context: Option<(String, String)>,
     fingerprint: Option<String>,
     level: Option<String>,
 }
@@ -354,21 +355,17 @@ impl CaptureExceptionOptions {
         self
     }
 
-    /// Associate the exception with a distributed trace.
-    ///
-    /// When the `opentelemetry` feature is enabled, this overrides the trace
-    /// ID automatically read from the current OpenTelemetry span.
-    pub fn trace_id<S: Into<String>>(mut self, trace_id: S) -> Self {
-        self.trace_id = Some(trace_id.into());
-        self
-    }
-
     /// Associate the exception with a span in a distributed trace.
     ///
-    /// When the `opentelemetry` feature is enabled, this overrides the span ID
-    /// automatically read from the current OpenTelemetry span.
-    pub fn span_id<S: Into<String>>(mut self, span_id: S) -> Self {
-        self.span_id = Some(span_id.into());
+    /// The IDs are accepted together so an exception can never combine a trace
+    /// ID and span ID from different contexts. When the `opentelemetry` feature
+    /// is enabled, this pair overrides the automatically detected context.
+    pub fn trace_context<T: Into<String>, S: Into<String>>(
+        mut self,
+        trace_id: T,
+        span_id: S,
+    ) -> Self {
+        self.trace_context = Some((trace_id.into(), span_id.into()));
         self
     }
 
@@ -404,24 +401,13 @@ where
         distinct_id,
         properties,
         groups,
-        trace_id,
-        span_id,
+        trace_context,
         fingerprint,
         level,
     } = options;
 
     #[cfg(feature = "opentelemetry")]
-    let current_context = (trace_id.is_none() || span_id.is_none())
-        .then(current_trace_context)
-        .flatten();
-    #[cfg(feature = "opentelemetry")]
-    let (trace_id, span_id) = match current_context {
-        Some((current_trace_id, current_span_id)) => (
-            trace_id.or(Some(current_trace_id)),
-            span_id.or(Some(current_span_id)),
-        ),
-        None => (trace_id, span_id),
-    };
+    let trace_context = trace_context.or_else(current_trace_context);
 
     let mut exception = Exception::from_error(error, et_options.capture_stacktrace());
     if let Some(fingerprint) = fingerprint {
@@ -444,10 +430,8 @@ where
 
     // Reserved properties are written after user-set properties so they can't
     // be overridden.
-    if let Some(trace_id) = trace_id {
+    if let Some((trace_id, span_id)) = trace_context {
         event.insert_prop("$trace_id", trace_id)?;
-    }
-    if let Some(span_id) = span_id {
         event.insert_prop("$span_id", span_id)?;
     }
     exception.write_into(&mut event, et_options)?;
@@ -456,10 +440,16 @@ where
 
 #[cfg(feature = "opentelemetry")]
 fn current_trace_context() -> Option<(String, String)> {
-    use opentelemetry::trace::TraceContextExt;
     use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-    let context = tracing::Span::current().context();
+    let tracing_context = tracing::Span::current().context();
+    context_ids(&tracing_context).or_else(|| context_ids(&opentelemetry::Context::current()))
+}
+
+#[cfg(feature = "opentelemetry")]
+fn context_ids(context: &opentelemetry::Context) -> Option<(String, String)> {
+    use opentelemetry::trace::TraceContextExt;
+
     let span = context.span();
     let span_context = span.span_context();
     span_context.is_valid().then(|| {
@@ -2832,8 +2822,7 @@ mod tests {
             .property("route", "/checkout")
             .unwrap()
             .group("company", "acme")
-            .trace_id("00000000000000000000000000000123")
-            .span_id("0000000000000456")
+            .trace_context("00000000000000000000000000000123", "0000000000000456")
             .fingerprint("checkout-error")
             .level("warning");
         let event =
@@ -2857,7 +2846,7 @@ mod tests {
 
     #[cfg(feature = "opentelemetry")]
     #[test]
-    fn build_exception_event_reads_current_opentelemetry_span() {
+    fn build_exception_event_reads_current_tracing_span() {
         use opentelemetry::trace::TracerProvider as _;
         use opentelemetry_sdk::trace::SdkTracerProvider;
         use tracing_subscriber::layer::SubscriberExt;
@@ -2875,15 +2864,76 @@ mod tests {
             let error = OuterError { source: InnerError };
             let event = build_exception_event(
                 &error,
-                CaptureExceptionOptions::new().trace_id("explicit-trace-id"),
+                CaptureExceptionOptions::new(),
+                &ErrorTrackingOptions::default(),
+            )
+            .unwrap();
+            let json = built_event_json(event);
+
+            assert_eq!(json["properties"]["$trace_id"], trace_id);
+            assert_eq!(json["properties"]["$span_id"], span_id);
+        });
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    #[test]
+    fn build_exception_event_reads_attached_opentelemetry_context() {
+        use opentelemetry::trace::{
+            SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+        };
+
+        let context = opentelemetry::Context::new().with_remote_span_context(SpanContext::new(
+            TraceId::from_hex("00000000000000000000000000000123").unwrap(),
+            SpanId::from_hex("0000000000000456").unwrap(),
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        ));
+        let _guard = context.attach();
+
+        let error = OuterError { source: InnerError };
+        let event = build_exception_event(
+            &error,
+            CaptureExceptionOptions::new(),
+            &ErrorTrackingOptions::default(),
+        )
+        .unwrap();
+        let json = built_event_json(event);
+
+        assert_eq!(
+            json["properties"]["$trace_id"],
+            "00000000000000000000000000000123"
+        );
+        assert_eq!(json["properties"]["$span_id"], "0000000000000456");
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    #[test]
+    fn explicit_trace_context_takes_precedence_as_a_pair() {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let provider = SdkTracerProvider::builder().build();
+        let tracer = provider.tracer("posthog-rs-test");
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("request");
+            let _entered = span.enter();
+            let error = OuterError { source: InnerError };
+            let event = build_exception_event(
+                &error,
+                CaptureExceptionOptions::new()
+                    .trace_context("explicit-trace-id", "explicit-span-id"),
                 &ErrorTrackingOptions::default(),
             )
             .unwrap();
             let json = built_event_json(event);
 
             assert_eq!(json["properties"]["$trace_id"], "explicit-trace-id");
-            assert_eq!(json["properties"]["$span_id"], span_id);
-            assert_ne!(trace_id, "explicit-trace-id");
+            assert_eq!(json["properties"]["$span_id"], "explicit-span-id");
         });
     }
 }

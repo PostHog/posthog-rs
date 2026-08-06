@@ -21,8 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             CaptureExceptionOptions::new()
                 .distinct_id("user-123")
                 .property("route", "/checkout")?
-                .trace_id("00000000000000000000000000000123")
-                .span_id("0000000000000456"),
+                .trace_context("00000000000000000000000000000123", "0000000000000456"),
         )
         .await?;
 

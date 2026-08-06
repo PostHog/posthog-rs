@@ -165,6 +165,9 @@ jobs:
           - name: Unit test (error-tracking + capture-v1, blocking client)
             cache-key: error-tracking-capture-v1-blocking-client
             command: cargo test --verbose --no-default-features --features error-tracking,capture-v1
+          - name: Unit test (OpenTelemetry, blocking client)
+            cache-key: opentelemetry-blocking-client
+            command: cargo test --verbose --no-default-features --features opentelemetry
           - name: E2E test
             cache-key: e2e
             command: cargo test --verbose --features e2e-test --no-default-features

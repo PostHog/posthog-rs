@@ -57,7 +57,7 @@ async-client = ["tokio"]
 capture-v1 = ["brotli", "zstd"]
 test-harness = []
 error-tracking = ["dep:backtrace", "dep:findshlibs"]
-opentelemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
+opentelemetry = ["error-tracking", "dep:opentelemetry", "dep:tracing-opentelemetry"]
 
 [workspace]
 members = [".", "compliance/adapter"]
