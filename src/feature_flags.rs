@@ -851,40 +851,16 @@ pub fn match_property_with_context(
     match_property(property, properties)
 }
 
-/// Evaluate cohort membership
+/// Evaluate cohort membership referenced by a flag property (`type = "cohort"`).
 fn match_cohort_property(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<bool, InconclusiveMatchError> {
-    let cohort_id = property
-        .value
-        .as_str()
-        .ok_or_else(|| InconclusiveMatchError::new("Cohort ID must be a string"))?;
+    let cohort_id = cohort_id_to_string(&property.value)
+        .ok_or_else(|| InconclusiveMatchError::new("Cohort ID must be a string or number"))?;
 
-    let cohort = ctx.cohorts.get(cohort_id).ok_or_else(|| {
-        InconclusiveMatchError::new(&format!("Cohort '{}' not found in local cache", cohort_id))
-    })?;
-
-    // Parse and evaluate all cohort properties against the user's properties
-    let cohort_properties = cohort.parse_properties();
-    let mut is_in_cohort = true;
-    for cohort_prop in &cohort_properties {
-        match match_property(cohort_prop, properties) {
-            Ok(true) => continue,
-            Ok(false) => {
-                is_in_cohort = false;
-                break;
-            }
-            Err(e) => {
-                // If we can't evaluate a cohort property, the cohort membership is inconclusive
-                return Err(InconclusiveMatchError::new(&format!(
-                    "Cannot evaluate cohort '{}' property '{}': {}",
-                    cohort_id, cohort_prop.key, e.message
-                )));
-            }
-        }
-    }
+    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx)?;
 
     // Handle "in" vs "not_in" operator
     Ok(match property.operator.as_str() {
@@ -897,6 +873,140 @@ fn match_cohort_property(
             )));
         }
     })
+}
+
+/// Cohort IDs arrive as either a JSON string or a number depending on where the
+/// reference lives (top-level flag property vs a nested cohort filter). Normalize
+/// both to the string keys used in the cohort cache.
+fn cohort_id_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Look up a cohort by ID and evaluate its property group against `properties`.
+fn match_cohort_by_id(
+    cohort_id: &str,
+    properties: &HashMap<String, serde_json::Value>,
+    ctx: &EvaluationContext,
+) -> Result<bool, InconclusiveMatchError> {
+    let cohort = ctx.cohorts.get(cohort_id).ok_or_else(|| {
+        InconclusiveMatchError::new(&format!("Cohort '{}' not found in local cache", cohort_id))
+    })?;
+
+    match_property_group(&cohort.properties, properties, ctx)
+}
+
+/// Recursively evaluate a cohort property group against a user's properties.
+///
+/// The `/flags/definitions/?send_cohorts` payload nests groups as
+/// `{"type": "AND"|"OR", "values": [...]}`, where each `values` entry is either
+/// another group (it has its own `values`), a cohort reference
+/// (`{"type": "cohort", "value": <id>, "negation": <bool>}`), or a leaf property
+/// filter. This mirrors posthog-python's `match_property_group`: `AND` requires
+/// every entry to match, `OR` requires any, and a bare JSON array is treated as
+/// an implicit `AND` of leaf properties (as produced by
+/// [`CohortDefinition::new`]).
+fn match_property_group(
+    group: &serde_json::Value,
+    properties: &HashMap<String, serde_json::Value>,
+    ctx: &EvaluationContext,
+) -> Result<bool, InconclusiveMatchError> {
+    if let Some(arr) = group.as_array() {
+        return match_property_group_values("AND", arr, properties, ctx);
+    }
+
+    let Some(obj) = group.as_object() else {
+        // An absent or empty group matches everyone.
+        return Ok(true);
+    };
+
+    let group_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("AND");
+
+    let Some(values) = obj.get("values").and_then(|v| v.as_array()) else {
+        return Ok(true);
+    };
+
+    match_property_group_values(group_type, values, properties, ctx)
+}
+
+/// Combine the `values` of a property group under AND/OR semantics.
+///
+/// An inconclusive entry (missing property, unknown operator, ...) is remembered
+/// but deferred: a later definitive result still short-circuits (a `false` under
+/// AND, a `true` under OR). Only if nothing definitive resolves the group does
+/// the deferred inconclusive surface — so evaluation falls back to the server
+/// rather than guessing.
+fn match_property_group_values(
+    group_type: &str,
+    values: &[serde_json::Value],
+    properties: &HashMap<String, serde_json::Value>,
+    ctx: &EvaluationContext,
+) -> Result<bool, InconclusiveMatchError> {
+    if values.is_empty() {
+        return Ok(true);
+    }
+
+    let is_and = !group_type.eq_ignore_ascii_case("OR");
+    let mut inconclusive: Option<InconclusiveMatchError> = None;
+
+    for value in values {
+        let result = if value.get("values").is_some() {
+            // Nested property group.
+            match_property_group(value, properties, ctx)
+        } else if value.get("type").and_then(|t| t.as_str()) == Some("cohort") {
+            // A cohort filter nested inside another cohort.
+            match_nested_cohort(value, properties, ctx)
+        } else {
+            // Leaf property filter.
+            match serde_json::from_value::<Property>(value.clone()) {
+                Ok(prop) => match_property_with_context(&prop, properties, ctx),
+                Err(e) => Err(InconclusiveMatchError::new(&format!(
+                    "Unable to parse cohort property: {}",
+                    e
+                ))),
+            }
+        };
+
+        match result {
+            Ok(true) if !is_and => return Ok(true),
+            Ok(false) if is_and => return Ok(false),
+            Ok(_) => {}
+            Err(e) => inconclusive = Some(e),
+        }
+    }
+
+    if let Some(e) = inconclusive {
+        return Err(e);
+    }
+
+    // AND: every entry matched. OR: none matched.
+    Ok(is_and)
+}
+
+/// Evaluate a cohort reference nested inside another cohort's property group,
+/// honoring the optional `negation` flag.
+fn match_nested_cohort(
+    value: &serde_json::Value,
+    properties: &HashMap<String, serde_json::Value>,
+    ctx: &EvaluationContext,
+) -> Result<bool, InconclusiveMatchError> {
+    let cohort_id = value
+        .get("value")
+        .and_then(cohort_id_to_string)
+        .ok_or_else(|| {
+            InconclusiveMatchError::new("Nested cohort ID must be a string or number")
+        })?;
+
+    let negation = value
+        .get("negation")
+        .and_then(|n| n.as_bool())
+        .unwrap_or(false);
+
+    let is_member = match_cohort_by_id(&cohort_id, properties, ctx)?;
+    Ok(is_member != negation)
 }
 
 /// Evaluate flag dependency
@@ -2199,6 +2309,164 @@ mod tests {
         let result = match_property_with_context(&prop, &properties, &ctx);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("Cohort"));
+    }
+
+    /// Build an `EvaluationContext` over just a cohort map (no flags/groups),
+    /// which is all cohort-membership tests need.
+    fn cohort_ctx(cohorts: &HashMap<String, CohortDefinition>) -> EvaluationContext<'_> {
+        EvaluationContext {
+            cohorts,
+            flags: EMPTY_FLAGS.get_or_init(HashMap::new),
+            distinct_id: "user-123",
+            groups: EMPTY_GROUPS.get_or_init(HashMap::new),
+            group_properties: EMPTY_GROUP_PROPS.get_or_init(HashMap::new),
+            group_type_mapping: EMPTY_GROUP_MAPPING.get_or_init(HashMap::new),
+        }
+    }
+
+    static EMPTY_FLAGS: OnceLock<HashMap<String, FeatureFlag>> = OnceLock::new();
+    static EMPTY_GROUPS: OnceLock<HashMap<String, String>> = OnceLock::new();
+    static EMPTY_GROUP_PROPS: OnceLock<HashMap<String, HashMap<String, serde_json::Value>>> =
+        OnceLock::new();
+    static EMPTY_GROUP_MAPPING: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+    /// A cohort whose properties are an `OR` group must match when *either*
+    /// branch matches — the old flatten-and-AND logic broke this entirely.
+    #[test]
+    fn test_cohort_or_group() {
+        let mut cohorts = HashMap::new();
+        cohorts.insert(
+            "cohort_or".to_string(),
+            CohortDefinition {
+                id: "cohort_or".to_string(),
+                properties: json!({
+                    "type": "OR",
+                    "values": [
+                        {"key": "country", "value": "US", "operator": "exact", "type": "person"},
+                        {"key": "country", "value": "CA", "operator": "exact", "type": "person"},
+                    ],
+                }),
+            },
+        );
+
+        let prop = Property {
+            key: "$cohort".to_string(),
+            value: json!("cohort_or"),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
+
+        let ctx = cohort_ctx(&cohorts);
+
+        // Either branch of the OR is enough.
+        let mut properties = HashMap::new();
+        properties.insert("country".to_string(), json!("US"));
+        assert!(match_property_with_context(&prop, &properties, &ctx).unwrap());
+
+        properties.insert("country".to_string(), json!("CA"));
+        assert!(match_property_with_context(&prop, &properties, &ctx).unwrap());
+
+        // Neither branch matches.
+        properties.insert("country".to_string(), json!("UK"));
+        assert!(!match_property_with_context(&prop, &properties, &ctx).unwrap());
+    }
+
+    /// A nested group inside an `AND` must be evaluated as a whole group, not
+    /// collapsed to its first property (the old `.next()` bug).
+    #[test]
+    fn test_cohort_nested_and_of_or() {
+        let mut cohorts = HashMap::new();
+        cohorts.insert(
+            "cohort_nested".to_string(),
+            CohortDefinition {
+                id: "cohort_nested".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [
+                        {"key": "plan", "value": "paid", "operator": "exact", "type": "person"},
+                        {
+                            "type": "OR",
+                            "values": [
+                                {"key": "country", "value": "US", "operator": "exact", "type": "person"},
+                                {"key": "country", "value": "CA", "operator": "exact", "type": "person"},
+                            ],
+                        },
+                    ],
+                }),
+            },
+        );
+
+        let prop = Property {
+            key: "$cohort".to_string(),
+            value: json!("cohort_nested"),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
+
+        let ctx = cohort_ctx(&cohorts);
+
+        // paid + (US or CA) → in cohort.
+        let mut properties = HashMap::new();
+        properties.insert("plan".to_string(), json!("paid"));
+        properties.insert("country".to_string(), json!("CA"));
+        assert!(match_property_with_context(&prop, &properties, &ctx).unwrap());
+
+        // paid but country outside the OR → not in cohort. Under the old
+        // first-property-only logic the OR group was dropped and this matched.
+        properties.insert("country".to_string(), json!("UK"));
+        assert!(!match_property_with_context(&prop, &properties, &ctx).unwrap());
+
+        // Wrong plan → the leading AND term fails.
+        properties.insert("plan".to_string(), json!("free"));
+        properties.insert("country".to_string(), json!("US"));
+        assert!(!match_property_with_context(&prop, &properties, &ctx).unwrap());
+    }
+
+    /// A cohort referenced from inside another cohort's group is resolved
+    /// recursively, honoring the `negation` flag.
+    #[test]
+    fn test_cohort_nested_cohort_reference() {
+        let mut cohorts = HashMap::new();
+        cohorts.insert(
+            "child".to_string(),
+            CohortDefinition {
+                id: "child".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [
+                        {"key": "country", "value": "US", "operator": "exact", "type": "person"},
+                    ],
+                }),
+            },
+        );
+        cohorts.insert(
+            "parent".to_string(),
+            CohortDefinition {
+                id: "parent".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [
+                        {"type": "cohort", "value": "child", "negation": false},
+                    ],
+                }),
+            },
+        );
+
+        let prop = Property {
+            key: "$cohort".to_string(),
+            value: json!("parent"),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
+
+        let ctx = cohort_ctx(&cohorts);
+
+        let mut properties = HashMap::new();
+        properties.insert("country".to_string(), json!("US"));
+        assert!(match_property_with_context(&prop, &properties, &ctx).unwrap());
+
+        properties.insert("country".to_string(), json!("UK"));
+        assert!(!match_property_with_context(&prop, &properties, &ctx).unwrap());
     }
 
     // ==================== Tests for flag dependencies ====================
