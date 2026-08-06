@@ -209,6 +209,7 @@ pub fn posthog_rs::ErrorTrackingOptionsBuilder::capture_panics(&mut self, bool) 
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::capture_stacktrace(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::in_app_exclude_paths(&mut self, alloc::vec::Vec<alloc::string::String>) -> &mut Self
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::in_app_include_paths(&mut self, alloc::vec::Vec<alloc::string::String>) -> &mut Self
+impl posthog_rs::ErrorTrackingOptionsBuilder
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::trace_context_provider<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn() -> core::option::Option<posthog_rs::TraceContext> + core::marker::Send + core::marker::Sync + 'static
 impl core::default::Default for posthog_rs::ErrorTrackingOptionsBuilder
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::default() -> Self
