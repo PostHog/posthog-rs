@@ -294,7 +294,10 @@ fn build_panic_event(
 /// properties, groups, trace context, and exception fingerprint/level.
 ///
 /// All fields are optional. An empty options set (`new()` / `Default`)
-/// captures the exception personlessly with no extra context.
+/// captures the exception personlessly with no extra context. With the
+/// optional `opentelemetry` feature enabled, the current OpenTelemetry span's
+/// valid trace and span IDs are attached automatically; values set here take
+/// precedence.
 ///
 /// # Examples
 ///
@@ -352,12 +355,18 @@ impl CaptureExceptionOptions {
     }
 
     /// Associate the exception with a distributed trace.
+    ///
+    /// When the `opentelemetry` feature is enabled, this overrides the trace
+    /// ID automatically read from the current OpenTelemetry span.
     pub fn trace_id<S: Into<String>>(mut self, trace_id: S) -> Self {
         self.trace_id = Some(trace_id.into());
         self
     }
 
     /// Associate the exception with a span in a distributed trace.
+    ///
+    /// When the `opentelemetry` feature is enabled, this overrides the span ID
+    /// automatically read from the current OpenTelemetry span.
     pub fn span_id<S: Into<String>>(mut self, span_id: S) -> Self {
         self.span_id = Some(span_id.into());
         self
@@ -401,6 +410,19 @@ where
         level,
     } = options;
 
+    #[cfg(feature = "opentelemetry")]
+    let current_context = (trace_id.is_none() || span_id.is_none())
+        .then(current_trace_context)
+        .flatten();
+    #[cfg(feature = "opentelemetry")]
+    let (trace_id, span_id) = match current_context {
+        Some((current_trace_id, current_span_id)) => (
+            trace_id.or(Some(current_trace_id)),
+            span_id.or(Some(current_span_id)),
+        ),
+        None => (trace_id, span_id),
+    };
+
     let mut exception = Exception::from_error(error, et_options.capture_stacktrace());
     if let Some(fingerprint) = fingerprint {
         exception.set_fingerprint(fingerprint);
@@ -430,6 +452,22 @@ where
     }
     exception.write_into(&mut event, et_options)?;
     Ok(event)
+}
+
+#[cfg(feature = "opentelemetry")]
+fn current_trace_context() -> Option<(String, String)> {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let context = tracing::Span::current().context();
+    let span = context.span();
+    let span_context = span.span_context();
+    span_context.is_valid().then(|| {
+        (
+            span_context.trace_id().to_string(),
+            span_context.span_id().to_string(),
+        )
+    })
 }
 
 /// A PostHog Error Tracking exception payload.
@@ -2815,5 +2853,37 @@ mod tests {
             "checkout-error"
         );
         assert_eq!(json["properties"]["$exception_level"], "warning");
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    #[test]
+    fn build_exception_event_reads_current_opentelemetry_span() {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let provider = SdkTracerProvider::builder().build();
+        let tracer = provider.tracer("posthog-rs-test");
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("request");
+            let _entered = span.enter();
+            let (trace_id, span_id) = current_trace_context().expect("valid trace context");
+
+            let error = OuterError { source: InnerError };
+            let event = build_exception_event(
+                &error,
+                CaptureExceptionOptions::new().trace_id("explicit-trace-id"),
+                &ErrorTrackingOptions::default(),
+            )
+            .unwrap();
+            let json = built_event_json(event);
+
+            assert_eq!(json["properties"]["$trace_id"], "explicit-trace-id");
+            assert_eq!(json["properties"]["$span_id"], span_id);
+            assert_ne!(trace_id, "explicit-trace-id");
+        });
     }
 }
