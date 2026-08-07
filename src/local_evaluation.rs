@@ -77,13 +77,23 @@ pub struct LocalEvaluationResponse {
 ///
 /// Cohorts are groups of users defined by property filters, used for
 /// targeting feature flags to specific user segments.
+///
+/// The `/flags/definitions/?send_cohorts` endpoint maps each cohort ID
+/// straight to its property group, `{"type": "AND"|"OR", "values": [...]}`,
+/// with no wrapping `id`/`name` fields — so this type is transparent over the
+/// raw property group and the owning ID is the map key in
+/// [`LocalEvaluationResponse::cohorts`].
+///
+/// The backend dependency loader can serialize cohort references that form a
+/// cycle across map entries. Serde preserves those references as-is; cohort
+/// evaluation must track active IDs before following them recursively to avoid
+/// a stack overflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Cohort {
-    /// Unique identifier for this cohort
-    pub id: String,
-    /// Human-readable name of the cohort
-    pub name: String,
-    /// Property filters that define cohort membership
+    /// The raw cohort property group exactly as returned by the API, e.g.
+    /// `{"type": "AND", "values": [{"key": "email", "value": "...", ...}]}`.
+    /// `values` entries may be leaf property filters or nested property groups.
     pub properties: serde_json::Value,
 }
 
@@ -190,7 +200,7 @@ impl FlagCache {
                 (
                     k.clone(),
                     CohortDefinition {
-                        id: v.id.clone(),
+                        id: k.clone(),
                         properties: v.properties.clone(),
                     },
                 )

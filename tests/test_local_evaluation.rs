@@ -66,6 +66,88 @@ fn test_local_evaluation_basic() {
     assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
 }
 
+/// Regression test: a non-empty `cohorts` payload must deserialize (the real
+/// API maps each cohort ID straight to its property group, with no `id`/`name`
+/// fields) and a flag targeting that cohort must evaluate against it. Before the
+/// fix, `cohorts` failed to deserialize and took down the entire
+/// `LocalEvaluationResponse` — every flag, not just the cohort-targeted ones.
+#[test]
+fn test_local_evaluation_with_cohorts_payload() {
+    // Shape mirrors `/flags/definitions/?send_cohorts`: cohort ID -> property
+    // group, nested groups and OR included.
+    let payload = json!({
+        "flags": [
+            {
+                "key": "cohort-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        {
+                            "properties": [
+                                {
+                                    "key": "id",
+                                    "value": 42,
+                                    "type": "cohort"
+                                }
+                            ],
+                            "rollout_percentage": 100.0
+                        }
+                    ]
+                }
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {
+            "42": {
+                "type": "AND",
+                "values": [
+                    {
+                        "type": "OR",
+                        "values": [
+                            {"key": "country", "value": "US", "operator": "exact", "type": "person"},
+                            {"key": "country", "value": "CA", "operator": "exact", "type": "person"}
+                        ]
+                    }
+                ]
+            }
+        }
+    });
+
+    // The whole response must parse — this is the exact path that used to fail.
+    let response: LocalEvaluationResponse =
+        serde_json::from_value(payload).expect("cohorts payload should deserialize");
+    assert_eq!(response.flags.len(), 1);
+    assert_eq!(response.cohorts.len(), 1);
+
+    let cache = FlagCache::new();
+    let evaluator = LocalEvaluator::new(cache.clone());
+    cache.update(response);
+
+    // Member of the cohort (country in {US, CA}).
+    let mut properties = HashMap::new();
+    properties.insert("country".to_string(), json!("CA"));
+    let result = evaluator.evaluate_flag(
+        "cohort-flag",
+        "user-123",
+        &properties,
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+
+    // Not a member — the OR group excludes UK.
+    let mut properties = HashMap::new();
+    properties.insert("country".to_string(), json!("UK"));
+    let result = evaluator.evaluate_flag(
+        "cohort-flag",
+        "user-123",
+        &properties,
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(false)));
+}
+
 #[test]
 fn test_local_evaluation_with_properties() {
     let cache = FlagCache::new();
