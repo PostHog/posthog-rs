@@ -83,6 +83,11 @@ pub struct LocalEvaluationResponse {
 /// with no wrapping `id`/`name` fields — so this type is transparent over the
 /// raw property group and the owning ID is the map key in
 /// [`LocalEvaluationResponse::cohorts`].
+///
+/// The backend dependency loader can serialize cohort references that form a
+/// cycle across map entries. Serde preserves those references as-is; cohort
+/// evaluation must track active IDs before following them recursively to avoid
+/// a stack overflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Cohort {

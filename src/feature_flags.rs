@@ -967,6 +967,11 @@ fn match_property_group(
         ));
     };
 
+    // The backend serializes a valid empty PropertyGroup as an empty object.
+    if obj.is_empty() {
+        return Ok(true);
+    }
+
     let group_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("AND");
 
     let Some(values) = obj.get("values").and_then(|v| v.as_array()) else {
@@ -2638,16 +2643,30 @@ mod tests {
             },
         );
         cohorts.insert(
-            "empty".to_string(),
+            "missing_values".to_string(),
             CohortDefinition {
-                id: "empty".to_string(),
+                id: "missing_values".to_string(),
+                properties: json!({"type": "AND"}),
+            },
+        );
+        cohorts.insert(
+            "empty_object".to_string(),
+            CohortDefinition {
+                id: "empty_object".to_string(),
+                properties: json!({}),
+            },
+        );
+        cohorts.insert(
+            "empty_values".to_string(),
+            CohortDefinition {
+                id: "empty_values".to_string(),
                 properties: json!({"type": "AND", "values": []}),
             },
         );
 
         let ctx = cohort_ctx(&cohorts);
         let properties = HashMap::new();
-        for cohort_id in ["scalar", "object_values"] {
+        for cohort_id in ["scalar", "object_values", "missing_values"] {
             let prop = Property {
                 key: "$cohort".to_string(),
                 value: json!(cohort_id),
@@ -2658,13 +2677,15 @@ mod tests {
             assert!(match_property_with_context(&prop, &properties, &ctx).is_err());
         }
 
-        let empty = Property {
-            key: "$cohort".to_string(),
-            value: json!("empty"),
-            operator: "in".to_string(),
-            property_type: Some("cohort".to_string()),
-        };
-        assert!(match_property_with_context(&empty, &properties, &ctx).unwrap());
+        for cohort_id in ["empty_object", "empty_values"] {
+            let empty = Property {
+                key: "$cohort".to_string(),
+                value: json!(cohort_id),
+                operator: "in".to_string(),
+                property_type: Some("cohort".to_string()),
+            };
+            assert!(match_property_with_context(&empty, &properties, &ctx).unwrap());
+        }
     }
 
     // ==================== Tests for flag dependencies ====================
