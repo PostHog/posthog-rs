@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.23.0 — 2026-08-07
+
+### Minor changes
+
+- [015e5a3](https://github.com/posthog/posthog-rs/commit/015e5a3fa0b1a915d356a081ebc186479ba7c5ce) Add an atomic `trace_context` capture option and a client-level trace-context provider so exception events can be linked to distributed traces without adding telemetry dependencies to the SDK. — Thanks @hpouillot for your first contribution 🎉!
+
 ## 0.22.0 — 2026-08-05
 
 ### Minor changes
