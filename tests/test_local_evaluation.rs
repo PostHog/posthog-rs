@@ -86,8 +86,7 @@ fn test_local_evaluation_with_cohorts_payload() {
                             "properties": [
                                 {
                                     "key": "id",
-                                    "value": "42",
-                                    "operator": "in",
+                                    "value": 42,
                                     "type": "cohort"
                                 }
                             ],

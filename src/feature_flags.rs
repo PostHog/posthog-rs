@@ -170,7 +170,10 @@ pub struct Property {
     /// `"not_regex"`, `"gt"`, `"gte"`, `"lt"`, `"lte"`, `"is_set"`,
     /// `"is_not_set"`, `"is_date_before"`, `"is_date_after"`, and the
     /// `"semver_*"` operators used by PostHog version targeting.
-    #[serde(default = "default_operator")]
+    #[serde(
+        default = "default_operator",
+        deserialize_with = "deserialize_operator"
+    )]
     pub operator: String,
     /// Property type. Use `Some("cohort")` for cohort membership checks; flag
     /// dependency checks use a property key that starts with `$feature/`.
@@ -180,6 +183,13 @@ pub struct Property {
 
 fn default_operator() -> String {
     "exact".to_string()
+}
+
+fn deserialize_operator<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_else(default_operator))
 }
 
 #[derive(Deserialize)]
@@ -871,9 +881,9 @@ fn match_cohort_property(
     let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx)
         .map_err(CohortMatchError::into_inconclusive)?;
 
-    // Handle "in" vs "not_in" operator
+    // Cohort references omit the operator in API payloads, so "exact" means membership.
     Ok(match property.operator.as_str() {
-        "in" => is_in_cohort,
+        "exact" | "in" => is_in_cohort,
         "not_in" => !is_in_cohort,
         op => {
             return Err(InconclusiveMatchError::new(&format!(
@@ -1620,6 +1630,19 @@ mod tests {
 
         properties.insert("country".to_string(), json!("UK"));
         assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    #[test]
+    fn test_null_property_operator_defaults_to_exact() {
+        let prop: Property = serde_json::from_value(json!({
+            "key": "country",
+            "value": "US",
+            "operator": null,
+            "type": "person"
+        }))
+        .unwrap();
+
+        assert_eq!(prop.operator, "exact");
     }
 
     #[test]
