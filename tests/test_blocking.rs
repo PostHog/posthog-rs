@@ -347,7 +347,7 @@ fn test_capture_batch_sends_to_batch_endpoint() {
         when.method(POST)
             .path("/batch/")
             .header(USER_AGENT.to_string(), default_user_agent())
-            .body_contains(r#""historical_migration":false"#);
+            .body_includes(r#""historical_migration":false"#);
         then.status(200);
     });
 
@@ -368,7 +368,7 @@ fn test_capture_batch_historical_migration() {
     let batch_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/batch/")
-            .body_contains(r#""historical_migration":true"#);
+            .body_includes(r#""historical_migration":true"#);
         then.status(200);
     });
 
@@ -432,7 +432,7 @@ fn v0_capture_injects_is_server_by_default() {
         when.method(POST)
             .path("/batch/")
             .header(USER_AGENT.to_string(), default_user_agent())
-            .body_contains("\"$is_server\":true");
+            .body_includes("\"$is_server\":true");
         then.status(200).body("ok");
     });
 
@@ -451,7 +451,7 @@ fn v0_capture_caller_override_wins_for_is_server() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/batch/")
-            .body_contains("\"$is_server\":false");
+            .body_includes("\"$is_server\":false");
         then.status(200).body("ok");
     });
 

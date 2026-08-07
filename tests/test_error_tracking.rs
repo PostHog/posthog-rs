@@ -33,10 +33,7 @@ impl fmt::Display for PanicDisplayError {
 impl StdError for PanicDisplayError {}
 
 fn request_has_capture_exception_user_frame_last(req: &HttpMockRequest) -> bool {
-    let Some(body) = req.body.as_deref() else {
-        return false;
-    };
-    let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
         return false;
     };
     // Canonical wire order is outermost first, so the capture-site user frame
@@ -49,10 +46,7 @@ fn request_has_capture_exception_user_frame_last(req: &HttpMockRequest) -> bool 
 }
 
 fn request_has_capture_exception_with_user_frame_last(req: &HttpMockRequest) -> bool {
-    let Some(body) = req.body.as_deref() else {
-        return false;
-    };
-    let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
         return false;
     };
     let crash_function = last_exception_stack_function(&body);
@@ -63,10 +57,7 @@ fn request_has_capture_exception_with_user_frame_last(req: &HttpMockRequest) -> 
 }
 
 fn request_has_no_stacktrace(req: &HttpMockRequest) -> bool {
-    let Some(body) = req.body.as_deref() else {
-        return false;
-    };
-    let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
         return false;
     };
 
@@ -102,12 +93,12 @@ mod blocking {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/batch/")
-                .body_contains(r#""event":"$exception""#)
-                .body_contains(r#""$process_person_profile":false"#)
-                .body_contains(r#""$exception_level":"error""#)
-                .body_contains(r#""value":"payment failed""#)
-                .body_contains(r#""platform":"native""#)
-                .body_contains(r#""lang":"rust""#)
+                .body_includes(r#""event":"$exception""#)
+                .body_includes(r#""$process_person_profile":false"#)
+                .body_includes(r#""$exception_level":"error""#)
+                .body_includes(r#""value":"payment failed""#)
+                .body_includes(r#""platform":"native""#)
+                .body_includes(r#""lang":"rust""#)
                 .matches(request_has_capture_exception_user_frame_last);
             then.status(200);
         });
@@ -125,12 +116,12 @@ mod blocking {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/batch/")
-                .body_contains(r#""event":"$exception""#)
-                .body_contains(r#""distinct_id":"user-1""#)
-                .body_contains(r#""route":"/checkout""#)
-                .body_contains(r#""$groups":{"company":"company-1"}"#)
-                .body_contains(r#""$exception_fingerprint":"checkout-error""#)
-                .body_contains(r#""$exception_level":"warning""#)
+                .body_includes(r#""event":"$exception""#)
+                .body_includes(r#""distinct_id":"user-1""#)
+                .body_includes(r#""route":"/checkout""#)
+                .body_includes(r#""$groups":{"company":"company-1"}"#)
+                .body_includes(r#""$exception_fingerprint":"checkout-error""#)
+                .body_includes(r#""$exception_level":"warning""#)
                 .matches(request_has_capture_exception_with_user_frame_last);
             then.status(200);
         });
@@ -178,8 +169,8 @@ mod blocking {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/batch/")
-                .body_contains(r#""event":"$exception""#)
-                .body_contains(r#""value":"payment failed""#)
+                .body_includes(r#""event":"$exception""#)
+                .body_includes(r#""value":"payment failed""#)
                 .matches(request_has_no_stacktrace);
             then.status(200);
         });
@@ -220,12 +211,12 @@ mod async_client {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/batch/")
-                .body_contains(r#""event":"$exception""#)
-                .body_contains(r#""$process_person_profile":false"#)
-                .body_contains(r#""$exception_level":"error""#)
-                .body_contains(r#""value":"payment failed""#)
-                .body_contains(r#""platform":"native""#)
-                .body_contains(r#""lang":"rust""#)
+                .body_includes(r#""event":"$exception""#)
+                .body_includes(r#""$process_person_profile":false"#)
+                .body_includes(r#""$exception_level":"error""#)
+                .body_includes(r#""value":"payment failed""#)
+                .body_includes(r#""platform":"native""#)
+                .body_includes(r#""lang":"rust""#)
                 .matches(request_has_capture_exception_user_frame_last);
             then.status(200);
         });
@@ -243,12 +234,12 @@ mod async_client {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/batch/")
-                .body_contains(r#""event":"$exception""#)
-                .body_contains(r#""distinct_id":"user-1""#)
-                .body_contains(r#""route":"/checkout""#)
-                .body_contains(r#""$groups":{"company":"company-1"}"#)
-                .body_contains(r#""$exception_fingerprint":"checkout-error""#)
-                .body_contains(r#""$exception_level":"warning""#)
+                .body_includes(r#""event":"$exception""#)
+                .body_includes(r#""distinct_id":"user-1""#)
+                .body_includes(r#""route":"/checkout""#)
+                .body_includes(r#""$groups":{"company":"company-1"}"#)
+                .body_includes(r#""$exception_fingerprint":"checkout-error""#)
+                .body_includes(r#""$exception_level":"warning""#)
                 .matches(request_has_capture_exception_with_user_frame_last);
             then.status(200);
         });
@@ -298,8 +289,8 @@ mod async_client {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/batch/")
-                .body_contains(r#""event":"$exception""#)
-                .body_contains(r#""value":"payment failed""#)
+                .body_includes(r#""event":"$exception""#)
+                .body_includes(r#""value":"payment failed""#)
                 .matches(request_has_no_stacktrace);
             then.status(200);
         });

@@ -210,7 +210,7 @@ mod async_v1 {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/i/v1/analytics/events")
-                .body_contains("\"historical_migration\":true");
+                .body_includes("\"historical_migration\":true");
             then.status(200).json_body(json!({ "results": {} }));
         });
 
@@ -384,7 +384,7 @@ mod async_v0 {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/batch/")
-                .body_contains("\"historical_migration\":true");
+                .body_includes("\"historical_migration\":true");
             then.status(200);
         });
 
@@ -397,10 +397,7 @@ mod async_v0 {
     }
 
     fn body_gunzips_to_user1(req: &HttpMockRequest) -> bool {
-        let Some(body) = req.body.as_ref() else {
-            return false;
-        };
-        let mut decoder = flate2::read::GzDecoder::new(&body[..]);
+        let mut decoder = flate2::read::GzDecoder::new(req.body_ref());
         let mut decoded = String::new();
         match decoder.read_to_string(&mut decoded) {
             Ok(_) => decoded.contains(r#""distinct_id":"user1""#),

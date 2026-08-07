@@ -28,10 +28,7 @@ fn integration_panic_site() {
 /// frames obey the canonical wire order (outermost first, crash site last) with
 /// the SDK's own capture plumbing stripped from the crash-site tail.
 fn is_panic_exception(req: &HttpMockRequest) -> bool {
-    let Some(body) = req.body.as_deref() else {
-        return false;
-    };
-    let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
         return false;
     };
     let is_panic = body.pointer("/batch/0/event").and_then(|v| v.as_str()) == Some("$exception")

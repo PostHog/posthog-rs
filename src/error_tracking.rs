@@ -1775,10 +1775,7 @@ mod tests {
     /// Match the panic `$exception` event inside the transport's batch envelope
     /// (`batch[0]`) — the same event shape for the V0 and V1 wire formats.
     fn request_has_panic_payload(req: &HttpMockRequest) -> bool {
-        let Some(body) = req.body.as_deref() else {
-            return false;
-        };
-        let Ok(body) = serde_json::from_slice::<Value>(body) else {
+        let Ok(body) = serde_json::from_slice::<Value>(req.body_ref()) else {
             return false;
         };
         let event = &body["batch"][0];
@@ -1913,7 +1910,7 @@ mod tests {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .body_contains(r#""value":"tokio task boom""#);
+                .body_includes(r#""value":"tokio task boom""#);
             then.status(200);
         });
         let options = ClientOptionsBuilder::default()
