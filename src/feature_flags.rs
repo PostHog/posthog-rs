@@ -2,7 +2,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
 
@@ -878,7 +878,8 @@ fn match_cohort_property(
     let cohort_id = cohort_id_to_string(&property.value)
         .ok_or_else(|| InconclusiveMatchError::new("Cohort ID must be a string or number"))?;
 
-    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx)
+    let mut active_cohorts = HashSet::new();
+    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx, &mut active_cohorts)
         .map_err(CohortMatchError::into_inconclusive)?;
 
     // Cohort references omit the operator in API payloads, so "exact" means membership.
@@ -926,11 +927,29 @@ impl CohortMatchError {
     }
 }
 
+/// How deep a chain of cohort references local evaluation will follow.
+///
+/// A cycle check alone bounds repeats, not depth: a chain of distinct cohorts is
+/// acyclic and still recurses once per link. Each cohort is a separate shallow
+/// entry in the manifest, so such a chain also clears `serde_json`'s own nesting
+/// limit on the way in, leaving nothing else between a long chain and an
+/// exhausted stack. Real cohort nesting is a handful of levels at most.
+const MAX_COHORT_RESOLUTION_DEPTH: usize = 100;
+
 /// Look up a cohort by ID and evaluate its property group against `properties`.
+///
+/// `active_cohorts` holds the IDs on the current resolution path, which bounds
+/// the recursion two ways: a cohort that references itself, directly or through
+/// others, is rejected as a cycle, and the path length is capped at
+/// [`MAX_COHORT_RESOLUTION_DEPTH`]. Either would otherwise recurse until the
+/// stack is exhausted, which aborts the process rather than panicking. IDs are
+/// removed on the way back out, so a cohort referenced twice down sibling
+/// branches still resolves normally.
 fn match_cohort_by_id(
     cohort_id: &str,
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
+    active_cohorts: &mut HashSet<String>,
 ) -> Result<bool, CohortMatchError> {
     let cohort = ctx.cohorts.get(cohort_id).ok_or_else(|| {
         CohortMatchError::MissingCohort(InconclusiveMatchError::new(&format!(
@@ -939,7 +958,27 @@ fn match_cohort_by_id(
         )))
     })?;
 
-    match_property_group(&cohort.properties, properties, ctx)
+    if active_cohorts.len() >= MAX_COHORT_RESOLUTION_DEPTH {
+        return Err(CohortMatchError::InvalidDefinition(
+            InconclusiveMatchError::new(&format!(
+                "Cohort '{}' is nested deeper than the limit of {}",
+                cohort_id, MAX_COHORT_RESOLUTION_DEPTH
+            )),
+        ));
+    }
+
+    if !active_cohorts.insert(cohort_id.to_string()) {
+        return Err(CohortMatchError::InvalidDefinition(
+            InconclusiveMatchError::new(&format!(
+                "Cohort '{}' is part of a reference cycle",
+                cohort_id
+            )),
+        ));
+    }
+
+    let result = match_property_group(&cohort.properties, properties, ctx, active_cohorts);
+    active_cohorts.remove(cohort_id);
+    result
 }
 
 /// Recursively evaluate a cohort property group against a user's properties.
@@ -956,9 +995,10 @@ fn match_property_group(
     group: &serde_json::Value,
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
+    active_cohorts: &mut HashSet<String>,
 ) -> Result<bool, CohortMatchError> {
     if let Some(arr) = group.as_array() {
-        return match_property_group_values("AND", arr, properties, ctx);
+        return match_property_group_values("AND", arr, properties, ctx, active_cohorts);
     }
 
     let Some(obj) = group.as_object() else {
@@ -980,7 +1020,7 @@ fn match_property_group(
         ));
     };
 
-    match_property_group_values(group_type, values, properties, ctx)
+    match_property_group_values(group_type, values, properties, ctx, active_cohorts)
 }
 
 /// Combine the `values` of a property group under AND/OR semantics.
@@ -995,6 +1035,7 @@ fn match_property_group_values(
     values: &[serde_json::Value],
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
+    active_cohorts: &mut HashSet<String>,
 ) -> Result<bool, CohortMatchError> {
     if values.is_empty() {
         return Ok(true);
@@ -1007,10 +1048,10 @@ fn match_property_group_values(
     for value in values {
         let result = if value.get("values").is_some() {
             // Nested property group.
-            match_property_group(value, properties, ctx)
+            match_property_group(value, properties, ctx, active_cohorts)
         } else if value.get("type").and_then(|t| t.as_str()) == Some("cohort") {
             // A cohort filter nested inside another cohort.
-            match_nested_cohort(value, properties, ctx)
+            match_nested_cohort(value, properties, ctx, active_cohorts)
         } else {
             // Leaf property filter.
             match serde_json::from_value::<CohortProperty>(value.clone()) {
@@ -1050,6 +1091,7 @@ fn match_nested_cohort(
     value: &serde_json::Value,
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
+    active_cohorts: &mut HashSet<String>,
 ) -> Result<bool, CohortMatchError> {
     let cohort_id = value
         .get("value")
@@ -1065,7 +1107,7 @@ fn match_nested_cohort(
         .and_then(|n| n.as_bool())
         .unwrap_or(false);
 
-    let is_member = match_cohort_by_id(&cohort_id, properties, ctx)?;
+    let is_member = match_cohort_by_id(&cohort_id, properties, ctx, active_cohorts)?;
     Ok(is_member != negation)
 }
 
@@ -2532,6 +2574,223 @@ mod tests {
             property_type: Some("cohort".to_string()),
         };
 
+        let ctx = cohort_ctx(&cohorts);
+
+        let mut properties = HashMap::new();
+        properties.insert("country".to_string(), json!("US"));
+        assert!(match_property_with_context(&prop, &properties, &ctx).unwrap());
+
+        properties.insert("country".to_string(), json!("UK"));
+        assert!(!match_property_with_context(&prop, &properties, &ctx).unwrap());
+    }
+
+    /// A cohort cycle must surface as inconclusive so the flag falls back to
+    /// server-side evaluation. Recursing until the stack runs out aborts the
+    /// process, which takes the caller's whole server down.
+    #[test]
+    fn test_cyclic_cohort_reference_is_inconclusive() {
+        let mut cohorts = HashMap::new();
+        cohorts.insert(
+            "a".to_string(),
+            CohortDefinition {
+                id: "a".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [{"type": "cohort", "value": "b", "negation": false}],
+                }),
+            },
+        );
+        cohorts.insert(
+            "b".to_string(),
+            CohortDefinition {
+                id: "b".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [{"type": "cohort", "value": "a", "negation": false}],
+                }),
+            },
+        );
+
+        let prop = Property {
+            key: "$cohort".to_string(),
+            value: json!("a"),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
+        let ctx = cohort_ctx(&cohorts);
+
+        let error = match_property_with_context(&prop, &HashMap::new(), &ctx)
+            .expect_err("a cohort cycle must not resolve locally");
+        assert!(
+            error.to_string().contains("cycle"),
+            "error should name the cycle, got: {}",
+            error
+        );
+    }
+
+    /// A cycle guard alone only bounds repeats, not depth. A chain of distinct
+    /// cohorts is acyclic, so it never trips the cycle check and recurses once
+    /// per link. Each cohort is its own shallow map entry, so the manifest also
+    /// clears serde_json's nesting limit on the way in.
+    #[test]
+    fn test_deep_acyclic_cohort_chain_is_inconclusive() {
+        let chain_len = MAX_COHORT_RESOLUTION_DEPTH + 50;
+        let mut cohorts = HashMap::new();
+        for link in 0..chain_len {
+            let properties = if link == chain_len - 1 {
+                json!({
+                    "type": "AND",
+                    "values": [
+                        {"key": "country", "value": "US", "operator": "exact", "type": "person"},
+                    ],
+                })
+            } else {
+                json!({
+                    "type": "AND",
+                    "values": [{"type": "cohort", "value": (link + 1).to_string()}],
+                })
+            };
+            cohorts.insert(
+                link.to_string(),
+                CohortDefinition {
+                    id: link.to_string(),
+                    properties,
+                },
+            );
+        }
+
+        let prop = Property {
+            key: "$cohort".to_string(),
+            value: json!("0"),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
+        let ctx = cohort_ctx(&cohorts);
+        let mut properties = HashMap::new();
+        properties.insert("country".to_string(), json!("US"));
+
+        assert!(
+            match_property_with_context(&prop, &properties, &ctx).is_err(),
+            "a cohort chain deeper than the limit must not resolve locally"
+        );
+    }
+
+    /// The depth bound has to leave realistic nesting alone.
+    #[test]
+    fn test_cohort_chain_within_the_depth_limit_still_resolves() {
+        let chain_len = 10;
+        let mut cohorts = HashMap::new();
+        for link in 0..chain_len {
+            let properties = if link == chain_len - 1 {
+                json!({
+                    "type": "AND",
+                    "values": [
+                        {"key": "country", "value": "US", "operator": "exact", "type": "person"},
+                    ],
+                })
+            } else {
+                json!({
+                    "type": "AND",
+                    "values": [{"type": "cohort", "value": (link + 1).to_string()}],
+                })
+            };
+            cohorts.insert(
+                link.to_string(),
+                CohortDefinition {
+                    id: link.to_string(),
+                    properties,
+                },
+            );
+        }
+
+        let prop = Property {
+            key: "$cohort".to_string(),
+            value: json!("0"),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
+        let ctx = cohort_ctx(&cohorts);
+        let mut properties = HashMap::new();
+        properties.insert("country".to_string(), json!("US"));
+
+        assert!(match_property_with_context(&prop, &properties, &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_self_referencing_cohort_is_inconclusive() {
+        let mut cohorts = HashMap::new();
+        cohorts.insert(
+            "loop".to_string(),
+            CohortDefinition {
+                id: "loop".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [{"type": "cohort", "value": "loop", "negation": false}],
+                }),
+            },
+        );
+
+        let prop = Property {
+            key: "$cohort".to_string(),
+            value: json!("loop"),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
+        let ctx = cohort_ctx(&cohorts);
+
+        assert!(match_property_with_context(&prop, &HashMap::new(), &ctx).is_err());
+    }
+
+    /// Referencing the same cohort twice down different branches is a diamond,
+    /// not a cycle. Tracking visited IDs for the whole evaluation instead of the
+    /// active path would wrongly reject this.
+    #[test]
+    fn test_repeated_cohort_reference_is_not_a_cycle() {
+        let mut cohorts = HashMap::new();
+        cohorts.insert(
+            "shared".to_string(),
+            CohortDefinition {
+                id: "shared".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [
+                        {"key": "country", "value": "US", "operator": "exact", "type": "person"},
+                    ],
+                }),
+            },
+        );
+        for branch in ["left", "right"] {
+            cohorts.insert(
+                branch.to_string(),
+                CohortDefinition {
+                    id: branch.to_string(),
+                    properties: json!({
+                        "type": "AND",
+                        "values": [{"type": "cohort", "value": "shared", "negation": false}],
+                    }),
+                },
+            );
+        }
+        cohorts.insert(
+            "parent".to_string(),
+            CohortDefinition {
+                id: "parent".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [
+                        {"type": "cohort", "value": "left", "negation": false},
+                        {"type": "cohort", "value": "right", "negation": false},
+                    ],
+                }),
+            },
+        );
+
+        let prop = Property {
+            key: "$cohort".to_string(),
+            value: json!("parent"),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
         let ctx = cohort_ctx(&cohorts);
 
         let mut properties = HashMap::new();

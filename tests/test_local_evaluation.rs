@@ -148,6 +148,62 @@ fn test_local_evaluation_with_cohorts_payload() {
     assert_eq!(result.unwrap(), Some(FlagValue::Boolean(false)));
 }
 
+/// A cyclic cohort definition must leave local evaluation inconclusive so the
+/// flag falls back to `/flags`. Before the cycle guard this recursed until the
+/// stack was exhausted, which aborts the process rather than panicking, taking
+/// down the caller's server.
+#[test]
+fn test_cyclic_cohort_definition_does_not_exhaust_the_stack() {
+    let payload = json!({
+        "flags": [
+            {
+                "key": "cohort-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        {
+                            "properties": [
+                                {"key": "id", "value": 1, "type": "cohort"}
+                            ],
+                            "rollout_percentage": 100.0
+                        }
+                    ]
+                }
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {
+            "1": {
+                "type": "AND",
+                "values": [{"type": "cohort", "value": 2}]
+            },
+            "2": {
+                "type": "AND",
+                "values": [{"type": "cohort", "value": 1}]
+            }
+        }
+    });
+
+    let response: LocalEvaluationResponse =
+        serde_json::from_value(payload).expect("cohorts payload should deserialize");
+    let cache = FlagCache::new();
+    let evaluator = LocalEvaluator::new(cache.clone());
+    cache.update(response);
+
+    let result = evaluator.evaluate_flag(
+        "cohort-flag",
+        "user-123",
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+
+    assert!(
+        result.is_err(),
+        "a cohort cycle must be inconclusive so the flag falls back to /flags"
+    );
+}
+
 #[test]
 fn test_local_evaluation_with_properties() {
     let cache = FlagCache::new();
