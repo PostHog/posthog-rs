@@ -20,7 +20,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &error,
             CaptureExceptionOptions::new()
                 .distinct_id("user-123")
-                .property("route", "/checkout")?,
+                .property("route", "/checkout")?
+                .trace_context("00000000000000000000000000000123", "0000000000000456"),
         )
         .await?;
 
