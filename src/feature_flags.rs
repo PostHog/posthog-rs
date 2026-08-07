@@ -182,6 +182,14 @@ fn default_operator() -> String {
     "exact".to_string()
 }
 
+#[derive(Deserialize)]
+struct CohortProperty {
+    #[serde(flatten)]
+    property: Property,
+    #[serde(default)]
+    negation: bool,
+}
+
 /// Definition of a cohort for local evaluation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CohortDefinition {
@@ -860,7 +868,8 @@ fn match_cohort_property(
     let cohort_id = cohort_id_to_string(&property.value)
         .ok_or_else(|| InconclusiveMatchError::new("Cohort ID must be a string or number"))?;
 
-    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx)?;
+    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx)
+        .map_err(CohortMatchError::into_inconclusive)?;
 
     // Handle "in" vs "not_in" operator
     Ok(match property.operator.as_str() {
@@ -886,14 +895,38 @@ fn cohort_id_to_string(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+#[derive(Debug)]
+enum CohortMatchError {
+    Inconclusive(InconclusiveMatchError),
+    InvalidDefinition(InconclusiveMatchError),
+    MissingCohort(InconclusiveMatchError),
+}
+
+impl CohortMatchError {
+    fn into_inconclusive(self) -> InconclusiveMatchError {
+        match self {
+            Self::Inconclusive(error)
+            | Self::InvalidDefinition(error)
+            | Self::MissingCohort(error) => error,
+        }
+    }
+
+    fn requires_server_evaluation(&self) -> bool {
+        !matches!(self, Self::Inconclusive(_))
+    }
+}
+
 /// Look up a cohort by ID and evaluate its property group against `properties`.
 fn match_cohort_by_id(
     cohort_id: &str,
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
-) -> Result<bool, InconclusiveMatchError> {
+) -> Result<bool, CohortMatchError> {
     let cohort = ctx.cohorts.get(cohort_id).ok_or_else(|| {
-        InconclusiveMatchError::new(&format!("Cohort '{}' not found in local cache", cohort_id))
+        CohortMatchError::MissingCohort(InconclusiveMatchError::new(&format!(
+            "Cohort '{}' not found in local cache",
+            cohort_id
+        )))
     })?;
 
     match_property_group(&cohort.properties, properties, ctx)
@@ -913,20 +946,23 @@ fn match_property_group(
     group: &serde_json::Value,
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
-) -> Result<bool, InconclusiveMatchError> {
+) -> Result<bool, CohortMatchError> {
     if let Some(arr) = group.as_array() {
         return match_property_group_values("AND", arr, properties, ctx);
     }
 
     let Some(obj) = group.as_object() else {
-        // An absent or empty group matches everyone.
-        return Ok(true);
+        return Err(CohortMatchError::InvalidDefinition(
+            InconclusiveMatchError::new("Cohort property group must be an object or array"),
+        ));
     };
 
     let group_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("AND");
 
     let Some(values) = obj.get("values").and_then(|v| v.as_array()) else {
-        return Ok(true);
+        return Err(CohortMatchError::InvalidDefinition(
+            InconclusiveMatchError::new("Cohort property group values must be an array"),
+        ));
     };
 
     match_property_group_values(group_type, values, properties, ctx)
@@ -934,23 +970,24 @@ fn match_property_group(
 
 /// Combine the `values` of a property group under AND/OR semantics.
 ///
-/// An inconclusive entry (missing property, unknown operator, ...) is remembered
-/// but deferred: a later definitive result still short-circuits (a `false` under
-/// AND, a `true` under OR). Only if nothing definitive resolves the group does
-/// the deferred inconclusive surface — so evaluation falls back to the server
-/// rather than guessing.
+/// An ordinary inconclusive entry (missing property, unknown operator, ...) is
+/// remembered but deferred: a definitive result (`false` under AND, `true` under
+/// OR) still resolves the group. Every entry is inspected so missing cohorts and
+/// malformed definitions always force server-side evaluation regardless of
+/// branch order.
 fn match_property_group_values(
     group_type: &str,
     values: &[serde_json::Value],
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
-) -> Result<bool, InconclusiveMatchError> {
+) -> Result<bool, CohortMatchError> {
     if values.is_empty() {
         return Ok(true);
     }
 
     let is_and = !group_type.eq_ignore_ascii_case("OR");
-    let mut inconclusive: Option<InconclusiveMatchError> = None;
+    let mut decisive_result = None;
+    let mut inconclusive: Option<CohortMatchError> = None;
 
     for value in values {
         let result = if value.get("values").is_some() {
@@ -961,25 +998,31 @@ fn match_property_group_values(
             match_nested_cohort(value, properties, ctx)
         } else {
             // Leaf property filter.
-            match serde_json::from_value::<Property>(value.clone()) {
-                Ok(prop) => match_property_with_context(&prop, properties, ctx),
-                Err(e) => Err(InconclusiveMatchError::new(&format!(
-                    "Unable to parse cohort property: {}",
-                    e
-                ))),
+            match serde_json::from_value::<CohortProperty>(value.clone()) {
+                Ok(prop) => match_property_with_context(&prop.property, properties, ctx)
+                    .map(|matches| matches != prop.negation)
+                    .map_err(CohortMatchError::Inconclusive),
+                Err(e) => Err(CohortMatchError::InvalidDefinition(
+                    InconclusiveMatchError::new(&format!("Unable to parse cohort property: {}", e)),
+                )),
             }
         };
 
         match result {
-            Ok(true) if !is_and => return Ok(true),
-            Ok(false) if is_and => return Ok(false),
+            Ok(true) if !is_and => decisive_result = Some(true),
+            Ok(false) if is_and => decisive_result = Some(false),
             Ok(_) => {}
-            Err(e) => inconclusive = Some(e),
+            Err(error) if error.requires_server_evaluation() => return Err(error),
+            Err(error) => inconclusive = Some(error),
         }
     }
 
-    if let Some(e) = inconclusive {
-        return Err(e);
+    if let Some(result) = decisive_result {
+        return Ok(result);
+    }
+
+    if let Some(error) = inconclusive {
+        return Err(error);
     }
 
     // AND: every entry matched. OR: none matched.
@@ -992,12 +1035,14 @@ fn match_nested_cohort(
     value: &serde_json::Value,
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
-) -> Result<bool, InconclusiveMatchError> {
+) -> Result<bool, CohortMatchError> {
     let cohort_id = value
         .get("value")
         .and_then(cohort_id_to_string)
         .ok_or_else(|| {
-            InconclusiveMatchError::new("Nested cohort ID must be a string or number")
+            CohortMatchError::InvalidDefinition(InconclusiveMatchError::new(
+                "Nested cohort ID must be a string or number",
+            ))
         })?;
 
     let negation = value
@@ -2467,6 +2512,136 @@ mod tests {
 
         properties.insert("country".to_string(), json!("UK"));
         assert!(!match_property_with_context(&prop, &properties, &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_cohort_leaf_negation() {
+        let mut cohorts = HashMap::new();
+        cohorts.insert(
+            "negated_leaf".to_string(),
+            CohortDefinition {
+                id: "negated_leaf".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [
+                        {
+                            "key": "country",
+                            "value": "US",
+                            "operator": "exact",
+                            "type": "person",
+                            "negation": true
+                        },
+                    ],
+                }),
+            },
+        );
+
+        let prop = Property {
+            key: "$cohort".to_string(),
+            value: json!("negated_leaf"),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
+        let ctx = cohort_ctx(&cohorts);
+        let mut properties = HashMap::new();
+
+        properties.insert("country".to_string(), json!("US"));
+        assert!(!match_property_with_context(&prop, &properties, &ctx).unwrap());
+
+        properties.insert("country".to_string(), json!("UK"));
+        assert!(match_property_with_context(&prop, &properties, &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_missing_nested_cohort_is_not_suppressed() {
+        let missing_cohort = json!({"type": "cohort", "value": "missing"});
+        let country_leaf = json!({
+            "key": "country",
+            "value": "US",
+            "operator": "exact",
+            "type": "person"
+        });
+        let mut cohorts = HashMap::new();
+        cohorts.insert(
+            "or_parent".to_string(),
+            CohortDefinition {
+                id: "or_parent".to_string(),
+                properties: json!({
+                    "type": "OR",
+                    "values": [country_leaf.clone(), missing_cohort.clone()],
+                }),
+            },
+        );
+        cohorts.insert(
+            "and_parent".to_string(),
+            CohortDefinition {
+                id: "and_parent".to_string(),
+                properties: json!({
+                    "type": "AND",
+                    "values": [country_leaf, missing_cohort],
+                }),
+            },
+        );
+
+        let ctx = cohort_ctx(&cohorts);
+        for (cohort_id, country) in [("or_parent", "US"), ("and_parent", "UK")] {
+            let prop = Property {
+                key: "$cohort".to_string(),
+                value: json!(cohort_id),
+                operator: "in".to_string(),
+                property_type: Some("cohort".to_string()),
+            };
+            let properties = HashMap::from([("country".to_string(), json!(country))]);
+
+            assert!(match_property_with_context(&prop, &properties, &ctx).is_err());
+        }
+    }
+
+    #[test]
+    fn test_malformed_cohort_groups_are_inconclusive() {
+        let mut cohorts = HashMap::new();
+        cohorts.insert(
+            "scalar".to_string(),
+            CohortDefinition {
+                id: "scalar".to_string(),
+                properties: json!("invalid"),
+            },
+        );
+        cohorts.insert(
+            "object_values".to_string(),
+            CohortDefinition {
+                id: "object_values".to_string(),
+                properties: json!({"type": "AND", "values": {}}),
+            },
+        );
+        cohorts.insert(
+            "empty".to_string(),
+            CohortDefinition {
+                id: "empty".to_string(),
+                properties: json!({"type": "AND", "values": []}),
+            },
+        );
+
+        let ctx = cohort_ctx(&cohorts);
+        let properties = HashMap::new();
+        for cohort_id in ["scalar", "object_values"] {
+            let prop = Property {
+                key: "$cohort".to_string(),
+                value: json!(cohort_id),
+                operator: "in".to_string(),
+                property_type: Some("cohort".to_string()),
+            };
+
+            assert!(match_property_with_context(&prop, &properties, &ctx).is_err());
+        }
+
+        let empty = Property {
+            key: "$cohort".to_string(),
+            value: json!("empty"),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
+        assert!(match_property_with_context(&empty, &properties, &ctx).unwrap());
     }
 
     // ==================== Tests for flag dependencies ====================
