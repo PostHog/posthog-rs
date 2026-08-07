@@ -9,6 +9,8 @@ use tracing::warn;
 
 mod common;
 #[cfg(test)]
+mod local_payload_test_support;
+#[cfg(test)]
 mod minimal_gate_test_support;
 mod on_error;
 mod summary;

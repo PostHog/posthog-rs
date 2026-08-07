@@ -274,6 +274,7 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
 
 pub(super) fn local_record(
     value: FlagValue,
+    payload: Option<serde_json::Value>,
     has_experiment: Option<bool>,
     minimal_flag_called_events: bool,
 ) -> EvaluatedFlagRecord {
@@ -284,8 +285,9 @@ pub(super) fn local_record(
     EvaluatedFlagRecord {
         enabled,
         variant,
-        // Local definitions do not surface a payload through the poller today.
-        payload: None,
+        // The definitions manifest stores payloads the same way `/flags`
+        // returns them, so they go through the same normalisation.
+        payload: payload.map(normalize_payload),
         id: None,
         version: None,
         reason: Some("Evaluated locally".to_string()),

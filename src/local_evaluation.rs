@@ -175,6 +175,25 @@ impl FlagCache {
             .and_then(|f| f.has_experiment)
     }
 
+    /// Return the payload a locally-evaluated flag carries for `value`, keyed
+    /// the way the definitions manifest stores it: `"true"` for a boolean
+    /// match, the variant key for a multivariate one. A flag that evaluated
+    /// false has no payload, matching `/flags`, which only attaches one to a
+    /// matching flag. The value is returned as stored — decoding it is the
+    /// caller's job, so local and remote payloads normalise identically.
+    pub(crate) fn flag_payload(&self, key: &str, value: &FlagValue) -> Option<serde_json::Value> {
+        let payload_key = match value {
+            FlagValue::Boolean(true) => "true",
+            FlagValue::Boolean(false) => return None,
+            FlagValue::String(variant) => variant.as_str(),
+        };
+        self.flags
+            .read()
+            .unwrap()
+            .get(key)
+            .and_then(|flag| flag.filters.payloads.get(payload_key).cloned())
+    }
+
     /// Return all cached feature flag definitions.
     pub fn get_all_flags(&self) -> Vec<FeatureFlag> {
         self.flags.read().unwrap().values().cloned().collect()
