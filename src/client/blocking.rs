@@ -1032,7 +1032,7 @@ impl Client {
                 .or_insert_with(|| json!(distinct_id.clone()));
             let groups_owned = options.groups.clone().unwrap_or_default();
             let group_props_owned = options.group_properties.clone().unwrap_or_default();
-            let local_results = evaluator.evaluate_all_flags(
+            let local_results = evaluator.evaluate_all_flags_with_details(
                 &distinct_id,
                 &person_props_owned,
                 &groups_owned,
@@ -1048,12 +1048,15 @@ impl Client {
                         continue;
                     }
                 }
-                if let Ok(value) = result {
-                    let has_experiment = evaluator.cache().has_experiment(&key);
-                    let payload = evaluator.cache().flag_payload(&key, &value);
+                if let Ok(value) = result.result {
                     records.insert(
                         key.clone(),
-                        local_record(value, payload, has_experiment, local_minimal_gate),
+                        local_record(
+                            value,
+                            result.payload,
+                            result.has_experiment,
+                            local_minimal_gate,
+                        ),
                     );
                     locally_evaluated_keys.insert(key);
                 }

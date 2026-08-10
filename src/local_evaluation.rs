@@ -165,35 +165,6 @@ impl FlagCache {
         self.flags.read().unwrap().get(key).cloned()
     }
 
-    /// Return a flag's `has_experiment` signal without cloning the full
-    /// [`FeatureFlag`] (its filters can hold nested `Vec`s and JSON values).
-    pub(crate) fn has_experiment(&self, key: &str) -> Option<bool> {
-        self.flags
-            .read()
-            .unwrap()
-            .get(key)
-            .and_then(|f| f.has_experiment)
-    }
-
-    /// Return the payload a locally-evaluated flag carries for `value`, keyed
-    /// the way the definitions manifest stores it: `"true"` for a boolean
-    /// match, the variant key for a multivariate one. A flag that evaluated
-    /// false has no payload, matching `/flags`, which only attaches one to a
-    /// matching flag. The value is returned as stored — decoding it is the
-    /// caller's job, so local and remote payloads normalise identically.
-    pub(crate) fn flag_payload(&self, key: &str, value: &FlagValue) -> Option<serde_json::Value> {
-        let payload_key = match value {
-            FlagValue::Boolean(true) => "true",
-            FlagValue::Boolean(false) => return None,
-            FlagValue::String(variant) => variant.as_str(),
-        };
-        self.flags
-            .read()
-            .unwrap()
-            .get(key)
-            .and_then(|flag| flag.filters.payloads.get(payload_key).cloned())
-    }
-
     /// Return all cached feature flag definitions.
     pub fn get_all_flags(&self) -> Vec<FeatureFlag> {
         self.flags.read().unwrap().values().cloned().collect()
@@ -729,6 +700,21 @@ pub struct LocalEvaluator {
     cache: FlagCache,
 }
 
+pub(crate) struct LocalFlagEvaluation {
+    pub(crate) result: Result<FlagValue, InconclusiveMatchError>,
+    pub(crate) payload: Option<serde_json::Value>,
+    pub(crate) has_experiment: Option<bool>,
+}
+
+fn flag_payload(flag: &FeatureFlag, value: &FlagValue) -> Option<serde_json::Value> {
+    let payload_key = match value {
+        FlagValue::Boolean(true) => "true",
+        FlagValue::Boolean(false) => return None,
+        FlagValue::String(variant) => variant.as_str(),
+    };
+    flag.filters.payloads.get(payload_key).cloned()
+}
+
 impl LocalEvaluator {
     /// Create an evaluator backed by a shared [`FlagCache`].
     pub fn new(cache: FlagCache) -> Self {
@@ -860,9 +846,27 @@ impl LocalEvaluator {
         groups: &HashMap<String, String>,
         group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     ) -> HashMap<String, Result<FlagValue, InconclusiveMatchError>> {
+        self.evaluate_all_flags_with_details(
+            distinct_id,
+            person_properties,
+            groups,
+            group_properties,
+        )
+        .into_iter()
+        .map(|(key, evaluation)| (key, evaluation.result))
+        .collect()
+    }
+
+    pub(crate) fn evaluate_all_flags_with_details(
+        &self,
+        distinct_id: &str,
+        person_properties: &HashMap<String, serde_json::Value>,
+        groups: &HashMap<String, String>,
+        group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
+    ) -> HashMap<String, LocalFlagEvaluation> {
         let mut results = HashMap::new();
 
-        // Build evaluation context once for all flags
+        // Build one definitions snapshot for evaluation and its metadata.
         let cohorts = self.cache.get_cohort_definitions();
         let flags = self.cache.get_flags_map();
         let group_type_mapping = self.cache.get_group_type_mapping();
@@ -876,12 +880,77 @@ impl LocalEvaluator {
             group_type_mapping: &group_type_mapping,
         };
 
-        for flag in self.cache.get_all_flags() {
-            let result = match_feature_flag_with_context(&flag, person_properties, &ctx);
-            results.insert(flag.key.clone(), result);
+        for flag in flags.values() {
+            let result = match_feature_flag_with_context(flag, person_properties, &ctx);
+            let payload = result
+                .as_ref()
+                .ok()
+                .and_then(|value| flag_payload(flag, value));
+            results.insert(
+                flag.key.clone(),
+                LocalFlagEvaluation {
+                    result,
+                    payload,
+                    has_experiment: flag.has_experiment,
+                },
+            );
         }
 
         debug!(flag_count = results.len(), "Evaluated all local flags");
         results
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feature_flags::{FeatureFlagCondition, FeatureFlagFilters};
+    use serde_json::json;
+
+    fn definitions(
+        active: bool,
+        payload: serde_json::Value,
+        has_experiment: bool,
+    ) -> LocalEvaluationResponse {
+        LocalEvaluationResponse {
+            flags: vec![FeatureFlag {
+                key: "snapshot-flag".to_string(),
+                active,
+                filters: FeatureFlagFilters {
+                    groups: vec![FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(100.0),
+                        variant: None,
+                        aggregation_group_type_index: None,
+                    }],
+                    payloads: HashMap::from([("true".to_string(), payload)]),
+                    ..Default::default()
+                },
+                has_experiment: Some(has_experiment),
+            }],
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+            minimal_flag_called_events: false,
+        }
+    }
+
+    #[test]
+    fn evaluated_details_survive_a_cache_refresh() {
+        let cache = FlagCache::new();
+        cache.update(definitions(true, json!({"snapshot": "old"}), true));
+        let evaluator = LocalEvaluator::new(cache.clone());
+
+        let evaluations = evaluator.evaluate_all_flags_with_details(
+            "user-1",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        cache.update(definitions(false, json!({"snapshot": "new"}), false));
+
+        let evaluation = evaluations.get("snapshot-flag").unwrap();
+        assert!(matches!(evaluation.result, Ok(FlagValue::Boolean(true))));
+        assert_eq!(evaluation.payload, Some(json!({"snapshot": "old"})));
+        assert_eq!(evaluation.has_experiment, Some(true));
     }
 }
