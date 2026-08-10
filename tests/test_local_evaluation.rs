@@ -697,7 +697,7 @@ fn test_sync_local_evaluation_with_mock_server_sends_default_user_agent() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_secs(60),
@@ -813,7 +813,7 @@ async fn test_etag_sent_on_second_poll() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -899,7 +899,7 @@ async fn test_304_preserves_cache() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -964,7 +964,7 @@ async fn test_no_etag_from_server() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(50),
@@ -1038,7 +1038,7 @@ fn test_sync_etag_sent_on_second_poll() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -1121,7 +1121,7 @@ fn test_sync_304_preserves_cache() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -1185,7 +1185,7 @@ fn test_sync_no_etag_from_server() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(50),

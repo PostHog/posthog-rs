@@ -317,10 +317,10 @@ impl core::fmt::Display for posthog_rs::InconclusiveMatchError
 pub fn posthog_rs::InconclusiveMatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct posthog_rs::LocalEvaluationConfig
 pub posthog_rs::LocalEvaluationConfig::api_host: alloc::string::String
-pub posthog_rs::LocalEvaluationConfig::personal_api_key: alloc::string::String
 pub posthog_rs::LocalEvaluationConfig::poll_interval: core::time::Duration
 pub posthog_rs::LocalEvaluationConfig::project_api_key: alloc::string::String
 pub posthog_rs::LocalEvaluationConfig::request_timeout: core::time::Duration
+pub posthog_rs::LocalEvaluationConfig::secret_key: alloc::string::String
 #[non_exhaustive] pub struct posthog_rs::LocalEvaluationFailure<'a>
 impl<'a> posthog_rs::LocalEvaluationFailure<'a>
 pub fn posthog_rs::LocalEvaluationFailure<'a>::error(&self) -> &posthog_rs::Error

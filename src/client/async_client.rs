@@ -140,7 +140,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
                 let cache = FlagCache::new();
 
                 let config = LocalEvaluationConfig {
-                    personal_api_key: secret_key.clone(),
+                    secret_key: secret_key.clone(),
                     project_api_key: options.api_key.clone(),
                     api_host: options.endpoints().api_host(),
                     poll_interval: Duration::from_secs(options.poll_interval_seconds),
