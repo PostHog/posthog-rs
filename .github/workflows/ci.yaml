@@ -87,6 +87,12 @@ jobs:
             toolchain: stable
             cache-key: capture-v1
             command: cargo build --verbose --features capture-v1
+          - name: tls-no-provider
+            toolchain: stable
+            cache-key: tls-no-provider
+            command: >-
+              cargo build --verbose --no-default-features --features async-client,error-tracking,capture-v1,tls-no-provider
+              && ! cargo tree --package posthog-rs --edges normal --invert aws-lc-sys --no-default-features --features async-client,error-tracking,capture-v1,tls-no-provider
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -165,9 +171,15 @@ jobs:
           - name: Unit test (error-tracking + capture-v1, blocking client)
             cache-key: error-tracking-capture-v1-blocking-client
             command: cargo test --verbose --no-default-features --features error-tracking,capture-v1
+          # Targeted at the tls-no-provider test binary only: without a
+          # built-in provider, constructing a client panics unless the test
+          # installs one first, so the rest of the suite cannot run here.
+          - name: Unit test (tls-no-provider, blocking client)
+            cache-key: tls-no-provider-blocking-client
+            command: cargo test --verbose --no-default-features --features tls-no-provider --test test_tls_no_provider
           - name: E2E test
             cache-key: e2e
-            command: cargo test --verbose --features e2e-test --no-default-features
+            command: cargo test --verbose --features e2e-test,tls --no-default-features
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
