@@ -211,7 +211,7 @@ impl posthog_rs::ErrorTrackingOptionsBuilder
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::trace_context_provider<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn() -> core::option::Option<posthog_rs::TraceContext> + core::marker::Send + core::marker::Sync + 'static
 impl core::default::Default for posthog_rs::ErrorTrackingOptionsBuilder
 pub fn posthog_rs::ErrorTrackingOptionsBuilder::default() -> Self
-pub struct posthog_rs::EvaluateFlagsOptions
+#[non_exhaustive] pub struct posthog_rs::EvaluateFlagsOptions
 pub posthog_rs::EvaluateFlagsOptions::disable_geoip: core::option::Option<bool>
 pub posthog_rs::EvaluateFlagsOptions::flag_keys: core::option::Option<alloc::vec::Vec<alloc::string::String>>
 pub posthog_rs::EvaluateFlagsOptions::group_properties: core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>>

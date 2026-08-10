@@ -544,24 +544,12 @@ mod blocking {
         let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
 
-        let snap_1 = client
-            .evaluate_flags(
-                "user-1",
-                EvaluateFlagsOptions {
-                    groups: Some(g1),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let snap_2 = client
-            .evaluate_flags(
-                "user-1",
-                EvaluateFlagsOptions {
-                    groups: Some(g2),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let mut options_1 = EvaluateFlagsOptions::default();
+        options_1.groups = Some(g1);
+        let snap_1 = client.evaluate_flags("user-1", options_1).unwrap();
+        let mut options_2 = EvaluateFlagsOptions::default();
+        options_2.groups = Some(g2);
+        let snap_2 = client.evaluate_flags("user-1", options_2).unwrap();
         assert!(snap_1.is_enabled("alpha"));
         client.flush();
         assert!(snap_2.is_enabled("alpha"));
@@ -596,15 +584,9 @@ mod blocking {
         });
         let capture_mock = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
-        let snap = client
-            .evaluate_flags(
-                "user-1",
-                EvaluateFlagsOptions {
-                    groups: Some(groups(&[("organization", "org-a")])),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let mut options = EvaluateFlagsOptions::default();
+        options.groups = Some(groups(&[("organization", "org-a")]));
+        let snap = client.evaluate_flags("user-1", options).unwrap();
         assert!(snap.is_enabled("alpha"));
         assert!(snap.is_enabled("alpha"));
         assert!(snap.is_enabled("alpha"));
@@ -640,10 +622,8 @@ mod blocking {
             then.status(200).json_body(flags_response_fixture());
         });
         let client = create_test_client(server.base_url());
-        let opts = EvaluateFlagsOptions {
-            flag_keys: Some(vec!["alpha".into(), "beta".into()]),
-            ..Default::default()
-        };
+        let mut opts = EvaluateFlagsOptions::default();
+        opts.flag_keys = Some(vec!["alpha".into(), "beta".into()]);
         let _ = client.evaluate_flags("user-1", opts).unwrap();
         flags_mock.assert_hits(1);
     }
@@ -1173,10 +1153,8 @@ mod async_tests {
             then.status(200).json_body(flags_response_fixture());
         });
         let client = create_test_client(server.base_url()).await;
-        let opts = EvaluateFlagsOptions {
-            flag_keys: Some(vec!["alpha".into()]),
-            ..Default::default()
-        };
+        let mut opts = EvaluateFlagsOptions::default();
+        opts.flag_keys = Some(vec!["alpha".into()]);
         let _ = client.evaluate_flags("user-1", opts).await.unwrap();
         flags_mock.assert_hits(1);
     }

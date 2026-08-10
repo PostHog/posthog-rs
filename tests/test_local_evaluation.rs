@@ -594,18 +594,14 @@ async fn test_local_evaluation_returns_payloads_without_calling_flags() {
     let client = posthog_rs::client(options).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    let mut options = EvaluateFlagsOptions::default();
+    options.flag_keys = Some(vec![
+        "bool-flag".to_string(),
+        "variant-flag".to_string(),
+        "no-payload-flag".to_string(),
+    ]);
     let snapshot = client
-        .evaluate_flags(
-            "user-123",
-            EvaluateFlagsOptions {
-                flag_keys: Some(vec![
-                    "bool-flag".to_string(),
-                    "variant-flag".to_string(),
-                    "no-payload-flag".to_string(),
-                ]),
-                ..Default::default()
-            },
-        )
+        .evaluate_flags("user-123", options)
         .await
         .expect("evaluate_flags");
 

@@ -316,14 +316,12 @@ async fn get_feature_flag(
     };
 
     let key = req.key;
-    let options = EvaluateFlagsOptions {
-        groups: req.groups,
-        person_properties: req.person_properties,
-        group_properties: req.group_properties,
-        only_evaluate_locally: false,
-        disable_geoip: req.disable_geoip,
-        flag_keys: Some(vec![key.clone()]),
-    };
+    let mut options = EvaluateFlagsOptions::default();
+    options.groups = req.groups;
+    options.person_properties = req.person_properties;
+    options.group_properties = req.group_properties;
+    options.disable_geoip = req.disable_geoip;
+    options.flag_keys = Some(vec![key.clone()]);
 
     match client.evaluate_flags(req.distinct_id, options).await {
         Ok(flags) => {
