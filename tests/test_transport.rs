@@ -43,10 +43,7 @@ fn wait_for_hits(mock: &httpmock::Mock, want: usize) {
 }
 
 fn body_contains(req: &HttpMockRequest, needle: &str) -> bool {
-    req.body
-        .as_deref()
-        .map(|b| String::from_utf8_lossy(b).contains(needle))
-        .unwrap_or(false)
+    String::from_utf8_lossy(req.body_ref()).contains(needle)
 }
 
 // --- flush -----------------------------------------------------------------
@@ -187,10 +184,7 @@ async fn batcher_preserves_fifo_order_within_a_batch() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
         when.method(POST).matches(|r| {
-            let Some(body) = r.body.as_deref() else {
-                return false;
-            };
-            let s = String::from_utf8_lossy(body);
+            let s = String::from_utf8_lossy(r.body_ref());
             match (s.find("First"), s.find("Second"), s.find("Third")) {
                 (Some(a), Some(b), Some(c)) => a < b && b < c,
                 _ => false,

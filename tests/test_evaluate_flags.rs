@@ -634,9 +634,9 @@ mod blocking {
     fn flag_keys_forwarded_to_request_body() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/flags/")
-                .json_body_partial(json!({"flag_keys_to_evaluate": ["alpha", "beta"]}).to_string());
+            when.method(POST).path("/flags/").json_body_includes(
+                json!({"flag_keys_to_evaluate": ["alpha", "beta"]}).to_string(),
+            );
             then.status(200).json_body(flags_response_fixture());
         });
         let client = create_test_client(server.base_url());
@@ -836,8 +836,8 @@ mod blocking {
                     "posthog-sdk-info",
                     format!("posthog-rs/{}", env!("CARGO_PKG_VERSION")),
                 )
-                .body_contains("$feature_flag_called")
-                .body_contains("\"$feature_flag\":\"alpha\"");
+                .body_includes("$feature_flag_called")
+                .body_includes("\"$feature_flag\":\"alpha\"");
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(json!({ "results": {} }));
@@ -1128,8 +1128,8 @@ mod async_tests {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path(CAPTURE_PATH)
-                .body_contains("\"$is_server\":true")
-                .body_contains("\"$lib\":\"posthog-rs\"");
+                .body_includes("\"$is_server\":true")
+                .body_includes("\"$lib\":\"posthog-rs\"");
             then.status(200);
         });
         let client = create_test_client(server.base_url()).await;
@@ -1169,7 +1169,7 @@ mod async_tests {
         let flags_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/flags/")
-                .json_body_partial(json!({"flag_keys_to_evaluate": ["alpha"]}).to_string());
+                .json_body_includes(json!({"flag_keys_to_evaluate": ["alpha"]}).to_string());
             then.status(200).json_body(flags_response_fixture());
         });
         let client = create_test_client(server.base_url()).await;
@@ -1217,8 +1217,8 @@ mod async_tests {
                     "posthog-sdk-info",
                     format!("posthog-rs/{}", env!("CARGO_PKG_VERSION")),
                 )
-                .body_contains("$feature_flag_called")
-                .body_contains("\"$feature_flag\":\"alpha\"");
+                .body_includes("$feature_flag_called")
+                .body_includes("\"$feature_flag\":\"alpha\"");
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(json!({ "results": {} }));

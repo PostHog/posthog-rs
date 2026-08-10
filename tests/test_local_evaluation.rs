@@ -547,10 +547,8 @@ async fn test_etag_sent_on_second_poll() {
             .query_param("send_cohorts", "")
             .matches(|req| {
                 // Match only if If-None-Match header exists with the correct value
-                req.headers.as_ref().is_some_and(|headers| {
-                    headers.iter().any(|(name, value)| {
-                        name.to_lowercase() == "if-none-match" && value == "\"abc123\""
-                    })
+                req.headers_vec().iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("if-none-match") && value == "\"abc123\""
                 })
             });
         then.status(304);
@@ -635,10 +633,8 @@ async fn test_304_preserves_cache() {
             .query_param("send_cohorts", "")
             .matches(|req| {
                 // Match only if If-None-Match header exists with the correct value
-                req.headers.as_ref().is_some_and(|headers| {
-                    headers.iter().any(|(name, value)| {
-                        name.to_lowercase() == "if-none-match" && value == "\"v1\""
-                    })
+                req.headers_vec().iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("if-none-match") && value == "\"v1\""
                 })
             });
         then.status(304);
@@ -777,10 +773,8 @@ fn test_sync_etag_sent_on_second_poll() {
             .query_param("send_cohorts", "")
             .matches(|req| {
                 // Match only if If-None-Match header exists with the correct value
-                req.headers.as_ref().is_some_and(|headers| {
-                    headers.iter().any(|(name, value)| {
-                        name.to_lowercase() == "if-none-match" && value == "\"sync-abc123\""
-                    })
+                req.headers_vec().iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("if-none-match") && value == "\"sync-abc123\""
                 })
             });
         then.status(304);
@@ -862,10 +856,8 @@ fn test_sync_304_preserves_cache() {
             .query_param("send_cohorts", "")
             .matches(|req| {
                 // Match only if If-None-Match header exists with the correct value
-                req.headers.as_ref().is_some_and(|headers| {
-                    headers.iter().any(|(name, value)| {
-                        name.to_lowercase() == "if-none-match" && value == "\"sync-v1\""
-                    })
+                req.headers_vec().iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("if-none-match") && value == "\"sync-v1\""
                 })
             });
         then.status(304);

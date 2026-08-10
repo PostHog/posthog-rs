@@ -123,7 +123,7 @@ fn retries_resend_identical_event() {
     // The mock only matches requests carrying the original UUID, so reaching
     // 3 hits proves every retry resent the same event identity.
     let mock = server.mock(|when, then| {
-        when.method(POST).body_contains(FIXED_UUID);
+        when.method(POST).body_includes(FIXED_UUID);
         then.status(503);
     });
 
@@ -140,10 +140,7 @@ fn retries_resend_identical_event() {
 
 /// Matcher: the request body is valid gzip that decodes to the expected event.
 fn body_gunzips_to_user1(req: &HttpMockRequest) -> bool {
-    let Some(body) = req.body.as_ref() else {
-        return false;
-    };
-    let mut decoder = flate2::read::GzDecoder::new(&body[..]);
+    let mut decoder = flate2::read::GzDecoder::new(req.body_ref());
     let mut decoded = String::new();
     match decoder.read_to_string(&mut decoded) {
         Ok(_) => decoded.contains(r#""distinct_id":"user1""#),

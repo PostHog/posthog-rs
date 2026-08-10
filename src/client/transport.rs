@@ -1485,10 +1485,7 @@ mod tests {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method(POST).matches(|req| {
-                let Some(bytes) = req.body.as_deref() else {
-                    return false;
-                };
-                let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+                let Ok(json) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
                     return false;
                 };
                 let event_ts = json["batch"][0]["timestamp"].as_str().and_then(parse_ts);

@@ -30,10 +30,7 @@ const PARTIAL_UUID_RETRY: &str = "01920000-0000-7000-8000-0000000000a2";
 const PARTIAL_UUID_DROP: &str = "01920000-0000-7000-8000-0000000000a3";
 
 fn body_string(req: &HttpMockRequest) -> String {
-    req.body
-        .as_ref()
-        .map(|b| String::from_utf8_lossy(b).into_owned())
-        .unwrap_or_default()
+    String::from_utf8_lossy(req.body_ref()).into_owned()
 }
 
 /// Matcher: retry event present, ok event pruned.
@@ -153,8 +150,8 @@ fn v1_blocking_partial_batch_retry() {
         when.method(POST)
             .path("/i/v1/analytics/events")
             .header("posthog-attempt", "1")
-            .body_contains(PARTIAL_UUID_OK)
-            .body_contains(PARTIAL_UUID_RETRY);
+            .body_includes(PARTIAL_UUID_OK)
+            .body_includes(PARTIAL_UUID_RETRY);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(first_resp);
@@ -266,9 +263,9 @@ fn v1_blocking_whole_batch_resent_on_retryable_status() {
             when.method(POST)
                 .path("/i/v1/analytics/events")
                 .header("posthog-attempt", "2")
-                .body_contains(&uuid1_str)
-                .body_contains(&uuid2_str)
-                .body_contains(ts);
+                .body_includes(&uuid1_str)
+                .body_includes(&uuid2_str)
+                .body_includes(ts);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(json!({
@@ -321,8 +318,8 @@ fn v1_blocking_prunes_terminal_events_on_partial_retry() {
         when.method(POST)
             .path("/i/v1/analytics/events")
             .header("posthog-attempt", "1")
-            .body_contains(PARTIAL_UUID_RETRY)
-            .body_contains(PARTIAL_UUID_DROP);
+            .body_includes(PARTIAL_UUID_RETRY)
+            .body_includes(PARTIAL_UUID_DROP);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(first_resp);
@@ -390,12 +387,10 @@ fn v1_blocking_partial_retry_exhausts_attempts() {
 static CAPTURED_REQUEST_IDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 fn capture_request_id(req: &HttpMockRequest) -> bool {
-    if let Some(headers) = req.headers.as_ref() {
-        for (key, value) in headers {
-            if key.eq_ignore_ascii_case("posthog-request-id") {
-                CAPTURED_REQUEST_IDS.lock().unwrap().push(value.clone());
-                break;
-            }
+    for (key, value) in req.headers_vec() {
+        if key.eq_ignore_ascii_case("posthog-request-id") {
+            CAPTURED_REQUEST_IDS.lock().unwrap().push(value.clone());
+            break;
         }
     }
     true
@@ -512,8 +507,8 @@ fn v1_blocking_sends_event_options() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/i/v1/analytics/events")
-            .body_contains("\"cookieless_mode\":true")
-            .body_contains("\"process_person_profile\":false");
+            .body_includes("\"cookieless_mode\":true")
+            .body_includes("\"process_person_profile\":false");
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({ "results": {} }));
@@ -536,7 +531,7 @@ fn v1_blocking_injects_geoip_disable_when_configured() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/i/v1/analytics/events")
-            .body_contains("\"$geoip_disable\":true");
+            .body_includes("\"$geoip_disable\":true");
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({ "results": {} }));
@@ -562,7 +557,7 @@ fn v1_blocking_injects_is_server_by_default() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/i/v1/analytics/events")
-            .body_contains("\"$is_server\":true");
+            .body_includes("\"$is_server\":true");
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({ "results": {} }));
@@ -581,7 +576,7 @@ fn v1_blocking_caller_override_wins_for_is_server() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/i/v1/analytics/events")
-            .body_contains("\"$is_server\":false");
+            .body_includes("\"$is_server\":false");
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({ "results": {} }));
@@ -602,7 +597,7 @@ fn v1_blocking_batch_sets_historical_migration() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/i/v1/analytics/events")
-            .body_contains("\"historical_migration\":true");
+            .body_includes("\"historical_migration\":true");
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({ "results": {} }));
@@ -619,10 +614,7 @@ fn v1_blocking_batch_sets_historical_migration() {
 fn v1_body_gunzips_to_user1(req: &HttpMockRequest) -> bool {
     use std::io::Read;
 
-    let Some(body) = req.body.as_ref() else {
-        return false;
-    };
-    let mut decoder = flate2::read::GzDecoder::new(&body[..]);
+    let mut decoder = flate2::read::GzDecoder::new(req.body_ref());
     let mut decoded = String::new();
     match decoder.read_to_string(&mut decoded) {
         Ok(_) => decoded.contains(r#""distinct_id":"user-1""#),
@@ -668,8 +660,8 @@ fn v1_blocking_preserves_uuid_and_timestamp_across_retries() {
         when.method(POST)
             .path("/i/v1/analytics/events")
             .header("posthog-attempt", "1")
-            .body_contains(uuid.to_string())
-            .body_contains(ts);
+            .body_includes(uuid.to_string())
+            .body_includes(ts);
         then.status(503)
             .header("retry-after", "0")
             .json_body(json!({ "error": "service_unavailable" }));
@@ -678,8 +670,8 @@ fn v1_blocking_preserves_uuid_and_timestamp_across_retries() {
         when.method(POST)
             .path("/i/v1/analytics/events")
             .header("posthog-attempt", "2")
-            .body_contains(uuid.to_string())
-            .body_contains(ts);
+            .body_includes(uuid.to_string())
+            .body_includes(ts);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({ "results": {} }));
