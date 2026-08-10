@@ -204,6 +204,79 @@ fn test_cyclic_cohort_definition_does_not_exhaust_the_stack() {
     );
 }
 
+/// Nested property groups contribute to stack depth as well as cohort links.
+/// This payload stays within serde_json's per-value nesting limit but combines
+/// both forms deeply enough to overflow a typical worker stack without a shared
+/// resolution-depth bound.
+#[test]
+fn test_combined_cohort_and_property_group_depth_is_inconclusive() {
+    let cohort_count = 100;
+    let groups_per_cohort = 50;
+    let mut cohorts = serde_json::Map::new();
+
+    for cohort_index in 0..cohort_count {
+        let mut properties = if cohort_index == cohort_count - 1 {
+            json!({"key": "country", "value": "US", "operator": "exact", "type": "person"})
+        } else {
+            json!({"type": "cohort", "value": (cohort_index + 1).to_string()})
+        };
+
+        for _ in 0..groups_per_cohort {
+            properties = json!({"type": "AND", "values": [properties]});
+        }
+
+        cohorts.insert(cohort_index.to_string(), properties);
+    }
+
+    let payload = json!({
+        "flags": [
+            {
+                "key": "cohort-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        {
+                            "properties": [
+                                {"key": "id", "value": "0", "type": "cohort"}
+                            ],
+                            "rollout_percentage": 100.0
+                        }
+                    ]
+                }
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": serde_json::Value::Object(cohorts)
+    });
+    let serialized = serde_json::to_string(&payload).expect("payload should serialize");
+    let response: LocalEvaluationResponse =
+        serde_json::from_str(&serialized).expect("payload should stay within the JSON depth limit");
+
+    let cache = FlagCache::new();
+    let evaluator = LocalEvaluator::new(cache.clone());
+    cache.update(response);
+
+    let result = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            evaluator.evaluate_flag(
+                "cohort-flag",
+                "user-123",
+                &HashMap::from([("country".to_string(), json!("US"))]),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+        })
+        .expect("evaluation thread should start")
+        .join()
+        .expect("evaluation thread should not abort or panic");
+
+    assert!(
+        result.is_err(),
+        "combined cohort and property-group depth must be inconclusive"
+    );
+}
+
 #[test]
 fn test_local_evaluation_with_properties() {
     let cache = FlagCache::new();

@@ -879,7 +879,7 @@ fn match_cohort_property(
         .ok_or_else(|| InconclusiveMatchError::new("Cohort ID must be a string or number"))?;
 
     let mut active_cohorts = HashSet::new();
-    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx, &mut active_cohorts)
+    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx, &mut active_cohorts, 0)
         .map_err(CohortMatchError::into_inconclusive)?;
 
     // Cohort references omit the operator in API payloads, so "exact" means membership.
@@ -927,29 +927,28 @@ impl CohortMatchError {
     }
 }
 
-/// How deep a chain of cohort references local evaluation will follow.
+/// How deeply local cohort evaluation will recurse through cohort references
+/// and nested property groups combined.
 ///
 /// A cycle check alone bounds repeats, not depth: a chain of distinct cohorts is
-/// acyclic and still recurses once per link. Each cohort is a separate shallow
-/// entry in the manifest, so such a chain also clears `serde_json`'s own nesting
-/// limit on the way in, leaving nothing else between a long chain and an
-/// exhausted stack. Real cohort nesting is a handful of levels at most.
+/// acyclic and still recurses once per link. Counting only cohort references is
+/// also insufficient because each cohort can contain nested property groups.
+/// Real cohort nesting is a handful of levels at most.
 const MAX_COHORT_RESOLUTION_DEPTH: usize = 100;
 
 /// Look up a cohort by ID and evaluate its property group against `properties`.
 ///
-/// `active_cohorts` holds the IDs on the current resolution path, which bounds
-/// the recursion two ways: a cohort that references itself, directly or through
-/// others, is rejected as a cycle, and the path length is capped at
-/// [`MAX_COHORT_RESOLUTION_DEPTH`]. Either would otherwise recurse until the
-/// stack is exhausted, which aborts the process rather than panicking. IDs are
-/// removed on the way back out, so a cohort referenced twice down sibling
-/// branches still resolves normally.
+/// `active_cohorts` holds the IDs on the current resolution path so a cohort
+/// that references itself, directly or through others, is rejected as a cycle.
+/// `resolution_depth` bounds the combined path through cohort references and
+/// nested property groups. IDs are removed on the way back out, so a cohort
+/// referenced twice down sibling branches still resolves normally.
 fn match_cohort_by_id(
     cohort_id: &str,
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
     active_cohorts: &mut HashSet<String>,
+    resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
     let cohort = ctx.cohorts.get(cohort_id).ok_or_else(|| {
         CohortMatchError::MissingCohort(InconclusiveMatchError::new(&format!(
@@ -958,7 +957,7 @@ fn match_cohort_by_id(
         )))
     })?;
 
-    if active_cohorts.len() >= MAX_COHORT_RESOLUTION_DEPTH {
+    if resolution_depth >= MAX_COHORT_RESOLUTION_DEPTH {
         return Err(CohortMatchError::InvalidDefinition(
             InconclusiveMatchError::new(&format!(
                 "Cohort '{}' is nested deeper than the limit of {}",
@@ -976,7 +975,13 @@ fn match_cohort_by_id(
         ));
     }
 
-    let result = match_property_group(&cohort.properties, properties, ctx, active_cohorts);
+    let result = match_property_group(
+        &cohort.properties,
+        properties,
+        ctx,
+        active_cohorts,
+        resolution_depth,
+    );
     active_cohorts.remove(cohort_id);
     result
 }
@@ -996,9 +1001,26 @@ fn match_property_group(
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
     active_cohorts: &mut HashSet<String>,
+    resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
+    if resolution_depth >= MAX_COHORT_RESOLUTION_DEPTH {
+        return Err(CohortMatchError::InvalidDefinition(
+            InconclusiveMatchError::new(&format!(
+                "Cohort property groups are nested deeper than the limit of {}",
+                MAX_COHORT_RESOLUTION_DEPTH
+            )),
+        ));
+    }
+
     if let Some(arr) = group.as_array() {
-        return match_property_group_values("AND", arr, properties, ctx, active_cohorts);
+        return match_property_group_values(
+            "AND",
+            arr,
+            properties,
+            ctx,
+            active_cohorts,
+            resolution_depth,
+        );
     }
 
     let Some(obj) = group.as_object() else {
@@ -1020,7 +1042,14 @@ fn match_property_group(
         ));
     };
 
-    match_property_group_values(group_type, values, properties, ctx, active_cohorts)
+    match_property_group_values(
+        group_type,
+        values,
+        properties,
+        ctx,
+        active_cohorts,
+        resolution_depth,
+    )
 }
 
 /// Combine the `values` of a property group under AND/OR semantics.
@@ -1036,6 +1065,7 @@ fn match_property_group_values(
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
     active_cohorts: &mut HashSet<String>,
+    resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
     if values.is_empty() {
         return Ok(true);
@@ -1048,10 +1078,10 @@ fn match_property_group_values(
     for value in values {
         let result = if value.get("values").is_some() {
             // Nested property group.
-            match_property_group(value, properties, ctx, active_cohorts)
+            match_property_group(value, properties, ctx, active_cohorts, resolution_depth + 1)
         } else if value.get("type").and_then(|t| t.as_str()) == Some("cohort") {
             // A cohort filter nested inside another cohort.
-            match_nested_cohort(value, properties, ctx, active_cohorts)
+            match_nested_cohort(value, properties, ctx, active_cohorts, resolution_depth + 1)
         } else {
             // Leaf property filter.
             match serde_json::from_value::<CohortProperty>(value.clone()) {
@@ -1092,6 +1122,7 @@ fn match_nested_cohort(
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
     active_cohorts: &mut HashSet<String>,
+    resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
     let cohort_id = value
         .get("value")
@@ -1107,7 +1138,13 @@ fn match_nested_cohort(
         .and_then(|n| n.as_bool())
         .unwrap_or(false);
 
-    let is_member = match_cohort_by_id(&cohort_id, properties, ctx, active_cohorts)?;
+    let is_member = match_cohort_by_id(
+        &cohort_id,
+        properties,
+        ctx,
+        active_cohorts,
+        resolution_depth,
+    )?;
     Ok(is_member != negation)
 }
 
