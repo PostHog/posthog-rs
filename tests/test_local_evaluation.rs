@@ -1,8 +1,3 @@
-// Some tests in this file exercise the deprecated single-flag methods
-// alongside the local-evaluation cache; tolerate the deprecation warnings
-// during the transition window.
-#![allow(deprecated)]
-
 mod common;
 
 use common::default_user_agent;
@@ -439,11 +434,19 @@ async fn test_local_evaluation_with_mock_server() {
     let mut properties = HashMap::new();
     properties.insert("email".to_string(), json!("test@company.com"));
 
-    let result = client
-        .get_feature_flag("feature-b", "user-123", None, Some(properties), None)
-        .await;
+    let flags = client
+        .evaluate_flags(
+            "user-123",
+            EvaluateFlagsOptions {
+                person_properties: Some(properties),
+                flag_keys: Some(vec!["feature-b".to_string()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
-    assert!(result.unwrap() == Some(FlagValue::Boolean(true)));
+    assert_eq!(flags.get_flag("feature-b"), Some(FlagValue::Boolean(true)));
 
     eval_mock.assert();
 }
@@ -496,8 +499,9 @@ async fn test_client_adds_distinct_id_for_local_evaluation_only() {
     let options = ClientOptionsBuilder::default()
         .host(server.base_url())
         .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
+        .secret_key("test_personal_key".to_string())
         .enable_local_evaluation(true)
+        .local_evaluation_only(true)
         .poll_interval_seconds(60)
         .build()
         .unwrap();
@@ -505,11 +509,15 @@ async fn test_client_adds_distinct_id_for_local_evaluation_only() {
     let client = posthog_rs::client(options).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let result = client
-        .get_feature_flag("distinct-id-flag", "user-123", None, None, None)
-        .await;
+    let flags = client
+        .evaluate_flags("user-123", EvaluateFlagsOptions::default())
+        .await
+        .unwrap();
 
-    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    assert_eq!(
+        flags.get_flag("distinct-id-flag"),
+        Some(FlagValue::Boolean(true))
+    );
     eval_mock.assert();
     flags_mock.assert_hits(0);
 }
@@ -585,7 +593,7 @@ async fn test_local_evaluation_returns_payloads_without_calling_flags() {
     let options = ClientOptionsBuilder::default()
         .host(server.base_url())
         .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
+        .secret_key("test_personal_key".to_string())
         .enable_local_evaluation(true)
         .poll_interval_seconds(60)
         .build()
@@ -653,20 +661,16 @@ async fn test_local_evaluation_with_mock_server_sends_default_user_agent() {
     let options = ClientOptionsBuilder::default()
         .host(server.base_url())
         .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
+        .secret_key("test_personal_key".to_string())
         .enable_local_evaluation(true)
         .poll_interval_seconds(60)
         .build()
         .unwrap();
 
-    let client = posthog_rs::client(options).await;
+    let _client = posthog_rs::client(options).await;
 
     // Give it a moment to load initial flags
     tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let _ = client
-        .get_feature_flag("feature-b", "", None, None, None)
-        .await;
 
     eval_mock.assert();
 }
