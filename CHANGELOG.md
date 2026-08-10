@@ -1,5 +1,18 @@
 # posthog-rs
 
+## 0.23.2 — 2026-08-10
+
+### Patch changes
+
+- [ea92c93](https://github.com/posthog/posthog-rs/commit/ea92c93251a97255208332c40df7a50854c57aa8) Surface feature flag payloads from local evaluation.
+  
+  The definitions manifest carries each flag's payloads, but locally evaluated flags always reported `payload: None`, so `FeatureFlagEvaluations::get_flag_payload` returned nothing for them. When `flag_keys` was fully covered locally there was also no `/flags` round trip left to recover the payload from. Local evaluation now resolves the payload for the matched value (`"true"` for a boolean match, the variant key for a multivariate one) and decodes it exactly like a `/flags` payload, so a flag returns the same payload whichever path evaluated it. As a result, `$feature_flag_called` events for locally evaluated flags now carry `$feature_flag_payload`, matching remote evaluation. — Thanks @slshults!
+- [962282c](https://github.com/posthog/posthog-rs/commit/962282cf3b0be3353d61ce088fbfa3514f1eebf4) Stop malformed cohort definitions from aborting the process during local evaluation.
+  
+  Cohort resolution recursed through nested cohort references with nothing bounding the recursion, so a cohort that referenced itself, directly or through another cohort, recursed until the thread stack was exhausted. A Rust stack overflow aborts the process rather than panicking catchably, so a single bad definitions response could take down the calling server, and would again on restart as soon as the poller refetched. A long chain of distinct cohorts reached the same abort without any cycle at all, and because each cohort is a separate shallow entry in the manifest, such a chain also cleared `serde_json`'s own nesting limit on the way in.
+  
+  Cohort resolution now tracks the cohorts on the active resolution path and the combined depth of cohort references and nested property groups. A repeated cohort is reported as a cycle, and total resolution depth is capped at 100. Either is reported as inconclusive, so the flag falls back to server-side evaluation rather than resolving to a wrong value. Referencing the same cohort twice down sibling branches still resolves normally, since IDs are released as the recursion unwinds. — Thanks @slshults!
+
 ## 0.23.1 — 2026-08-10
 
 ### Patch changes

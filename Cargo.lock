@@ -1569,7 +1569,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "posthog-rs"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "backtrace",
  "brotli",
