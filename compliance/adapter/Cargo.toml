@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-posthog-rs = { path = "../..", features = ["async-client", "test-harness"] }
+posthog-rs = { path = "../..", default-features = false, features = ["async-client", "test-harness"] }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

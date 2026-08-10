@@ -79,14 +79,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: default features
+          - name: default features (V1 capture)
             toolchain: stable
             cache-key: default-features
             command: cargo build --verbose
-          - name: capture-v1
+          - name: V0 capture fallback
             toolchain: stable
-            cache-key: capture-v1
-            command: cargo build --verbose --features capture-v1
+            cache-key: capture-v0
+            command: cargo build --verbose --no-default-features --features async-client,error-tracking
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -147,15 +147,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Unit test (default features)
+          - name: Unit test (default features, V1 capture)
             cache-key: default-features
             command: cargo test --verbose
           - name: Unit test (workspace)
             cache-key: workspace
             command: cargo test --workspace --verbose
-          - name: Unit test (capture-v1, async client)
-            cache-key: capture-v1-async-client
-            command: cargo test --verbose --features capture-v1
+          - name: Unit test (V0 capture fallback, async client)
+            cache-key: capture-v0-async-client
+            command: cargo test --verbose --no-default-features --features async-client,error-tracking
           - name: Unit test (capture-v1, blocking client)
             cache-key: capture-v1-blocking-client
             command: cargo test --verbose --no-default-features --features capture-v1

@@ -48,7 +48,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eyre = "0.6.12"
 
 [features]
-default = ["async-client", "error-tracking"]
+default = ["async-client", "error-tracking", "capture-v1"]
 e2e-test = []
 async-client = ["tokio"]
 capture-v1 = ["brotli", "zstd"]
