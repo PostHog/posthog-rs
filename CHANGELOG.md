@@ -1,5 +1,13 @@
 # posthog-rs
 
+## 0.23.1 — 2026-08-10
+
+### Patch changes
+
+- [cf8952a](https://github.com/posthog/posthog-rs/commit/cf8952a3ea46b1765e551b2afac374e7253df493) Fix local flag evaluation for projects that use cohorts.
+  
+  The `/flags/definitions/?send_cohorts` payload maps each cohort ID directly to its property group (`{"type": "AND"|"OR", "values": [...]}`), but `Cohort` required non-existent `id`/`name`/`properties` fields, so the whole `LocalEvaluationResponse` failed to deserialize and no flags loaded at all. `Cohort` now deserializes the real payload, and cohort matching recurses through nested AND/OR groups and cohort references instead of flattening them. — Thanks @posthog[bot] for your first contribution 🎉!
+
 ## 0.23.0 — 2026-08-07
 
 ### Minor changes
