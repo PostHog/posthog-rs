@@ -1032,7 +1032,7 @@ impl Client {
                 .or_insert_with(|| json!(distinct_id.clone()));
             let groups_owned = options.groups.clone().unwrap_or_default();
             let group_props_owned = options.group_properties.clone().unwrap_or_default();
-            let local_results = evaluator.evaluate_all_flags(
+            let local_results = evaluator.evaluate_all_flags_with_details(
                 &distinct_id,
                 &person_props_owned,
                 &groups_owned,
@@ -1048,11 +1048,15 @@ impl Client {
                         continue;
                     }
                 }
-                if let Ok(value) = result {
-                    let has_experiment = evaluator.cache().has_experiment(&key);
+                if let Ok(value) = result.result {
                     records.insert(
                         key.clone(),
-                        local_record(value, has_experiment, local_minimal_gate),
+                        local_record(
+                            value,
+                            result.payload,
+                            result.has_experiment,
+                            local_minimal_gate,
+                        ),
                     );
                     locally_evaluated_keys.insert(key);
                 }
@@ -1375,5 +1379,97 @@ mod minimal_gate_tests {
             Some(&serde_json::json!(false))
         );
         assert!(captured[0].minimal);
+    }
+}
+
+#[cfg(test)]
+mod local_payload_tests {
+    use super::*;
+    use crate::client::local_payload_test_support::payload_definitions;
+    use crate::client::minimal_gate_test_support::RecordingHost;
+    use serde_json::json;
+
+    fn snapshot() -> FeatureFlagEvaluations {
+        let cache = FlagCache::new();
+        cache.update(payload_definitions());
+        let options = ClientOptions::from(("phc_test", "http://localhost:0"));
+        let client = Client {
+            options,
+            client: HttpClient::builder().build().unwrap(),
+            local_evaluator: Some(LocalEvaluator::new(cache)),
+            _flag_poller: None,
+            flag_event_host: OnceLock::new(),
+            transport: None,
+        };
+        client
+            .flag_event_host
+            .set(Arc::new(RecordingHost::default()) as _)
+            .unwrap_or_else(|_| panic!("host already set"));
+        client
+            .evaluate_flags(
+                "user-1",
+                EvaluateFlagsOptions {
+                    only_evaluate_locally: true,
+                    ..Default::default()
+                },
+            )
+            .expect("local evaluate_flags")
+    }
+
+    /// Payloads live in the definitions manifest, so local evaluation must
+    /// surface them the same way `/flags` does — including the JSON decoding,
+    /// or the same flag would yield different payloads depending on which path
+    /// evaluated it.
+    #[test]
+    fn local_evaluation_surfaces_payloads_matching_the_remote_shape() {
+        let snapshot = snapshot();
+
+        assert_eq!(
+            snapshot.get_flag_payload("json-string-payload"),
+            Some(json!({"color": "blue"}))
+        );
+        assert_eq!(
+            snapshot.get_flag_payload("parsed-payload"),
+            Some(json!({"color": "blue"}))
+        );
+        assert_eq!(
+            snapshot.get_flag_payload("quoted-string-payload"),
+            Some(json!("just text"))
+        );
+        assert_eq!(
+            snapshot.get_flag_payload("undecodable-payload"),
+            Some(json!("not json"))
+        );
+    }
+
+    #[test]
+    fn local_payload_is_keyed_by_the_matched_variant() {
+        let snapshot = snapshot();
+
+        assert_eq!(
+            snapshot.get_flag("variant-payload"),
+            Some(FlagValue::String("test".to_string()))
+        );
+        assert_eq!(
+            snapshot.get_flag_payload("variant-payload"),
+            Some(json!({"tier": 2}))
+        );
+    }
+
+    #[test]
+    fn local_payload_is_absent_without_a_matching_payload() {
+        let snapshot = snapshot();
+
+        assert_eq!(snapshot.get_flag_payload("no-payload"), None);
+        assert_eq!(snapshot.get_flag_payload("not-a-flag"), None);
+
+        // A missing key also yields `None`, so pin the flag down first:
+        // it was evaluated, it evaluated false, and its "true" payload
+        // stayed behind.
+        assert_eq!(
+            snapshot.get_flag("disabled-with-payload"),
+            Some(FlagValue::Boolean(false))
+        );
+        assert_eq!(snapshot.get_flag_payload("disabled-with-payload"), None);
     }
 }

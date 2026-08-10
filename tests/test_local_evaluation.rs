@@ -8,7 +8,7 @@ mod common;
 use common::default_user_agent;
 use httpmock::prelude::*;
 #[cfg(feature = "async-client")]
-use posthog_rs::{AsyncFlagPoller, ClientOptionsBuilder};
+use posthog_rs::{AsyncFlagPoller, ClientOptionsBuilder, EvaluateFlagsOptions};
 use posthog_rs::{
     FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache, FlagPoller, FlagValue,
     LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator, Property,
@@ -381,6 +381,119 @@ async fn test_client_adds_distinct_id_for_local_evaluation_only() {
         .await;
 
     assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    eval_mock.assert();
+    flags_mock.assert_hits(0);
+}
+
+/// Payloads ride along in the definitions manifest, so a snapshot that never
+/// touches `/flags` must still expose them. This is the path where they were
+/// most thoroughly lost: with `flag_keys` fully covered locally there is no
+/// remote round trip left to recover a payload from.
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_local_evaluation_returns_payloads_without_calling_flags() {
+    let server = MockServer::start();
+
+    // Payloads arrive JSON-encoded from `/flags/definitions/`, the same shape
+    // `/flags` returns them in.
+    let mock_flags = json!({
+        "flags": [
+            {
+                "key": "bool-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        { "properties": [], "rollout_percentage": 100.0, "variant": null }
+                    ],
+                    "multivariate": null,
+                    "payloads": { "true": "{\"color\": \"blue\"}" }
+                }
+            },
+            {
+                "key": "variant-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        { "properties": [], "rollout_percentage": 100.0, "variant": null }
+                    ],
+                    "multivariate": {
+                        "variants": [
+                            { "key": "test", "rollout_percentage": 100.0 },
+                            { "key": "control", "rollout_percentage": 0.0 }
+                        ]
+                    },
+                    "payloads": { "test": "{\"tier\": 2}", "control": "{\"tier\": 1}" }
+                }
+            },
+            {
+                "key": "no-payload-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        { "properties": [], "rollout_percentage": 100.0, "variant": null }
+                    ],
+                    "multivariate": null,
+                    "payloads": {}
+                }
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+
+    let eval_mock = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(mock_flags);
+    });
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({
+            "featureFlags": {},
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let options = ClientOptionsBuilder::default()
+        .host(server.base_url())
+        .api_key("test_project_key".to_string())
+        .personal_api_key("test_personal_key".to_string())
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(60)
+        .build()
+        .unwrap();
+
+    let client = posthog_rs::client(options).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let snapshot = client
+        .evaluate_flags(
+            "user-123",
+            EvaluateFlagsOptions {
+                flag_keys: Some(vec![
+                    "bool-flag".to_string(),
+                    "variant-flag".to_string(),
+                    "no-payload-flag".to_string(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("evaluate_flags");
+
+    assert_eq!(
+        snapshot.get_flag_payload("bool-flag"),
+        Some(json!({ "color": "blue" }))
+    );
+    assert_eq!(
+        snapshot.get_flag("variant-flag"),
+        Some(FlagValue::String("test".to_string()))
+    );
+    assert_eq!(
+        snapshot.get_flag_payload("variant-flag"),
+        Some(json!({ "tier": 2 }))
+    );
+    assert_eq!(snapshot.get_flag_payload("no-payload-flag"), None);
+
     eval_mock.assert();
     flags_mock.assert_hits(0);
 }
