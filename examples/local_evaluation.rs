@@ -8,7 +8,7 @@
 //!   cargo run --example local_evaluation --features async-client
 
 #[cfg(feature = "async-client")]
-use posthog_rs::{ClientOptionsBuilder, EvaluateFlagsOptions};
+use posthog::{ClientOptionsBuilder, EvaluateFlagsOptions};
 #[cfg(feature = "async-client")]
 use serde_json::json;
 #[cfg(feature = "async-client")]
@@ -32,7 +32,7 @@ async fn main() {
             .poll_interval_seconds(30)
             .build()
             .unwrap();
-        posthog_rs::client(options).await
+        posthog::client(options).await
     };
 
     let api_client = {
@@ -40,7 +40,7 @@ async fn main() {
             .api_key(api_key)
             .build()
             .unwrap();
-        posthog_rs::client(options).await
+        posthog::client(options).await
     };
 
     println!("Fetching flag definitions for local evaluation...");

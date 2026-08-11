@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use httpmock::prelude::*;
-use posthog_rs::{Client, ClientOptionsBuilder, Event};
+use posthog::{Client, ClientOptionsBuilder, Event};
 
 async fn client_with(host: String, flush_at: usize, max_attempts: u32) -> Client {
     let options = ClientOptionsBuilder::default()
@@ -27,7 +27,7 @@ async fn client_with(host: String, flush_at: usize, max_attempts: u32) -> Client
         .retry_max_backoff_ms(600_000u64)
         .build()
         .unwrap();
-    posthog_rs::client(options).await
+    posthog::client(options).await
 }
 
 /// Poll a mock until it has been hit `want` times (for worker-timed paths such

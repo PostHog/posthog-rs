@@ -86,16 +86,16 @@ fn request_has_no_stacktrace(req: &HttpMockRequest) -> bool {
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
-    use posthog_rs::CaptureExceptionOptions;
+    use posthog::CaptureExceptionOptions;
 
-    fn create_test_client(base_url: String) -> posthog_rs::Client {
-        let options = posthog_rs::ClientOptionsBuilder::default()
+    fn create_test_client(base_url: String) -> posthog::Client {
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(base_url)
             .max_capture_attempts(1u32)
             .build()
             .unwrap();
-        posthog_rs::client(options)
+        posthog::client(options)
     }
 
     #[test]
@@ -160,13 +160,13 @@ mod blocking {
 
     #[test]
     fn disabled_capture_exception_does_not_build_exception_payload() {
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host("http://127.0.0.1:1")
             .disabled(true)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
 
         client.capture_exception(&PanicDisplayError).unwrap();
         client
@@ -193,19 +193,19 @@ mod blocking {
                 .json_body(ok_response());
         });
 
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
             .max_capture_attempts(1u32)
             .error_tracking(
-                posthog_rs::ErrorTrackingOptionsBuilder::default()
+                posthog::ErrorTrackingOptionsBuilder::default()
                     .capture_stacktrace(false)
                     .build()
                     .unwrap(),
             )
             .build()
             .unwrap();
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
 
         client.capture_exception(&TestError).unwrap();
         client.flush();
@@ -217,16 +217,16 @@ mod blocking {
 #[cfg(feature = "async-client")]
 mod async_client {
     use super::*;
-    use posthog_rs::CaptureExceptionOptions;
+    use posthog::CaptureExceptionOptions;
 
-    async fn create_test_client(base_url: String) -> posthog_rs::Client {
-        let options = posthog_rs::ClientOptionsBuilder::default()
+    async fn create_test_client(base_url: String) -> posthog::Client {
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(base_url)
             .max_capture_attempts(1u32)
             .build()
             .unwrap();
-        posthog_rs::client(options).await
+        posthog::client(options).await
     }
 
     #[tokio::test]
@@ -292,13 +292,13 @@ mod async_client {
 
     #[tokio::test]
     async fn disabled_capture_exception_does_not_build_exception_payload() {
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host("http://127.0.0.1:1")
             .disabled(true)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
 
         client.capture_exception(&PanicDisplayError).await.unwrap();
         client
@@ -326,19 +326,19 @@ mod async_client {
                 .json_body(ok_response());
         });
 
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
             .max_capture_attempts(1u32)
             .error_tracking(
-                posthog_rs::ErrorTrackingOptionsBuilder::default()
+                posthog::ErrorTrackingOptionsBuilder::default()
                     .capture_stacktrace(false)
                     .build()
                     .unwrap(),
             )
             .build()
             .unwrap();
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
 
         client.capture_exception(&TestError).await.unwrap();
         client.flush().await;

@@ -1,6 +1,6 @@
-# Migrating from posthog-rs 0.x to 1.0
+# Migrating from posthog-rs 0.x to posthog 1.0
 
-Version 1.0 makes the V1 analytics endpoint the SDK's only capture path and removes APIs that were already deprecated in 0.x. This guide describes the changes currently staged on the `v1` branch.
+Version 1.0 publishes the SDK under the canonical `posthog` package and import name, makes the V1 analytics endpoint the only capture path, and removes APIs that were already deprecated in 0.x. The `posthog-rs` package remains as a compatibility crate, so existing applications can upgrade without changing package or import names. This guide uses the canonical `posthog` name for 1.0 examples.
 
 ## Cargo features
 
@@ -11,17 +11,17 @@ Remove `capture-v1` from your dependency features. Capture no longer needs a fea
 posthog-rs = { version = "0.25", features = ["capture-v1"] }
 
 # 1.0
-posthog-rs = "1"
+posthog = "1"
 ```
 
 The default features remain the async client and error tracking. Use `default-features = false` for the blocking client.
 
 ```toml
 # Async client with error tracking
-posthog-rs = "1"
+posthog = "1"
 
 # Blocking client without error tracking
-posthog-rs = { version = "1", default-features = false }
+posthog = { version = "1", default-features = false }
 ```
 
 The V0 capture implementation and its `/i/v0/e/` and batch plumbing have been removed. `Endpoint::Batch` no longer exists, and `Endpoint::Capture` now resolves to `/i/v1/analytics/events`.
@@ -53,7 +53,7 @@ Rename `V1ErrorResponse` to `CaptureErrorResponse`:
 let response: Option<&posthog_rs::V1ErrorResponse> = failure.error_response();
 
 // 1.0
-let response: Option<&posthog_rs::CaptureErrorResponse> = failure.error_response();
+let response: Option<&posthog::CaptureErrorResponse> = failure.error_response();
 ```
 
 ## Feature flags
@@ -68,7 +68,7 @@ The deprecated single-flag methods have been removed:
 Call `evaluate_flags` once and read from the returned snapshot instead:
 
 ```rust
-use posthog_rs::EvaluateFlagsOptions;
+use posthog::EvaluateFlagsOptions;
 
 let flags = client
     .evaluate_flags("user-123", EvaluateFlagsOptions::default())
@@ -97,7 +97,7 @@ options.flag_keys = Some(vec!["new-checkout".to_string()]);
 Use `secret_key` terminology throughout configuration. The builder's deprecated `personal_api_key` alias has been removed, and `LocalEvaluationConfig::personal_api_key` is now `secret_key`.
 
 ```rust
-let options = posthog_rs::ClientOptionsBuilder::default()
+let options = posthog::ClientOptionsBuilder::default()
     .api_key("phc_project_token")
     .secret_key("phs_project_secret")
     .enable_local_evaluation(true)

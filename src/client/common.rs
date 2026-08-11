@@ -90,7 +90,7 @@ impl FeatureFlagEvaluationsHost for FlagEventHost {
 
     fn log_warning(&self, message: &str) {
         // Surface filter-helper misuse via tracing — users can silence these
-        // with their tracing-subscriber level filter (e.g. `posthog_rs=error`).
+        // with their tracing-subscriber level filter (e.g. `posthog=error`).
         warn!("{message}");
     }
 }

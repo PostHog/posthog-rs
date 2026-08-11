@@ -97,9 +97,9 @@ const BLANK_IDS: [&str; 2] = ["", "   "];
 mod blocking {
     use super::*;
 
-    fn create_test_client(base_url: String) -> posthog_rs::Client {
-        let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
-        posthog_rs::client(options)
+    fn create_test_client(base_url: String) -> posthog::Client {
+        let options: posthog::ClientOptions = ("test_api_key", base_url.as_str()).into();
+        posthog::client(options)
     }
 
     #[test]
@@ -198,13 +198,13 @@ mod blocking {
             then.status(200).json_body(ok_response());
         });
 
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .host(server.base_url())
             .build()
             .unwrap();
         assert!(options.is_disabled());
 
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
         client.alias(PREVIOUS_ID, DISTINCT_ID);
         client.flush();
 
@@ -216,9 +216,9 @@ mod blocking {
 mod async_client {
     use super::*;
 
-    async fn create_test_client(base_url: String) -> posthog_rs::Client {
-        let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
-        posthog_rs::client(options).await
+    async fn create_test_client(base_url: String) -> posthog::Client {
+        let options: posthog::ClientOptions = ("test_api_key", base_url.as_str()).into();
+        posthog::client(options).await
     }
 
     #[tokio::test]
@@ -317,13 +317,13 @@ mod async_client {
             then.status(200).json_body(ok_response());
         });
 
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .host(server.base_url())
             .build()
             .unwrap();
         assert!(options.is_disabled());
 
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
         client.alias(PREVIOUS_ID, DISTINCT_ID);
         client.flush().await;
 

@@ -150,7 +150,7 @@ impl Client {
     ///
     /// ```no_run
     /// # async fn example() {
-    /// let client = posthog_rs::client("phc_project_api_key").await;
+    /// let client = posthog::client("phc_project_api_key").await;
     ///
     /// // The visitor browsed anonymously, then logged in.
     /// client.alias("anon-abc123", "user-42");
@@ -187,10 +187,10 @@ impl Client {
     /// # Examples
     ///
     /// ```no_run
-    /// # async fn example() -> Result<(), posthog_rs::Error> {
+    /// # async fn example() -> Result<(), posthog::Error> {
     /// use serde_json::json;
     ///
-    /// let client = posthog_rs::client("phc_project_api_key").await;
+    /// let client = posthog::client("phc_project_api_key").await;
     ///
     /// client.group_identify(
     ///     "company",
@@ -327,8 +327,8 @@ impl Client {
     /// # Examples
     ///
     /// ```no_run
-    /// # async fn example() -> Result<(), posthog_rs::Error> {
-    /// let client = posthog_rs::client("phc_project_api_key").await;
+    /// # async fn example() -> Result<(), posthog::Error> {
+    /// let client = posthog::client("phc_project_api_key").await;
     /// let error = std::io::Error::other("checkout failed");
     ///
     /// client.capture_exception(&error).await?;
@@ -353,10 +353,10 @@ impl Client {
     /// # Examples
     ///
     /// ```no_run
-    /// # async fn example() -> Result<(), posthog_rs::Error> {
-    /// use posthog_rs::CaptureExceptionOptions;
+    /// # async fn example() -> Result<(), posthog::Error> {
+    /// use posthog::CaptureExceptionOptions;
     ///
-    /// let client = posthog_rs::client("phc_project_api_key").await;
+    /// let client = posthog::client("phc_project_api_key").await;
     /// let error = std::io::Error::other("checkout failed");
     ///
     /// client

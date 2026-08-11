@@ -5,7 +5,7 @@ async fn get_client_async() {
     dotenv().ok(); // Load the .env file
 
     // see https://us.posthog.com/project/115809/ for the e2e project
-    use posthog_rs::Event;
+    use posthog::Event;
     use std::collections::HashMap;
 
     let api_key = match std::env::var("POSTHOG_RS_E2E_TEST_API_KEY") {
@@ -15,7 +15,7 @@ async fn get_client_async() {
             return;
         }
     };
-    let client = posthog_rs::client(api_key.as_str()).await;
+    let client = posthog::client(api_key.as_str()).await;
 
     let mut child_map = HashMap::new();
     child_map.insert("child_key1", "child_value1");
@@ -35,7 +35,7 @@ fn get_client_blocking() {
     dotenv().ok(); // Load the .env file
 
     // see https://us.posthog.com/project/115809/ for the e2e project
-    use posthog_rs::Event;
+    use posthog::Event;
     use std::collections::HashMap;
 
     let api_key = match std::env::var("POSTHOG_RS_E2E_TEST_API_KEY") {
@@ -45,7 +45,7 @@ fn get_client_blocking() {
             return;
         }
     };
-    let client = posthog_rs::client(api_key.as_str());
+    let client = posthog::client(api_key.as_str());
 
     let mut child_map = HashMap::new();
     child_map.insert("child_key1", "child_value1");
@@ -64,7 +64,7 @@ async fn get_client_v1_async() {
     use dotenv::dotenv;
     dotenv().ok();
 
-    use posthog_rs::{ClientOptionsBuilder, Event};
+    use posthog::{ClientOptionsBuilder, Event};
     use std::collections::HashMap;
 
     let api_key = match std::env::var("POSTHOG_RS_E2E_TEST_API_KEY") {
@@ -79,7 +79,7 @@ async fn get_client_v1_async() {
         .api_key(api_key)
         .build()
         .unwrap();
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
 
     let mut child_map = HashMap::new();
     child_map.insert("child_key1", "child_value1");
