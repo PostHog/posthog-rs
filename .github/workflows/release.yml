@@ -44,7 +44,7 @@ jobs:
   notify-approval-needed:
     name: Notify Slack - Approval Needed
     needs: check-changesets
-    if: needs.check-changesets.outputs.has-changesets == 'true'
+    if: needs.check-changesets.outputs.has-changesets == 'true' && github.run_attempt == 1
     uses: posthog/.github/.github/workflows/notify-approval-needed.yml@5fc4680761e8ac29a61b212756230eba0e276d8c
     with:
       slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
@@ -57,7 +57,11 @@ jobs:
     name: Release and publish
     needs: [check-changesets, notify-approval-needed]
     runs-on: ubuntu-latest
-    if: always() && needs.check-changesets.outputs.has-changesets == 'true'
+    if: >-
+      always() &&
+      needs.check-changesets.result == 'success' &&
+      (needs.check-changesets.outputs.has-changesets == 'true' ||
+       github.run_attempt > 1)
     environment: "Release"
     permissions:
       contents: write
@@ -65,7 +69,7 @@ jobs:
       id-token: write
     steps:
       - name: Notify Slack - Approved
-        if: needs.notify-approval-needed.outputs.slack_ts != ''
+        if: needs.notify-approval-needed.outputs.slack_ts != '' && github.run_attempt == 1
         uses: posthog/.github/.github/actions/slack-thread-reply@cb0979b67dcd585828b61ac45927eef4da8f6287 # main
         with:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
@@ -88,6 +92,59 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.releaser.outputs.token }}
 
+      - name: Locate prepared release on retry
+        id: retry-release
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          echo "is-resume=false" >> "$GITHUB_OUTPUT"
+          if [ "$RUN_ATTEMPT" -le 1 ]; then
+            exit 0
+          fi
+
+          git fetch origin main --tags
+          if ! git merge-base --is-ancestor "$TRIGGER_SHA" origin/main; then
+            echo "The original workflow commit is no longer on main; continuing as a normal retry"
+            exit 0
+          fi
+
+          release_commit=""
+          release_version=""
+          while IFS= read -r commit; do
+            if ! git log -1 --format=%B "$commit" |
+               grep -Fx "Release-Workflow-Run: ${RUN_ID}" >/dev/null; then
+              continue
+            fi
+            subject=$(git log -1 --pretty=%s "$commit")
+            case "$subject" in
+              "chore: Release v"*" [skip ci]")
+                version=${subject#"chore: Release v"}
+                version=${version%" [skip ci]"}
+                manifest_version=$(git show "$commit:Cargo.toml" | grep '^version = ' | head -1 | sed 's/version = "\(.*\)"/\1/')
+                shim_version=$(git show "$commit:crates/posthog-rs/Cargo.toml" | grep '^version = ' | head -1 | sed 's/version = "\(.*\)"/\1/')
+                if [ "$manifest_version" = "$version" ] &&
+                   [ "$shim_version" = "$version" ] &&
+                   git show "$commit:CHANGELOG.md" | grep "^## ${version} " >/dev/null; then
+                  release_commit="$commit"
+                  release_version="$version"
+                  break
+                fi
+                ;;
+            esac
+          done < <(git rev-list --reverse --first-parent "$TRIGGER_SHA..origin/main")
+
+          if [ -z "$release_commit" ]; then
+            echo "No prepared release commit found; continuing as a normal retry"
+            exit 0
+          fi
+
+          git switch -C main "$release_commit"
+          echo "is-resume=true" >> "$GITHUB_OUTPUT"
+          echo "release-commit=$release_commit" >> "$GITHUB_OUTPUT"
+          echo "Resuming release ${release_version} from ${release_commit}"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1.93.1
         with:
@@ -99,13 +156,14 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/sampo
-          key: sampo-${{ runner.os }}-${{ runner.arch }}
+          key: sampo-0.19.0-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install Sampo CLI
         if: steps.cache-sampo.outputs.cache-hit != 'true'
-        run: cargo install sampo
+        run: cargo install sampo --version 0.19.0 --locked
 
       - name: Prepare release with Sampo
+        if: steps.retry-release.outputs.is-resume != 'true'
         id: sampo-release
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
@@ -115,6 +173,7 @@ jobs:
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
       - name: Check for changes
+        if: steps.retry-release.outputs.is-resume != 'true'
         id: check-changes
         run: |
           if git diff --quiet; then
@@ -127,57 +186,217 @@ jobs:
 
       - name: Commit release changes
         if: steps.check-changes.outputs.committed == 'true'
+        id: release-commit
         uses: planetscale/ghcommit-action@a6b150b81dca5dd027baa898604418eec9e11465
         with:
-          commit_message: "chore: Release v${{ steps.sampo-release.outputs.new_version }} [skip ci]"
+          commit_message: |
+            chore: Release v${{ steps.sampo-release.outputs.new_version }} [skip ci]
+
+            Release-Workflow-Run: ${{ github.run_id }}
           repo: ${{ github.repository }}
           branch: main
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
 
-      # ghcommit-action commits via the GitHub API, so the local working
-      # tree still has dirty files. Discard them (already committed remotely)
-      # and pull, otherwise cargo publish fails with "files contain changes
-      # not yet committed".
+      # ghcommit-action commits via the GitHub API, so the local working tree
+      # still has dirty files. Discard them and check out the exact release
+      # commit; main may advance while the release is awaiting approval.
       - name: Sync local repository
         if: steps.check-changes.outputs.committed == 'true'
-        run: git checkout -- . && git pull origin main
+        env:
+          RELEASE_COMMIT: ${{ steps.release-commit.outputs.commit-hash }}
+        run: |
+          git checkout -- .
+          git fetch origin main
+          git switch -C main "$RELEASE_COMMIT"
+          if ! git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main; then
+            echo "Release commit does not belong to the main branch" >&2
+            exit 1
+          fi
 
-      - name: Publish dry-run
-        if: steps.check-changes.outputs.committed == 'true'
-        run: cargo publish --workspace --dry-run
+      - name: Resolve release details
+        id: release-details
+        env:
+          RESUME_MODE: ${{ steps.retry-release.outputs.is-resume }}
+          PREPARED_VERSION: ${{ steps.sampo-release.outputs.new_version }}
+          COMMITTED: ${{ steps.check-changes.outputs.committed }}
+        run: |
+          if [ "$RESUME_MODE" = "true" ]; then
+            version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            expected_subject="chore: Release v${version} [skip ci]"
+            actual_subject=$(git log -1 --pretty=%s)
+            if [ "$actual_subject" != "$expected_subject" ]; then
+              echo "Retry target is not the release commit for v${version}" >&2
+              exit 1
+            fi
+            if ! grep -q "^## ${version} " CHANGELOG.md; then
+              echo "CHANGELOG.md does not contain a release entry for ${version}" >&2
+              exit 1
+            fi
+            if git show-ref --verify --quiet "refs/tags/${version}"; then
+              tag_sha=$(git rev-list -n 1 "$version")
+              if [ "$tag_sha" != "$(git rev-parse HEAD)" ]; then
+                echo "Tag ${version} does not point to the retry commit" >&2
+                exit 1
+              fi
+            fi
+            should_publish=true
+          else
+            version="$PREPARED_VERSION"
+            should_publish="$COMMITTED"
+          fi
+
+          if [ -z "$version" ]; then
+            echo "Could not resolve the release version" >&2
+            exit 1
+          fi
+
+          canonical_version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          shim_version=$(grep '^version = ' crates/posthog-rs/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          if [ "$canonical_version" != "$version" ] || [ "$shim_version" != "$version" ]; then
+            echo "posthog and posthog-rs versions are not synchronized at ${version}" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "should-publish=$should_publish" >> "$GITHUB_OUTPUT"
+
+      - name: Workspace publish dry-run
+        if: steps.release-details.outputs.should-publish == 'true'
+        run: cargo publish --workspace --dry-run --locked --package posthog --package posthog-rs
+
+      - name: Check crates.io release state
+        if: steps.release-details.outputs.should-publish == 'true'
+        id: registry
+        env:
+          RESUME_MODE: ${{ steps.retry-release.outputs.is-resume }}
+          VERSION: ${{ steps.release-details.outputs.version }}
+        run: |
+          check_crate() {
+            local name="$1"
+            local code
+            if ! code=$(curl --silent --show-error --location \
+              --retry 3 --retry-all-errors \
+              --header "User-Agent: posthog-rs-release-workflow" \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://crates.io/api/v1/crates/${name}/${VERSION}"); then
+              echo "Failed to check crates.io for ${name}@${VERSION}" >&2
+              return 1
+            fi
+            case "$code" in
+              200) echo true ;;
+              404) echo false ;;
+              *)
+                echo "Unexpected crates.io response ${code} for ${name}@${VERSION}" >&2
+                return 1
+                ;;
+            esac
+          }
+
+          posthog_rs_exists=$(check_crate posthog-rs)
+          posthog_exists=$(check_crate posthog)
+          echo "posthog_rs_exists=$posthog_rs_exists" >> "$GITHUB_OUTPUT"
+          echo "posthog_exists=$posthog_exists" >> "$GITHUB_OUTPUT"
+
+          if [ "$RESUME_MODE" != "true" ] && \
+             { [ "$posthog_rs_exists" = "true" ] || [ "$posthog_exists" = "true" ]; }; then
+            echo "Release version ${VERSION} already exists on crates.io" >&2
+            exit 1
+          fi
 
       - name: Authenticate with crates.io
-        if: steps.check-changes.outputs.committed == 'true'
+        if: >-
+          steps.release-details.outputs.should-publish == 'true' &&
+          (steps.registry.outputs.posthog_rs_exists != 'true' ||
+           steps.registry.outputs.posthog_exists != 'true')
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: crates-auth
 
-      - name: Configure git identity
-        if: steps.check-changes.outputs.committed == 'true'
-        run: |
-          git config user.name "posthog-rs-releaser[bot]"
-          git config user.email "posthog-rs-releaser[bot]@users.noreply.github.com"
-
-      - name: Publish with Sampo
-        if: steps.check-changes.outputs.committed == 'true'
+      - name: Publish posthog
+        if: steps.release-details.outputs.should-publish == 'true' && steps.registry.outputs.posthog_exists != 'true'
         env:
-          GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
-        run: sampo publish
+        run: cargo publish --locked --package posthog
+
+      - name: Publish posthog-rs compatibility crate
+        if: steps.release-details.outputs.should-publish == 'true' && steps.registry.outputs.posthog_rs_exists != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          RETRY_TIMES: 20
+          RETRY_WAIT_SECONDS: 5
+        run: |
+          for attempt in $(seq 1 "$RETRY_TIMES"); do
+            if cargo publish --locked --package posthog-rs; then
+              exit 0
+            fi
+            if [ "$attempt" -eq "$RETRY_TIMES" ]; then
+              exit 1
+            fi
+            echo "posthog-rs publication failed while the crates.io index may still be updating; retrying in ${RETRY_WAIT_SECONDS}s"
+            sleep "$RETRY_WAIT_SECONDS"
+          done
+
+      - name: Ensure release tags
+        if: steps.release-details.outputs.should-publish == 'true'
+        env:
+          VERSION: ${{ steps.release-details.outputs.version }}
+        run: |
+          head_sha=$(git rev-parse HEAD)
+          ensure_tag() {
+            local tag="$1"
+            if git show-ref --verify --quiet "refs/tags/${tag}"; then
+              tag_sha=$(git rev-list -n 1 "$tag")
+              if [ "$tag_sha" != "$head_sha" ]; then
+                echo "Tag ${tag} does not point to the release commit" >&2
+                exit 1
+              fi
+            else
+              git tag "$tag"
+            fi
+          }
+
+          ensure_tag "$VERSION"
+          ensure_tag "posthog-rs-v${VERSION}"
+          git push origin "refs/tags/${VERSION}" "refs/tags/posthog-rs-v${VERSION}"
 
       - name: Create GitHub Release
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.release-details.outputs.should-publish == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
-          NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
+          NEW_VERSION: ${{ steps.release-details.outputs.version }}
         run: |
+          release_sha=$(git rev-parse HEAD)
           CHANGELOG_ENTRY=$(awk -v defText="see CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
-          gh release create "$NEW_VERSION" --target main --notes "$CHANGELOG_ENTRY"
+          create_error=$(mktemp)
+          for attempt in $(seq 1 5); do
+            if gh release create "$NEW_VERSION" \
+              --target "$release_sha" \
+              --notes "$CHANGELOG_ENTRY" 2>"$create_error"; then
+              rm -f "$create_error"
+              echo "Created GitHub Release ${NEW_VERSION}"
+              exit 0
+            fi
+
+            if gh release view "$NEW_VERSION" >/dev/null 2>&1; then
+              rm -f "$create_error"
+              echo "GitHub Release ${NEW_VERSION} exists after a failed create response"
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 5 ]; then
+              cat "$create_error" >&2
+              rm -f "$create_error"
+              exit 1
+            fi
+
+            echo "GitHub Release ${NEW_VERSION} is not visible after a failed create response; retrying"
+            sleep 2
+          done
 
       - name: Dispatch posthog upgrade for posthog-rs
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.release-details.outputs.should-publish == 'true'
         env:
-          PACKAGE_VERSION: ${{ steps.sampo-release.outputs.new_version }}
+          PACKAGE_VERSION: ${{ steps.release-details.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -f -sS -X POST \
@@ -207,9 +426,9 @@ jobs:
               "sdk": "posthog-rs",
               "jobName": "release",
               "packageName": "posthog-rs",
-              "packageVersion": "${{ steps.sampo-release.outputs.new_version || 'unknown' }}",
+              "packageVersion": "${{ steps.release-details.outputs.version || steps.sampo-release.outputs.new_version || 'unknown' }}",
               "actionUrl": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-              "alertText": ":rotating_light: Failed to release posthog-rs@${{ steps.sampo-release.outputs.new_version }} :rotating_light:",
+              "alertText": ":rotating_light: Failed to release posthog-rs/posthog@${{ steps.release-details.outputs.version || steps.sampo-release.outputs.new_version || 'unknown' }} :rotating_light:",
               "alertContext": "The release workflow failed before completion."
             }
 
@@ -220,7 +439,7 @@ jobs:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
           thread_ts: ${{ needs.notify-approval-needed.outputs.slack_ts }}
-          message: "❌ Failed to release `posthog-rs@${{ steps.sampo-release.outputs.new_version }}`! <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>"
+          message: "❌ Failed to release `posthog-rs/posthog@${{ steps.release-details.outputs.version || steps.sampo-release.outputs.new_version || 'unknown' }}`! <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>"
           emoji_reaction: "x"
 
   notify-released:
@@ -238,5 +457,5 @@ jobs:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
           thread_ts: ${{ needs.notify-approval-needed.outputs.slack_ts }}
-          message: "🚀 posthog-rs released successfully!"
+          message: "🚀 posthog and posthog-rs released successfully!"
           emoji_reaction: "rocket"

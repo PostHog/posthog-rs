@@ -92,7 +92,7 @@ jobs:
             cache-key: tls-no-provider
             command: >-
               cargo build --verbose --no-default-features --features async-client,error-tracking,tls-no-provider
-              && ! cargo tree --package posthog-rs --edges normal --invert aws-lc-sys --no-default-features --features async-client,error-tracking,tls-no-provider
+              && ! cargo tree --package posthog --edges normal --invert aws-lc-sys --no-default-features --features async-client,error-tracking,tls-no-provider
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -143,8 +143,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Publish dry run
-        run: cargo publish --dry-run --locked
+      - name: Workspace publish dry run
+        run: cargo publish --workspace --dry-run --locked --package posthog --package posthog-rs
 
   test:
     name: ${{ matrix.name }}
@@ -159,6 +159,9 @@ jobs:
           - name: Unit test (workspace)
             cache-key: workspace
             command: cargo test --workspace --verbose
+          - name: Compatibility crate
+            cache-key: compatibility-crate
+            command: scripts/check-compatibility-crate.sh && cargo test --verbose --package posthog-rs --all-features && cargo check --verbose --package posthog-rs --no-default-features
           - name: Unit test (blocking client)
             cache-key: blocking-client
             command: cargo test --verbose --no-default-features

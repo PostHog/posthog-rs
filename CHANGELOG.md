@@ -1,4 +1,4 @@
-# posthog-rs
+# posthog
 
 ## 0.25.4 — 2026-08-31
 

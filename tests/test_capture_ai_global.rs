@@ -1,10 +1,10 @@
-//! `posthog_rs::capture_ai` on the global client rides the AI lane.
+//! `posthog::capture_ai` on the global client rides the AI lane.
 //!
 //! Own integration-test binary on purpose: `init_global` sets a process-wide
 //! `OnceLock`, so this must not share a process with any other global test.
 
 use httpmock::prelude::*;
-use posthog_rs::{CaptureCompression, ClientOptionsBuilder, Event};
+use posthog::{CaptureCompression, ClientOptionsBuilder, Event};
 use serde_json::json;
 
 fn ok_mock<'a>(server: &'a MockServer, path: &str) -> httpmock::Mock<'a> {
@@ -18,19 +18,19 @@ fn ok_mock<'a>(server: &'a MockServer, path: &str) -> httpmock::Mock<'a> {
 }
 
 #[cfg(feature = "async-client")]
-fn init_and_flush(options: posthog_rs::ClientOptions, event: Event) {
+fn init_and_flush(options: posthog::ClientOptions, event: Event) {
     futures::executor::block_on(async {
-        posthog_rs::init_global(options).await.unwrap();
-        posthog_rs::capture_ai(event);
-        posthog_rs::flush().await;
+        posthog::init_global(options).await.unwrap();
+        posthog::capture_ai(event);
+        posthog::flush().await;
     });
 }
 
 #[cfg(not(feature = "async-client"))]
-fn init_and_flush(options: posthog_rs::ClientOptions, event: Event) {
-    posthog_rs::init_global(options).unwrap();
-    posthog_rs::capture_ai(event);
-    posthog_rs::flush();
+fn init_and_flush(options: posthog::ClientOptions, event: Event) {
+    posthog::init_global(options).unwrap();
+    posthog::capture_ai(event);
+    posthog::flush();
 }
 
 #[test]

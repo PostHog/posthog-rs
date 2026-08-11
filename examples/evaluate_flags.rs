@@ -10,7 +10,7 @@
 /// Run:
 ///   export POSTHOG_API_TOKEN=phc_your_key
 ///   cargo run --example evaluate_flags --features async-client
-use posthog_rs::{EvaluateFlagsOptions, Event};
+use posthog::{EvaluateFlagsOptions, Event};
 
 #[cfg(feature = "async-client")]
 #[tokio::main]
@@ -20,7 +20,7 @@ async fn main() {
         "demo_api_key".to_string()
     });
 
-    let client = posthog_rs::client(api_key.as_str()).await;
+    let client = posthog::client(api_key.as_str()).await;
 
     let user_id = "user-123";
 

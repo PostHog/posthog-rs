@@ -14,9 +14,9 @@ use httpmock::prelude::*;
 use std::panic::{self, AssertUnwindSafe};
 
 /// The panic site, named so the captured stack frame is matchable. Lives in
-/// this test crate (not `posthog_rs`), so its frame classifies as in-app —
+/// this test crate (not `posthog`), so its frame classifies as in-app —
 /// which the in-process unit tests can't show (a panic there originates inside
-/// `posthog_rs`, which is classified out-of-app).
+/// `posthog`, which is classified out-of-app).
 #[inline(never)]
 fn integration_panic_site() {
     panic!("integration panic boom");
@@ -54,12 +54,12 @@ fn is_panic_exception(req: &HttpMockRequest) -> bool {
     });
     // Canonical wire order puts the crash site last. The panic hook fires nested
     // inside the panic runtime, so a naive reverse would leave the SDK's own hook
-    // plumbing (`posthog_rs::error_tracking::*`) as the tail. We strip everything
-    // innermost of the panic dispatcher, so no posthog_rs frame survives at all,
+    // plumbing (`posthog::error_tracking::*`) as the tail. We strip everything
+    // innermost of the panic dispatcher, so no posthog frame survives at all,
     // and the tail is the crash-side panic runtime rather than an SDK frame.
     let no_sdk_frames = !function_names
         .iter()
-        .any(|name| name.contains("posthog_rs::error_tracking"));
+        .any(|name| name.contains("posthog::error_tracking"));
     let tail_is_panic_runtime = function_names
         .last()
         .is_some_and(|name| name.contains("panicking::") || name.contains("panic_with_hook"));
@@ -82,15 +82,15 @@ fn is_panic_exception(req: &HttpMockRequest) -> bool {
 }
 
 #[cfg(feature = "async-client")]
-fn init_global_for_test(options: posthog_rs::ClientOptions) -> Result<(), posthog_rs::Error> {
+fn init_global_for_test(options: posthog::ClientOptions) -> Result<(), posthog::Error> {
     // The async constructor only awaits under local evaluation, so a minimal
     // executor drives it with no Tokio runtime needed.
-    futures::executor::block_on(posthog_rs::init_global(options))
+    futures::executor::block_on(posthog::init_global(options))
 }
 
 #[cfg(not(feature = "async-client"))]
-fn init_global_for_test(options: posthog_rs::ClientOptions) -> Result<(), posthog_rs::Error> {
-    posthog_rs::init_global(options)
+fn init_global_for_test(options: posthog::ClientOptions) -> Result<(), posthog::Error> {
+    posthog::init_global(options)
 }
 
 #[test]
@@ -105,11 +105,11 @@ fn init_global_installs_panic_capture_when_enabled() {
     // caught, expected panic doesn't print to the test output.
     panic::set_hook(Box::new(|_| {}));
 
-    let options = posthog_rs::ClientOptionsBuilder::default()
+    let options = posthog::ClientOptionsBuilder::default()
         .api_key("test_api_key".to_string())
         .host(server.base_url())
         .error_tracking(
-            posthog_rs::ErrorTrackingOptionsBuilder::default()
+            posthog::ErrorTrackingOptionsBuilder::default()
                 .capture_panics(true)
                 .build()
                 .unwrap(),

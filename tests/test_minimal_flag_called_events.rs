@@ -18,7 +18,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-use posthog_rs::EvaluateFlagsOptions;
+use posthog::EvaluateFlagsOptions;
 
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
 
@@ -189,8 +189,8 @@ async fn captured_flag_called_properties(
 ) -> serde_json::Map<String, Value> {
     let server = start_recording_server(gate);
 
-    let options: posthog_rs::ClientOptions = ("phc_test", server.base_url.as_str()).into();
-    let client = posthog_rs::client(options).await;
+    let options: posthog::ClientOptions = ("phc_test", server.base_url.as_str()).into();
+    let client = posthog::client(options).await;
     let snapshot = client
         .evaluate_flags("user-1", EvaluateFlagsOptions::default())
         .await

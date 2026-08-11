@@ -1,6 +1,6 @@
-# Migrating from posthog-rs 0.x to 1.0
+# Migrating from posthog-rs 0.x to posthog 1.0
 
-Version 1.0 makes the V1 analytics endpoint the SDK's only capture path and removes APIs that were already deprecated in 0.x. This guide describes the changes currently staged on the `v1` branch.
+Version 1.0 publishes the SDK under the canonical `posthog` package and import name, makes the V1 analytics endpoint the only capture path, and removes APIs that were already deprecated in 0.x. The `posthog-rs` package remains as a compatibility crate, so existing applications can upgrade without changing package or import names. This guide uses the canonical `posthog` name for 1.0 examples.
 
 ## Cargo features
 
@@ -11,17 +11,17 @@ Remove `capture-v1` from your dependency features. Capture no longer needs a fea
 posthog-rs = { version = "0.25", features = ["capture-v1"] }
 
 # 1.0
-posthog-rs = "1"
+posthog = "1"
 ```
 
 The default features are the async client, error tracking, and TLS. Use `default-features = false` for the blocking client and explicitly enable a TLS feature when sending to an HTTPS endpoint.
 
 ```toml
 # Async client with error tracking and TLS
-posthog-rs = "1"
+posthog = "1"
 
 # Blocking client with TLS
-posthog-rs = { version = "1", default-features = false, features = ["tls"] }
+posthog = { version = "1", default-features = false, features = ["tls"] }
 ```
 
 TLS was previously enabled even with `default-features = false`. In 1.0, choose `tls` to use reqwest's default Rustls provider, or choose `tls-no-provider` when the application installs a process-level Rustls `CryptoProvider`. The latter avoids pulling in `aws-lc-rs` from this SDK, but constructing a client before installing a provider will panic. Cargo features are additive, so `tls-no-provider` only avoids the built-in provider when no dependency enables `tls`.
@@ -36,7 +36,7 @@ All event-producing SDK paths now use the same capture endpoint, including error
 
 ### AI events
 
-Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog_rs::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size, with the backend's 8 MiB per-event ceiling applied locally. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
+Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size, with the backend's 8 MiB per-event ceiling applied locally. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
 
 `capture` never reroutes by event name. Sending an AI event through `capture` worked on the V0 path because the backend diverted it; on the V1 analytics endpoint the backend will refuse it as a per-event `drop` once both lanes enforce their event sets, and it will not be ingested. Move those calls to `capture_ai`. Custom events that merely start with `$ai_` and are not PostHog AI event names stay on `capture`.
 
@@ -63,7 +63,7 @@ Rename `V1ErrorResponse` to `CaptureErrorResponse`:
 let response: Option<&posthog_rs::V1ErrorResponse> = failure.error_response();
 
 // 1.0
-let response: Option<&posthog_rs::CaptureErrorResponse> = failure.error_response();
+let response: Option<&posthog::CaptureErrorResponse> = failure.error_response();
 ```
 
 ## Feature flags
@@ -78,7 +78,7 @@ The deprecated single-flag methods have been removed:
 Call `evaluate_flags` once and read from the returned snapshot instead:
 
 ```rust
-use posthog_rs::EvaluateFlagsOptions;
+use posthog::EvaluateFlagsOptions;
 
 let flags = client
     .evaluate_flags("user-123", EvaluateFlagsOptions::default())
@@ -107,7 +107,7 @@ options.flag_keys = Some(vec!["new-checkout".to_string()]);
 Use `secret_key` terminology throughout configuration. The builder's deprecated `personal_api_key` alias has been removed, and `LocalEvaluationConfig::personal_api_key` is now `secret_key`.
 
 ```rust
-let options = posthog_rs::ClientOptionsBuilder::default()
+let options = posthog::ClientOptionsBuilder::default()
     .api_key("phc_project_token")
     .secret_key("phs_project_secret")
     .enable_local_evaluation(true)

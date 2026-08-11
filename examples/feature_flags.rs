@@ -8,7 +8,7 @@
 //!   cargo run --example feature_flags --features async-client
 
 #[cfg(feature = "async-client")]
-use posthog_rs::{EvaluateFlagsOptions, FlagValue};
+use posthog::{EvaluateFlagsOptions, FlagValue};
 #[cfg(feature = "async-client")]
 use serde_json::json;
 #[cfg(feature = "async-client")]
@@ -25,7 +25,7 @@ async fn main() {
     let client = if api_key == "demo_api_key" {
         create_demo_client().await
     } else {
-        posthog_rs::client(api_key.as_str()).await
+        posthog::client(api_key.as_str()).await
     };
 
     let user_id = "user-123";
@@ -73,9 +73,9 @@ async fn main() {
 }
 
 #[cfg(feature = "async-client")]
-async fn create_demo_client() -> posthog_rs::Client {
+async fn create_demo_client() -> posthog::Client {
     println!("API calls will fail in demo mode, but the example shows the API shape.\n");
-    posthog_rs::client(("demo_key", "https://demo.posthog.com")).await
+    posthog::client(("demo_key", "https://demo.posthog.com")).await
 }
 
 #[cfg(not(feature = "async-client"))]
