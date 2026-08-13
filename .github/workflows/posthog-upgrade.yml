@@ -110,13 +110,6 @@ jobs:
         run: |
           echo "PostHog pull request for $PACKAGE_NAME version $PACKAGE_VERSION ready: $PR_URL"
 
-      - name: Enable automerge
-        env:
-          GH_TOKEN: ${{ steps.upgrader.outputs.token }}
-          PR_NUMBER: ${{ steps.main-repo-pr.outputs.pull-request-number }}
-        run: |
-          gh pr merge "$PR_NUMBER" --repo PostHog/posthog --auto --squash
-
       - name: Assign reviewers
         env:
           GH_TOKEN: ${{ steps.upgrader.outputs.token }}
