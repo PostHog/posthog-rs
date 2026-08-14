@@ -202,6 +202,36 @@ impl Client {
         }
     }
 
+    /// Merge two distinct IDs onto the same person by sending a `$create_alias`
+    /// event.
+    ///
+    /// See <https://posthog.com/docs/product-analytics/identify#alias-assigning-multiple-distinct-ids-to-the-same-user>.
+    ///
+    /// # Parameters
+    ///
+    /// - `previous_id`: ID already known to PostHog, such as an anonymous ID.
+    /// - `distinct_id`: ID it should be merged into, such as a logged-in user ID.
+    ///
+    /// # Remarks
+    ///
+    /// Fire-and-forget, like [`Client::capture`]. A blank ID on either side
+    /// cannot describe a merge, so the event is dropped with a warning rather
+    /// than sent.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let client = posthog_rs::client("phc_project_api_key");
+    ///
+    /// // The visitor browsed anonymously, then logged in.
+    /// client.alias("anon-abc123", "user-42");
+    /// ```
+    pub fn alias<P: Into<String>, D: Into<String>>(&self, previous_id: P, distinct_id: D) {
+        if let Some(event) = Event::alias(previous_id.into(), distinct_id.into()) {
+            self.capture(event);
+        }
+    }
+
     /// Flush queued events, blocking until the worker has attempted delivery of
     /// everything queued before this call. Transient failures are kept for retry
     /// (the call still returns). A no-op for disabled clients.

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
 use semver::Version;
 use serde::Serialize;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::client::CRATE_VERSION;
@@ -197,6 +198,43 @@ impl Event {
         }
         self.timestamp = Some(timestamp.naive_utc());
         Ok(())
+    }
+
+    /// Build the `$create_alias` event backing [`crate::Client::alias`].
+    ///
+    /// The event is attributed to `previous_id`, which is also mirrored into
+    /// `properties.distinct_id` alongside the merge target in `properties.alias`
+    /// — the shape posthog-python, posthog-js-lite, and posthog-php all send.
+    ///
+    /// Returns `None` when either ID is blank. A merge needs both sides, so a
+    /// blank one can only produce a malformed event; the SDKs above drop it with
+    /// a warning rather than sending it, and so do we.
+    ///
+    /// Properties are built directly rather than through `insert_prop` so
+    /// construction is infallible: both values are strings, which cannot fail to
+    /// serialize, leaving no always-`Ok` `Result` for callers to discard.
+    pub(crate) fn alias(previous_id: String, distinct_id: String) -> Option<Self> {
+        if previous_id.trim().is_empty() || distinct_id.trim().is_empty() {
+            warn!("alias() called with a blank id, dropping the $create_alias event");
+            return None;
+        }
+
+        let mut properties = HashMap::new();
+        properties.insert(
+            "distinct_id".to_string(),
+            serde_json::Value::String(previous_id.clone()),
+        );
+        properties.insert("alias".to_string(), serde_json::Value::String(distinct_id));
+
+        Some(Self {
+            event: "$create_alias".to_string(),
+            distinct_id: previous_id,
+            properties,
+            groups: HashMap::new(),
+            timestamp: None,
+            uuid: Uuid::now_v7(),
+            minimal_flag_called: false,
+        })
     }
 
     /// Stamp the capture (enqueue) time when the caller hasn't set an explicit
