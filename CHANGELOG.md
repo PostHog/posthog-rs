@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.23.3 — 2026-08-14
+
+### Patch changes
+
+- [f4e940d](https://github.com/posthog/posthog-rs/commit/f4e940d8940c45a513401ed5490f389d68134b72) Normalize SDK timestamps to UTC — Thanks @marandaneto!
+
 ## 0.23.2 — 2026-08-10
 
 ### Patch changes
