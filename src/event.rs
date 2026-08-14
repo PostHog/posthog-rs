@@ -180,8 +180,8 @@ impl Event {
     ///
     /// # Parameters
     ///
-    /// - `timestamp`: Timestamp to send with the event. It is converted to UTC
-    ///   before serialization.
+    /// - `timestamp`: Timestamp to send with the event. UTC input is preferred;
+    ///   non-UTC input is converted to the equivalent UTC instant before serialization.
     ///
     /// # Errors
     ///
@@ -381,7 +381,7 @@ pub struct InnerEvent {
     event: String,
     distinct_id: String,
     properties: HashMap<String, serde_json::Value>,
-    timestamp: Option<NaiveDateTime>,
+    timestamp: Option<DateTime<Utc>>,
 }
 
 impl InnerEvent {
@@ -408,7 +408,7 @@ impl InnerEvent {
             event: event.event,
             distinct_id: event.distinct_id,
             properties: event.properties,
-            timestamp: event.timestamp,
+            timestamp: event.timestamp.map(|timestamp| timestamp.and_utc()),
         }
     }
 }
@@ -478,6 +478,19 @@ pub mod tests {
             assert!(event.get("$distinct_id").is_none());
             assert!(event.get("api_key").is_none());
         }
+    }
+
+    #[test]
+    fn v0_serializes_non_utc_timestamp_as_equivalent_utc_instant() {
+        let mut event = Event::new("test", "user1");
+        event
+            .set_timestamp(
+                chrono::DateTime::parse_from_rfc3339("2023-01-01T10:00:00.123+03:00").unwrap(),
+            )
+            .unwrap();
+
+        let json = serde_json::to_value(build_v0(event)).unwrap();
+        assert_eq!(json["timestamp"], "2023-01-01T07:00:00.123Z");
     }
 
     #[test]
