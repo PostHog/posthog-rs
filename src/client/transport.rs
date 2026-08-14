@@ -1461,17 +1461,11 @@ mod tests {
         );
     }
 
-    /// Parse either an RFC3339 string (v1 timestamps / v0 `sent_at`) or a naive
-    /// datetime (v0 event timestamps serialize without an offset) as UTC.
+    /// Parse an RFC3339 wire timestamp and normalize it to UTC.
     fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
         DateTime::parse_from_rfc3339(s)
             .map(|d| d.with_timezone(&Utc))
             .ok()
-            .or_else(|| {
-                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
-                    .map(|n| n.and_utc())
-                    .ok()
-            })
     }
 
     #[test]

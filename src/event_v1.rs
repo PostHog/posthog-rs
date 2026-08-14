@@ -217,6 +217,17 @@ mod tests {
     }
 
     #[test]
+    fn v1_event_preserves_utc_timestamp_serialization() {
+        let mut event = Event::new("test_event", "user-1");
+        event
+            .set_timestamp(DateTime::parse_from_rfc3339("2023-01-01T10:00:00.123+03:00").unwrap())
+            .unwrap();
+
+        let v1 = V1Event::from_event(&event);
+        assert_eq!(v1.timestamp, "2023-01-01T07:00:00.123Z");
+    }
+
+    #[test]
     fn v1_event_from_event_anon() {
         let event = Event::new_anon("anon_event");
         let v1 = V1Event::from_event(&event);
