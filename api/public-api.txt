@@ -125,6 +125,7 @@ pub fn posthog_rs::CaptureSummary::not_persisted(&self) -> usize
 pub fn posthog_rs::CaptureSummary::submitted(&self) -> usize
 pub struct posthog_rs::Client
 impl posthog_rs::Client
+pub fn posthog_rs::Client::alias<P: core::convert::Into<alloc::string::String>, D: core::convert::Into<alloc::string::String>>(&self, P, D)
 pub fn posthog_rs::Client::capture(&self, posthog_rs::Event)
 pub fn posthog_rs::Client::capture_batch(&self, alloc::vec::Vec<posthog_rs::Event>, bool)
 pub async fn posthog_rs::Client::capture_batch_immediate(&self, alloc::vec::Vec<posthog_rs::Event>, bool) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
