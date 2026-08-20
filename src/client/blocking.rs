@@ -157,9 +157,12 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
                 (Some(LocalEvaluator::new(cache)), Some(poller))
             } else {
-                warn!(
-                "Local evaluation enabled but secret_key not set, falling back to API evaluation"
-            );
+                let warning = if options.local_evaluation_only {
+                    "Missing secret_key; local-only evaluation will return empty results"
+                } else {
+                    "Local evaluation enabled without secret_key; using remote API fallback"
+                };
+                warn!("{warning}");
                 (None, None)
             }
         } else {
@@ -737,7 +740,7 @@ impl Client {
             .is_some_and(|keys| keys.iter().all(|k| locally_evaluated_keys.contains(k)));
 
         if !options.only_evaluate_locally
-            && !(self.options.local_evaluation_only && self.local_evaluator.is_some())
+            && !self.options.local_evaluation_only
             && !local_covers_request
         {
             // Don't lose successful local evaluations if `/flags` fails — degrade

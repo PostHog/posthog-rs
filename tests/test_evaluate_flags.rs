@@ -333,7 +333,7 @@ mod blocking {
     }
 
     #[test]
-    fn local_evaluation_only_without_evaluator_falls_back_to_api() {
+    fn local_evaluation_only_without_evaluator_does_not_call_api() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
             when.method(POST).path("/flags/");
@@ -350,10 +350,10 @@ mod blocking {
 
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
-            .expect("missing secret key should fall back to API evaluation");
+            .expect("local-only evaluation should return an empty snapshot");
 
-        assert_eq!(snapshot.get_flag("alpha"), Some(FlagValue::Boolean(true)));
-        flags_mock.assert_calls(1);
+        assert!(snapshot.keys().is_empty());
+        flags_mock.assert_calls(0);
     }
 
     #[test]
@@ -972,7 +972,7 @@ mod async_tests {
     }
 
     #[tokio::test]
-    async fn local_evaluation_only_without_evaluator_falls_back_to_api() {
+    async fn local_evaluation_only_without_evaluator_does_not_call_api() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
             when.method(POST).path("/flags/");
@@ -990,10 +990,10 @@ mod async_tests {
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .await
-            .expect("missing secret key should fall back to API evaluation");
+            .expect("local-only evaluation should return an empty snapshot");
 
-        assert_eq!(snapshot.get_flag("alpha"), Some(FlagValue::Boolean(true)));
-        flags_mock.assert_calls(1);
+        assert!(snapshot.keys().is_empty());
+        flags_mock.assert_calls(0);
     }
 
     #[tokio::test]
