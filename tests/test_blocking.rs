@@ -253,3 +253,70 @@ fn test_api_error_handling() {
 
     error_mock.assert();
 }
+
+/// Ported from the removed V0 suite: a client with an absent or blank API key
+/// is disabled and makes no network calls at all. Distinct from the
+/// `disabled(true)` path — this exercises `ClientOptions::sanitize`'s
+/// blank-key handling, including whitespace-only keys.
+#[test]
+fn test_client_with_empty_api_key_is_noop() {
+    for api_key in [None, Some(" \n\t ")] {
+        assert_disabled_client_is_noop(api_key);
+    }
+}
+
+fn assert_disabled_client_is_noop(api_key: Option<&str>) {
+    let server = MockServer::start();
+
+    let capture_mock = server.mock(|when, then| {
+        when.method(POST).path("/i/v1/analytics/events");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/").query_param("v", "2");
+        then.status(200).json_body(json!({
+            "featureFlags": {},
+            "featureFlagPayloads": {}
+        }));
+    });
+
+    let mut options_builder = posthog_rs::ClientOptionsBuilder::default();
+    if let Some(api_key) = api_key {
+        options_builder.api_key(api_key.to_string());
+    }
+    let options = options_builder.host(server.base_url()).build().unwrap();
+    assert!(options.is_disabled());
+
+    let client = posthog_rs::client(options);
+    let event = posthog_rs::Event::new("test_event", "user1");
+
+    client.capture(event.clone());
+    client.capture_batch(vec![event], false);
+
+    let (feature_flags, payloads) = client
+        .get_feature_flags("test-user".to_string(), None, None, None)
+        .unwrap();
+    assert!(feature_flags.is_empty());
+    assert!(payloads.is_empty());
+
+    assert_eq!(
+        client
+            .get_feature_flag("test-flag", "test-user", None, None, None)
+            .unwrap(),
+        None
+    );
+    assert!(!client
+        .is_feature_enabled("test-flag", "test-user", None, None, None)
+        .unwrap());
+    assert_eq!(
+        client
+            .get_feature_flag_payload("test-flag", "test-user")
+            .unwrap(),
+        None
+    );
+
+    capture_mock.assert_hits(0);
+    flags_mock.assert_hits(0);
+}

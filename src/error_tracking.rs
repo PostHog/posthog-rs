@@ -1654,7 +1654,7 @@ mod tests {
 
     use super::*;
     use crate::client::ClientOptionsBuilder;
-    use crate::event::InnerEvent;
+    use crate::event_v1::V1Event;
 
     #[derive(Debug)]
     struct OuterError {
@@ -1695,9 +1695,10 @@ mod tests {
 
     impl StdError for BorrowedError<'_> {}
 
-    fn built_event_json(mut event: Event) -> Value {
-        event.prepare_for_v0();
-        serde_json::to_value(InnerEvent::new(event, "api-key".to_string())).unwrap()
+    /// Serialize through the capture wire builder so these tests assert the
+    /// shape actually put on the wire.
+    fn built_event_json(event: Event) -> Value {
+        serde_json::to_value(V1Event::from_event(&event)).unwrap()
     }
 
     fn event_json_with(exception: Exception, options: &ErrorTrackingOptions) -> Value {
@@ -2456,7 +2457,9 @@ mod tests {
         let json = event_json(Exception::from_message("Error", "no user context", true));
 
         assert_eq!(json["event"], "$exception");
-        assert_eq!(json["properties"]["$process_person_profile"], false);
+        // Lifted out of `properties` into the typed wire options object.
+        assert_eq!(json["options"]["process_person_profile"], false);
+        assert!(json["properties"]["$process_person_profile"].is_null());
     }
 
     #[test]
@@ -2865,7 +2868,9 @@ mod tests {
         let json = built_event_json(event);
 
         assert_eq!(json["event"], "$exception");
-        assert_eq!(json["properties"]["$process_person_profile"], false);
+        // Lifted out of `properties` into the typed wire options object.
+        assert_eq!(json["options"]["process_person_profile"], false);
+        assert!(json["properties"]["$process_person_profile"].is_null());
         assert_eq!(json["properties"]["$exception_level"], "error");
     }
 

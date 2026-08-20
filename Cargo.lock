@@ -1587,7 +1587,6 @@ dependencies = [
  "os_info",
  "regex",
  "reqwest",
- "semver",
  "serde",
  "serde_json",
  "sha1",

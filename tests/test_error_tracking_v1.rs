@@ -69,6 +69,20 @@ fn request_has_capture_exception_with_user_frame_last(req: &HttpMockRequest) -> 
         && !crash_function.contains("build_exception_event")
 }
 
+/// Ported from the removed V0 suite: an `$exception_list` entry is present but
+/// carries no `stacktrace`, i.e. `capture_stacktrace(false)` was honored.
+fn request_has_no_stacktrace(req: &HttpMockRequest) -> bool {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
+        return false;
+    };
+
+    body.pointer("/batch/0/properties/$exception_list/0")
+        .is_some()
+        && body
+            .pointer("/batch/0/properties/$exception_list/0/stacktrace")
+            .is_none()
+}
+
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
@@ -161,6 +175,42 @@ mod blocking {
                 CaptureExceptionOptions::new().distinct_id("user-1"),
             )
             .unwrap();
+    }
+
+    /// Ported from the removed V0 suite: client-level `ErrorTrackingOptions`
+    /// (here `capture_stacktrace(false)`) apply to `capture_exception`.
+    #[test]
+    fn capture_exception_uses_client_error_tracking_options() {
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path(V1_CAPTURE_PATH)
+                .body_includes(r#""event":"$exception""#)
+                .body_includes(r#""value":"payment failed""#)
+                .matches(request_has_no_stacktrace);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(v1_ok_response());
+        });
+
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .max_capture_attempts(1u32)
+            .error_tracking(
+                posthog_rs::ErrorTrackingOptionsBuilder::default()
+                    .capture_stacktrace(false)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options);
+
+        client.capture_exception(&TestError).unwrap();
+        client.flush();
+
+        capture_mock.assert_hits(1);
     }
 }
 
@@ -258,5 +308,41 @@ mod async_client {
             )
             .await
             .unwrap();
+    }
+
+    /// Ported from the removed V0 suite: client-level `ErrorTrackingOptions`
+    /// (here `capture_stacktrace(false)`) apply to `capture_exception`.
+    #[tokio::test]
+    async fn capture_exception_uses_client_error_tracking_options() {
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path(V1_CAPTURE_PATH)
+                .body_includes(r#""event":"$exception""#)
+                .body_includes(r#""value":"payment failed""#)
+                .matches(request_has_no_stacktrace);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(v1_ok_response());
+        });
+
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .max_capture_attempts(1u32)
+            .error_tracking(
+                posthog_rs::ErrorTrackingOptionsBuilder::default()
+                    .capture_stacktrace(false)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options).await;
+
+        client.capture_exception(&TestError).await.unwrap();
+        client.flush().await;
+
+        capture_mock.assert_hits(1);
     }
 }

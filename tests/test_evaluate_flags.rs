@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 /// Where the background worker ships analytics captures.
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
 
-/// Feature-aware capture mock; the JSON body is required by V1, ignored by v0.
+/// Capture mock returning an empty results map, so the client makes one attempt.
 fn capture_path_mock(server: &MockServer) -> httpmock::Mock<'_> {
     server.mock(|when, then| {
         when.method(POST).path(CAPTURE_PATH);
@@ -298,7 +298,7 @@ fn start_status_then_success_flags_server(
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, FlagValue};
+    use posthog_rs::{EvaluateFlagsOptions, Event, FlagValue};
     use reqwest::header::USER_AGENT;
 
     fn create_test_client(base_url: String) -> posthog_rs::Client {
@@ -878,6 +878,59 @@ mod blocking {
         assert!(snapshot.keys().is_empty());
         flags_mock.assert_hits(0);
     }
+
+    /// Ported from the removed V0 suite: `Event::with_flags` attaches the flag
+    /// properties from an existing snapshot without triggering a second
+    /// `/flags` fetch.
+    #[test]
+    fn event_with_flags_attaches_properties_without_extra_request() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = capture_path_mock(&server);
+        let client = create_test_client(server.base_url());
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .unwrap();
+        let mut event = Event::new("checkout-started", "user-1");
+        event.with_flags(&snapshot);
+        client.capture(event);
+        client.flush();
+        // One /flags request, one capture request — no second flag fetch.
+        flags_mock.assert_hits(1);
+        capture_mock.assert_hits(1);
+    }
+
+    /// Ported from the removed V0 suite: `$feature_flag_called` carries
+    /// `$is_server`. The `$lib`/`$lib_version` half of the original assertion
+    /// now travels in the `posthog-sdk-info` header instead of the body, and is
+    /// covered by `flag_called_event_routes_to_v1_endpoint` above.
+    #[test]
+    fn flag_called_event_contains_is_server() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path(CAPTURE_PATH)
+                .body_includes("$feature_flag_called")
+                .body_includes("\"$is_server\":true");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "results": {} }));
+        });
+        let client = create_test_client(server.base_url());
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .unwrap();
+        assert!(snapshot.is_enabled("alpha"));
+        client.flush();
+        capture_mock.assert_hits(1);
+    }
 }
 
 // ---------- async ----------
@@ -885,7 +938,7 @@ mod blocking {
 #[cfg(feature = "async-client")]
 mod async_tests {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, FlagValue};
+    use posthog_rs::{EvaluateFlagsOptions, Event, FlagValue};
     use reqwest::header::USER_AGENT;
 
     async fn create_test_client(base_url: String) -> posthog_rs::Client {
@@ -1210,5 +1263,60 @@ mod async_tests {
         client.flush().await;
         first_attempt.assert_hits(1);
         retry_attempt.assert_hits(1);
+    }
+
+    /// Ported from the removed V0 suite: `Event::with_flags` attaches the flag
+    /// properties from an existing snapshot without triggering a second
+    /// `/flags` fetch.
+    #[tokio::test]
+    async fn event_with_flags_attaches_properties_without_extra_request() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = capture_path_mock(&server);
+        let client = create_test_client(server.base_url()).await;
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        let mut event = Event::new("checkout-started", "user-1");
+        event.with_flags(&snapshot);
+        client.capture(event);
+        client.flush().await;
+        // One /flags request, one capture request — no second flag fetch.
+        flags_mock.assert_hits(1);
+        capture_mock.assert_hits(1);
+    }
+
+    /// Ported from the removed V0 suite: `$feature_flag_called` carries
+    /// `$is_server`. The `$lib`/`$lib_version` half of the original assertion
+    /// now travels in the `posthog-sdk-info` header instead of the body, and is
+    /// covered by `flag_called_event_routes_to_v1_endpoint` above.
+    #[tokio::test]
+    async fn flag_called_event_contains_is_server() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path(CAPTURE_PATH)
+                .body_includes("$feature_flag_called")
+                .body_includes("\"$is_server\":true");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "results": {} }));
+        });
+        let client = create_test_client(server.base_url()).await;
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        assert!(snapshot.is_enabled("alpha"));
+        client.flush().await;
+        capture_mock.assert_hits(1);
     }
 }
