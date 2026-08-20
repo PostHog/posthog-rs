@@ -333,6 +333,30 @@ mod blocking {
     }
 
     #[test]
+    fn local_evaluation_only_without_evaluator_falls_back_to_api() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .enable_local_evaluation(true)
+            .local_evaluation_only(true)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options);
+
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .expect("missing secret key should fall back to API evaluation");
+
+        assert_eq!(snapshot.get_flag("alpha"), Some(FlagValue::Boolean(true)));
+        flags_mock.assert_calls(1);
+    }
+
+    #[test]
     fn evaluate_flags_retries_transport_error_then_succeeds() {
         let server = start_flaky_flags_server(flags_response_fixture().to_string());
         let options = posthog_rs::ClientOptionsBuilder::default()
@@ -945,6 +969,31 @@ mod async_tests {
         keys.sort();
         assert_eq!(keys, vec!["alpha", "beta", "variant-flag"]);
         flags_mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn local_evaluation_only_without_evaluator_falls_back_to_api() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .enable_local_evaluation(true)
+            .local_evaluation_only(true)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options).await;
+
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .expect("missing secret key should fall back to API evaluation");
+
+        assert_eq!(snapshot.get_flag("alpha"), Some(FlagValue::Boolean(true)));
+        flags_mock.assert_calls(1);
     }
 
     #[tokio::test]

@@ -744,7 +744,7 @@ impl Client {
             .is_some_and(|keys| keys.iter().all(|k| locally_evaluated_keys.contains(k)));
 
         if !options.only_evaluate_locally
-            && !self.options.local_evaluation_only
+            && !(self.options.local_evaluation_only && self.local_evaluator.is_some())
             && !local_covers_request
         {
             // Don't lose successful local evaluations if `/flags` fails — degrade
