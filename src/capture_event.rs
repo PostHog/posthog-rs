@@ -194,10 +194,17 @@ pub struct CaptureErrorResponse {
     pub error_uri: Option<String>,
 }
 
+/// Wire-shape tests for the capture event builder.
+///
+/// Note on `$lib`/`$lib_version`: they are never carried in `properties`. The
+/// SDK sends its identity in the `posthog-sdk-info` header and capture
+/// materializes the properties server-side, so that contract is covered by
+/// `client::capture::tests::build_headers_sdk_info_is_canonical_lib_slash_version`.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Event;
+    use uuid::Uuid;
 
     // -- from_event basics ---------------------------------------------------
 
@@ -450,6 +457,50 @@ mod tests {
             options.get("process_person_profile"),
             Some(&serde_json::json!(true))
         );
+    }
+
+    // -- event root fields ----------------------------------------------------
+
+    #[test]
+    fn serializes_distinct_id_at_root() {
+        let json =
+            serde_json::to_value(CaptureEvent::from_event(&Event::new("test", "user1"))).unwrap();
+
+        // Canonical field at the event root; the legacy `$distinct_id` spelling
+        // (only tolerated by capture via a serde alias) must not be emitted, and
+        // it must not be duplicated into properties.
+        assert_eq!(json["distinct_id"], "user1");
+        assert!(json.get("$distinct_id").is_none());
+        assert!(json["properties"].get("distinct_id").is_none());
+    }
+
+    #[test]
+    fn includes_auto_generated_uuid() {
+        let json =
+            serde_json::to_value(CaptureEvent::from_event(&Event::new("test", "user1"))).unwrap();
+
+        let uuid_str = json["uuid"].as_str().expect("uuid should be present");
+        Uuid::parse_str(uuid_str).expect("uuid should be valid");
+    }
+
+    #[test]
+    fn preserves_overridden_uuid() {
+        let uuid = Uuid::now_v7();
+        let mut event = Event::new("test", "user1");
+        event.set_uuid(uuid);
+
+        let wire = CaptureEvent::from_event(&event);
+        assert_eq!(wire.uuid, uuid);
+    }
+
+    #[test]
+    fn no_process_person_profile_when_unset() {
+        let wire = CaptureEvent::from_event(&Event::new("test", "user1"));
+        let json = serde_json::to_value(&wire).unwrap();
+
+        // Absent everywhere: not defaulted into options, not left in properties.
+        assert!(json["options"].get("process_person_profile").is_none());
+        assert!(json["properties"].get("$process_person_profile").is_none());
     }
 
     // -- batch / response serialization (unchanged) --------------------------
