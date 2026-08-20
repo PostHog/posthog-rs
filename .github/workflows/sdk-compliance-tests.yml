@@ -28,7 +28,7 @@ jobs:
   test-rust-sdk:
     uses: PostHog/posthog-sdk-test-harness/.github/workflows/test-sdk-action.yml@02c049e529001d02f37a534745678e057d371fb0
     with:
-      adapter-dockerfile: compliance/harness/Dockerfile
+      adapter-dockerfile: compliance/Dockerfile
       adapter-context: .
       test-harness-version: "0.10.0"
       report-name: rust-sdk-compliance-report

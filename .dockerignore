@@ -1,4 +1,4 @@
-# Keep the compliance adapter's build context small. `compliance/harness/Dockerfile`
+# Keep the compliance adapter's build context small. `compliance/Dockerfile`
 # does `COPY . .` from the repo root, so without this a local `target/` (tens of
 # GB after a few cargo runs) is copied into the build and can exhaust the
 # builder. CI checkouts have no target/, which is why this only bites locally.
