@@ -13,10 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Where the background worker ships analytics captures.
-#[cfg(feature = "capture-v1")]
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
-#[cfg(not(feature = "capture-v1"))]
-const CAPTURE_PATH: &str = "/batch/";
 
 /// Feature-aware capture mock; the JSON body is required by V1, ignored by v0.
 fn capture_path_mock(server: &MockServer) -> httpmock::Mock<'_> {
@@ -301,8 +298,6 @@ fn start_status_then_success_flags_server(
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
-    #[cfg(not(feature = "capture-v1"))]
-    use posthog_rs::Event;
     use posthog_rs::{EvaluateFlagsOptions, FlagValue};
     use reqwest::header::USER_AGENT;
 
@@ -666,33 +661,6 @@ mod blocking {
         capture_mock.assert_hits(0);
     }
 
-    #[cfg(not(feature = "capture-v1"))]
-    #[test]
-    fn event_with_flags_attaches_properties_without_extra_request() {
-        let server = MockServer::start();
-        let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags/");
-            then.status(200).json_body(flags_response_fixture());
-        });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path(CAPTURE_PATH);
-            then.status(200)
-                .header("content-type", "application/json")
-                .json_body(json!({ "results": {} }));
-        });
-        let client = create_test_client(server.base_url());
-        let snapshot = client
-            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
-            .unwrap();
-        let mut event = Event::new("checkout-started", "user-1");
-        event.with_flags(&snapshot);
-        client.capture(event);
-        client.flush();
-        // One /flags request, one capture request — no second flag fetch.
-        flags_mock.assert_hits(1);
-        capture_mock.assert_hits(1);
-    }
-
     #[test]
     fn only_filters_to_named_keys() {
         let server = MockServer::start();
@@ -820,7 +788,6 @@ mod blocking {
     }
 
     /// C5: `$feature_flag_called` ships via the V1 endpoint, never the v0 path.
-    #[cfg(feature = "capture-v1")]
     #[test]
     fn flag_called_event_routes_to_v1_endpoint() {
         let server = MockServer::start();
@@ -857,7 +824,6 @@ mod blocking {
     }
 
     /// C5: `$feature_flag_called` uses the normal V1 capture retry path.
-    #[cfg(feature = "capture-v1")]
     #[test]
     fn flag_called_event_v1_failure_is_retried() {
         let server = MockServer::start();
@@ -919,8 +885,6 @@ mod blocking {
 #[cfg(feature = "async-client")]
 mod async_tests {
     use super::*;
-    #[cfg(not(feature = "capture-v1"))]
-    use posthog_rs::Event;
     use posthog_rs::{EvaluateFlagsOptions, FlagValue};
     use reqwest::header::USER_AGENT;
 
@@ -1117,31 +1081,6 @@ mod async_tests {
         capture_mock.assert_hits(2);
     }
 
-    #[cfg(not(feature = "capture-v1"))]
-    #[tokio::test]
-    async fn flag_called_event_contains_is_server_and_lib() {
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST).path("/flags/");
-            then.status(200).json_body(flags_response_fixture());
-        });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST)
-                .path(CAPTURE_PATH)
-                .body_includes("\"$is_server\":true")
-                .body_includes("\"$lib\":\"posthog-rs\"");
-            then.status(200);
-        });
-        let client = create_test_client(server.base_url()).await;
-        let snapshot = client
-            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
-            .await
-            .unwrap();
-        assert!(snapshot.is_enabled("alpha"));
-        client.flush().await;
-        capture_mock.assert_hits(1);
-    }
-
     #[tokio::test]
     async fn get_flag_payload_does_not_fire_event() {
         let server = MockServer::start();
@@ -1201,7 +1140,6 @@ mod async_tests {
     }
 
     /// C5: `$feature_flag_called` ships via the V1 endpoint, never the v0 path.
-    #[cfg(feature = "capture-v1")]
     #[tokio::test]
     async fn flag_called_event_routes_to_v1_endpoint() {
         let server = MockServer::start();
@@ -1239,7 +1177,6 @@ mod async_tests {
     }
 
     /// C5: `$feature_flag_called` uses the normal V1 capture retry path.
-    #[cfg(feature = "capture-v1")]
     #[tokio::test]
     async fn flag_called_event_v1_failure_is_retried() {
         let server = MockServer::start();
@@ -1273,32 +1210,5 @@ mod async_tests {
         client.flush().await;
         first_attempt.assert_hits(1);
         retry_attempt.assert_hits(1);
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    #[tokio::test]
-    async fn event_with_flags_attaches_properties_without_extra_request() {
-        let server = MockServer::start();
-        let flags_mock = server.mock(|when, then| {
-            when.method(POST).path("/flags/");
-            then.status(200).json_body(flags_response_fixture());
-        });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path(CAPTURE_PATH);
-            then.status(200)
-                .header("content-type", "application/json")
-                .json_body(json!({ "results": {} }));
-        });
-        let client = create_test_client(server.base_url()).await;
-        let snapshot = client
-            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
-            .await
-            .unwrap();
-        let mut event = Event::new("checkout-started", "user-1");
-        event.with_flags(&snapshot);
-        client.capture(event);
-        client.flush().await;
-        flags_mock.assert_hits(1);
-        capture_mock.assert_hits(1);
     }
 }

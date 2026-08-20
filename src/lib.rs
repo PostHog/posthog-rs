@@ -94,7 +94,6 @@ mod error;
 #[cfg(feature = "error-tracking")]
 mod error_tracking;
 mod event;
-#[cfg(feature = "capture-v1")]
 mod event_v1;
 mod feature_flag_evaluations;
 mod feature_flags;
@@ -131,8 +130,7 @@ pub use error_tracking::{
 // Event
 pub use event::Event;
 
-// V1 Capture types
-#[cfg(feature = "capture-v1")]
+// Capture wire types
 pub use event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse};
 
 // Feature Flags

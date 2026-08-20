@@ -667,15 +667,12 @@ fn drain_historical(
 }
 
 // ===========================================================================
-// V1 pipeline
+// Capture pipeline
 // ===========================================================================
 
-#[cfg(feature = "capture-v1")]
 use std::collections::HashMap;
-#[cfg(feature = "capture-v1")]
 use uuid::Uuid;
 
-#[cfg(feature = "capture-v1")]
 struct RetryBatch {
     pending: Vec<crate::event_v1::V1Event>,
     request_id: Uuid,
@@ -686,7 +683,6 @@ struct RetryBatch {
     next_at: Instant,
 }
 
-#[cfg(feature = "capture-v1")]
 struct Pipeline {
     http: reqwest::blocking::Client,
     options: ClientOptions,
@@ -696,7 +692,6 @@ struct Pipeline {
     retries: VecDeque<RetryBatch>,
 }
 
-#[cfg(feature = "capture-v1")]
 impl Pipeline {
     fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
         let http = reqwest::blocking::Client::builder()
@@ -943,231 +938,12 @@ impl Pipeline {
 
 /// Count events the V1 backend will not persist (`retry`/`drop` verdicts).
 /// `ok`/`warning` were delivered, so they are excluded from the lost tally.
-#[cfg(feature = "capture-v1")]
 fn undelivered_results(results: &HashMap<Uuid, crate::event_v1::EventResult>) -> usize {
     use crate::event_v1::EventStatus;
     results
         .values()
         .filter(|r| matches!(r.result, EventStatus::Retry | EventStatus::Drop))
         .count()
-}
-
-// ===========================================================================
-// V0 pipeline
-// ===========================================================================
-
-#[cfg(not(feature = "capture-v1"))]
-struct RetryBatch {
-    body: Vec<u8>,
-    encoding: Option<&'static str>,
-    count: usize,
-    historical_migration: bool,
-    attempt: u32,
-    next_at: Instant,
-}
-
-#[cfg(not(feature = "capture-v1"))]
-struct Pipeline {
-    http: reqwest::blocking::Client,
-    options: ClientOptions,
-    url_base: String,
-    clock: Arc<dyn Clock>,
-    len: Arc<AtomicUsize>,
-    retries: VecDeque<RetryBatch>,
-}
-
-#[cfg(not(feature = "capture-v1"))]
-impl Pipeline {
-    fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build()
-            .unwrap_or_default();
-        let url_base = options
-            .endpoints()
-            .build_url(crate::endpoints::Endpoint::Batch);
-        Self {
-            http,
-            options: options.clone(),
-            url_base,
-            clock,
-            len,
-            retries: VecDeque::new(),
-        }
-    }
-
-    fn send_batch(
-        &mut self,
-        events: Vec<Event>,
-        historical_migration: bool,
-        deadline: Option<Instant>,
-    ) {
-        let defaults = self.options.capture_defaults();
-        let count = events.len();
-        let (payload, kept) = match super::v0_capture::build_batch_payload(
-            events,
-            self.options.api_key.clone(),
-            historical_migration,
-            self.clock.now_utc(),
-            &defaults,
-            &self.options.before_send,
-        ) {
-            Ok(Some(pair)) => pair,
-            Ok(None) => {
-                // Every event dropped by before_send (terminal).
-                dec_len(&self.len, count);
-                return;
-            }
-            Err(e) => {
-                if self.options.on_error.is_empty() {
-                    warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
-                } else {
-                    let err = Error::Serialization(e.to_string());
-                    self.fire_capture(Some(&err), None, 1, historical_migration, count);
-                }
-                dec_len(&self.len, count);
-                return;
-            }
-        };
-        // Events dropped by before_send are terminal; account for them now so the
-        // batch tracks (and logs) only what is actually in flight.
-        dec_len(&self.len, count - kept);
-        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
-        let batch = RetryBatch {
-            body,
-            encoding,
-            count: kept,
-            historical_migration,
-            attempt: 1,
-            next_at: self.clock.now(),
-        };
-        self.attempt(batch, deadline);
-    }
-
-    fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
-        use super::get_default_user_agent;
-        use super::retry::{v0_after_response, v0_after_transport_error, Step};
-        use reqwest::header::{CONTENT_TYPE, USER_AGENT};
-
-        // v0 capture reads the compression hint from the query param, not the header.
-        let url = match batch.encoding {
-            Some(token) => format!("{}?compression={token}", self.url_base),
-            None => self.url_base.clone(),
-        };
-        let mut request = self
-            .http
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
-            .body(batch.body.clone());
-        if let Some(token) = batch.encoding {
-            request = request.header(reqwest::header::CONTENT_ENCODING, token);
-        }
-        let request = super::v0_capture::apply_extra_headers(&self.options, request);
-        let request = bound_request(
-            request,
-            deadline,
-            self.clock.now(),
-            self.options.request_timeout_seconds,
-        );
-
-        let mut http_status: Option<u16> = None;
-        let step = match request.send() {
-            Err(e) => v0_after_transport_error(&self.options, batch.attempt, e.to_string()),
-            Ok(response) => {
-                let status = response.status().as_u16();
-                http_status = Some(status);
-                let retry_after = super::retry::parse_retry_after(response.headers());
-                let body = response
-                    .text()
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                v0_after_response(&self.options, batch.attempt, status, retry_after, &body)
-            }
-        };
-
-        match step {
-            Step::Done => dec_len(&self.len, batch.count),
-            Step::Fail(e) => {
-                if self.options.on_error.is_empty() {
-                    warn!("posthog-rs: dropping {} event(s): {e}", batch.count);
-                } else {
-                    self.fire_capture(
-                        Some(&e),
-                        http_status,
-                        batch.attempt,
-                        batch.historical_migration,
-                        batch.count,
-                    );
-                }
-                dec_len(&self.len, batch.count);
-            }
-            Step::Backoff(delay) => {
-                if deadline.is_some() {
-                    warn!(
-                        "posthog-rs: dropping {} undelivered event(s) on shutdown",
-                        batch.count
-                    );
-                    dec_len(&self.len, batch.count);
-                } else {
-                    batch.attempt += 1;
-                    batch.next_at = self.clock.now() + delay;
-                    self.retries.push_back(batch);
-                }
-            }
-        }
-    }
-
-    fn earliest_retry(&self) -> Option<Instant> {
-        self.retries.iter().map(|b| b.next_at).min()
-    }
-
-    fn attempt_due(&mut self) {
-        let now = self.clock.now();
-        for batch in std::mem::take(&mut self.retries) {
-            if now >= batch.next_at {
-                self.attempt(batch, None);
-            } else {
-                self.retries.push_back(batch);
-            }
-        }
-    }
-
-    fn flush_retries(&mut self, deadline: Option<Instant>) {
-        // `Some` is the shutdown/disconnect path: attempts are final (drop on
-        // failure), and any batch still pending once the deadline passes is
-        // dropped rather than attempted.
-        for batch in std::mem::take(&mut self.retries) {
-            if deadline.is_some_and(|d| self.clock.now() >= d) {
-                warn!(
-                    "posthog-rs: shutdown timeout reached; dropping {} undelivered event(s)",
-                    batch.count
-                );
-                dec_len(&self.len, batch.count);
-            } else {
-                self.attempt(batch, deadline);
-            }
-        }
-    }
-
-    /// Fire the `on_error` hooks for a terminal capture outcome. The V0 pipeline
-    /// has no per-event verdicts, so it reports only the batch-level cause.
-    fn fire_capture(
-        &self,
-        error: Option<&Error>,
-        status: Option<u16>,
-        attempt: u32,
-        historical_migration: bool,
-        event_count: usize,
-    ) {
-        let failure = PostHogError::Capture(CaptureFailure {
-            error,
-            status,
-            attempt,
-            event_count,
-            historical_migration,
-        });
-        apply_on_error_hooks(&self.options.on_error, &failure);
-    }
 }
 
 #[cfg(test)]
@@ -1670,7 +1446,6 @@ mod tests {
     /// will not persist) while excluding delivered `ok`/`warning` — a batch that
     /// mixes a drop with a retry must report both, not just whatever remained in
     /// `pending`. Guards the historical `event_count` under-count.
-    #[cfg(feature = "capture-v1")]
     #[test]
     fn undelivered_results_counts_retry_and_drop_only() {
         use crate::event_v1::{EventResult, EventStatus};
@@ -1687,7 +1462,6 @@ mod tests {
         assert_eq!(undelivered_results(&results), 2);
     }
 
-    #[cfg(feature = "capture-v1")]
     #[test]
     fn capture_failure_v1_surfaces_request_id_and_error_response() {
         // A non-2xx V1 response with a structured error body must reach the hook
@@ -1733,7 +1507,6 @@ mod tests {
         assert!(has_error);
     }
 
-    #[cfg(feature = "capture-v1")]
     #[test]
     fn capture_failure_v1_2xx_counts_dropped_and_final_retry() {
         // A 2xx whose per-event verdicts leave events un-persisted (a `drop` and

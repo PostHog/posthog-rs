@@ -273,29 +273,24 @@ impl Event {
     }
 
     /// Return the event name.
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub fn event_name(&self) -> &str {
         &self.event
     }
 
     /// Return the event distinct ID.
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub fn distinct_id(&self) -> &str {
         &self.distinct_id
     }
 
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn uuid(&self) -> Uuid {
         self.uuid
     }
 
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn timestamp(&self) -> Option<NaiveDateTime> {
         self.timestamp
     }
 
     /// Return the event properties.
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub fn properties(&self) -> &HashMap<String, serde_json::Value> {
         &self.properties
     }
@@ -313,7 +308,6 @@ impl Event {
         self.properties.entry(key.into()).or_insert(value);
     }
 
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn groups(&self) -> &HashMap<String, String> {
         &self.groups
     }
@@ -326,7 +320,6 @@ impl Event {
     }
 
     /// Whether this event is a minimized `$feature_flag_called` event.
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn is_minimal_flag_called(&self) -> bool {
         self.minimal_flag_called
     }
@@ -335,7 +328,7 @@ impl Event {
     /// when it is a minimized `$feature_flag_called` event; a no-op otherwise.
     /// Called as the final capture step so no property added upstream survives
     /// outside the allowlist.
-    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn apply_minimal_flag_called_allowlist(&mut self) {
         if self.minimal_flag_called {
             self.properties
@@ -349,7 +342,7 @@ impl Event {
     ///
     /// `$process_person_profile` is already in `properties` when set by
     /// constructors (`new_anon`, `add_group`) or explicit `insert_prop`.
-    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn prepare_for_v0(&mut self) {
         if !self.properties.contains_key("$lib") {
             self.properties.insert(
@@ -397,20 +390,9 @@ impl Event {
     }
 }
 
-/// Wrapper for the `/batch/` endpoint that includes the API key and options
-/// alongside the event array.
-#[cfg(not(feature = "capture-v1"))]
-#[derive(Serialize)]
-pub struct BatchRequest {
-    pub api_key: String,
-    pub historical_migration: bool,
-    /// Time the batch left the client, for server-side clock-skew correction.
-    pub sent_at: String,
-    pub batch: Vec<InnerEvent>,
-}
-
-// With `capture-v1` enabled nothing outside tests builds the V0 wire format.
-#[cfg_attr(feature = "capture-v1", allow(dead_code))]
+// V0 wire format: retained only as test scaffolding until the error_tracking and
+// event tests are ported to the V1 builder, then deleted.
+#[allow(dead_code)]
 #[derive(Serialize)]
 pub struct InnerEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -433,12 +415,7 @@ impl InnerEvent {
 
     /// Construct a V0 batch wire event. The `/batch/` root `api_key` has
     /// precedence on the backend, so per-event keys are intentionally omitted.
-    #[cfg(not(feature = "capture-v1"))]
-    pub(crate) fn new_for_batch(event: Event) -> Self {
-        Self::from_event(event, None)
-    }
-
-    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
+    #[allow(dead_code)]
     fn from_event(event: Event, api_key: Option<String>) -> Self {
         Self {
             api_key,
@@ -463,12 +440,6 @@ pub mod tests {
         InnerEvent::new(event, "test_api_key".to_string())
     }
 
-    #[cfg(not(feature = "capture-v1"))]
-    fn build_v0_batch_event(mut event: Event) -> InnerEvent {
-        event.prepare_for_v0();
-        InnerEvent::new_for_batch(event)
-    }
-
     #[test]
     fn v0_adds_lib_properties() {
         let mut event = Event::new("unit test event", "1234");
@@ -490,32 +461,6 @@ pub mod tests {
         // (only tolerated by capture via a serde alias) must not be emitted.
         assert_eq!(json["distinct_id"], "user1");
         assert!(json.get("$distinct_id").is_none());
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    #[test]
-    fn v0_batch_serializes_distinct_id_at_root() {
-        use crate::event::BatchRequest;
-
-        let batch = BatchRequest {
-            api_key: "test_api_key".to_string(),
-            historical_migration: false,
-            sent_at: "2026-01-01T00:00:00Z".to_string(),
-            batch: vec![
-                build_v0_batch_event(Event::new("e1", "user1")),
-                build_v0_batch_event(Event::new("e2", "user2")),
-            ],
-        };
-        let json = serde_json::to_value(&batch).unwrap();
-
-        assert_eq!(json["api_key"], "test_api_key");
-
-        let events = json["batch"].as_array().expect("batch is an array");
-        for (event, expected_id) in events.iter().zip(["user1", "user2"]) {
-            assert_eq!(event["distinct_id"], expected_id);
-            assert!(event.get("$distinct_id").is_none());
-            assert!(event.get("api_key").is_none());
-        }
     }
 
     #[test]

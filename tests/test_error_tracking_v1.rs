@@ -1,8 +1,7 @@
-// V1-transport twins of the Error Tracking integration tests in
-// `test_error_tracking.rs`, which is v0-shaped and gated out under capture-v1.
+// Error Tracking integration tests over the capture transport.
 // The mock responds with an empty results map and the client runs a single
-// attempt, so each test asserts exactly one well-formed V1 request.
-#![cfg(all(feature = "error-tracking", feature = "capture-v1"))]
+// attempt, so each test asserts exactly one well-formed request.
+#![cfg(feature = "error-tracking")]
 
 use httpmock::prelude::*;
 use serde_json::json;

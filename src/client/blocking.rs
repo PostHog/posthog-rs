@@ -53,8 +53,6 @@ use super::common::{
 };
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
-#[cfg(not(feature = "capture-v1"))]
-use reqwest::header::CONTENT_ENCODING;
 
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
@@ -463,8 +461,8 @@ impl Client {
     /// # Behavior
     ///
     /// Sends inline (bypassing the background worker) and retries transient
-    /// failures per the client's retry configuration. On the `capture-v1`
-    /// pipeline a returned `Ok` can still report unpersisted events — inspect
+    /// failures per the client's retry configuration. A returned `Ok` can still
+    /// report unpersisted events — inspect
     /// [`CaptureSummary::all_persisted`]. Does NOT fire `on_error` hooks: the
     /// returned `Result` is the delivery signal. Disabled clients and an empty
     /// (or fully `before_send`-filtered) batch return a default `CaptureSummary`.
@@ -493,7 +491,6 @@ impl Client {
     /// Inline V1 capture: prepare once via the shared sans-IO helpers, then loop
     /// send/classify, sleeping on the calling thread between retries. The setup and
     /// classification are shared with the async client; only this loop differs.
-    #[cfg(feature = "capture-v1")]
     fn send_immediate(
         &self,
         events: Vec<Event>,
@@ -566,56 +563,6 @@ impl Client {
 
     /// Inline V0 capture: prepare the batch body once via the shared sans-IO
     /// helpers, then loop send/classify. A `2xx` persists the whole batch.
-    #[cfg(not(feature = "capture-v1"))]
-    fn send_immediate(
-        &self,
-        events: Vec<Event>,
-        historical_migration: bool,
-    ) -> Result<CaptureSummary, Error> {
-        use super::retry::{self, v0_after_response, v0_after_transport_error, Step};
-        use super::v0_capture;
-
-        let Some(prep) =
-            v0_capture::prepare_immediate(&self.options, events, historical_migration)?
-        else {
-            return Ok(CaptureSummary::default());
-        };
-
-        let mut attempt: u32 = 1;
-        loop {
-            let mut request = self
-                .client
-                .post(&prep.url)
-                .header(CONTENT_TYPE, "application/json")
-                .header(USER_AGENT, get_default_user_agent())
-                .body(prep.body.clone());
-            if let Some(token) = prep.encoding {
-                request = request.header(CONTENT_ENCODING, token);
-            }
-            let request = v0_capture::apply_extra_headers(&self.options, request);
-
-            let step = match request.send() {
-                Err(e) => v0_after_transport_error(&self.options, attempt, e.to_string()),
-                Ok(response) => {
-                    let status = response.status().as_u16();
-                    let retry_after = retry::parse_retry_after(response.headers());
-                    let text = response
-                        .text()
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    v0_after_response(&self.options, attempt, status, retry_after, &text)
-                }
-            };
-
-            match step {
-                Step::Done => return Ok(CaptureSummary::delivered(prep.kept)),
-                Step::Fail(e) => return Err(e),
-                Step::Backoff(delay) => {
-                    attempt += 1;
-                    std::thread::sleep(delay);
-                }
-            }
-        }
-    }
 
     /// Number of events accepted but not yet delivered or dropped — those still
     /// in the channel, in the worker's current batch, or held for retry. Returns

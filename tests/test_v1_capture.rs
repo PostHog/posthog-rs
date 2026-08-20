@@ -1,4 +1,4 @@
-#![cfg(all(feature = "async-client", feature = "capture-v1"))]
+#![cfg(feature = "async-client")]
 
 //! V1 capture behavior under the background transport. `capture` /
 //! `capture_batch` are non-blocking enqueues that always return `Ok`, so these
