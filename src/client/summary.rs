@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::event_v1::{EventResult, EventStatus};
+use crate::capture_event::{EventResult, EventStatus};
 
 /// The outcome of an immediate capture ([`Client::capture_immediate`] /
 /// [`Client::capture_batch_immediate`]), returned once the SDK has a terminal

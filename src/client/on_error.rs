@@ -28,7 +28,7 @@ use crate::error::Error;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::event_v1::{EventResult, V1ErrorResponse};
+use crate::capture_event::{CaptureErrorResponse, EventResult};
 
 type OnErrorFn = dyn Fn(&PostHogError<'_>) + Send + Sync + 'static;
 type SharedOnErrorHook = Arc<OnErrorFn>;
@@ -94,7 +94,7 @@ pub struct CaptureFailure<'a> {
     pub(crate) historical_migration: bool,
     pub(crate) request_id: Option<&'a Uuid>,
     pub(crate) results: &'a HashMap<Uuid, EventResult>,
-    pub(crate) error_response: Option<&'a V1ErrorResponse>,
+    pub(crate) error_response: Option<&'a CaptureErrorResponse>,
 }
 
 impl<'a> CaptureFailure<'a> {
@@ -153,7 +153,7 @@ impl<'a> CaptureFailure<'a> {
     /// body parsed as one. `None` for a transport error, a `2xx`, or an
     /// unrecognizable body — the raw body remains available via
     /// [`error`](Self::error).
-    pub fn error_response(&self) -> Option<&V1ErrorResponse> {
+    pub fn error_response(&self) -> Option<&CaptureErrorResponse> {
         self.error_response
     }
 }

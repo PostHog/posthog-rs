@@ -1653,8 +1653,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+    use crate::capture_event::CaptureEvent;
     use crate::client::ClientOptionsBuilder;
-    use crate::event_v1::V1Event;
 
     #[derive(Debug)]
     struct OuterError {
@@ -1698,7 +1698,7 @@ mod tests {
     /// Serialize through the capture wire builder so these tests assert the
     /// shape actually put on the wire.
     fn built_event_json(event: Event) -> Value {
-        serde_json::to_value(V1Event::from_event(&event)).unwrap()
+        serde_json::to_value(CaptureEvent::from_event(&event)).unwrap()
     }
 
     fn event_json_with(exception: Exception, options: &ErrorTrackingOptions) -> Value {
@@ -1774,7 +1774,7 @@ mod tests {
     }
 
     /// Match the panic `$exception` event inside the transport's batch envelope
-    /// (`batch[0]`) — the same event shape for the V0 and V1 wire formats.
+    /// (`batch[0]`).
     fn request_has_panic_payload(req: &HttpMockRequest) -> bool {
         let Ok(body) = serde_json::from_slice::<Value>(req.body_ref()) else {
             return false;
@@ -1804,7 +1804,8 @@ mod tests {
         });
 
         event["event"] == "$exception"
-            // V0 injects `$process_person_profile` into properties; V1 keeps it
+            // `$process_person_profile` is lifted into the typed options object;
+            // tolerate the properties spelling too for hand-built payloads.
             // in the typed `options` object.
             && (event["properties"]["$process_person_profile"] == false
                 || event["options"]["process_person_profile"] == false)

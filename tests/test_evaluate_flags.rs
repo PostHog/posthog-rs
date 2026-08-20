@@ -787,15 +787,16 @@ mod blocking {
         );
     }
 
-    /// C5: `$feature_flag_called` ships via the V1 endpoint, never the v0 path.
+    /// C5: `$feature_flag_called` ships via the capture endpoint, never the
+    /// retired legacy path.
     #[test]
-    fn flag_called_event_routes_to_v1_endpoint() {
+    fn flag_called_event_routes_to_capture_endpoint() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let v1_mock = server.mock(|when, then| {
+        let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/i/v1/analytics/events")
                 .header("posthog-attempt", "1")
@@ -809,7 +810,7 @@ mod blocking {
                 .header("content-type", "application/json")
                 .json_body(json!({ "results": {} }));
         });
-        let v0_mock = server.mock(|when, then| {
+        let legacy_mock = server.mock(|when, then| {
             when.method(POST).path("/i/v0/e/");
             then.status(200);
         });
@@ -819,13 +820,13 @@ mod blocking {
             .unwrap();
         assert!(snapshot.is_enabled("alpha"));
         client.flush();
-        v1_mock.assert_hits(1);
-        v0_mock.assert_hits(0);
+        capture_mock.assert_hits(1);
+        legacy_mock.assert_hits(0);
     }
 
     /// C5: `$feature_flag_called` uses the normal V1 capture retry path.
     #[test]
-    fn flag_called_event_v1_failure_is_retried() {
+    fn flag_called_event_failure_is_retried() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/flags/");
@@ -906,7 +907,7 @@ mod blocking {
     /// Ported from the removed V0 suite: `$feature_flag_called` carries
     /// `$is_server`. The `$lib`/`$lib_version` half of the original assertion
     /// now travels in the `posthog-sdk-info` header instead of the body, and is
-    /// covered by `flag_called_event_routes_to_v1_endpoint` above.
+    /// covered by `flag_called_event_routes_to_capture_endpoint` above.
     #[test]
     fn flag_called_event_contains_is_server() {
         let server = MockServer::start();
@@ -1192,15 +1193,16 @@ mod async_tests {
         capture_mock.assert_hits(0);
     }
 
-    /// C5: `$feature_flag_called` ships via the V1 endpoint, never the v0 path.
+    /// C5: `$feature_flag_called` ships via the capture endpoint, never the
+    /// retired legacy path.
     #[tokio::test]
-    async fn flag_called_event_routes_to_v1_endpoint() {
+    async fn flag_called_event_routes_to_capture_endpoint() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let v1_mock = server.mock(|when, then| {
+        let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/i/v1/analytics/events")
                 .header("posthog-attempt", "1")
@@ -1214,7 +1216,7 @@ mod async_tests {
                 .header("content-type", "application/json")
                 .json_body(json!({ "results": {} }));
         });
-        let v0_mock = server.mock(|when, then| {
+        let legacy_mock = server.mock(|when, then| {
             when.method(POST).path("/i/v0/e/");
             then.status(200);
         });
@@ -1225,13 +1227,13 @@ mod async_tests {
             .unwrap();
         assert!(snapshot.is_enabled("alpha"));
         client.flush().await;
-        v1_mock.assert_hits(1);
-        v0_mock.assert_hits(0);
+        capture_mock.assert_hits(1);
+        legacy_mock.assert_hits(0);
     }
 
     /// C5: `$feature_flag_called` uses the normal V1 capture retry path.
     #[tokio::test]
-    async fn flag_called_event_v1_failure_is_retried() {
+    async fn flag_called_event_failure_is_retried() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/flags/");
@@ -1293,7 +1295,7 @@ mod async_tests {
     /// Ported from the removed V0 suite: `$feature_flag_called` carries
     /// `$is_server`. The `$lib`/`$lib_version` half of the original assertion
     /// now travels in the `posthog-sdk-info` header instead of the body, and is
-    /// covered by `flag_called_event_routes_to_v1_endpoint` above.
+    /// covered by `flag_called_event_routes_to_capture_endpoint` above.
     #[tokio::test]
     async fn flag_called_event_contains_is_server() {
         let server = MockServer::start();

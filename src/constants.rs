@@ -23,7 +23,7 @@ pub(crate) const PRODUCT_TOUR_ID_OPT: &str = "product_tour_id";
 pub(crate) const PROCESS_PERSON_PROFILE_OPT: &str = "process_person_profile";
 
 /// The type the backend's `Options` struct expects for a lifted key. Drives
-/// the coercion in `V1Event::from_event_at`: a caller value that can't be
+/// the coercion in `CaptureEvent::from_event_at`: a caller value that can't be
 /// coerced to this type is dropped rather than shipped (a mistyped option
 /// otherwise 400s the whole batch, since the backend `Options` is strict
 /// serde — see `rust/capture/src/v1/analytics/types.rs`).

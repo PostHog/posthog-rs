@@ -24,8 +24,8 @@ pub use summary::CaptureSummary;
 ///
 /// When set on [`ClientOptions`], capture requests are compressed and the
 /// matching `Content-Encoding` header is sent. The variant string matches the
-/// HTTP `Content-Encoding` token the server expects. The V0 pipeline supports
-/// `Gzip` only; V1 supports all variants.
+/// HTTP `Content-Encoding` token the server expects. All four variants are
+/// accepted by the capture endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureCompression {
     Gzip,
@@ -48,9 +48,9 @@ impl CaptureCompression {
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+mod capture;
 mod retry;
 mod transport;
-mod v1_capture;
 #[cfg(not(feature = "async-client"))]
 pub use blocking::client;
 #[cfg(not(feature = "async-client"))]

@@ -2,7 +2,7 @@ services:
   sdk-adapter:
     build:
       context: ../..
-      dockerfile: compliance/v1/Dockerfile
+      dockerfile: compliance/harness/Dockerfile
     environment:
       - COMPRESSION=gzip
     ports:

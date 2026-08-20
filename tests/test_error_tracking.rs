@@ -30,9 +30,9 @@ impl fmt::Display for PanicDisplayError {
 
 impl StdError for PanicDisplayError {}
 
-const V1_CAPTURE_PATH: &str = "/i/v1/analytics/events";
+const CAPTURE_PATH: &str = "/i/v1/analytics/events";
 
-fn v1_ok_response() -> serde_json::Value {
+fn ok_response() -> serde_json::Value {
     json!({ "results": {} })
 }
 
@@ -103,7 +103,7 @@ mod blocking {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path(V1_CAPTURE_PATH)
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""process_person_profile":false"#)
                 .body_includes(r#""$exception_level":"error""#)
@@ -112,7 +112,7 @@ mod blocking {
                 .matches(request_has_capture_exception_user_frame_last);
             then.status(200)
                 .header("content-type", "application/json")
-                .json_body(v1_ok_response());
+                .json_body(ok_response());
         });
 
         let client = create_test_client(server.base_url());
@@ -127,7 +127,7 @@ mod blocking {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path(V1_CAPTURE_PATH)
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""distinct_id":"user-1""#)
                 .body_includes(r#""route":"/checkout""#)
@@ -137,7 +137,7 @@ mod blocking {
                 .matches(request_has_capture_exception_with_user_frame_last);
             then.status(200)
                 .header("content-type", "application/json")
-                .json_body(v1_ok_response());
+                .json_body(ok_response());
         });
 
         let client = create_test_client(server.base_url());
@@ -184,13 +184,13 @@ mod blocking {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path(V1_CAPTURE_PATH)
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""value":"payment failed""#)
                 .matches(request_has_no_stacktrace);
             then.status(200)
                 .header("content-type", "application/json")
-                .json_body(v1_ok_response());
+                .json_body(ok_response());
         });
 
         let options = posthog_rs::ClientOptionsBuilder::default()
@@ -234,7 +234,7 @@ mod async_client {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path(V1_CAPTURE_PATH)
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""process_person_profile":false"#)
                 .body_includes(r#""$exception_level":"error""#)
@@ -243,7 +243,7 @@ mod async_client {
                 .matches(request_has_capture_exception_user_frame_last);
             then.status(200)
                 .header("content-type", "application/json")
-                .json_body(v1_ok_response());
+                .json_body(ok_response());
         });
 
         let client = create_test_client(server.base_url()).await;
@@ -258,7 +258,7 @@ mod async_client {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path(V1_CAPTURE_PATH)
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""distinct_id":"user-1""#)
                 .body_includes(r#""route":"/checkout""#)
@@ -268,7 +268,7 @@ mod async_client {
                 .matches(request_has_capture_exception_with_user_frame_last);
             then.status(200)
                 .header("content-type", "application/json")
-                .json_body(v1_ok_response());
+                .json_body(ok_response());
         });
 
         let client = create_test_client(server.base_url()).await;
@@ -317,13 +317,13 @@ mod async_client {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path(V1_CAPTURE_PATH)
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""value":"payment failed""#)
                 .matches(request_has_no_stacktrace);
             then.status(200)
                 .header("content-type", "application/json")
-                .json_body(v1_ok_response());
+                .json_body(ok_response());
         });
 
         let options = posthog_rs::ClientOptionsBuilder::default()

@@ -49,7 +49,7 @@ pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
 ];
 
 /// Whether `key` survives minimization to [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`].
-/// Applied by the capture pipeline (`v1_capture::build_events_at`) so the
+/// Applied by the capture pipeline (`capture::build_events_at`) so the
 /// allowlist check has a single implementation independent of the properties
 /// representation it is applied to.
 pub(crate) fn is_minimal_flag_called_property(key: &str) -> bool {
@@ -327,18 +327,18 @@ impl Event {
 /// Note on `$lib`/`$lib_version`: V1 never carries them in `properties`. The
 /// SDK sends its identity in the `posthog-sdk-info` header and capture
 /// materializes the properties server-side, so that contract is covered by
-/// `client::v1_capture::tests::build_headers_sdk_info_is_canonical_lib_slash_version`.
+/// `client::capture::tests::build_headers_sdk_info_is_canonical_lib_slash_version`.
 #[cfg(test)]
 pub mod tests {
     use serde_json::{json, Value};
     use uuid::Uuid;
 
-    use crate::{event_v1::V1Event, Event};
+    use crate::{capture_event::CaptureEvent, Event};
 
     /// Serialize an event through the V1 builder, yielding the exact JSON the
     /// capture request would carry for it.
     fn build_v1(event: Event) -> Value {
-        serde_json::to_value(V1Event::from_event(&event)).unwrap()
+        serde_json::to_value(CaptureEvent::from_event(&event)).unwrap()
     }
 
     /// Assert `$process_person_profile` was lifted to `options` with `expected`

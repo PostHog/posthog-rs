@@ -497,10 +497,10 @@ impl Client {
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureSummary, Error> {
-        use super::v1_capture::{self, Step};
+        use super::capture::{self, Step};
 
         let Some(mut prep) =
-            v1_capture::prepare_immediate(&self.options, events, historical_migration)
+            capture::prepare_immediate(&self.options, events, historical_migration)
         else {
             return Ok(CaptureSummary::default());
         };
@@ -508,7 +508,7 @@ impl Client {
         let mut attempt: u32 = 1;
 
         loop {
-            let (headers, body) = v1_capture::build_attempt_parts(
+            let (headers, body) = capture::build_attempt_parts(
                 &self.options,
                 &prep.request_id,
                 attempt,
@@ -525,7 +525,7 @@ impl Client {
                 .send()
                 .await
             {
-                Err(e) => v1_capture::after_transport_error(
+                Err(e) => capture::after_transport_error(
                     &self.options,
                     &prep.request_id,
                     attempt,
@@ -533,12 +533,12 @@ impl Client {
                 ),
                 Ok(response) => {
                     let status = response.status().as_u16();
-                    let retry_after = v1_capture::parse_retry_after(response.headers());
+                    let retry_after = capture::parse_retry_after(response.headers());
                     let text = response
                         .text()
                         .await
                         .unwrap_or_else(|_| "Unknown error".to_string());
-                    v1_capture::after_response(
+                    capture::after_response(
                         &self.options,
                         &prep.request_id,
                         attempt,
@@ -563,9 +563,6 @@ impl Client {
             }
         }
     }
-
-    /// Inline V0 capture: prepare the batch body once via the shared sans-IO
-    /// helpers, then loop send/classify. A `2xx` persists the whole batch.
 
     /// Number of events accepted but not yet delivered or dropped — those still
     /// in the channel, in the worker's current batch, or held for retry. Returns

@@ -674,10 +674,10 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 struct RetryBatch {
-    pending: Vec<crate::event_v1::V1Event>,
+    pending: Vec<crate::capture_event::CaptureEvent>,
     request_id: Uuid,
     created_at: String,
-    final_results: HashMap<Uuid, crate::event_v1::EventResult>,
+    final_results: HashMap<Uuid, crate::capture_event::EventResult>,
     historical_migration: bool,
     attempt: u32,
     next_at: Instant,
@@ -700,7 +700,7 @@ impl Pipeline {
             .unwrap_or_default();
         let url = options
             .endpoints()
-            .build_custom_url(super::v1_capture::V1_CAPTURE_PATH);
+            .build_url(crate::endpoints::Endpoint::Capture);
         Self {
             http,
             options: options.clone(),
@@ -734,8 +734,7 @@ impl Pipeline {
             return;
         }
         let now = self.clock.now();
-        let pending =
-            super::v1_capture::build_events_at(&processed, &defaults, self.clock.now_utc());
+        let pending = super::capture::build_events_at(&processed, &defaults, self.clock.now_utc());
         let batch = RetryBatch {
             pending,
             request_id: Uuid::now_v7(),
@@ -749,10 +748,10 @@ impl Pipeline {
     }
 
     fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
-        use super::v1_capture::{self, Step};
-        use crate::event_v1::{V1BatchRequestRef, V1ErrorResponse};
+        use super::capture::{self, Step};
+        use crate::capture_event::{BatchRequestRef, CaptureErrorResponse};
 
-        let req = V1BatchRequestRef {
+        let req = BatchRequestRef {
             created_at: &batch.created_at,
             historical_migration: batch.historical_migration.then_some(true),
             batch: &batch.pending,
@@ -772,14 +771,13 @@ impl Pipeline {
                 return;
             }
         };
-        let mut headers = v1_capture::build_headers_at(
+        let mut headers = capture::build_headers_at(
             &self.options,
             &batch.request_id,
             batch.attempt,
             self.clock.now_utc(),
         );
-        let body =
-            v1_capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
+        let body = capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
 
         let count = batch.pending.len();
         let request = bound_request(
@@ -794,7 +792,7 @@ impl Pipeline {
         let mut http_status: Option<u16> = None;
         let mut response_body: Option<String> = None;
         let step = match request.send() {
-            Err(e) => v1_capture::after_transport_error(
+            Err(e) => capture::after_transport_error(
                 &self.options,
                 &batch.request_id,
                 batch.attempt,
@@ -803,9 +801,9 @@ impl Pipeline {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 http_status = Some(status);
-                let retry_after = v1_capture::parse_retry_after(resp.headers());
+                let retry_after = capture::parse_retry_after(resp.headers());
                 let text = resp.text().unwrap_or_else(|_| "Unknown error".to_string());
-                let step = v1_capture::after_response(
+                let step = capture::after_response(
                     &self.options,
                     &batch.request_id,
                     batch.attempt,
@@ -850,7 +848,7 @@ impl Pipeline {
                 } else {
                     let error_response = response_body
                         .as_deref()
-                        .and_then(|b| serde_json::from_str::<V1ErrorResponse>(b).ok());
+                        .and_then(|b| serde_json::from_str::<CaptureErrorResponse>(b).ok());
                     let lost = batch.pending.len() + undelivered_results(&batch.final_results);
                     self.fire_capture(
                         &batch,
@@ -919,7 +917,7 @@ impl Pipeline {
         request_id: Option<&Uuid>,
         error: Option<&Error>,
         status: Option<u16>,
-        error_response: Option<&crate::event_v1::V1ErrorResponse>,
+        error_response: Option<&crate::capture_event::CaptureErrorResponse>,
         event_count: usize,
     ) {
         let failure = PostHogError::Capture(CaptureFailure {
@@ -938,8 +936,8 @@ impl Pipeline {
 
 /// Count events the V1 backend will not persist (`retry`/`drop` verdicts).
 /// `ok`/`warning` were delivered, so they are excluded from the lost tally.
-fn undelivered_results(results: &HashMap<Uuid, crate::event_v1::EventResult>) -> usize {
-    use crate::event_v1::EventStatus;
+fn undelivered_results(results: &HashMap<Uuid, crate::capture_event::EventResult>) -> usize {
+    use crate::capture_event::EventStatus;
     results
         .values()
         .filter(|r| matches!(r.result, EventStatus::Retry | EventStatus::Drop))
@@ -1448,7 +1446,7 @@ mod tests {
     /// `pending`. Guards the historical `event_count` under-count.
     #[test]
     fn undelivered_results_counts_retry_and_drop_only() {
-        use crate::event_v1::{EventResult, EventStatus};
+        use crate::capture_event::{EventResult, EventStatus};
         let mk = |result| EventResult {
             result,
             details: None,
@@ -1463,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_failure_v1_surfaces_request_id_and_error_response() {
+    fn capture_failure_surfaces_request_id_and_error_response() {
         // A non-2xx V1 response with a structured error body must reach the hook
         // as a parsed `error_response`, alongside the request id of the attempt.
         let server = MockServer::start();
@@ -1508,7 +1506,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_failure_v1_2xx_counts_dropped_and_final_retry() {
+    fn capture_failure_2xx_counts_dropped_and_final_retry() {
         // A 2xx whose per-event verdicts leave events un-persisted (a `drop` and
         // a `retry` on the final attempt) fires the hook once as `Step::Done`
         // with `error == None`, and `event_count` counts BOTH lost events while

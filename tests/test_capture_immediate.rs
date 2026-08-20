@@ -14,14 +14,14 @@
 // Async capture
 // ---------------------------------------------------------------------------
 #[cfg(feature = "async-client")]
-mod async_v1 {
+mod async_capture {
     use std::sync::{Arc, Mutex};
 
     use httpmock::prelude::*;
     use posthog_rs::{Client, ClientOptionsBuilder, Event, PostHogError};
     use serde_json::json;
 
-    async fn v1_client(base_url: String) -> Client {
+    async fn capture_client(base_url: String) -> Client {
         posthog_rs::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
@@ -57,7 +57,7 @@ mod async_v1 {
                 .json_body(json!({ "results": { uuid.to_string(): { "result": "ok" } } }));
         });
 
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
 
@@ -87,7 +87,7 @@ mod async_v1 {
             } }));
         });
 
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         let summary = client
             .capture_batch_immediate(vec![ok, dropped], false)
             .await
@@ -117,7 +117,7 @@ mod async_v1 {
             then.status(200).json_body(json!({ "results": {} }));
         });
 
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         let summary = client
             .capture_immediate(Event::new("test", "user-1"))
             .await
@@ -152,7 +152,7 @@ mod async_v1 {
                 .json_body(json!({ "results": { uuid.to_string(): { "result": "ok" } } }));
         });
 
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
 
@@ -174,7 +174,7 @@ mod async_v1 {
                 then.status(status).json_body(json!({ "error": "boom" }));
             });
 
-            let client = v1_client(server.base_url()).await;
+            let client = capture_client(server.base_url()).await;
             let result = client.capture_immediate(Event::new("test", "user-1")).await;
             assert!(
                 result.is_err(),
@@ -197,7 +197,7 @@ mod async_v1 {
                     .json_body(json!({ "error": "terminal" }));
             });
 
-            let client = v1_client(server.base_url()).await;
+            let client = capture_client(server.base_url()).await;
             let result = client.capture_immediate(Event::new("test", "user-1")).await;
             assert!(result.is_err(), "status {} must be terminal", status);
             mock.assert_hits(1);
@@ -214,7 +214,7 @@ mod async_v1 {
             then.status(200).json_body(json!({ "results": {} }));
         });
 
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         client
             .capture_batch_immediate(vec![Event::new("a", "u"), Event::new("b", "u")], true)
             .await
@@ -277,7 +277,7 @@ mod async_v1 {
             when.method(POST).path("/i/v1/analytics/events");
             then.status(200).json_body(json!({ "results": {} }));
         });
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         let summary = client.capture_batch_immediate(vec![], false).await.unwrap();
         assert_eq!(summary.submitted(), 0);
         mock.assert_hits(0);
@@ -291,14 +291,14 @@ mod async_v1 {
 // Blocking capture
 // ---------------------------------------------------------------------------
 #[cfg(not(feature = "async-client"))]
-mod blocking_v1 {
+mod blocking {
     use std::sync::{Arc, Mutex};
 
     use httpmock::prelude::*;
     use posthog_rs::{Client, ClientOptionsBuilder, Event, PostHogError};
     use serde_json::json;
 
-    fn v1_client(base_url: String) -> Client {
+    fn capture_client(base_url: String) -> Client {
         posthog_rs::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
@@ -321,7 +321,7 @@ mod blocking_v1 {
                 .json_body(json!({ "results": { uuid.to_string(): { "result": "ok" } } }));
         });
 
-        let client = v1_client(server.base_url());
+        let client = capture_client(server.base_url());
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
         let summary = client.capture_immediate(event).unwrap();
@@ -348,7 +348,7 @@ mod blocking_v1 {
             } }));
         });
 
-        let client = v1_client(server.base_url());
+        let client = capture_client(server.base_url());
         let summary = client
             .capture_batch_immediate(vec![ok, dropped], false)
             .unwrap();
@@ -367,7 +367,7 @@ mod blocking_v1 {
                 then.status(status).json_body(json!({ "error": "boom" }));
             });
 
-            let client = v1_client(server.base_url());
+            let client = capture_client(server.base_url());
             let result = client.capture_immediate(Event::new("test", "user-1"));
             assert!(
                 result.is_err(),
@@ -389,7 +389,7 @@ mod blocking_v1 {
                     .json_body(json!({ "error": "terminal" }));
             });
 
-            let client = v1_client(server.base_url());
+            let client = capture_client(server.base_url());
             let result = client.capture_immediate(Event::new("test", "user-1"));
             assert!(result.is_err(), "status {} must be terminal", status);
             mock.assert_hits(1);
