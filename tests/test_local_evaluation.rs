@@ -434,17 +434,10 @@ async fn test_local_evaluation_with_mock_server() {
     let mut properties = HashMap::new();
     properties.insert("email".to_string(), json!("test@company.com"));
 
-    let flags = client
-        .evaluate_flags(
-            "user-123",
-            EvaluateFlagsOptions {
-                person_properties: Some(properties),
-                flag_keys: Some(vec!["feature-b".to_string()]),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+    let mut options = EvaluateFlagsOptions::default();
+    options.person_properties = Some(properties);
+    options.flag_keys = Some(vec!["feature-b".to_string()]);
+    let flags = client.evaluate_flags("user-123", options).await.unwrap();
 
     assert_eq!(flags.get_flag("feature-b"), Some(FlagValue::Boolean(true)));
 

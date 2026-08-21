@@ -34,16 +34,9 @@ async fn main() {
     person_properties.insert("country".to_string(), json!("US"));
     person_properties.insert("account_age_days".to_string(), json!(45));
 
-    let flags = match client
-        .evaluate_flags(
-            user_id,
-            EvaluateFlagsOptions {
-                person_properties: Some(person_properties),
-                ..Default::default()
-            },
-        )
-        .await
-    {
+    let mut options = EvaluateFlagsOptions::default();
+    options.person_properties = Some(person_properties);
+    let flags = match client.evaluate_flags(user_id, options).await {
         Ok(flags) => flags,
         Err(error) => {
             eprintln!("Unable to evaluate feature flags: {error}");

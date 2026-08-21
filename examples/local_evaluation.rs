@@ -55,15 +55,11 @@ async fn main() {
     println!("\n1. Remote evaluation (10 requests):");
     let start = Instant::now();
     for i in 0..10 {
+        let mut options = EvaluateFlagsOptions::default();
+        options.person_properties = Some(person_properties.clone());
+        options.flag_keys = Some(vec![flag_key.to_string()]);
         let _ = api_client
-            .evaluate_flags(
-                format!("{user_id}-{i}"),
-                EvaluateFlagsOptions {
-                    person_properties: Some(person_properties.clone()),
-                    flag_keys: Some(vec![flag_key.to_string()]),
-                    ..Default::default()
-                },
-            )
+            .evaluate_flags(format!("{user_id}-{i}"), options)
             .await;
     }
     let api_duration = start.elapsed();
@@ -76,16 +72,12 @@ async fn main() {
     println!("\n2. Local evaluation (10 requests):");
     let start = Instant::now();
     for i in 0..10 {
+        let mut options = EvaluateFlagsOptions::default();
+        options.person_properties = Some(person_properties.clone());
+        options.only_evaluate_locally = true;
+        options.flag_keys = Some(vec![flag_key.to_string()]);
         let _ = local_client
-            .evaluate_flags(
-                format!("{user_id}-{i}"),
-                EvaluateFlagsOptions {
-                    person_properties: Some(person_properties.clone()),
-                    only_evaluate_locally: true,
-                    flag_keys: Some(vec![flag_key.to_string()]),
-                    ..Default::default()
-                },
-            )
+            .evaluate_flags(format!("{user_id}-{i}"), options)
             .await;
     }
     let local_duration = start.elapsed();
@@ -99,17 +91,10 @@ async fn main() {
     println!("\nLocal evaluation is {speedup:.1}x faster!");
 
     let start = Instant::now();
-    match local_client
-        .evaluate_flags(
-            user_id,
-            EvaluateFlagsOptions {
-                person_properties: Some(person_properties),
-                only_evaluate_locally: true,
-                ..Default::default()
-            },
-        )
-        .await
-    {
+    let mut options = EvaluateFlagsOptions::default();
+    options.person_properties = Some(person_properties);
+    options.only_evaluate_locally = true;
+    match local_client.evaluate_flags(user_id, options).await {
         Ok(flags) => println!(
             "Evaluated {} flags in {:?}",
             flags.keys().len(),
