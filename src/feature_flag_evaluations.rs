@@ -68,7 +68,11 @@ pub(crate) trait FeatureFlagEvaluationsHost: Send + Sync {
 }
 
 /// Optional inputs for [`Client::evaluate_flags`](crate::Client::evaluate_flags).
+///
+/// This struct is non-exhaustive so more options can be added in minor releases.
+/// Create it with [`Default`] and then set the fields you need.
 #[derive(Default, Clone, Debug)]
+#[non_exhaustive]
 pub struct EvaluateFlagsOptions {
     /// Group keys for group-targeted feature flags, keyed by group type (for
     /// example `{ "company": "company_123" }`). These groups are also
