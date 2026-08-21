@@ -1653,8 +1653,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+    use crate::capture_event::CaptureEvent;
     use crate::client::ClientOptionsBuilder;
-    use crate::event::InnerEvent;
 
     #[derive(Debug)]
     struct OuterError {
@@ -1695,9 +1695,10 @@ mod tests {
 
     impl StdError for BorrowedError<'_> {}
 
-    fn built_event_json(mut event: Event) -> Value {
-        event.prepare_for_v0();
-        serde_json::to_value(InnerEvent::new(event, "api-key".to_string())).unwrap()
+    /// Serialize through the capture wire builder so these tests assert the
+    /// shape actually put on the wire.
+    fn built_event_json(event: Event) -> Value {
+        serde_json::to_value(CaptureEvent::from_event(&event)).unwrap()
     }
 
     fn event_json_with(exception: Exception, options: &ErrorTrackingOptions) -> Value {
@@ -1773,7 +1774,7 @@ mod tests {
     }
 
     /// Match the panic `$exception` event inside the transport's batch envelope
-    /// (`batch[0]`) — the same event shape for the V0 and V1 wire formats.
+    /// (`batch[0]`).
     fn request_has_panic_payload(req: &HttpMockRequest) -> bool {
         let Ok(body) = serde_json::from_slice::<Value>(req.body_ref()) else {
             return false;
@@ -1803,7 +1804,8 @@ mod tests {
         });
 
         event["event"] == "$exception"
-            // V0 injects `$process_person_profile` into properties; V1 keeps it
+            // `$process_person_profile` is lifted into the typed options object;
+            // tolerate the properties spelling too for hand-built payloads.
             // in the typed `options` object.
             && (event["properties"]["$process_person_profile"] == false
                 || event["options"]["process_person_profile"] == false)
@@ -2456,7 +2458,9 @@ mod tests {
         let json = event_json(Exception::from_message("Error", "no user context", true));
 
         assert_eq!(json["event"], "$exception");
-        assert_eq!(json["properties"]["$process_person_profile"], false);
+        // Lifted out of `properties` into the typed wire options object.
+        assert_eq!(json["options"]["process_person_profile"], false);
+        assert!(json["properties"]["$process_person_profile"].is_null());
     }
 
     #[test]
@@ -2865,7 +2869,9 @@ mod tests {
         let json = built_event_json(event);
 
         assert_eq!(json["event"], "$exception");
-        assert_eq!(json["properties"]["$process_person_profile"], false);
+        // Lifted out of `properties` into the typed wire options object.
+        assert_eq!(json["options"]["process_person_profile"], false);
+        assert!(json["properties"]["$process_person_profile"].is_null());
         assert_eq!(json["properties"]["$exception_level"], "error");
     }
 

@@ -86,6 +86,7 @@
 //! signal. Reach for them only when the caller must know a batch persisted
 //! before advancing its own durable state (for example, a server-side importer
 //! committing an upstream offset); prefer fire-and-forget everywhere else.
+mod capture_event;
 mod client;
 mod compression;
 mod constants;
@@ -94,8 +95,6 @@ mod error;
 #[cfg(feature = "error-tracking")]
 mod error_tracking;
 mod event;
-#[cfg(feature = "capture-v1")]
-mod event_v1;
 mod feature_flag_evaluations;
 mod feature_flags;
 mod global;
@@ -131,9 +130,8 @@ pub use error_tracking::{
 // Event
 pub use event::Event;
 
-// V1 Capture types
-#[cfg(feature = "capture-v1")]
-pub use event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse};
+// Capture wire types
+pub use capture_event::{CaptureErrorResponse, CaptureResponse, EventResult, EventStatus};
 
 // Feature Flags
 pub use feature_flag_evaluations::{EvaluateFlagsOptions, FeatureFlagEvaluations};

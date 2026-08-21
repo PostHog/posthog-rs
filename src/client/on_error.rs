@@ -25,13 +25,10 @@ use std::sync::Arc;
 
 use crate::error::Error;
 
-#[cfg(feature = "capture-v1")]
 use std::collections::HashMap;
-#[cfg(feature = "capture-v1")]
 use uuid::Uuid;
 
-#[cfg(feature = "capture-v1")]
-use crate::event_v1::{EventResult, V1ErrorResponse};
+use crate::capture_event::{CaptureErrorResponse, EventResult};
 
 type OnErrorFn = dyn Fn(&PostHogError<'_>) + Send + Sync + 'static;
 type SharedOnErrorHook = Arc<OnErrorFn>;
@@ -95,25 +92,15 @@ pub struct CaptureFailure<'a> {
     pub(crate) attempt: u32,
     pub(crate) event_count: usize,
     pub(crate) historical_migration: bool,
-    #[cfg(feature = "capture-v1")]
     pub(crate) request_id: Option<&'a Uuid>,
-    #[cfg(feature = "capture-v1")]
     pub(crate) results: &'a HashMap<Uuid, EventResult>,
-    #[cfg(feature = "capture-v1")]
-    pub(crate) error_response: Option<&'a V1ErrorResponse>,
+    pub(crate) error_response: Option<&'a CaptureErrorResponse>,
 }
 
 impl<'a> CaptureFailure<'a> {
     /// The batch-level cause: a permanent reject, exhausted transport/HTTP
     /// retries, or a serialization failure.
-    #[cfg_attr(
-        not(feature = "capture-v1"),
-        doc = "\nAlways present: every capture failure surfaced to the hook carries a cause."
-    )]
-    #[cfg_attr(
-        feature = "capture-v1",
-        doc = "\n`None` only when the request itself succeeded (`2xx`) but some events were not\npersisted after the retry budget — inspect [`event_results`](Self::event_results)."
-    )]
+    #[doc = "\n`None` only when the request itself succeeded (`2xx`) but some events were not\npersisted after the retry budget — inspect [`event_results`](Self::event_results)."]
     pub fn error(&self) -> Option<&Error> {
         self.error
     }
@@ -130,10 +117,7 @@ impl<'a> CaptureFailure<'a> {
     }
 
     /// Number of events this failure dropped (lost).
-    #[cfg_attr(
-        feature = "capture-v1",
-        doc = "\nCounts only undelivered events (`retry`/`drop`), including any finalized on\nearlier attempts. This can be smaller than [`event_results`](Self::event_results)`.len()`,\nwhich also reports persisted `ok`/`warning` verdicts — filter by status before\ntreating an entry as lost."
-    )]
+    #[doc = "\nCounts only undelivered events (`retry`/`drop`), including any finalized on\nearlier attempts. This can be smaller than [`event_results`](Self::event_results)`.len()`,\nwhich also reports persisted `ok`/`warning` verdicts — filter by status before\ntreating an entry as lost."]
     pub fn event_count(&self) -> usize {
         self.event_count
     }
@@ -146,7 +130,6 @@ impl<'a> CaptureFailure<'a> {
     /// The V1 capture `posthog-request-id` of the final attempt, when one was
     /// sent. `None` for a serialization failure (no request reached the wire)
     /// and on the v0 pipeline (which has no request id).
-    #[cfg(feature = "capture-v1")]
     pub fn request_id(&self) -> Option<&Uuid> {
         self.request_id
     }
@@ -161,7 +144,6 @@ impl<'a> CaptureFailure<'a> {
     /// when [`error`](Self::error) is `None` (a `2xx` where events weren't
     /// persisted after retries); possibly partial on a batch-level failure
     /// (only verdicts collected from earlier attempts).
-    #[cfg(feature = "capture-v1")]
     pub fn event_results(&self) -> &HashMap<Uuid, EventResult> {
         self.results
     }
@@ -171,8 +153,7 @@ impl<'a> CaptureFailure<'a> {
     /// body parsed as one. `None` for a transport error, a `2xx`, or an
     /// unrecognizable body — the raw body remains available via
     /// [`error`](Self::error).
-    #[cfg(feature = "capture-v1")]
-    pub fn error_response(&self) -> Option<&V1ErrorResponse> {
+    pub fn error_response(&self) -> Option<&CaptureErrorResponse> {
         self.error_response
     }
 }

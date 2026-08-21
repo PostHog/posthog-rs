@@ -20,10 +20,7 @@ use std::time::{Duration, Instant};
 
 use posthog_rs::EvaluateFlagsOptions;
 
-#[cfg(feature = "capture-v1")]
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
-#[cfg(not(feature = "capture-v1"))]
-const CAPTURE_PATH: &str = "/batch/";
 
 /// The full minimal-event allowlist, mirrored from the crate-internal constant
 /// so this black-box test can assert nothing outside it survives.

@@ -50,8 +50,6 @@ use super::common::{
 };
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
-#[cfg(not(feature = "capture-v1"))]
-use reqwest::header::CONTENT_ENCODING;
 
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
@@ -195,6 +193,38 @@ impl Client {
     pub fn capture(&self, event: Event) {
         if let Some(transport) = &self.transport {
             transport.enqueue(event);
+        }
+    }
+
+    /// Merge two distinct IDs onto the same person by sending a `$create_alias`
+    /// event.
+    ///
+    /// See <https://posthog.com/docs/product-analytics/identify#alias-assigning-multiple-distinct-ids-to-the-same-user>.
+    ///
+    /// # Parameters
+    ///
+    /// - `previous_id`: ID already known to PostHog, such as an anonymous ID.
+    /// - `distinct_id`: ID it should be merged into, such as a logged-in user ID.
+    ///
+    /// # Remarks
+    ///
+    /// Fire-and-forget, like [`Client::capture`]. A blank ID on either side
+    /// cannot describe a merge, so the event is dropped with a warning rather
+    /// than sent.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() {
+    /// let client = posthog_rs::client("phc_project_api_key").await;
+    ///
+    /// // The visitor browsed anonymously, then logged in.
+    /// client.alias("anon-abc123", "user-42");
+    /// # }
+    /// ```
+    pub fn alias<P: Into<String>, D: Into<String>>(&self, previous_id: P, distinct_id: D) {
+        if let Some(event) = Event::alias(previous_id.into(), distinct_id.into()) {
+            self.capture(event);
         }
     }
 
@@ -432,8 +462,8 @@ impl Client {
     /// # Behavior
     ///
     /// Sends inline (bypassing the background worker) and retries transient
-    /// failures per the client's retry configuration. On the `capture-v1`
-    /// pipeline a returned `Ok` can still report unpersisted events — inspect
+    /// failures per the client's retry configuration. A returned `Ok` can still
+    /// report unpersisted events — inspect
     /// [`CaptureSummary::all_persisted`]. Does NOT fire `on_error` hooks: the
     /// returned `Result` is the delivery signal. Disabled clients and an empty
     /// (or fully `before_send`-filtered) batch return a default `CaptureSummary`.
@@ -462,16 +492,15 @@ impl Client {
     /// Inline V1 capture: prepare once via the shared sans-IO helpers, then loop
     /// send/classify, awaiting `tokio::time::sleep` between retries. The setup and
     /// classification are shared with the blocking client; only this loop differs.
-    #[cfg(feature = "capture-v1")]
     async fn send_immediate(
         &self,
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureSummary, Error> {
-        use super::v1_capture::{self, Step};
+        use super::capture::{self, Step};
 
         let Some(mut prep) =
-            v1_capture::prepare_immediate(&self.options, events, historical_migration)
+            capture::prepare_immediate(&self.options, events, historical_migration)
         else {
             return Ok(CaptureSummary::default());
         };
@@ -479,7 +508,7 @@ impl Client {
         let mut attempt: u32 = 1;
 
         loop {
-            let (headers, body) = v1_capture::build_attempt_parts(
+            let (headers, body) = capture::build_attempt_parts(
                 &self.options,
                 &prep.request_id,
                 attempt,
@@ -496,7 +525,7 @@ impl Client {
                 .send()
                 .await
             {
-                Err(e) => v1_capture::after_transport_error(
+                Err(e) => capture::after_transport_error(
                     &self.options,
                     &prep.request_id,
                     attempt,
@@ -504,12 +533,12 @@ impl Client {
                 ),
                 Ok(response) => {
                     let status = response.status().as_u16();
-                    let retry_after = v1_capture::parse_retry_after(response.headers());
+                    let retry_after = capture::parse_retry_after(response.headers());
                     let text = response
                         .text()
                         .await
                         .unwrap_or_else(|_| "Unknown error".to_string());
-                    v1_capture::after_response(
+                    capture::after_response(
                         &self.options,
                         &prep.request_id,
                         attempt,
@@ -526,65 +555,6 @@ impl Client {
                 Step::Done => {
                     return Ok(CaptureSummary::from_results(prep.submitted, final_results))
                 }
-                Step::Fail(e) => return Err(e),
-                Step::Backoff(delay) => {
-                    attempt += 1;
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-    }
-
-    /// Inline V0 capture: prepare the batch body once via the shared sans-IO
-    /// helpers, then loop send/classify. A `2xx` persists the whole batch.
-    #[cfg(not(feature = "capture-v1"))]
-    async fn send_immediate(
-        &self,
-        events: Vec<Event>,
-        historical_migration: bool,
-    ) -> Result<CaptureSummary, Error> {
-        use super::retry::{self, v0_after_response, v0_after_transport_error, Step};
-        use super::v0_capture;
-
-        let Some(prep) =
-            v0_capture::prepare_immediate(&self.options, events, historical_migration)?
-        else {
-            return Ok(CaptureSummary::default());
-        };
-
-        let mut attempt: u32 = 1;
-        loop {
-            let mut request = self
-                .client
-                .post(&prep.url)
-                .header(CONTENT_TYPE, "application/json")
-                .header(USER_AGENT, get_default_user_agent())
-                .body(prep.body.clone());
-            if let Some(token) = prep.encoding {
-                request = request.header(CONTENT_ENCODING, token);
-            }
-            #[cfg(feature = "test-harness")]
-            if let Some(ref extra) = self.options.extra_capture_headers {
-                for (k, v) in extra {
-                    request = request.header(k.as_str(), v.as_str());
-                }
-            }
-
-            let step = match request.send().await {
-                Err(e) => v0_after_transport_error(&self.options, attempt, e.to_string()),
-                Ok(response) => {
-                    let status = response.status().as_u16();
-                    let retry_after = retry::parse_retry_after(response.headers());
-                    let text = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    v0_after_response(&self.options, attempt, status, retry_after, &text)
-                }
-            };
-
-            match step {
-                Step::Done => return Ok(CaptureSummary::delivered(prep.kept)),
                 Step::Fail(e) => return Err(e),
                 Step::Backoff(delay) => {
                     attempt += 1;
