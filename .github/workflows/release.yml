@@ -24,7 +24,7 @@ jobs:
       has-changesets: ${{ steps.check.outputs.has-changesets }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -82,14 +82,14 @@ jobs:
           private-key: ${{ secrets.GH_APP_POSTHOG_RS_RELEASER_PRIVATE_KEY }}
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
           token: ${{ steps.releaser.outputs.token }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.93.1
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1.93.1
         with:
           components: cargo
           toolchain: stable
@@ -149,7 +149,7 @@ jobs:
 
       - name: Authenticate with crates.io
         if: steps.check-changes.outputs.committed == 'true'
-        uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: crates-auth
 
       - name: Configure git identity
@@ -230,7 +230,7 @@ jobs:
     if: always() && needs.release.result == 'success' && needs.notify-approval-needed.outputs.slack_ts != ''
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Notify Slack - Released
         uses: posthog/.github/.github/actions/slack-thread-reply@cb0979b67dcd585828b61ac45927eef4da8f6287 # main

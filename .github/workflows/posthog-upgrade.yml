@@ -31,13 +31,13 @@ jobs:
           private_key: ${{ secrets.GH_APP_POSTHOG_JS_UPGRADER_PRIVATE_KEY }}
 
       - name: Check out main repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: "PostHog/posthog"
           token: ${{ steps.upgrader.outputs.token }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.93.1
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1.93.1
         with:
           components: cargo
           toolchain: stable
@@ -51,8 +51,8 @@ jobs:
           PACKAGE_NAME: ${{ github.event.inputs.package_name }}
           PACKAGE_VERSION: ${{ github.event.inputs.package_version }}
         run: |
-          # posthog-rs is 0.x, so most bumps are semver-incompatible and need
-          # the workspace manifest requirement updated, not just the lockfile.
+          # Update the workspace manifest requirement, not just the lockfile, so
+          # semver-incompatible bumps are actually picked up.
           sed -i "s|^${PACKAGE_NAME} = { version = \"[^\"]*\"|${PACKAGE_NAME} = { version = \"${PACKAGE_VERSION}\"|" Cargo.toml
           if git diff --quiet Cargo.toml; then
             echo "Failed to update ${PACKAGE_NAME} requirement in rust/Cargo.toml" >&2
@@ -109,13 +109,6 @@ jobs:
           PR_URL: ${{ steps.main-repo-pr.outputs.pull-request-url }}
         run: |
           echo "PostHog pull request for $PACKAGE_NAME version $PACKAGE_VERSION ready: $PR_URL"
-
-      - name: Enable automerge
-        env:
-          GH_TOKEN: ${{ steps.upgrader.outputs.token }}
-          PR_NUMBER: ${{ steps.main-repo-pr.outputs.pull-request-number }}
-        run: |
-          gh pr merge "$PR_NUMBER" --repo PostHog/posthog --auto --squash
 
       - name: Assign reviewers
         env:

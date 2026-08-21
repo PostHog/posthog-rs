@@ -24,8 +24,8 @@ pub use summary::CaptureSummary;
 ///
 /// When set on [`ClientOptions`], capture requests are compressed and the
 /// matching `Content-Encoding` header is sent. The variant string matches the
-/// HTTP `Content-Encoding` token the server expects. The V0 pipeline supports
-/// `Gzip` only; V1 supports all variants.
+/// HTTP `Content-Encoding` token the server expects. All four variants are
+/// accepted by the capture endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureCompression {
     Gzip,
@@ -48,12 +48,9 @@ impl CaptureCompression {
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+mod capture;
 mod retry;
 mod transport;
-#[cfg(not(feature = "capture-v1"))]
-mod v0_capture;
-#[cfg(feature = "capture-v1")]
-mod v1_capture;
 #[cfg(not(feature = "async-client"))]
 pub use blocking::client;
 #[cfg(not(feature = "async-client"))]
@@ -194,20 +191,17 @@ pub struct ClientOptions {
     #[builder(default = "false")]
     local_evaluation_only: bool,
 
-    /// Maximum number of attempts for V1 capture requests (default: 3).
+    /// Maximum number of attempts for capture requests (default: 3).
     /// Includes the initial attempt, so `3` means 1 initial + 2 retries.
     #[builder(default = "3")]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) max_capture_attempts: u32,
 
     /// Initial retry backoff duration in milliseconds (default: 200)
     #[builder(default = "200")]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) retry_initial_backoff_ms: u64,
 
     /// Maximum retry backoff duration in milliseconds (default: 30000)
     #[builder(default = "30000")]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) retry_max_backoff_ms: u64,
 
     /// Number of buffered events that triggers an automatic flush (default: 100).
