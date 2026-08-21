@@ -30,7 +30,6 @@ const DEFAULT_TEST_ID: &str = "_global";
 /// options. Mirrors (in inverse) the SDK's internal `OPTIONS_EXTRACTION_TABLE`;
 /// agreement is enforced by the capture_v1 compliance suite (`assert_event_option`),
 /// so any drift fails CI rather than shipping silently.
-#[cfg(feature = "capture-v1")]
 const HARNESS_OPTION_TO_PROP: &[(&str, &str)] = &[
     ("cookieless_mode", "$cookieless_mode"),
     ("disable_skew_correction", "$ignore_sent_at"),
@@ -71,7 +70,6 @@ struct CaptureRequest {
     properties: Option<serde_json::Value>,
     #[serde(default)]
     timestamp: Option<String>,
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     #[serde(default)]
     options: Option<serde_json::Value>,
 }
@@ -141,23 +139,15 @@ fn compression_capability(c: CaptureCompression) -> &'static str {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let mut capabilities: Vec<String> = Vec::new();
-    if cfg!(feature = "capture-v1") {
-        capabilities.push("capture_v1".to_string());
-    } else {
-        capabilities.push("capture_v0".to_string());
-    }
+    // `capture_v1` is the harness contract key that selects the capture suite
+    // (see `requires:` in contracts/capture_analytics_v1_tests.yaml) — it is a
+    // frozen external string, not an internal name.
+    let mut capabilities: Vec<String> = vec!["capture_v1".to_string()];
     if let Some(algo) = state.compression {
         capabilities.push(compression_capability(algo).to_string());
     }
     Json(HealthResponse {
-        // Per-build name so the v0 and v1 compliance jobs post distinct PR
-        // comments instead of overwriting one shared report.
-        sdk_name: if cfg!(feature = "capture-v1") {
-            "posthog-rs-v1"
-        } else {
-            "posthog-rs-v0"
-        },
+        sdk_name: "posthog-rs",
         sdk_version: env!("CARGO_PKG_VERSION"),
         adapter_version: env!("CARGO_PKG_VERSION"),
         capabilities,
@@ -249,7 +239,6 @@ async fn capture_event(
             let _ = event.set_timestamp(ts);
         }
     }
-    #[cfg(feature = "capture-v1")]
     if let Some(opts_val) = req.options {
         if let Some(obj) = opts_val.as_object() {
             for (k, v) in obj {
@@ -440,17 +429,12 @@ async fn reset(
 #[tokio::main]
 async fn main() {
     let compression = parse_compression();
-    let mode_str = if cfg!(feature = "capture-v1") {
-        "v1"
-    } else {
-        "v0"
-    };
     let compression_str = match compression {
         Some(algo) => compression_capability(algo),
         None => "none",
     };
     eprintln!(
-        "Starting posthog-rs SDK adapter (capture={mode_str}, compression={compression_str}, parallel={SUPPORTS_PARALLEL})"
+        "Starting posthog-rs SDK adapter (compression={compression_str}, parallel={SUPPORTS_PARALLEL})"
     );
 
     let state = AppState {

@@ -1,5 +1,17 @@
 # posthog-rs
 
+## 0.24.0 — 2026-08-19
+
+### Minor changes
+
+- [7e2bede](https://github.com/posthog/posthog-rs/commit/7e2bede1a34b2f9edb599c4e2566684736d8cccf) Add a `Client::alias` helper that merges two distinct IDs onto the same person, so callers no longer need to hand-build the `$create_alias` event and know that `distinct_id` is written both at the top level and inside `properties`. Available on the async and blocking clients with the same fire-and-forget signature as `capture`. A blank ID on either side cannot describe a merge, so the event is dropped with a warning rather than sent. — Thanks @HughScott2002 for your first contribution 🎉!
+
+## 0.23.3 — 2026-08-14
+
+### Patch changes
+
+- [f4e940d](https://github.com/posthog/posthog-rs/commit/f4e940d8940c45a513401ed5490f389d68134b72) Normalize SDK timestamps to UTC — Thanks @marandaneto!
+
 ## 0.23.2 — 2026-08-10
 
 ### Patch changes

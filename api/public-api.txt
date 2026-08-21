@@ -19,8 +19,7 @@ pub fn posthog_rs::ClientOptionsBuilderError::from(derive_builder::error::Uninit
 impl core::error::Error for posthog_rs::ClientOptionsBuilderError
 impl core::fmt::Display for posthog_rs::ClientOptionsBuilderError
 pub fn posthog_rs::ClientOptionsBuilderError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub enum posthog_rs::Endpoint
-pub posthog_rs::Endpoint::Batch
+#[non_exhaustive] pub enum posthog_rs::Endpoint
 pub posthog_rs::Endpoint::Capture
 pub posthog_rs::Endpoint::Flags
 pub posthog_rs::Endpoint::LocalEvaluation
@@ -96,6 +95,10 @@ pub fn posthog_rs::AsyncFlagPoller::drop(&mut self)
 pub struct posthog_rs::BeforeSendHook(_)
 impl posthog_rs::BeforeSendHook
 pub fn posthog_rs::BeforeSendHook::new<F>(F) -> Self where F: core::ops::function::FnMut(posthog_rs::Event) -> core::option::Option<posthog_rs::Event> + core::marker::Send + 'static
+#[non_exhaustive] pub struct posthog_rs::CaptureErrorResponse
+pub posthog_rs::CaptureErrorResponse::error: alloc::string::String
+pub posthog_rs::CaptureErrorResponse::error_description: core::option::Option<alloc::string::String>
+pub posthog_rs::CaptureErrorResponse::error_uri: core::option::Option<alloc::string::String>
 pub struct posthog_rs::CaptureExceptionOptions
 impl posthog_rs::CaptureExceptionOptions
 pub fn posthog_rs::CaptureExceptionOptions::distinct_id<S: core::convert::Into<alloc::string::String>>(self, S) -> Self
@@ -109,7 +112,7 @@ pub fn posthog_rs::CaptureExceptionOptions::trace_context<T: core::convert::Into
 impl<'a> posthog_rs::CaptureFailure<'a>
 pub fn posthog_rs::CaptureFailure<'a>::attempt(&self) -> u32
 pub fn posthog_rs::CaptureFailure<'a>::error(&self) -> core::option::Option<&posthog_rs::Error>
-pub fn posthog_rs::CaptureFailure<'a>::error_response(&self) -> core::option::Option<&posthog_rs::V1ErrorResponse>
+pub fn posthog_rs::CaptureFailure<'a>::error_response(&self) -> core::option::Option<&posthog_rs::CaptureErrorResponse>
 pub fn posthog_rs::CaptureFailure<'a>::event_count(&self) -> usize
 pub fn posthog_rs::CaptureFailure<'a>::event_results(&self) -> &std::collections::hash::map::HashMap<uuid::Uuid, posthog_rs::EventResult>
 pub fn posthog_rs::CaptureFailure<'a>::historical_migration(&self) -> bool
@@ -125,6 +128,7 @@ pub fn posthog_rs::CaptureSummary::not_persisted(&self) -> usize
 pub fn posthog_rs::CaptureSummary::submitted(&self) -> usize
 pub struct posthog_rs::Client
 impl posthog_rs::Client
+pub fn posthog_rs::Client::alias<P: core::convert::Into<alloc::string::String>, D: core::convert::Into<alloc::string::String>>(&self, P, D)
 pub fn posthog_rs::Client::capture(&self, posthog_rs::Event)
 pub fn posthog_rs::Client::capture_batch(&self, alloc::vec::Vec<posthog_rs::Event>, bool)
 pub async fn posthog_rs::Client::capture_batch_immediate(&self, alloc::vec::Vec<posthog_rs::Event>, bool) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
@@ -355,10 +359,6 @@ pub posthog_rs::Property::value: serde_json::value::Value
 pub struct posthog_rs::TraceContext
 impl posthog_rs::TraceContext
 pub fn posthog_rs::TraceContext::new<T: core::convert::Into<alloc::string::String>, S: core::convert::Into<alloc::string::String>>(T, S) -> Self
-#[non_exhaustive] pub struct posthog_rs::V1ErrorResponse
-pub posthog_rs::V1ErrorResponse::error: alloc::string::String
-pub posthog_rs::V1ErrorResponse::error_description: core::option::Option<alloc::string::String>
-pub posthog_rs::V1ErrorResponse::error_uri: core::option::Option<alloc::string::String>
 pub const posthog_rs::DEFAULT_HOST: &str
 pub const posthog_rs::EU_INGESTION_ENDPOINT: &str
 pub const posthog_rs::US_INGESTION_ENDPOINT: &str

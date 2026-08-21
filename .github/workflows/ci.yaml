@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
         run: |
@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
         run: |
@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install public API tooling
         run: |
@@ -83,13 +83,13 @@ jobs:
             toolchain: stable
             cache-key: default-features
             command: cargo build --verbose
-          - name: capture-v1
+          - name: blocking client
             toolchain: stable
-            cache-key: capture-v1
-            command: cargo build --verbose --features capture-v1
+            cache-key: blocking-client
+            command: cargo build --verbose --no-default-features
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust ${{ matrix.toolchain }}
         run: |
@@ -119,7 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
         run: |
@@ -153,24 +153,18 @@ jobs:
           - name: Unit test (workspace)
             cache-key: workspace
             command: cargo test --workspace --verbose
-          - name: Unit test (capture-v1, async client)
-            cache-key: capture-v1-async-client
-            command: cargo test --verbose --features capture-v1
-          - name: Unit test (capture-v1, blocking client)
-            cache-key: capture-v1-blocking-client
-            command: cargo test --verbose --no-default-features --features capture-v1
+          - name: Unit test (blocking client)
+            cache-key: blocking-client
+            command: cargo test --verbose --no-default-features
           - name: Unit test (error-tracking, blocking client)
             cache-key: error-tracking-blocking-client
             command: cargo test --verbose --no-default-features --features error-tracking
-          - name: Unit test (error-tracking + capture-v1, blocking client)
-            cache-key: error-tracking-capture-v1-blocking-client
-            command: cargo test --verbose --no-default-features --features error-tracking,capture-v1
           - name: E2E test
             cache-key: e2e
             command: cargo test --verbose --features e2e-test --no-default-features
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
         run: |
