@@ -328,7 +328,31 @@ mod blocking {
     }
 
     #[test]
-    fn get_feature_flags_retries_transport_error_then_succeeds() {
+    fn local_evaluation_only_without_evaluator_does_not_call_api() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .enable_local_evaluation(true)
+            .local_evaluation_only(true)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options);
+
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .expect("local-only evaluation should return an empty snapshot");
+
+        assert!(snapshot.keys().is_empty());
+        flags_mock.assert_calls(0);
+    }
+
+    #[test]
+    fn evaluate_flags_retries_transport_error_then_succeeds() {
         let server = start_flaky_flags_server(flags_response_fixture().to_string());
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
@@ -340,16 +364,16 @@ mod blocking {
             .unwrap();
         let client = posthog_rs::client(options);
 
-        let (flags, _payloads) = client
-            .get_feature_flags("user-1", None, None, None)
-            .expect("get_feature_flags should retry transport error");
+        let flags = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .expect("evaluate_flags should retry transport error");
 
-        assert_eq!(flags.get("alpha"), Some(&FlagValue::Boolean(true)));
+        assert_eq!(flags.get_flag("alpha"), Some(FlagValue::Boolean(true)));
         server.assert_retry_succeeded();
     }
 
     #[test]
-    fn get_feature_flags_returns_error_after_transport_retry_budget() {
+    fn evaluate_flags_returns_error_after_transport_retry_budget() {
         let server = start_resetting_flags_server(2);
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
@@ -362,7 +386,7 @@ mod blocking {
         let client = posthog_rs::client(options);
 
         let err = client
-            .get_feature_flags("user-1", None, None, None)
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .expect_err("transport errors should stop after retry budget is exhausted");
 
         assert!(matches!(err, posthog_rs::Error::Connection(_)));
@@ -966,7 +990,32 @@ mod async_tests {
     }
 
     #[tokio::test]
-    async fn get_feature_flags_retries_transport_error_then_succeeds() {
+    async fn local_evaluation_only_without_evaluator_does_not_call_api() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .enable_local_evaluation(true)
+            .local_evaluation_only(true)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options).await;
+
+        let snapshot = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .expect("local-only evaluation should return an empty snapshot");
+
+        assert!(snapshot.keys().is_empty());
+        flags_mock.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn evaluate_flags_retries_transport_error_then_succeeds() {
         let server = start_flaky_flags_server(flags_response_fixture().to_string());
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
@@ -978,17 +1027,17 @@ mod async_tests {
             .unwrap();
         let client = posthog_rs::client(options).await;
 
-        let (flags, _payloads) = client
-            .get_feature_flags("user-1", None, None, None)
+        let flags = client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .await
-            .expect("get_feature_flags should retry transport error");
+            .expect("evaluate_flags should retry transport error");
 
-        assert_eq!(flags.get("alpha"), Some(&FlagValue::Boolean(true)));
+        assert_eq!(flags.get_flag("alpha"), Some(FlagValue::Boolean(true)));
         server.assert_retry_succeeded();
     }
 
     #[tokio::test]
-    async fn get_feature_flags_returns_error_after_transport_retry_budget() {
+    async fn evaluate_flags_returns_error_after_transport_retry_budget() {
         let server = start_resetting_flags_server(2);
         let options = posthog_rs::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
@@ -1001,7 +1050,7 @@ mod async_tests {
         let client = posthog_rs::client(options).await;
 
         let err = client
-            .get_feature_flags("user-1", None, None, None)
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .await
             .expect_err("transport errors should stop after retry budget is exhausted");
 
