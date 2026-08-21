@@ -222,8 +222,11 @@ impl FlagCache {
 /// definitions from the PostHog API for local evaluation.
 #[derive(Clone)]
 pub struct LocalEvaluationConfig {
-    /// Personal API key for authentication (found in PostHog project settings)
-    pub personal_api_key: String,
+    /// Secret key for authentication.
+    ///
+    /// Accepts either a Personal API Key (`phx_...`) or a Project Secret API
+    /// Key (`phs_...`).
+    pub secret_key: String,
     /// Project API key to identify which project's flags to fetch
     pub project_api_key: String,
     /// PostHog API host URL (for example, `https://us.i.posthog.com`).
@@ -326,10 +329,7 @@ impl FlagPoller {
 
                 let mut request = client
                     .get(&url)
-                    .header(
-                        "Authorization",
-                        format!("Bearer {}", config.personal_api_key),
-                    )
+                    .header("Authorization", format!("Bearer {}", config.secret_key))
                     .header("X-PostHog-Project-Api-Key", &config.project_api_key)
                     .header(USER_AGENT, get_default_user_agent());
 
@@ -395,7 +395,7 @@ impl FlagPoller {
             .get(&url)
             .header(
                 "Authorization",
-                format!("Bearer {}", self.config.personal_api_key),
+                format!("Bearer {}", self.config.secret_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
             .header(USER_AGENT, get_default_user_agent())
@@ -554,7 +554,7 @@ impl AsyncFlagPoller {
 
                         let mut request = client
                             .get(&url)
-                            .header("Authorization", format!("Bearer {}", config.personal_api_key))
+                            .header("Authorization", format!("Bearer {}", config.secret_key))
                             .header("X-PostHog-Project-Api-Key", &config.project_api_key)
                             .header(USER_AGENT, get_default_user_agent());
 
@@ -625,7 +625,7 @@ impl AsyncFlagPoller {
             .get(&url)
             .header(
                 "Authorization",
-                format!("Bearer {}", self.config.personal_api_key),
+                format!("Bearer {}", self.config.secret_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
             .header(USER_AGENT, get_default_user_agent())

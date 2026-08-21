@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use reqwest::{header::CONTENT_TYPE, header::USER_AGENT, Client as HttpClient};
 use serde_json::json;
-use tracing::{debug, instrument, trace, warn};
+#[cfg(feature = "error-tracking")]
+use tracing::trace;
+use tracing::{debug, instrument, warn};
 
 use super::get_default_user_agent;
 use crate::endpoints::Endpoint;
@@ -136,7 +138,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
                 let cache = FlagCache::new();
 
                 let config = LocalEvaluationConfig {
-                    personal_api_key: secret_key.clone(),
+                    secret_key: secret_key.clone(),
                     project_api_key: options.api_key.clone(),
                     api_host: options.endpoints().api_host(),
                     poll_interval: Duration::from_secs(options.poll_interval_seconds),
@@ -149,9 +151,12 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
                 (Some(LocalEvaluator::new(cache)), Some(poller))
             } else {
-                warn!(
-                "Local evaluation enabled but secret_key not set, falling back to API evaluation"
-            );
+                let warning = if options.local_evaluation_only {
+                    "Missing secret_key; local-only evaluation will return empty results"
+                } else {
+                    "Local evaluation enabled without secret_key; using remote API fallback"
+                };
+                warn!("{warning}");
                 (None, None)
             }
         } else {
@@ -575,355 +580,6 @@ impl Client {
         self.transport.as_ref().map_or(0, |t| t.pending())
     }
 
-    /// Get all remote feature flags and payloads for a user.
-    ///
-    /// For new code, prefer [`Client::evaluate_flags`] so flag reads are
-    /// deduplicated and can be attached to captured events with
-    /// [`Event::with_flags`](crate::Event::with_flags).
-    ///
-    /// # Parameters
-    ///
-    /// - `distinct_id`: User distinct ID.
-    /// - `groups`: Optional group keys for group-targeted flags.
-    /// - `person_properties`: Optional person properties for release
-    ///   conditions.
-    /// - `group_properties`: Optional group properties for group-targeted
-    ///   release conditions.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(feature_flags, feature_flag_payloads)`, each keyed by flag
-    /// key. Disabled clients return two empty maps.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Connection`] for request failures or non-success HTTP
-    /// statuses, and [`Error::Serialization`] when the response cannot be
-    /// parsed.
-    #[must_use = "feature flags result should be used"]
-    pub async fn get_feature_flags<S: Into<String>>(
-        &self,
-        distinct_id: S,
-        groups: Option<HashMap<String, String>>,
-        person_properties: Option<HashMap<String, serde_json::Value>>,
-        group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
-    ) -> Result<
-        (
-            HashMap<String, FlagValue>,
-            HashMap<String, serde_json::Value>,
-        ),
-        Error,
-    > {
-        if self.options.is_disabled() {
-            trace!("Client is disabled, skipping feature flags request");
-            return Ok((HashMap::new(), HashMap::new()));
-        }
-
-        let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
-
-        let mut payload = json!({
-            "api_key": self.options.api_key,
-            "distinct_id": distinct_id.into(),
-        });
-
-        if let Some(groups) = groups {
-            payload["groups"] = json!(groups);
-        }
-
-        if let Some(person_properties) = person_properties {
-            payload["person_properties"] = json!(person_properties);
-        }
-
-        if let Some(group_properties) = group_properties {
-            payload["group_properties"] = json!(group_properties);
-        }
-
-        // Add geoip disable parameter if configured
-        if self.options.disable_geoip {
-            payload["disable_geoip"] = json!(true);
-        }
-
-        let response = self
-            .send_feature_flags_request(&flags_endpoint, &payload)
-            .await?;
-
-        let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            let err = Error::Connection(format!("API request failed with status {status}: {text}"));
-            report_flags_error(
-                &self.options.on_error,
-                &flags_endpoint,
-                distinct_id,
-                Some(status.as_u16()),
-                Some(&text),
-                &err,
-            );
-            return Err(err);
-        }
-
-        let status = response.status().as_u16();
-        let flags_response = match response.json::<FeatureFlagsResponse>().await {
-            Ok(r) => r,
-            Err(e) => {
-                let err =
-                    Error::Serialization(format!("Failed to parse feature flags response: {e}"));
-                report_flags_error(
-                    &self.options.on_error,
-                    &flags_endpoint,
-                    distinct_id,
-                    Some(status),
-                    None,
-                    &err,
-                );
-                return Err(err);
-            }
-        };
-
-        Ok(flags_response.normalize())
-    }
-
-    /// Get a specific feature flag value for a user.
-    ///
-    /// # Parameters
-    ///
-    /// - `key`: Feature flag key.
-    /// - `distinct_id`: User distinct ID.
-    /// - `groups`: Optional group keys for group-targeted flags.
-    /// - `person_properties`: Optional person properties for release
-    ///   conditions.
-    /// - `group_properties`: Optional group properties for group-targeted
-    ///   release conditions.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Some(value))` when the flag is returned, `Ok(None)` when it is not
-    /// returned or local-only evaluation cannot resolve it.
-    ///
-    /// # Errors
-    ///
-    /// Returns errors from remote `/flags` requests or response parsing.
-    #[must_use = "feature flag result should be used"]
-    #[instrument(skip_all, level = "debug")]
-    #[deprecated(
-        since = "0.6.0",
-        note = "Use Client::evaluate_flags() to fetch a snapshot, then call .get_flag(key) on it. \
-                The snapshot deduplicates $feature_flag_called events and supports attaching \
-                rich metadata to captured events via Event::with_flags()."
-    )]
-    pub async fn get_feature_flag<K: Into<String>, D: Into<String>>(
-        &self,
-        key: K,
-        distinct_id: D,
-        groups: Option<HashMap<String, String>>,
-        person_properties: Option<HashMap<String, serde_json::Value>>,
-        group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
-    ) -> Result<Option<FlagValue>, Error> {
-        let key_str = key.into();
-        let distinct_id_str = distinct_id.into();
-
-        // Try local evaluation first if available
-        if let Some(ref evaluator) = self.local_evaluator {
-            let empty_props = HashMap::new();
-            let empty_groups: HashMap<String, String> = HashMap::new();
-            let empty_group_props: HashMap<String, HashMap<String, serde_json::Value>> =
-                HashMap::new();
-            let mut local_props;
-            let props = if let Some(props) = person_properties.as_ref() {
-                local_props = props.clone();
-                local_props
-                    .entry("distinct_id".to_string())
-                    .or_insert_with(|| json!(distinct_id_str.clone()));
-                &local_props
-            } else {
-                local_props = empty_props;
-                local_props.insert("distinct_id".to_string(), json!(distinct_id_str.clone()));
-                &local_props
-            };
-            let groups_ref = groups.as_ref().unwrap_or(&empty_groups);
-            let group_props_ref = group_properties.as_ref().unwrap_or(&empty_group_props);
-            match evaluator.evaluate_flag(
-                &key_str,
-                &distinct_id_str,
-                props,
-                groups_ref,
-                group_props_ref,
-            ) {
-                Ok(Some(value)) => {
-                    debug!(flag = %key_str, ?value, "Flag evaluated locally");
-                    return Ok(Some(value));
-                }
-                Ok(None) => {
-                    if self.options.local_evaluation_only {
-                        debug!(flag = %key_str, "Flag not found locally, skipping remote fallback");
-                        return Ok(None);
-                    }
-                    debug!(flag = %key_str, "Flag not found locally, falling back to API");
-                }
-                Err(e) => {
-                    if self.options.local_evaluation_only {
-                        debug!(flag = %key_str, error = %e.message, "Inconclusive local evaluation, skipping remote fallback");
-                        return Ok(None);
-                    }
-                    debug!(flag = %key_str, error = %e.message, "Inconclusive local evaluation, falling back to API");
-                }
-            }
-        }
-
-        // Fall back to API
-        trace!(flag = %key_str, "Fetching flag from API");
-        let (feature_flags, _payloads) = self
-            .get_feature_flags(distinct_id_str, groups, person_properties, group_properties)
-            .await?;
-        Ok(feature_flags.get(&key_str).cloned())
-    }
-
-    /// Check if a feature flag is enabled for a user.
-    ///
-    /// # Returns
-    ///
-    /// `true` for `FlagValue::Boolean(true)` or any multivariate variant,
-    /// `false` for disabled or missing flags.
-    ///
-    /// # Errors
-    ///
-    /// Returns errors from [`Client::get_feature_flag`].
-    #[must_use = "feature flag enabled check result should be used"]
-    #[deprecated(
-        since = "0.6.0",
-        note = "Use Client::evaluate_flags() to fetch a snapshot, then call .is_enabled(key) \
-                on it. The snapshot deduplicates $feature_flag_called events and supports \
-                attaching rich metadata to captured events via Event::with_flags()."
-    )]
-    #[allow(deprecated)] // calls deprecated get_feature_flag internally
-    pub async fn is_feature_enabled<K: Into<String>, D: Into<String>>(
-        &self,
-        key: K,
-        distinct_id: D,
-        groups: Option<HashMap<String, String>>,
-        person_properties: Option<HashMap<String, serde_json::Value>>,
-        group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
-    ) -> Result<bool, Error> {
-        let flag_value = self
-            .get_feature_flag(
-                key.into(),
-                distinct_id.into(),
-                groups,
-                person_properties,
-                group_properties,
-            )
-            .await?;
-        Ok(match flag_value {
-            Some(FlagValue::Boolean(b)) => b,
-            Some(FlagValue::String(_)) => true, // Variants are considered enabled
-            None => false,
-        })
-    }
-
-    /// Get a feature flag payload for a user.
-    ///
-    /// # Parameters
-    ///
-    /// - `key`: Feature flag key.
-    /// - `distinct_id`: User distinct ID.
-    ///
-    /// # Returns
-    ///
-    /// The JSON payload for the flag, if one was returned. This method does not
-    /// emit `$feature_flag_called` events.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Connection`] for request failures and
-    /// [`Error::Serialization`] when the response cannot be parsed.
-    #[must_use = "feature flag payload result should be used"]
-    #[deprecated(
-        since = "0.6.0",
-        note = "Use Client::evaluate_flags() to fetch a snapshot, then call \
-                .get_flag_payload(key) on it. Reading the payload from a snapshot is \
-                event-free, matching this method's behavior, and avoids the per-call \
-                /flags request."
-    )]
-    pub async fn get_feature_flag_payload<K: Into<String>, D: Into<String>>(
-        &self,
-        key: K,
-        distinct_id: D,
-    ) -> Result<Option<serde_json::Value>, Error> {
-        if self.options.is_disabled() {
-            trace!("Client is disabled, skipping feature flag payload request");
-            return Ok(None);
-        }
-
-        let key_str = key.into();
-        let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
-
-        let mut payload = json!({
-            "api_key": self.options.api_key,
-            "distinct_id": distinct_id.into(),
-        });
-
-        // Add geoip disable parameter if configured
-        if self.options.disable_geoip {
-            payload["disable_geoip"] = json!(true);
-        }
-
-        let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
-        let response = match self
-            .client
-            .post(&flags_endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let err = Error::Connection(e.to_string());
-                report_flags_error(
-                    &self.options.on_error,
-                    &flags_endpoint,
-                    distinct_id,
-                    None,
-                    None,
-                    &err,
-                );
-                return Err(err);
-            }
-        };
-
-        if !response.status().is_success() {
-            return Ok(None);
-        }
-
-        let status = response.status().as_u16();
-        let flags_response: FeatureFlagsResponse = match response.json().await {
-            Ok(r) => r,
-            Err(e) => {
-                let err = Error::Serialization(format!("Failed to parse response: {e}"));
-                report_flags_error(
-                    &self.options.on_error,
-                    &flags_endpoint,
-                    distinct_id,
-                    Some(status),
-                    None,
-                    &err,
-                );
-                return Err(err);
-            }
-        };
-
-        let (_flags, payloads) = flags_response.normalize();
-        Ok(payloads.get(&key_str).cloned())
-    }
-
     /// Evaluate a supplied feature flag definition locally.
     ///
     /// `groups` and `group_properties` are only consulted when the flag (or one
@@ -1060,7 +716,10 @@ impl Client {
             .as_ref()
             .is_some_and(|keys| keys.iter().all(|k| locally_evaluated_keys.contains(k)));
 
-        if !options.only_evaluate_locally && !local_covers_request {
+        if !options.only_evaluate_locally
+            && !self.options.local_evaluation_only
+            && !local_covers_request
+        {
             // Don't lose successful local evaluations if `/flags` fails — degrade
             // to a snapshot built from the local results we already have. The
             // alternative (returning Err) wastes useful data and surprises
