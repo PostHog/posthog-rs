@@ -1,22 +1,26 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::client::BeforeSendHook;
 use crate::client::CaptureDefaults;
 use crate::client::FlagsFailure;
 use crate::client::OnErrorHook;
 use crate::client::PostHogError;
-use crate::feature_flag_evaluations::{EvaluatedFlagRecord, FlagCalledEventParams};
+use crate::feature_flag_evaluations::{
+    EvaluatedFlagRecord, FeatureFlagEvaluationsHost, FlagCalledEventParams,
+};
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
 use crate::Error;
 use crate::Event;
-use tracing::error;
+use tracing::{error, warn};
+
+use super::transport::TransportHandle;
 
 /// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
 /// dedup cache. On overflow the entire map is reset (matches the JS SDK).
-pub(super) const MAX_FLAG_CALLED_CACHE_SIZE: usize = 50_000;
+const MAX_FLAG_CALLED_CACHE_SIZE: usize = 50_000;
 
-pub(super) type FlagEventDedupCache = Mutex<HashMap<String, HashSet<String>>>;
+type FlagEventDedupCache = Mutex<HashMap<String, HashSet<String>>>;
 
 struct RuntimeContext {
     os: String,
@@ -44,8 +48,49 @@ pub(super) fn apply_runtime_context(event: &mut Event) {
     );
 }
 
-pub(super) fn flag_event_dedup_cache() -> FlagEventDedupCache {
+fn flag_event_dedup_cache() -> FlagEventDedupCache {
     Mutex::new(HashMap::new())
+}
+
+/// Runtime-neutral host for deduplicating and enqueueing
+/// `$feature_flag_called` events. Each client lazily constructs its own host so
+/// snapshots from that client share one dedup cache without sharing across
+/// clients.
+pub(super) struct FlagEventHost {
+    defaults: CaptureDefaults,
+    transport: Option<Arc<TransportHandle>>,
+    dedup_cache: FlagEventDedupCache,
+}
+
+impl FlagEventHost {
+    pub(super) fn new(defaults: CaptureDefaults, transport: Option<Arc<TransportHandle>>) -> Self {
+        Self {
+            defaults,
+            transport,
+            dedup_cache: flag_event_dedup_cache(),
+        }
+    }
+}
+
+impl FeatureFlagEvaluationsHost for FlagEventHost {
+    fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
+        let dedup_key = build_dedup_key(&params.key, params.response.as_ref(), &params.groups);
+        if already_reported(&self.dedup_cache, &params.distinct_id, &dedup_key) {
+            return;
+        }
+
+        if let (Some(transport), Some(event)) =
+            (&self.transport, flag_called_event(params, &self.defaults))
+        {
+            transport.enqueue(event);
+        }
+    }
+
+    fn log_warning(&self, message: &str) {
+        // Surface filter-helper misuse via tracing — users can silence these
+        // with their tracing-subscriber level filter (e.g. `posthog_rs=error`).
+        warn!("{message}");
+    }
 }
 
 fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaults) {
@@ -127,11 +172,7 @@ pub(crate) fn report_flags_error(
 
 /// Returns `true` when the helper has already shipped this
 /// `(distinct_id, key, response)` combination and the caller should skip.
-pub(super) fn already_reported(
-    cache: &FlagEventDedupCache,
-    distinct_id: &str,
-    dedup_key: &str,
-) -> bool {
+fn already_reported(cache: &FlagEventDedupCache, distinct_id: &str, dedup_key: &str) -> bool {
     let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(seen) = cache.get(distinct_id) {
         if seen.contains(dedup_key) {
@@ -148,7 +189,7 @@ pub(super) fn already_reported(
     false
 }
 
-pub(super) fn build_dedup_key(
+fn build_dedup_key(
     flag_key: &str,
     response: Option<&FlagValue>,
     groups: &HashMap<String, String>,
@@ -182,11 +223,7 @@ fn pct(s: &str) -> String {
         .replace(';', "%3B")
 }
 
-pub(super) fn flag_called_event(
-    params: FlagCalledEventParams,
-    client_disable_geoip: bool,
-    is_server: bool,
-) -> Option<Event> {
+fn flag_called_event(params: FlagCalledEventParams, defaults: &CaptureDefaults) -> Option<Event> {
     let mut event = Event::new("$feature_flag_called".to_string(), params.distinct_id);
     if params.minimal {
         // Marks the event so the capture pipeline trims it to the minimal
@@ -202,10 +239,10 @@ pub(super) fn flag_called_event(
     for (group_name, group_id) in &params.groups {
         event.add_group(group_name, group_id);
     }
-    if params.disable_geoip.unwrap_or(client_disable_geoip) {
+    if params.disable_geoip.unwrap_or(defaults.disable_geoip) {
         event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
     }
-    if is_server {
+    if defaults.is_server {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
     Some(event)
@@ -357,6 +394,13 @@ mod tests {
             .collect()
     }
 
+    fn defaults(disable_geoip: bool, is_server: bool) -> CaptureDefaults {
+        CaptureDefaults {
+            disable_geoip,
+            is_server,
+        }
+    }
+
     fn flag_params(
         properties: HashMap<String, serde_json::Value>,
         groups: HashMap<String, String>,
@@ -408,8 +452,7 @@ mod tests {
 
         let event = flag_called_event(
             flag_params(properties, groups(&[("organization", "org-a")]), Some(true)),
-            true,
-            true,
+            &defaults(true, true),
         )
         .expect("valid flag-called event");
 
@@ -428,13 +471,38 @@ mod tests {
     fn flag_called_event_adds_defaults_when_missing() {
         let event = flag_called_event(
             flag_params(HashMap::new(), HashMap::new(), None),
-            true,
-            true,
+            &defaults(true, true),
         )
         .expect("valid flag-called event");
 
         assert_eq!(event.properties().get("$is_server"), Some(&json!(true)));
         assert_eq!(event.properties().get("$geoip_disable"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn flag_event_hosts_keep_dedup_state_separate() {
+        let first = FlagEventHost::new(defaults(false, true), None);
+        let second = FlagEventHost::new(defaults(false, true), None);
+        let params = flag_params(HashMap::new(), HashMap::new(), None);
+
+        first.capture_flag_called_event_if_needed(params.clone());
+        first.capture_flag_called_event_if_needed(params.clone());
+
+        let first_cache = first.dedup_cache.lock().unwrap();
+        assert_eq!(first_cache.get("user-1").map(HashSet::len), Some(1));
+        drop(first_cache);
+        assert!(second.dedup_cache.lock().unwrap().is_empty());
+
+        second.capture_flag_called_event_if_needed(params);
+        assert_eq!(
+            second
+                .dedup_cache
+                .lock()
+                .unwrap()
+                .get("user-1")
+                .map(HashSet::len),
+            Some(1)
+        );
     }
 
     #[test]
@@ -453,8 +521,7 @@ mod tests {
     fn flag_called_event_leaves_runtime_context_to_capture_path() {
         let event = flag_called_event(
             flag_params(HashMap::new(), HashMap::new(), None),
-            false,
-            true,
+            &defaults(false, true),
         )
         .expect("valid flag-called event");
 

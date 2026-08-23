@@ -16,16 +16,14 @@ use crate::endpoints::Endpoint;
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
 use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
-    FlagCalledEventParams,
 };
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
 use super::common::{
-    already_reported, build_dedup_key, extract_flag_details, flag_called_event,
-    flag_event_dedup_cache, local_record, remote_record_from_detail, report_flags_error,
-    DetailedFlagsResponse, FlagEventDedupCache,
+    extract_flag_details, local_record, remote_record_from_detail, report_flags_error,
+    DetailedFlagsResponse, FlagEventHost,
 };
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
@@ -39,52 +37,6 @@ pub struct Client {
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
     /// Background event transport. `None` for disabled clients.
     transport: Option<Arc<TransportHandle>>,
-}
-
-/// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
-/// `$feature_flag_called` events through the same background capture transport
-/// as any other event.
-struct AsyncFlagEventHost {
-    options: ClientOptions,
-    transport: Option<Arc<TransportHandle>>,
-    dedup_cache: FlagEventDedupCache,
-}
-
-impl AsyncFlagEventHost {
-    fn from_options(options: &ClientOptions, transport: Option<Arc<TransportHandle>>) -> Self {
-        Self {
-            options: options.clone(),
-            transport,
-            dedup_cache: flag_event_dedup_cache(),
-        }
-    }
-
-    fn enqueue(&self, event: Event) {
-        if let Some(transport) = &self.transport {
-            transport.enqueue(event);
-        }
-    }
-}
-
-impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
-    fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
-        let dedup_key = build_dedup_key(&params.key, params.response.as_ref(), &params.groups);
-        if already_reported(&self.dedup_cache, &params.distinct_id, &dedup_key) {
-            return;
-        }
-
-        if let Some(event) =
-            flag_called_event(params, self.options.disable_geoip, self.options.is_server)
-        {
-            self.enqueue(event);
-        }
-    }
-
-    fn log_warning(&self, message: &str) {
-        // Surface filter-helper misuse via tracing — users can silence these
-        // with their tracing-subscriber level filter (e.g. `posthog_rs=error`).
-        warn!("{message}");
-    }
 }
 
 /// Construct an async PostHog client from an API key or [`ClientOptions`].
@@ -746,8 +698,8 @@ impl Client {
     fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {
         self.flag_event_host
             .get_or_init(|| {
-                Arc::new(AsyncFlagEventHost::from_options(
-                    &self.options,
+                Arc::new(FlagEventHost::new(
+                    self.options.capture_defaults(),
                     self.transport.clone(),
                 )) as Arc<dyn FeatureFlagEvaluationsHost>
             })
