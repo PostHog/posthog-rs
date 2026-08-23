@@ -113,9 +113,8 @@ pub(crate) struct TransportHandle {
     max_queue_size: usize,
     /// Shares the worker's clock; used to stamp capture (enqueue) time.
     clock: Arc<dyn Clock>,
-    /// The worker thread's id, so the panic hook can tell when it is running on
-    /// this client's own worker — where capturing would deadlock or recurse.
-    #[cfg_attr(not(feature = "error-tracking"), allow(dead_code))]
+    /// The worker thread's id, so teardown and the panic hook can avoid waiting
+    /// for or joining this client's own worker.
     worker_id: Option<std::thread::ThreadId>,
 }
 
@@ -252,6 +251,23 @@ impl TransportHandle {
         !self.closed.swap(true, Ordering::AcqRel)
     }
 
+    /// Synchronously close and join the worker for external callers. When called
+    /// from the worker itself (for example, when a callback drops its client),
+    /// only queue the shutdown: waiting for its completion or joining here would
+    /// deadlock the worker inside its own callback.
+    pub(crate) fn close_blocking(&self) {
+        let on_worker = self.on_worker_thread();
+        if self.begin_close() {
+            let (tx, rx) = mpsc::channel();
+            if self.send_control(Control::Shutdown(Completion::Blocking(tx))) && !on_worker {
+                let _ = rx.recv();
+            }
+        }
+        if !on_worker {
+            self.join();
+        }
+    }
+
     /// Join the worker thread. Safe to call repeatedly.
     pub(crate) fn join(&self) {
         if let Some(handle) = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take() {
@@ -294,11 +310,9 @@ impl TransportHandle {
         }
     }
 
-    /// True when the calling thread is this transport's worker thread. The panic
-    /// hook skips capturing there: a synchronous self-flush would deadlock the
-    /// worker, and routing the `$exception` back through `before_send` would
-    /// recurse if a `before_send` hook panicked.
-    #[cfg(feature = "error-tracking")]
+    /// True when the calling thread is this transport's worker thread. Teardown
+    /// must not synchronously wait there; the panic hook also skips capturing to
+    /// avoid a self-flush deadlock or recursive `before_send` panic.
     pub(crate) fn on_worker_thread(&self) -> bool {
         self.worker_id == Some(std::thread::current().id())
     }
@@ -306,14 +320,7 @@ impl TransportHandle {
     /// Test helper: flush + stop + join, mirroring the client's shutdown.
     #[cfg(test)]
     fn shutdown_blocking(&self) {
-        if !self.begin_close() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        if self.send_control(Control::Shutdown(Completion::Blocking(tx))) {
-            let _ = rx.recv();
-        }
-        self.join();
+        self.close_blocking();
     }
 }
 
@@ -1093,6 +1100,91 @@ mod tests {
             0,
             "dropped events left counted as pending"
         );
+    }
+
+    #[test]
+    fn close_from_worker_callback_does_not_wait_or_self_join() {
+        let handle_slot = Arc::new(Mutex::new(None::<Arc<TransportHandle>>));
+        let callback_slot = Arc::clone(&handle_slot);
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let handle = Arc::new(TransportHandle::spawn(
+            options("http://localhost:0".to_string())
+                .flush_at(1usize)
+                .before_send(move |_| {
+                    let callback_handle = callback_slot
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .take()
+                        .expect("transport installed before capture");
+                    assert!(callback_handle.on_worker_thread());
+                    callback_handle.close_blocking();
+                    returned_tx.send(()).unwrap();
+                    None
+                })
+                .build()
+                .unwrap(),
+        ));
+        *handle_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&handle));
+
+        handle.enqueue(Event::new("close-in-callback", "user-1"));
+        returned_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker-thread close blocked");
+
+        // An external caller still performs the durable join, and repeats are no-ops.
+        handle.close_blocking();
+        handle.close_blocking();
+        assert!(handle.is_closed());
+        assert_eq!(handle.pending(), 0);
+    }
+
+    #[test]
+    fn concurrent_external_close_is_idempotent_and_durable() {
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let handle = Arc::new(TransportHandle::spawn(
+            options(server.base_url())
+                .flush_at(1usize)
+                .before_send(move |event| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Some(event)
+                })
+                .build()
+                .unwrap(),
+        ));
+        handle.enqueue(Event::new("close-race", "user-1"));
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker did not enter callback");
+
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let closers: Vec<_> = (0..2)
+            .map(|_| {
+                let handle = Arc::clone(&handle);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    handle.close_blocking();
+                })
+            })
+            .collect();
+        start.wait();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !handle.is_closed() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(handle.is_closed(), "neither close caller won the race");
+        release_tx.send(()).unwrap();
+        for closer in closers {
+            closer.join().unwrap();
+        }
+
+        handle.close_blocking();
+        mock.assert_calls(1);
+        assert_eq!(handle.pending(), 0);
     }
 
     // -- virtual-clock worker tests (no real sleeps) -------------------------

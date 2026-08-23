@@ -918,22 +918,60 @@ impl Drop for Client {
     /// `shutdown` can't run in a destructor), so dropping a `Client` inside an
     /// async task blocks that executor thread until the drain completes (up to
     /// `shutdown_timeout_ms` plus any in-flight request) — prefer an explicit
-    /// `shutdown().await` first, which makes this a no-op.
+    /// `shutdown().await` first, which makes this a no-op. A drop from a transport
+    /// callback instead queues shutdown without waiting for or joining the current
+    /// worker thread.
     fn drop(&mut self) {
-        let Some(transport) = &self.transport else {
-            return;
-        };
-        if transport.begin_close() {
-            let (tx, rx) = std::sync::mpsc::channel();
-            if transport.send_control(Control::Shutdown(Completion::Blocking(tx))) {
-                let _ = rx.recv();
-            }
+        if let Some(transport) = &self.transport {
+            transport.close_blocking();
         }
-        // Always join — even if this caller lost the `begin_close` race or its
-        // shutdown wait was cancelled — so every shutdown/drop path waits for the
-        // worker and the flush stays durable. The winner has already sent the
-        // Shutdown (synchronously, before any await), so the worker will exit.
-        transport.join();
+    }
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use super::*;
+    use std::sync::{mpsc, Mutex};
+
+    #[tokio::test]
+    async fn drop_from_worker_callback_closes_without_blocking() {
+        let client_slot = Arc::new(Mutex::new(None::<Client>));
+        let callback_slot = Arc::clone(&client_slot);
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let options = crate::ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host("http://localhost:0".to_string())
+            .flush_at(1usize)
+            .before_send(move |_| {
+                let client = callback_slot
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                    .expect("client installed before capture");
+                drop(client);
+                dropped_tx.send(()).unwrap();
+                None
+            })
+            .build()
+            .unwrap();
+        let client = client(options).await;
+        let transport = Arc::clone(client.transport.as_ref().unwrap());
+        *client_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(client);
+
+        client_slot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .unwrap()
+            .capture(Event::new("drop-in-callback", "user-1"));
+        dropped_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("client drop blocked its transport worker");
+
+        // Reap the worker from an external thread and verify repeated close is safe.
+        transport.close_blocking();
+        transport.close_blocking();
+        assert!(transport.is_closed());
     }
 }
 
