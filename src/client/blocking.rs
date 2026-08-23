@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 #[cfg(feature = "error-tracking")]
 use std::error::Error as StdError;
 use std::sync::{Arc, OnceLock};
@@ -11,22 +11,21 @@ use reqwest::{
 use serde_json::json;
 #[cfg(feature = "error-tracking")]
 use tracing::trace;
-use tracing::{debug, instrument, warn};
+use tracing::{instrument, warn};
 
 use super::get_default_user_agent;
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
 use crate::feature_flag_evaluations::{
-    EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
+    EvaluateFlagsOptions, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
 };
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
 use super::common::{
-    extract_flag_details, local_record, remote_record_from_detail, report_flags_error,
-    DetailedFlagsResponse, FlagEventHost,
+    extract_flag_details, report_flags_error, DetailedFlagsResponse, EvaluationState, FlagEventHost,
 };
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
@@ -573,112 +572,13 @@ impl Client {
             return Ok(FeatureFlagEvaluations::empty(host));
         }
 
-        let mut options = options;
-        options.groups.get_or_insert_with(HashMap::new);
-        options.group_properties.get_or_insert_with(HashMap::new);
-
-        let mut records: HashMap<String, EvaluatedFlagRecord> = HashMap::new();
-        let mut locally_evaluated_keys: HashSet<String> = HashSet::new();
-
-        if let Some(evaluator) = &self.local_evaluator {
-            let mut person_props_owned = options.person_properties.clone().unwrap_or_default();
-            person_props_owned
-                .entry("distinct_id".to_string())
-                .or_insert_with(|| json!(distinct_id.clone()));
-            let groups_owned = options.groups.clone().unwrap_or_default();
-            let group_props_owned = options.group_properties.clone().unwrap_or_default();
-            let local_results = evaluator.evaluate_all_flags_with_details(
-                &distinct_id,
-                &person_props_owned,
-                &groups_owned,
-                &group_props_owned,
-            );
-            // Pin the gate from the poller's current definitions snapshot at the
-            // point local evaluation succeeded, so it travels with these records
-            // rather than being re-read from shared state at event time.
-            let local_minimal_gate = evaluator.cache().minimal_flag_called_events();
-            for (key, result) in local_results {
-                if let Some(filter) = &options.flag_keys {
-                    if !filter.iter().any(|k| k == &key) {
-                        continue;
-                    }
-                }
-                if let Ok(value) = result.result {
-                    records.insert(
-                        key.clone(),
-                        local_record(
-                            value,
-                            result.payload,
-                            result.has_experiment,
-                            local_minimal_gate,
-                        ),
-                    );
-                    locally_evaluated_keys.insert(key);
-                }
-            }
+        let mut state = EvaluationState::new(distinct_id, options, self.local_evaluator.as_ref());
+        if state.should_fetch_remote(self.options.local_evaluation_only) {
+            let response = self.fetch_flag_details(state.distinct_id(), state.options());
+            state.apply_remote_result(response)?;
         }
 
-        let mut request_id: Option<String> = None;
-        let mut errors_while_computing = false;
-        let mut quota_limited = false;
-
-        // Skip the remote round-trip when local evaluation has already covered
-        // every requested flag. Without `flag_keys` we have to assume the caller
-        // wants every flag the project has and still hit `/flags` to discover
-        // any not loaded by the poller.
-        let local_covers_request = options
-            .flag_keys
-            .as_ref()
-            .is_some_and(|keys| keys.iter().all(|k| locally_evaluated_keys.contains(k)));
-
-        if !options.only_evaluate_locally
-            && !self.options.local_evaluation_only
-            && !local_covers_request
-        {
-            // Don't lose successful local evaluations if `/flags` fails — degrade
-            // to a snapshot built from the local results we already have. The
-            // alternative (returning Err) wastes useful data and surprises
-            // callers who would otherwise get partial coverage.
-            match self.fetch_flag_details(&distinct_id, &options) {
-                Ok(response) => {
-                    request_id = response.request_id;
-                    errors_while_computing = response.errors_while_computing_flags;
-                    quota_limited = response.quota_limited;
-                    // The remote response is the source of these flags' values,
-                    // so it is also the source of their minimization gate.
-                    let remote_minimal_gate = response.minimal_flag_called_events;
-                    for (key, detail) in response.flags {
-                        if locally_evaluated_keys.contains(&key) {
-                            continue;
-                        }
-                        records.insert(key, remote_record_from_detail(detail, remote_minimal_gate));
-                    }
-                }
-                Err(e) => {
-                    if records.is_empty() {
-                        return Err(e);
-                    }
-                    debug!(
-                        error = e.to_string(),
-                        local_count = records.len(),
-                        "/flags fetch failed; returning snapshot from local results only"
-                    );
-                    errors_while_computing = true;
-                }
-            }
-        }
-
-        Ok(FeatureFlagEvaluations::new(
-            host,
-            distinct_id,
-            records,
-            options.groups.unwrap_or_default(),
-            options.disable_geoip,
-            request_id,
-            None,
-            errors_while_computing,
-            quota_limited,
-        ))
+        Ok(state.into_evaluations(host))
     }
 
     fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {

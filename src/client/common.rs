@@ -7,12 +7,14 @@ use crate::client::FlagsFailure;
 use crate::client::OnErrorHook;
 use crate::client::PostHogError;
 use crate::feature_flag_evaluations::{
-    EvaluatedFlagRecord, FeatureFlagEvaluationsHost, FlagCalledEventParams,
+    EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
+    FlagCalledEventParams,
 };
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
+use crate::local_evaluation::LocalEvaluator;
 use crate::Error;
 use crate::Event;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use super::transport::TransportHandle;
 
@@ -318,7 +320,155 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
     }
 }
 
-pub(super) fn local_record(
+/// Shared policy for combining local and remote flag evaluations. The clients
+/// retain their concrete HTTP and async/blocking boundaries; this state owns
+/// only the runtime-neutral decisions on whether to fetch and how to merge.
+pub(super) struct EvaluationState {
+    distinct_id: String,
+    options: EvaluateFlagsOptions,
+    records: HashMap<String, EvaluatedFlagRecord>,
+    request_id: Option<String>,
+    errors_while_computing: bool,
+    quota_limited: bool,
+}
+
+impl EvaluationState {
+    pub(super) fn new(
+        distinct_id: String,
+        mut options: EvaluateFlagsOptions,
+        local_evaluator: Option<&LocalEvaluator>,
+    ) -> Self {
+        options.groups.get_or_insert_with(HashMap::new);
+        options.group_properties.get_or_insert_with(HashMap::new);
+
+        let mut state = Self {
+            distinct_id,
+            options,
+            records: HashMap::new(),
+            request_id: None,
+            errors_while_computing: false,
+            quota_limited: false,
+        };
+        state.evaluate_locally(local_evaluator);
+        state
+    }
+
+    fn evaluate_locally(&mut self, local_evaluator: Option<&LocalEvaluator>) {
+        let Some(evaluator) = local_evaluator else {
+            return;
+        };
+
+        let mut person_properties = self.options.person_properties.clone().unwrap_or_default();
+        person_properties
+            .entry("distinct_id".to_string())
+            .or_insert_with(|| serde_json::json!(self.distinct_id.clone()));
+        let groups = self.options.groups.clone().unwrap_or_default();
+        let group_properties = self.options.group_properties.clone().unwrap_or_default();
+        let local_results = evaluator.evaluate_all_flags_with_details(
+            &self.distinct_id,
+            &person_properties,
+            &groups,
+            &group_properties,
+        );
+
+        // Pin the gate from the definitions snapshot that produced each local
+        // result rather than re-reading shared state when an event is captured.
+        let minimal_flag_called_events = evaluator.cache().minimal_flag_called_events();
+        for (key, result) in local_results {
+            if self
+                .options
+                .flag_keys
+                .as_ref()
+                .is_some_and(|filter| !filter.iter().any(|candidate| candidate == &key))
+            {
+                continue;
+            }
+            if let Ok(value) = result.result {
+                self.records.insert(
+                    key,
+                    local_record(
+                        value,
+                        result.payload,
+                        result.has_experiment,
+                        minimal_flag_called_events,
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Without an explicit key filter, local definitions cannot prove that they
+    /// contain every project flag, so remote discovery remains necessary.
+    pub(super) fn should_fetch_remote(&self, local_evaluation_only: bool) -> bool {
+        let local_covers_request = self
+            .options
+            .flag_keys
+            .as_ref()
+            .is_some_and(|keys| keys.iter().all(|key| self.records.contains_key(key)));
+
+        !self.options.only_evaluate_locally && !local_evaluation_only && !local_covers_request
+    }
+
+    pub(super) fn distinct_id(&self) -> &str {
+        &self.distinct_id
+    }
+
+    pub(super) fn options(&self) -> &EvaluateFlagsOptions {
+        &self.options
+    }
+
+    pub(super) fn apply_remote_result(
+        &mut self,
+        result: Result<DetailedFlagsResponse, Error>,
+    ) -> Result<(), Error> {
+        match result {
+            Ok(response) => {
+                self.request_id = response.request_id;
+                self.errors_while_computing = response.errors_while_computing_flags;
+                self.quota_limited = response.quota_limited;
+                let minimal_flag_called_events = response.minimal_flag_called_events;
+                for (key, detail) in response.flags {
+                    // A successful local evaluation is authoritative. Remote
+                    // evaluation only fills flags that local evaluation could
+                    // not resolve.
+                    self.records.entry(key).or_insert_with(|| {
+                        remote_record_from_detail(detail, minimal_flag_called_events)
+                    });
+                }
+                Ok(())
+            }
+            Err(error) if self.records.is_empty() => Err(error),
+            Err(error) => {
+                debug!(
+                    error = error.to_string(),
+                    local_count = self.records.len(),
+                    "/flags fetch failed; returning snapshot from local results only"
+                );
+                self.errors_while_computing = true;
+                Ok(())
+            }
+        }
+    }
+
+    pub(super) fn into_evaluations(
+        self,
+        host: Arc<dyn FeatureFlagEvaluationsHost>,
+    ) -> FeatureFlagEvaluations {
+        FeatureFlagEvaluations::new(
+            host,
+            self.distinct_id,
+            self.records,
+            self.options.groups.unwrap_or_default(),
+            self.options.disable_geoip,
+            self.request_id,
+            None,
+            self.errors_while_computing,
+            self.quota_limited,
+        )
+    }
+}
+
+fn local_record(
     value: FlagValue,
     payload: Option<serde_json::Value>,
     has_experiment: Option<bool>,
@@ -343,7 +493,7 @@ pub(super) fn local_record(
     }
 }
 
-pub(super) fn remote_record_from_detail(
+fn remote_record_from_detail(
     detail: FlagDetail,
     minimal_flag_called_events: bool,
 ) -> EvaluatedFlagRecord {
@@ -399,6 +549,155 @@ mod tests {
             disable_geoip,
             is_server,
         }
+    }
+
+    fn local_evaluator() -> LocalEvaluator {
+        use crate::feature_flags::{FeatureFlag, FeatureFlagCondition, FeatureFlagFilters};
+        use crate::local_evaluation::{FlagCache, LocalEvaluationResponse};
+
+        let flag = |key: &str| FeatureFlag {
+            key: key.to_string(),
+            active: true,
+            has_experiment: Some(false),
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: Vec::new(),
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+
+        let cache = FlagCache::new();
+        cache.update(LocalEvaluationResponse {
+            flags: vec![flag("local"), flag("filtered-out")],
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+            minimal_flag_called_events: true,
+        });
+        LocalEvaluator::new(cache)
+    }
+
+    fn remote_detail(key: &str, enabled: bool, id: u64) -> FlagDetail {
+        FlagDetail {
+            key: key.to_string(),
+            enabled,
+            variant: None,
+            reason: Some(crate::feature_flags::FlagReason {
+                code: "condition_match".to_string(),
+                condition_index: Some(0),
+                description: Some("Matched remotely".to_string()),
+            }),
+            metadata: Some(FlagMetadata {
+                id,
+                version: 7,
+                description: None,
+                payload: Some(json!({"source": "remote"})),
+                has_experiment: Some(true),
+            }),
+        }
+    }
+
+    #[test]
+    fn evaluation_state_filters_local_results_and_preserves_local_wins_merge_metadata() {
+        let evaluator = local_evaluator();
+        let mut options = EvaluateFlagsOptions::default();
+        options.flag_keys = Some(vec!["local".to_string(), "remote".to_string()]);
+        options.groups = Some(groups(&[("organization", "org-a")]));
+
+        let mut state = EvaluationState::new("user-1".to_string(), options, Some(&evaluator));
+        assert_eq!(state.records.len(), 1);
+        assert!(state.records.contains_key("local"));
+        assert!(!state.records.contains_key("filtered-out"));
+        assert!(state.should_fetch_remote(false));
+
+        let local_before_merge = &state.records["local"];
+        assert!(local_before_merge.enabled);
+        assert!(local_before_merge.locally_evaluated);
+        assert!(local_before_merge.minimal_flag_called_events);
+
+        let response = DetailedFlagsResponse {
+            flags: HashMap::from([
+                ("local".to_string(), remote_detail("local", false, 101)),
+                ("remote".to_string(), remote_detail("remote", true, 202)),
+            ]),
+            request_id: Some("req-policy".to_string()),
+            errors_while_computing_flags: true,
+            quota_limited: true,
+            minimal_flag_called_events: false,
+        };
+        state.apply_remote_result(Ok(response)).unwrap();
+
+        let local = &state.records["local"];
+        assert!(local.enabled, "successful local evaluation must win");
+        assert!(local.locally_evaluated);
+        assert_eq!(local.id, None);
+        assert!(local.minimal_flag_called_events);
+
+        let remote = &state.records["remote"];
+        assert!(remote.enabled);
+        assert!(!remote.locally_evaluated);
+        assert_eq!(remote.id, Some(202));
+        assert_eq!(remote.version, Some(7));
+        assert_eq!(remote.reason.as_deref(), Some("Matched remotely"));
+        assert_eq!(remote.payload, Some(json!({"source": "remote"})));
+        assert_eq!(remote.has_experiment, Some(true));
+        assert!(!remote.minimal_flag_called_events);
+
+        assert_eq!(state.request_id.as_deref(), Some("req-policy"));
+        assert!(state.errors_while_computing);
+        assert!(state.quota_limited);
+        assert_eq!(
+            state.options.groups.as_ref().unwrap().get("organization"),
+            Some(&"org-a".to_string())
+        );
+    }
+
+    #[test]
+    fn evaluation_state_characterizes_fetch_gates_and_partial_fallback() {
+        let evaluator = local_evaluator();
+
+        let mut covered_options = EvaluateFlagsOptions::default();
+        covered_options.flag_keys = Some(vec!["local".to_string()]);
+        let covered = EvaluationState::new("user-1".to_string(), covered_options, Some(&evaluator));
+        assert!(!covered.should_fetch_remote(false));
+
+        let mut local_only_options = EvaluateFlagsOptions::default();
+        local_only_options.only_evaluate_locally = true;
+        let local_only =
+            EvaluationState::new("user-1".to_string(), local_only_options, Some(&evaluator));
+        assert!(!local_only.should_fetch_remote(false));
+
+        let project_local_only = EvaluationState::new(
+            "user-1".to_string(),
+            EvaluateFlagsOptions::default(),
+            Some(&evaluator),
+        );
+        assert!(!project_local_only.should_fetch_remote(true));
+
+        let mut partial_options = EvaluateFlagsOptions::default();
+        partial_options.flag_keys = Some(vec!["local".to_string(), "missing".to_string()]);
+        let mut partial =
+            EvaluationState::new("user-1".to_string(), partial_options, Some(&evaluator));
+        partial
+            .apply_remote_result(Err(Error::Connection("remote failed".to_string())))
+            .expect("local results degrade a remote failure to a partial snapshot");
+        assert_eq!(partial.records.len(), 1);
+        assert!(partial.records.contains_key("local"));
+        assert!(partial.errors_while_computing);
+        assert_eq!(partial.request_id, None);
+        assert!(!partial.quota_limited);
+
+        let mut empty =
+            EvaluationState::new("user-1".to_string(), EvaluateFlagsOptions::default(), None);
+        assert!(empty
+            .apply_remote_result(Err(Error::Connection("remote failed".to_string())))
+            .is_err());
     }
 
     fn flag_params(
