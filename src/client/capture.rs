@@ -13,7 +13,7 @@ use super::retry::{backoff_duration, is_retryable_status};
 // `capture::parse_retry_after` / `capture::Step`.
 pub(crate) use super::retry::{parse_retry_after, Step};
 use super::{
-    common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
+    common::{apply_runtime_context, preprocess_capture_event},
     CaptureCompression, CaptureDefaults, ClientOptions,
 };
 use crate::capture_event::{
@@ -166,10 +166,7 @@ pub(crate) fn prepare_immediate(
     let defaults = opts.capture_defaults();
     let events: Vec<Event> = events
         .into_iter()
-        .filter_map(|mut event| {
-            apply_capture_defaults(&mut event, &defaults);
-            apply_before_send_hooks(&opts.before_send, event)
-        })
+        .filter_map(|event| preprocess_capture_event(event, &defaults, &opts.before_send))
         .collect();
     if events.is_empty() {
         return None;

@@ -48,7 +48,7 @@ pub(super) fn flag_event_dedup_cache() -> FlagEventDedupCache {
     Mutex::new(HashMap::new())
 }
 
-pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaults) {
+fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaults) {
     if defaults.disable_geoip {
         event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
     }
@@ -57,7 +57,16 @@ pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaul
     }
 }
 
-pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
+pub(super) fn preprocess_capture_event(
+    mut event: Event,
+    defaults: &CaptureDefaults,
+    hooks: &[BeforeSendHook],
+) -> Option<Event> {
+    apply_capture_defaults(&mut event, defaults);
+    apply_before_send_hooks(hooks, event)
+}
+
+fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
     let mut current = Some(event);
 
     for hook in hooks {
