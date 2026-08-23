@@ -3158,40 +3158,6 @@ mod tests {
     // ==================== Tests for invalid regex patterns ====================
 
     #[test]
-    fn test_regex_with_invalid_pattern_returns_false() {
-        // Invalid regex pattern (unclosed group)
-        let prop = Property {
-            key: "email".to_string(),
-            value: json!("(unclosed"),
-            operator: "regex".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-        properties.insert("email".to_string(), json!("test@example.com"));
-
-        // Invalid regex should return false (not match)
-        assert!(!match_property(&prop, &properties).unwrap());
-    }
-
-    #[test]
-    fn test_not_regex_with_invalid_pattern_returns_true() {
-        // Invalid regex pattern (unclosed group)
-        let prop = Property {
-            key: "email".to_string(),
-            value: json!("(unclosed"),
-            operator: "not_regex".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-        properties.insert("email".to_string(), json!("test@example.com"));
-
-        // Invalid regex with not_regex should return true (no match means "not matching")
-        assert!(match_property(&prop, &properties).unwrap());
-    }
-
-    #[test]
     fn test_regex_with_various_invalid_patterns() {
         let invalid_patterns = vec![
             "(unclosed", // Unclosed group
@@ -3301,30 +3267,43 @@ mod tests {
         assert_eq!(parse_semver("not-a-version"), None);
     }
 
-    // ==================== Semver eq/neq tests ====================
+    // ==================== Semver operator tests ====================
 
-    #[test]
-    fn test_semver_eq_basic() {
-        let prop = Property {
+    fn assert_semver_cases(operator: &str, target: &str, cases: &[(&str, &str, bool)]) {
+        let property = Property {
             key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_eq".to_string(),
+            value: json!(target),
+            operator: operator.to_string(),
             property_type: None,
         };
 
-        let mut properties = HashMap::new();
+        for &(label, value, expected) in cases {
+            let properties = HashMap::from([("version".to_string(), json!(value))]);
+            let actual = match_property(&property, &properties).unwrap_or_else(|error| {
+                panic!(
+                    "{}: evaluating {} {} {} returned an error: {}",
+                    label, value, operator, target, error
+                )
+            });
+            assert_eq!(
+                actual, expected,
+                "{label}: expected {value} {operator} {target} to be {expected}"
+            );
+        }
+    }
 
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.3.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
+    #[test]
+    fn test_semver_eq_basic() {
+        assert_semver_cases(
+            "semver_eq",
+            "1.2.3",
+            &[
+                ("exact match", "1.2.3", true),
+                ("different patch", "1.2.4", false),
+                ("different minor", "1.3.3", false),
+                ("different major", "2.2.3", false),
+            ],
+        );
     }
 
     #[test]
@@ -3398,154 +3377,80 @@ mod tests {
 
     #[test]
     fn test_semver_neq() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_neq".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_neq",
+            "1.2.3",
+            &[
+                ("exact match", "1.2.3", false),
+                ("different patch", "1.2.4", true),
+                ("different major", "2.0.0", true),
+            ],
+        );
     }
 
     // ==================== Semver gt/gte/lt/lte tests ====================
 
     #[test]
     fn test_semver_gt() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_gt".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.3.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.1.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_gt",
+            "1.2.3",
+            &[
+                ("greater patch", "1.2.4", true),
+                ("greater minor", "1.3.0", true),
+                ("greater major", "2.0.0", true),
+                ("equal version", "1.2.3", false),
+                ("lesser patch", "1.2.2", false),
+                ("lesser minor", "1.1.9", false),
+                ("lesser major", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_gte() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_gte".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_gte",
+            "1.2.3",
+            &[
+                ("greater patch", "1.2.4", true),
+                ("greater major", "2.0.0", true),
+                ("equal version", "1.2.3", true),
+                ("lesser patch", "1.2.2", false),
+                ("lesser major", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_lt() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_lt".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.1.9"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_lt",
+            "1.2.3",
+            &[
+                ("lesser patch", "1.2.2", true),
+                ("lesser minor", "1.1.9", true),
+                ("lesser major", "0.9.9", true),
+                ("equal version", "1.2.3", false),
+                ("greater patch", "1.2.4", false),
+                ("greater major", "2.0.0", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_lte() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_lte".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_lte",
+            "1.2.3",
+            &[
+                ("lesser patch", "1.2.2", true),
+                ("lesser major", "0.9.9", true),
+                ("equal version", "1.2.3", true),
+                ("greater patch", "1.2.4", false),
+                ("greater major", "2.0.0", false),
+            ],
+        );
     }
 
     // ==================== Semver tilde tests ====================
@@ -3621,217 +3526,107 @@ mod tests {
 
     #[test]
     fn test_semver_caret_major_nonzero() {
-        // ^1.2.3 means >=1.2.3 <2.0.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_caret".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Exact match
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.3.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.99.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("2.0.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // ^1.2.3 means >=1.2.3 <2.0.0.
+        assert_semver_cases(
+            "semver_caret",
+            "1.2.3",
+            &[
+                ("exact lower bound", "1.2.3", true),
+                ("within patch range", "1.2.4", true),
+                ("within minor range", "1.3.0", true),
+                ("within major range", "1.99.99", true),
+                ("excluded upper bound", "2.0.0", false),
+                ("above upper bound", "2.0.1", false),
+                ("below lower patch", "1.2.2", false),
+                ("below lower major", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_caret_major_zero_minor_nonzero() {
-        // ^0.2.3 means >=0.2.3 <0.3.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("0.2.3"),
-            operator: "semver_caret".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Exact match
-        properties.insert("version".to_string(), json!("0.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("0.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.2.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("0.3.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("0.3.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("0.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.1.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // ^0.2.3 means >=0.2.3 <0.3.0.
+        assert_semver_cases(
+            "semver_caret",
+            "0.2.3",
+            &[
+                ("exact lower bound", "0.2.3", true),
+                ("within patch range", "0.2.4", true),
+                ("within minor range", "0.2.99", true),
+                ("excluded upper bound", "0.3.0", false),
+                ("above upper minor", "0.3.1", false),
+                ("above upper major", "1.0.0", false),
+                ("below lower patch", "0.2.2", false),
+                ("below lower minor", "0.1.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_caret_major_zero_minor_zero() {
-        // ^0.0.3 means >=0.0.3 <0.0.4
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("0.0.3"),
-            operator: "semver_caret".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Exact match
-        properties.insert("version".to_string(), json!("0.0.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("0.0.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("0.0.5"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.1.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("0.0.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // ^0.0.3 means >=0.0.3 <0.0.4.
+        assert_semver_cases(
+            "semver_caret",
+            "0.0.3",
+            &[
+                ("exact lower bound", "0.0.3", true),
+                ("excluded upper bound", "0.0.4", false),
+                ("above upper patch", "0.0.5", false),
+                ("above upper minor", "0.1.0", false),
+                ("below lower bound", "0.0.2", false),
+            ],
+        );
     }
 
     // ==================== Semver wildcard tests ====================
 
     #[test]
     fn test_semver_wildcard_major() {
-        // 1.* means >=1.0.0 <2.0.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.*"),
-            operator: "semver_wildcard".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // At lower bound
-        properties.insert("version".to_string(), json!("1.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.99.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("2.0.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // 1.* means >=1.0.0 <2.0.0.
+        assert_semver_cases(
+            "semver_wildcard",
+            "1.*",
+            &[
+                ("exact lower bound", "1.0.0", true),
+                ("within minor range", "1.2.3", true),
+                ("within upper range", "1.99.99", true),
+                ("excluded upper bound", "2.0.0", false),
+                ("above upper bound", "2.0.1", false),
+                ("below lower bound", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_wildcard_minor() {
-        // 1.2.* means >=1.2.0 <1.3.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.*"),
-            operator: "semver_wildcard".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // At lower bound
-        properties.insert("version".to_string(), json!("1.2.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.2.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("1.3.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("1.3.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("1.1.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // 1.2.* means >=1.2.0 <1.3.0.
+        assert_semver_cases(
+            "semver_wildcard",
+            "1.2.*",
+            &[
+                ("exact lower bound", "1.2.0", true),
+                ("within patch range", "1.2.3", true),
+                ("within upper range", "1.2.99", true),
+                ("excluded upper bound", "1.3.0", false),
+                ("above upper minor", "1.3.1", false),
+                ("above upper major", "2.0.0", false),
+                ("below lower bound", "1.1.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_wildcard_zero() {
-        // 0.* means >=0.0.0 <1.0.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("0.*"),
-            operator: "semver_wildcard".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        properties.insert("version".to_string(), json!("0.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.99.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // 0.* means >=0.0.0 <1.0.0.
+        assert_semver_cases(
+            "semver_wildcard",
+            "0.*",
+            &[
+                ("exact lower bound", "0.0.0", true),
+                ("within upper range", "0.99.99", true),
+                ("excluded upper bound", "1.0.0", false),
+            ],
+        );
     }
 
     // ==================== Semver error handling tests ====================
@@ -4474,22 +4269,13 @@ mod tests {
         FlagValue::Boolean(true)
     );
 
-    #[test]
-    fn test_early_exit_default_is_false_from_json() {
-        // A flag definition that omits `early_exit` must deserialize to false
-        // and preserve the legacy fall-through behavior.
-        let flag: FeatureFlag = serde_json::from_value(json!({
-            "key": "early-exit-flag",
-            "active": true,
-            "filters": {
-                "groups": [
-                    { "properties": [], "rollout_percentage": 0.0, "variant": null },
-                    { "properties": [], "rollout_percentage": 100.0, "variant": null }
-                ]
-            }
-        }))
-        .unwrap();
-        assert!(!flag.filters.early_exit);
+    fn assert_early_exit_json_falls_through(label: &str, fixture: serde_json::Value) {
+        let flag: FeatureFlag = serde_json::from_value(fixture).unwrap();
+        assert!(
+            !flag.filters.early_exit,
+            "{}: early_exit should deserialize as false",
+            label
+        );
         let result = match_feature_flag(
             &flag,
             "user-123",
@@ -4499,12 +4285,32 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(result, FlagValue::Boolean(true));
+        assert_eq!(
+            result,
+            FlagValue::Boolean(true),
+            "{label}: evaluation should fall through to the matching group"
+        );
+    }
+
+    #[test]
+    fn test_early_exit_default_is_false_from_json() {
+        // Omitting `early_exit` must preserve the legacy fall-through behavior.
+        let fixture = json!({
+            "key": "early-exit-flag",
+            "active": true,
+            "filters": {
+                "groups": [
+                    { "properties": [], "rollout_percentage": 0.0, "variant": null },
+                    { "properties": [], "rollout_percentage": 100.0, "variant": null }
+                ]
+            }
+        });
+        assert_early_exit_json_falls_through("omitted early_exit", fixture);
     }
 
     #[test]
     fn test_early_exit_explicit_false_falls_through() {
-        let flag: FeatureFlag = serde_json::from_value(json!({
+        let fixture = json!({
             "key": "early-exit-flag",
             "active": true,
             "filters": {
@@ -4514,19 +4320,8 @@ mod tests {
                     { "properties": [], "rollout_percentage": 100.0, "variant": null }
                 ]
             }
-        }))
-        .unwrap();
-        assert!(!flag.filters.early_exit);
-        let result = match_feature_flag(
-            &flag,
-            "user-123",
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(result, FlagValue::Boolean(true));
+        });
+        assert_early_exit_json_falls_through("explicit false early_exit", fixture);
     }
 
     #[test]
