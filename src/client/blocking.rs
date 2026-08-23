@@ -8,6 +8,7 @@ use reqwest::{
     blocking::Client as HttpClient,
     header::{CONTENT_TYPE, USER_AGENT},
 };
+use serde::Serialize;
 use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
 
@@ -228,6 +229,51 @@ impl Client {
     /// ```
     pub fn alias<P: Into<String>, D: Into<String>>(&self, previous_id: P, distinct_id: D) {
         if let Some(event) = Event::alias(previous_id.into(), distinct_id.into()) {
+            self.capture(event);
+        }
+    }
+
+    /// Create or update a group and set its properties by sending a `$groupidentify`
+    /// event.
+    ///
+    /// See <https://posthog.com/docs/product-analytics/group-analytics#setting-group-properties>.
+    ///
+    /// # Parameters
+    ///
+    /// - `group_type`: Group type, such as `"company"`, `"project"`, or `"organization"`.
+    /// - `group_key`: Unique identifier for the group, such as an ID in your database.
+    /// - `properties`: Any serializable object or JSON map representing group properties.
+    ///
+    /// # Remarks
+    ///
+    /// Fire-and-forget, like [`Client::capture`]. A blank `group_type` or `group_key`,
+    /// or properties that fail to serialize, will drop the event with a warning rather
+    /// than panic.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use serde_json::json;
+    ///
+    /// let client = posthog_rs::client("phc_project_api_key");
+    ///
+    /// client.group_identify(
+    ///     "company",
+    ///     "company_id_in_your_db",
+    ///     json!({
+    ///         "name": "Awesome Inc.",
+    ///         "employees": 11,
+    ///     }),
+    /// );
+    /// ```
+    pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(
+        &self,
+        group_type: T,
+        group_key: K,
+        properties: P,
+    ) {
+        if let Some(event) = Event::group_identify(group_type.into(), group_key.into(), properties)
+        {
             self.capture(event);
         }
     }

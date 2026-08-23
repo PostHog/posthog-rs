@@ -237,6 +237,60 @@ impl Event {
         })
     }
 
+    /// Build the `$groupidentify` event backing [`crate::Client::group_identify`].
+    ///
+    /// Sets `$group_type`, `$group_key`, and `$group_set` in `properties`.
+    /// The event is attributed to `format!("${group_type}_{group_key}")`.
+    ///
+    /// Returns `None` when either `group_type` or `group_key` is blank, or if
+    /// `properties` fails to serialize to JSON (a warning is logged in either case).
+    pub(crate) fn group_identify<P: Serialize>(
+        group_type: String,
+        group_key: String,
+        properties: P,
+    ) -> Option<Self> {
+        if group_type.trim().is_empty() {
+            warn!("group_identify() called with a blank group_type, dropping the $groupidentify event");
+            return None;
+        }
+        if group_key.trim().is_empty() {
+            warn!(
+                "group_identify() called with a blank group_key, dropping the $groupidentify event"
+            );
+            return None;
+        }
+
+        let group_set = match serde_json::to_value(properties) {
+            Ok(val) => val,
+            Err(err) => {
+                warn!("group_identify() failed to serialize properties: {err}, dropping the $groupidentify event");
+                return None;
+            }
+        };
+
+        let distinct_id = format!("${group_type}_{group_key}");
+        let mut props = HashMap::new();
+        props.insert(
+            "$group_type".to_string(),
+            serde_json::Value::String(group_type),
+        );
+        props.insert(
+            "$group_key".to_string(),
+            serde_json::Value::String(group_key),
+        );
+        props.insert("$group_set".to_string(), group_set);
+
+        Some(Self {
+            event: "$groupidentify".to_string(),
+            distinct_id,
+            properties: props,
+            groups: HashMap::new(),
+            timestamp: None,
+            uuid: Uuid::now_v7(),
+            minimal_flag_called: false,
+        })
+    }
+
     /// Stamp the capture (enqueue) time when the caller hasn't set an explicit
     /// timestamp. Done on the producer side before the event is queued, so a
     /// batched or retried event records when it *occurred*, not when the worker
@@ -644,6 +698,45 @@ pub mod tests {
             .as_object()
             .unwrap();
         assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
+    }
+
+    #[test]
+    fn v0_group_identify_payload() {
+        let event = Event::group_identify(
+            "company".to_string(),
+            "acme_123".to_string(),
+            serde_json::json!({ "name": "Acme Inc.", "employees": 42 }),
+        )
+        .expect("group_identify should succeed");
+
+        let inner = build_v0(event);
+        let json = serde_json::to_value(&inner).unwrap();
+
+        assert_eq!(json["event"], "$groupidentify");
+        assert_eq!(json["distinct_id"], "$company_acme_123");
+        assert_eq!(json["properties"]["$group_type"], "company");
+        assert_eq!(json["properties"]["$group_key"], "acme_123");
+        assert_eq!(json["properties"]["$group_set"]["name"], "Acme Inc.");
+        assert_eq!(json["properties"]["$group_set"]["employees"], 42);
+        assert!(!inner.properties.contains_key("$process_person_profile"));
+    }
+
+    #[test]
+    fn group_identify_rejects_blank_keys() {
+        assert!(
+            Event::group_identify("".to_string(), "k".to_string(), serde_json::json!({})).is_none()
+        );
+        assert!(
+            Event::group_identify("   ".to_string(), "k".to_string(), serde_json::json!({}))
+                .is_none()
+        );
+        assert!(
+            Event::group_identify("t".to_string(), "".to_string(), serde_json::json!({})).is_none()
+        );
+        assert!(
+            Event::group_identify("t".to_string(), "   ".to_string(), serde_json::json!({}))
+                .is_none()
+        );
     }
 }
 
