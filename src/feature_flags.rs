@@ -584,88 +584,15 @@ pub fn match_feature_flag(
     group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     group_type_mapping: &HashMap<String, String>,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    if !flag.active {
-        return Ok(FlagValue::Boolean(false));
-    }
-
-    let conditions = &flag.filters.groups;
-    let flag_aggregation = flag.filters.aggregation_group_type_index;
-
-    // Sort conditions to evaluate variant overrides first
-    let mut sorted_conditions = conditions.clone();
-    sorted_conditions.sort_by_key(|c| if c.variant.is_some() { 0 } else { 1 });
-
-    let mut is_inconclusive = false;
-
-    for condition in sorted_conditions {
-        let (effective_bucketing, effective_properties) = match resolve_condition_target(
-            &condition,
-            flag_aggregation,
-            distinct_id,
-            person_properties,
-            groups,
-            group_properties,
-            group_type_mapping,
-        ) {
-            ConditionTarget::Use {
-                bucketing,
-                properties,
-            } => (bucketing, properties),
-            ConditionTarget::Skip => continue,
-            ConditionTarget::Inconclusive => {
-                is_inconclusive = true;
-                continue;
-            }
-        };
-
-        match is_condition_match(flag, &effective_bucketing, &condition, effective_properties) {
-            Ok(ConditionMatch::Match) => {
-                if let Some(variant_override) = &condition.variant {
-                    // Check if variant is valid
-                    if let Some(ref multivariate) = flag.filters.multivariate {
-                        let valid_variants: Vec<String> = multivariate
-                            .variants
-                            .iter()
-                            .map(|v| v.key.clone())
-                            .collect();
-
-                        if valid_variants.contains(variant_override) {
-                            return Ok(FlagValue::String(variant_override.clone()));
-                        }
-                    }
-                }
-
-                // Try to get matching variant or return true
-                if let Some(variant) = get_matching_variant(flag, &effective_bucketing) {
-                    return Ok(FlagValue::String(variant));
-                }
-                return Ok(FlagValue::Boolean(true));
-            }
-            Ok(ConditionMatch::OutOfRolloutBound) => {
-                // The user's properties matched this group but the rollout
-                // excluded them. With early_exit enabled the flag is
-                // definitively disabled; otherwise fall through to later groups.
-                // Only short-circuit when no prior group was inconclusive — an
-                // inconclusive result means we can't evaluate locally and must
-                // fall back to the server, so it takes priority over early_exit.
-                if flag.filters.early_exit && !is_inconclusive {
-                    return Ok(FlagValue::Boolean(false));
-                }
-            }
-            Ok(ConditionMatch::NoMatch) => continue,
-            Err(_) => {
-                is_inconclusive = true;
-            }
-        }
-    }
-
-    if is_inconclusive {
-        return Err(InconclusiveMatchError::new(
-            "Can't determine if feature flag is enabled or not with given properties",
-        ));
-    }
-
-    Ok(FlagValue::Boolean(false))
+    evaluate_feature_flag(
+        flag,
+        distinct_id,
+        person_properties,
+        groups,
+        group_properties,
+        group_type_mapping,
+        match_property,
+    )
 }
 
 /// Outcome of evaluating a single condition group, mirroring the PostHog Rust
@@ -684,15 +611,20 @@ enum ConditionMatch {
     OutOfRolloutBound,
 }
 
-fn is_condition_match(
+fn is_condition_match<F>(
     flag: &FeatureFlag,
     bucketing_id: &str,
     condition: &FeatureFlagCondition,
     properties: &HashMap<String, serde_json::Value>,
-) -> Result<ConditionMatch, InconclusiveMatchError> {
-    // Check properties first
+    property_matcher: &F,
+) -> Result<ConditionMatch, InconclusiveMatchError>
+where
+    F: Fn(&Property, &HashMap<String, serde_json::Value>) -> Result<bool, InconclusiveMatchError>,
+{
+    // Check properties first. The caller supplies either the basic matcher or
+    // the context-aware matcher; rollout handling remains identical.
     for prop in &condition.properties {
-        if !match_property(prop, properties)? {
+        if !property_matcher(prop, properties)? {
             return Ok(ConditionMatch::NoMatch);
         }
     }
@@ -725,16 +657,42 @@ pub fn match_feature_flag_with_context(
     person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<FlagValue, InconclusiveMatchError> {
+    evaluate_feature_flag(
+        flag,
+        ctx.distinct_id,
+        person_properties,
+        ctx.groups,
+        ctx.group_properties,
+        ctx.group_type_mapping,
+        |property, properties| match_property_with_context(property, properties, ctx),
+    )
+}
+
+/// Shared feature flag evaluation engine. Public entry points differ only in
+/// how individual properties are matched.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_feature_flag<F>(
+    flag: &FeatureFlag,
+    distinct_id: &str,
+    person_properties: &HashMap<String, serde_json::Value>,
+    groups: &HashMap<String, String>,
+    group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
+    group_type_mapping: &HashMap<String, String>,
+    property_matcher: F,
+) -> Result<FlagValue, InconclusiveMatchError>
+where
+    F: Fn(&Property, &HashMap<String, serde_json::Value>) -> Result<bool, InconclusiveMatchError>,
+{
     if !flag.active {
         return Ok(FlagValue::Boolean(false));
     }
 
-    let conditions = &flag.filters.groups;
     let flag_aggregation = flag.filters.aggregation_group_type_index;
 
-    // Sort conditions to evaluate variant overrides first
-    let mut sorted_conditions = conditions.clone();
-    sorted_conditions.sort_by_key(|c| if c.variant.is_some() { 0 } else { 1 });
+    // Stable sorting gives variant overrides priority while retaining their
+    // definition order relative to other overrides.
+    let mut sorted_conditions = flag.filters.groups.clone();
+    sorted_conditions.sort_by_key(|condition| if condition.variant.is_some() { 0 } else { 1 });
 
     let mut is_inconclusive = false;
 
@@ -742,11 +700,11 @@ pub fn match_feature_flag_with_context(
         let (effective_bucketing, effective_properties) = match resolve_condition_target(
             &condition,
             flag_aggregation,
-            ctx.distinct_id,
+            distinct_id,
             person_properties,
-            ctx.groups,
-            ctx.group_properties,
-            ctx.group_type_mapping,
+            groups,
+            group_properties,
+            group_type_mapping,
         ) {
             ConditionTarget::Use {
                 bucketing,
@@ -759,50 +717,44 @@ pub fn match_feature_flag_with_context(
             }
         };
 
-        match is_condition_match_with_context(
+        match is_condition_match(
             flag,
             &effective_bucketing,
             &condition,
             effective_properties,
-            ctx,
+            &property_matcher,
         ) {
             Ok(ConditionMatch::Match) => {
                 if let Some(variant_override) = &condition.variant {
-                    // Check if variant is valid
-                    if let Some(ref multivariate) = flag.filters.multivariate {
-                        let valid_variants: Vec<String> = multivariate
-                            .variants
-                            .iter()
-                            .map(|v| v.key.clone())
-                            .collect();
-
-                        if valid_variants.contains(variant_override) {
-                            return Ok(FlagValue::String(variant_override.clone()));
-                        }
+                    let is_valid = flag
+                        .filters
+                        .multivariate
+                        .as_ref()
+                        .is_some_and(|multivariate| {
+                            multivariate
+                                .variants
+                                .iter()
+                                .any(|variant| variant.key == *variant_override)
+                        });
+                    if is_valid {
+                        return Ok(FlagValue::String(variant_override.clone()));
                     }
                 }
 
-                // Try to get matching variant or return true
                 if let Some(variant) = get_matching_variant(flag, &effective_bucketing) {
                     return Ok(FlagValue::String(variant));
                 }
                 return Ok(FlagValue::Boolean(true));
             }
             Ok(ConditionMatch::OutOfRolloutBound) => {
-                // The user's properties matched this group but the rollout
-                // excluded them. With early_exit enabled the flag is
-                // definitively disabled; otherwise fall through to later groups.
-                // Only short-circuit when no prior group was inconclusive — an
-                // inconclusive result means we can't evaluate locally and must
-                // fall back to the server, so it takes priority over early_exit.
+                // A prior inconclusive condition takes precedence because local
+                // evaluation still cannot provide a definitive answer.
                 if flag.filters.early_exit && !is_inconclusive {
                     return Ok(FlagValue::Boolean(false));
                 }
             }
             Ok(ConditionMatch::NoMatch) => continue,
-            Err(_) => {
-                is_inconclusive = true;
-            }
+            Err(_) => is_inconclusive = true,
         }
     }
 
@@ -813,31 +765,6 @@ pub fn match_feature_flag_with_context(
     }
 
     Ok(FlagValue::Boolean(false))
-}
-
-fn is_condition_match_with_context(
-    flag: &FeatureFlag,
-    bucketing_id: &str,
-    condition: &FeatureFlagCondition,
-    properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
-) -> Result<ConditionMatch, InconclusiveMatchError> {
-    // Check properties first (using context-aware matching for cohorts/flag dependencies)
-    for prop in &condition.properties {
-        if !match_property_with_context(prop, properties, ctx)? {
-            return Ok(ConditionMatch::NoMatch);
-        }
-    }
-
-    // If all properties match (or no properties), check rollout percentage
-    if let Some(rollout_percentage) = condition.rollout_percentage {
-        let hash_value = hash_key(&flag.key, bucketing_id, ROLLOUT_HASH_SALT);
-        if hash_value > (rollout_percentage / 100.0) {
-            return Ok(ConditionMatch::OutOfRolloutBound);
-        }
-    }
-
-    Ok(ConditionMatch::Match)
 }
 
 /// Match a property with additional context for cohorts and flag dependencies.
@@ -3231,40 +3158,6 @@ mod tests {
     // ==================== Tests for invalid regex patterns ====================
 
     #[test]
-    fn test_regex_with_invalid_pattern_returns_false() {
-        // Invalid regex pattern (unclosed group)
-        let prop = Property {
-            key: "email".to_string(),
-            value: json!("(unclosed"),
-            operator: "regex".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-        properties.insert("email".to_string(), json!("test@example.com"));
-
-        // Invalid regex should return false (not match)
-        assert!(!match_property(&prop, &properties).unwrap());
-    }
-
-    #[test]
-    fn test_not_regex_with_invalid_pattern_returns_true() {
-        // Invalid regex pattern (unclosed group)
-        let prop = Property {
-            key: "email".to_string(),
-            value: json!("(unclosed"),
-            operator: "not_regex".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-        properties.insert("email".to_string(), json!("test@example.com"));
-
-        // Invalid regex with not_regex should return true (no match means "not matching")
-        assert!(match_property(&prop, &properties).unwrap());
-    }
-
-    #[test]
     fn test_regex_with_various_invalid_patterns() {
         let invalid_patterns = vec![
             "(unclosed", // Unclosed group
@@ -3374,30 +3267,43 @@ mod tests {
         assert_eq!(parse_semver("not-a-version"), None);
     }
 
-    // ==================== Semver eq/neq tests ====================
+    // ==================== Semver operator tests ====================
 
-    #[test]
-    fn test_semver_eq_basic() {
-        let prop = Property {
+    fn assert_semver_cases(operator: &str, target: &str, cases: &[(&str, &str, bool)]) {
+        let property = Property {
             key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_eq".to_string(),
+            value: json!(target),
+            operator: operator.to_string(),
             property_type: None,
         };
 
-        let mut properties = HashMap::new();
+        for &(label, value, expected) in cases {
+            let properties = HashMap::from([("version".to_string(), json!(value))]);
+            let actual = match_property(&property, &properties).unwrap_or_else(|error| {
+                panic!(
+                    "{}: evaluating {} {} {} returned an error: {}",
+                    label, value, operator, target, error
+                )
+            });
+            assert_eq!(
+                actual, expected,
+                "{label}: expected {value} {operator} {target} to be {expected}"
+            );
+        }
+    }
 
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.3.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
+    #[test]
+    fn test_semver_eq_basic() {
+        assert_semver_cases(
+            "semver_eq",
+            "1.2.3",
+            &[
+                ("exact match", "1.2.3", true),
+                ("different patch", "1.2.4", false),
+                ("different minor", "1.3.3", false),
+                ("different major", "2.2.3", false),
+            ],
+        );
     }
 
     #[test]
@@ -3471,154 +3377,80 @@ mod tests {
 
     #[test]
     fn test_semver_neq() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_neq".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_neq",
+            "1.2.3",
+            &[
+                ("exact match", "1.2.3", false),
+                ("different patch", "1.2.4", true),
+                ("different major", "2.0.0", true),
+            ],
+        );
     }
 
     // ==================== Semver gt/gte/lt/lte tests ====================
 
     #[test]
     fn test_semver_gt() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_gt".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.3.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.1.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_gt",
+            "1.2.3",
+            &[
+                ("greater patch", "1.2.4", true),
+                ("greater minor", "1.3.0", true),
+                ("greater major", "2.0.0", true),
+                ("equal version", "1.2.3", false),
+                ("lesser patch", "1.2.2", false),
+                ("lesser minor", "1.1.9", false),
+                ("lesser major", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_gte() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_gte".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_gte",
+            "1.2.3",
+            &[
+                ("greater patch", "1.2.4", true),
+                ("greater major", "2.0.0", true),
+                ("equal version", "1.2.3", true),
+                ("lesser patch", "1.2.2", false),
+                ("lesser major", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_lt() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_lt".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.1.9"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_lt",
+            "1.2.3",
+            &[
+                ("lesser patch", "1.2.2", true),
+                ("lesser minor", "1.1.9", true),
+                ("lesser major", "0.9.9", true),
+                ("equal version", "1.2.3", false),
+                ("greater patch", "1.2.4", false),
+                ("greater major", "2.0.0", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_lte() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_lte".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_lte",
+            "1.2.3",
+            &[
+                ("lesser patch", "1.2.2", true),
+                ("lesser major", "0.9.9", true),
+                ("equal version", "1.2.3", true),
+                ("greater patch", "1.2.4", false),
+                ("greater major", "2.0.0", false),
+            ],
+        );
     }
 
     // ==================== Semver tilde tests ====================
@@ -3694,217 +3526,107 @@ mod tests {
 
     #[test]
     fn test_semver_caret_major_nonzero() {
-        // ^1.2.3 means >=1.2.3 <2.0.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_caret".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Exact match
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.3.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.99.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("2.0.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // ^1.2.3 means >=1.2.3 <2.0.0.
+        assert_semver_cases(
+            "semver_caret",
+            "1.2.3",
+            &[
+                ("exact lower bound", "1.2.3", true),
+                ("within patch range", "1.2.4", true),
+                ("within minor range", "1.3.0", true),
+                ("within major range", "1.99.99", true),
+                ("excluded upper bound", "2.0.0", false),
+                ("above upper bound", "2.0.1", false),
+                ("below lower patch", "1.2.2", false),
+                ("below lower major", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_caret_major_zero_minor_nonzero() {
-        // ^0.2.3 means >=0.2.3 <0.3.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("0.2.3"),
-            operator: "semver_caret".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Exact match
-        properties.insert("version".to_string(), json!("0.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("0.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.2.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("0.3.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("0.3.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("0.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.1.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // ^0.2.3 means >=0.2.3 <0.3.0.
+        assert_semver_cases(
+            "semver_caret",
+            "0.2.3",
+            &[
+                ("exact lower bound", "0.2.3", true),
+                ("within patch range", "0.2.4", true),
+                ("within minor range", "0.2.99", true),
+                ("excluded upper bound", "0.3.0", false),
+                ("above upper minor", "0.3.1", false),
+                ("above upper major", "1.0.0", false),
+                ("below lower patch", "0.2.2", false),
+                ("below lower minor", "0.1.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_caret_major_zero_minor_zero() {
-        // ^0.0.3 means >=0.0.3 <0.0.4
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("0.0.3"),
-            operator: "semver_caret".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Exact match
-        properties.insert("version".to_string(), json!("0.0.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("0.0.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("0.0.5"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.1.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("0.0.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // ^0.0.3 means >=0.0.3 <0.0.4.
+        assert_semver_cases(
+            "semver_caret",
+            "0.0.3",
+            &[
+                ("exact lower bound", "0.0.3", true),
+                ("excluded upper bound", "0.0.4", false),
+                ("above upper patch", "0.0.5", false),
+                ("above upper minor", "0.1.0", false),
+                ("below lower bound", "0.0.2", false),
+            ],
+        );
     }
 
     // ==================== Semver wildcard tests ====================
 
     #[test]
     fn test_semver_wildcard_major() {
-        // 1.* means >=1.0.0 <2.0.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.*"),
-            operator: "semver_wildcard".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // At lower bound
-        properties.insert("version".to_string(), json!("1.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.99.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("2.0.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // 1.* means >=1.0.0 <2.0.0.
+        assert_semver_cases(
+            "semver_wildcard",
+            "1.*",
+            &[
+                ("exact lower bound", "1.0.0", true),
+                ("within minor range", "1.2.3", true),
+                ("within upper range", "1.99.99", true),
+                ("excluded upper bound", "2.0.0", false),
+                ("above upper bound", "2.0.1", false),
+                ("below lower bound", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_wildcard_minor() {
-        // 1.2.* means >=1.2.0 <1.3.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.*"),
-            operator: "semver_wildcard".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // At lower bound
-        properties.insert("version".to_string(), json!("1.2.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.2.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("1.3.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("1.3.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("1.1.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // 1.2.* means >=1.2.0 <1.3.0.
+        assert_semver_cases(
+            "semver_wildcard",
+            "1.2.*",
+            &[
+                ("exact lower bound", "1.2.0", true),
+                ("within patch range", "1.2.3", true),
+                ("within upper range", "1.2.99", true),
+                ("excluded upper bound", "1.3.0", false),
+                ("above upper minor", "1.3.1", false),
+                ("above upper major", "2.0.0", false),
+                ("below lower bound", "1.1.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_wildcard_zero() {
-        // 0.* means >=0.0.0 <1.0.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("0.*"),
-            operator: "semver_wildcard".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        properties.insert("version".to_string(), json!("0.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.99.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // 0.* means >=0.0.0 <1.0.0.
+        assert_semver_cases(
+            "semver_wildcard",
+            "0.*",
+            &[
+                ("exact lower bound", "0.0.0", true),
+                ("within upper range", "0.99.99", true),
+                ("excluded upper bound", "1.0.0", false),
+            ],
+        );
     }
 
     // ==================== Semver error handling tests ====================
@@ -4185,6 +3907,301 @@ mod tests {
         }
     }
 
+    // ==================== Evaluation engine characterizations ====================
+
+    #[test]
+    fn test_variant_overrides_keep_definition_order_in_both_public_apis() {
+        let matching_property = Property {
+            key: "audience".to_string(),
+            value: json!("matched"),
+            operator: "exact".to_string(),
+            property_type: None,
+        };
+        let flag = FeatureFlag {
+            key: "stable-overrides".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(100.0),
+                        variant: None,
+                        aggregation_group_type_index: None,
+                    },
+                    FeatureFlagCondition {
+                        properties: vec![matching_property.clone()],
+                        rollout_percentage: Some(100.0),
+                        variant: Some("first".to_string()),
+                        aggregation_group_type_index: None,
+                    },
+                    FeatureFlagCondition {
+                        properties: vec![matching_property],
+                        rollout_percentage: Some(100.0),
+                        variant: Some("second".to_string()),
+                        aggregation_group_type_index: None,
+                    },
+                ],
+                multivariate: Some(MultivariateFilter {
+                    variants: vec![
+                        MultivariateVariant {
+                            key: "first".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                        MultivariateVariant {
+                            key: "second".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                    ],
+                }),
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let properties = HashMap::from([("audience".to_string(), json!("matched"))]);
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_mapping = HashMap::new();
+        let ctx = EvaluationContext {
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id: "user-123",
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_mapping,
+        };
+
+        let expected = FlagValue::String("first".to_string());
+        assert_eq!(
+            match_feature_flag(
+                &flag,
+                ctx.distinct_id,
+                &properties,
+                ctx.groups,
+                ctx.group_properties,
+                ctx.group_type_mapping,
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            match_feature_flag_with_context(&flag, &properties, &ctx).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_group_targeting_uses_group_properties_and_group_key_for_bucketing() {
+        let flag = FeatureFlag {
+            key: "group-bucketing".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![Property {
+                        key: "plan".to_string(),
+                        value: json!("enterprise"),
+                        operator: "exact".to_string(),
+                        property_type: None,
+                    }],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: Some(MultivariateFilter {
+                    variants: vec![
+                        MultivariateVariant {
+                            key: "control".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                        MultivariateVariant {
+                            key: "test".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                    ],
+                }),
+                payloads: HashMap::new(),
+                aggregation_group_type_index: Some(0),
+                early_exit: false,
+            },
+        };
+        let person_properties = HashMap::from([("plan".to_string(), json!("free"))]);
+        let groups = HashMap::from([("company".to_string(), "acme".to_string())]);
+        let group_properties = HashMap::from([(
+            "company".to_string(),
+            HashMap::from([("plan".to_string(), json!("enterprise"))]),
+        )]);
+        let group_type_mapping = HashMap::from([("0".to_string(), "company".to_string())]);
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let ctx = EvaluationContext {
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id: "different-person-id",
+            groups: &groups,
+            group_properties: &group_properties,
+            group_type_mapping: &group_type_mapping,
+        };
+
+        let basic_result = match_feature_flag(
+            &flag,
+            "person-id",
+            &person_properties,
+            &groups,
+            &group_properties,
+            &group_type_mapping,
+        )
+        .unwrap();
+        let context_result =
+            match_feature_flag_with_context(&flag, &person_properties, &ctx).unwrap();
+        assert_eq!(basic_result, context_result);
+        assert!(matches!(basic_result, FlagValue::String(_)));
+
+        // An unresolved group type or absent group key skips the condition.
+        assert_eq!(
+            match_feature_flag(
+                &flag,
+                "person-id",
+                &person_properties,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .unwrap(),
+            FlagValue::Boolean(false)
+        );
+        // Once the type and key resolve, missing group properties are
+        // inconclusive rather than a definitive miss.
+        assert!(match_feature_flag(
+            &flag,
+            "person-id",
+            &person_properties,
+            &groups,
+            &HashMap::new(),
+            &group_type_mapping,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_rollout_boundary_is_inclusive_in_both_public_apis() {
+        let distinct_id = "boundary-user";
+        let key = "rollout-boundary";
+        let boundary = hash_key(key, distinct_id, ROLLOUT_HASH_SALT) * 100.0;
+        let flag = FeatureFlag {
+            key: key.to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![],
+                    rollout_percentage: Some(boundary),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_mapping = HashMap::new();
+        let properties = HashMap::new();
+        let ctx = EvaluationContext {
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id,
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_mapping,
+        };
+
+        assert_eq!(
+            match_feature_flag(
+                &flag,
+                distinct_id,
+                &properties,
+                &empty_groups,
+                &empty_group_properties,
+                &empty_group_mapping,
+            )
+            .unwrap(),
+            FlagValue::Boolean(true)
+        );
+        assert_eq!(
+            match_feature_flag_with_context(&flag, &properties, &ctx).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn test_context_engine_preserves_flag_dependency_matching() {
+        let prerequisite = FeatureFlag {
+            key: "prerequisite".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let dependent = FeatureFlag {
+            key: "dependent".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![Property {
+                        key: "$feature/prerequisite".to_string(),
+                        value: json!(true),
+                        operator: "exact".to_string(),
+                        property_type: None,
+                    }],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let flags = HashMap::from([("prerequisite".to_string(), prerequisite)]);
+        let empty_cohorts = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_mapping = HashMap::new();
+        let ctx = EvaluationContext {
+            cohorts: &empty_cohorts,
+            flags: &flags,
+            distinct_id: "user-123",
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_mapping,
+        };
+
+        assert_eq!(
+            match_feature_flag_with_context(&dependent, &HashMap::new(), &ctx).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
     // ==================== Tests for early_exit ====================
 
     /// Build a two-group flag where the first group always lands
@@ -4252,22 +4269,13 @@ mod tests {
         FlagValue::Boolean(true)
     );
 
-    #[test]
-    fn test_early_exit_default_is_false_from_json() {
-        // A flag definition that omits `early_exit` must deserialize to false
-        // and preserve the legacy fall-through behavior.
-        let flag: FeatureFlag = serde_json::from_value(json!({
-            "key": "early-exit-flag",
-            "active": true,
-            "filters": {
-                "groups": [
-                    { "properties": [], "rollout_percentage": 0.0, "variant": null },
-                    { "properties": [], "rollout_percentage": 100.0, "variant": null }
-                ]
-            }
-        }))
-        .unwrap();
-        assert!(!flag.filters.early_exit);
+    fn assert_early_exit_json_falls_through(label: &str, fixture: serde_json::Value) {
+        let flag: FeatureFlag = serde_json::from_value(fixture).unwrap();
+        assert!(
+            !flag.filters.early_exit,
+            "{}: early_exit should deserialize as false",
+            label
+        );
         let result = match_feature_flag(
             &flag,
             "user-123",
@@ -4277,12 +4285,32 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(result, FlagValue::Boolean(true));
+        assert_eq!(
+            result,
+            FlagValue::Boolean(true),
+            "{label}: evaluation should fall through to the matching group"
+        );
+    }
+
+    #[test]
+    fn test_early_exit_default_is_false_from_json() {
+        // Omitting `early_exit` must preserve the legacy fall-through behavior.
+        let fixture = json!({
+            "key": "early-exit-flag",
+            "active": true,
+            "filters": {
+                "groups": [
+                    { "properties": [], "rollout_percentage": 0.0, "variant": null },
+                    { "properties": [], "rollout_percentage": 100.0, "variant": null }
+                ]
+            }
+        });
+        assert_early_exit_json_falls_through("omitted early_exit", fixture);
     }
 
     #[test]
     fn test_early_exit_explicit_false_falls_through() {
-        let flag: FeatureFlag = serde_json::from_value(json!({
+        let fixture = json!({
             "key": "early-exit-flag",
             "active": true,
             "filters": {
@@ -4292,19 +4320,8 @@ mod tests {
                     { "properties": [], "rollout_percentage": 100.0, "variant": null }
                 ]
             }
-        }))
-        .unwrap();
-        assert!(!flag.filters.early_exit);
-        let result = match_feature_flag(
-            &flag,
-            "user-123",
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(result, FlagValue::Boolean(true));
+        });
+        assert_early_exit_json_falls_through("explicit false early_exit", fixture);
     }
 
     #[test]
@@ -4444,5 +4461,18 @@ mod tests {
             "expected InconclusiveMatchError, got {:?}",
             result
         );
+
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let ctx = EvaluationContext {
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id: "user-123",
+            groups: &groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &group_type_mapping,
+        };
+        assert!(match_feature_flag_with_context(&flag, &HashMap::new(), &ctx).is_err());
     }
 }
