@@ -335,16 +335,14 @@ impl Client {
     /// Fire-and-forget, like [`Client::capture`]. The batch is enqueued per event
     /// rather than atomically, so if the bounded queue fills partway through, the
     /// remaining events are dropped (with the usual single full-queue warning).
-    #[instrument(skip(self, events), fields(event_count = events.len()), level = "debug")]
+    #[instrument(
+        skip(self, events),
+        fields(event_count = events.len(), historical_migration),
+        level = "debug"
+    )]
     pub fn capture_batch(&self, events: Vec<Event>, historical_migration: bool) {
         if let Some(transport) = &self.transport {
-            if historical_migration {
-                transport.enqueue_historical(events);
-            } else {
-                for event in events {
-                    transport.enqueue(event);
-                }
-            }
+            transport.enqueue_batch(events, historical_migration);
         }
     }
 

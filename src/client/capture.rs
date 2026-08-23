@@ -333,19 +333,21 @@ pub(crate) fn after_response(
         );
 
         if attempt >= opts.max_capture_attempts {
-            Step::Fail(
-                Error::from_http_response(status, body.to_string())
-                    .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))),
-            )
+            Step::Fail(terminal_response_error(status, body))
         } else {
             Step::Backoff(backoff_duration(opts, attempt, retry_after))
         }
     } else {
-        Step::Fail(
-            Error::from_http_response(status, body.to_string())
-                .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))),
-        )
+        Step::Fail(terminal_response_error(status, body))
     }
+}
+
+/// Convert a terminal HTTP response into its status-specific SDK error. The
+/// fallback preserves the prior defensive behavior if a success status ever
+/// reaches a terminal branch.
+fn terminal_response_error(status: u16, body: &str) -> Error {
+    Error::from_http_response(status, body.to_string())
+        .unwrap_or_else(|| Error::Connection(format!("HTTP {status}")))
 }
 
 #[cfg(test)]
@@ -718,7 +720,13 @@ mod tests {
             &mut pending,
             &mut final_results,
         );
-        assert!(matches!(step, Step::Fail(_)));
+        match step {
+            Step::Fail(Error::ServerError { status, message }) => {
+                assert_eq!(status, 503);
+                assert_eq!(message, body);
+            }
+            other => panic!("expected status-preserving ServerError, got {:?}", other),
+        }
     }
 
     #[test]
@@ -738,7 +746,13 @@ mod tests {
             &mut pending,
             &mut final_results,
         );
-        assert!(matches!(step, Step::Fail(Error::BillingLimitExceeded(_))));
+        match step {
+            Step::Fail(Error::BillingLimitExceeded(message)) => assert_eq!(message, body),
+            other => panic!(
+                "expected body-preserving BillingLimitExceeded, got {:?}",
+                other
+            ),
+        }
     }
 
     #[test]
