@@ -25,29 +25,6 @@ use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
-fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
-    if err.is_timeout() {
-        return true;
-    }
-
-    let mut source = std::error::Error::source(err);
-    while let Some(error) = source {
-        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
-            return matches!(
-                io_error.kind(),
-                std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::TimedOut
-                    | std::io::ErrorKind::UnexpectedEof
-            );
-        }
-        source = std::error::Error::source(error);
-    }
-
-    !err.to_string()
-        .to_lowercase()
-        .contains("connection refused")
-}
-
 use super::common::{
     already_reported, build_dedup_key, extract_flag_details, flag_called_event,
     flag_event_dedup_cache, local_record, remote_record_from_detail, report_flags_error,
@@ -809,7 +786,7 @@ impl Client {
                     match super::retry::feature_flags_after_transport_error(
                         &self.options,
                         attempt,
-                        is_retryable_feature_flags_error(&e),
+                        super::retry::is_retryable_feature_flags_error(&e),
                         err_msg,
                     ) {
                         super::retry::FeatureFlagsTransportStep::Backoff(delay) => {
