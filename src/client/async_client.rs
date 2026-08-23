@@ -797,10 +797,7 @@ mod teardown_tests {
         shutdown_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("client shutdown blocked its transport worker");
-        client_slot
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
+        client_slot.lock().unwrap_or_else(|p| p.into_inner()).take();
 
         // Reap the worker externally and verify repeated shutdown is safe.
         client.shutdown().await;
