@@ -234,22 +234,26 @@ impl Client {
 
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
     /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
-    /// disabled clients.
+    /// disabled clients. When called from a transport callback, queues shutdown
+    /// without waiting for or joining the current worker thread.
     pub async fn shutdown(&self) {
         let Some(transport) = &self.transport else {
             return;
         };
+        let on_worker = transport.on_worker_thread();
         if transport.begin_close() {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            if transport.send_control(Control::Shutdown(Completion::Async(tx))) {
+            if transport.send_control(Control::Shutdown(Completion::Async(tx))) && !on_worker {
                 let _ = rx.await;
             }
         }
-        // Always join — even if this caller lost the `begin_close` race or its
-        // shutdown wait was cancelled — so every shutdown/drop path waits for the
-        // worker and the flush stays durable. The winner has already sent the
-        // Shutdown (synchronously, before any await), so the worker will exit.
-        transport.join();
+        // Always join for external callers — even if this caller lost the
+        // `begin_close` race or its shutdown wait was cancelled — so every
+        // external shutdown/drop path waits for the worker and the flush stays
+        // durable. Joining from the worker itself would deadlock.
+        if !on_worker {
+            transport.join();
+        }
     }
 
     /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
@@ -861,6 +865,44 @@ impl Drop for Client {
 mod teardown_tests {
     use super::*;
     use std::sync::{mpsc, Mutex};
+
+    #[tokio::test]
+    async fn shutdown_from_worker_callback_closes_without_blocking() {
+        let client_slot = Arc::new(Mutex::new(None::<Arc<Client>>));
+        let callback_slot = Arc::clone(&client_slot);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let options = crate::ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host("http://localhost:0".to_string())
+            .flush_at(1usize)
+            .before_send(move |_| {
+                let client = Arc::clone(
+                    callback_slot
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .as_ref()
+                        .expect("client installed before capture"),
+                );
+                futures::executor::block_on(client.shutdown());
+                shutdown_tx.send(()).unwrap();
+                None
+            })
+            .build()
+            .unwrap();
+        let client = Arc::new(client(options).await);
+        *client_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&client));
+
+        client.capture(Event::new("shutdown-in-callback", "user-1"));
+        shutdown_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("client shutdown blocked its transport worker");
+        client_slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+
+        // Reap the worker externally and verify repeated shutdown is safe.
+        client.shutdown().await;
+        client.shutdown().await;
+        assert!(client.transport.as_ref().unwrap().is_closed());
+    }
 
     #[tokio::test]
     async fn drop_from_worker_callback_closes_without_blocking() {
