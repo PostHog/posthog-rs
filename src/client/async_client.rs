@@ -278,8 +278,7 @@ impl Client {
         group_key: K,
         properties: P,
     ) -> Result<(), Error> {
-        if let Some(event) =
-            Event::group_identify(group_type.into(), group_key.into(), properties)?
+        if let Some(event) = Event::group_identify(group_type.into(), group_key.into(), properties)?
         {
             self.capture(event);
         }
