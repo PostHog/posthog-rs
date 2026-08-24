@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.25.1 — 2026-08-24
+
+### Patch changes
+
+- [253a7c0](https://github.com/posthog/posthog-rs/commit/253a7c09a6776dda0d753ed847a9f2d4fbbe7d0d) Prevent transport worker deadlocks during client shutdown. — Thanks @marandaneto!
+
 ## 0.25.0 — 2026-08-24
 
 ### Minor changes
