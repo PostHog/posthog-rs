@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.25.0 — 2026-08-24
+
+### Minor changes
+
+- [710ea93](https://github.com/posthog/posthog-rs/commit/710ea931e9f580f3b364509f03c152112c5b244e) Add `group_identify` helper to `Client` (async) and `Client` (blocking) for creating or updating group properties via `$groupidentify`. — Thanks @vjymisal0 for your first contribution 🎉!
+
 ## 0.24.0 — 2026-08-19
 
 ### Minor changes
