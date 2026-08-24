@@ -242,31 +242,36 @@ impl Event {
     /// Sets `$group_type`, `$group_key`, and `$group_set` in `properties`.
     /// The event is attributed to `format!("${group_type}_{group_key}")`.
     ///
-    /// Returns `None` when either `group_type` or `group_key` is blank, or if
-    /// `properties` fails to serialize to JSON (a warning is logged in either case).
+    /// Returns `Ok(None)` when either `group_type` or `group_key` is blank (a
+    /// warning is logged and the event is dropped).
+    ///
+    /// Returns [`Error::Serialization`] if `properties` fails to serialize to
+    /// JSON, or if it does not serialize to a JSON object — PostHog ingestion
+    /// requires `$group_set` to be an object and silently drops the event
+    /// otherwise.
     pub(crate) fn group_identify<P: Serialize>(
         group_type: String,
         group_key: String,
         properties: P,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, Error> {
         if group_type.trim().is_empty() {
             warn!("group_identify() called with a blank group_type, dropping the $groupidentify event");
-            return None;
+            return Ok(None);
         }
         if group_key.trim().is_empty() {
             warn!(
                 "group_identify() called with a blank group_key, dropping the $groupidentify event"
             );
-            return None;
+            return Ok(None);
         }
 
-        let group_set = match serde_json::to_value(properties) {
-            Ok(val) => val,
-            Err(err) => {
-                warn!("group_identify() failed to serialize properties: {err}, dropping the $groupidentify event");
-                return None;
-            }
-        };
+        let group_set =
+            serde_json::to_value(properties).map_err(|e| Error::Serialization(e.to_string()))?;
+        if !group_set.is_object() {
+            return Err(Error::Serialization(format!(
+                "group_identify() properties must serialize to a JSON object, got {group_set}"
+            )));
+        }
 
         let distinct_id = format!("${group_type}_{group_key}");
         let mut props = HashMap::new();
@@ -280,7 +285,7 @@ impl Event {
         );
         props.insert("$group_set".to_string(), group_set);
 
-        Some(Self {
+        Ok(Some(Self {
             event: "$groupidentify".to_string(),
             distinct_id,
             properties: props,
@@ -288,7 +293,7 @@ impl Event {
             timestamp: None,
             uuid: Uuid::now_v7(),
             minimal_flag_called: false,
-        })
+        }))
     }
 
     /// Stamp the capture (enqueue) time when the caller hasn't set an explicit
@@ -509,7 +514,7 @@ impl InnerEvent {
 pub mod tests {
     use uuid::Uuid;
 
-    use crate::{event::InnerEvent, Event};
+    use crate::{event::InnerEvent, Error, Event};
 
     /// Helper: prepares an event for V0 and constructs the InnerEvent.
     fn build_v0(mut event: Event) -> InnerEvent {
@@ -707,7 +712,8 @@ pub mod tests {
             "acme_123".to_string(),
             serde_json::json!({ "name": "Acme Inc.", "employees": 42 }),
         )
-        .expect("group_identify should succeed");
+        .expect("group_identify should succeed")
+        .expect("group_identify should not be dropped");
 
         let inner = build_v0(event);
         let json = serde_json::to_value(&inner).unwrap();
@@ -724,19 +730,48 @@ pub mod tests {
     #[test]
     fn group_identify_rejects_blank_keys() {
         assert!(
-            Event::group_identify("".to_string(), "k".to_string(), serde_json::json!({})).is_none()
+            Event::group_identify("".to_string(), "k".to_string(), serde_json::json!({}))
+                .unwrap()
+                .is_none()
         );
         assert!(
             Event::group_identify("   ".to_string(), "k".to_string(), serde_json::json!({}))
+                .unwrap()
                 .is_none()
         );
         assert!(
-            Event::group_identify("t".to_string(), "".to_string(), serde_json::json!({})).is_none()
+            Event::group_identify("t".to_string(), "".to_string(), serde_json::json!({}))
+                .unwrap()
+                .is_none()
         );
         assert!(
             Event::group_identify("t".to_string(), "   ".to_string(), serde_json::json!({}))
+                .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn group_identify_rejects_non_object_properties() {
+        let err = Event::group_identify("company".to_string(), "acme_123".to_string(), 42)
+            .expect_err("non-object properties should be rejected");
+        assert!(matches!(err, Error::Serialization(_)));
+
+        let err = Event::group_identify(
+            "company".to_string(),
+            "acme_123".to_string(),
+            serde_json::json!(["a", "b"]),
+        )
+        .expect_err("array properties should be rejected");
+        assert!(matches!(err, Error::Serialization(_)));
+
+        let err = Event::group_identify(
+            "company".to_string(),
+            "acme_123".to_string(),
+            serde_json::Value::Null,
+        )
+        .expect_err("null properties should be rejected");
+        assert!(matches!(err, Error::Serialization(_)));
     }
 }
 

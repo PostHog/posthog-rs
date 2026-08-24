@@ -134,14 +134,16 @@ mod blocking {
         });
 
         let client = create_test_client(server.base_url());
-        client.group_identify(
-            GROUP_TYPE,
-            GROUP_KEY,
-            json!({
-                "name": "Awesome Inc.",
-                "employees": 11,
-            }),
-        );
+        client
+            .group_identify(
+                GROUP_TYPE,
+                GROUP_KEY,
+                json!({
+                    "name": "Awesome Inc.",
+                    "employees": 11,
+                }),
+            )
+            .unwrap();
         client.flush();
 
         capture_mock.assert();
@@ -158,14 +160,16 @@ mod blocking {
         });
 
         let client = create_test_client(server.base_url());
-        client.group_identify(
-            GROUP_TYPE,
-            String::from(GROUP_KEY),
-            CompanyProperties {
-                name: "Awesome Inc.".to_string(),
-                employees: 11,
-            },
-        );
+        client
+            .group_identify(
+                GROUP_TYPE,
+                String::from(GROUP_KEY),
+                CompanyProperties {
+                    name: "Awesome Inc.".to_string(),
+                    employees: 11,
+                },
+            )
+            .unwrap();
         client.flush();
 
         capture_mock.assert();
@@ -182,8 +186,12 @@ mod blocking {
         });
 
         let client = create_test_client(server.base_url());
-        client.group_identify(GROUP_TYPE, GROUP_KEY, json!({ "name": "Awesome Inc." }));
-        client.group_identify("organization", "org_99", json!({ "name": "Org 99" }));
+        client
+            .group_identify(GROUP_TYPE, GROUP_KEY, json!({ "name": "Awesome Inc." }))
+            .unwrap();
+        client
+            .group_identify("organization", "org_99", json!({ "name": "Org 99" }))
+            .unwrap();
         client.flush();
 
         capture_mock.assert();
@@ -199,7 +207,9 @@ mod blocking {
             });
 
             let client = create_test_client(server.base_url());
-            client.group_identify(blank, GROUP_KEY, json!({ "name": "Awesome Inc." }));
+            client
+                .group_identify(blank, GROUP_KEY, json!({ "name": "Awesome Inc." }))
+                .unwrap();
             client.flush();
 
             capture_mock.assert_hits(0);
@@ -216,7 +226,9 @@ mod blocking {
             });
 
             let client = create_test_client(server.base_url());
-            client.group_identify(GROUP_TYPE, blank, json!({ "name": "Awesome Inc." }));
+            client
+                .group_identify(GROUP_TYPE, blank, json!({ "name": "Awesome Inc." }))
+                .unwrap();
             client.flush();
 
             capture_mock.assert_hits(0);
@@ -238,7 +250,9 @@ mod blocking {
         assert!(options.is_disabled());
 
         let client = posthog_rs::client(options);
-        client.group_identify(GROUP_TYPE, GROUP_KEY, json!({ "name": "Awesome Inc." }));
+        client
+            .group_identify(GROUP_TYPE, GROUP_KEY, json!({ "name": "Awesome Inc." }))
+            .unwrap();
         client.flush();
 
         capture_mock.assert_hits(0);
@@ -268,14 +282,16 @@ mod async_client {
             .await;
 
         let client = create_test_client(server.base_url()).await;
-        client.group_identify(
-            GROUP_TYPE,
-            GROUP_KEY,
-            json!({
-                "name": "Awesome Inc.",
-                "employees": 11,
-            }),
-        );
+        client
+            .group_identify(
+                GROUP_TYPE,
+                GROUP_KEY,
+                json!({
+                    "name": "Awesome Inc.",
+                    "employees": 11,
+                }),
+            )
+            .unwrap();
         client.flush().await;
 
         capture_mock.assert_async().await;
@@ -294,14 +310,16 @@ mod async_client {
             .await;
 
         let client = create_test_client(server.base_url()).await;
-        client.group_identify(
-            GROUP_TYPE,
-            String::from(GROUP_KEY),
-            CompanyProperties {
-                name: "Awesome Inc.".to_string(),
-                employees: 11,
-            },
-        );
+        client
+            .group_identify(
+                GROUP_TYPE,
+                String::from(GROUP_KEY),
+                CompanyProperties {
+                    name: "Awesome Inc.".to_string(),
+                    employees: 11,
+                },
+            )
+            .unwrap();
         client.flush().await;
 
         capture_mock.assert_async().await;
@@ -320,8 +338,12 @@ mod async_client {
             .await;
 
         let client = create_test_client(server.base_url()).await;
-        client.group_identify(GROUP_TYPE, GROUP_KEY, json!({ "name": "Awesome Inc." }));
-        client.group_identify("organization", "org_99", json!({ "name": "Org 99" }));
+        client
+            .group_identify(GROUP_TYPE, GROUP_KEY, json!({ "name": "Awesome Inc." }))
+            .unwrap();
+        client
+            .group_identify("organization", "org_99", json!({ "name": "Org 99" }))
+            .unwrap();
         client.flush().await;
 
         capture_mock.assert_async().await;
@@ -339,7 +361,9 @@ mod async_client {
                 .await;
 
             let client = create_test_client(server.base_url()).await;
-            client.group_identify(blank, GROUP_KEY, json!({ "name": "Awesome Inc." }));
+            client
+                .group_identify(blank, GROUP_KEY, json!({ "name": "Awesome Inc." }))
+                .unwrap();
             client.flush().await;
 
             capture_mock.assert_hits_async(0).await;
@@ -358,7 +382,9 @@ mod async_client {
                 .await;
 
             let client = create_test_client(server.base_url()).await;
-            client.group_identify(GROUP_TYPE, blank, json!({ "name": "Awesome Inc." }));
+            client
+                .group_identify(GROUP_TYPE, blank, json!({ "name": "Awesome Inc." }))
+                .unwrap();
             client.flush().await;
 
             capture_mock.assert_hits_async(0).await;
@@ -382,7 +408,9 @@ mod async_client {
         assert!(options.is_disabled());
 
         let client = posthog_rs::client(options).await;
-        client.group_identify(GROUP_TYPE, GROUP_KEY, json!({ "name": "Awesome Inc." }));
+        client
+            .group_identify(GROUP_TYPE, GROUP_KEY, json!({ "name": "Awesome Inc." }))
+            .unwrap();
         client.flush().await;
 
         capture_mock.assert_hits_async(0).await;

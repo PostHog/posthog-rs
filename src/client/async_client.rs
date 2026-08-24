@@ -244,14 +244,19 @@ impl Client {
     ///
     /// # Remarks
     ///
-    /// Fire-and-forget, like [`Client::capture`]. A blank `group_type` or `group_key`,
-    /// or properties that fail to serialize, will drop the event with a warning rather
-    /// than panic.
+    /// Fire-and-forget, like [`Client::capture`], for a blank `group_type` or
+    /// `group_key`: the event is dropped with a warning rather than sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Serialization`] if `properties` fails to serialize to
+    /// JSON, or if it does not serialize to a JSON object (PostHog requires
+    /// `$group_set` to be an object).
     ///
     /// # Examples
     ///
     /// ```no_run
-    /// # async fn example() {
+    /// # async fn example() -> Result<(), posthog_rs::Error> {
     /// use serde_json::json;
     ///
     /// let client = posthog_rs::client("phc_project_api_key").await;
@@ -263,7 +268,8 @@ impl Client {
     ///         "name": "Awesome Inc.",
     ///         "employees": 11,
     ///     }),
-    /// );
+    /// )?;
+    /// # Ok(())
     /// # }
     /// ```
     pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(
@@ -271,11 +277,13 @@ impl Client {
         group_type: T,
         group_key: K,
         properties: P,
-    ) {
-        if let Some(event) = Event::group_identify(group_type.into(), group_key.into(), properties)
+    ) -> Result<(), Error> {
+        if let Some(event) =
+            Event::group_identify(group_type.into(), group_key.into(), properties)?
         {
             self.capture(event);
         }
+        Ok(())
     }
 
     /// Flush queued events, returning once the worker has attempted delivery of
