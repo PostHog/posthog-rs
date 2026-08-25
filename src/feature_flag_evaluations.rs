@@ -772,51 +772,29 @@ mod tests {
     }
 
     #[test]
-    fn has_experiment_true_sets_property() {
-        let host = Arc::new(RecordingHost::default());
-        let snap = snapshot_with_flag(
-            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
-            Some(true),
-            false,
-        );
-        let _ = snap.is_enabled("gated");
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(
-            captured[0].properties.get("$feature_flag_has_experiment"),
-            Some(&json!(true))
-        );
-    }
+    fn has_experiment_property_preserves_tri_state() {
+        let cases = [
+            ("reported true", Some(true), false, Some(json!(true))),
+            ("reported false", Some(false), false, Some(json!(false))),
+            // Never fabricate false when the server did not report the signal.
+            ("unknown", None, true, None),
+        ];
 
-    #[test]
-    fn has_experiment_false_sets_property() {
-        let host = Arc::new(RecordingHost::default());
-        let snap = snapshot_with_flag(
-            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
-            Some(false),
-            false,
-        );
-        let _ = snap.is_enabled("gated");
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(
-            captured[0].properties.get("$feature_flag_has_experiment"),
-            Some(&json!(false))
-        );
-    }
-
-    #[test]
-    fn has_experiment_unknown_omits_property() {
-        let host = Arc::new(RecordingHost::default());
-        let snap = snapshot_with_flag(
-            Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
-            None,
-            true,
-        );
-        let _ = snap.is_enabled("gated");
-        let captured = host.captured.lock().unwrap();
-        // Never fabricated as false when the server did not report it.
-        assert!(!captured[0]
-            .properties
-            .contains_key("$feature_flag_has_experiment"));
+        for (label, has_experiment, gate, expected_property) in cases {
+            let host = Arc::new(RecordingHost::default());
+            let snap = snapshot_with_flag(
+                Arc::clone(&host) as Arc<dyn FeatureFlagEvaluationsHost>,
+                has_experiment,
+                gate,
+            );
+            let _ = snap.is_enabled("gated");
+            let captured = host.captured.lock().unwrap();
+            assert_eq!(
+                captured[0].properties.get("$feature_flag_has_experiment"),
+                expected_property.as_ref(),
+                "{label}: has_experiment={has_experiment:?} should preserve its property state"
+            );
+        }
     }
 
     #[test]
