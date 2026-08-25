@@ -1086,9 +1086,22 @@ impl Client {
     ) -> Result<FeatureFlagEvaluations, Error> {
         let distinct_id: String = distinct_id.into();
         let host = self.flag_event_host();
-
         if distinct_id.is_empty() || self.options.is_disabled() {
             return Ok(FeatureFlagEvaluations::empty(host));
+        }
+
+        if options.flag_keys.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(FeatureFlagEvaluations::new(
+                host,
+                distinct_id,
+                HashMap::new(),
+                options.groups.unwrap_or_default(),
+                options.disable_geoip,
+                None,
+                None,
+                false,
+                false,
+            ));
         }
 
         let mut options = options;
