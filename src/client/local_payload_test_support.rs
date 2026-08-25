@@ -7,8 +7,10 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
+use crate::feature_flag_evaluations::FeatureFlagEvaluations;
 use crate::feature_flags::{
-    FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, MultivariateFilter, MultivariateVariant,
+    FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagValue, MultivariateFilter,
+    MultivariateVariant,
 };
 use crate::local_evaluation::LocalEvaluationResponse;
 
@@ -111,4 +113,48 @@ pub(super) fn payload_definitions() -> LocalEvaluationResponse {
         cohorts: HashMap::new(),
         minimal_flag_called_events: false,
     }
+}
+
+pub(super) fn assert_payloads_match_remote_shape(snapshot: &FeatureFlagEvaluations) {
+    assert_eq!(
+        snapshot.get_flag_payload("json-string-payload"),
+        Some(json!({"color": "blue"}))
+    );
+    assert_eq!(
+        snapshot.get_flag_payload("parsed-payload"),
+        Some(json!({"color": "blue"}))
+    );
+    assert_eq!(
+        snapshot.get_flag_payload("quoted-string-payload"),
+        Some(json!("just text"))
+    );
+    assert_eq!(
+        snapshot.get_flag_payload("undecodable-payload"),
+        Some(json!("not json"))
+    );
+}
+
+pub(super) fn assert_payload_is_keyed_by_matched_variant(snapshot: &FeatureFlagEvaluations) {
+    assert_eq!(
+        snapshot.get_flag("variant-payload"),
+        Some(FlagValue::String("test".to_string()))
+    );
+    assert_eq!(
+        snapshot.get_flag_payload("variant-payload"),
+        Some(json!({"tier": 2}))
+    );
+}
+
+pub(super) fn assert_payload_is_absent_without_match(snapshot: &FeatureFlagEvaluations) {
+    assert_eq!(snapshot.get_flag_payload("no-payload"), None);
+    assert_eq!(snapshot.get_flag_payload("not-a-flag"), None);
+
+    // A missing key also yields `None`, so pin the flag down first:
+    // it was evaluated, it evaluated false, and its "true" payload
+    // stayed behind.
+    assert_eq!(
+        snapshot.get_flag("disabled-with-payload"),
+        Some(FlagValue::Boolean(false))
+    );
+    assert_eq!(snapshot.get_flag_payload("disabled-with-payload"), None);
 }
