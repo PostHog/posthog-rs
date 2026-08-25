@@ -584,88 +584,15 @@ pub fn match_feature_flag(
     group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     group_type_mapping: &HashMap<String, String>,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    if !flag.active {
-        return Ok(FlagValue::Boolean(false));
-    }
-
-    let conditions = &flag.filters.groups;
-    let flag_aggregation = flag.filters.aggregation_group_type_index;
-
-    // Sort conditions to evaluate variant overrides first
-    let mut sorted_conditions = conditions.clone();
-    sorted_conditions.sort_by_key(|c| if c.variant.is_some() { 0 } else { 1 });
-
-    let mut is_inconclusive = false;
-
-    for condition in sorted_conditions {
-        let (effective_bucketing, effective_properties) = match resolve_condition_target(
-            &condition,
-            flag_aggregation,
-            distinct_id,
-            person_properties,
-            groups,
-            group_properties,
-            group_type_mapping,
-        ) {
-            ConditionTarget::Use {
-                bucketing,
-                properties,
-            } => (bucketing, properties),
-            ConditionTarget::Skip => continue,
-            ConditionTarget::Inconclusive => {
-                is_inconclusive = true;
-                continue;
-            }
-        };
-
-        match is_condition_match(flag, &effective_bucketing, &condition, effective_properties) {
-            Ok(ConditionMatch::Match) => {
-                if let Some(variant_override) = &condition.variant {
-                    // Check if variant is valid
-                    if let Some(ref multivariate) = flag.filters.multivariate {
-                        let valid_variants: Vec<String> = multivariate
-                            .variants
-                            .iter()
-                            .map(|v| v.key.clone())
-                            .collect();
-
-                        if valid_variants.contains(variant_override) {
-                            return Ok(FlagValue::String(variant_override.clone()));
-                        }
-                    }
-                }
-
-                // Try to get matching variant or return true
-                if let Some(variant) = get_matching_variant(flag, &effective_bucketing) {
-                    return Ok(FlagValue::String(variant));
-                }
-                return Ok(FlagValue::Boolean(true));
-            }
-            Ok(ConditionMatch::OutOfRolloutBound) => {
-                // The user's properties matched this group but the rollout
-                // excluded them. With early_exit enabled the flag is
-                // definitively disabled; otherwise fall through to later groups.
-                // Only short-circuit when no prior group was inconclusive — an
-                // inconclusive result means we can't evaluate locally and must
-                // fall back to the server, so it takes priority over early_exit.
-                if flag.filters.early_exit && !is_inconclusive {
-                    return Ok(FlagValue::Boolean(false));
-                }
-            }
-            Ok(ConditionMatch::NoMatch) => continue,
-            Err(_) => {
-                is_inconclusive = true;
-            }
-        }
-    }
-
-    if is_inconclusive {
-        return Err(InconclusiveMatchError::new(
-            "Can't determine if feature flag is enabled or not with given properties",
-        ));
-    }
-
-    Ok(FlagValue::Boolean(false))
+    evaluate_feature_flag(
+        flag,
+        distinct_id,
+        person_properties,
+        groups,
+        group_properties,
+        group_type_mapping,
+        match_property,
+    )
 }
 
 /// Outcome of evaluating a single condition group, mirroring the PostHog Rust
@@ -684,15 +611,20 @@ enum ConditionMatch {
     OutOfRolloutBound,
 }
 
-fn is_condition_match(
+fn is_condition_match<F>(
     flag: &FeatureFlag,
     bucketing_id: &str,
     condition: &FeatureFlagCondition,
     properties: &HashMap<String, serde_json::Value>,
-) -> Result<ConditionMatch, InconclusiveMatchError> {
-    // Check properties first
+    property_matcher: &F,
+) -> Result<ConditionMatch, InconclusiveMatchError>
+where
+    F: Fn(&Property, &HashMap<String, serde_json::Value>) -> Result<bool, InconclusiveMatchError>,
+{
+    // Check properties first. The caller supplies either the basic matcher or
+    // the context-aware matcher; rollout handling remains identical.
     for prop in &condition.properties {
-        if !match_property(prop, properties)? {
+        if !property_matcher(prop, properties)? {
             return Ok(ConditionMatch::NoMatch);
         }
     }
@@ -725,16 +657,42 @@ pub fn match_feature_flag_with_context(
     person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<FlagValue, InconclusiveMatchError> {
+    evaluate_feature_flag(
+        flag,
+        ctx.distinct_id,
+        person_properties,
+        ctx.groups,
+        ctx.group_properties,
+        ctx.group_type_mapping,
+        |property, properties| match_property_with_context(property, properties, ctx),
+    )
+}
+
+/// Shared feature flag evaluation engine. Public entry points differ only in
+/// how individual properties are matched.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_feature_flag<F>(
+    flag: &FeatureFlag,
+    distinct_id: &str,
+    person_properties: &HashMap<String, serde_json::Value>,
+    groups: &HashMap<String, String>,
+    group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
+    group_type_mapping: &HashMap<String, String>,
+    property_matcher: F,
+) -> Result<FlagValue, InconclusiveMatchError>
+where
+    F: Fn(&Property, &HashMap<String, serde_json::Value>) -> Result<bool, InconclusiveMatchError>,
+{
     if !flag.active {
         return Ok(FlagValue::Boolean(false));
     }
 
-    let conditions = &flag.filters.groups;
     let flag_aggregation = flag.filters.aggregation_group_type_index;
 
-    // Sort conditions to evaluate variant overrides first
-    let mut sorted_conditions = conditions.clone();
-    sorted_conditions.sort_by_key(|c| if c.variant.is_some() { 0 } else { 1 });
+    // Stable sorting gives variant overrides priority while retaining their
+    // definition order relative to other overrides.
+    let mut sorted_conditions = flag.filters.groups.clone();
+    sorted_conditions.sort_by_key(|condition| if condition.variant.is_some() { 0 } else { 1 });
 
     let mut is_inconclusive = false;
 
@@ -742,11 +700,11 @@ pub fn match_feature_flag_with_context(
         let (effective_bucketing, effective_properties) = match resolve_condition_target(
             &condition,
             flag_aggregation,
-            ctx.distinct_id,
+            distinct_id,
             person_properties,
-            ctx.groups,
-            ctx.group_properties,
-            ctx.group_type_mapping,
+            groups,
+            group_properties,
+            group_type_mapping,
         ) {
             ConditionTarget::Use {
                 bucketing,
@@ -759,50 +717,44 @@ pub fn match_feature_flag_with_context(
             }
         };
 
-        match is_condition_match_with_context(
+        match is_condition_match(
             flag,
             &effective_bucketing,
             &condition,
             effective_properties,
-            ctx,
+            &property_matcher,
         ) {
             Ok(ConditionMatch::Match) => {
                 if let Some(variant_override) = &condition.variant {
-                    // Check if variant is valid
-                    if let Some(ref multivariate) = flag.filters.multivariate {
-                        let valid_variants: Vec<String> = multivariate
-                            .variants
-                            .iter()
-                            .map(|v| v.key.clone())
-                            .collect();
-
-                        if valid_variants.contains(variant_override) {
-                            return Ok(FlagValue::String(variant_override.clone()));
-                        }
+                    let is_valid = flag
+                        .filters
+                        .multivariate
+                        .as_ref()
+                        .is_some_and(|multivariate| {
+                            multivariate
+                                .variants
+                                .iter()
+                                .any(|variant| variant.key == *variant_override)
+                        });
+                    if is_valid {
+                        return Ok(FlagValue::String(variant_override.clone()));
                     }
                 }
 
-                // Try to get matching variant or return true
                 if let Some(variant) = get_matching_variant(flag, &effective_bucketing) {
                     return Ok(FlagValue::String(variant));
                 }
                 return Ok(FlagValue::Boolean(true));
             }
             Ok(ConditionMatch::OutOfRolloutBound) => {
-                // The user's properties matched this group but the rollout
-                // excluded them. With early_exit enabled the flag is
-                // definitively disabled; otherwise fall through to later groups.
-                // Only short-circuit when no prior group was inconclusive — an
-                // inconclusive result means we can't evaluate locally and must
-                // fall back to the server, so it takes priority over early_exit.
+                // A prior inconclusive condition takes precedence because local
+                // evaluation still cannot provide a definitive answer.
                 if flag.filters.early_exit && !is_inconclusive {
                     return Ok(FlagValue::Boolean(false));
                 }
             }
             Ok(ConditionMatch::NoMatch) => continue,
-            Err(_) => {
-                is_inconclusive = true;
-            }
+            Err(_) => is_inconclusive = true,
         }
     }
 
@@ -813,31 +765,6 @@ pub fn match_feature_flag_with_context(
     }
 
     Ok(FlagValue::Boolean(false))
-}
-
-fn is_condition_match_with_context(
-    flag: &FeatureFlag,
-    bucketing_id: &str,
-    condition: &FeatureFlagCondition,
-    properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
-) -> Result<ConditionMatch, InconclusiveMatchError> {
-    // Check properties first (using context-aware matching for cohorts/flag dependencies)
-    for prop in &condition.properties {
-        if !match_property_with_context(prop, properties, ctx)? {
-            return Ok(ConditionMatch::NoMatch);
-        }
-    }
-
-    // If all properties match (or no properties), check rollout percentage
-    if let Some(rollout_percentage) = condition.rollout_percentage {
-        let hash_value = hash_key(&flag.key, bucketing_id, ROLLOUT_HASH_SALT);
-        if hash_value > (rollout_percentage / 100.0) {
-            return Ok(ConditionMatch::OutOfRolloutBound);
-        }
-    }
-
-    Ok(ConditionMatch::Match)
 }
 
 /// Match a property with additional context for cohorts and flag dependencies.
@@ -4185,6 +4112,301 @@ mod tests {
         }
     }
 
+    // ==================== Evaluation engine characterizations ====================
+
+    #[test]
+    fn test_variant_overrides_keep_definition_order_in_both_public_apis() {
+        let matching_property = Property {
+            key: "audience".to_string(),
+            value: json!("matched"),
+            operator: "exact".to_string(),
+            property_type: None,
+        };
+        let flag = FeatureFlag {
+            key: "stable-overrides".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(100.0),
+                        variant: None,
+                        aggregation_group_type_index: None,
+                    },
+                    FeatureFlagCondition {
+                        properties: vec![matching_property.clone()],
+                        rollout_percentage: Some(100.0),
+                        variant: Some("first".to_string()),
+                        aggregation_group_type_index: None,
+                    },
+                    FeatureFlagCondition {
+                        properties: vec![matching_property],
+                        rollout_percentage: Some(100.0),
+                        variant: Some("second".to_string()),
+                        aggregation_group_type_index: None,
+                    },
+                ],
+                multivariate: Some(MultivariateFilter {
+                    variants: vec![
+                        MultivariateVariant {
+                            key: "first".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                        MultivariateVariant {
+                            key: "second".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                    ],
+                }),
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let properties = HashMap::from([("audience".to_string(), json!("matched"))]);
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_mapping = HashMap::new();
+        let ctx = EvaluationContext {
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id: "user-123",
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_mapping,
+        };
+
+        let expected = FlagValue::String("first".to_string());
+        assert_eq!(
+            match_feature_flag(
+                &flag,
+                ctx.distinct_id,
+                &properties,
+                ctx.groups,
+                ctx.group_properties,
+                ctx.group_type_mapping,
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            match_feature_flag_with_context(&flag, &properties, &ctx).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_group_targeting_uses_group_properties_and_group_key_for_bucketing() {
+        let flag = FeatureFlag {
+            key: "group-bucketing".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![Property {
+                        key: "plan".to_string(),
+                        value: json!("enterprise"),
+                        operator: "exact".to_string(),
+                        property_type: None,
+                    }],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: Some(MultivariateFilter {
+                    variants: vec![
+                        MultivariateVariant {
+                            key: "control".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                        MultivariateVariant {
+                            key: "test".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                    ],
+                }),
+                payloads: HashMap::new(),
+                aggregation_group_type_index: Some(0),
+                early_exit: false,
+            },
+        };
+        let person_properties = HashMap::from([("plan".to_string(), json!("free"))]);
+        let groups = HashMap::from([("company".to_string(), "acme".to_string())]);
+        let group_properties = HashMap::from([(
+            "company".to_string(),
+            HashMap::from([("plan".to_string(), json!("enterprise"))]),
+        )]);
+        let group_type_mapping = HashMap::from([("0".to_string(), "company".to_string())]);
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let ctx = EvaluationContext {
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id: "different-person-id",
+            groups: &groups,
+            group_properties: &group_properties,
+            group_type_mapping: &group_type_mapping,
+        };
+
+        let basic_result = match_feature_flag(
+            &flag,
+            "person-id",
+            &person_properties,
+            &groups,
+            &group_properties,
+            &group_type_mapping,
+        )
+        .unwrap();
+        let context_result =
+            match_feature_flag_with_context(&flag, &person_properties, &ctx).unwrap();
+        assert_eq!(basic_result, context_result);
+        assert!(matches!(basic_result, FlagValue::String(_)));
+
+        // An unresolved group type or absent group key skips the condition.
+        assert_eq!(
+            match_feature_flag(
+                &flag,
+                "person-id",
+                &person_properties,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .unwrap(),
+            FlagValue::Boolean(false)
+        );
+        // Once the type and key resolve, missing group properties are
+        // inconclusive rather than a definitive miss.
+        assert!(match_feature_flag(
+            &flag,
+            "person-id",
+            &person_properties,
+            &groups,
+            &HashMap::new(),
+            &group_type_mapping,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_rollout_boundary_is_inclusive_in_both_public_apis() {
+        let distinct_id = "boundary-user";
+        let key = "rollout-boundary";
+        let boundary = hash_key(key, distinct_id, ROLLOUT_HASH_SALT) * 100.0;
+        let flag = FeatureFlag {
+            key: key.to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![],
+                    rollout_percentage: Some(boundary),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_mapping = HashMap::new();
+        let properties = HashMap::new();
+        let ctx = EvaluationContext {
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id,
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_mapping,
+        };
+
+        assert_eq!(
+            match_feature_flag(
+                &flag,
+                distinct_id,
+                &properties,
+                &empty_groups,
+                &empty_group_properties,
+                &empty_group_mapping,
+            )
+            .unwrap(),
+            FlagValue::Boolean(true)
+        );
+        assert_eq!(
+            match_feature_flag_with_context(&flag, &properties, &ctx).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn test_context_engine_preserves_flag_dependency_matching() {
+        let prerequisite = FeatureFlag {
+            key: "prerequisite".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let dependent = FeatureFlag {
+            key: "dependent".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![Property {
+                        key: "$feature/prerequisite".to_string(),
+                        value: json!(true),
+                        operator: "exact".to_string(),
+                        property_type: None,
+                    }],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let flags = HashMap::from([("prerequisite".to_string(), prerequisite)]);
+        let empty_cohorts = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_mapping = HashMap::new();
+        let ctx = EvaluationContext {
+            cohorts: &empty_cohorts,
+            flags: &flags,
+            distinct_id: "user-123",
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_mapping,
+        };
+
+        assert_eq!(
+            match_feature_flag_with_context(&dependent, &HashMap::new(), &ctx).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
     // ==================== Tests for early_exit ====================
 
     /// Build a two-group flag where the first group always lands
@@ -4444,5 +4666,18 @@ mod tests {
             "expected InconclusiveMatchError, got {:?}",
             result
         );
+
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let ctx = EvaluationContext {
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id: "user-123",
+            groups: &groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &group_type_mapping,
+        };
+        assert!(match_feature_flag_with_context(&flag, &HashMap::new(), &ctx).is_err());
     }
 }
