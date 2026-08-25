@@ -199,11 +199,25 @@ impl TransportHandle {
         }
     }
 
+    /// Enqueue a caller-formed batch according to its ingestion policy. Live
+    /// events retain the per-event enqueue behavior; historical events stay
+    /// together on the dedicated historical path. Both reserve capacity per
+    /// event and may accept only a prefix when the queue fills.
+    pub(crate) fn enqueue_batch(&self, events: Vec<Event>, historical_migration: bool) {
+        if historical_migration {
+            self.enqueue_historical(events);
+        } else {
+            for event in events {
+                self.enqueue(event);
+            }
+        }
+    }
+
     /// Enqueue a caller-formed historical-migration batch on its own path, kept
     /// off the live buffer (which is always non-historical). Reserves a queue
     /// slot per event up to the bound, dropping any overflow with the usual
     /// once-per-episode full warning.
-    pub(crate) fn enqueue_historical(&self, mut events: Vec<Event>) {
+    fn enqueue_historical(&self, mut events: Vec<Event>) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
@@ -1411,6 +1425,82 @@ mod tests {
             0,
             "dropped events leave nothing in flight"
         );
+    }
+
+    #[test]
+    fn enqueue_batch_routes_live_and_historical_policies() {
+        let server = MockServer::start();
+        let live = server.mock(|when, then| {
+            when.method(POST).is_true(|req| {
+                serde_json::from_slice::<serde_json::Value>(req.body_ref()).is_ok_and(|body| {
+                    body["batch"][0]["event"].as_str() == Some("live")
+                        && body.get("historical_migration").is_none()
+                })
+            });
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "results": {} }));
+        });
+        let historical = server.mock(|when, then| {
+            when.method(POST).is_true(|req| {
+                serde_json::from_slice::<serde_json::Value>(req.body_ref()).is_ok_and(|body| {
+                    body["batch"][0]["event"].as_str() == Some("historical")
+                        && body["historical_migration"].as_bool() == Some(true)
+                })
+            });
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "results": {} }));
+        });
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url()).build().unwrap(),
+            Arc::new(ManualClock::new()),
+        );
+
+        handle.enqueue_batch(vec![Event::new("live", "user-1")], false);
+        handle.enqueue_batch(vec![Event::new("historical", "user-1")], true);
+        handle.flush_blocking();
+
+        live.assert_calls(1);
+        historical.assert_calls(1);
+        assert_eq!(handle.pending(), 0);
+        handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn enqueue_batch_preserves_per_event_capacity_for_both_policies() {
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+
+        for historical_migration in [false, true] {
+            let handle = TransportHandle::spawn_with_clock(
+                options(server.base_url())
+                    .max_queue_size(2usize)
+                    .shutdown_timeout_ms(0u64)
+                    .build()
+                    .unwrap(),
+                Arc::new(ManualClock::new()),
+            );
+
+            handle.enqueue_batch(
+                vec![
+                    Event::new("one", "user-1"),
+                    Event::new("two", "user-1"),
+                    Event::new("overflow", "user-1"),
+                ],
+                historical_migration,
+            );
+
+            assert_eq!(
+                handle.pending(),
+                2,
+                "each batch policy accepts only the prefix that fits"
+            );
+            handle.shutdown_blocking();
+            assert_eq!(handle.pending(), 0);
+        }
+
+        mock.assert_calls(0);
     }
 
     #[test]
