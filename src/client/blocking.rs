@@ -837,7 +837,9 @@ mod teardown_tests {
 #[cfg(test)]
 mod minimal_gate_tests {
     use super::*;
-    use crate::client::minimal_gate_test_support::{definitions, RecordingHost};
+    use crate::client::minimal_gate_test_support::{
+        assert_gate_was_pinned, assert_has_experiment_was_threaded, definitions, gate_test_fixture,
+    };
 
     fn test_client(cache: FlagCache, host: Arc<dyn FeatureFlagEvaluationsHost>) -> Client {
         let options = ClientOptions::from(("phc_test", "http://localhost:0"));
@@ -874,67 +876,46 @@ mod minimal_gate_tests {
     /// evaluation and event capture must not reshape the event.
     #[test]
     fn local_gate_pinned_at_evaluation_survives_cache_mutation_to_off() {
-        let cache = FlagCache::new();
-        cache.update(definitions(Some(false), true)); // gate ON at evaluation
-        let host = Arc::new(RecordingHost::default());
-        let client = test_client(cache.clone(), Arc::clone(&host) as _);
+        let fixture = gate_test_fixture(Some(false), true);
+        let client = test_client(fixture.cache.clone(), Arc::clone(&fixture.host) as _);
 
         let snapshot = evaluate(&client);
         // Poller refresh flips the gate OFF after the snapshot was produced.
-        cache.update(definitions(Some(false), false));
+        fixture.cache.update(definitions(Some(false), false));
 
-        assert!(snapshot.is_enabled("gated"));
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(captured.len(), 1);
-        assert!(
-            captured[0].minimal,
-            "event must reflect the gate pinned at evaluation (on), not the mutated cache (off)"
-        );
+        assert_gate_was_pinned(&snapshot, fixture.host.as_ref(), true);
     }
 
     #[test]
     fn local_gate_pinned_at_evaluation_survives_cache_mutation_to_on() {
-        let cache = FlagCache::new();
-        cache.update(definitions(Some(false), false)); // gate OFF at evaluation
-        let host = Arc::new(RecordingHost::default());
-        let client = test_client(cache.clone(), Arc::clone(&host) as _);
+        let fixture = gate_test_fixture(Some(false), false);
+        let client = test_client(fixture.cache.clone(), Arc::clone(&fixture.host) as _);
 
         let snapshot = evaluate(&client);
         // Poller refresh flips the gate ON after the snapshot was produced.
-        cache.update(definitions(Some(false), true));
+        fixture.cache.update(definitions(Some(false), true));
 
-        assert!(snapshot.is_enabled("gated"));
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(captured.len(), 1);
-        assert!(
-            !captured[0].minimal,
-            "event must reflect the gate pinned at evaluation (off), not the mutated cache (on)"
-        );
+        assert_gate_was_pinned(&snapshot, fixture.host.as_ref(), false);
     }
 
     #[test]
     fn local_has_experiment_is_threaded_from_definitions() {
-        let cache = FlagCache::new();
-        cache.update(definitions(Some(false), true));
-        let host = Arc::new(RecordingHost::default());
-        let client = test_client(cache, Arc::clone(&host) as _);
+        let fixture = gate_test_fixture(Some(false), true);
+        let client = test_client(fixture.cache.clone(), Arc::clone(&fixture.host) as _);
 
-        assert!(evaluate(&client).is_enabled("gated"));
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(
-            captured[0].properties.get("$feature_flag_has_experiment"),
-            Some(&serde_json::json!(false))
-        );
-        assert!(captured[0].minimal);
+        let snapshot = evaluate(&client);
+        assert_has_experiment_was_threaded(&snapshot, fixture.host.as_ref());
     }
 }
 
 #[cfg(test)]
 mod local_payload_tests {
     use super::*;
-    use crate::client::local_payload_test_support::payload_definitions;
+    use crate::client::local_payload_test_support::{
+        assert_payload_is_absent_without_match, assert_payload_is_keyed_by_matched_variant,
+        assert_payloads_match_remote_shape, payload_definitions,
+    };
     use crate::client::minimal_gate_test_support::RecordingHost;
-    use serde_json::json;
 
     fn snapshot() -> FeatureFlagEvaluations {
         let cache = FlagCache::new();
@@ -970,53 +951,18 @@ mod local_payload_tests {
     #[test]
     fn local_evaluation_surfaces_payloads_matching_the_remote_shape() {
         let snapshot = snapshot();
-
-        assert_eq!(
-            snapshot.get_flag_payload("json-string-payload"),
-            Some(json!({"color": "blue"}))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("parsed-payload"),
-            Some(json!({"color": "blue"}))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("quoted-string-payload"),
-            Some(json!("just text"))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("undecodable-payload"),
-            Some(json!("not json"))
-        );
+        assert_payloads_match_remote_shape(&snapshot);
     }
 
     #[test]
     fn local_payload_is_keyed_by_the_matched_variant() {
         let snapshot = snapshot();
-
-        assert_eq!(
-            snapshot.get_flag("variant-payload"),
-            Some(FlagValue::String("test".to_string()))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("variant-payload"),
-            Some(json!({"tier": 2}))
-        );
+        assert_payload_is_keyed_by_matched_variant(&snapshot);
     }
 
     #[test]
     fn local_payload_is_absent_without_a_matching_payload() {
         let snapshot = snapshot();
-
-        assert_eq!(snapshot.get_flag_payload("no-payload"), None);
-        assert_eq!(snapshot.get_flag_payload("not-a-flag"), None);
-
-        // A missing key also yields `None`, so pin the flag down first:
-        // it was evaluated, it evaluated false, and its "true" payload
-        // stayed behind.
-        assert_eq!(
-            snapshot.get_flag("disabled-with-payload"),
-            Some(FlagValue::Boolean(false))
-        );
-        assert_eq!(snapshot.get_flag_payload("disabled-with-payload"), None);
+        assert_payload_is_absent_without_match(&snapshot);
     }
 }
