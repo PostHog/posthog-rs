@@ -138,6 +138,7 @@ pub async fn posthog_rs::Client::capture_immediate(&self, posthog_rs::Event) -> 
 pub fn posthog_rs::Client::evaluate_feature_flag_locally(&self, &posthog_rs::FeatureFlag, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::Error>
 pub async fn posthog_rs::Client::evaluate_flags<S: core::convert::Into<alloc::string::String>>(&self, S, posthog_rs::EvaluateFlagsOptions) -> core::result::Result<posthog_rs::FeatureFlagEvaluations, posthog_rs::Error>
 pub async fn posthog_rs::Client::flush(&self)
+pub fn posthog_rs::Client::group_identify<T: core::convert::Into<alloc::string::String>, K: core::convert::Into<alloc::string::String>, P: serde_core::ser::Serialize>(&self, T, K, P) -> core::result::Result<(), posthog_rs::Error>
 pub async fn posthog_rs::Client::shutdown(&self)
 impl core::ops::drop::Drop for posthog_rs::Client
 pub fn posthog_rs::Client::drop(&mut self)

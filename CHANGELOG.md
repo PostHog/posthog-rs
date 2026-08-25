@@ -1,5 +1,17 @@
 # posthog-rs
 
+## 0.25.1 — 2026-08-24
+
+### Patch changes
+
+- [253a7c0](https://github.com/posthog/posthog-rs/commit/253a7c09a6776dda0d753ed847a9f2d4fbbe7d0d) Prevent transport worker deadlocks during client shutdown. — Thanks @marandaneto!
+
+## 0.25.0 — 2026-08-24
+
+### Minor changes
+
+- [710ea93](https://github.com/posthog/posthog-rs/commit/710ea931e9f580f3b364509f03c152112c5b244e) Add `group_identify` helper to `Client` (async) and `Client` (blocking) for creating or updating group properties via `$groupidentify`. — Thanks @vjymisal0 for your first contribution 🎉!
+
 ## 0.24.0 — 2026-08-19
 
 ### Minor changes
