@@ -1431,7 +1431,7 @@ mod tests {
     fn enqueue_batch_routes_live_and_historical_policies() {
         let server = MockServer::start();
         let live = server.mock(|when, then| {
-            when.method(POST).matches(|req| {
+            when.method(POST).is_true(|req| {
                 serde_json::from_slice::<serde_json::Value>(req.body_ref()).is_ok_and(|body| {
                     body["batch"][0]["event"].as_str() == Some("live")
                         && body.get("historical_migration").is_none()
@@ -1442,7 +1442,7 @@ mod tests {
                 .json_body(serde_json::json!({ "results": {} }));
         });
         let historical = server.mock(|when, then| {
-            when.method(POST).matches(|req| {
+            when.method(POST).is_true(|req| {
                 serde_json::from_slice::<serde_json::Value>(req.body_ref()).is_ok_and(|body| {
                     body["batch"][0]["event"].as_str() == Some("historical")
                         && body["historical_migration"].as_bool() == Some(true)
