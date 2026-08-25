@@ -755,23 +755,31 @@ mod tests {
         }
     }
 
+    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
     #[test]
-    fn after_response_malformed_200_body_fails() {
-        let opts = test_opts();
-        let rid = Uuid::now_v7();
-        let mut pending = vec![dummy_event()];
-        let mut final_results = HashMap::new();
-        let step = after_response(
-            &opts,
-            &rid,
-            1,
-            200,
-            None,
-            "not json",
-            &mut pending,
-            &mut final_results,
-        );
-        assert!(matches!(step, Step::Fail(Error::Serialization(_))));
+    fn after_response_malformed_200_and_201_bodies_fail() {
+        for (case, status) in [("standard success", 200), ("alternate 2xx", 201)] {
+            let opts = test_opts();
+            let rid = Uuid::now_v7();
+            let mut pending = vec![dummy_event()];
+            let mut final_results = HashMap::new();
+            let step = after_response(
+                &opts,
+                &rid,
+                1,
+                status,
+                None,
+                "not json",
+                &mut pending,
+                &mut final_results,
+            );
+            assert!(
+                matches!(step, Step::Fail(Error::Serialization(_))),
+                "{} (HTTP {}) should fail with a Serialization error",
+                case,
+                status
+            );
+        }
     }
 
     /// C3: any 2xx with a well-formed body is success, not a connection error.
@@ -804,26 +812,6 @@ mod tests {
             );
             assert_eq!(final_results.len(), 1);
         }
-    }
-
-    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
-    #[test]
-    fn after_response_alternate_2xx_malformed_body_fails() {
-        let opts = test_opts();
-        let rid = Uuid::now_v7();
-        let mut pending = vec![dummy_event()];
-        let mut final_results = HashMap::new();
-        let step = after_response(
-            &opts,
-            &rid,
-            1,
-            201,
-            None,
-            "not json",
-            &mut pending,
-            &mut final_results,
-        );
-        assert!(matches!(step, Step::Fail(Error::Serialization(_))));
     }
 
     /// A body-less 2xx (e.g. 204 from beacon mode) is terminal on the first
