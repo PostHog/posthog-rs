@@ -690,14 +690,10 @@ mod blocking {
         let client = posthog_rs::client(options);
         definitions_mock.assert_calls(1);
 
+        let mut evaluate_options = EvaluateFlagsOptions::default();
+        evaluate_options.flag_keys = Some(Vec::new());
         let snapshot = client
-            .evaluate_flags(
-                "user-1",
-                EvaluateFlagsOptions {
-                    flag_keys: Some(Vec::new()),
-                    ..Default::default()
-                },
-            )
+            .evaluate_flags("user-1", evaluate_options)
             .expect("empty key scope should be valid");
 
         assert!(snapshot.keys().is_empty());
