@@ -52,6 +52,11 @@ pub(crate) fn build_events_at(
                     map.entry("$is_server")
                         .or_insert(serde_json::Value::Bool(true));
                 }
+                // The injected `$release_id` (see `apply_capture_defaults` for the V0 path).
+                if let Some(release_id) = crate::release_marker::cached() {
+                    map.entry("$release_id")
+                        .or_insert(serde_json::Value::String(release_id.clone()));
+                }
                 // Final step for minimized `$feature_flag_called` events: drop
                 // everything outside the allowlist. Wire-lifted keys
                 // ($session_id/$window_id/$process_person_profile) already moved

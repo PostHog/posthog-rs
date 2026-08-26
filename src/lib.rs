@@ -100,6 +100,7 @@ mod feature_flag_evaluations;
 mod feature_flags;
 mod global;
 mod local_evaluation;
+mod release_marker;
 
 // Public interface - any change to this is breaking!
 // Client
@@ -120,6 +121,9 @@ pub use endpoints::{
 
 // Error
 pub use error::Error;
+
+// Release injection
+pub use release_marker::injected_release_id;
 
 // Error Tracking
 #[cfg(feature = "error-tracking")]

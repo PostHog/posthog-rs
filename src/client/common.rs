@@ -55,6 +55,11 @@ pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaul
     if defaults.is_server {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
+    // The `$release_id` the CLI stamped into this binary, if any — the server resolves the release
+    // from it. `insert_prop_default` keeps a caller-set value.
+    if let Some(release_id) = crate::release_marker::cached() {
+        event.insert_prop_default("$release_id", serde_json::Value::String(release_id.clone()));
+    }
 }
 
 pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
