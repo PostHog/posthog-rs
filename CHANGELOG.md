@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.25.2 — 2026-08-25
+
+### Patch changes
+
+- [e4ac827](https://github.com/posthog/posthog-rs/commit/e4ac82711d44e2715eac8fc94579086df9059a98) Return an empty feature flag snapshot without evaluation when feature flag keys are explicitly empty. — Thanks @marandaneto!
+
 ## 0.25.1 — 2026-08-24
 
 ### Patch changes

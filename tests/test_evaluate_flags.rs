@@ -82,6 +82,26 @@ fn flags_response_fixture() -> Value {
     })
 }
 
+fn local_definitions_fixture() -> Value {
+    json!({
+        "flags": [{
+            "key": "alpha",
+            "active": true,
+            "filters": {
+                "groups": [{
+                    "properties": [],
+                    "rollout_percentage": 100.0,
+                    "variant": null
+                }],
+                "multivariate": null,
+                "payloads": {}
+            }
+        }],
+        "group_type_mapping": {},
+        "cohorts": {}
+    })
+}
+
 struct FlakyFlagsServer {
     base_url: String,
     attempts: Arc<AtomicUsize>,
@@ -648,6 +668,47 @@ mod blocking {
     }
 
     #[test]
+    fn explicit_empty_flag_keys_skip_local_and_remote_evaluation() {
+        let server = MockServer::start();
+        let definitions_mock = server.mock(|when, then| {
+            when.method(GET).path("/flags/definitions/");
+            then.status(200).json_body(local_definitions_fixture());
+        });
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = capture_path_mock(&server);
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .secret_key("test_personal_key".to_string())
+            .enable_local_evaluation(true)
+            .poll_interval_seconds(3600)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options);
+        definitions_mock.assert_calls(1);
+
+        let snapshot = client
+            .evaluate_flags(
+                "user-1",
+                EvaluateFlagsOptions {
+                    flag_keys: Some(Vec::new()),
+                    ..Default::default()
+                },
+            )
+            .expect("empty key scope should be valid");
+
+        assert!(snapshot.keys().is_empty());
+        assert!(!snapshot.is_enabled("alpha"));
+        client.flush();
+        definitions_mock.assert_calls(1);
+        flags_mock.assert_calls(0);
+        capture_mock.assert_calls(1);
+    }
+
+    #[test]
     fn empty_distinct_id_returns_empty_snapshot_without_request_or_events() {
         let server = MockServer::start();
         let flags_mock = server.mock(|when, then| {
@@ -1199,6 +1260,48 @@ mod async_tests {
         opts.flag_keys = Some(vec!["alpha".into()]);
         let _ = client.evaluate_flags("user-1", opts).await.unwrap();
         flags_mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn explicit_empty_flag_keys_skip_local_and_remote_evaluation() {
+        let server = MockServer::start();
+        let definitions_mock = server.mock(|when, then| {
+            when.method(GET).path("/flags/definitions/");
+            then.status(200).json_body(local_definitions_fixture());
+        });
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let capture_mock = capture_path_mock(&server);
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .secret_key("test_personal_key".to_string())
+            .enable_local_evaluation(true)
+            .poll_interval_seconds(3600)
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options).await;
+        definitions_mock.assert_calls(1);
+
+        let snapshot = client
+            .evaluate_flags(
+                "user-1",
+                EvaluateFlagsOptions {
+                    flag_keys: Some(Vec::new()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("empty key scope should be valid");
+
+        assert!(snapshot.keys().is_empty());
+        assert!(!snapshot.is_enabled("alpha"));
+        client.flush().await;
+        definitions_mock.assert_calls(1);
+        flags_mock.assert_calls(0);
+        capture_mock.assert_calls(1);
     }
 
     #[tokio::test]

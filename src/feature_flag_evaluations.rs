@@ -95,7 +95,8 @@ pub struct EvaluateFlagsOptions {
     /// Optional list of flag keys. When provided, only these flags are
     /// evaluated — the underlying `/flags` request asks the server for just
     /// this subset, which makes the response smaller and the request cheaper.
-    /// Use this when you only need a handful of flags out of many.
+    /// An explicitly empty list returns an empty snapshot without local or
+    /// remote evaluation; `None` evaluates all flags.
     ///
     /// Distinct from [`FeatureFlagEvaluations::only`]: `flag_keys` trims the
     /// network call, [`only`](FeatureFlagEvaluations::only) trims which flags
@@ -153,7 +154,7 @@ impl FeatureFlagEvaluations {
         }
     }
 
-    /// Construct an empty snapshot used when no `distinct_id` was resolvable.
+    /// Construct an empty snapshot used when evaluation is skipped.
     /// The empty `distinct_id` short-circuits event firing inside
     /// [`record_access`](Self::record_access).
     pub(crate) fn empty(host: Arc<dyn FeatureFlagEvaluationsHost>) -> Self {
