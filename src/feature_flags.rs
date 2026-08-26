@@ -1404,15 +1404,6 @@ fn match_property(
     let value = match properties.get(&property.key) {
         Some(v) => v,
         None => {
-            // Handle is_not_set operator
-            if property.operator == "is_not_set" {
-                return Ok(true);
-            }
-            // Handle is_set operator
-            if property.operator == "is_set" {
-                return Ok(false);
-            }
-            // For other operators, missing property is inconclusive
             return Err(InconclusiveMatchError::new(&format!(
                 "Property '{}' not found in provided properties",
                 property.key
@@ -2041,11 +2032,23 @@ mod tests {
         };
 
         let mut properties = HashMap::new();
-        properties.insert("email".to_string(), json!("test@example.com"));
-        assert!(match_property(&prop, &properties).unwrap());
+        for value in [
+            json!(null),
+            json!(false),
+            json!(0),
+            json!(""),
+            json!([]),
+            json!({}),
+        ] {
+            properties.insert("email".to_string(), value);
+            assert!(match_property(&prop, &properties).unwrap());
+        }
 
         properties.remove("email");
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert!(matches!(
+            match_property(&prop, &properties),
+            Err(InconclusiveMatchError { .. })
+        ));
     }
 
     #[test]
@@ -2058,10 +2061,23 @@ mod tests {
         };
 
         let mut properties = HashMap::new();
-        assert!(match_property(&prop, &properties).unwrap());
+        for value in [
+            json!(null),
+            json!(false),
+            json!(0),
+            json!(""),
+            json!([]),
+            json!({}),
+        ] {
+            properties.insert("phone".to_string(), value);
+            assert!(!match_property(&prop, &properties).unwrap());
+        }
 
-        properties.insert("phone".to_string(), json!("+1234567890"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        properties.remove("phone");
+        assert!(matches!(
+            match_property(&prop, &properties),
+            Err(InconclusiveMatchError { .. })
+        ));
     }
 
     #[test]
