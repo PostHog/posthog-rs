@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.25.3 — 2026-08-26
+
+### Patch changes
+
+- [6d1a444](https://github.com/posthog/posthog-rs/commit/6d1a444cda522b0c3dd69bb15903e617e3237ba6) Treat omitted local evaluation properties as inconclusive for presence operators. — Thanks @marandaneto!
+
 ## 0.25.2 — 2026-08-25
 
 ### Patch changes
