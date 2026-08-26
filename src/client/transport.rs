@@ -199,11 +199,25 @@ impl TransportHandle {
         }
     }
 
+    /// Enqueue a caller-formed batch according to its ingestion policy. Live
+    /// events retain the per-event enqueue behavior; historical events stay
+    /// together on the dedicated historical path. Both reserve capacity per
+    /// event and may accept only a prefix when the queue fills.
+    pub(crate) fn enqueue_batch(&self, events: Vec<Event>, historical_migration: bool) {
+        if historical_migration {
+            self.enqueue_historical(events);
+        } else {
+            for event in events {
+                self.enqueue(event);
+            }
+        }
+    }
+
     /// Enqueue a caller-formed historical-migration batch on its own path, kept
     /// off the live buffer (which is always non-historical). Reserves a queue
     /// slot per event up to the bound, dropping any overflow with the usual
     /// once-per-episode full warning.
-    pub(crate) fn enqueue_historical(&self, mut events: Vec<Event>) {
+    fn enqueue_historical(&self, mut events: Vec<Event>) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
@@ -724,15 +738,14 @@ impl Pipeline {
         historical_migration: bool,
         deadline: Option<Instant>,
     ) {
-        use super::common::{apply_before_send_hooks, apply_capture_defaults};
+        use super::common::preprocess_capture_event;
 
         let defaults = self.options.capture_defaults();
         let original = events.len();
         let processed: Vec<Event> = events
             .into_iter()
-            .filter_map(|mut event| {
-                apply_capture_defaults(&mut event, &defaults);
-                apply_before_send_hooks(&self.options.before_send, event)
+            .filter_map(|event| {
+                preprocess_capture_event(event, &defaults, &self.options.before_send)
             })
             .collect();
         // Events dropped by before_send are terminal.
@@ -1255,20 +1268,29 @@ mod tests {
     }
 
     #[test]
-    fn before_send_dropped_events_are_not_counted_in_flight() {
+    fn capture_preprocessing_applies_defaults_before_hooks_and_accounts_for_drops() {
         // before_send drops one of two events; a 503 holds the batch for retry.
         // pending() must reflect only the surviving event: the dropped one is
         // terminal at build time, so counting it as in-flight would inflate the
         // bounded-queue depth (and the drop/retry logs) for the batch's lifetime.
         let server = MockServer::start();
         let fail = server.mock(|when, then| {
-            when.method(POST);
+            when.method(POST)
+                .body_includes("\"hook_saw_defaults\":true");
             then.status(503);
         });
         let clock = ManualClock::new();
         let handle = TransportHandle::spawn_with_clock(
             options(server.base_url())
-                .before_send(|event| {
+                .disable_geoip(true)
+                .before_send(|mut event| {
+                    let saw_defaults = event.properties().get("$is_server")
+                        == Some(&serde_json::json!(true))
+                        && event.properties().get("$geoip_disable")
+                            == Some(&serde_json::json!(true));
+                    event
+                        .insert_prop("hook_saw_defaults", saw_defaults)
+                        .unwrap();
                     if event.properties().get("__drop").is_some() {
                         None
                     } else {
@@ -1403,6 +1425,82 @@ mod tests {
             0,
             "dropped events leave nothing in flight"
         );
+    }
+
+    #[test]
+    fn enqueue_batch_routes_live_and_historical_policies() {
+        let server = MockServer::start();
+        let live = server.mock(|when, then| {
+            when.method(POST).is_true(|req| {
+                serde_json::from_slice::<serde_json::Value>(req.body_ref()).is_ok_and(|body| {
+                    body["batch"][0]["event"].as_str() == Some("live")
+                        && body.get("historical_migration").is_none()
+                })
+            });
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "results": {} }));
+        });
+        let historical = server.mock(|when, then| {
+            when.method(POST).is_true(|req| {
+                serde_json::from_slice::<serde_json::Value>(req.body_ref()).is_ok_and(|body| {
+                    body["batch"][0]["event"].as_str() == Some("historical")
+                        && body["historical_migration"].as_bool() == Some(true)
+                })
+            });
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "results": {} }));
+        });
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url()).build().unwrap(),
+            Arc::new(ManualClock::new()),
+        );
+
+        handle.enqueue_batch(vec![Event::new("live", "user-1")], false);
+        handle.enqueue_batch(vec![Event::new("historical", "user-1")], true);
+        handle.flush_blocking();
+
+        live.assert_calls(1);
+        historical.assert_calls(1);
+        assert_eq!(handle.pending(), 0);
+        handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn enqueue_batch_preserves_per_event_capacity_for_both_policies() {
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+
+        for historical_migration in [false, true] {
+            let handle = TransportHandle::spawn_with_clock(
+                options(server.base_url())
+                    .max_queue_size(2usize)
+                    .shutdown_timeout_ms(0u64)
+                    .build()
+                    .unwrap(),
+                Arc::new(ManualClock::new()),
+            );
+
+            handle.enqueue_batch(
+                vec![
+                    Event::new("one", "user-1"),
+                    Event::new("two", "user-1"),
+                    Event::new("overflow", "user-1"),
+                ],
+                historical_migration,
+            );
+
+            assert_eq!(
+                handle.pending(),
+                2,
+                "each batch policy accepts only the prefix that fits"
+            );
+            handle.shutdown_blocking();
+            assert_eq!(handle.pending(), 0);
+        }
+
+        mock.assert_calls(0);
     }
 
     #[test]

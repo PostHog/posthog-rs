@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 #[cfg(feature = "error-tracking")]
 use std::error::Error as StdError;
 use std::sync::{Arc, OnceLock};
@@ -9,47 +9,21 @@ use serde::Serialize;
 use serde_json::json;
 #[cfg(feature = "error-tracking")]
 use tracing::trace;
-use tracing::{debug, instrument, warn};
+use tracing::{instrument, warn};
 
 use super::get_default_user_agent;
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
 use crate::feature_flag_evaluations::{
-    EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
-    FlagCalledEventParams,
+    EvaluateFlagsOptions, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
 };
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
-fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
-    if err.is_timeout() {
-        return true;
-    }
-
-    let mut source = std::error::Error::source(err);
-    while let Some(error) = source {
-        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
-            return matches!(
-                io_error.kind(),
-                std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::TimedOut
-                    | std::io::ErrorKind::UnexpectedEof
-            );
-        }
-        source = std::error::Error::source(error);
-    }
-
-    !err.to_string()
-        .to_lowercase()
-        .contains("connection refused")
-}
-
 use super::common::{
-    already_reported, build_dedup_key, extract_flag_details, flag_called_event,
-    flag_event_dedup_cache, local_record, remote_record_from_detail, report_flags_error,
-    DetailedFlagsResponse, FlagEventDedupCache,
+    extract_flag_details, report_flags_error, DetailedFlagsResponse, EvaluationState, FlagEventHost,
 };
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
@@ -63,52 +37,6 @@ pub struct Client {
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
     /// Background event transport. `None` for disabled clients.
     transport: Option<Arc<TransportHandle>>,
-}
-
-/// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
-/// `$feature_flag_called` events through the same background capture transport
-/// as any other event.
-struct AsyncFlagEventHost {
-    options: ClientOptions,
-    transport: Option<Arc<TransportHandle>>,
-    dedup_cache: FlagEventDedupCache,
-}
-
-impl AsyncFlagEventHost {
-    fn from_options(options: &ClientOptions, transport: Option<Arc<TransportHandle>>) -> Self {
-        Self {
-            options: options.clone(),
-            transport,
-            dedup_cache: flag_event_dedup_cache(),
-        }
-    }
-
-    fn enqueue(&self, event: Event) {
-        if let Some(transport) = &self.transport {
-            transport.enqueue(event);
-        }
-    }
-}
-
-impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
-    fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
-        let dedup_key = build_dedup_key(&params.key, params.response.as_ref(), &params.groups);
-        if already_reported(&self.dedup_cache, &params.distinct_id, &dedup_key) {
-            return;
-        }
-
-        if let Some(event) =
-            flag_called_event(params, self.options.disable_geoip, self.options.is_server)
-        {
-            self.enqueue(event);
-        }
-    }
-
-    fn log_warning(&self, message: &str) {
-        // Surface filter-helper misuse via tracing — users can silence these
-        // with their tracing-subscriber level filter (e.g. `posthog_rs=error`).
-        warn!("{message}");
-    }
 }
 
 /// Construct an async PostHog client from an API key or [`ClientOptions`].
@@ -479,15 +407,14 @@ impl Client {
     /// Fire-and-forget, like [`Client::capture`]. The batch is enqueued per event
     /// rather than atomically, so if the bounded queue fills partway through, the
     /// remaining events are dropped (with the usual single full-queue warning).
+    #[instrument(
+        skip(self, events),
+        fields(event_count = events.len(), historical_migration),
+        level = "debug"
+    )]
     pub fn capture_batch(&self, events: Vec<Event>, historical_migration: bool) {
         if let Some(transport) = &self.transport {
-            if historical_migration {
-                transport.enqueue_historical(events);
-            } else {
-                for event in events {
-                    transport.enqueue(event);
-                }
-            }
+            transport.enqueue_batch(events, historical_migration);
         }
     }
 
@@ -730,119 +657,22 @@ impl Client {
             ));
         }
 
-        let mut options = options;
-        options.groups.get_or_insert_with(HashMap::new);
-        options.group_properties.get_or_insert_with(HashMap::new);
-
-        let mut records: HashMap<String, EvaluatedFlagRecord> = HashMap::new();
-        let mut locally_evaluated_keys: HashSet<String> = HashSet::new();
-
-        if let Some(evaluator) = &self.local_evaluator {
-            let mut person_props_owned = options.person_properties.clone().unwrap_or_default();
-            person_props_owned
-                .entry("distinct_id".to_string())
-                .or_insert_with(|| json!(distinct_id.clone()));
-            let groups_owned = options.groups.clone().unwrap_or_default();
-            let group_props_owned = options.group_properties.clone().unwrap_or_default();
-            let local_results = evaluator.evaluate_all_flags_with_details(
-                &distinct_id,
-                &person_props_owned,
-                &groups_owned,
-                &group_props_owned,
-            );
-            // Pin the gate from the poller's current definitions snapshot at the
-            // point local evaluation succeeded, so it travels with these records
-            // rather than being re-read from shared state at event time.
-            let local_minimal_gate = evaluator.cache().minimal_flag_called_events();
-            for (key, result) in local_results {
-                if let Some(filter) = &options.flag_keys {
-                    if !filter.iter().any(|k| k == &key) {
-                        continue;
-                    }
-                }
-                if let Ok(value) = result.result {
-                    records.insert(
-                        key.clone(),
-                        local_record(
-                            value,
-                            result.payload,
-                            result.has_experiment,
-                            local_minimal_gate,
-                        ),
-                    );
-                    locally_evaluated_keys.insert(key);
-                }
-            }
+        let mut state = EvaluationState::new(distinct_id, options, self.local_evaluator.as_ref());
+        if state.should_fetch_remote(self.options.local_evaluation_only) {
+            let response = self
+                .fetch_flag_details(state.distinct_id(), state.options())
+                .await;
+            state.apply_remote_result(response)?;
         }
 
-        let mut request_id: Option<String> = None;
-        let mut errors_while_computing = false;
-        let mut quota_limited = false;
-
-        // Skip the remote round-trip when local evaluation has already covered
-        // every requested flag. Without `flag_keys` we have to assume the caller
-        // wants every flag the project has and still hit `/flags` to discover
-        // any not loaded by the poller.
-        let local_covers_request = options
-            .flag_keys
-            .as_ref()
-            .is_some_and(|keys| keys.iter().all(|k| locally_evaluated_keys.contains(k)));
-
-        if !options.only_evaluate_locally
-            && !self.options.local_evaluation_only
-            && !local_covers_request
-        {
-            // Don't lose successful local evaluations if `/flags` fails — degrade
-            // to a snapshot built from the local results we already have. The
-            // alternative (returning Err) wastes useful data and surprises
-            // callers who would otherwise get partial coverage.
-            match self.fetch_flag_details(&distinct_id, &options).await {
-                Ok(response) => {
-                    request_id = response.request_id;
-                    errors_while_computing = response.errors_while_computing_flags;
-                    quota_limited = response.quota_limited;
-                    // The remote response is the source of these flags' values,
-                    // so it is also the source of their minimization gate.
-                    let remote_minimal_gate = response.minimal_flag_called_events;
-                    for (key, detail) in response.flags {
-                        if locally_evaluated_keys.contains(&key) {
-                            continue;
-                        }
-                        records.insert(key, remote_record_from_detail(detail, remote_minimal_gate));
-                    }
-                }
-                Err(e) => {
-                    if records.is_empty() {
-                        return Err(e);
-                    }
-                    debug!(
-                        error = e.to_string(),
-                        local_count = records.len(),
-                        "/flags fetch failed; returning snapshot from local results only"
-                    );
-                    errors_while_computing = true;
-                }
-            }
-        }
-
-        Ok(FeatureFlagEvaluations::new(
-            host,
-            distinct_id,
-            records,
-            options.groups.unwrap_or_default(),
-            options.disable_geoip,
-            request_id,
-            None,
-            errors_while_computing,
-            quota_limited,
-        ))
+        Ok(state.into_evaluations(host))
     }
 
     fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {
         self.flag_event_host
             .get_or_init(|| {
-                Arc::new(AsyncFlagEventHost::from_options(
-                    &self.options,
+                Arc::new(FlagEventHost::new(
+                    self.options.capture_defaults(),
                     self.transport.clone(),
                 )) as Arc<dyn FeatureFlagEvaluationsHost>
             })
@@ -894,7 +724,7 @@ impl Client {
                     match super::retry::feature_flags_after_transport_error(
                         &self.options,
                         attempt,
-                        is_retryable_feature_flags_error(&e),
+                        super::retry::is_retryable_feature_flags_error(&e),
                         err_msg,
                     ) {
                         super::retry::FeatureFlagsTransportStep::Backoff(delay) => {
@@ -1088,7 +918,9 @@ mod teardown_tests {
 #[cfg(test)]
 mod minimal_gate_tests {
     use super::*;
-    use crate::client::minimal_gate_test_support::{definitions, RecordingHost};
+    use crate::client::minimal_gate_test_support::{
+        assert_gate_was_pinned, assert_has_experiment_was_threaded, definitions, gate_test_fixture,
+    };
 
     fn test_client(cache: FlagCache, host: Arc<dyn FeatureFlagEvaluationsHost>) -> Client {
         let options = ClientOptions::from(("phc_test", "http://localhost:0"));
@@ -1126,67 +958,46 @@ mod minimal_gate_tests {
     /// evaluation and event capture must not reshape the event.
     #[tokio::test]
     async fn local_gate_pinned_at_evaluation_survives_cache_mutation_to_off() {
-        let cache = FlagCache::new();
-        cache.update(definitions(Some(false), true)); // gate ON at evaluation
-        let host = Arc::new(RecordingHost::default());
-        let client = test_client(cache.clone(), Arc::clone(&host) as _);
+        let fixture = gate_test_fixture(Some(false), true);
+        let client = test_client(fixture.cache.clone(), Arc::clone(&fixture.host) as _);
 
         let snapshot = evaluate(&client).await;
         // Poller refresh flips the gate OFF after the snapshot was produced.
-        cache.update(definitions(Some(false), false));
+        fixture.cache.update(definitions(Some(false), false));
 
-        assert!(snapshot.is_enabled("gated"));
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(captured.len(), 1);
-        assert!(
-            captured[0].minimal,
-            "event must reflect the gate pinned at evaluation (on), not the mutated cache (off)"
-        );
+        assert_gate_was_pinned(&snapshot, fixture.host.as_ref(), true);
     }
 
     #[tokio::test]
     async fn local_gate_pinned_at_evaluation_survives_cache_mutation_to_on() {
-        let cache = FlagCache::new();
-        cache.update(definitions(Some(false), false)); // gate OFF at evaluation
-        let host = Arc::new(RecordingHost::default());
-        let client = test_client(cache.clone(), Arc::clone(&host) as _);
+        let fixture = gate_test_fixture(Some(false), false);
+        let client = test_client(fixture.cache.clone(), Arc::clone(&fixture.host) as _);
 
         let snapshot = evaluate(&client).await;
         // Poller refresh flips the gate ON after the snapshot was produced.
-        cache.update(definitions(Some(false), true));
+        fixture.cache.update(definitions(Some(false), true));
 
-        assert!(snapshot.is_enabled("gated"));
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(captured.len(), 1);
-        assert!(
-            !captured[0].minimal,
-            "event must reflect the gate pinned at evaluation (off), not the mutated cache (on)"
-        );
+        assert_gate_was_pinned(&snapshot, fixture.host.as_ref(), false);
     }
 
     #[tokio::test]
     async fn local_has_experiment_is_threaded_from_definitions() {
-        let cache = FlagCache::new();
-        cache.update(definitions(Some(false), true));
-        let host = Arc::new(RecordingHost::default());
-        let client = test_client(cache, Arc::clone(&host) as _);
+        let fixture = gate_test_fixture(Some(false), true);
+        let client = test_client(fixture.cache.clone(), Arc::clone(&fixture.host) as _);
 
-        assert!(evaluate(&client).await.is_enabled("gated"));
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(
-            captured[0].properties.get("$feature_flag_has_experiment"),
-            Some(&serde_json::json!(false))
-        );
-        assert!(captured[0].minimal);
+        let snapshot = evaluate(&client).await;
+        assert_has_experiment_was_threaded(&snapshot, fixture.host.as_ref());
     }
 }
 
 #[cfg(test)]
 mod local_payload_tests {
     use super::*;
-    use crate::client::local_payload_test_support::payload_definitions;
+    use crate::client::local_payload_test_support::{
+        assert_payload_is_absent_without_match, assert_payload_is_keyed_by_matched_variant,
+        assert_payloads_match_remote_shape, payload_definitions,
+    };
     use crate::client::minimal_gate_test_support::RecordingHost;
-    use serde_json::json;
 
     async fn snapshot() -> FeatureFlagEvaluations {
         let cache = FlagCache::new();
@@ -1223,53 +1034,18 @@ mod local_payload_tests {
     #[tokio::test]
     async fn local_evaluation_surfaces_payloads_matching_the_remote_shape() {
         let snapshot = snapshot().await;
-
-        assert_eq!(
-            snapshot.get_flag_payload("json-string-payload"),
-            Some(json!({"color": "blue"}))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("parsed-payload"),
-            Some(json!({"color": "blue"}))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("quoted-string-payload"),
-            Some(json!("just text"))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("undecodable-payload"),
-            Some(json!("not json"))
-        );
+        assert_payloads_match_remote_shape(&snapshot);
     }
 
     #[tokio::test]
     async fn local_payload_is_keyed_by_the_matched_variant() {
         let snapshot = snapshot().await;
-
-        assert_eq!(
-            snapshot.get_flag("variant-payload"),
-            Some(FlagValue::String("test".to_string()))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("variant-payload"),
-            Some(json!({"tier": 2}))
-        );
+        assert_payload_is_keyed_by_matched_variant(&snapshot);
     }
 
     #[tokio::test]
     async fn local_payload_is_absent_without_a_matching_payload() {
         let snapshot = snapshot().await;
-
-        assert_eq!(snapshot.get_flag_payload("no-payload"), None);
-        assert_eq!(snapshot.get_flag_payload("not-a-flag"), None);
-
-        // A missing key also yields `None`, so pin the flag down first:
-        // it was evaluated, it evaluated false, and its "true" payload
-        // stayed behind.
-        assert_eq!(
-            snapshot.get_flag("disabled-with-payload"),
-            Some(FlagValue::Boolean(false))
-        );
-        assert_eq!(snapshot.get_flag_payload("disabled-with-payload"), None);
+        assert_payload_is_absent_without_match(&snapshot);
     }
 }

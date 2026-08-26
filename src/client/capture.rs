@@ -13,7 +13,7 @@ use super::retry::{backoff_duration, is_retryable_status};
 // `capture::parse_retry_after` / `capture::Step`.
 pub(crate) use super::retry::{parse_retry_after, Step};
 use super::{
-    common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
+    common::{apply_runtime_context, preprocess_capture_event},
     CaptureCompression, CaptureDefaults, ClientOptions,
 };
 use crate::capture_event::{
@@ -166,10 +166,7 @@ pub(crate) fn prepare_immediate(
     let defaults = opts.capture_defaults();
     let events: Vec<Event> = events
         .into_iter()
-        .filter_map(|mut event| {
-            apply_capture_defaults(&mut event, &defaults);
-            apply_before_send_hooks(&opts.before_send, event)
-        })
+        .filter_map(|event| preprocess_capture_event(event, &defaults, &opts.before_send))
         .collect();
     if events.is_empty() {
         return None;
@@ -336,19 +333,21 @@ pub(crate) fn after_response(
         );
 
         if attempt >= opts.max_capture_attempts {
-            Step::Fail(
-                Error::from_http_response(status, body.to_string())
-                    .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))),
-            )
+            Step::Fail(terminal_response_error(status, body))
         } else {
             Step::Backoff(backoff_duration(opts, attempt, retry_after))
         }
     } else {
-        Step::Fail(
-            Error::from_http_response(status, body.to_string())
-                .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))),
-        )
+        Step::Fail(terminal_response_error(status, body))
     }
+}
+
+/// Convert a terminal HTTP response into its status-specific SDK error. The
+/// fallback preserves the prior defensive behavior if a success status ever
+/// reaches a terminal branch.
+fn terminal_response_error(status: u16, body: &str) -> Error {
+    Error::from_http_response(status, body.to_string())
+        .unwrap_or_else(|| Error::Connection(format!("HTTP {status}")))
 }
 
 #[cfg(test)]
@@ -721,7 +720,13 @@ mod tests {
             &mut pending,
             &mut final_results,
         );
-        assert!(matches!(step, Step::Fail(_)));
+        match step {
+            Step::Fail(Error::ServerError { status, message }) => {
+                assert_eq!(status, 503);
+                assert_eq!(message, body);
+            }
+            other => panic!("expected status-preserving ServerError, got {:?}", other),
+        }
     }
 
     #[test]
@@ -741,26 +746,40 @@ mod tests {
             &mut pending,
             &mut final_results,
         );
-        assert!(matches!(step, Step::Fail(Error::BillingLimitExceeded(_))));
+        match step {
+            Step::Fail(Error::BillingLimitExceeded(message)) => assert_eq!(message, body),
+            other => panic!(
+                "expected body-preserving BillingLimitExceeded, got {:?}",
+                other
+            ),
+        }
     }
 
+    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
     #[test]
-    fn after_response_malformed_200_body_fails() {
-        let opts = test_opts();
-        let rid = Uuid::now_v7();
-        let mut pending = vec![dummy_event()];
-        let mut final_results = HashMap::new();
-        let step = after_response(
-            &opts,
-            &rid,
-            1,
-            200,
-            None,
-            "not json",
-            &mut pending,
-            &mut final_results,
-        );
-        assert!(matches!(step, Step::Fail(Error::Serialization(_))));
+    fn after_response_malformed_200_and_201_bodies_fail() {
+        for (case, status) in [("standard success", 200), ("alternate 2xx", 201)] {
+            let opts = test_opts();
+            let rid = Uuid::now_v7();
+            let mut pending = vec![dummy_event()];
+            let mut final_results = HashMap::new();
+            let step = after_response(
+                &opts,
+                &rid,
+                1,
+                status,
+                None,
+                "not json",
+                &mut pending,
+                &mut final_results,
+            );
+            assert!(
+                matches!(step, Step::Fail(Error::Serialization(_))),
+                "{} (HTTP {}) should fail with a Serialization error",
+                case,
+                status
+            );
+        }
     }
 
     /// C3: any 2xx with a well-formed body is success, not a connection error.
@@ -793,26 +812,6 @@ mod tests {
             );
             assert_eq!(final_results.len(), 1);
         }
-    }
-
-    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
-    #[test]
-    fn after_response_alternate_2xx_malformed_body_fails() {
-        let opts = test_opts();
-        let rid = Uuid::now_v7();
-        let mut pending = vec![dummy_event()];
-        let mut final_results = HashMap::new();
-        let step = after_response(
-            &opts,
-            &rid,
-            1,
-            201,
-            None,
-            "not json",
-            &mut pending,
-            &mut final_results,
-        );
-        assert!(matches!(step, Step::Fail(Error::Serialization(_))));
     }
 
     /// A body-less 2xx (e.g. 204 from beacon mode) is terminal on the first

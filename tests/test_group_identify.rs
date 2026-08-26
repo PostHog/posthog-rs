@@ -1,6 +1,8 @@
 ﻿//! Coverage for `Client::group_identify`, the `$groupidentify` helper.
 //!
-//! Nothing in the emitted event is lifted into the V1 `options` object.
+//! The emitted event keeps its group properties in the event properties map;
+//! nothing is lifted into the V1 `options` object.
+//!
 //! Capture is a non-blocking enqueue drained by the background worker, so every
 //! test `flush()`es before asserting.
 

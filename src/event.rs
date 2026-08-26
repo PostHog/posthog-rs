@@ -388,6 +388,7 @@ mod test {
     use chrono::{DateTime, Utc};
 
     use super::Event;
+    use crate::Error;
 
     #[test]
     fn test_timestamp_is_correctly_set() {
@@ -428,5 +429,33 @@ mod test {
         event.set_timestamp(caller).unwrap();
         event.ensure_timestamp(now);
         assert_eq!(event.timestamp, Some(caller.naive_utc()));
+    }
+
+    #[test]
+    fn group_identify_rejects_blank_keys() {
+        for (group_type, group_key) in [("", "key"), ("   ", "key"), ("type", ""), ("type", "   ")]
+        {
+            assert!(Event::group_identify(
+                group_type.to_string(),
+                group_key.to_string(),
+                serde_json::json!({}),
+            )
+            .unwrap()
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn group_identify_rejects_non_object_properties() {
+        for properties in [
+            serde_json::json!(42),
+            serde_json::json!(["a", "b"]),
+            serde_json::Value::Null,
+        ] {
+            let err =
+                Event::group_identify("company".to_string(), "acme_123".to_string(), properties)
+                    .expect_err("non-object properties should be rejected");
+            assert!(matches!(err, Error::Serialization(_)));
+        }
     }
 }

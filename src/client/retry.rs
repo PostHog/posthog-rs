@@ -1,4 +1,4 @@
-//! Runtime-agnostic retry primitives shared by the V0 and V1 capture paths.
+//! Runtime-agnostic retry primitives shared by client request paths.
 
 use std::time::{Duration, SystemTime};
 
@@ -34,6 +34,30 @@ pub(crate) enum FeatureFlagsTransportStep {
 /// caller surfaces it without burning the attempt budget.
 pub(crate) fn is_retryable_status(status: u16) -> bool {
     matches!(status, 408 | 500 | 502 | 503 | 504)
+}
+
+/// Classify transport errors from remote feature-flag requests.
+pub(crate) fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
+    if err.is_timeout() {
+        return true;
+    }
+
+    let mut source = std::error::Error::source(err);
+    while let Some(error) = source {
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::UnexpectedEof
+            );
+        }
+        source = std::error::Error::source(error);
+    }
+
+    !err.to_string()
+        .to_lowercase()
+        .contains("connection refused")
 }
 
 /// Parse `Retry-After` as either delay-seconds or an HTTP-date.
@@ -140,6 +164,10 @@ pub(crate) fn feature_flags_after_transport_error(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener};
+    use std::thread;
+
     use reqwest::header::{HeaderMap, HeaderValue};
 
     use super::*;
@@ -153,6 +181,17 @@ mod tests {
             .retry_max_backoff_ms(5000u64)
             .build()
             .unwrap()
+    }
+
+    fn has_io_error_kind(err: &reqwest::Error, expected: std::io::ErrorKind) -> bool {
+        let mut source = std::error::Error::source(err);
+        while let Some(error) = source {
+            if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+                return io_error.kind() == expected;
+            }
+            source = std::error::Error::source(error);
+        }
+        false
     }
 
     #[test]
@@ -175,6 +214,77 @@ mod tests {
                 code
             );
         }
+    }
+
+    #[test]
+    fn feature_flags_timeout_error_is_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+
+        let err = client.get(url).send().unwrap_err();
+
+        assert!(err.is_timeout());
+        assert!(is_retryable_feature_flags_error(&err));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn feature_flags_unexpected_eof_error_is_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n")
+                .unwrap();
+            let _ = stream.shutdown(Shutdown::Both);
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+
+        let err = client.get(url).send().unwrap().bytes().unwrap_err();
+
+        assert!(has_io_error_kind(&err, std::io::ErrorKind::UnexpectedEof));
+        assert!(is_retryable_feature_flags_error(&err));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn feature_flags_connection_refused_error_is_not_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+
+        let err = client.get(url).send().unwrap_err();
+
+        assert!(!is_retryable_feature_flags_error(&err));
+    }
+
+    #[test]
+    fn feature_flags_unknown_error_is_retryable() {
+        let err = reqwest::blocking::Client::new()
+            .get("ftp://example.com")
+            .send()
+            .unwrap_err();
+
+        assert!(is_retryable_feature_flags_error(&err));
     }
 
     #[test]
