@@ -1459,40 +1459,44 @@ fn match_property(
         "icontains" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
-            prop_str.to_lowercase().contains(&search_str.to_lowercase())
+            prop_str
+                .to_ascii_lowercase()
+                .contains(&search_str.to_ascii_lowercase())
         }
         "not_icontains" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
-            !prop_str.to_lowercase().contains(&search_str.to_lowercase())
+            !prop_str
+                .to_ascii_lowercase()
+                .contains(&search_str.to_ascii_lowercase())
         }
         "starts_with" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
             prop_str
-                .to_lowercase()
-                .starts_with(&search_str.to_lowercase())
+                .to_ascii_lowercase()
+                .starts_with(&search_str.to_ascii_lowercase())
         }
         "not_starts_with" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
             !prop_str
-                .to_lowercase()
-                .starts_with(&search_str.to_lowercase())
+                .to_ascii_lowercase()
+                .starts_with(&search_str.to_ascii_lowercase())
         }
         "ends_with" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
             prop_str
-                .to_lowercase()
-                .ends_with(&search_str.to_lowercase())
+                .to_ascii_lowercase()
+                .ends_with(&search_str.to_ascii_lowercase())
         }
         "not_ends_with" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
             !prop_str
-                .to_lowercase()
-                .ends_with(&search_str.to_lowercase())
+                .to_ascii_lowercase()
+                .ends_with(&search_str.to_ascii_lowercase())
         }
         "regex" => {
             let prop_str = value_to_string(value);
@@ -1577,13 +1581,7 @@ fn match_property(
 }
 
 fn compare_values(a: &serde_json::Value, b: &serde_json::Value) -> bool {
-    // Case-insensitive string comparison
-    if let (Some(a_str), Some(b_str)) = (a.as_str(), b.as_str()) {
-        return a_str.eq_ignore_ascii_case(b_str);
-    }
-
-    // Direct comparison for other types
-    a == b
+    value_to_string(a).to_lowercase() == value_to_string(b).to_lowercase()
 }
 
 fn value_to_string(value: &serde_json::Value) -> String {
@@ -1705,6 +1703,43 @@ mod tests {
 
         properties.insert("country".to_string(), json!("UK"));
         assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    #[test]
+    fn test_property_case_folding_matches_flags_service() {
+        let matches = |operator: &str, expected, actual| {
+            let property = Property {
+                key: "key".to_string(),
+                value: expected,
+                operator: operator.to_string(),
+                property_type: None,
+            };
+            match_property(&property, &HashMap::from([("key".to_string(), actual)])).unwrap()
+        };
+
+        // Exact matching stringifies both sides and applies Unicode lowercase.
+        assert!(matches("exact", json!("PRO"), json!("pro")));
+        assert!(matches("exact", json!("Ä"), json!("ä")));
+        assert!(!matches("exact", json!("ß"), json!("ss")));
+        assert!(!matches("exact", json!("Σ"), json!("ς")));
+        assert!(matches("exact", json!(323), json!("323")));
+        assert!(matches("exact", json!(["FREE", "PRÖ"]), json!("prö")));
+        assert!(!matches("is_not", json!(["FREE", "PRÖ"]), json!("prö")));
+        assert!(matches("is_not", json!(["FREE", "PRÖ"]), json!("team")));
+
+        // Serde preserves a float's decimal point; exact matching must not collapse it to an integer.
+        assert_eq!(value_to_string(&json!(323.0)), "323.0");
+        assert!(matches("exact", json!("323.0"), json!(323.0)));
+        assert!(!matches("exact", json!("323"), json!(323.0)));
+
+        // Substring and anchored operators fold ASCII only.
+        assert!(matches("icontains", json!("ADMIN"), json!("admin-user")));
+        assert!(!matches("icontains", json!("Ä"), json!("äbc")));
+        assert!(matches("not_icontains", json!("Ä"), json!("äbc")));
+        assert!(!matches("starts_with", json!("Ä"), json!("äbc")));
+        assert!(matches("not_starts_with", json!("Ä"), json!("äbc")));
+        assert!(!matches("ends_with", json!("Ä"), json!("bcä")));
+        assert!(matches("not_ends_with", json!("Ä"), json!("bcä")));
     }
 
     #[test]
