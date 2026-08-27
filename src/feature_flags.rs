@@ -1717,29 +1717,38 @@ mod tests {
             match_property(&property, &HashMap::from([("key".to_string(), actual)])).unwrap()
         };
 
-        // Exact matching stringifies both sides and applies Unicode lowercase.
-        assert!(matches("exact", json!("PRO"), json!("pro")));
-        assert!(matches("exact", json!("Ä"), json!("ä")));
-        assert!(!matches("exact", json!("ß"), json!("ss")));
-        assert!(!matches("exact", json!("Σ"), json!("ς")));
-        assert!(matches("exact", json!(323), json!("323")));
-        assert!(matches("exact", json!(["FREE", "PRÖ"]), json!("prö")));
-        assert!(!matches("is_not", json!(["FREE", "PRÖ"]), json!("prö")));
-        assert!(matches("is_not", json!(["FREE", "PRÖ"]), json!("team")));
-
         // Serde preserves a float's decimal point; exact matching must not collapse it to an integer.
         assert_eq!(value_to_string(&json!(323.0)), "323.0");
-        assert!(matches("exact", json!("323.0"), json!(323.0)));
-        assert!(!matches("exact", json!("323"), json!(323.0)));
 
-        // Substring and anchored operators fold ASCII only.
-        assert!(matches("icontains", json!("ADMIN"), json!("admin-user")));
-        assert!(!matches("icontains", json!("Ä"), json!("äbc")));
-        assert!(matches("not_icontains", json!("Ä"), json!("äbc")));
-        assert!(!matches("starts_with", json!("Ä"), json!("äbc")));
-        assert!(matches("not_starts_with", json!("Ä"), json!("äbc")));
-        assert!(!matches("ends_with", json!("Ä"), json!("bcä")));
-        assert!(matches("not_ends_with", json!("Ä"), json!("bcä")));
+        let cases = [
+            // Exact matching stringifies both sides and applies Unicode lowercase.
+            ("exact", json!("PRO"), json!("pro"), true),
+            ("exact", json!("Ä"), json!("ä"), true),
+            ("exact", json!("ß"), json!("ss"), false),
+            ("exact", json!("Σ"), json!("ς"), false),
+            ("exact", json!(323), json!("323"), true),
+            ("exact", json!(["FREE", "PRÖ"]), json!("prö"), true),
+            ("is_not", json!(["FREE", "PRÖ"]), json!("prö"), false),
+            ("is_not", json!(["FREE", "PRÖ"]), json!("team"), true),
+            ("exact", json!("323.0"), json!(323.0), true),
+            ("exact", json!("323"), json!(323.0), false),
+            // Substring and anchored operators fold ASCII only.
+            ("icontains", json!("ADMIN"), json!("admin-user"), true),
+            ("icontains", json!("Ä"), json!("äbc"), false),
+            ("not_icontains", json!("Ä"), json!("äbc"), true),
+            ("starts_with", json!("Ä"), json!("äbc"), false),
+            ("not_starts_with", json!("Ä"), json!("äbc"), true),
+            ("ends_with", json!("Ä"), json!("bcä"), false),
+            ("not_ends_with", json!("Ä"), json!("bcä"), true),
+        ];
+
+        for (operator, expected, actual, should_match) in cases {
+            let result = matches(operator, expected.clone(), actual.clone());
+            assert_eq!(
+                result, should_match,
+                "operator {operator} comparing {actual} against {expected}"
+            );
+        }
     }
 
     #[test]
