@@ -55,9 +55,10 @@ pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaul
     if defaults.is_server {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
-    // The release id the app was launched with (`POSTHOG_RELEASE_ID`, printed by
-    // `posthog-cli release resolve`), if any. Set before before_send so a hook can still drop it.
-    apply_release_id(event, crate::release_env::release_id());
+    // The release id for this build (the explicit `release_id` option, else the
+    // `POSTHOG_RELEASE_ID` environment fallback), resolved once in `capture_defaults`. Set before
+    // before_send so a hook can still drop it.
+    apply_release_id(event, defaults.release_id.as_deref());
 }
 
 /// Stamp `$release_id` on an `$exception` event when a release id is set. Only exception events

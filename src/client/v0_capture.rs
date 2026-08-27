@@ -205,6 +205,7 @@ mod tests {
             &CaptureDefaults {
                 disable_geoip: true,
                 is_server: true,
+                release_id: None,
             },
         );
         // Mirrors the no-hooks case in `build_batch_payload`, where the trim runs
@@ -259,6 +260,7 @@ mod tests {
             &CaptureDefaults {
                 disable_geoip: true,
                 is_server: true,
+                release_id: None,
             },
         );
         // No minimization marker -> the full shape is preserved, including the
@@ -297,6 +299,7 @@ mod tests {
             &CaptureDefaults {
                 disable_geoip: true,
                 is_server: true,
+                release_id: None,
             },
             &hooks,
         )

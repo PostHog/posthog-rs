@@ -172,6 +172,16 @@ pub struct ClientOptions {
     #[builder(default = "true")]
     is_server: bool,
 
+    /// The release the build belongs to, reported as `$release_id` on `$exception`
+    /// events so the server resolves the release by a direct id lookup. Set it to
+    /// bake the release into the binary at build time — e.g.
+    /// `option_env!("POSTHOG_RELEASE_ID")`, whose value the CLI's `release resolve`
+    /// prints. When left unset, the SDK falls back to reading `POSTHOG_RELEASE_ID`
+    /// from the environment at runtime, so a deploy can still supply it without a
+    /// rebuild. An explicit value here wins over the environment.
+    #[builder(setter(into, strip_option), default)]
+    release_id: Option<String>,
+
     /// Timeout in seconds for remote `/flags` requests. Defaults to `3`.
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
@@ -278,10 +288,13 @@ pub struct ClientOptions {
 /// paths (V0 capture, V0 flag-called host, V1 capture) so each default is
 /// applied in exactly one place with caller-wins (`entry().or_insert`)
 /// semantics.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct CaptureDefaults {
     pub(crate) disable_geoip: bool,
     pub(crate) is_server: bool,
+    /// The resolved release id, if any: the explicit `release_id` option, else the
+    /// `POSTHOG_RELEASE_ID` environment fallback. Built once per capture, not per event.
+    pub(crate) release_id: Option<String>,
 }
 
 impl ClientOptions {
@@ -290,6 +303,10 @@ impl ClientOptions {
         CaptureDefaults {
             disable_geoip: self.disable_geoip,
             is_server: self.is_server,
+            release_id: crate::release_env::resolve_release_id(
+                self.release_id.as_deref(),
+                crate::release_env::release_id(),
+            ),
         }
     }
 
@@ -459,6 +476,22 @@ mod tests {
         assert_eq!(options.host.as_deref(), Some("https://eu.posthog.com/"));
         assert_eq!(options.secret_key, None);
         assert_eq!(options.endpoints().api_host(), EU_INGESTION_ENDPOINT);
+    }
+
+    #[test]
+    fn an_explicit_release_id_option_reaches_the_capture_defaults() {
+        // The build-time path: a caller (typically via `option_env!("POSTHOG_RELEASE_ID")`) sets
+        // the release id in code, and it must flow through to the resolved capture defaults.
+        let options = ClientOptionsBuilder::default()
+            .api_key("test-api-key".to_string())
+            .release_id("01a04367-c799-0000-dbe9-a7b5d6121d6b")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            options.capture_defaults().release_id.as_deref(),
+            Some("01a04367-c799-0000-dbe9-a7b5d6121d6b")
+        );
     }
 
     #[test]

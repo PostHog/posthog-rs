@@ -169,6 +169,7 @@ pub fn posthog_rs::ClientOptionsBuilder::max_batch_size(&mut self, usize) -> &mu
 pub fn posthog_rs::ClientOptionsBuilder::max_capture_attempts(&mut self, u32) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::max_queue_size(&mut self, usize) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::poll_interval_seconds(&mut self, u64) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::release_id<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::request_timeout_seconds(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::retry_initial_backoff_ms(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::retry_max_backoff_ms(&mut self, u64) -> &mut Self

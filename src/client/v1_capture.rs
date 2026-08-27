@@ -395,6 +395,7 @@ mod tests {
         let defaults = CaptureDefaults {
             disable_geoip: true,
             is_server: true,
+            release_id: None,
         };
         let built = build_events_at(&[event], &defaults, Utc::now());
         let map = built[0].properties.as_object().unwrap();
@@ -432,6 +433,7 @@ mod tests {
         let defaults = CaptureDefaults {
             disable_geoip: false,
             is_server: false,
+            release_id: None,
         };
         let built = build_events_at(&[event], &defaults, Utc::now());
         let map = built[0].properties.as_object().unwrap();
