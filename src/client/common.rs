@@ -57,7 +57,18 @@ pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaul
     }
     // The release id the app was launched with (`POSTHOG_RELEASE_ID`, printed by
     // `posthog-cli release resolve`), if any. Set before before_send so a hook can still drop it.
-    if let Some(release_id) = crate::release_env::release_id() {
+    apply_release_id(event, crate::release_env::release_id());
+}
+
+/// Stamp `$release_id` on an `$exception` event when a release id is set. Only exception events
+/// carry it, because that is where the server resolves a release from `$release_id` — a pageview or
+/// a custom event has no release to resolve. Split out so the event-name gate is unit-tested
+/// without the process-global `POSTHOG_RELEASE_ID` read.
+fn apply_release_id(event: &mut Event, release_id: Option<&str>) {
+    if event.event_name() != "$exception" {
+        return;
+    }
+    if let Some(release_id) = release_id {
         event.insert_prop_default(
             "$release_id",
             serde_json::Value::String(release_id.to_string()),
@@ -354,6 +365,29 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn release_id_is_added_only_to_exception_events() {
+        let id = Some("01a03d94-7dd8-0000-e1cb-2a269e5ea0b5");
+
+        // The server resolves a release from `$release_id` on `$exception` events, so it belongs
+        // there.
+        let mut exception = Event::new_anon("$exception");
+        apply_release_id(&mut exception, id);
+        assert!(exception.properties().contains_key("$release_id"));
+
+        // A pageview or any other event has no release to resolve, so it must not carry it.
+        let mut pageview = Event::new_anon("$pageview");
+        apply_release_id(&mut pageview, id);
+        assert!(!pageview.properties().contains_key("$release_id"));
+
+        // No `POSTHOG_RELEASE_ID` set: even an exception carries nothing.
+        let mut exception_without_id = Event::new_anon("$exception");
+        apply_release_id(&mut exception_without_id, None);
+        assert!(!exception_without_id
+            .properties()
+            .contains_key("$release_id"));
     }
 
     fn flag_params(
