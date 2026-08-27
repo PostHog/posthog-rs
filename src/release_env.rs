@@ -32,8 +32,11 @@ fn normalize(raw: Option<String>) -> Option<String> {
 /// Resolve the release id from the two sources, explicit option first, environment fallback second.
 /// A `config` value set in code (typically a build-time `option_env!("POSTHOG_RELEASE_ID")`) wins
 /// over `env` (the runtime `POSTHOG_RELEASE_ID`), so a deploy-time override is opt-in, not implicit.
+/// The option is normalized like the environment value, so a blank `release_id("")` — e.g.
+/// `option_env!("POSTHOG_RELEASE_ID").unwrap_or_default()` in a build that never set it — falls back
+/// to the environment instead of sending an empty id.
 pub(crate) fn resolve_release_id(config: Option<&str>, env: Option<&str>) -> Option<String> {
-    config.or(env).map(str::to_string)
+    normalize(config.map(str::to_string)).or_else(|| env.map(str::to_string))
 }
 
 #[cfg(test)]
@@ -52,6 +55,16 @@ mod tests {
     fn the_environment_is_used_when_no_config_id_is_set() {
         assert_eq!(
             resolve_release_id(None, Some("from-env")).as_deref(),
+            Some("from-env")
+        );
+    }
+
+    #[test]
+    fn a_blank_config_id_falls_back_to_the_environment() {
+        // A build that never set POSTHOG_RELEASE_ID can pass an empty option (e.g.
+        // `option_env!(...).unwrap_or_default()`); it must not shadow the runtime env value.
+        assert_eq!(
+            resolve_release_id(Some("  "), Some("from-env")).as_deref(),
             Some("from-env")
         );
     }
