@@ -100,6 +100,7 @@ mod feature_flag_evaluations;
 mod feature_flags;
 mod global;
 mod local_evaluation;
+mod release_env;
 
 // Public interface - any change to this is breaking!
 // Client

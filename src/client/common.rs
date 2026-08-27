@@ -55,6 +55,14 @@ pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaul
     if defaults.is_server {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
+    // The release id the app was launched with (`POSTHOG_RELEASE_ID`, printed by
+    // `posthog-cli release resolve`), if any. Set before before_send so a hook can still drop it.
+    if let Some(release_id) = crate::release_env::release_id() {
+        event.insert_prop_default(
+            "$release_id",
+            serde_json::Value::String(release_id.to_string()),
+        );
+    }
 }
 
 pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
