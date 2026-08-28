@@ -470,8 +470,11 @@ pub fn hash_key(key: &str, distinct_id: &str, salt: &str) -> f64 {
     let mut hasher = Sha1::new();
     hasher.update(hash_key.as_bytes());
     let result = hasher.finalize();
-    let hex_str = format!("{result:x}");
-    let hash_val = u64::from_str_radix(&hex_str[..15], 16).unwrap_or(0);
+    // The top 60 bits of the digest, i.e. the integer value of its first 15 hex
+    // digits. Matches the Python SDK's `int(sha1(...).hexdigest()[:15], 16)`.
+    let hash_val = result
+        .first_chunk::<8>()
+        .map_or(0, |head| u64::from_be_bytes(*head) >> 4);
     hash_val as f64 / LONG_SCALE
 }
 
@@ -1654,6 +1657,41 @@ mod tests {
         // Different inputs should produce different hash
         let hash3 = hash_key("test-flag", "user-456", TEST_SALT);
         assert_ne!(hash, hash3);
+    }
+
+    /// Bucketing must stay bit-identical across SDKs, so pin known values.
+    /// Generated with the Python SDK's algorithm:
+    /// `int(hashlib.sha1(f"{key}.{distinct_id}{salt}".encode()).hexdigest()[:15], 16) / 0xfffffffffffffff`
+    #[test]
+    fn test_hash_key_matches_known_vectors() {
+        for (key, distinct_id, salt, expected) in [
+            ("test-flag", "user-123", TEST_SALT, 0.982_062_667_408_254_5),
+            ("test-flag", "user-456", TEST_SALT, 0.695_145_973_300_181_1),
+            (
+                "beta-feature",
+                "distinct_id",
+                ROLLOUT_HASH_SALT,
+                0.875_596_347_947_407_8,
+            ),
+            (
+                "beta-feature",
+                "distinct_id",
+                VARIANT_HASH_SALT,
+                0.228_302_715_824_090_7,
+            ),
+            (
+                "multivariate-flag",
+                "user_1",
+                ROLLOUT_HASH_SALT,
+                0.223_607_742_058_685_7,
+            ),
+        ] {
+            assert_eq!(
+                hash_key(key, distinct_id, salt),
+                expected,
+                "hash_key({key:?}, {distinct_id:?}, {salt:?}) drifted from the other SDKs"
+            );
+        }
     }
 
     #[test]
