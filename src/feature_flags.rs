@@ -1428,32 +1428,8 @@ fn match_property(
     };
 
     Ok(match property.operator.as_str() {
-        "exact" => {
-            if property.value.is_array() {
-                if let Some(arr) = property.value.as_array() {
-                    for val in arr {
-                        if compare_values(val, value) {
-                            return Ok(true);
-                        }
-                    }
-                    return Ok(false);
-                }
-            }
-            compare_values(&property.value, value)
-        }
-        "is_not" => {
-            if property.value.is_array() {
-                if let Some(arr) = property.value.as_array() {
-                    for val in arr {
-                        if compare_values(val, value) {
-                            return Ok(false);
-                        }
-                    }
-                    return Ok(true);
-                }
-            }
-            !compare_values(&property.value, value)
-        }
+        "exact" => compute_exact_match(&property.value, value),
+        "is_not" => !compute_exact_match(&property.value, value),
         "is_set" => true,      // We already know the property exists
         "is_not_set" => false, // We already know the property exists
         "icontains" => {
@@ -1578,6 +1554,40 @@ fn match_property(
             )));
         }
     })
+}
+
+fn compute_exact_match(value: &serde_json::Value, override_value: &serde_json::Value) -> bool {
+    if is_truthy_or_falsy_property_value(value) {
+        return is_truthy_property_value(value) == is_truthy_property_value(override_value);
+    }
+
+    if let Some(values) = value.as_array() {
+        return values
+            .iter()
+            .any(|candidate| compare_values(candidate, override_value));
+    }
+
+    compare_values(value, override_value)
+}
+
+fn is_truthy_or_falsy_property_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(_) => true,
+        serde_json::Value::String(value) => {
+            value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")
+        }
+        serde_json::Value::Array(values) => values.iter().all(is_truthy_or_falsy_property_value),
+        _ => false,
+    }
+}
+
+fn is_truthy_property_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(value) => *value,
+        serde_json::Value::String(value) => value.eq_ignore_ascii_case("true"),
+        serde_json::Value::Array(values) => values.iter().all(is_truthy_property_value),
+        _ => false,
+    }
 }
 
 fn compare_values(a: &serde_json::Value, b: &serde_json::Value) -> bool {
@@ -1726,6 +1736,10 @@ mod tests {
             ("exact", json!("Ä"), json!("ä"), true),
             ("exact", json!("ß"), json!("ss"), false),
             ("exact", json!("Σ"), json!("ς"), false),
+            ("exact", json!("ΟΣ"), json!("ος"), true),
+            ("exact", json!("ΟΣ"), json!("οσ"), false),
+            ("exact", json!("İ"), json!("i\u{0307}"), true),
+            ("exact", json!("İ"), json!("i"), false),
             ("exact", json!(323), json!("323"), true),
             ("exact", json!(["FREE", "PRÖ"]), json!("prö"), true),
             ("is_not", json!(["FREE", "PRÖ"]), json!("prö"), false),
@@ -1747,6 +1761,51 @@ mod tests {
             assert_eq!(
                 result, should_match,
                 "operator {operator} comparing {actual} against {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_exact_boolean_coercion_matches_flags_service() {
+        let matches = |operator: &str, expected, actual| {
+            let property = Property {
+                key: "key".to_string(),
+                value: expected,
+                operator: operator.to_string(),
+                property_type: None,
+            };
+            match_property(&property, &HashMap::from([("key".to_string(), actual)])).unwrap()
+        };
+
+        let cases = [
+            // Boolean-like filters compare aggregate truthiness before array membership.
+            (json!(false), json!("banana"), true),
+            (json!("false"), json!(0), true),
+            (json!(["false"]), json!(null), true),
+            (json!(["true", "false"]), json!("true"), false),
+            (json!(["true", "false"]), json!("pro"), true),
+            // Empty arrays are boolean-like and truthy because all() on an empty iterator is true.
+            (json!([]), json!(true), true),
+            (json!([]), json!("true"), true),
+            (json!([]), json!([]), true),
+            (json!([]), json!([true]), true),
+            (json!([]), json!(false), false),
+            (json!([]), json!("banana"), false),
+            // Non-boolean-like arrays retain ordinary ANY membership.
+            (json!(["FREE", "PRO"]), json!("pro"), true),
+            (json!(["FREE", "PRO"]), json!("team"), false),
+        ];
+
+        for (expected, actual, exact_match) in cases {
+            assert_eq!(
+                matches("exact", expected.clone(), actual.clone()),
+                exact_match,
+                "exact comparing {actual} against {expected}"
+            );
+            assert_eq!(
+                matches("is_not", expected.clone(), actual.clone()),
+                !exact_match,
+                "is_not comparing {actual} against {expected}"
             );
         }
     }
