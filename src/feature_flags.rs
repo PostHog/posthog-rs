@@ -1431,71 +1431,51 @@ fn match_property(
     };
 
     Ok(match property.operator.as_str() {
-        "exact" => {
-            if property.value.is_array() {
-                if let Some(arr) = property.value.as_array() {
-                    for val in arr {
-                        if compare_values(val, value) {
-                            return Ok(true);
-                        }
-                    }
-                    return Ok(false);
-                }
-            }
-            compare_values(&property.value, value)
-        }
-        "is_not" => {
-            if property.value.is_array() {
-                if let Some(arr) = property.value.as_array() {
-                    for val in arr {
-                        if compare_values(val, value) {
-                            return Ok(false);
-                        }
-                    }
-                    return Ok(true);
-                }
-            }
-            !compare_values(&property.value, value)
-        }
+        "exact" => compute_exact_match(&property.value, value),
+        "is_not" => !compute_exact_match(&property.value, value),
         "is_set" => true,      // We already know the property exists
         "is_not_set" => false, // We already know the property exists
         "icontains" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
-            prop_str.to_lowercase().contains(&search_str.to_lowercase())
+            prop_str
+                .to_ascii_lowercase()
+                .contains(&search_str.to_ascii_lowercase())
         }
         "not_icontains" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
-            !prop_str.to_lowercase().contains(&search_str.to_lowercase())
+            !prop_str
+                .to_ascii_lowercase()
+                .contains(&search_str.to_ascii_lowercase())
         }
         "starts_with" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
             prop_str
-                .to_lowercase()
-                .starts_with(&search_str.to_lowercase())
+                .to_ascii_lowercase()
+                .starts_with(&search_str.to_ascii_lowercase())
         }
         "not_starts_with" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
             !prop_str
-                .to_lowercase()
-                .starts_with(&search_str.to_lowercase())
+                .to_ascii_lowercase()
+                .starts_with(&search_str.to_ascii_lowercase())
         }
         "ends_with" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
             prop_str
-                .to_lowercase()
-                .ends_with(&search_str.to_lowercase())
+                .to_ascii_lowercase()
+                .ends_with(&search_str.to_ascii_lowercase())
         }
         "not_ends_with" => {
             let prop_str = value_to_string(value);
             let search_str = value_to_string(&property.value);
             !prop_str
-                .to_lowercase()
-                .ends_with(&search_str.to_lowercase())
+                .to_ascii_lowercase()
+                .ends_with(&search_str.to_ascii_lowercase())
         }
         "regex" => {
             let prop_str = value_to_string(value);
@@ -1579,14 +1559,42 @@ fn match_property(
     })
 }
 
-fn compare_values(a: &serde_json::Value, b: &serde_json::Value) -> bool {
-    // Case-insensitive string comparison
-    if let (Some(a_str), Some(b_str)) = (a.as_str(), b.as_str()) {
-        return a_str.eq_ignore_ascii_case(b_str);
+fn compute_exact_match(value: &serde_json::Value, override_value: &serde_json::Value) -> bool {
+    if is_truthy_or_falsy_property_value(value) {
+        return is_truthy_property_value(value) == is_truthy_property_value(override_value);
     }
 
-    // Direct comparison for other types
-    a == b
+    if let Some(values) = value.as_array() {
+        return values
+            .iter()
+            .any(|candidate| compare_values(candidate, override_value));
+    }
+
+    compare_values(value, override_value)
+}
+
+fn is_truthy_or_falsy_property_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(_) => true,
+        serde_json::Value::String(value) => {
+            value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")
+        }
+        serde_json::Value::Array(values) => values.iter().all(is_truthy_or_falsy_property_value),
+        _ => false,
+    }
+}
+
+fn is_truthy_property_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(value) => *value,
+        serde_json::Value::String(value) => value.eq_ignore_ascii_case("true"),
+        serde_json::Value::Array(values) => values.iter().all(is_truthy_property_value),
+        _ => false,
+    }
+}
+
+fn compare_values(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    value_to_string(a).to_lowercase() == value_to_string(b).to_lowercase()
 }
 
 fn value_to_string(value: &serde_json::Value) -> String {
@@ -1743,6 +1751,101 @@ mod tests {
 
         properties.insert("country".to_string(), json!("UK"));
         assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    #[test]
+    fn test_property_case_folding_matches_flags_service() {
+        let matches = |operator: &str, expected, actual| {
+            let property = Property {
+                key: "key".to_string(),
+                value: expected,
+                operator: operator.to_string(),
+                property_type: None,
+            };
+            match_property(&property, &HashMap::from([("key".to_string(), actual)])).unwrap()
+        };
+
+        // Serde preserves a float's decimal point; exact matching must not collapse it to an integer.
+        assert_eq!(value_to_string(&json!(323.0)), "323.0");
+
+        let cases = [
+            // Exact matching stringifies both sides and applies Unicode lowercase.
+            ("exact", json!("PRO"), json!("pro"), true),
+            ("exact", json!("Ä"), json!("ä"), true),
+            ("exact", json!("ß"), json!("ss"), false),
+            ("exact", json!("Σ"), json!("ς"), false),
+            ("exact", json!("ΟΣ"), json!("ος"), true),
+            ("exact", json!("ΟΣ"), json!("οσ"), false),
+            ("exact", json!("İ"), json!("i\u{0307}"), true),
+            ("exact", json!("İ"), json!("i"), false),
+            ("exact", json!(323), json!("323"), true),
+            ("exact", json!(["FREE", "PRÖ"]), json!("prö"), true),
+            ("is_not", json!(["FREE", "PRÖ"]), json!("prö"), false),
+            ("is_not", json!(["FREE", "PRÖ"]), json!("team"), true),
+            ("exact", json!("323.0"), json!(323.0), true),
+            ("exact", json!("323"), json!(323.0), false),
+            // Substring and anchored operators fold ASCII only.
+            ("icontains", json!("ADMIN"), json!("admin-user"), true),
+            ("icontains", json!("Ä"), json!("äbc"), false),
+            ("not_icontains", json!("Ä"), json!("äbc"), true),
+            ("starts_with", json!("Ä"), json!("äbc"), false),
+            ("not_starts_with", json!("Ä"), json!("äbc"), true),
+            ("ends_with", json!("Ä"), json!("bcä"), false),
+            ("not_ends_with", json!("Ä"), json!("bcä"), true),
+        ];
+
+        for (operator, expected, actual, should_match) in cases {
+            let result = matches(operator, expected.clone(), actual.clone());
+            assert_eq!(
+                result, should_match,
+                "operator {operator} comparing {actual} against {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_exact_boolean_coercion_matches_flags_service() {
+        let matches = |operator: &str, expected, actual| {
+            let property = Property {
+                key: "key".to_string(),
+                value: expected,
+                operator: operator.to_string(),
+                property_type: None,
+            };
+            match_property(&property, &HashMap::from([("key".to_string(), actual)])).unwrap()
+        };
+
+        let cases = [
+            // Boolean-like filters compare aggregate truthiness before array membership.
+            (json!(false), json!("banana"), true),
+            (json!("false"), json!(0), true),
+            (json!(["false"]), json!(null), true),
+            (json!(["true", "false"]), json!("true"), false),
+            (json!(["true", "false"]), json!("pro"), true),
+            // Empty arrays are boolean-like and truthy because all() on an empty iterator is true.
+            (json!([]), json!(true), true),
+            (json!([]), json!("true"), true),
+            (json!([]), json!([]), true),
+            (json!([]), json!([true]), true),
+            (json!([]), json!(false), false),
+            (json!([]), json!("banana"), false),
+            // Non-boolean-like arrays retain ordinary ANY membership.
+            (json!(["FREE", "PRO"]), json!("pro"), true),
+            (json!(["FREE", "PRO"]), json!("team"), false),
+        ];
+
+        for (expected, actual, exact_match) in cases {
+            assert_eq!(
+                matches("exact", expected.clone(), actual.clone()),
+                exact_match,
+                "exact comparing {actual} against {expected}"
+            );
+            assert_eq!(
+                matches("is_not", expected.clone(), actual.clone()),
+                !exact_match,
+                "is_not comparing {actual} against {expected}"
+            );
+        }
     }
 
     #[test]
