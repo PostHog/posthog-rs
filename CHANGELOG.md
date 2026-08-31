@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.25.4 — 2026-08-31
+
+### Patch changes
+
+- [20cf390](https://github.com/posthog/posthog-rs/commit/20cf3903269cc03b20f650cb2dddedbda203ae15) Match local feature flag properties with the same case folding, string coercion, and boolean-like filter precedence as the flags service. Substring and prefix/suffix operators now fold ASCII only, while `exact` and `is_not` use the service's truthiness handling before Unicode-lowercase comparison. — Thanks @marandaneto!
+
 ## 0.25.3 — 2026-08-26
 
 ### Patch changes
