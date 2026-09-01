@@ -23,14 +23,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  preflight:
-    name: Release candidate preflight
+  resolve-candidate:
+    name: Resolve candidate SHA
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.candidate_ref }}
+
+      - name: Resolve immutable SHA
+        id: resolve
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  preflight:
+    name: Release candidate preflight
+    needs: resolve-candidate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-candidate.outputs.sha }}
 
       - name: Set up Rust
         run: |
@@ -48,11 +64,12 @@ jobs:
       - name: Record candidate
         env:
           CANDIDATE_REF: ${{ inputs.candidate_ref }}
+          CANDIDATE_SHA: ${{ needs.resolve-candidate.outputs.sha }}
           SOAK_DAYS: ${{ inputs.soak_days }}
         run: |
           {
             echo "candidate_ref=${CANDIDATE_REF}"
-            echo "candidate_sha=$(git rev-parse HEAD)"
+            echo "candidate_sha=${CANDIDATE_SHA}"
             echo "validated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "minimum_soak_days=${SOAK_DAYS}"
           } | tee release-candidate.txt
@@ -65,6 +82,7 @@ jobs:
 
   required-checks:
     name: Verify candidate checks
+    needs: resolve-candidate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout validation scripts
@@ -72,6 +90,6 @@ jobs:
 
       - name: Verify CI and SDK compliance checks
         env:
-          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+          CANDIDATE_SHA: ${{ needs.resolve-candidate.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
-        run: scripts/verify-release-candidate-checks.sh "$CANDIDATE_REF"
+        run: scripts/verify-release-candidate-checks.sh "$CANDIDATE_SHA"
