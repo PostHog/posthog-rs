@@ -23,10 +23,6 @@ permissions:
   contents: read
   packages: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ matrix.client }}-${{ matrix.compression }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   test-rust-sdk:
     name: ${{ matrix.client }} / ${{ matrix.compression }}
@@ -36,6 +32,9 @@ jobs:
       matrix:
         client: [async, blocking]
         compression: [gzip, deflate, br, zstd]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ matrix.client }}-${{ matrix.compression }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - name: Checkout SDK repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
