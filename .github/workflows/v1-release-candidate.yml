@@ -1,0 +1,77 @@
+name: V1 Release Candidate Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Commit SHA, tag, or branch to validate
+        required: true
+        default: v1
+        type: string
+      soak_days:
+        description: Minimum production validation period after publishing the candidate
+        required: true
+        default: '7'
+        type: string
+
+permissions:
+  contents: read
+  checks: read
+
+concurrency:
+  group: v1-release-candidate-${{ inputs.candidate_ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Release candidate preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.candidate_ref }}
+
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+          rustup toolchain install nightly-2026-06-12 --profile minimal
+
+      - name: Install public API tooling
+        run: cargo install cargo-public-api --version 0.52.0 --locked
+
+      - name: Run release candidate preflight
+        run: scripts/validate-release-candidate.sh
+
+      - name: Record candidate
+        env:
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+          SOAK_DAYS: ${{ inputs.soak_days }}
+        run: |
+          {
+            echo "candidate_ref=${CANDIDATE_REF}"
+            echo "candidate_sha=$(git rev-parse HEAD)"
+            echo "validated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "minimum_soak_days=${SOAK_DAYS}"
+          } | tee release-candidate.txt
+
+      - name: Upload candidate record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: v1-release-candidate-${{ github.run_id }}
+          path: release-candidate.txt
+
+  required-checks:
+    name: Verify candidate checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout validation scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify CI and SDK compliance checks
+        env:
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/verify-release-candidate-checks.sh "$CANDIDATE_REF"
