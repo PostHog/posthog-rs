@@ -9,15 +9,15 @@
 //!
 //! # Getting started
 //!
-//! Add `posthog-rs` to your `Cargo.toml`, then initialize a client with your
+//! Add `posthog` to your `Cargo.toml`, then initialize a client with your
 //! project API key.
 //!
 //! ```no_run
-//! use posthog_rs::{client, EvaluateFlagsOptions, Event};
+//! use posthog::{client, EvaluateFlagsOptions, Event};
 //!
 //! #[cfg(feature = "async-client")]
 //! #[tokio::main]
-//! async fn main() -> Result<(), posthog_rs::Error> {
+//! async fn main() -> Result<(), posthog::Error> {
 //!     let api_key = std::env::var("POSTHOG_API_KEY")
 //!         .expect("set POSTHOG_API_KEY to your PostHog project API key");
 //!
@@ -44,7 +44,7 @@
 //! }
 //!
 //! #[cfg(not(feature = "async-client"))]
-//! fn main() -> Result<(), posthog_rs::Error> {
+//! fn main() -> Result<(), posthog::Error> {
 //!     let api_key = std::env::var("POSTHOG_API_KEY")
 //!         .expect("set POSTHOG_API_KEY to your PostHog project API key");
 //!

@@ -1,9 +1,9 @@
 [package]
-name = "posthog-rs"
+name = "posthog"
 license = "MIT"
 version = "0.25.4"
 authors = ["PostHog <engineering@posthog.com>"]
-description = "The official Rust client for Posthog (https://posthog.com/)."
+description = "The official Rust SDK for PostHog (https://posthog.com/)."
 repository = "https://github.com/posthog/posthog-rs"
 edition = "2018"
 rust-version = "1.78.0"
@@ -54,4 +54,4 @@ test-harness = []
 error-tracking = ["dep:backtrace", "dep:findshlibs"]
 
 [workspace]
-members = [".", "compliance/adapter"]
+members = [".", "compliance/adapter", "crates/posthog-rs"]

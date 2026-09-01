@@ -1624,7 +1624,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
-name = "posthog-rs"
+name = "posthog"
 version = "0.25.4"
 dependencies = [
  "backtrace",
@@ -1649,6 +1649,13 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "posthog-rs"
+version = "0.25.4"
+dependencies = [
+ "posthog",
 ]
 
 [[package]]
@@ -1996,7 +2003,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
- "posthog-rs",
+ "posthog",
  "serde",
  "serde_json",
  "tokio",

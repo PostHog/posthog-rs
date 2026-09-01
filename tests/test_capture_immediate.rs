@@ -18,11 +18,11 @@ mod async_capture {
     use std::sync::{Arc, Mutex};
 
     use httpmock::prelude::*;
-    use posthog_rs::{Client, ClientOptionsBuilder, Event, PostHogError};
+    use posthog::{Client, ClientOptionsBuilder, Event, PostHogError};
     use serde_json::json;
 
     async fn capture_client(base_url: String) -> Client {
-        posthog_rs::client(
+        posthog::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
                 .host(base_url)
@@ -232,7 +232,7 @@ mod async_capture {
         });
 
         let (count, hook) = error_sink();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
                 .host(server.base_url())
@@ -256,7 +256,7 @@ mod async_capture {
     #[tokio::test]
     async fn disabled_and_empty_are_noops() {
         // Disabled client: no request, default summary.
-        let disabled = posthog_rs::client(
+        let disabled = posthog::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .disabled(true)
@@ -295,11 +295,11 @@ mod blocking {
     use std::sync::{Arc, Mutex};
 
     use httpmock::prelude::*;
-    use posthog_rs::{Client, ClientOptionsBuilder, Event, PostHogError};
+    use posthog::{Client, ClientOptionsBuilder, Event, PostHogError};
     use serde_json::json;
 
     fn capture_client(base_url: String) -> Client {
-        posthog_rs::client(
+        posthog::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
                 .host(base_url)
@@ -407,7 +407,7 @@ mod blocking {
 
         let count = Arc::new(Mutex::new(0usize));
         let sink = count.clone();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
                 .host(server.base_url())

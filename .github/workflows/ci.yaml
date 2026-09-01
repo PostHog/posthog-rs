@@ -137,8 +137,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Publish dry run
-        run: cargo publish --dry-run --locked
+      - name: Workspace publish dry run
+        run: cargo publish --workspace --dry-run --locked --package posthog --package posthog-rs
 
   test:
     name: ${{ matrix.name }}
@@ -153,6 +153,9 @@ jobs:
           - name: Unit test (workspace)
             cache-key: workspace
             command: cargo test --workspace --verbose
+          - name: Compatibility crate
+            cache-key: compatibility-crate
+            command: scripts/check-compatibility-crate.sh && cargo test --verbose --package posthog-rs --all-features && cargo check --verbose --package posthog-rs --no-default-features
           - name: Unit test (blocking client)
             cache-key: blocking-client
             command: cargo test --verbose --no-default-features

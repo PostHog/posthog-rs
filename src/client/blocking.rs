@@ -152,7 +152,7 @@ impl Client {
     /// # Examples
     ///
     /// ```no_run
-    /// let client = posthog_rs::client("phc_project_api_key");
+    /// let client = posthog::client("phc_project_api_key");
     ///
     /// // The visitor browsed anonymously, then logged in.
     /// client.alias("anon-abc123", "user-42");
@@ -190,7 +190,7 @@ impl Client {
     /// ```no_run
     /// use serde_json::json;
     ///
-    /// let client = posthog_rs::client("phc_project_api_key");
+    /// let client = posthog::client("phc_project_api_key");
     ///
     /// client.group_identify(
     ///     "company",
@@ -200,7 +200,7 @@ impl Client {
     ///         "employees": 11,
     ///     }),
     /// )?;
-    /// # Ok::<(), posthog_rs::Error>(())
+    /// # Ok::<(), posthog::Error>(())
     /// ```
     pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(
         &self,
@@ -311,8 +311,8 @@ impl Client {
     /// # Examples
     ///
     /// ```no_run
-    /// # fn example() -> Result<(), posthog_rs::Error> {
-    /// let client = posthog_rs::client("phc_project_api_key");
+    /// # fn example() -> Result<(), posthog::Error> {
+    /// let client = posthog::client("phc_project_api_key");
     /// let error = std::io::Error::other("checkout failed");
     ///
     /// client.capture_exception(&error)?;
@@ -336,10 +336,10 @@ impl Client {
     /// # Examples
     ///
     /// ```no_run
-    /// # fn example() -> Result<(), posthog_rs::Error> {
-    /// use posthog_rs::CaptureExceptionOptions;
+    /// # fn example() -> Result<(), posthog::Error> {
+    /// use posthog::CaptureExceptionOptions;
     ///
-    /// let client = posthog_rs::client("phc_project_api_key");
+    /// let client = posthog::client("phc_project_api_key");
     /// let error = std::io::Error::other("checkout failed");
     ///
     /// client.capture_exception_with(

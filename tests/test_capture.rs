@@ -12,10 +12,10 @@
 use std::time::Duration;
 
 use httpmock::prelude::*;
-use posthog_rs::{ClientOptionsBuilder, Event};
+use posthog::{ClientOptionsBuilder, Event};
 use serde_json::json;
 
-async fn create_capture_client(base_url: String) -> posthog_rs::Client {
+async fn create_capture_client(base_url: String) -> posthog::Client {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test_token".to_string())
         .host(base_url)
@@ -26,7 +26,7 @@ async fn create_capture_client(base_url: String) -> posthog_rs::Client {
         .retry_max_backoff_ms(2000u64)
         .build()
         .unwrap();
-    posthog_rs::client(options).await
+    posthog::client(options).await
 }
 
 // Constants required because httpmock `matches` takes bare fn pointers (no captures).
@@ -482,7 +482,7 @@ async fn capture_injects_geoip_disable_when_configured() {
         .disable_geoip(true)
         .build()
         .unwrap();
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
 
     client.capture(Event::new("test", "user-1"));
     client.flush().await;
@@ -590,7 +590,7 @@ async fn before_send_runs_after_capture_defaults() {
         })
         .build()
         .unwrap();
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
 
     client.capture(Event::new("test", "user-1"));
     client.flush().await;
@@ -624,7 +624,7 @@ async fn batch_before_send_runs_after_capture_defaults() {
         })
         .build()
         .unwrap();
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
 
     client.capture_batch(vec![Event::new("test", "user-1")], false);
     client.flush().await;
@@ -710,7 +710,7 @@ fn body_gunzips_to_user1(req: &HttpMockRequest) -> bool {
 
 #[tokio::test]
 async fn capture_sends_gzip_content_encoding() {
-    use posthog_rs::CaptureCompression;
+    use posthog::CaptureCompression;
 
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
@@ -729,7 +729,7 @@ async fn capture_sends_gzip_content_encoding() {
         .capture_compression(CaptureCompression::Gzip)
         .build()
         .unwrap();
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
 
     client.capture(Event::new("test", "user-1"));
     client.flush().await;
@@ -983,7 +983,7 @@ async fn capture_disabled_client_noop() {
         .disabled(true)
         .build()
         .unwrap();
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
 
     client.capture(Event::new("test", "user-1"));
 }

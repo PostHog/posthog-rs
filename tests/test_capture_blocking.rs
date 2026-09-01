@@ -9,10 +9,10 @@
 //! flushes. Wire-format assertions are unchanged from the synchronous model.
 
 use httpmock::prelude::*;
-use posthog_rs::{ClientOptionsBuilder, Event};
+use posthog::{ClientOptionsBuilder, Event};
 use serde_json::json;
 
-fn create_capture_client(base_url: String) -> posthog_rs::Client {
+fn create_capture_client(base_url: String) -> posthog::Client {
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test_token".to_string())
         .host(base_url)
@@ -21,7 +21,7 @@ fn create_capture_client(base_url: String) -> posthog_rs::Client {
         .retry_max_backoff_ms(50u64)
         .build()
         .unwrap();
-    posthog_rs::client(options)
+    posthog::client(options)
 }
 
 // Constants required because httpmock `matches` takes bare fn pointers (no captures).
@@ -543,7 +543,7 @@ fn blocking_injects_geoip_disable_when_configured() {
         .disable_geoip(true)
         .build()
         .unwrap();
-    let client = posthog_rs::client(options);
+    let client = posthog::client(options);
 
     client.capture(Event::new("test", "user-1"));
     client.flush();
@@ -624,7 +624,7 @@ fn body_gunzips_to_user1(req: &HttpMockRequest) -> bool {
 
 #[test]
 fn blocking_sends_gzip_content_encoding() {
-    use posthog_rs::CaptureCompression;
+    use posthog::CaptureCompression;
 
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
@@ -643,7 +643,7 @@ fn blocking_sends_gzip_content_encoding() {
         .capture_compression(CaptureCompression::Gzip)
         .build()
         .unwrap();
-    let client = posthog_rs::client(options);
+    let client = posthog::client(options);
 
     client.capture(Event::new("test", "user-1"));
     client.flush();
@@ -719,7 +719,7 @@ fn blocking_disabled_client_noop() {
         .disabled(true)
         .build()
         .unwrap();
-    let client = posthog_rs::client(options);
+    let client = posthog::client(options);
 
     client.capture(Event::new("test", "user-1"));
 }
