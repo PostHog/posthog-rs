@@ -61,7 +61,7 @@ pub posthog_rs::EventStatus::Ok
 pub posthog_rs::EventStatus::Retry
 pub posthog_rs::EventStatus::Unknown
 pub posthog_rs::EventStatus::Warning
-pub enum posthog_rs::FeatureFlagsResponse
+#[non_exhaustive] pub enum posthog_rs::FeatureFlagsResponse
 pub posthog_rs::FeatureFlagsResponse::Legacy
 pub posthog_rs::FeatureFlagsResponse::Legacy::errors: core::option::Option<alloc::vec::Vec<alloc::string::String>>
 pub posthog_rs::FeatureFlagsResponse::Legacy::feature_flag_payloads: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
@@ -118,7 +118,7 @@ pub fn posthog_rs::CaptureFailure<'a>::event_results(&self) -> &std::collections
 pub fn posthog_rs::CaptureFailure<'a>::historical_migration(&self) -> bool
 pub fn posthog_rs::CaptureFailure<'a>::request_id(&self) -> core::option::Option<&uuid::Uuid>
 pub fn posthog_rs::CaptureFailure<'a>::status(&self) -> core::option::Option<u16>
-pub struct posthog_rs::CaptureResponse
+#[non_exhaustive] pub struct posthog_rs::CaptureResponse
 pub posthog_rs::CaptureResponse::results: std::collections::hash::map::HashMap<uuid::Uuid, posthog_rs::EventResult>
 #[non_exhaustive] pub struct posthog_rs::CaptureSummary
 impl posthog_rs::CaptureSummary
@@ -238,7 +238,7 @@ pub fn posthog_rs::Event::remove_prop(&mut self, &str) -> core::option::Option<s
 pub fn posthog_rs::Event::set_timestamp<Tz>(&mut self, chrono::datetime::DateTime<Tz>) -> core::result::Result<(), posthog_rs::Error> where Tz: chrono::offset::TimeZone
 pub fn posthog_rs::Event::set_uuid(&mut self, uuid::Uuid)
 pub fn posthog_rs::Event::with_flags(&mut self, &posthog_rs::FeatureFlagEvaluations) -> &mut Self
-pub struct posthog_rs::EventResult
+#[non_exhaustive] pub struct posthog_rs::EventResult
 pub posthog_rs::EventResult::details: core::option::Option<alloc::string::String>
 pub posthog_rs::EventResult::result: posthog_rs::EventStatus
 pub struct posthog_rs::FeatureFlag
@@ -282,13 +282,13 @@ pub fn posthog_rs::FlagCache::new() -> Self
 pub fn posthog_rs::FlagCache::update(&self, posthog_rs::LocalEvaluationResponse)
 impl core::default::Default for posthog_rs::FlagCache
 pub fn posthog_rs::FlagCache::default() -> Self
-pub struct posthog_rs::FlagDetail
+#[non_exhaustive] pub struct posthog_rs::FlagDetail
 pub posthog_rs::FlagDetail::enabled: bool
 pub posthog_rs::FlagDetail::key: alloc::string::String
 pub posthog_rs::FlagDetail::metadata: core::option::Option<posthog_rs::FlagMetadata>
 pub posthog_rs::FlagDetail::reason: core::option::Option<posthog_rs::FlagReason>
 pub posthog_rs::FlagDetail::variant: core::option::Option<alloc::string::String>
-pub struct posthog_rs::FlagMetadata
+#[non_exhaustive] pub struct posthog_rs::FlagMetadata
 pub posthog_rs::FlagMetadata::description: core::option::Option<alloc::string::String>
 pub posthog_rs::FlagMetadata::has_experiment: core::option::Option<bool>
 pub posthog_rs::FlagMetadata::id: u64
@@ -302,7 +302,7 @@ pub fn posthog_rs::FlagPoller::start(&mut self)
 pub fn posthog_rs::FlagPoller::stop(&mut self)
 impl core::ops::drop::Drop for posthog_rs::FlagPoller
 pub fn posthog_rs::FlagPoller::drop(&mut self)
-pub struct posthog_rs::FlagReason
+#[non_exhaustive] pub struct posthog_rs::FlagReason
 pub posthog_rs::FlagReason::code: alloc::string::String
 pub posthog_rs::FlagReason::condition_index: core::option::Option<usize>
 pub posthog_rs::FlagReason::description: core::option::Option<alloc::string::String>
@@ -330,11 +330,13 @@ pub posthog_rs::LocalEvaluationConfig::secret_key: alloc::string::String
 impl<'a> posthog_rs::LocalEvaluationFailure<'a>
 pub fn posthog_rs::LocalEvaluationFailure<'a>::error(&self) -> &posthog_rs::Error
 pub fn posthog_rs::LocalEvaluationFailure<'a>::status(&self) -> core::option::Option<u16>
-pub struct posthog_rs::LocalEvaluationResponse
+#[non_exhaustive] pub struct posthog_rs::LocalEvaluationResponse
 pub posthog_rs::LocalEvaluationResponse::cohorts: std::collections::hash::map::HashMap<alloc::string::String, posthog_rs::Cohort>
 pub posthog_rs::LocalEvaluationResponse::flags: alloc::vec::Vec<posthog_rs::FeatureFlag>
 pub posthog_rs::LocalEvaluationResponse::group_type_mapping: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub posthog_rs::LocalEvaluationResponse::minimal_flag_called_events: bool
+impl posthog_rs::LocalEvaluationResponse
+pub fn posthog_rs::LocalEvaluationResponse::new(alloc::vec::Vec<posthog_rs::FeatureFlag>) -> Self
 pub struct posthog_rs::LocalEvaluator
 impl posthog_rs::LocalEvaluator
 pub fn posthog_rs::LocalEvaluator::cache(&self) -> &posthog_rs::FlagCache

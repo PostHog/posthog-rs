@@ -480,7 +480,7 @@ impl Client {
         self.send_immediate(events, historical_migration).await
     }
 
-    /// Inline V1 capture: prepare once via the shared sans-IO helpers, then loop
+    /// Inline capture: prepare once via the shared sans-I/O helpers, then loop
     /// send/classify, awaiting `tokio::time::sleep` between retries. The setup and
     /// classification are shared with the blocking client; only this loop differs.
     async fn send_immediate(

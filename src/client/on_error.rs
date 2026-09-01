@@ -127,14 +127,14 @@ impl<'a> CaptureFailure<'a> {
         self.historical_migration
     }
 
-    /// The V1 capture `posthog-request-id` of the final attempt, when one was
-    /// sent. `None` for a serialization failure (no request reached the wire)
-    /// and on the v0 pipeline (which has no request id).
+    /// The capture `posthog-request-id` of the final attempt, when one was
+    /// sent. `None` for a serialization failure where no request reached the
+    /// wire.
     pub fn request_id(&self) -> Option<&Uuid> {
         self.request_id
     }
 
-    /// Per-event server verdicts for the batch (V1 capture pipeline only).
+    /// Per-event server verdicts for the capture batch.
     ///
     /// Maps event UUID to its [`EventResult`]. Includes **all** verdicts the
     /// batch collected — persisted (`ok`/`warning`) as well as lost
@@ -148,7 +148,7 @@ impl<'a> CaptureFailure<'a> {
         self.results
     }
 
-    /// The structured error body returned by the V1 capture backend on a
+    /// The structured error body returned by the capture backend on a
     /// non-`2xx` response (`error`, `error_description`, `error_uri`), when the
     /// body parsed as one. `None` for a transport error, a `2xx`, or an
     /// unrecognizable body — the raw body remains available via

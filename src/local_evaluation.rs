@@ -57,6 +57,7 @@ fn report_local_eval_error(hooks: &[OnErrorHook], status: Option<u16>, error: &E
 /// Contains feature flag definitions, group type mappings, and cohort definitions
 /// that can be cached locally for flag evaluation without server round-trips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LocalEvaluationResponse {
     /// List of feature flag definitions
     pub flags: Vec<FeatureFlag>,
@@ -71,6 +72,21 @@ pub struct LocalEvaluationResponse {
     /// strict property allowlist. Absent fails safe to `false` (full event).
     #[serde(default)]
     pub minimal_flag_called_events: bool,
+}
+
+impl LocalEvaluationResponse {
+    /// Create a local-evaluation response from feature flag definitions.
+    ///
+    /// Group mappings, cohorts, and minimized flag-called events default to
+    /// empty or disabled and can be assigned through their public fields.
+    pub fn new(flags: Vec<FeatureFlag>) -> Self {
+        Self {
+            flags,
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+            minimal_flag_called_events: false,
+        }
+    }
 }
 
 /// A cohort definition for local evaluation.

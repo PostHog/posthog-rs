@@ -8,9 +8,9 @@ use reqwest::header::HeaderMap;
 use super::ClientOptions;
 use crate::error::Error;
 
-/// Outcome of one capture attempt, computed without any I/O so both the async
-/// and blocking clients (and both V0 and V1) can share the decision logic and
-/// keep only the transport-specific loop.
+/// Outcome of one capture attempt, computed without any I/O so the async and
+/// blocking clients can share the decision logic and keep only the
+/// transport-specific loop.
 #[derive(Debug)]
 pub(crate) enum Step {
     Done,
@@ -402,7 +402,7 @@ mod tests {
         );
     }
 
-    // -- v0 sans-IO decisions ------------------------------------------------
+    // -- Feature flag sans-I/O decisions -------------------------------------
 
     /// The schedule the call sites actually produce. Guards the `attempt + 1`
     /// off-by-one: the first retry must wait exactly `retry_initial_backoff_ms`

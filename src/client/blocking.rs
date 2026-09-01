@@ -461,7 +461,7 @@ impl Client {
         self.send_immediate(events, historical_migration)
     }
 
-    /// Inline V1 capture: prepare once via the shared sans-IO helpers, then loop
+    /// Inline capture: prepare once via the shared sans-I/O helpers, then loop
     /// send/classify, sleeping on the calling thread between retries. The setup and
     /// classification are shared with the async client; only this loop differs.
     fn send_immediate(

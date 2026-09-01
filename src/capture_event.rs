@@ -172,6 +172,7 @@ pub enum EventStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct EventResult {
     pub result: EventStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -179,6 +180,7 @@ pub struct EventResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CaptureResponse {
     pub results: HashMap<Uuid, EventResult>,
 }
