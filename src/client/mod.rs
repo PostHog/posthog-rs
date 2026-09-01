@@ -236,8 +236,7 @@ pub struct ClientOptions {
     pub(crate) shutdown_timeout_ms: u64,
 
     /// Optional request-body compression. When `None` (default), bodies are
-    /// sent uncompressed. The V0 pipeline supports `Gzip` only; V1 supports all
-    /// variants.
+    /// sent uncompressed. The capture endpoint supports all variants.
     #[builder(default, setter(strip_option))]
     pub(crate) capture_compression: Option<CaptureCompression>,
 
@@ -268,10 +267,9 @@ pub struct ClientOptions {
 
 /// Resolved client-level default properties for capture requests.
 ///
-/// Built once from [`ClientOptions`] and threaded through all event-producing
-/// paths (V0 capture, V0 flag-called host, V1 capture) so each default is
-/// applied in exactly one place with caller-wins (`entry().or_insert`)
-/// semantics.
+/// Built once from [`ClientOptions`] and threaded through every event-producing
+/// path so each default is applied in exactly one place with caller-wins
+/// (`entry().or_insert`) semantics.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CaptureDefaults {
     pub(crate) disable_geoip: bool,

@@ -317,6 +317,7 @@ pub struct MultivariateVariant {
 /// legacy format (simple flag values and payloads).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum FeatureFlagsResponse {
     /// v2 API format from `/flags/?v=2` endpoint
     V2 {
@@ -411,6 +412,7 @@ impl FeatureFlagsResponse {
 /// Returned by the `/flags/?v=2` endpoint with extended information about why a
 /// flag evaluated to a particular value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FlagDetail {
     /// The feature flag key
     pub key: String,
@@ -428,6 +430,7 @@ pub struct FlagDetail {
 
 /// Explains why a feature flag evaluated to a particular value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FlagReason {
     /// Reason code (e.g., "condition_match", "out_of_rollout_bound")
     pub code: String,
@@ -441,6 +444,7 @@ pub struct FlagReason {
 
 /// Metadata about a feature flag from the PostHog server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FlagMetadata {
     /// Unique identifier for this flag
     pub id: u64,

@@ -1,4 +1,4 @@
-//! Shared, runtime-agnostic helpers for the V1 capture pipeline.
+//! Shared, runtime-agnostic helpers for the capture pipeline.
 //! Each client keeps only the I/O; this module owns everything else.
 
 use std::{collections::HashMap, time::Duration};
@@ -9,7 +9,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::retry::{backoff_duration, is_retryable_status};
-// Re-exported so the V1 capture loops in the client modules can reach them as
+// Re-exported so the capture loops in the client modules can reach them as
 // `capture::parse_retry_after` / `capture::Step`.
 pub(crate) use super::retry::{parse_retry_after, Step};
 use super::{
@@ -141,7 +141,7 @@ pub(crate) fn maybe_compress(
 // Inline (immediate) capture preparation
 // ---------------------------------------------------------------------------
 
-/// Everything an inline immediate V1 capture needs after event preparation:
+/// Everything an inline immediate capture needs after event preparation:
 /// built once, then reused across retry attempts. The async and blocking
 /// clients share this (it is I/O-free) and keep only the send loop.
 pub(crate) struct Prepared {
@@ -153,7 +153,7 @@ pub(crate) struct Prepared {
     pub(crate) submitted: usize,
 }
 
-/// Prepare an inline immediate V1 capture: apply client defaults + `before_send`,
+/// Prepare an inline immediate capture: apply client defaults + `before_send`,
 /// then build the wire events and the per-request identity (request id,
 /// `created_at`, URL). Returns `None` when nothing survives filtering (an empty
 /// or fully `before_send`-dropped batch), so the caller returns a default
@@ -270,7 +270,7 @@ pub(crate) fn after_transport_error(
         request_id = %request_id,
         attempt,
         error = %err_msg,
-        "V1 capture request failed, will retry"
+        "Capture request failed, will retry"
     );
     Step::Backoff(backoff_duration(opts, attempt, None))
 }
@@ -300,7 +300,7 @@ pub(crate) fn after_response(
                 request_id = %request_id,
                 attempt,
                 results = ?result_counts,
-                "V1 capture batch response"
+                "Capture batch response"
             );
         }
 
@@ -329,7 +329,7 @@ pub(crate) fn after_response(
             attempt,
             status,
             error = %error_desc,
-            "V1 capture request failed, will retry"
+            "Capture request failed, will retry"
         );
 
         if attempt >= opts.max_capture_attempts {

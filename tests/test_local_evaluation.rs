@@ -39,12 +39,7 @@ fn test_local_evaluation_basic() {
     };
 
     // Update cache with the flag
-    let response = LocalEvaluationResponse {
-        flags: vec![flag],
-        group_type_mapping: HashMap::new(),
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    };
+    let response = LocalEvaluationResponse::new(vec![flag]);
     cache.update(response);
 
     // Test evaluation
@@ -302,12 +297,7 @@ fn test_local_evaluation_with_properties() {
     };
 
     // Update cache
-    let response = LocalEvaluationResponse {
-        flags: vec![flag],
-        group_type_mapping: HashMap::new(),
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    };
+    let response = LocalEvaluationResponse::new(vec![flag]);
     cache.update(response);
 
     // Test with matching properties
@@ -731,12 +721,7 @@ fn test_cache_operations() {
         },
     ];
 
-    let response = LocalEvaluationResponse {
-        flags: flags.clone(),
-        group_type_mapping: HashMap::new(),
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    };
+    let response = LocalEvaluationResponse::new(flags.clone());
 
     cache.update(response);
 
@@ -1274,12 +1259,9 @@ fn cache_with(flag: FeatureFlag) -> FlagCache {
     let cache = FlagCache::new();
     let mut group_type_mapping = HashMap::new();
     group_type_mapping.insert("0".to_string(), "company".to_string());
-    cache.update(LocalEvaluationResponse {
-        flags: vec![flag],
-        group_type_mapping,
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    });
+    let mut response = LocalEvaluationResponse::new(vec![flag]);
+    response.group_type_mapping = group_type_mapping;
+    cache.update(response);
     cache
 }
 
