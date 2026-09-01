@@ -138,6 +138,46 @@ fn compression_capability(c: CaptureCompression) -> &'static str {
     }
 }
 
+async fn build_client(options: posthog_rs::ClientOptions) -> Client {
+    #[cfg(feature = "async-client")]
+    {
+        posthog_rs::client(options).await
+    }
+    #[cfg(not(feature = "async-client"))]
+    {
+        posthog_rs::client(options)
+    }
+}
+
+async fn evaluate_flags(
+    client: &Client,
+    distinct_id: String,
+    options: EvaluateFlagsOptions,
+) -> Result<posthog_rs::FeatureFlagEvaluations, posthog_rs::Error> {
+    #[cfg(feature = "async-client")]
+    {
+        client.evaluate_flags(distinct_id, options).await
+    }
+    #[cfg(not(feature = "async-client"))]
+    {
+        client.evaluate_flags(distinct_id, options)
+    }
+}
+
+async fn flush_client(client: &Client) {
+    #[cfg(feature = "async-client")]
+    client.flush().await;
+    #[cfg(not(feature = "async-client"))]
+    client.flush();
+}
+
+async fn shutdown_client(client: &Client) {
+    #[cfg(feature = "async-client")]
+    client.shutdown().await;
+    #[cfg(not(feature = "async-client"))]
+    client.shutdown();
+}
+
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     // `capture_v1` is the harness contract key that selects the capture suite
     // (see `requires:` in contracts/capture_analytics_v1_tests.yaml) — it is a
@@ -203,7 +243,7 @@ async fn init(
 
     match builder.build() {
         Ok(opts) => {
-            let client = posthog_rs::client(opts).await;
+            let client = build_client(opts).await;
             s.client = Some(Arc::new(client));
             Json(serde_json::json!({ "success": true })).into_response()
         }
@@ -312,7 +352,7 @@ async fn get_feature_flag(
     options.disable_geoip = req.disable_geoip;
     options.flag_keys = Some(vec![key.clone()]);
 
-    match client.evaluate_flags(req.distinct_id, options).await {
+    match evaluate_flags(&client, req.distinct_id, options).await {
         Ok(flags) => {
             let value = flags.get_flag(&key);
             Json(serde_json::json!({ "success": true, "value": value })).into_response()
@@ -350,7 +390,7 @@ async fn flush(
     };
 
     let before = client.pending_events() as u64;
-    client.flush().await;
+    flush_client(&client).await;
     let flushed = before.saturating_sub(client.pending_events() as u64);
 
     Json(serde_json::json!({
@@ -378,7 +418,7 @@ async fn shutdown(
         }
     };
 
-    client.shutdown().await;
+    shutdown_client(&client).await;
     Json(serde_json::json!({ "success": true })).into_response()
 }
 
@@ -433,8 +473,13 @@ async fn main() {
         Some(algo) => compression_capability(algo),
         None => "none",
     };
+    let client_mode = if cfg!(feature = "async-client") {
+        "async"
+    } else {
+        "blocking"
+    };
     eprintln!(
-        "Starting posthog-rs SDK adapter (compression={compression_str}, parallel={SUPPORTS_PARALLEL})"
+        "Starting posthog-rs SDK adapter (client={client_mode}, compression={compression_str}, parallel={SUPPORTS_PARALLEL})"
     );
 
     let state = AppState {
