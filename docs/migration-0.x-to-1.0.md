@@ -40,7 +40,7 @@ All event-producing SDK paths now use the same capture endpoint, including error
 
 The V1 endpoint returns a result for each event. The SDK retries transient request failures and only the events with retryable results from a partial response.
 
-`CaptureSummary::not_persisted()` and `CaptureSummary::all_persisted()` now use those per-event results. In the V0 path they reported a successful `2xx` as fully persisted without per-event confirmation. Applications that advance durable state after `capture_immediate` should check `all_persisted()` under the new semantics.
+`CaptureSummary::not_persisted()` and `CaptureSummary::all_persisted()` now use those per-event results. In the V0 path they reported a successful `2xx` as fully persisted without per-event confirmation. Applications that advance durable state after `capture_immediate` should check both that `submitted()` equals the number of intended events and that `all_persisted()` is true, because disabled clients and fully `before_send`-filtered batches submit no events but still report `all_persisted()` as true.
 
 HTTP 429 is not a retryable V1 capture status. The V1 service uses HTTP 402 for billing limits and per-event `drop` or `warning` results in successful responses. `Retry-After` is still honored for retryable failures and retry results.
 
