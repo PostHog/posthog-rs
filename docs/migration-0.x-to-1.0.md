@@ -1,6 +1,6 @@
 # Migrating from posthog-rs 0.x to 1.0
 
-Version 1.0 makes the V1 analytics endpoint the SDK's only capture path and removes APIs that were already deprecated in 0.x. This guide describes the changes currently staged on the `v1` branch. The package rename described below lands separately in [PR #183](https://github.com/PostHog/posthog-rs/pull/183).
+Version 1.0 makes the V1 analytics endpoint the SDK's only capture path and removes APIs that were already deprecated in 0.x. This guide describes the changes currently staged on the `v1` branch.
 
 ## Cargo features
 
@@ -105,31 +105,3 @@ let options = posthog_rs::ClientOptionsBuilder::default()
 ```
 
 `secret_key` accepts either a project secret key (`phs_...`) or a personal API key (`phx_...`). Do not send this key as an event property.
-
-## Planned package rename
-
-[PR #183](https://github.com/PostHog/posthog-rs/pull/183) plans to publish the implementation as `posthog` and retain `posthog-rs` as a compatibility crate that re-exports it. Once that PR is part of the release branch, new applications should depend on and import `posthog`:
-
-```toml
-posthog = "1"
-```
-
-```rust
-use posthog::{client, Event};
-```
-
-Existing applications may stay on the `posthog-rs` compatibility package during the announced compatibility period. The exact retirement timeline is not decided yet in [issue #178](https://github.com/PostHog/posthog-rs/issues/178), so do not remove `posthog-rs` solely based on this guide until the v1 release notes confirm the package plan.
-
-## TLS configuration
-
-The proposed `rustls-no-provider` feature from [PR #201](https://github.com/PostHog/posthog-rs/pull/201) is not part of the current `v1` branch. No TLS migration is documented yet. Recheck the final v1 release notes if that work is revived before 1.0.
-
-## Upgrade checklist
-
-1. Remove the `capture-v1` Cargo feature.
-2. Replace deprecated feature flag calls with `evaluate_flags` snapshots.
-3. Replace `personal_api_key` configuration with `secret_key`.
-4. Rename `V1ErrorResponse` and remove any use of `Endpoint::Batch`.
-5. Review immediate-capture persistence checks and configured compression.
-6. Run both your default async build and any `default-features = false` blocking build.
-7. Apply the package rename only after PR #183 is included in the release branch.
