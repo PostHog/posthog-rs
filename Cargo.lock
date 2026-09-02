@@ -1641,6 +1641,7 @@ dependencies = [
  "os_info",
  "regex",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha1 0.11.0",
@@ -1887,6 +1888,7 @@ checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",

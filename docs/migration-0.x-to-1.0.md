@@ -14,15 +14,17 @@ posthog-rs = { version = "0.25", features = ["capture-v1"] }
 posthog-rs = "1"
 ```
 
-The default features remain the async client and error tracking. Use `default-features = false` for the blocking client.
+The default features are the async client, error tracking, and TLS. Use `default-features = false` for the blocking client and explicitly enable a TLS feature when sending to an HTTPS endpoint.
 
 ```toml
-# Async client with error tracking
+# Async client with error tracking and TLS
 posthog-rs = "1"
 
-# Blocking client without error tracking
-posthog-rs = { version = "1", default-features = false }
+# Blocking client with TLS
+posthog-rs = { version = "1", default-features = false, features = ["tls"] }
 ```
+
+TLS was previously enabled even with `default-features = false`. In 1.0, choose `tls` to use reqwest's default Rustls provider, or choose `tls-no-provider` when the application installs a process-level Rustls `CryptoProvider`. The latter avoids pulling in `aws-lc-rs` from this SDK, but constructing a client before installing a provider will panic. Cargo features are additive, so `tls-no-provider` only avoids the built-in provider when no dependency enables `tls`.
 
 The V0 capture implementation and its `/i/v0/e/` and batch plumbing have been removed. `Endpoint::Batch` no longer exists, and `Endpoint::Capture` now resolves to `/i/v1/analytics/events`.
 

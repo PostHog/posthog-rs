@@ -10,7 +10,6 @@ rust-version = "1.78.0"
 
 [dependencies]
 reqwest = { version = "0.13.2", default-features = false, features = [
-    "rustls",
     "blocking",
     "json",
     "gzip",
@@ -38,6 +37,10 @@ zstd = "0.13"
 
 [dev-dependencies]
 dotenv = "0.15.0"
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+] }
 ctor = "1.0.12"
 tokio = { version = "1", features = ["full"] }
 httpmock = "0.8"
@@ -47,11 +50,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eyre = "0.6.12"
 
 [features]
-default = ["async-client", "error-tracking"]
+default = ["async-client", "error-tracking", "tls"]
 e2e-test = []
 async-client = ["tokio"]
 test-harness = []
 error-tracking = ["dep:backtrace", "dep:findshlibs"]
+tls = ["reqwest/rustls"]
+tls-no-provider = ["reqwest/rustls-no-provider"]
 
 [workspace]
 members = [".", "compliance/adapter"]

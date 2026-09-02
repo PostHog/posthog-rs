@@ -87,6 +87,12 @@ jobs:
             toolchain: stable
             cache-key: blocking-client
             command: cargo build --verbose --no-default-features
+          - name: TLS without a built-in provider
+            toolchain: stable
+            cache-key: tls-no-provider
+            command: >-
+              cargo build --verbose --no-default-features --features async-client,error-tracking,tls-no-provider
+              && ! cargo tree --package posthog-rs --edges normal --invert aws-lc-sys --no-default-features --features async-client,error-tracking,tls-no-provider
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -159,9 +165,15 @@ jobs:
           - name: Unit test (error-tracking, blocking client)
             cache-key: error-tracking-blocking-client
             command: cargo test --verbose --no-default-features --features error-tracking
+          - name: TLS without a built-in provider (async client)
+            cache-key: tls-no-provider-async
+            command: cargo test --verbose --no-default-features --features async-client,tls-no-provider --test test_tls_no_provider
+          - name: TLS without a built-in provider (blocking client)
+            cache-key: tls-no-provider-blocking
+            command: cargo test --verbose --no-default-features --features tls-no-provider --test test_tls_no_provider
           - name: E2E test
             cache-key: e2e
-            command: cargo test --verbose --features e2e-test --no-default-features
+            command: cargo test --verbose --features e2e-test,tls --no-default-features
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
