@@ -1,4 +1,5 @@
 use std::any::{type_name, type_name_of_val};
+use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::io::Write;
 use std::panic::{self, AssertUnwindSafe};
@@ -368,6 +369,7 @@ fn build_panic_event(
         event.insert_prop("$exception_panic_line", location.line())?;
         event.insert_prop("$exception_panic_column", location.column())?;
     }
+    event.insert_prop("$exception_source", "rust.panic_hook")?;
     exception.write_into(&mut event, et_options)?;
     Ok(event)
 }
@@ -502,6 +504,9 @@ where
         None => Event::new_anon("$exception"),
     };
     for (key, value) in properties {
+        if is_reserved_exception_property(&key) {
+            continue;
+        }
         event.insert_prop(key, value)?;
     }
     for (group_name, group_id) in groups {
@@ -555,9 +560,20 @@ impl Exception {
             stacktrace: None,
         }];
 
+        // Include the value alongside the address: zero-sized error values in a
+        // chain may legitimately share an address even when they are distinct.
+        let mut seen =
+            HashSet::from([(error as *const E as *const () as usize, error_value(error))]);
         let mut source = error.source();
         while let Some(err) = source {
             if items.len() >= MAX_ERROR_SOURCES {
+                break;
+            }
+            let identity = (
+                err as *const dyn StdError as *const () as usize,
+                error_value(err),
+            );
+            if !seen.insert(identity) {
                 break;
             }
             items.push(ExceptionItem {
@@ -607,7 +623,7 @@ impl Exception {
             items: vec![ExceptionItem {
                 exception_type: exception_type.into(),
                 value: value.into(),
-                mechanism: ExceptionMechanism::default(),
+                mechanism: ExceptionMechanism::synthetic(),
                 stacktrace: None,
             }],
             captured_frames,
@@ -634,8 +650,9 @@ impl Exception {
                 value: panic_message(panic_info),
                 mechanism: ExceptionMechanism {
                     mechanism_type: "panic".to_string(),
-                    handled: false,
-                    synthetic: false,
+                    handled: Some(false),
+                    synthetic: Some(false),
+                    source: None,
                     exception_id: None,
                     parent_id: None,
                 },
@@ -657,7 +674,9 @@ impl Exception {
 
     /// Set the exception severity level. Defaults to `"error"`.
     pub(crate) fn set_level<S: Into<String>>(&mut self, level: S) {
-        self.level = level.into();
+        self.level = normalize_exception_level(&level.into())
+            .unwrap_or("error")
+            .to_string();
     }
 
     /// Apply client-level Error Tracking options (in-app classification, frame
@@ -674,6 +693,9 @@ impl Exception {
         if items.is_empty() {
             return Ok(());
         }
+        // The final event assembler owns deterministic linkage, including the
+        // required linkage-only data for a single exception.
+        link_exception_chain(&mut items);
 
         let mut debug_images = Vec::new();
         if let Some(mut frames) = captured_frames {
@@ -727,8 +749,13 @@ pub(crate) struct ExceptionItem {
 pub(crate) struct ExceptionMechanism {
     #[serde(rename = "type")]
     pub mechanism_type: String,
-    pub handled: bool,
-    pub synthetic: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthetic: Option<bool>,
+    /// Relationship through which a nested exception was reached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Position in the cause chain, `0` being the outermost error. Only set when
     /// the exception is part of a multi-error chain.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -742,12 +769,54 @@ impl Default for ExceptionMechanism {
     fn default() -> Self {
         Self {
             mechanism_type: "generic".to_string(),
-            handled: true,
-            synthetic: false,
+            handled: Some(true),
+            synthetic: Some(false),
+            source: None,
             exception_id: None,
             parent_id: None,
         }
     }
+}
+
+impl ExceptionMechanism {
+    fn synthetic() -> Self {
+        Self {
+            synthetic: Some(true),
+            ..Self::default()
+        }
+    }
+}
+
+fn normalize_exception_level(level: &str) -> Option<&'static str> {
+    match level.to_ascii_lowercase().as_str() {
+        "fatal" | "critical" | "alert" | "emergency" => Some("fatal"),
+        "error" => Some("error"),
+        "warning" | "warn" => Some("warning"),
+        "log" => Some("log"),
+        "notice" | "info" => Some("info"),
+        "trace" | "debug" => Some("debug"),
+        _ => None,
+    }
+}
+
+fn is_reserved_exception_property(key: &str) -> bool {
+    matches!(
+        key,
+        "$exception_list"
+            | "$exception_level"
+            | "$exception_source"
+            | "$debug_images"
+            | "$exception_handled"
+            | "$exception_types"
+            | "$exception_values"
+            | "$exception_sources"
+            | "$exception_functions"
+            | "$exception_fingerprint_version"
+            | "$exception_fingerprint_record"
+            | "$exception_issue_id"
+            | "$exception_release"
+            | "$cymbal_errors"
+    )
 }
 
 /// A normalized stacktrace.
@@ -1411,17 +1480,15 @@ fn source_type_name(error: &(dyn StdError + 'static)) -> String {
 }
 
 /// Link a multi-error chain so each source points at the error it came from,
-/// mirroring the `$exception_list` chaining other PostHog SDKs emit. Single
-/// exceptions are left unlinked.
+/// mirroring the `$exception_list` chaining other PostHog SDKs emit.
 fn link_exception_chain(exception_list: &mut [ExceptionItem]) {
-    if exception_list.len() < 2 {
-        return;
-    }
     for (index, item) in exception_list.iter_mut().enumerate() {
         item.mechanism.exception_id = Some(index);
         if index > 0 {
             item.mechanism.parent_id = Some(index - 1);
             item.mechanism.mechanism_type = "chained".to_string();
+            item.mechanism.source = Some("cause".to_string());
+            item.mechanism.handled = None;
         }
     }
 }
@@ -2271,6 +2338,8 @@ mod tests {
         assert_eq!(exception_list[0]["stacktrace"]["type"], "raw");
         assert_eq!(exception_list[1]["value"], "database unavailable");
         assert_eq!(exception_list[1]["mechanism"]["type"], "chained");
+        assert_eq!(exception_list[1]["mechanism"]["source"], "cause");
+        assert!(exception_list[1]["mechanism"].get("handled").is_none());
         assert_eq!(exception_list[1]["mechanism"]["exception_id"], 1);
         assert_eq!(exception_list[1]["mechanism"]["parent_id"], 0);
 
