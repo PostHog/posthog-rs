@@ -1,9 +1,7 @@
-//! Shared, runtime-agnostic helpers for the V1 capture pipeline.
+//! Shared, runtime-agnostic helpers for the capture pipeline.
 //! Each client keeps only the I/O; this module owns everything else.
 
 use std::{collections::HashMap, time::Duration};
-
-pub(crate) const V1_CAPTURE_PATH: &str = "/i/v1/analytics/events";
 
 use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
@@ -11,19 +9,20 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::retry::{backoff_duration, is_retryable_status};
-// Re-exported so the V1 capture loops in the client modules can reach them as
-// `v1_capture::parse_retry_after` / `v1_capture::Step`.
+// Re-exported so the capture loops in the client modules can reach them as
+// `capture::parse_retry_after` / `capture::Step`.
 pub(crate) use super::retry::{parse_retry_after, Step};
 use super::{
-    common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
+    common::{apply_runtime_context, preprocess_capture_event},
     CaptureCompression, CaptureDefaults, ClientOptions,
 };
+use crate::capture_event::{
+    BatchRequestRef, CaptureErrorResponse, CaptureEvent, CaptureResponse, EventResult, EventStatus,
+};
 use crate::client::get_default_user_agent;
+use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::event::{is_minimal_flag_called_property, Event};
-use crate::event_v1::{
-    CaptureResponse, EventResult, EventStatus, V1BatchRequestRef, V1ErrorResponse, V1Event,
-};
 
 // ---------------------------------------------------------------------------
 // Request building
@@ -35,14 +34,14 @@ pub(crate) fn build_events_at(
     events: &[Event],
     defaults: &CaptureDefaults,
     now: DateTime<Utc>,
-) -> Vec<V1Event> {
+) -> Vec<CaptureEvent> {
     events
         .iter()
         .map(|event| {
             let mut event = event.clone();
             apply_runtime_context(&mut event);
             let minimal = event.is_minimal_flag_called();
-            let mut v1 = V1Event::from_event_at(&event, now);
+            let mut v1 = CaptureEvent::from_event_at(&event, now);
             if let serde_json::Value::Object(ref mut map) = v1.properties {
                 if defaults.disable_geoip {
                     map.entry("$geoip_disable")
@@ -142,19 +141,19 @@ pub(crate) fn maybe_compress(
 // Inline (immediate) capture preparation
 // ---------------------------------------------------------------------------
 
-/// Everything an inline immediate V1 capture needs after event preparation:
+/// Everything an inline immediate capture needs after event preparation:
 /// built once, then reused across retry attempts. The async and blocking
 /// clients share this (it is I/O-free) and keep only the send loop.
-pub(crate) struct PreparedV1 {
+pub(crate) struct Prepared {
     pub(crate) url: String,
     pub(crate) request_id: Uuid,
     pub(crate) created_at: String,
     pub(crate) historical_migration: Option<bool>,
-    pub(crate) pending: Vec<V1Event>,
+    pub(crate) pending: Vec<CaptureEvent>,
     pub(crate) submitted: usize,
 }
 
-/// Prepare an inline immediate V1 capture: apply client defaults + `before_send`,
+/// Prepare an inline immediate capture: apply client defaults + `before_send`,
 /// then build the wire events and the per-request identity (request id,
 /// `created_at`, URL). Returns `None` when nothing survives filtering (an empty
 /// or fully `before_send`-dropped batch), so the caller returns a default
@@ -163,14 +162,11 @@ pub(crate) fn prepare_immediate(
     opts: &ClientOptions,
     events: Vec<Event>,
     historical_migration: bool,
-) -> Option<PreparedV1> {
+) -> Option<Prepared> {
     let defaults = opts.capture_defaults();
     let events: Vec<Event> = events
         .into_iter()
-        .filter_map(|mut event| {
-            apply_capture_defaults(&mut event, &defaults);
-            apply_before_send_hooks(&opts.before_send, event)
-        })
+        .filter_map(|event| preprocess_capture_event(event, &defaults, &opts.before_send))
         .collect();
     if events.is_empty() {
         return None;
@@ -179,10 +175,10 @@ pub(crate) fn prepare_immediate(
     let request_id = Uuid::now_v7();
     let created_at = Utc::now().to_rfc3339();
     let historical_migration = historical_migration.then_some(true);
-    let url = opts.endpoints().build_custom_url(V1_CAPTURE_PATH);
+    let url = opts.endpoints().build_url(Endpoint::Capture);
     let pending = build_events_at(&events, &defaults, Utc::now());
     let submitted = pending.len();
-    Some(PreparedV1 {
+    Some(Prepared {
         url,
         request_id,
         created_at,
@@ -201,9 +197,9 @@ pub(crate) fn build_attempt_parts(
     attempt: u32,
     created_at: &str,
     historical_migration: Option<bool>,
-    pending: &[V1Event],
+    pending: &[CaptureEvent],
 ) -> Result<(HeaderMap, Vec<u8>), Error> {
-    let request = V1BatchRequestRef {
+    let request = BatchRequestRef {
         created_at,
         historical_migration,
         batch: pending,
@@ -233,11 +229,11 @@ pub(crate) fn count_results(resp: &CaptureResponse) -> HashMap<(String, Option<S
 /// O(n) consuming pass: records terminal results, returns only retry events.
 /// Events absent from `results` are silently dropped.
 pub(crate) fn process_batch_response(
-    pending: Vec<V1Event>,
+    pending: Vec<CaptureEvent>,
     results: &HashMap<Uuid, EventResult>,
     final_results: &mut HashMap<Uuid, EventResult>,
     is_final_attempt: bool,
-) -> Vec<V1Event> {
+) -> Vec<CaptureEvent> {
     let mut next = Vec::new();
     for v1 in pending {
         match results.get(&v1.uuid) {
@@ -274,7 +270,7 @@ pub(crate) fn after_transport_error(
         request_id = %request_id,
         attempt,
         error = %err_msg,
-        "V1 capture request failed, will retry"
+        "Capture request failed, will retry"
     );
     Step::Backoff(backoff_duration(opts, attempt, None))
 }
@@ -287,7 +283,7 @@ pub(crate) fn after_response(
     status: u16,
     retry_after: Option<Duration>,
     body: &str,
-    pending: &mut Vec<V1Event>,
+    pending: &mut Vec<CaptureEvent>,
     final_results: &mut HashMap<Uuid, EventResult>,
 ) -> Step {
     // The backend sends exactly 200 today; accept the whole 2xx class so a
@@ -304,7 +300,7 @@ pub(crate) fn after_response(
                 request_id = %request_id,
                 attempt,
                 results = ?result_counts,
-                "V1 capture batch response"
+                "Capture batch response"
             );
         }
 
@@ -323,7 +319,7 @@ pub(crate) fn after_response(
             Step::Backoff(backoff_duration(opts, attempt, retry_after))
         }
     } else if is_retryable_status(status) {
-        let error_desc = serde_json::from_str::<V1ErrorResponse>(body)
+        let error_desc = serde_json::from_str::<CaptureErrorResponse>(body)
             .ok()
             .and_then(|e| e.error_description)
             .unwrap_or_else(|| body.to_string());
@@ -333,23 +329,25 @@ pub(crate) fn after_response(
             attempt,
             status,
             error = %error_desc,
-            "V1 capture request failed, will retry"
+            "Capture request failed, will retry"
         );
 
         if attempt >= opts.max_capture_attempts {
-            Step::Fail(
-                Error::from_http_response(status, body.to_string())
-                    .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))),
-            )
+            Step::Fail(terminal_response_error(status, body))
         } else {
             Step::Backoff(backoff_duration(opts, attempt, retry_after))
         }
     } else {
-        Step::Fail(
-            Error::from_http_response(status, body.to_string())
-                .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))),
-        )
+        Step::Fail(terminal_response_error(status, body))
     }
+}
+
+/// Convert a terminal HTTP response into its status-specific SDK error. The
+/// fallback preserves the prior defensive behavior if a success status ever
+/// reaches a terminal branch.
+fn terminal_response_error(status: u16, body: &str) -> Error {
+    Error::from_http_response(status, body.to_string())
+        .unwrap_or_else(|| Error::Connection(format!("HTTP {status}")))
 }
 
 #[cfg(test)]
@@ -359,9 +357,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::capture_event::{CaptureEvent, CaptureResponse, EventResult, EventStatus};
     use crate::client::ClientOptionsBuilder;
     use crate::event::MINIMAL_FLAG_CALLED_EVENT_PROPERTIES;
-    use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1Event};
 
     fn test_opts() -> ClientOptions {
         ClientOptionsBuilder::default()
@@ -374,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn minimal_flag_called_event_v1_keeps_only_allowlisted_properties() {
+    fn minimal_flag_called_event_keeps_only_allowlisted_properties() {
         use std::collections::HashSet;
 
         let mut event = Event::new("$feature_flag_called", "user-1");
@@ -420,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn non_minimal_flag_called_event_v1_keeps_everything() {
+    fn non_minimal_flag_called_event_keeps_everything() {
         let mut event = Event::new("$feature_flag_called", "user-1");
         event
             .insert_prop("$feature/my-flag", serde_json::json!(true))
@@ -442,8 +440,8 @@ mod tests {
         assert_eq!(map.get("$feature/my-flag"), Some(&serde_json::json!(true)));
     }
 
-    fn dummy_v1_event() -> V1Event {
-        V1Event {
+    fn dummy_event() -> CaptureEvent {
+        CaptureEvent {
             event: "$pageview".into(),
             uuid: Uuid::now_v7(),
             distinct_id: "user-1".into(),
@@ -488,8 +486,8 @@ mod tests {
 
     #[test]
     fn process_batch_retry_kept_when_not_final() {
-        let e1 = dummy_v1_event();
-        let e2 = dummy_v1_event();
+        let e1 = dummy_event();
+        let e2 = dummy_event();
         let results = HashMap::from([
             (e1.uuid, event_result(EventStatus::Ok, None)),
             (
@@ -512,7 +510,7 @@ mod tests {
 
     #[test]
     fn process_batch_retry_finalized_when_final() {
-        let e1 = dummy_v1_event();
+        let e1 = dummy_event();
         let results = HashMap::from([(
             e1.uuid,
             event_result(EventStatus::Retry, Some("not_persisted")),
@@ -525,9 +523,9 @@ mod tests {
 
     #[test]
     fn process_batch_terminal_results_finalized() {
-        let ok_ev = dummy_v1_event();
-        let drop_ev = dummy_v1_event();
-        let warn_ev = dummy_v1_event();
+        let ok_ev = dummy_event();
+        let drop_ev = dummy_event();
+        let warn_ev = dummy_event();
         let results = HashMap::from([
             (ok_ev.uuid, event_result(EventStatus::Ok, None)),
             (
@@ -552,7 +550,7 @@ mod tests {
 
     #[test]
     fn process_batch_missing_uuid_silently_dropped() {
-        let e = dummy_v1_event();
+        let e = dummy_event();
         let results = HashMap::new();
         let mut final_results = HashMap::new();
         let next = process_batch_response(vec![e.clone()], &results, &mut final_results, false);
@@ -565,7 +563,7 @@ mod tests {
     /// Guards the `attempt + 1` off-by-one on the V1 call sites: the first
     /// retry must wait exactly `retry_initial_backoff_ms`, not double it.
     #[test]
-    fn v1_backoff_schedule_starts_at_initial() {
+    fn backoff_schedule_starts_at_initial() {
         let opts = ClientOptionsBuilder::default()
             .api_key("phc_test".to_string())
             .max_capture_attempts(10u32)
@@ -594,7 +592,7 @@ mod tests {
 
         // Same schedule via a retryable HTTP response.
         let body = r#"{"error":"service_unavailable"}"#;
-        let mut pending = vec![dummy_v1_event()];
+        let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
         let step = after_response(
             &opts,
@@ -633,7 +631,7 @@ mod tests {
     fn after_response_200_all_ok_is_done() {
         let opts = test_opts();
         let rid = Uuid::now_v7();
-        let e = dummy_v1_event();
+        let e = dummy_event();
         let body = serde_json::json!({
             "results": { e.uuid.to_string(): { "result": "ok" } }
         })
@@ -658,8 +656,8 @@ mod tests {
     fn after_response_200_partial_retry_backs_off() {
         let opts = test_opts();
         let rid = Uuid::now_v7();
-        let e1 = dummy_v1_event();
-        let e2 = dummy_v1_event();
+        let e1 = dummy_event();
+        let e2 = dummy_event();
         let body = serde_json::json!({
             "results": {
                 e1.uuid.to_string(): { "result": "ok" },
@@ -690,7 +688,7 @@ mod tests {
         let opts = test_opts();
         let rid = Uuid::now_v7();
         let body = r#"{"error":"service_unavailable"}"#;
-        let mut pending = vec![dummy_v1_event()];
+        let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
         let step = after_response(
             &opts,
@@ -710,7 +708,7 @@ mod tests {
         let opts = test_opts();
         let rid = Uuid::now_v7();
         let body = r#"{"error":"service_unavailable"}"#;
-        let mut pending = vec![dummy_v1_event()];
+        let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
         let step = after_response(
             &opts,
@@ -722,7 +720,13 @@ mod tests {
             &mut pending,
             &mut final_results,
         );
-        assert!(matches!(step, Step::Fail(_)));
+        match step {
+            Step::Fail(Error::ServerError { status, message }) => {
+                assert_eq!(status, 503);
+                assert_eq!(message, body);
+            }
+            other => panic!("expected status-preserving ServerError, got {:?}", other),
+        }
     }
 
     #[test]
@@ -730,7 +734,7 @@ mod tests {
         let opts = test_opts();
         let rid = Uuid::now_v7();
         let body = r#"{"error":"billing_limit_exceeded"}"#;
-        let mut pending = vec![dummy_v1_event()];
+        let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
         let step = after_response(
             &opts,
@@ -742,26 +746,40 @@ mod tests {
             &mut pending,
             &mut final_results,
         );
-        assert!(matches!(step, Step::Fail(Error::BillingLimitExceeded(_))));
+        match step {
+            Step::Fail(Error::BillingLimitExceeded(message)) => assert_eq!(message, body),
+            other => panic!(
+                "expected body-preserving BillingLimitExceeded, got {:?}",
+                other
+            ),
+        }
     }
 
+    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
     #[test]
-    fn after_response_malformed_200_body_fails() {
-        let opts = test_opts();
-        let rid = Uuid::now_v7();
-        let mut pending = vec![dummy_v1_event()];
-        let mut final_results = HashMap::new();
-        let step = after_response(
-            &opts,
-            &rid,
-            1,
-            200,
-            None,
-            "not json",
-            &mut pending,
-            &mut final_results,
-        );
-        assert!(matches!(step, Step::Fail(Error::Serialization(_))));
+    fn after_response_malformed_200_and_201_bodies_fail() {
+        for (case, status) in [("standard success", 200), ("alternate 2xx", 201)] {
+            let opts = test_opts();
+            let rid = Uuid::now_v7();
+            let mut pending = vec![dummy_event()];
+            let mut final_results = HashMap::new();
+            let step = after_response(
+                &opts,
+                &rid,
+                1,
+                status,
+                None,
+                "not json",
+                &mut pending,
+                &mut final_results,
+            );
+            assert!(
+                matches!(step, Step::Fail(Error::Serialization(_))),
+                "{} (HTTP {}) should fail with a Serialization error",
+                case,
+                status
+            );
+        }
     }
 
     /// C3: any 2xx with a well-formed body is success, not a connection error.
@@ -770,7 +788,7 @@ mod tests {
         let opts = test_opts();
         let rid = Uuid::now_v7();
         for status in [201u16, 202, 204, 207, 299] {
-            let e = dummy_v1_event();
+            let e = dummy_event();
             let body = serde_json::json!({
                 "results": { e.uuid.to_string(): { "result": "ok" } }
             })
@@ -796,26 +814,6 @@ mod tests {
         }
     }
 
-    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
-    #[test]
-    fn after_response_alternate_2xx_malformed_body_fails() {
-        let opts = test_opts();
-        let rid = Uuid::now_v7();
-        let mut pending = vec![dummy_v1_event()];
-        let mut final_results = HashMap::new();
-        let step = after_response(
-            &opts,
-            &rid,
-            1,
-            201,
-            None,
-            "not json",
-            &mut pending,
-            &mut final_results,
-        );
-        assert!(matches!(step, Step::Fail(Error::Serialization(_))));
-    }
-
     /// A body-less 2xx (e.g. 204 from beacon mode) is terminal on the first
     /// attempt: Serialization error, no retry, final_results left empty.
     /// posthog-rs never opts into beacon mode, so this is a safety net.
@@ -823,7 +821,7 @@ mod tests {
     fn after_response_204_empty_body_is_terminal_serialization_error() {
         let opts = test_opts();
         let rid = Uuid::now_v7();
-        let mut pending = vec![dummy_v1_event()];
+        let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
         let step = after_response(
             &opts,

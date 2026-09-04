@@ -57,6 +57,7 @@ fn report_local_eval_error(hooks: &[OnErrorHook], status: Option<u16>, error: &E
 /// Contains feature flag definitions, group type mappings, and cohort definitions
 /// that can be cached locally for flag evaluation without server round-trips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LocalEvaluationResponse {
     /// List of feature flag definitions
     pub flags: Vec<FeatureFlag>,
@@ -71,6 +72,21 @@ pub struct LocalEvaluationResponse {
     /// strict property allowlist. Absent fails safe to `false` (full event).
     #[serde(default)]
     pub minimal_flag_called_events: bool,
+}
+
+impl LocalEvaluationResponse {
+    /// Create a local-evaluation response from feature flag definitions.
+    ///
+    /// Group mappings, cohorts, and minimized flag-called events default to
+    /// empty or disabled and can be assigned through their public fields.
+    pub fn new(flags: Vec<FeatureFlag>) -> Self {
+        Self {
+            flags,
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+            minimal_flag_called_events: false,
+        }
+    }
 }
 
 /// A cohort definition for local evaluation.
@@ -222,8 +238,11 @@ impl FlagCache {
 /// definitions from the PostHog API for local evaluation.
 #[derive(Clone)]
 pub struct LocalEvaluationConfig {
-    /// Personal API key for authentication (found in PostHog project settings)
-    pub personal_api_key: String,
+    /// Secret key for authentication.
+    ///
+    /// Accepts either a Personal API Key (`phx_...`) or a Project Secret API
+    /// Key (`phs_...`).
+    pub secret_key: String,
     /// Project API key to identify which project's flags to fetch
     pub project_api_key: String,
     /// PostHog API host URL (for example, `https://us.i.posthog.com`).
@@ -326,10 +345,7 @@ impl FlagPoller {
 
                 let mut request = client
                     .get(&url)
-                    .header(
-                        "Authorization",
-                        format!("Bearer {}", config.personal_api_key),
-                    )
+                    .header("Authorization", format!("Bearer {}", config.secret_key))
                     .header("X-PostHog-Project-Api-Key", &config.project_api_key)
                     .header(USER_AGENT, get_default_user_agent());
 
@@ -395,7 +411,7 @@ impl FlagPoller {
             .get(&url)
             .header(
                 "Authorization",
-                format!("Bearer {}", self.config.personal_api_key),
+                format!("Bearer {}", self.config.secret_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
             .header(USER_AGENT, get_default_user_agent())
@@ -554,7 +570,7 @@ impl AsyncFlagPoller {
 
                         let mut request = client
                             .get(&url)
-                            .header("Authorization", format!("Bearer {}", config.personal_api_key))
+                            .header("Authorization", format!("Bearer {}", config.secret_key))
                             .header("X-PostHog-Project-Api-Key", &config.project_api_key)
                             .header(USER_AGENT, get_default_user_agent());
 
@@ -625,7 +641,7 @@ impl AsyncFlagPoller {
             .get(&url)
             .header(
                 "Authorization",
-                format!("Bearer {}", self.config.personal_api_key),
+                format!("Bearer {}", self.config.secret_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
             .header(USER_AGENT, get_default_user_agent())

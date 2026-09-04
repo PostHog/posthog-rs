@@ -199,11 +199,25 @@ impl TransportHandle {
         }
     }
 
+    /// Enqueue a caller-formed batch according to its ingestion policy. Live
+    /// events retain the per-event enqueue behavior; historical events stay
+    /// together on the dedicated historical path. Both reserve capacity per
+    /// event and may accept only a prefix when the queue fills.
+    pub(crate) fn enqueue_batch(&self, events: Vec<Event>, historical_migration: bool) {
+        if historical_migration {
+            self.enqueue_historical(events);
+        } else {
+            for event in events {
+                self.enqueue(event);
+            }
+        }
+    }
+
     /// Enqueue a caller-formed historical-migration batch on its own path, kept
     /// off the live buffer (which is always non-historical). Reserves a queue
     /// slot per event up to the bound, dropping any overflow with the usual
     /// once-per-episode full warning.
-    pub(crate) fn enqueue_historical(&self, mut events: Vec<Event>) {
+    fn enqueue_historical(&self, mut events: Vec<Event>) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
@@ -674,26 +688,22 @@ fn drain_historical(
 }
 
 // ===========================================================================
-// V1 pipeline
+// Capture pipeline
 // ===========================================================================
 
-#[cfg(feature = "capture-v1")]
 use std::collections::HashMap;
-#[cfg(feature = "capture-v1")]
 use uuid::Uuid;
 
-#[cfg(feature = "capture-v1")]
 struct RetryBatch {
-    pending: Vec<crate::event_v1::V1Event>,
+    pending: Vec<crate::capture_event::CaptureEvent>,
     request_id: Uuid,
     created_at: String,
-    final_results: HashMap<Uuid, crate::event_v1::EventResult>,
+    final_results: HashMap<Uuid, crate::capture_event::EventResult>,
     historical_migration: bool,
     attempt: u32,
     next_at: Instant,
 }
 
-#[cfg(feature = "capture-v1")]
 struct Pipeline {
     http: reqwest::blocking::Client,
     options: ClientOptions,
@@ -703,7 +713,6 @@ struct Pipeline {
     retries: VecDeque<RetryBatch>,
 }
 
-#[cfg(feature = "capture-v1")]
 impl Pipeline {
     fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
         let http = reqwest::blocking::Client::builder()
@@ -712,7 +721,7 @@ impl Pipeline {
             .unwrap_or_default();
         let url = options
             .endpoints()
-            .build_custom_url(super::v1_capture::V1_CAPTURE_PATH);
+            .build_url(crate::endpoints::Endpoint::Capture);
         Self {
             http,
             options: options.clone(),
@@ -729,15 +738,14 @@ impl Pipeline {
         historical_migration: bool,
         deadline: Option<Instant>,
     ) {
-        use super::common::{apply_before_send_hooks, apply_capture_defaults};
+        use super::common::preprocess_capture_event;
 
         let defaults = self.options.capture_defaults();
         let original = events.len();
         let processed: Vec<Event> = events
             .into_iter()
-            .filter_map(|mut event| {
-                apply_capture_defaults(&mut event, &defaults);
-                apply_before_send_hooks(&self.options.before_send, event)
+            .filter_map(|event| {
+                preprocess_capture_event(event, &defaults, &self.options.before_send)
             })
             .collect();
         // Events dropped by before_send are terminal.
@@ -746,8 +754,7 @@ impl Pipeline {
             return;
         }
         let now = self.clock.now();
-        let pending =
-            super::v1_capture::build_events_at(&processed, &defaults, self.clock.now_utc());
+        let pending = super::capture::build_events_at(&processed, &defaults, self.clock.now_utc());
         let batch = RetryBatch {
             pending,
             request_id: Uuid::now_v7(),
@@ -761,10 +768,10 @@ impl Pipeline {
     }
 
     fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
-        use super::v1_capture::{self, Step};
-        use crate::event_v1::{V1BatchRequestRef, V1ErrorResponse};
+        use super::capture::{self, Step};
+        use crate::capture_event::{BatchRequestRef, CaptureErrorResponse};
 
-        let req = V1BatchRequestRef {
+        let req = BatchRequestRef {
             created_at: &batch.created_at,
             historical_migration: batch.historical_migration.then_some(true),
             batch: &batch.pending,
@@ -784,14 +791,13 @@ impl Pipeline {
                 return;
             }
         };
-        let mut headers = v1_capture::build_headers_at(
+        let mut headers = capture::build_headers_at(
             &self.options,
             &batch.request_id,
             batch.attempt,
             self.clock.now_utc(),
         );
-        let body =
-            v1_capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
+        let body = capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
 
         let count = batch.pending.len();
         let request = bound_request(
@@ -806,7 +812,7 @@ impl Pipeline {
         let mut http_status: Option<u16> = None;
         let mut response_body: Option<String> = None;
         let step = match request.send() {
-            Err(e) => v1_capture::after_transport_error(
+            Err(e) => capture::after_transport_error(
                 &self.options,
                 &batch.request_id,
                 batch.attempt,
@@ -815,9 +821,9 @@ impl Pipeline {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 http_status = Some(status);
-                let retry_after = v1_capture::parse_retry_after(resp.headers());
+                let retry_after = capture::parse_retry_after(resp.headers());
                 let text = resp.text().unwrap_or_else(|_| "Unknown error".to_string());
-                let step = v1_capture::after_response(
+                let step = capture::after_response(
                     &self.options,
                     &batch.request_id,
                     batch.attempt,
@@ -862,7 +868,7 @@ impl Pipeline {
                 } else {
                     let error_response = response_body
                         .as_deref()
-                        .and_then(|b| serde_json::from_str::<V1ErrorResponse>(b).ok());
+                        .and_then(|b| serde_json::from_str::<CaptureErrorResponse>(b).ok());
                     let lost = batch.pending.len() + undelivered_results(&batch.final_results);
                     self.fire_capture(
                         &batch,
@@ -931,7 +937,7 @@ impl Pipeline {
         request_id: Option<&Uuid>,
         error: Option<&Error>,
         status: Option<u16>,
-        error_response: Option<&crate::event_v1::V1ErrorResponse>,
+        error_response: Option<&crate::capture_event::CaptureErrorResponse>,
         event_count: usize,
     ) {
         let failure = PostHogError::Capture(CaptureFailure {
@@ -950,231 +956,12 @@ impl Pipeline {
 
 /// Count events the V1 backend will not persist (`retry`/`drop` verdicts).
 /// `ok`/`warning` were delivered, so they are excluded from the lost tally.
-#[cfg(feature = "capture-v1")]
-fn undelivered_results(results: &HashMap<Uuid, crate::event_v1::EventResult>) -> usize {
-    use crate::event_v1::EventStatus;
+fn undelivered_results(results: &HashMap<Uuid, crate::capture_event::EventResult>) -> usize {
+    use crate::capture_event::EventStatus;
     results
         .values()
         .filter(|r| matches!(r.result, EventStatus::Retry | EventStatus::Drop))
         .count()
-}
-
-// ===========================================================================
-// V0 pipeline
-// ===========================================================================
-
-#[cfg(not(feature = "capture-v1"))]
-struct RetryBatch {
-    body: Vec<u8>,
-    encoding: Option<&'static str>,
-    count: usize,
-    historical_migration: bool,
-    attempt: u32,
-    next_at: Instant,
-}
-
-#[cfg(not(feature = "capture-v1"))]
-struct Pipeline {
-    http: reqwest::blocking::Client,
-    options: ClientOptions,
-    url_base: String,
-    clock: Arc<dyn Clock>,
-    len: Arc<AtomicUsize>,
-    retries: VecDeque<RetryBatch>,
-}
-
-#[cfg(not(feature = "capture-v1"))]
-impl Pipeline {
-    fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build()
-            .unwrap_or_default();
-        let url_base = options
-            .endpoints()
-            .build_url(crate::endpoints::Endpoint::Batch);
-        Self {
-            http,
-            options: options.clone(),
-            url_base,
-            clock,
-            len,
-            retries: VecDeque::new(),
-        }
-    }
-
-    fn send_batch(
-        &mut self,
-        events: Vec<Event>,
-        historical_migration: bool,
-        deadline: Option<Instant>,
-    ) {
-        let defaults = self.options.capture_defaults();
-        let count = events.len();
-        let (payload, kept) = match super::v0_capture::build_batch_payload(
-            events,
-            self.options.api_key.clone(),
-            historical_migration,
-            self.clock.now_utc(),
-            &defaults,
-            &self.options.before_send,
-        ) {
-            Ok(Some(pair)) => pair,
-            Ok(None) => {
-                // Every event dropped by before_send (terminal).
-                dec_len(&self.len, count);
-                return;
-            }
-            Err(e) => {
-                if self.options.on_error.is_empty() {
-                    warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
-                } else {
-                    let err = Error::Serialization(e.to_string());
-                    self.fire_capture(Some(&err), None, 1, historical_migration, count);
-                }
-                dec_len(&self.len, count);
-                return;
-            }
-        };
-        // Events dropped by before_send are terminal; account for them now so the
-        // batch tracks (and logs) only what is actually in flight.
-        dec_len(&self.len, count - kept);
-        let (body, encoding) = super::v0_capture::encode_body(&self.options, payload);
-        let batch = RetryBatch {
-            body,
-            encoding,
-            count: kept,
-            historical_migration,
-            attempt: 1,
-            next_at: self.clock.now(),
-        };
-        self.attempt(batch, deadline);
-    }
-
-    fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
-        use super::get_default_user_agent;
-        use super::retry::{v0_after_response, v0_after_transport_error, Step};
-        use reqwest::header::{CONTENT_TYPE, USER_AGENT};
-
-        // v0 capture reads the compression hint from the query param, not the header.
-        let url = match batch.encoding {
-            Some(token) => format!("{}?compression={token}", self.url_base),
-            None => self.url_base.clone(),
-        };
-        let mut request = self
-            .http
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
-            .body(batch.body.clone());
-        if let Some(token) = batch.encoding {
-            request = request.header(reqwest::header::CONTENT_ENCODING, token);
-        }
-        let request = super::v0_capture::apply_extra_headers(&self.options, request);
-        let request = bound_request(
-            request,
-            deadline,
-            self.clock.now(),
-            self.options.request_timeout_seconds,
-        );
-
-        let mut http_status: Option<u16> = None;
-        let step = match request.send() {
-            Err(e) => v0_after_transport_error(&self.options, batch.attempt, e.to_string()),
-            Ok(response) => {
-                let status = response.status().as_u16();
-                http_status = Some(status);
-                let retry_after = super::retry::parse_retry_after(response.headers());
-                let body = response
-                    .text()
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                v0_after_response(&self.options, batch.attempt, status, retry_after, &body)
-            }
-        };
-
-        match step {
-            Step::Done => dec_len(&self.len, batch.count),
-            Step::Fail(e) => {
-                if self.options.on_error.is_empty() {
-                    warn!("posthog-rs: dropping {} event(s): {e}", batch.count);
-                } else {
-                    self.fire_capture(
-                        Some(&e),
-                        http_status,
-                        batch.attempt,
-                        batch.historical_migration,
-                        batch.count,
-                    );
-                }
-                dec_len(&self.len, batch.count);
-            }
-            Step::Backoff(delay) => {
-                if deadline.is_some() {
-                    warn!(
-                        "posthog-rs: dropping {} undelivered event(s) on shutdown",
-                        batch.count
-                    );
-                    dec_len(&self.len, batch.count);
-                } else {
-                    batch.attempt += 1;
-                    batch.next_at = self.clock.now() + delay;
-                    self.retries.push_back(batch);
-                }
-            }
-        }
-    }
-
-    fn earliest_retry(&self) -> Option<Instant> {
-        self.retries.iter().map(|b| b.next_at).min()
-    }
-
-    fn attempt_due(&mut self) {
-        let now = self.clock.now();
-        for batch in std::mem::take(&mut self.retries) {
-            if now >= batch.next_at {
-                self.attempt(batch, None);
-            } else {
-                self.retries.push_back(batch);
-            }
-        }
-    }
-
-    fn flush_retries(&mut self, deadline: Option<Instant>) {
-        // `Some` is the shutdown/disconnect path: attempts are final (drop on
-        // failure), and any batch still pending once the deadline passes is
-        // dropped rather than attempted.
-        for batch in std::mem::take(&mut self.retries) {
-            if deadline.is_some_and(|d| self.clock.now() >= d) {
-                warn!(
-                    "posthog-rs: shutdown timeout reached; dropping {} undelivered event(s)",
-                    batch.count
-                );
-                dec_len(&self.len, batch.count);
-            } else {
-                self.attempt(batch, deadline);
-            }
-        }
-    }
-
-    /// Fire the `on_error` hooks for a terminal capture outcome. The V0 pipeline
-    /// has no per-event verdicts, so it reports only the batch-level cause.
-    fn fire_capture(
-        &self,
-        error: Option<&Error>,
-        status: Option<u16>,
-        attempt: u32,
-        historical_migration: bool,
-        event_count: usize,
-    ) {
-        let failure = PostHogError::Capture(CaptureFailure {
-            error,
-            status,
-            attempt,
-            event_count,
-            historical_migration,
-        });
-        apply_on_error_hooks(&self.options.on_error, &failure);
-    }
 }
 
 #[cfg(test)]
@@ -1481,20 +1268,29 @@ mod tests {
     }
 
     #[test]
-    fn before_send_dropped_events_are_not_counted_in_flight() {
+    fn capture_preprocessing_applies_defaults_before_hooks_and_accounts_for_drops() {
         // before_send drops one of two events; a 503 holds the batch for retry.
         // pending() must reflect only the surviving event: the dropped one is
         // terminal at build time, so counting it as in-flight would inflate the
         // bounded-queue depth (and the drop/retry logs) for the batch's lifetime.
         let server = MockServer::start();
         let fail = server.mock(|when, then| {
-            when.method(POST);
+            when.method(POST)
+                .body_includes("\"hook_saw_defaults\":true");
             then.status(503);
         });
         let clock = ManualClock::new();
         let handle = TransportHandle::spawn_with_clock(
             options(server.base_url())
-                .before_send(|event| {
+                .disable_geoip(true)
+                .before_send(|mut event| {
+                    let saw_defaults = event.properties().get("$is_server")
+                        == Some(&serde_json::json!(true))
+                        && event.properties().get("$geoip_disable")
+                            == Some(&serde_json::json!(true));
+                    event
+                        .insert_prop("hook_saw_defaults", saw_defaults)
+                        .unwrap();
                     if event.properties().get("__drop").is_some() {
                         None
                     } else {
@@ -1632,6 +1428,82 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_batch_routes_live_and_historical_policies() {
+        let server = MockServer::start();
+        let live = server.mock(|when, then| {
+            when.method(POST).is_true(|req| {
+                serde_json::from_slice::<serde_json::Value>(req.body_ref()).is_ok_and(|body| {
+                    body["batch"][0]["event"].as_str() == Some("live")
+                        && body.get("historical_migration").is_none()
+                })
+            });
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "results": {} }));
+        });
+        let historical = server.mock(|when, then| {
+            when.method(POST).is_true(|req| {
+                serde_json::from_slice::<serde_json::Value>(req.body_ref()).is_ok_and(|body| {
+                    body["batch"][0]["event"].as_str() == Some("historical")
+                        && body["historical_migration"].as_bool() == Some(true)
+                })
+            });
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "results": {} }));
+        });
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url()).build().unwrap(),
+            Arc::new(ManualClock::new()),
+        );
+
+        handle.enqueue_batch(vec![Event::new("live", "user-1")], false);
+        handle.enqueue_batch(vec![Event::new("historical", "user-1")], true);
+        handle.flush_blocking();
+
+        live.assert_calls(1);
+        historical.assert_calls(1);
+        assert_eq!(handle.pending(), 0);
+        handle.shutdown_blocking();
+    }
+
+    #[test]
+    fn enqueue_batch_preserves_per_event_capacity_for_both_policies() {
+        let server = MockServer::start();
+        let mock = ok_mock(&server);
+
+        for historical_migration in [false, true] {
+            let handle = TransportHandle::spawn_with_clock(
+                options(server.base_url())
+                    .max_queue_size(2usize)
+                    .shutdown_timeout_ms(0u64)
+                    .build()
+                    .unwrap(),
+                Arc::new(ManualClock::new()),
+            );
+
+            handle.enqueue_batch(
+                vec![
+                    Event::new("one", "user-1"),
+                    Event::new("two", "user-1"),
+                    Event::new("overflow", "user-1"),
+                ],
+                historical_migration,
+            );
+
+            assert_eq!(
+                handle.pending(),
+                2,
+                "each batch policy accepts only the prefix that fits"
+            );
+            handle.shutdown_blocking();
+            assert_eq!(handle.pending(), 0);
+        }
+
+        mock.assert_calls(0);
+    }
+
+    #[test]
     fn historical_batch_sends_chunked() {
         // A historical batch takes its own path: queued off the live buffer and
         // sent in its own chunks (forced out here by a flush), never via the buffer.
@@ -1762,10 +1634,9 @@ mod tests {
     /// will not persist) while excluding delivered `ok`/`warning` — a batch that
     /// mixes a drop with a retry must report both, not just whatever remained in
     /// `pending`. Guards the historical `event_count` under-count.
-    #[cfg(feature = "capture-v1")]
     #[test]
     fn undelivered_results_counts_retry_and_drop_only() {
-        use crate::event_v1::{EventResult, EventStatus};
+        use crate::capture_event::{EventResult, EventStatus};
         let mk = |result| EventResult {
             result,
             details: None,
@@ -1779,9 +1650,8 @@ mod tests {
         assert_eq!(undelivered_results(&results), 2);
     }
 
-    #[cfg(feature = "capture-v1")]
     #[test]
-    fn capture_failure_v1_surfaces_request_id_and_error_response() {
+    fn capture_failure_surfaces_request_id_and_error_response() {
         // A non-2xx V1 response with a structured error body must reach the hook
         // as a parsed `error_response`, alongside the request id of the attempt.
         let server = MockServer::start();
@@ -1825,9 +1695,8 @@ mod tests {
         assert!(has_error);
     }
 
-    #[cfg(feature = "capture-v1")]
     #[test]
-    fn capture_failure_v1_2xx_counts_dropped_and_final_retry() {
+    fn capture_failure_2xx_counts_dropped_and_final_retry() {
         // A 2xx whose per-event verdicts leave events un-persisted (a `drop` and
         // a `retry` on the final attempt) fires the hook once as `Step::Done`
         // with `error == None`, and `event_count` counts BOTH lost events while

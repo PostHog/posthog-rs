@@ -1,8 +1,7 @@
 ﻿//! Coverage for `Client::group_identify`, the `$groupidentify` helper.
 //!
-//! The emitted event is identical on both capture pipelines — nothing in it is
-//! lifted into the V1 `options` object — so a single `CAPTURE_PATH` switch
-//! covers V0 and V1 rather than the split-file treatment error tracking needs.
+//! The emitted event keeps its group properties in the event properties map;
+//! nothing is lifted into the V1 `options` object.
 //!
 //! Capture is a non-blocking enqueue drained by the background worker, so every
 //! test `flush()`es before asserting.
@@ -11,10 +10,7 @@ use httpmock::prelude::*;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-#[cfg(feature = "capture-v1")]
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
-#[cfg(not(feature = "capture-v1"))]
-const CAPTURE_PATH: &str = "/batch/";
 
 const GROUP_TYPE: &str = "company";
 const GROUP_KEY: &str = "company_id_in_your_db";
@@ -26,7 +22,7 @@ struct CompanyProperties {
 }
 
 /// V1 reports per-event status in `results`; an empty map is a clean accept and
-/// keeps the client to a single attempt. V0 ignores the body entirely.
+/// keeps the client to a single attempt.
 fn ok_response() -> Value {
     json!({ "results": {} })
 }
