@@ -447,7 +447,14 @@ fn run_worker(
     // any sane teardown budget.
     let shutdown_timeout =
         Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT);
-    let mut pipeline = Pipeline::new(&options, Arc::clone(&clock), len);
+    // Without an HTTP client nothing can ever be delivered, so stop the worker
+    // instead of running a pipeline that cannot send. Producers keep going: any
+    // queued completion is signalled on the way out, and once the channel is
+    // disconnected an enqueue releases its reserved slot.
+    let Some(mut pipeline) = Pipeline::new(&options, Arc::clone(&clock), Arc::clone(&len)) else {
+        drain_pending_completions(&rx, &len);
+        return;
+    };
 
     let mut buffer: Vec<Event> = Vec::new();
     let mut buffer_since: Option<Instant> = None;
@@ -673,6 +680,25 @@ fn drain_historical(
     }
 }
 
+/// Build the worker's blocking HTTP client.
+///
+/// `build()` is fallible — it sets up the TLS trust store, and the blocking
+/// client also spawns its own thread and runtime — and `Default` is not a safe
+/// fallback: it calls `Client::new`, which panics on exactly those failures.
+/// Return `None` instead so the worker can stop without panicking.
+fn build_http(options: &ClientOptions) -> Option<reqwest::blocking::Client> {
+    match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(options.request_timeout_seconds))
+        .build()
+    {
+        Ok(http) => Some(http),
+        Err(e) => {
+            warn!("posthog-rs: failed to build the transport HTTP client: {e}");
+            None
+        }
+    }
+}
+
 // ===========================================================================
 // V1 pipeline
 // ===========================================================================
@@ -705,22 +731,20 @@ struct Pipeline {
 
 #[cfg(feature = "capture-v1")]
 impl Pipeline {
-    fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build()
-            .unwrap_or_default();
+    /// `None` when the HTTP client cannot be built, so nothing could be sent.
+    fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Option<Self> {
+        let http = build_http(options)?;
         let url = options
             .endpoints()
             .build_custom_url(super::v1_capture::V1_CAPTURE_PATH);
-        Self {
+        Some(Self {
             http,
             options: options.clone(),
             url,
             clock,
             len,
             retries: VecDeque::new(),
-        }
+        })
     }
 
     fn send_batch(
@@ -985,22 +1009,20 @@ struct Pipeline {
 
 #[cfg(not(feature = "capture-v1"))]
 impl Pipeline {
-    fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build()
-            .unwrap_or_default();
+    /// `None` when the HTTP client cannot be built, so nothing could be sent.
+    fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Option<Self> {
+        let http = build_http(options)?;
         let url_base = options
             .endpoints()
             .build_url(crate::endpoints::Endpoint::Batch);
-        Self {
+        Some(Self {
             http,
             options: options.clone(),
             url_base,
             clock,
             len,
             retries: VecDeque::new(),
-        }
+        })
     }
 
     fn send_batch(
