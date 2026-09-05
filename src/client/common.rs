@@ -3,6 +3,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::client::BeforeSendHook;
 use crate::client::CaptureDefaults;
+use crate::client::ClientOptions;
 use crate::client::FlagsFailure;
 use crate::client::OnErrorHook;
 use crate::client::PostHogError;
@@ -10,7 +11,7 @@ use crate::feature_flag_evaluations::{EvaluatedFlagRecord, FlagCalledEventParams
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
 use crate::Error;
 use crate::Event;
-use tracing::error;
+use tracing::{error, warn};
 
 /// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
 /// dedup cache. On overflow the entire map is reset (matches the JS SDK).
@@ -336,6 +337,28 @@ fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Take the result of building the HTTP client. On failure, log a warning and
+/// disable `options` so the SDK degrades to a no-op client instead of
+/// panicking. TLS trust-store setup makes `build()` fallible: a container
+/// without CA certificates fails here.
+pub(super) fn http_client_or_disable<C, E: std::fmt::Debug>(
+    result: Result<C, E>,
+    options: &mut ClientOptions,
+) -> Option<C> {
+    match result {
+        Ok(client) => Some(client),
+        Err(err) => {
+            // Debug, not Display: `reqwest::Error` displays a builder failure
+            // as the bare text `builder error` and keeps the cause — the
+            // missing certificates, say — in its source, which only Debug
+            // prints.
+            warn!("Failed to build HTTP client ({err:?}); disabling PostHog client");
+            options.disabled = true;
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +515,22 @@ mod tests {
         assert!(
             apply_before_send_hooks(&options.before_send, Event::new("test", "user-1")).is_none()
         );
+    }
+
+    #[test]
+    fn http_client_build_failure_disables_client() {
+        let mut options = crate::ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .build()
+            .unwrap();
+        assert!(!options.is_disabled());
+
+        let client = http_client_or_disable(
+            Err::<(), _>("failed to load native root certificates"),
+            &mut options,
+        );
+
+        assert!(client.is_none());
+        assert!(options.is_disabled());
     }
 }
