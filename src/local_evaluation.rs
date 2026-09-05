@@ -239,11 +239,14 @@ pub struct LocalEvaluationConfig {
 /// warning and return `None` so the poller degrades to doing nothing instead
 /// of panicking. TLS trust-store setup makes `build()` fallible: a container
 /// without CA certificates fails here.
-fn http_client_or_warn<C, E: std::fmt::Display>(result: Result<C, E>) -> Option<C> {
+fn http_client_or_warn<C, E: std::fmt::Debug>(result: Result<C, E>) -> Option<C> {
     match result {
         Ok(client) => Some(client),
         Err(err) => {
-            warn!(error = %err, "Failed to build HTTP client; flag polling is disabled");
+            // Debug, not Display: `reqwest::Error` displays a builder failure
+            // as the bare text `builder error` and keeps the cause in its
+            // source, which only Debug prints.
+            warn!(error = ?err, "Failed to build HTTP client; flag polling is disabled");
             None
         }
     }

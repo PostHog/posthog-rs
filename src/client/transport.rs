@@ -693,7 +693,7 @@ fn build_http(options: &ClientOptions) -> Option<reqwest::blocking::Client> {
     {
         Ok(http) => Some(http),
         Err(e) => {
-            warn!("posthog-rs: failed to build the transport HTTP client: {e}");
+            warn!("posthog-rs: failed to build the transport HTTP client: {e:?}");
             None
         }
     }
