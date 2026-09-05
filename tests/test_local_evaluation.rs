@@ -45,6 +45,7 @@ fn test_local_evaluation_basic() {
 
     // Update cache with the flag
     let response = LocalEvaluationResponse {
+        property_matching_version: 1,
         flags: vec![flag],
         group_type_mapping: HashMap::new(),
         cohorts: HashMap::new(),
@@ -308,6 +309,7 @@ fn test_local_evaluation_with_properties() {
 
     // Update cache
     let response = LocalEvaluationResponse {
+        property_matching_version: 1,
         flags: vec![flag],
         group_type_mapping: HashMap::new(),
         cohorts: HashMap::new(),
@@ -739,6 +741,7 @@ fn test_cache_operations() {
     ];
 
     let response = LocalEvaluationResponse {
+        property_matching_version: 1,
         flags: flags.clone(),
         group_type_mapping: HashMap::new(),
         cohorts: HashMap::new(),
@@ -1282,6 +1285,7 @@ fn cache_with(flag: FeatureFlag) -> FlagCache {
     let mut group_type_mapping = HashMap::new();
     group_type_mapping.insert("0".to_string(), "company".to_string());
     cache.update(LocalEvaluationResponse {
+        property_matching_version: 1,
         flags: vec![flag],
         group_type_mapping,
         cohorts: HashMap::new(),
