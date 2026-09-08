@@ -154,6 +154,7 @@ pub use local_evaluation::AsyncFlagPoller;
 // global client. flush/shutdown matter because the global singleton lives in a
 // `static`, whose `Drop` never runs — they must be called to drain on exit.
 pub use global::capture;
+pub use global::capture_ai;
 #[cfg(feature = "error-tracking")]
 pub use global::capture_exception;
 #[cfg(feature = "error-tracking")]

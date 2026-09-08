@@ -37,31 +37,111 @@ pub(crate) fn build_events_at(
 ) -> Vec<CaptureEvent> {
     events
         .iter()
-        .map(|event| {
-            let mut event = event.clone();
-            apply_runtime_context(&mut event);
-            let minimal = event.is_minimal_flag_called();
-            let mut v1 = CaptureEvent::from_event_at(&event, now);
-            if let serde_json::Value::Object(ref mut map) = v1.properties {
-                if defaults.disable_geoip {
-                    map.entry("$geoip_disable")
-                        .or_insert(serde_json::Value::Bool(true));
-                }
-                if defaults.is_server {
-                    map.entry("$is_server")
-                        .or_insert(serde_json::Value::Bool(true));
-                }
-                // Final step for minimized `$feature_flag_called` events: drop
-                // everything outside the allowlist. Wire-lifted keys
-                // ($session_id/$window_id/$process_person_profile) already moved
-                // off `properties` and are preserved on the event elsewhere.
-                if minimal {
-                    map.retain(|key, _| is_minimal_flag_called_property(key));
-                }
-            }
-            v1
-        })
+        .map(|event| build_event_at(event, defaults, now))
         .collect()
+}
+
+/// Build one V1 wire event: runtime context, client defaults (caller wins),
+/// and the minimized-`$feature_flag_called` allowlist.
+pub(crate) fn build_event_at(
+    event: &Event,
+    defaults: &CaptureDefaults,
+    now: DateTime<Utc>,
+) -> CaptureEvent {
+    let mut event = event.clone();
+    apply_runtime_context(&mut event);
+    let minimal = event.is_minimal_flag_called();
+    let mut v1 = CaptureEvent::from_event_at(&event, now);
+    if let serde_json::Value::Object(ref mut map) = v1.properties {
+        if defaults.disable_geoip {
+            map.entry("$geoip_disable")
+                .or_insert(serde_json::Value::Bool(true));
+        }
+        if defaults.is_server {
+            map.entry("$is_server")
+                .or_insert(serde_json::Value::Bool(true));
+        }
+        // Final step for minimized `$feature_flag_called` events: drop
+        // everything outside the allowlist. Wire-lifted keys
+        // ($session_id/$window_id/$process_person_profile) already moved
+        // off `properties` and are preserved on the event elsewhere.
+        if minimal {
+            map.retain(|key, _| is_minimal_flag_called_property(key));
+        }
+    }
+    v1
+}
+
+// ---------------------------------------------------------------------------
+// Byte accounting (AI lane)
+// ---------------------------------------------------------------------------
+
+/// Serialized size of one wire event, measured without allocating the JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EventSize {
+    /// Bytes of the whole serialized [`CaptureEvent`]; what a batch body grows
+    /// by when this event is appended (excluding the `,` separator).
+    pub(crate) total: usize,
+    /// Bytes of the serialized `properties` object alone — the denominator the
+    /// capture backend applies its per-event AI ceiling to.
+    pub(crate) properties: usize,
+}
+
+/// `io::Write` that only counts, so sizes cost one serializer pass and no
+/// allocation. Serialization is deterministic for a given value, so the count
+/// equals the bytes the request body will carry.
+struct CountingWriter(usize);
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+    let mut w = CountingWriter(0);
+    // Serialization of an already-built `CaptureEvent` cannot fail short of an
+    // allocation error; a failure here would also fail at send time, where it
+    // is reported. Treat it as size 0 so the event is not dropped twice.
+    let _ = serde_json::to_writer(&mut w, value);
+    w.0
+}
+
+pub(crate) fn measure_event(event: &CaptureEvent) -> EventSize {
+    EventSize {
+        total: json_len(event),
+        properties: json_len(&event.properties),
+    }
+}
+
+/// Split measured events into batches under a soft byte target using the
+/// guarded check-before-append rule: a batch is closed only when it is
+/// non-empty and the next event would push it past `target`, so an event
+/// larger than the target still ships alone (worst-case body =
+/// `max(target, largest event)`). Order is preserved.
+pub(crate) fn chunk_by_bytes(
+    events: Vec<(CaptureEvent, usize)>,
+    target: usize,
+) -> Vec<Vec<CaptureEvent>> {
+    let mut batches: Vec<Vec<CaptureEvent>> = Vec::new();
+    let mut current: Vec<CaptureEvent> = Vec::new();
+    let mut current_bytes = 0usize;
+    for (event, bytes) in events {
+        if !current.is_empty() && current_bytes + bytes > target {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current.push(event);
+        current_bytes += bytes;
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
 }
 
 #[cfg(test)]
@@ -153,39 +233,89 @@ pub(crate) struct Prepared {
     pub(crate) submitted: usize,
 }
 
+/// Per-lane settings for an inline immediate capture. The analytics lane sends
+/// one request with the client's compression; the AI lane forces its codec and
+/// splits the batch by bytes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImmediateLane {
+    pub(crate) endpoint: Endpoint,
+    /// `None`: use `ClientOptions::capture_compression`.
+    pub(crate) compression_override: Option<CaptureCompression>,
+    /// `None`: everything goes in one request.
+    pub(crate) batch_bytes_target: Option<usize>,
+}
+
+impl ImmediateLane {
+    pub(crate) fn analytics() -> Self {
+        Self {
+            endpoint: Endpoint::Capture,
+            compression_override: None,
+            batch_bytes_target: None,
+        }
+    }
+
+    pub(crate) fn ai() -> Self {
+        Self {
+            endpoint: Endpoint::CaptureAi,
+            compression_override: Some(super::transport::AI_COMPRESSION),
+            batch_bytes_target: Some(super::transport::AI_BATCH_BYTES_TARGET),
+        }
+    }
+
+    pub(crate) fn compression(&self, opts: &ClientOptions) -> Option<CaptureCompression> {
+        self.compression_override.or(opts.capture_compression)
+    }
+}
+
 /// Prepare an inline immediate capture: apply client defaults + `before_send`,
 /// then build the wire events and the per-request identity (request id,
-/// `created_at`, URL). Returns `None` when nothing survives filtering (an empty
-/// or fully `before_send`-dropped batch), so the caller returns a default
-/// summary without sending.
+/// `created_at`, URL) for each request. Returns an empty `Vec` when nothing
+/// survives filtering (an empty or fully `before_send`-dropped batch), so the
+/// caller returns a default summary without sending. The analytics lane always
+/// yields exactly one `Prepared`; the AI lane yields one per byte-sized chunk,
+/// in order.
 pub(crate) fn prepare_immediate(
     opts: &ClientOptions,
+    lane: ImmediateLane,
     events: Vec<Event>,
     historical_migration: bool,
-) -> Option<Prepared> {
+) -> Vec<Prepared> {
     let defaults = opts.capture_defaults();
     let events: Vec<Event> = events
         .into_iter()
         .filter_map(|event| preprocess_capture_event(event, &defaults, &opts.before_send))
         .collect();
     if events.is_empty() {
-        return None;
+        return Vec::new();
     }
 
-    let request_id = Uuid::now_v7();
-    let created_at = Utc::now().to_rfc3339();
     let historical_migration = historical_migration.then_some(true);
-    let url = opts.endpoints().build_url(Endpoint::Capture);
-    let pending = build_events_at(&events, &defaults, Utc::now());
-    let submitted = pending.len();
-    Some(Prepared {
-        url,
-        request_id,
-        created_at,
-        historical_migration,
-        pending,
-        submitted,
-    })
+    let url = opts.endpoints().build_url(lane.endpoint);
+    let built = build_events_at(&events, &defaults, Utc::now());
+    let chunks = match lane.batch_bytes_target {
+        Some(target) => chunk_by_bytes(
+            built
+                .into_iter()
+                .map(|event| {
+                    let bytes = measure_event(&event).total;
+                    (event, bytes)
+                })
+                .collect(),
+            target,
+        ),
+        None => vec![built],
+    };
+    chunks
+        .into_iter()
+        .map(|pending| Prepared {
+            url: url.clone(),
+            request_id: Uuid::now_v7(),
+            created_at: Utc::now().to_rfc3339(),
+            historical_migration,
+            submitted: pending.len(),
+            pending,
+        })
+        .collect()
 }
 
 /// Build the headers and (optionally compressed) body for one immediate V1
@@ -193,6 +323,7 @@ pub(crate) fn prepare_immediate(
 /// and the attempt number advances between retries. I/O-free.
 pub(crate) fn build_attempt_parts(
     opts: &ClientOptions,
+    compression: Option<CaptureCompression>,
     request_id: &Uuid,
     attempt: u32,
     created_at: &str,
@@ -206,7 +337,7 @@ pub(crate) fn build_attempt_parts(
     };
     let payload = serde_json::to_vec(&request).map_err(|e| Error::Serialization(e.to_string()))?;
     let mut headers = build_headers_at(opts, request_id, attempt, Utc::now());
-    let body = maybe_compress(opts.capture_compression, &mut headers, payload);
+    let body = maybe_compress(compression, &mut headers, payload);
     Ok((headers, body))
 }
 
@@ -867,5 +998,168 @@ mod tests {
         // user-agent mirrors the same identity string.
         let ua = headers.get("user-agent").unwrap().to_str().unwrap();
         assert_eq!(ua, expected);
+    }
+
+    // -- byte accounting (AI lane) -------------------------------------------
+
+    fn sized(name: &str, bytes: usize) -> CaptureEvent {
+        let mut e = dummy_event();
+        e.event = name.into();
+        e.properties = serde_json::json!({ "blob": "x".repeat(bytes) });
+        e
+    }
+
+    #[test]
+    fn measure_event_matches_the_serialized_bytes() {
+        let e = sized("$ai_generation", 500);
+        let size = measure_event(&e);
+        assert_eq!(size.total, serde_json::to_vec(&e).unwrap().len());
+        assert_eq!(
+            size.properties,
+            serde_json::to_vec(&e.properties).unwrap().len()
+        );
+        assert!(size.properties < size.total);
+        // `properties` is what the backend's AI ceiling is charged against, so it
+        // must exclude the envelope fields: exactly `{"blob":"xxx…"}`.
+        assert_eq!(size.properties, "{\"blob\":\"\"}".len() + 500);
+    }
+
+    #[test]
+    fn chunk_by_bytes_is_guarded_check_before_append_with_carryover() {
+        let s = 100;
+        let events: Vec<(CaptureEvent, usize)> = ["e1", "e2", "e3"]
+            .iter()
+            .map(|n| (sized(n, 10), s))
+            .collect();
+        let names = |batches: &Vec<Vec<CaptureEvent>>| -> Vec<Vec<String>> {
+            batches
+                .iter()
+                .map(|b| b.iter().map(|e| e.event.clone()).collect())
+                .collect()
+        };
+
+        // Target between 2S and 3S: [e1, e2] closes when e3 would overflow it.
+        let batches = chunk_by_bytes(events.clone(), 2 * s + s / 2);
+        assert_eq!(names(&batches), vec![vec!["e1", "e2"], vec!["e3"]]);
+
+        // Target exactly 2S: two fit (`>` not `>=`), the third carries over.
+        let batches = chunk_by_bytes(events.clone(), 2 * s);
+        assert_eq!(names(&batches), vec![vec!["e1", "e2"], vec!["e3"]]);
+
+        // Target below one event: every event ships alone; nothing is lost.
+        let batches = chunk_by_bytes(events.clone(), s / 2);
+        assert_eq!(names(&batches), vec![vec!["e1"], vec!["e2"], vec!["e3"]]);
+
+        // A huge target keeps everything together, in order.
+        let batches = chunk_by_bytes(events.clone(), usize::MAX);
+        assert_eq!(names(&batches), vec![vec!["e1", "e2", "e3"]]);
+
+        // Order is preserved when a big event lands between small ones.
+        let mixed = vec![
+            (sized("a", 10), s),
+            (sized("big", 10), 10 * s),
+            (sized("b", 10), s),
+        ];
+        let batches = chunk_by_bytes(mixed, 2 * s);
+        assert_eq!(names(&batches), vec![vec!["a"], vec!["big"], vec!["b"]]);
+
+        assert!(chunk_by_bytes(Vec::new(), s).is_empty());
+    }
+
+    #[test]
+    fn immediate_lanes_pick_endpoint_compression_and_chunking() {
+        let mut builder = ClientOptionsBuilder::default();
+        builder
+            .api_key("phc_test".to_string())
+            .capture_compression(CaptureCompression::Gzip);
+        let opts = builder.build().unwrap();
+
+        let analytics = ImmediateLane::analytics();
+        assert_eq!(analytics.endpoint, Endpoint::Capture);
+        assert_eq!(analytics.compression(&opts), Some(CaptureCompression::Gzip));
+        let ai = ImmediateLane::ai();
+        assert_eq!(ai.endpoint, Endpoint::CaptureAi);
+        assert_eq!(ai.compression(&opts), Some(CaptureCompression::Zstd));
+        assert_eq!(
+            ai.batch_bytes_target,
+            Some(super::super::transport::AI_BATCH_BYTES_TARGET)
+        );
+
+        // Analytics: one request, whatever the size.
+        let events: Vec<Event> = (0..3)
+            .map(|i| {
+                let mut e = Event::new(format!("e{i}"), "user-1".to_string());
+                e.insert_prop("blob", "x".repeat(4096)).unwrap();
+                e
+            })
+            .collect();
+        let prepared = prepare_immediate(&opts, analytics, events.clone(), false);
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].submitted, 3);
+        assert!(prepared[0].url.ends_with("/i/v1/analytics/events"));
+
+        // AI: split by bytes. Shrink the target to fit exactly two of the three
+        // (equal-size) events, so the third needs a second request; identity
+        // (request id, created_at) is per request.
+        let size = measure_event(&build_event_at(
+            &events[0],
+            &opts.capture_defaults(),
+            Utc::now(),
+        ))
+        .total;
+        let small_target = ImmediateLane {
+            batch_bytes_target: Some(2 * size + size / 2),
+            ..ai
+        };
+        let prepared = prepare_immediate(&opts, small_target, events.clone(), true);
+        assert_eq!(prepared.len(), 2);
+        assert_eq!(prepared[0].pending.len(), 2);
+        assert_eq!(prepared[1].pending.len(), 1);
+        assert_eq!(prepared[0].submitted + prepared[1].submitted, 3);
+        assert_ne!(prepared[0].request_id, prepared[1].request_id);
+        assert!(prepared.iter().all(|p| p.url.ends_with("/i/v1/ai/events")));
+        assert!(prepared
+            .iter()
+            .all(|p| p.historical_migration == Some(true)));
+
+        // Nothing surviving before_send → nothing to send.
+        let mut filtered = ClientOptionsBuilder::default();
+        filtered
+            .api_key("phc_test".to_string())
+            .before_send(|_| None);
+        let filtered = filtered.build().unwrap();
+        assert!(prepare_immediate(&filtered, ai, events, false).is_empty());
+    }
+
+    #[test]
+    fn build_attempt_parts_uses_the_lane_compression() {
+        let opts = test_opts();
+        let pending = vec![dummy_event()];
+        let (headers, body) = build_attempt_parts(
+            &opts,
+            Some(CaptureCompression::Zstd),
+            &Uuid::now_v7(),
+            1,
+            "2026-05-28T12:00:00Z",
+            None,
+            &pending,
+        )
+        .unwrap();
+        assert_eq!(headers.get("content-encoding").unwrap(), "zstd");
+        let decoded = zstd::decode_all(body.as_slice()).unwrap();
+        assert!(String::from_utf8_lossy(&decoded).contains("\"event\":\"$pageview\""));
+
+        let (headers, body) = build_attempt_parts(
+            &opts,
+            None,
+            &Uuid::now_v7(),
+            1,
+            "2026-05-28T12:00:00Z",
+            None,
+            &pending,
+        )
+        .unwrap();
+        assert!(headers.get("content-encoding").is_none());
+        assert!(String::from_utf8_lossy(&body).contains("\"event\":\"$pageview\""));
     }
 }

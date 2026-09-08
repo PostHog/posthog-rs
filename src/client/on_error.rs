@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::capture_event::{CaptureErrorResponse, EventResult};
+use crate::endpoints::Endpoint;
 
 type OnErrorFn = dyn Fn(&PostHogError<'_>) + Send + Sync + 'static;
 type SharedOnErrorHook = Arc<OnErrorFn>;
@@ -82,11 +83,12 @@ pub enum PostHogError<'a> {
 ///
 /// Fields are read through accessors; the struct is `#[non_exhaustive]`.
 ///
-/// Does not fire for shutdown-timeout, queue-full, or `before_send` drops —
-/// those are not delivery failures.
+/// Does not fire for shutdown-timeout, queue-full, `before_send`, or local
+/// oversize-AI-event drops — those are not delivery failures.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct CaptureFailure<'a> {
+    pub(crate) endpoint: Endpoint,
     pub(crate) error: Option<&'a Error>,
     pub(crate) status: Option<u16>,
     pub(crate) attempt: u32,
@@ -98,6 +100,13 @@ pub struct CaptureFailure<'a> {
 }
 
 impl<'a> CaptureFailure<'a> {
+    /// The capture endpoint the failed batch targeted: [`Endpoint::Capture`]
+    /// for `capture`/`capture_batch`, [`Endpoint::CaptureAi`] for
+    /// `capture_ai`/`capture_ai_batch`. Lets one hook tell the lanes apart.
+    pub fn endpoint(&self) -> Endpoint {
+        self.endpoint
+    }
+
     /// The batch-level cause: a permanent reject, exhausted transport/HTTP
     /// retries, or a serialization failure.
     #[doc = "\n`None` only when the request itself succeeded (`2xx`) but some events were not\npersisted after the retry budget — inspect [`event_results`](Self::event_results)."]

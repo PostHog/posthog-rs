@@ -25,10 +25,11 @@ use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse
 use crate::local_evaluation::{FlagCache, FlagPoller, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
+use super::capture::ImmediateLane;
 use super::common::{
     extract_flag_details, report_flags_error, DetailedFlagsResponse, EvaluationState, FlagEventHost,
 };
-use super::transport::{Completion, Control, TransportHandle};
+use super::transport::{Completion, Control, LaneConfig, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
 
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
@@ -38,8 +39,11 @@ pub struct Client {
     local_evaluator: Option<LocalEvaluator>,
     _flag_poller: Option<FlagPoller>,
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
-    /// Background event transport. `None` for disabled clients.
+    /// Background analytics event transport. `None` for disabled clients.
     transport: Option<Arc<TransportHandle>>,
+    /// Background AI event transport, spawned on the first `capture_ai*` call
+    /// so clients that never emit AI events pay for no extra thread.
+    ai_transport: OnceLock<Arc<TransportHandle>>,
 }
 
 /// Construct a blocking PostHog client from an API key or [`ClientOptions`].
@@ -108,6 +112,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         _flag_poller: flag_poller,
         flag_event_host: OnceLock::new(),
         transport,
+        ai_transport: OnceLock::new(),
     }
 }
 
@@ -126,11 +131,67 @@ impl Client {
     /// once it is delivered, and delivery failures are not surfaced to the
     /// caller. Disabled clients and a full queue drop the event (the latter
     /// with a single warning).
+    ///
+    /// Use [`Client::capture_ai`] for LLM analytics events (`$ai_generation`,
+    /// `$ai_span`, …): `capture` never reroutes by event name, and the
+    /// analytics endpoint does not accept AI events.
     #[instrument(skip(self, event), level = "debug")]
     pub fn capture(&self, event: Event) {
         if let Some(transport) = &self.transport {
             transport.enqueue(event);
         }
+    }
+
+    /// Capture an AI (LLM analytics) event, sending it to PostHog's AI
+    /// ingestion endpoint.
+    ///
+    /// # Parameters
+    ///
+    /// - `event`: The AI event (`$ai_generation`, `$ai_span`, `$ai_trace`,
+    ///   `$ai_embedding`, …) with its `$ai_*` properties.
+    ///
+    /// # Remarks
+    ///
+    /// Fire-and-forget, like [`Client::capture`], on a separate lane: its own
+    /// background worker, queue, retry state, and endpoint, so a multi-MB AI
+    /// event can never delay or displace analytics events. The lane batches by
+    /// size (about 5 MiB per request), sends zstd-compressed bodies, and drops
+    /// an event locally — with a warning naming only the event and its byte
+    /// size — when its serialized properties exceed 8 MiB, the backend's
+    /// per-event ceiling. The worker starts on the first call.
+    ///
+    /// The SDK does not inspect the event name. The backend accepts only its
+    /// AI event names on this endpoint and reports anything else as a per-event
+    /// `drop`, which reaches an `on_error` hook (see
+    /// [`CaptureFailure::endpoint`](crate::CaptureFailure::endpoint)) or, with no
+    /// hook, one aggregate warning per batch.
+    #[instrument(skip(self, event), level = "debug")]
+    pub fn capture_ai(&self, event: Event) {
+        if let Some(transport) = self.ai_transport() {
+            transport.enqueue(event);
+        }
+    }
+
+    /// The AI lane's transport, spawned on first use. `None` for disabled
+    /// clients and once shutdown has begun (so a late `capture_ai` cannot start
+    /// a worker nobody will stop).
+    fn ai_transport(&self) -> Option<&Arc<TransportHandle>> {
+        let analytics = self.transport.as_ref()?;
+        if analytics.is_closed() {
+            return None;
+        }
+        Some(self.ai_transport.get_or_init(|| {
+            Arc::new(TransportHandle::spawn_lane(
+                self.options.clone(),
+                LaneConfig::ai(),
+            ))
+        }))
+    }
+
+    /// Every transport lane that exists: analytics, plus the AI lane once it
+    /// has been spawned. Empty for disabled clients.
+    fn lanes(&self) -> impl Iterator<Item = &Arc<TransportHandle>> {
+        self.transport.iter().chain(self.ai_transport.get())
     }
 
     /// Merge two distinct IDs onto the same person by sending a `$create_alias`
@@ -219,14 +280,19 @@ impl Client {
     /// everything queued before this call. Transient failures are kept for retry
     /// (the call still returns). A no-op for disabled clients.
     pub fn flush(&self) {
-        let Some(transport) = &self.transport else {
-            return;
-        };
-        if transport.is_closed() {
-            return;
+        // Request every lane's flush first, then wait on each, so the lanes
+        // drain concurrently rather than back to back.
+        let mut waits = Vec::new();
+        for transport in self.lanes() {
+            if transport.is_closed() {
+                continue;
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            if transport.send_control(Control::Flush(Completion::Blocking(tx))) {
+                waits.push(rx);
+            }
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        if transport.send_control(Control::Flush(Completion::Blocking(tx))) {
+        for rx in waits {
             let _ = rx.recv();
         }
     }
@@ -250,7 +316,7 @@ impl Client {
     /// `flush_blocking_timeout`.
     #[cfg(test)]
     pub(crate) fn flush_blocking(&self) {
-        if let Some(transport) = &self.transport {
+        for transport in self.lanes() {
             transport.flush_blocking();
         }
     }
@@ -289,9 +355,8 @@ impl Client {
     /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
     /// disabled clients.
     pub fn shutdown(&self) {
-        if let Some(transport) = &self.transport {
-            transport.close_blocking();
-        }
+        let lanes: Vec<&TransportHandle> = self.lanes().map(Arc::as_ref).collect();
+        TransportHandle::close_all_blocking(&lanes);
     }
 
     /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
@@ -399,6 +464,32 @@ impl Client {
         }
     }
 
+    /// Capture a batch of AI events on the AI lane.
+    ///
+    /// # Parameters
+    ///
+    /// - `events`: AI events to send.
+    /// - `historical_migration`: Kept for parity with [`Client::capture_batch`]
+    ///   and passed through to the backend, which currently ignores it for AI
+    ///   events.
+    ///
+    /// # Remarks
+    ///
+    /// Fire-and-forget, like [`Client::capture_ai`]. Events are enqueued per
+    /// event, so if the bounded queue fills partway through, the remaining
+    /// events are dropped (with the usual single full-queue warning). The lane
+    /// splits the batch into requests of about 5 MiB each.
+    #[instrument(
+        skip(self, events),
+        fields(event_count = events.len(), historical_migration),
+        level = "debug"
+    )]
+    pub fn capture_ai_batch(&self, events: Vec<Event>, historical_migration: bool) {
+        if let Some(transport) = self.ai_transport() {
+            transport.enqueue_batch(events, historical_migration);
+        }
+    }
+
     // ----- Immediate (inline) capture -------------------------------------
     //
     // `capture`/`capture_batch` above are fire-and-forget: they enqueue onto the
@@ -416,6 +507,61 @@ impl Client {
     #[must_use = "the delivery outcome should be inspected"]
     pub fn capture_immediate(&self, event: Event) -> Result<CaptureSummary, Error> {
         self.capture_batch_immediate(vec![event], false)
+    }
+
+    /// Capture a single AI event and block until the request completes.
+    ///
+    /// The immediate-delivery counterpart to [`Client::capture_ai`]. This is a
+    /// convenience wrapper over [`Client::capture_ai_batch_immediate`] with a
+    /// one-event batch; see it for full semantics.
+    #[must_use = "the delivery outcome should be inspected"]
+    pub fn capture_ai_immediate(&self, event: Event) -> Result<CaptureSummary, Error> {
+        self.capture_ai_batch_immediate(vec![event], false)
+    }
+
+    /// Capture a batch of AI events and block until every request completes,
+    /// returning a [`CaptureSummary`] describing the outcome.
+    ///
+    /// The immediate-delivery counterpart to [`Client::capture_ai_batch`].
+    ///
+    /// # Parameters
+    ///
+    /// - `events`: AI events to send.
+    /// - `historical_migration`: Kept for parity with
+    ///   [`Client::capture_batch_immediate`] and passed through to the backend,
+    ///   which currently ignores it for AI events.
+    ///
+    /// # Behavior
+    ///
+    /// Like [`Client::capture_batch_immediate`], but on the AI endpoint with
+    /// zstd compression, and the batch is split into requests of about 5 MiB
+    /// each, sent in order. Each request retries transient failures and
+    /// per-event `retry` verdicts per the client's retry configuration; the
+    /// summary merges every request's verdicts. Unlike the background lane, no
+    /// event is dropped locally for size: an oversize event is sent and comes
+    /// back as a per-event `drop` (`ai_event_too_big`) in the summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] as soon as one request is rejected with a terminal
+    /// status or exhausts its retry budget; requests sent before it may already
+    /// have persisted. An `Err` therefore means "not confirmed", not "nothing
+    /// was stored".
+    #[must_use = "the delivery outcome should be inspected"]
+    #[instrument(
+        skip(self, events),
+        fields(event_count = events.len(), historical_migration),
+        level = "debug"
+    )]
+    pub fn capture_ai_batch_immediate(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<CaptureSummary, Error> {
+        if self.options.is_disabled() || events.is_empty() {
+            return Ok(CaptureSummary::default());
+        }
+        self.send_immediate(ImmediateLane::ai(), events, historical_migration)
     }
 
     /// Capture a batch of events and block until the request completes,
@@ -458,80 +604,88 @@ impl Client {
         if self.options.is_disabled() || events.is_empty() {
             return Ok(CaptureSummary::default());
         }
-        self.send_immediate(events, historical_migration)
+        self.send_immediate(ImmediateLane::analytics(), events, historical_migration)
     }
 
-    /// Inline capture: prepare once via the shared sans-I/O helpers, then loop
-    /// send/classify, sleeping on the calling thread between retries. The setup and
-    /// classification are shared with the async client; only this loop differs.
+    /// Inline capture: prepare once via the shared sans-I/O helpers, then for
+    /// each prepared request loop send/classify, sleeping on the calling thread
+    /// between retries. The setup and classification are shared with the async
+    /// client; only this loop differs. The analytics lane yields one request;
+    /// the AI lane yields one per byte-sized chunk, sent in order, and the first
+    /// terminal failure ends the call.
     fn send_immediate(
         &self,
+        lane: ImmediateLane,
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureSummary, Error> {
         use super::capture::{self, Step};
 
-        let Some(mut prep) =
-            capture::prepare_immediate(&self.options, events, historical_migration)
-        else {
-            return Ok(CaptureSummary::default());
-        };
+        let compression = lane.compression(&self.options);
+        let mut submitted = 0;
         let mut final_results = HashMap::new();
-        let mut attempt: u32 = 1;
 
-        loop {
-            let (headers, body) = capture::build_attempt_parts(
-                &self.options,
-                &prep.request_id,
-                attempt,
-                &prep.created_at,
-                prep.historical_migration,
-                &prep.pending,
-            )?;
-
-            let step = match self
-                .client
-                .post(&prep.url)
-                .headers(headers)
-                .body(body)
-                .send()
-            {
-                Err(e) => capture::after_transport_error(
+        for mut prep in
+            capture::prepare_immediate(&self.options, lane, events, historical_migration)
+        {
+            let mut attempt: u32 = 1;
+            loop {
+                let (headers, body) = capture::build_attempt_parts(
                     &self.options,
+                    compression,
                     &prep.request_id,
                     attempt,
-                    e.to_string(),
-                ),
-                Ok(response) => {
-                    let status = response.status().as_u16();
-                    let retry_after = capture::parse_retry_after(response.headers());
-                    let text = response
-                        .text()
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    capture::after_response(
+                    &prep.created_at,
+                    prep.historical_migration,
+                    &prep.pending,
+                )?;
+
+                let step = match self
+                    .client
+                    .post(&prep.url)
+                    .headers(headers)
+                    .body(body)
+                    .send()
+                {
+                    Err(e) => capture::after_transport_error(
                         &self.options,
                         &prep.request_id,
                         attempt,
-                        status,
-                        retry_after,
-                        &text,
-                        &mut prep.pending,
-                        &mut final_results,
-                    )
-                }
-            };
+                        e.to_string(),
+                    ),
+                    Ok(response) => {
+                        let status = response.status().as_u16();
+                        let retry_after = capture::parse_retry_after(response.headers());
+                        let text = response
+                            .text()
+                            .unwrap_or_else(|_| "Unknown error".to_string());
+                        capture::after_response(
+                            &self.options,
+                            &prep.request_id,
+                            attempt,
+                            status,
+                            retry_after,
+                            &text,
+                            &mut prep.pending,
+                            &mut final_results,
+                        )
+                    }
+                };
 
-            match step {
-                Step::Done => {
-                    return Ok(CaptureSummary::from_results(prep.submitted, final_results))
-                }
-                Step::Fail(e) => return Err(e),
-                Step::Backoff(delay) => {
-                    attempt += 1;
-                    std::thread::sleep(delay);
+                match step {
+                    Step::Done => {
+                        submitted += prep.submitted;
+                        break;
+                    }
+                    Step::Fail(e) => return Err(e),
+                    Step::Backoff(delay) => {
+                        attempt += 1;
+                        std::thread::sleep(delay);
+                    }
                 }
             }
         }
+        Ok(CaptureSummary::from_results(submitted, final_results))
     }
 
     /// Number of events accepted but not yet delivered or dropped — those still
@@ -542,7 +696,7 @@ impl Client {
     /// for the SDK compliance harness and is not part of the normal public API.
     #[cfg(feature = "test-harness")]
     pub fn pending_events(&self) -> usize {
-        self.transport.as_ref().map_or(0, |t| t.pending())
+        self.lanes().map(|t| t.pending()).sum()
     }
 
     /// Evaluate a supplied feature flag definition locally.
@@ -794,9 +948,8 @@ impl Drop for Client {
     /// beforehand makes this a no-op. A drop from a transport callback queues
     /// shutdown without waiting for or joining the current worker thread.
     fn drop(&mut self) {
-        if let Some(transport) = &self.transport {
-            transport.close_blocking();
-        }
+        let lanes: Vec<&TransportHandle> = self.lanes().map(Arc::as_ref).collect();
+        TransportHandle::close_all_blocking(&lanes);
     }
 }
 
@@ -804,6 +957,74 @@ impl Drop for Client {
 mod teardown_tests {
     use super::*;
     use std::sync::{mpsc, Mutex};
+
+    fn lane_test_client_options(host: String) -> ClientOptions {
+        lane_test_client_options_with_key("phc_test", host)
+    }
+
+    /// An empty API key yields a disabled client (no transport at all).
+    fn lane_test_client_options_with_key(api_key: &str, host: String) -> ClientOptions {
+        crate::ClientOptionsBuilder::default()
+            .api_key(api_key.to_string())
+            .host(host)
+            .flush_interval_ms(60_000u64)
+            .shutdown_timeout_ms(1_000u64)
+            .max_capture_attempts(1u32)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn ai_lane_is_not_spawned_until_capture_ai_is_called() {
+        let client = client(lane_test_client_options("http://localhost:0".to_string()));
+        client.capture(Event::new("clicked", "user-1"));
+        client.flush();
+        assert!(
+            client.ai_transport.get().is_none(),
+            "analytics use never starts the AI lane"
+        );
+
+        client.capture_ai(Event::new("$ai_generation", "user-1"));
+        let first = Arc::clone(
+            client
+                .ai_transport
+                .get()
+                .expect("spawned on first capture_ai"),
+        );
+        client.capture_ai(Event::new("$ai_span", "user-1"));
+        assert!(
+            Arc::ptr_eq(&first, client.ai_transport.get().unwrap()),
+            "spawned exactly once"
+        );
+        client.shutdown();
+        assert!(first.is_closed(), "shutdown closes the AI lane too");
+    }
+
+    #[test]
+    fn capture_ai_after_shutdown_does_not_spawn_a_lane() {
+        let client = client(lane_test_client_options("http://localhost:0".to_string()));
+        client.shutdown();
+        client.capture_ai(Event::new("$ai_generation", "user-1"));
+        assert!(client.ai_transport.get().is_none());
+    }
+
+    #[test]
+    fn disabled_client_ignores_capture_ai() {
+        let client = client(lane_test_client_options_with_key(
+            "",
+            "http://localhost:0".to_string(),
+        ));
+        assert!(client.transport.is_none());
+        client.capture_ai(Event::new("$ai_generation", "user-1"));
+        client.capture_ai_batch(vec![Event::new("$ai_generation", "user-1")], false);
+        assert!(client.ai_transport.get().is_none());
+        let summary = client
+            .capture_ai_immediate(Event::new("$ai_generation", "user-1"))
+            .unwrap();
+        assert_eq!(summary.submitted(), 0);
+        client.flush();
+        client.shutdown();
+    }
 
     #[test]
     fn drop_from_worker_callback_closes_without_blocking() {
@@ -863,6 +1084,7 @@ mod minimal_gate_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            ai_transport: OnceLock::new(),
         };
         client
             .flag_event_host
@@ -941,6 +1163,7 @@ mod local_payload_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            ai_transport: OnceLock::new(),
         };
         client
             .flag_event_host
