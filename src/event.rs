@@ -470,15 +470,36 @@ pub struct BatchRequest {
 
 // With `capture-v1` enabled nothing outside tests builds the V0 wire format.
 #[cfg_attr(feature = "capture-v1", allow(dead_code))]
-#[derive(Serialize)]
 pub struct InnerEvent {
-    #[serde(skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
     uuid: Uuid,
     event: String,
     distinct_id: String,
     properties: HashMap<String, serde_json::Value>,
     timestamp: Option<DateTime<Utc>>,
+}
+
+impl Serialize for InnerEvent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut wire =
+            serializer.serialize_struct("InnerEvent", 5 + usize::from(self.api_key.is_some()))?;
+        if let Some(api_key) = &self.api_key {
+            wire.serialize_field("api_key", api_key)?;
+        }
+        wire.serialize_field("uuid", &self.uuid)?;
+        wire.serialize_field("event", &self.event)?;
+        wire.serialize_field("distinct_id", &self.distinct_id)?;
+        wire.serialize_field(
+            "properties",
+            &crate::property_serialization::EventProperties {
+                event: &self.event,
+                properties: &self.properties,
+            },
+        )?;
+        wire.serialize_field("timestamp", &self.timestamp)?;
+        wire.end()
+    }
 }
 
 impl InnerEvent {
