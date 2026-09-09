@@ -178,10 +178,11 @@ impl Client {
     /// clients and once shutdown has begun (so a late `capture_ai` cannot start
     /// a worker nobody will stop).
     ///
-    /// Shutdown marks the analytics lane closed *before* it snapshots the lanes
-    /// to drain, so re-checking after `get_or_init` covers every ordering: a
-    /// lane spawned before that mark is in the snapshot; one spawned after it
-    /// sees the mark here and is closed immediately (`Drop` joins it).
+    /// `shutdown`/`Drop` mark the analytics lane closed *before* they read the
+    /// AI lane to drain (see `close_lanes`), so re-checking after `get_or_init`
+    /// covers every ordering: a lane initialized before that mark is seen by
+    /// the closing side; one initialized after it sees the mark here and is
+    /// closed immediately (`Drop` joins it).
     fn ai_transport(&self) -> Option<&Arc<TransportHandle>> {
         let analytics = self.transport.as_ref()?;
         if analytics.is_closed() {
@@ -376,8 +377,44 @@ impl Client {
     /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
     /// disabled clients.
     pub fn shutdown(&self) {
-        let lanes: Vec<&TransportHandle> = self.lanes().map(Arc::as_ref).collect();
-        TransportHandle::close_all_blocking(&lanes);
+        self.close_lanes_blocking();
+    }
+
+    /// Flush, stop, and join every lane. Order matters: mark the analytics lane
+    /// closed FIRST. `ai_transport()` re-checks that mark after initializing, so
+    /// every AI lane that exists after this line either shows up in the read
+    /// below or closes itself. Reading the AI lane before marking would let a
+    /// first `capture_ai` slip a worker in between that this shutdown never
+    /// drains. Requests are queued on both lanes before waiting, so their
+    /// drains overlap within one `shutdown_timeout_ms`; from a worker's own
+    /// callback only the requests are queued (waiting or joining there would
+    /// deadlock).
+    fn close_lanes_blocking(&self) {
+        let Some(analytics) = &self.transport else {
+            return;
+        };
+        let mut waits = Vec::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        if analytics.request_shutdown(Completion::Blocking(tx)) {
+            waits.push(rx);
+        }
+        let mut lanes: Vec<&TransportHandle> = vec![analytics.as_ref()];
+        if let Some(ai) = self.ai_transport.get() {
+            lanes.push(ai.as_ref());
+            let (tx, rx) = std::sync::mpsc::channel();
+            if ai.request_shutdown(Completion::Blocking(tx)) {
+                waits.push(rx);
+            }
+        }
+        if lanes.iter().any(|t| t.on_worker_thread()) {
+            return;
+        }
+        for rx in waits {
+            let _ = rx.recv();
+        }
+        for transport in lanes {
+            transport.join();
+        }
     }
 
     /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
@@ -969,8 +1006,7 @@ impl Drop for Client {
     /// beforehand makes this a no-op. A drop from a transport callback queues
     /// shutdown without waiting for or joining the current worker thread.
     fn drop(&mut self) {
-        let lanes: Vec<&TransportHandle> = self.lanes().map(Arc::as_ref).collect();
-        TransportHandle::close_all_blocking(&lanes);
+        self.close_lanes_blocking();
     }
 }
 
@@ -1040,6 +1076,28 @@ mod teardown_tests {
         );
         assert!(client.ai_transport().is_none());
         client.shutdown();
+    }
+
+    #[test]
+    fn shutdown_racing_a_first_capture_ai_always_closes_the_ai_lane() {
+        // Review finding: a first `capture_ai` landing between shutdown's lane
+        // read and its close mark could leave an AI worker running after
+        // `shutdown` returned. Race the two repeatedly; whatever the interleaving,
+        // any AI lane that exists once shutdown returns must be closed.
+        for _ in 0..100 {
+            let client = Arc::new(client(lane_test_client_options(
+                "http://localhost:0".to_string(),
+            )));
+            let racer = Arc::clone(&client);
+            let t = std::thread::spawn(move || {
+                racer.capture_ai(Event::new("$ai_generation", "user-1"));
+            });
+            client.shutdown();
+            t.join().unwrap();
+            if let Some(ai) = client.ai_transport.get() {
+                assert!(ai.is_closed(), "AI lane left open after shutdown returned");
+            }
+        }
     }
 
     #[test]

@@ -367,14 +367,25 @@ impl TransportHandle {
         Self::close_all_blocking(&[self]);
     }
 
+    /// Mark closed and, for the caller that won the transition, queue the
+    /// `Shutdown` control carrying `completion`. Returns `true` only when that
+    /// control was sent, i.e. when the caller should wait on its completion.
+    /// Marking happens before the send, so `is_closed()` is observable as soon
+    /// as this returns.
+    pub(crate) fn request_shutdown(&self, completion: Completion) -> bool {
+        if self.begin_close() {
+            self.send_control(Control::Shutdown(completion))
+        } else {
+            false
+        }
+    }
+
     /// Request shutdown without waiting: used when a lane is spawned by a call
     /// that raced `shutdown`, so the new worker stops accepting events at once
-    /// and drains; `Drop` later joins it via `close_all_blocking`.
+    /// and drains; `Drop` later joins it.
     pub(crate) fn request_close(&self) {
-        if self.begin_close() {
-            let (tx, _rx) = mpsc::channel();
-            let _ = self.send_control(Control::Shutdown(Completion::Blocking(tx)));
-        }
+        let (tx, _rx) = mpsc::channel();
+        self.request_shutdown(Completion::Blocking(tx));
     }
 
     /// [`close_blocking`](Self::close_blocking) across several lanes at once,
@@ -383,15 +394,14 @@ impl TransportHandle {
     /// `shutdown_timeout_ms`, not two. If the caller is on *any* of these
     /// workers, no waiting or joining happens (same rule as the single-lane
     /// form: a worker must not wait on itself inside a callback).
+    #[cfg(test)]
     pub(crate) fn close_all_blocking(handles: &[&TransportHandle]) {
         let on_worker = handles.iter().any(|h| h.on_worker_thread());
         let mut waits = Vec::with_capacity(handles.len());
         for handle in handles {
-            if handle.begin_close() {
-                let (tx, rx) = mpsc::channel();
-                if handle.send_control(Control::Shutdown(Completion::Blocking(tx))) && !on_worker {
-                    waits.push(rx);
-                }
+            let (tx, rx) = mpsc::channel();
+            if handle.request_shutdown(Completion::Blocking(tx)) && !on_worker {
+                waits.push(rx);
             }
         }
         for rx in waits {
@@ -618,7 +628,8 @@ impl LiveBuffer {
 }
 
 /// Admit one live event to the buffer, flushing when a size threshold is met.
-/// Returns `true` when the buffer was sent (so the caller resets its timer).
+/// Owns `buffer_since`: it is `Some` exactly while the buffer holds events,
+/// so a carried-over event keeps an interval timer of its own.
 ///
 /// Deferred (analytics): push, flush at `flush_at` events — unchanged behavior.
 ///
@@ -637,7 +648,7 @@ fn admit_live(
     event: Event,
     flush_at: usize,
     max_batch_size: usize,
-) -> bool {
+) {
     match buffer {
         LiveBuffer::Deferred(events) => {
             if events.is_empty() {
@@ -646,9 +657,8 @@ fn admit_live(
             events.push(event);
             if events.len() >= flush_at {
                 send_buffer(pipeline, buffer, max_batch_size, None);
-                return true;
+                *buffer_since = None;
             }
-            false
         }
         LiveBuffer::Prepared { .. } => {
             let target = pipeline
@@ -657,27 +667,25 @@ fn admit_live(
                 .expect("Prepared buffer implies a byte target");
             let Some((wire, size)) = pipeline.prepare_measured(event) else {
                 // Dropped locally (before_send or oversize); slot already released.
-                return false;
+                return;
             };
-            let mut sent = false;
             if !buffer.is_empty() && buffer_bytes(buffer) + size.total > target {
                 send_buffer(pipeline, buffer, max_batch_size, None);
                 *buffer_since = None;
-                sent = true;
             }
             let LiveBuffer::Prepared { events, bytes } = buffer else {
                 unreachable!("buffer variant is fixed per lane");
             };
             if events.is_empty() {
+                // Also the carried-over case: the new batch gets its own timer.
                 *buffer_since = Some(pipeline.clock.now());
             }
             events.push(wire);
             *bytes += size.total;
             if events.len() >= flush_at || *bytes >= target {
                 send_buffer(pipeline, buffer, max_batch_size, None);
-                return true;
+                *buffer_since = None;
             }
-            sent
         }
     }
 }
@@ -750,16 +758,14 @@ fn run_worker(
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
                 // decremented by the pipeline once a batch is delivered or dropped.
-                if admit_live(
+                admit_live(
                     &mut pipeline,
                     &mut buffer,
                     &mut buffer_since,
                     *event,
                     flush_at,
                     max_batch_size,
-                ) {
-                    buffer_since = None;
-                }
+                );
             }
             Wake::Msg(Control::HistoricalBatch { mut events }) => {
                 // Queue the chunks off the live buffer (which stays non-historical
@@ -2694,6 +2700,59 @@ mod tests {
             handle.flush_blocking();
             assert_eq!(handle.pending(), 0);
             TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn carried_over_event_keeps_its_interval_timer() {
+            // Admitting e3 closes [e1, e2] and carries e3 into a fresh batch. That
+            // batch must flush on the interval by itself — without another event,
+            // flush, or shutdown (review finding: the timer used to be cleared).
+            let server = MockServer::start();
+            let mock = path_mock(&server, CAPTURE_AI_PATH);
+            let clock = ManualClock::new();
+            let mut builder = options(server.base_url());
+            let size = wire_total(&sized_event("e1", 100), &mut builder);
+            let lane = LaneConfig {
+                batch_bytes_target: Some(2 * size + size / 2),
+                ..plain_ai()
+            };
+            let handle = TransportHandle::spawn_lane_with_clock(
+                builder.build().unwrap(),
+                lane,
+                Arc::new(clock.clone()),
+            );
+            handle.enqueue(sized_event("e1", 100));
+            handle.enqueue(sized_event("e2", 100));
+            handle.enqueue(sized_event("e3", 100));
+            handle.tick();
+            mock.assert_calls(1);
+            assert_eq!(handle.pending(), 1);
+            clock.advance(Duration::from_millis(10_000)); // options(): flush_interval 10s
+            handle.tick();
+            mock.assert_calls(2);
+            assert_eq!(handle.pending(), 0);
+            handle.shutdown_blocking();
+        }
+
+        #[test]
+        fn request_shutdown_marks_closed_and_sends_exactly_once() {
+            let server = MockServer::start();
+            let _mock = path_mock(&server, CAPTURE_AI_PATH);
+            let handle = spawn(&mut options(server.base_url()), plain_ai());
+            assert!(!handle.is_closed());
+            let (tx, rx) = mpsc::channel();
+            assert!(handle.request_shutdown(Completion::Blocking(tx)));
+            assert!(
+                handle.is_closed(),
+                "marked before the caller can observe the send"
+            );
+            let (tx2, _rx2) = mpsc::channel();
+            assert!(
+                !handle.request_shutdown(Completion::Blocking(tx2)),
+                "second caller lost"
+            );
+            let _ = rx.recv();
+            handle.join();
         }
 
         #[test]

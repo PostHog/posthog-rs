@@ -175,10 +175,11 @@ impl Client {
     /// clients and once shutdown has begun (so a late `capture_ai` cannot start
     /// a worker nobody will stop).
     ///
-    /// Shutdown marks the analytics lane closed *before* it snapshots the lanes
-    /// to drain, so re-checking after `get_or_init` covers every ordering: a
-    /// lane spawned before that mark is in the snapshot; one spawned after it
-    /// sees the mark here and is closed immediately (`Drop` joins it).
+    /// `shutdown`/`Drop` mark the analytics lane closed *before* they read the
+    /// AI lane to drain (see `close_lanes`), so re-checking after `get_or_init`
+    /// covers every ordering: a lane initialized before that mark is seen by
+    /// the closing side; one initialized after it sees the mark here and is
+    /// closed immediately (`Drop` joins it).
     fn ai_transport(&self) -> Option<&Arc<TransportHandle>> {
         let analytics = self.transport.as_ref()?;
         if analytics.is_closed() {
@@ -378,30 +379,73 @@ impl Client {
     /// disabled clients. When called from a transport callback, queues shutdown
     /// without waiting for or joining the current worker thread.
     pub async fn shutdown(&self) {
-        // Phased across lanes (request all, await all, join all) so the AI and
-        // analytics drains overlap within one `shutdown_timeout_ms`.
-        let lanes: Vec<&Arc<TransportHandle>> = self.lanes().collect();
-        let on_worker = lanes.iter().any(|t| t.on_worker_thread());
+        let Some(analytics) = &self.transport else {
+            return;
+        };
+        // Order matters: mark the analytics lane closed FIRST. `ai_transport()`
+        // re-checks that mark after initializing, so every AI lane that exists
+        // after this line either shows up in the read below or closes itself.
+        // Reading the AI lane before marking would let a first `capture_ai`
+        // slip a worker in between that this shutdown never drains.
         let mut waits = Vec::new();
-        for transport in &lanes {
-            if transport.begin_close() {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                if transport.send_control(Control::Shutdown(Completion::Async(tx))) && !on_worker {
-                    waits.push(rx);
-                }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if analytics.request_shutdown(Completion::Async(tx)) {
+            waits.push(rx);
+        }
+        let mut lanes: Vec<&TransportHandle> = vec![analytics.as_ref()];
+        if let Some(ai) = self.ai_transport.get() {
+            lanes.push(ai.as_ref());
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if ai.request_shutdown(Completion::Async(tx)) {
+                waits.push(rx);
             }
         }
+        // From a worker's own callback, only queue the shutdowns: waiting for or
+        // joining the current worker would deadlock.
+        if lanes.iter().any(|t| t.on_worker_thread()) {
+            return;
+        }
+        // Requests are queued on both lanes before awaiting, so their drains
+        // overlap within one `shutdown_timeout_ms`.
         for rx in waits {
             let _ = rx.await;
         }
         // Always join for external callers — even if this caller lost the
         // `begin_close` race or its shutdown wait was cancelled — so every
-        // external shutdown/drop path waits for the worker and the flush stays
-        // durable. Joining from a worker itself would deadlock.
-        if !on_worker {
-            for transport in &lanes {
-                transport.join();
+        // external shutdown/drop path waits for the workers and the flush stays
+        // durable.
+        for transport in lanes {
+            transport.join();
+        }
+    }
+
+    /// Blocking form of [`Self::shutdown`] with the same lane ordering, for
+    /// `Drop`.
+    fn close_lanes_blocking(&self) {
+        let Some(analytics) = &self.transport else {
+            return;
+        };
+        let mut waits = Vec::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        if analytics.request_shutdown(Completion::Blocking(tx)) {
+            waits.push(rx);
+        }
+        let mut lanes: Vec<&TransportHandle> = vec![analytics.as_ref()];
+        if let Some(ai) = self.ai_transport.get() {
+            lanes.push(ai.as_ref());
+            let (tx, rx) = std::sync::mpsc::channel();
+            if ai.request_shutdown(Completion::Blocking(tx)) {
+                waits.push(rx);
             }
+        }
+        if lanes.iter().any(|t| t.on_worker_thread()) {
+            return;
+        }
+        for rx in waits {
+            let _ = rx.recv();
+        }
+        for transport in lanes {
+            transport.join();
         }
     }
 
@@ -1011,8 +1055,7 @@ impl Drop for Client {
     /// callback instead queues shutdown without waiting for or joining the current
     /// worker thread.
     fn drop(&mut self) {
-        let lanes: Vec<&TransportHandle> = self.lanes().map(Arc::as_ref).collect();
-        TransportHandle::close_all_blocking(&lanes);
+        self.close_lanes_blocking();
     }
 }
 
@@ -1082,6 +1125,27 @@ mod teardown_tests {
         );
         assert!(client.ai_transport().is_none());
         client.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_racing_a_first_capture_ai_always_closes_the_ai_lane() {
+        // Review finding: a first `capture_ai` landing between shutdown's lane
+        // read and its close mark could leave an AI worker running after
+        // `shutdown` returned. Race the two repeatedly; whatever the interleaving,
+        // any AI lane that exists once shutdown returns must be closed.
+        for _ in 0..100 {
+            let client =
+                Arc::new(client(lane_test_client_options("http://localhost:0".to_string())).await);
+            let racer = Arc::clone(&client);
+            let t = std::thread::spawn(move || {
+                racer.capture_ai(Event::new("$ai_generation", "user-1"));
+            });
+            client.shutdown().await;
+            t.join().unwrap();
+            if let Some(ai) = client.ai_transport.get() {
+                assert!(ai.is_closed(), "AI lane left open after shutdown returned");
+            }
+        }
     }
 
     #[tokio::test]
