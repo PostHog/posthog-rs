@@ -226,12 +226,13 @@ pub struct ClientOptions {
     /// Maximum time `shutdown()` and `Drop` spend draining buffered and
     /// retrying events before abandoning the rest, in milliseconds (default:
     /// 30000). This bounds the drain itself, including any delivery the drain
-    /// starts. It does not bound work already underway: the single background
-    /// worker performs one blocking send at a time, so an automatic flush or
-    /// drain in progress when shutdown is requested runs to completion first —
-    /// up to `request_timeout_seconds` per in-flight batch, so a large
-    /// auto-drain can delay teardown by several request timeouts. `flush()` is
-    /// unaffected.
+    /// starts. It does not bound work already underway: each background
+    /// worker (analytics, and the AI lane once used) performs one blocking send
+    /// at a time, so an automatic flush or drain in progress when shutdown is
+    /// requested runs to completion first — up to `request_timeout_seconds`
+    /// per in-flight batch, so a large auto-drain can delay teardown by several
+    /// request timeouts. The lanes drain concurrently, so the budget is shared,
+    /// not doubled. `flush()` is unaffected.
     #[builder(default = "30000")]
     pub(crate) shutdown_timeout_ms: u64,
 
@@ -239,6 +240,17 @@ pub struct ClientOptions {
     /// sent uncompressed. The capture endpoint supports all variants.
     #[builder(default, setter(strip_option))]
     pub(crate) capture_compression: Option<CaptureCompression>,
+
+    /// Compression for `capture_ai*` bodies; unset (default) sends them
+    /// uncompressed. Prefer `Zstd`: AI events are large JSON.
+    #[builder(default, setter(strip_option))]
+    pub(crate) capture_ai_compression: Option<CaptureCompression>,
+
+    /// Maximum `capture_ai*` events buffered before new ones are dropped
+    /// (default: 1000). Lower than `max_queue_size` because AI events can be
+    /// multi-MB; a single warning is logged while the queue is full.
+    #[builder(default = "1000")]
+    pub(crate) capture_ai_max_queue_size: usize,
 
     /// Hooks to modify, filter, or sample events before they are sent.
     #[builder(default, setter(custom))]

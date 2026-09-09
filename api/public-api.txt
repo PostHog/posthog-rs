@@ -21,6 +21,7 @@ impl core::fmt::Display for posthog_rs::ClientOptionsBuilderError
 pub fn posthog_rs::ClientOptionsBuilderError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub enum posthog_rs::Endpoint
 pub posthog_rs::Endpoint::Capture
+pub posthog_rs::Endpoint::CaptureAi
 pub posthog_rs::Endpoint::Flags
 pub posthog_rs::Endpoint::LocalEvaluation
 impl posthog_rs::Endpoint
@@ -111,6 +112,7 @@ pub fn posthog_rs::CaptureExceptionOptions::trace_context<T: core::convert::Into
 #[non_exhaustive] pub struct posthog_rs::CaptureFailure<'a>
 impl<'a> posthog_rs::CaptureFailure<'a>
 pub fn posthog_rs::CaptureFailure<'a>::attempt(&self) -> u32
+pub fn posthog_rs::CaptureFailure<'a>::endpoint(&self) -> posthog_rs::Endpoint
 pub fn posthog_rs::CaptureFailure<'a>::error(&self) -> core::option::Option<&posthog_rs::Error>
 pub fn posthog_rs::CaptureFailure<'a>::error_response(&self) -> core::option::Option<&posthog_rs::CaptureErrorResponse>
 pub fn posthog_rs::CaptureFailure<'a>::event_count(&self) -> usize
@@ -130,6 +132,10 @@ pub struct posthog_rs::Client
 impl posthog_rs::Client
 pub fn posthog_rs::Client::alias<P: core::convert::Into<alloc::string::String>, D: core::convert::Into<alloc::string::String>>(&self, P, D)
 pub fn posthog_rs::Client::capture(&self, posthog_rs::Event)
+pub fn posthog_rs::Client::capture_ai(&self, posthog_rs::Event)
+pub fn posthog_rs::Client::capture_ai_batch(&self, alloc::vec::Vec<posthog_rs::Event>, bool)
+pub async fn posthog_rs::Client::capture_ai_batch_immediate(&self, alloc::vec::Vec<posthog_rs::Event>, bool) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
+pub async fn posthog_rs::Client::capture_ai_immediate(&self, posthog_rs::Event) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
 pub fn posthog_rs::Client::capture_batch(&self, alloc::vec::Vec<posthog_rs::Event>, bool)
 pub async fn posthog_rs::Client::capture_batch_immediate(&self, alloc::vec::Vec<posthog_rs::Event>, bool) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
 pub async fn posthog_rs::Client::capture_exception<E>(&self, &E) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
@@ -152,6 +158,8 @@ pub fn posthog_rs::ClientOptions::from((&str, &str)) -> Self
 pub struct posthog_rs::ClientOptionsBuilder
 impl posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::api_key(&mut self, alloc::string::String) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::capture_ai_compression(&mut self, posthog_rs::CaptureCompression) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::capture_ai_max_queue_size(&mut self, usize) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::capture_compression(&mut self, posthog_rs::CaptureCompression) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::disable_geoip(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::disabled(&mut self, bool) -> &mut Self
@@ -361,6 +369,7 @@ pub const posthog_rs::DEFAULT_HOST: &str
 pub const posthog_rs::EU_INGESTION_ENDPOINT: &str
 pub const posthog_rs::US_INGESTION_ENDPOINT: &str
 pub fn posthog_rs::capture(posthog_rs::Event)
+pub fn posthog_rs::capture_ai(posthog_rs::Event)
 pub async fn posthog_rs::capture_exception<E>(&E) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub async fn posthog_rs::capture_exception_with<E>(&E, posthog_rs::CaptureExceptionOptions) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub async fn posthog_rs::client<C: core::convert::Into<posthog_rs::ClientOptions>>(C) -> posthog_rs::Client

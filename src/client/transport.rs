@@ -1,10 +1,16 @@
 //! Runtime-independent event transport.
 //!
-//! A single background `std::thread` drains a channel, batches events, sends
-//! them with **blocking** reqwest, and retries transient failures on a schedule.
-//! Being a plain thread with a blocking client (never a tokio task) it works for
-//! the async client, the blocking client, and — in a later change — a
-//! `std::panic` hook with no runtime present.
+//! One background `std::thread` per lane drains a channel, batches events,
+//! sends them with **blocking** reqwest, and retries transient failures on a
+//! schedule. Being a plain thread with a blocking client (never a tokio task) it
+//! works for the async client, the blocking client, and a `std::panic` hook
+//! with no runtime present.
+//!
+//! There are two lanes, described by [`LaneConfig`]: analytics (always
+//! spawned) and AI (spawned on first `capture_ai*`). They share this worker and
+//! pipeline implementation and differ only in endpoint, compression, and how a
+//! batch is bounded — by event count (analytics) or by serialized bytes with a
+//! per-event ceiling (AI).
 //!
 //! `capture()` becomes a non-blocking enqueue (`Control::Capture`). `flush()` and
 //! `shutdown()` send a control message carrying a [`Completion`] the worker
@@ -25,8 +31,11 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use tracing::warn;
 
-use super::common::apply_on_error_hooks;
-use super::{CaptureFailure, ClientOptions, PostHogError};
+use super::capture::{build_event_at, chunk_by_bytes, measure_event, EventSize};
+use super::common::{apply_on_error_hooks, preprocess_capture_event};
+use super::{CaptureCompression, CaptureDefaults, CaptureFailure, ClientOptions, PostHogError};
+use crate::capture_event::CaptureEvent;
+use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::Event;
 
@@ -118,9 +127,78 @@ pub(crate) struct TransportHandle {
     worker_id: Option<std::thread::ThreadId>,
 }
 
-/// Name of the background worker thread (aids debugging). The panic hook detects
+/// Name of the analytics worker thread (aids debugging). The panic hook detects
 /// the worker by its thread *id* (see `worker_id`), not this shared name.
 const WORKER_THREAD_NAME: &str = "posthog-transport";
+
+/// Name of the AI-lane worker thread.
+const AI_WORKER_THREAD_NAME: &str = "posthog-transport-ai";
+
+/// Soft byte target for one AI batch body. The capture-ai deployment caps a
+/// compressed request body at 20 MiB; with the guarded check-before-append rule
+/// the worst-case body is `max(target, largest event)` = 8 MiB, a 2.5x margin.
+/// Same value posthog-python and posthog-node use.
+pub(crate) const AI_BATCH_BYTES_TARGET: usize = 5 * 1024 * 1024;
+
+/// Per-event ceiling on the serialized `properties` object of an AI event,
+/// mirroring the backend's `AI_MAX_EVENT_BYTES` (strictly greater is refused
+/// with `ai_event_too_big`). Events over it are dropped locally so a doomed
+/// multi-MB upload is never attempted. Measured on `properties` only, like the
+/// v1 backend — not on the whole serialized event as the v0 path did.
+pub(crate) const AI_MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Everything that differs between the analytics and AI transport lanes. One
+/// worker/pipeline implementation serves both; a lane is chosen by the public
+/// method the caller used, never by an argument on it.
+#[derive(Debug, Clone)]
+pub(crate) struct LaneConfig {
+    pub(crate) endpoint: Endpoint,
+    pub(crate) thread_name: &'static str,
+    /// `Some`: byte-based batching with this soft target (events are built and
+    /// measured when buffered). `None`: count-based only, built at send time.
+    pub(crate) batch_bytes_target: Option<usize>,
+    /// `Some`: drop an event locally when its serialized `properties` exceed
+    /// this many bytes. `None`: no local ceiling.
+    pub(crate) max_event_bytes: Option<usize>,
+}
+
+impl LaneConfig {
+    /// Today's analytics behavior, unchanged: count-based batches built at send
+    /// time, client-configured compression, no local size ceiling.
+    pub(crate) fn analytics() -> Self {
+        Self {
+            endpoint: Endpoint::Capture,
+            thread_name: WORKER_THREAD_NAME,
+            batch_bytes_target: None,
+            max_event_bytes: None,
+        }
+    }
+
+    pub(crate) fn ai() -> Self {
+        Self {
+            endpoint: Endpoint::CaptureAi,
+            thread_name: AI_WORKER_THREAD_NAME,
+            batch_bytes_target: Some(AI_BATCH_BYTES_TARGET),
+            max_event_bytes: Some(AI_MAX_EVENT_BYTES),
+        }
+    }
+
+    /// The client option that configures this lane's body compression.
+    pub(crate) fn compression(&self, options: &ClientOptions) -> Option<CaptureCompression> {
+        match self.endpoint {
+            Endpoint::CaptureAi => options.capture_ai_compression,
+            _ => options.capture_compression,
+        }
+    }
+
+    /// The client option that bounds this lane's queue.
+    pub(crate) fn max_queue_size(&self, options: &ClientOptions) -> usize {
+        match self.endpoint {
+            Endpoint::CaptureAi => options.capture_ai_max_queue_size,
+            _ => options.max_queue_size,
+        }
+    }
+}
 
 /// Upper bound on a blocking-flush / shutdown timeout, so an absurd value can't
 /// overflow the `now + timeout` deadlines (worker drain) or the `recv_timeout`
@@ -128,20 +206,35 @@ const WORKER_THREAD_NAME: &str = "posthog-transport";
 const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(86_400);
 
 impl TransportHandle {
-    /// Spawn the worker with the real system clock.
+    /// Spawn the analytics worker with the real system clock.
     pub(crate) fn spawn(options: ClientOptions) -> Self {
-        Self::spawn_with_clock(options, Arc::new(SystemClock))
+        Self::spawn_lane(options, LaneConfig::analytics())
     }
 
+    /// Spawn a worker for `lane` with the real system clock.
+    pub(crate) fn spawn_lane(options: ClientOptions, lane: LaneConfig) -> Self {
+        Self::spawn_lane_with_clock(options, lane, Arc::new(SystemClock))
+    }
+
+    /// Test seam: the analytics lane on an injected clock.
+    #[cfg(test)]
     fn spawn_with_clock(options: ClientOptions, clock: Arc<dyn Clock>) -> Self {
+        Self::spawn_lane_with_clock(options, LaneConfig::analytics(), clock)
+    }
+
+    fn spawn_lane_with_clock(
+        options: ClientOptions,
+        lane: LaneConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<Control>();
         let len = Arc::new(AtomicUsize::new(0));
-        let max_queue_size = options.max_queue_size;
+        let max_queue_size = lane.max_queue_size(&options);
         let worker_len = len.clone();
         let worker_clock = Arc::clone(&clock);
         let worker = thread::Builder::new()
-            .name(WORKER_THREAD_NAME.to_string())
-            .spawn(move || run_worker(options, rx, worker_len, worker_clock))
+            .name(lane.thread_name.to_string())
+            .spawn(move || run_worker(options, lane, rx, worker_len, worker_clock))
             .ok();
         let worker_id = worker.as_ref().map(|handle| handle.thread().id());
         Self {
@@ -269,16 +362,55 @@ impl TransportHandle {
     /// from the worker itself (for example, when a callback drops its client),
     /// only queue the shutdown: waiting for its completion or joining here would
     /// deadlock the worker inside its own callback.
+    #[cfg(test)]
     pub(crate) fn close_blocking(&self) {
-        let on_worker = self.on_worker_thread();
+        Self::close_all_blocking(&[self]);
+    }
+
+    /// Mark closed and, for the caller that won the transition, queue the
+    /// `Shutdown` control carrying `completion`. Returns `true` only when that
+    /// control was sent, i.e. when the caller should wait on its completion.
+    /// Marking happens before the send, so `is_closed()` is observable as soon
+    /// as this returns.
+    pub(crate) fn request_shutdown(&self, completion: Completion) -> bool {
         if self.begin_close() {
+            self.send_control(Control::Shutdown(completion))
+        } else {
+            false
+        }
+    }
+
+    /// Request shutdown without waiting: used when a lane is spawned by a call
+    /// that raced `shutdown`, so the new worker stops accepting events at once
+    /// and drains; `Drop` later joins it.
+    pub(crate) fn request_close(&self) {
+        let (tx, _rx) = mpsc::channel();
+        self.request_shutdown(Completion::Blocking(tx));
+    }
+
+    /// [`close_blocking`](Self::close_blocking) across several lanes at once,
+    /// phased so their drains overlap: request every shutdown first, then wait
+    /// for each, then join each. Two lanes therefore tear down within one
+    /// `shutdown_timeout_ms`, not two. If the caller is on *any* of these
+    /// workers, no waiting or joining happens (same rule as the single-lane
+    /// form: a worker must not wait on itself inside a callback).
+    #[cfg(test)]
+    pub(crate) fn close_all_blocking(handles: &[&TransportHandle]) {
+        let on_worker = handles.iter().any(|h| h.on_worker_thread());
+        let mut waits = Vec::with_capacity(handles.len());
+        for handle in handles {
             let (tx, rx) = mpsc::channel();
-            if self.send_control(Control::Shutdown(Completion::Blocking(tx))) && !on_worker {
-                let _ = rx.recv();
+            if handle.request_shutdown(Completion::Blocking(tx)) && !on_worker {
+                waits.push(rx);
             }
         }
+        for rx in waits {
+            let _ = rx.recv();
+        }
         if !on_worker {
-            self.join();
+            for handle in handles {
+                handle.join();
+            }
         }
     }
 
@@ -447,8 +579,127 @@ enum Wake {
     Disconnected,
 }
 
+/// The worker's live (non-historical) buffer.
+///
+/// The analytics lane defers building wire events until send time, so
+/// `before_send` runs as late as possible and the hot path stays as it was.
+/// The AI lane needs each event's serialized size to place batch boundaries,
+/// so it builds and measures at admission and holds ready-to-send wire events
+/// plus their running byte total.
+enum LiveBuffer {
+    Deferred(Vec<Event>),
+    Prepared {
+        events: Vec<CaptureEvent>,
+        bytes: usize,
+    },
+}
+
+impl LiveBuffer {
+    fn for_lane(lane: &LaneConfig) -> Self {
+        match lane.batch_bytes_target {
+            Some(_) => LiveBuffer::Prepared {
+                events: Vec::new(),
+                bytes: 0,
+            },
+            None => LiveBuffer::Deferred(Vec::new()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            LiveBuffer::Deferred(events) => events.len(),
+            LiveBuffer::Prepared { events, .. } => events.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn clear(&mut self) {
+        match self {
+            LiveBuffer::Deferred(events) => events.clear(),
+            LiveBuffer::Prepared { events, bytes } => {
+                events.clear();
+                *bytes = 0;
+            }
+        }
+    }
+}
+
+/// Admit one live event to the buffer, flushing when a size threshold is met.
+/// Owns `buffer_since`: it is `Some` exactly while the buffer holds events,
+/// so a carried-over event keeps an interval timer of its own.
+///
+/// Deferred (analytics): push, flush at `flush_at` events — unchanged behavior.
+///
+/// Prepared (AI): build + measure now (dropping the event if it fails the
+/// lane's `properties` ceiling), then apply the guarded check-before-append
+/// rule: if the buffer is non-empty and this event would push it past the byte
+/// target, send the buffer first and start a new one with this event. That
+/// keeps every body at `max(target, largest event)`; an event bigger than the
+/// target still ships, alone. After appending, flush when the count reaches
+/// `flush_at` or the bytes reach the target, so a full batch does not wait for
+/// the interval.
+fn admit_live(
+    pipeline: &mut Pipeline,
+    buffer: &mut LiveBuffer,
+    buffer_since: &mut Option<Instant>,
+    event: Event,
+    flush_at: usize,
+    max_batch_size: usize,
+) {
+    match buffer {
+        LiveBuffer::Deferred(events) => {
+            if events.is_empty() {
+                *buffer_since = Some(pipeline.clock.now());
+            }
+            events.push(event);
+            if events.len() >= flush_at {
+                send_buffer(pipeline, buffer, max_batch_size, None);
+                *buffer_since = None;
+            }
+        }
+        LiveBuffer::Prepared { .. } => {
+            let target = pipeline
+                .lane
+                .batch_bytes_target
+                .expect("Prepared buffer implies a byte target");
+            let Some((wire, size)) = pipeline.prepare_measured(event) else {
+                // Dropped locally (before_send or oversize); slot already released.
+                return;
+            };
+            if !buffer.is_empty() && buffer_bytes(buffer) + size.total > target {
+                send_buffer(pipeline, buffer, max_batch_size, None);
+                *buffer_since = None;
+            }
+            let LiveBuffer::Prepared { events, bytes } = buffer else {
+                unreachable!("buffer variant is fixed per lane");
+            };
+            if events.is_empty() {
+                // Also the carried-over case: the new batch gets its own timer.
+                *buffer_since = Some(pipeline.clock.now());
+            }
+            events.push(wire);
+            *bytes += size.total;
+            if events.len() >= flush_at || *bytes >= target {
+                send_buffer(pipeline, buffer, max_batch_size, None);
+                *buffer_since = None;
+            }
+        }
+    }
+}
+
+fn buffer_bytes(buffer: &LiveBuffer) -> usize {
+    match buffer {
+        LiveBuffer::Deferred(_) => 0,
+        LiveBuffer::Prepared { bytes, .. } => *bytes,
+    }
+}
+
 fn run_worker(
     options: ClientOptions,
+    lane: LaneConfig,
     rx: mpsc::Receiver<Control>,
     len: Arc<AtomicUsize>,
     clock: Arc<dyn Clock>,
@@ -461,9 +712,9 @@ fn run_worker(
     // any sane teardown budget.
     let shutdown_timeout =
         Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT);
-    let mut pipeline = Pipeline::new(&options, Arc::clone(&clock), len);
+    let mut buffer = LiveBuffer::for_lane(&lane);
+    let mut pipeline = Pipeline::new(&options, lane, Arc::clone(&clock), len);
 
-    let mut buffer: Vec<Event> = Vec::new();
     let mut buffer_since: Option<Instant> = None;
     // Caller-formed historical batches awaiting their own (chunked) send. Queued
     // rather than sent inline, and timed on the flush interval like the live
@@ -507,14 +758,14 @@ fn run_worker(
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
                 // decremented by the pipeline once a batch is delivered or dropped.
-                if buffer.is_empty() {
-                    buffer_since = Some(clock.now());
-                }
-                buffer.push(*event);
-                if buffer.len() >= flush_at {
-                    send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
-                    buffer_since = None;
-                }
+                admit_live(
+                    &mut pipeline,
+                    &mut buffer,
+                    &mut buffer_since,
+                    *event,
+                    flush_at,
+                    max_batch_size,
+                );
             }
             Wake::Msg(Control::HistoricalBatch { mut events }) => {
                 // Queue the chunks off the live buffer (which stays non-historical
@@ -643,7 +894,7 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
 /// dropped so teardown can't hang on a slow endpoint.
 fn send_buffer(
     pipeline: &mut Pipeline,
-    buffer: &mut Vec<Event>,
+    buffer: &mut LiveBuffer,
     max_batch_size: usize,
     deadline: Option<Instant>,
 ) {
@@ -658,10 +909,24 @@ fn send_buffer(
             return;
         }
         let take = buffer.len().min(max_batch_size);
-        let chunk: Vec<Event> = buffer.drain(..take).collect();
         // The buffer only ever holds live events; historical batches take their
         // own path, so this is always a non-historical send.
-        pipeline.send_batch(chunk, false, deadline);
+        match buffer {
+            LiveBuffer::Deferred(events) => {
+                let chunk: Vec<Event> = events.drain(..take).collect();
+                pipeline.send_batch(chunk, false, deadline);
+            }
+            LiveBuffer::Prepared { events, bytes } => {
+                // A prepared buffer is flushed whole as soon as it reaches the
+                // byte target, so every count-chunk drained here is already
+                // within it (or is a single over-target event on its own).
+                let chunk: Vec<CaptureEvent> = events.drain(..take).collect();
+                if events.is_empty() {
+                    *bytes = 0;
+                }
+                pipeline.send_prepared(chunk, false, deadline);
+            }
+        }
     }
 }
 
@@ -707,6 +972,7 @@ struct RetryBatch {
 struct Pipeline {
     http: reqwest::blocking::Client,
     options: ClientOptions,
+    lane: LaneConfig,
     url: String,
     clock: Arc<dyn Clock>,
     len: Arc<AtomicUsize>,
@@ -714,17 +980,21 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
+    fn new(
+        options: &ClientOptions,
+        lane: LaneConfig,
+        clock: Arc<dyn Clock>,
+        len: Arc<AtomicUsize>,
+    ) -> Self {
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(options.request_timeout_seconds))
             .build()
             .unwrap_or_default();
-        let url = options
-            .endpoints()
-            .build_url(crate::endpoints::Endpoint::Capture);
+        let url = options.endpoints().build_url(lane.endpoint);
         Self {
             http,
             options: options.clone(),
+            lane,
             url,
             clock,
             len,
@@ -732,14 +1002,21 @@ impl Pipeline {
         }
     }
 
+    /// The codec for this lane's request bodies, from the lane's client option.
+    fn compression(&self) -> Option<CaptureCompression> {
+        self.lane.compression(&self.options)
+    }
+
+    /// Send caller-order events that have not been built yet: defaults +
+    /// `before_send`, then the wire events. On a byte-batched lane the events
+    /// are also measured, checked against the lane's per-event ceiling, and
+    /// split into byte-sized requests; otherwise they go as one request.
     fn send_batch(
         &mut self,
         events: Vec<Event>,
         historical_migration: bool,
         deadline: Option<Instant>,
     ) {
-        use super::common::preprocess_capture_event;
-
         let defaults = self.options.capture_defaults();
         let original = events.len();
         let processed: Vec<Event> = events
@@ -753,8 +1030,35 @@ impl Pipeline {
         if processed.is_empty() {
             return;
         }
-        let now = self.clock.now();
-        let pending = super::capture::build_events_at(&processed, &defaults, self.clock.now_utc());
+        match self.lane.batch_bytes_target {
+            Some(target) => {
+                let measured: Vec<(CaptureEvent, usize)> = processed
+                    .into_iter()
+                    .filter_map(|event| self.build_measured(&event, &defaults))
+                    .map(|(wire, size)| (wire, size.total))
+                    .collect();
+                for chunk in chunk_by_bytes(measured, target) {
+                    self.send_prepared(chunk, historical_migration, deadline);
+                }
+            }
+            None => {
+                let pending =
+                    super::capture::build_events_at(&processed, &defaults, self.clock.now_utc());
+                self.send_prepared(pending, historical_migration, deadline);
+            }
+        }
+    }
+
+    /// Send already-built wire events as one request (with retries).
+    fn send_prepared(
+        &mut self,
+        pending: Vec<CaptureEvent>,
+        historical_migration: bool,
+        deadline: Option<Instant>,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
         let batch = RetryBatch {
             pending,
             request_id: Uuid::now_v7(),
@@ -762,9 +1066,49 @@ impl Pipeline {
             final_results: HashMap::new(),
             historical_migration,
             attempt: 1,
-            next_at: now,
+            next_at: self.clock.now(),
         };
         self.attempt(batch, deadline);
+    }
+
+    /// Byte-batched lanes: run defaults + `before_send` on a freshly buffered
+    /// live event, then build and measure it. `None` means the event was
+    /// dropped locally (hook drop or over the lane's ceiling) and its queue slot
+    /// released.
+    fn prepare_measured(&self, event: Event) -> Option<(CaptureEvent, EventSize)> {
+        let defaults = self.options.capture_defaults();
+        let Some(event) = preprocess_capture_event(event, &defaults, &self.options.before_send)
+        else {
+            dec_len(&self.len, 1);
+            return None;
+        };
+        self.build_measured(&event, &defaults)
+    }
+
+    /// Build the wire event and measure it, enforcing the lane's per-event
+    /// `properties` ceiling. The event is already preprocessed. An oversize
+    /// event is dropped here with one log line naming only the event and its
+    /// size: AI payloads may hold unredacted prompts or media that must never
+    /// reach the logs. This is a local drop, so `on_error` does not fire (the
+    /// backend would have refused it with `ai_event_too_big` anyway).
+    fn build_measured(
+        &self,
+        event: &Event,
+        defaults: &CaptureDefaults,
+    ) -> Option<(CaptureEvent, EventSize)> {
+        let wire = build_event_at(event, defaults, self.clock.now_utc());
+        let size = measure_event(&wire);
+        if let Some(max) = self.lane.max_event_bytes {
+            if size.properties > max {
+                warn!(
+                    "posthog-rs: dropping event {:?} for {}: properties are {} bytes, over the {} byte limit",
+                    wire.event, self.lane.endpoint, size.properties, max
+                );
+                dec_len(&self.len, 1);
+                return None;
+            }
+        }
+        Some((wire, size))
     }
 
     fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
@@ -797,7 +1141,7 @@ impl Pipeline {
             batch.attempt,
             self.clock.now_utc(),
         );
-        let body = capture::maybe_compress(self.options.capture_compression, &mut headers, payload);
+        let body = capture::maybe_compress(self.compression(), &mut headers, payload);
 
         let count = batch.pending.len();
         let request = bound_request(
@@ -847,10 +1191,19 @@ impl Pipeline {
             Step::Done => {
                 // A 2xx whose per-event verdicts include `drop` or `retry`-on-final
                 // (events the backend will not persist): surface them even though
-                // the request itself succeeded (`error` is `None`).
-                if !self.options.on_error.is_empty() {
-                    let lost = batch.pending.len() + undelivered_results(&batch.final_results);
-                    if lost > 0 {
+                // the request itself succeeded (`error` is `None`). Without a hook
+                // this is one aggregate line per batch — never one per event, so
+                // a misrouted integration at volume cannot flood the logs, and
+                // never naming payloads. The per-event detail lives on the
+                // project's Ingestion Warnings page.
+                let lost = batch.pending.len() + undelivered_results(&batch.final_results);
+                if lost > 0 {
+                    if self.options.on_error.is_empty() {
+                        warn!(
+                            "posthog-rs: {lost} event(s) not persisted by {} (per-event verdicts)",
+                            self.lane.endpoint
+                        );
+                    } else {
                         self.fire_capture(
                             &batch,
                             Some(&batch.request_id),
@@ -864,7 +1217,11 @@ impl Pipeline {
             }
             Step::Fail(e) => {
                 if self.options.on_error.is_empty() {
-                    warn!("posthog-rs: dropping {} event(s): {e}", batch.pending.len());
+                    warn!(
+                        "posthog-rs: dropping {} event(s) for {}: {e}",
+                        batch.pending.len(),
+                        self.lane.endpoint
+                    );
                 } else {
                     let error_response = response_body
                         .as_deref()
@@ -941,6 +1298,7 @@ impl Pipeline {
         event_count: usize,
     ) {
         let failure = PostHogError::Capture(CaptureFailure {
+            endpoint: self.lane.endpoint,
             error,
             status,
             attempt: batch.attempt,
@@ -1759,5 +2117,662 @@ mod tests {
         assert!(!has_error, "a 2xx is not an error");
         assert_eq!(lost, 2, "counts the dropped event and the final retry");
         assert_eq!(results, 3, "all verdicts reported, including the ok");
+    }
+
+    // -- AI lane -------------------------------------------------------------
+
+    mod ai_lane {
+        use super::*;
+        use crate::capture_event::EventStatus;
+        use crate::endpoints::{CAPTURE_AI_PATH, CAPTURE_PATH};
+
+        /// Mock one path, 200 with an empty verdict map.
+        fn path_mock<'a>(server: &'a MockServer, path: &str) -> httpmock::Mock<'a> {
+            let path = path.to_string();
+            server.mock(move |when, then| {
+                when.method(POST).path(path);
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({ "results": {} }));
+            })
+        }
+
+        /// Mock one path, matching only when the (uncompressed) body contains
+        /// every `present` string and none of the `absent` ones.
+        fn body_mock<'a>(
+            server: &'a MockServer,
+            path: &str,
+            present: &[&str],
+            absent: &[&str],
+        ) -> httpmock::Mock<'a> {
+            let path = path.to_string();
+            let present: Vec<String> = present.iter().map(|s| s.to_string()).collect();
+            let absent: Vec<String> = absent.iter().map(|s| s.to_string()).collect();
+            server.mock(move |when, then| {
+                when.method(POST).path(path).is_true(move |req| {
+                    let body = String::from_utf8_lossy(req.body_ref());
+                    present.iter().all(|s| body.contains(s.as_str()))
+                        && absent.iter().all(|s| !body.contains(s.as_str()))
+                });
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({ "results": {} }));
+            })
+        }
+
+        /// The AI lane; bodies are raw unless a test sets `capture_ai_compression`,
+        /// so body matchers can read the JSON.
+        fn plain_ai() -> LaneConfig {
+            LaneConfig::ai()
+        }
+
+        fn spawn(builder: &mut ClientOptionsBuilder, lane: LaneConfig) -> TransportHandle {
+            TransportHandle::spawn_lane_with_clock(
+                builder.build().unwrap(),
+                lane,
+                Arc::new(ManualClock::new()),
+            )
+        }
+
+        /// An event whose `blob` property is `bytes` ASCII characters.
+        fn sized_event(name: &str, bytes: usize) -> Event {
+            let mut event = Event::new(name, "user-1");
+            event.insert_prop("blob", "x".repeat(bytes)).unwrap();
+            event
+        }
+
+        /// Serialized wire size of `event` as the worker will measure it. Sizes
+        /// are deterministic: the timestamp and uuid are fixed-width.
+        fn wire_total(event: &Event, builder: &mut ClientOptionsBuilder) -> usize {
+            let opts = builder.build().unwrap();
+            measure_event(&build_event_at(event, &opts.capture_defaults(), Utc::now())).total
+        }
+
+        fn worker_thread_name(handle: &TransportHandle) -> Option<String> {
+            handle
+                .worker
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|h| h.thread().name().map(str::to_string))
+        }
+
+        #[test]
+        fn lane_configs_pin_the_decided_limits() {
+            let ai = LaneConfig::ai();
+            assert_eq!(ai.endpoint, Endpoint::CaptureAi);
+            assert_eq!(ai.batch_bytes_target, Some(5 * 1024 * 1024));
+            assert_eq!(ai.max_event_bytes, Some(8 * 1024 * 1024));
+            let analytics = LaneConfig::analytics();
+            assert_eq!(analytics.endpoint, Endpoint::Capture);
+            assert_eq!(analytics.batch_bytes_target, None);
+            assert_eq!(analytics.max_event_bytes, None);
+
+            // Each lane reads its own option; defaults are raw bodies, 10000 and
+            // 1000 queue slots.
+            let opts = options("http://localhost:0".to_string()).build().unwrap();
+            assert_eq!(analytics.compression(&opts), None);
+            assert_eq!(ai.compression(&opts), None);
+            assert_eq!(analytics.max_queue_size(&opts), 10_000);
+            assert_eq!(ai.max_queue_size(&opts), 1_000);
+            let mut builder = options("http://localhost:0".to_string());
+            builder
+                .capture_compression(CaptureCompression::Gzip)
+                .capture_ai_compression(CaptureCompression::Zstd)
+                .max_queue_size(7usize)
+                .capture_ai_max_queue_size(3usize);
+            let opts = builder.build().unwrap();
+            assert_eq!(analytics.compression(&opts), Some(CaptureCompression::Gzip));
+            assert_eq!(ai.compression(&opts), Some(CaptureCompression::Zstd));
+            assert_eq!(analytics.max_queue_size(&opts), 7);
+            assert_eq!(ai.max_queue_size(&opts), 3);
+        }
+
+        #[test]
+        fn ai_queue_is_bounded_by_its_own_option() {
+            // Two slots on the AI lane, plenty on analytics: the third AI event is
+            // dropped at enqueue while the analytics lane accepts all three.
+            let server = MockServer::start();
+            let ai_mock = path_mock(&server, CAPTURE_AI_PATH);
+            let analytics_mock = path_mock(&server, CAPTURE_PATH);
+            let mut builder = options(server.base_url());
+            builder.capture_ai_max_queue_size(2usize);
+            let analytics = spawn(&mut builder, LaneConfig::analytics());
+            let ai = spawn(&mut builder, plain_ai());
+            for _ in 0..3 {
+                analytics.enqueue(Event::new("clicked", "user-1"));
+                ai.enqueue(Event::new("$ai_generation", "user-1"));
+            }
+            assert_eq!(ai.pending(), 2, "third AI event dropped by the lane's cap");
+            assert_eq!(analytics.pending(), 3);
+            analytics.flush_blocking();
+            ai.flush_blocking();
+            analytics_mock.assert_calls(1);
+            ai_mock.assert_calls(1);
+            TransportHandle::close_all_blocking(&[&analytics, &ai]);
+        }
+
+        #[test]
+        fn ai_lane_posts_zstd_to_ai_path_and_analytics_lane_is_unchanged() {
+            // One server, both lanes. With `capture_ai_compression(Zstd)` the AI
+            // lane hits `/i/v1/ai/events` with a zstd body while the analytics
+            // lane keeps its own setting (none here) and path.
+            let server = MockServer::start();
+            let ai_mock = server.mock(|when, then| {
+                when.method(POST)
+                    .path(CAPTURE_AI_PATH)
+                    .header("content-encoding", "zstd")
+                    .is_true(|req| {
+                        let body = zstd::decode_all(req.body_ref()).expect("zstd body");
+                        String::from_utf8_lossy(&body).contains("\"event\":\"$ai_generation\"")
+                    });
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({ "results": {} }));
+            });
+            let analytics_mock = server.mock(|when, then| {
+                when.method(POST)
+                    .path(CAPTURE_PATH)
+                    .header_missing("content-encoding")
+                    .body_includes("\"event\":\"clicked\"");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({ "results": {} }));
+            });
+
+            let mut builder = options(server.base_url());
+            builder.capture_ai_compression(CaptureCompression::Zstd);
+            let analytics = spawn(&mut builder, LaneConfig::analytics());
+            let ai = spawn(&mut builder, LaneConfig::ai());
+            analytics.enqueue(Event::new("clicked", "user-1"));
+            ai.enqueue(Event::new("$ai_generation", "user-1"));
+            analytics.flush_blocking();
+            ai.flush_blocking();
+
+            analytics_mock.assert_calls(1);
+            ai_mock.assert_calls(1);
+            assert_eq!(
+                worker_thread_name(&ai).as_deref(),
+                Some(AI_WORKER_THREAD_NAME)
+            );
+            assert_eq!(
+                worker_thread_name(&analytics).as_deref(),
+                Some(WORKER_THREAD_NAME)
+            );
+            analytics.shutdown_blocking();
+            ai.shutdown_blocking();
+            TransportHandle::close_all_blocking(&[&analytics, &ai]);
+        }
+
+        #[test]
+        fn compression_options_are_per_lane() {
+            // `capture_compression` governs analytics only: the AI lane stays raw
+            // unless `capture_ai_compression` is set, and vice versa.
+            fn expect_encoding<'a>(
+                server: &'a MockServer,
+                path: &str,
+                encoding: Option<&str>,
+            ) -> httpmock::Mock<'a> {
+                let path = path.to_string();
+                let encoding = encoding.map(str::to_string);
+                server.mock(move |when, then| {
+                    let when = when.method(POST).path(path);
+                    match &encoding {
+                        Some(enc) => when.header("content-encoding", enc.clone()),
+                        None => when.header_missing("content-encoding"),
+                    };
+                    then.status(200)
+                        .json_body(serde_json::json!({ "results": {} }));
+                })
+            }
+            let server = MockServer::start();
+
+            let mut ai_raw = expect_encoding(&server, CAPTURE_AI_PATH, None);
+            let mut analytics_gzip = expect_encoding(&server, CAPTURE_PATH, Some("gzip"));
+            let mut builder = options(server.base_url());
+            builder.capture_compression(CaptureCompression::Gzip);
+            let analytics = spawn(&mut builder, LaneConfig::analytics());
+            let ai = spawn(&mut builder, LaneConfig::ai());
+            analytics.enqueue(Event::new("clicked", "user-1"));
+            ai.enqueue(Event::new("$ai_generation", "user-1"));
+            analytics.flush_blocking();
+            ai.flush_blocking();
+            analytics_gzip.assert_calls(1);
+            ai_raw.assert_calls(1);
+            TransportHandle::close_all_blocking(&[&analytics, &ai]);
+            ai_raw.delete();
+            analytics_gzip.delete();
+
+            let ai_br = expect_encoding(&server, CAPTURE_AI_PATH, Some("br"));
+            let analytics_raw = expect_encoding(&server, CAPTURE_PATH, None);
+            let mut builder = options(server.base_url());
+            builder.capture_ai_compression(CaptureCompression::Br);
+            let analytics = spawn(&mut builder, LaneConfig::analytics());
+            let ai = spawn(&mut builder, LaneConfig::ai());
+            analytics.enqueue(Event::new("clicked", "user-1"));
+            ai.enqueue(Event::new("$ai_generation", "user-1"));
+            analytics.flush_blocking();
+            ai.flush_blocking();
+            analytics_raw.assert_calls(1);
+            ai_br.assert_calls(1);
+            TransportHandle::close_all_blocking(&[&analytics, &ai]);
+        }
+
+        #[test]
+        fn byte_target_closes_batch_before_append_and_carries_the_event_over() {
+            // Three equal events, target between 2S and 3S: admitting e3 closes
+            // [e1, e2] and starts a new batch with e3, which the flush then sends.
+            let server = MockServer::start();
+            let first = body_mock(&server, CAPTURE_AI_PATH, &["\"e1\"", "\"e2\""], &["\"e3\""]);
+            let second = body_mock(&server, CAPTURE_AI_PATH, &["\"e3\""], &["\"e1\"", "\"e2\""]);
+            let mut builder = options(server.base_url());
+            let size = wire_total(&sized_event("e1", 100), &mut builder);
+            let lane = LaneConfig {
+                batch_bytes_target: Some(2 * size + size / 2),
+                ..plain_ai()
+            };
+            let handle = spawn(&mut builder, lane);
+            handle.enqueue(sized_event("e1", 100));
+            handle.enqueue(sized_event("e2", 100));
+            handle.enqueue(sized_event("e3", 100));
+            handle.tick(); // worker has admitted all three
+            first.assert_calls(1);
+            second.assert_calls(0);
+            assert_eq!(handle.pending(), 1, "e3 carried over into the next batch");
+            handle.flush_blocking();
+            second.assert_calls(1);
+            assert_eq!(handle.pending(), 0);
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn event_exactly_at_target_flushes_alone_without_waiting() {
+            let server = MockServer::start();
+            let mock = path_mock(&server, CAPTURE_AI_PATH);
+            let mut builder = options(server.base_url());
+            let size = wire_total(&sized_event("e1", 100), &mut builder);
+            let lane = LaneConfig {
+                batch_bytes_target: Some(size),
+                ..plain_ai()
+            };
+            let handle = spawn(&mut builder, lane);
+            handle.enqueue(sized_event("e1", 100));
+            handle.tick();
+            mock.assert_calls(1);
+            assert_eq!(handle.pending(), 0);
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn event_larger_than_target_ships_alone_after_the_current_batch() {
+            // A small event is buffered; a big one (over the target by itself) must
+            // first force the small batch out, then go on its own — in that order.
+            let server = MockServer::start();
+            let small = body_mock(&server, CAPTURE_AI_PATH, &["\"small\""], &["\"big\""]);
+            let big = body_mock(&server, CAPTURE_AI_PATH, &["\"big\""], &["\"small\""]);
+            let mut builder = options(server.base_url());
+            let small_size = wire_total(&sized_event("small", 100), &mut builder);
+            let lane = LaneConfig {
+                batch_bytes_target: Some(2 * small_size + small_size / 2),
+                max_event_bytes: None,
+                ..plain_ai()
+            };
+            let handle = spawn(&mut builder, lane);
+            handle.enqueue(sized_event("small", 100));
+            handle.enqueue(sized_event("big", 10 * small_size));
+            handle.tick();
+            small.assert_calls(1);
+            big.assert_calls(1);
+            assert_eq!(handle.pending(), 0);
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn count_and_interval_triggers_still_apply_under_a_large_byte_target() {
+            let server = MockServer::start();
+            let mock = path_mock(&server, CAPTURE_AI_PATH);
+            let clock = ManualClock::new();
+            let mut builder = options(server.base_url());
+            builder.flush_at(2usize);
+            let handle = TransportHandle::spawn_lane_with_clock(
+                builder.build().unwrap(),
+                plain_ai(),
+                Arc::new(clock.clone()),
+            );
+            // Count: two events reach flush_at and go out at once.
+            handle.enqueue(Event::new("$ai_span", "user-1"));
+            handle.enqueue(Event::new("$ai_span", "user-1"));
+            handle.tick();
+            mock.assert_calls(1);
+            // Interval: one event waits, then goes out when the interval elapses.
+            handle.enqueue(Event::new("$ai_span", "user-1"));
+            handle.tick();
+            mock.assert_calls(1);
+            clock.advance(Duration::from_millis(10_000));
+            handle.tick();
+            mock.assert_calls(2);
+            assert_eq!(handle.pending(), 0);
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn oversize_event_is_dropped_locally_with_no_request_and_no_hook() {
+            let server = MockServer::start();
+            let mock = path_mock(&server, CAPTURE_AI_PATH);
+            let hook_calls = Arc::new(AtomicUsize::new(0));
+            let counter = hook_calls.clone();
+            let mut builder = options(server.base_url());
+            builder.on_error(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+            let lane = LaneConfig {
+                max_event_bytes: Some(1024),
+                ..plain_ai()
+            };
+            let handle = spawn(&mut builder, lane);
+            handle.enqueue(sized_event("$ai_generation", 2048));
+            handle.flush_blocking();
+            mock.assert_calls(0);
+            assert_eq!(handle.pending(), 0, "the dropped event released its slot");
+            assert_eq!(
+                hook_calls.load(Ordering::SeqCst),
+                0,
+                "local drops do not fire on_error"
+            );
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn oversize_ceiling_is_measured_on_properties_after_before_send() {
+            // The hook shrinks an over-limit event below the ceiling: it is sent.
+            let server = MockServer::start();
+            let mock = path_mock(&server, CAPTURE_AI_PATH);
+            let mut builder = options(server.base_url());
+            builder.before_send(|mut event| {
+                event.remove_prop("blob");
+                Some(event)
+            });
+            let lane = LaneConfig {
+                max_event_bytes: Some(1024),
+                ..plain_ai()
+            };
+            let handle = spawn(&mut builder, lane);
+            handle.enqueue(sized_event("$ai_generation", 4096));
+            handle.flush_blocking();
+            mock.assert_calls(1);
+            handle.shutdown_blocking();
+
+            // The hook grows an event past the ceiling: it is dropped.
+            let mut builder = options(server.base_url());
+            builder.before_send(|mut event| {
+                event.insert_prop("padding", "y".repeat(4096)).unwrap();
+                Some(event)
+            });
+            let handle = spawn(
+                &mut builder,
+                LaneConfig {
+                    max_event_bytes: Some(1024),
+                    ..plain_ai()
+                },
+            );
+            handle.enqueue(Event::new("$ai_generation", "user-1"));
+            handle.flush_blocking();
+            mock.assert_calls(1);
+            assert_eq!(handle.pending(), 0);
+            handle.shutdown_blocking();
+        }
+
+        #[test]
+        fn before_send_drop_at_admission_releases_the_slot() {
+            let server = MockServer::start();
+            let mock = path_mock(&server, CAPTURE_AI_PATH);
+            let mut builder = options(server.base_url());
+            builder.before_send(|_| None);
+            let handle = spawn(&mut builder, plain_ai());
+            handle.enqueue(Event::new("$ai_generation", "user-1"));
+            handle.flush_blocking();
+            mock.assert_calls(0);
+            assert_eq!(handle.pending(), 0);
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn historical_batch_on_ai_lane_is_chunked_by_bytes() {
+            let server = MockServer::start();
+            let mock = path_mock(&server, CAPTURE_AI_PATH);
+            let mut builder = options(server.base_url());
+            let size = wire_total(&sized_event("h1", 100), &mut builder);
+            let lane = LaneConfig {
+                batch_bytes_target: Some(2 * size + size / 2),
+                ..plain_ai()
+            };
+            let handle = spawn(&mut builder, lane);
+            handle.enqueue_batch(
+                vec![
+                    sized_event("h1", 100),
+                    sized_event("h2", 100),
+                    sized_event("h3", 100),
+                ],
+                true,
+            );
+            handle.flush_blocking();
+            mock.assert_calls(2); // [h1, h2] then [h3]
+            assert_eq!(handle.pending(), 0);
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn retry_state_is_isolated_between_lanes() {
+            // The AI endpoint fails with a retryable 503 while analytics succeeds:
+            // the analytics batch is delivered and the AI batch alone is held.
+            let server = MockServer::start();
+            let ai_fail = server.mock(|when, then| {
+                when.method(POST).path(CAPTURE_AI_PATH);
+                then.status(503);
+            });
+            let analytics_ok = path_mock(&server, CAPTURE_PATH);
+            let mut builder = options(server.base_url());
+            builder.max_capture_attempts(3u32);
+            let analytics = spawn(&mut builder, LaneConfig::analytics());
+            let ai = spawn(&mut builder, LaneConfig::ai());
+            analytics.enqueue(Event::new("clicked", "user-1"));
+            ai.enqueue(Event::new("$ai_generation", "user-1"));
+            analytics.flush_blocking();
+            ai.flush_blocking();
+            analytics_ok.assert_calls(1);
+            ai_fail.assert_calls(1);
+            assert_eq!(analytics.pending(), 0);
+            assert_eq!(ai.pending(), 1, "held for retry on the AI lane only");
+            TransportHandle::close_all_blocking(&[&analytics, &ai]);
+        }
+
+        #[test]
+        fn capture_failure_reports_the_lane_endpoint() {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST);
+                then.status(500);
+            });
+            let seen = Arc::new(Mutex::new(Vec::<Endpoint>::new()));
+            let sink = seen.clone();
+            let mut builder = options(server.base_url());
+            builder.max_capture_attempts(1u32).on_error(move |failure| {
+                if let PostHogError::Capture(c) = failure {
+                    sink.lock().unwrap().push(c.endpoint());
+                }
+            });
+            let analytics = spawn(&mut builder, LaneConfig::analytics());
+            let ai = spawn(&mut builder, LaneConfig::ai());
+            analytics.enqueue(Event::new("clicked", "user-1"));
+            analytics.flush_blocking();
+            ai.enqueue(Event::new("$ai_generation", "user-1"));
+            ai.flush_blocking();
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![Endpoint::Capture, Endpoint::CaptureAi]
+            );
+            TransportHandle::close_all_blocking(&[&analytics, &ai]);
+        }
+
+        #[test]
+        fn server_verdicts_on_ai_lane_reach_on_error_with_details() {
+            // The SDK never tests the event name; the backend does, and its
+            // per-event `drop` verdicts (misrouted name, oversize) must reach the
+            // hook with their detail strings intact and the AI endpoint named.
+            let misrouted = Uuid::now_v7();
+            let too_big = Uuid::now_v7();
+            let ok = Uuid::now_v7();
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path(CAPTURE_AI_PATH);
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({ "results": {
+                        misrouted.to_string(): { "result": "drop", "details": "non_ai_event" },
+                        too_big.to_string(): { "result": "drop", "details": "ai_event_too_big" },
+                        ok.to_string(): { "result": "ok" }
+                    }}));
+            });
+            let seen = Arc::new(Mutex::new(
+                Vec::<(Endpoint, usize, Vec<(Uuid, String)>)>::new(),
+            ));
+            let sink = seen.clone();
+            let mut builder = options(server.base_url());
+            builder.on_error(move |failure| {
+                if let PostHogError::Capture(c) = failure {
+                    let mut drops: Vec<(Uuid, String)> = c
+                        .event_results()
+                        .iter()
+                        .filter(|(_, r)| r.result == EventStatus::Drop)
+                        .map(|(u, r)| (*u, r.details.clone().unwrap_or_default()))
+                        .collect();
+                    drops.sort();
+                    sink.lock()
+                        .unwrap()
+                        .push((c.endpoint(), c.event_count(), drops));
+                }
+            });
+            let handle = spawn(&mut builder, LaneConfig::ai());
+            for (uuid, name) in [
+                (misrouted, "not_an_ai_event"),
+                (too_big, "$ai_generation"),
+                (ok, "$ai_span"),
+            ] {
+                let mut event = Event::new(name, "user-1");
+                event.set_uuid(uuid);
+                handle.enqueue(event);
+            }
+            handle.flush_blocking();
+
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            let (endpoint, lost, drops) = &seen[0];
+            assert_eq!(*endpoint, Endpoint::CaptureAi);
+            assert_eq!(*lost, 2);
+            let mut expected = vec![
+                (misrouted, "non_ai_event".to_string()),
+                (too_big, "ai_event_too_big".to_string()),
+            ];
+            expected.sort();
+            assert_eq!(*drops, expected);
+            assert_eq!(handle.pending(), 0);
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn two_xx_drops_without_a_hook_release_slots() {
+            // The no-hook path logs one aggregate line per batch (not asserted) and
+            // must still account the dropped events as terminal.
+            let dropped = Uuid::now_v7();
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path(CAPTURE_AI_PATH);
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({ "results": {
+                        dropped.to_string(): { "result": "drop", "details": "non_ai_event" }
+                    }}));
+            });
+            let handle = spawn(&mut options(server.base_url()), LaneConfig::ai());
+            let mut event = Event::new("not_an_ai_event", "user-1");
+            event.set_uuid(dropped);
+            handle.enqueue(event);
+            handle.flush_blocking();
+            assert_eq!(handle.pending(), 0);
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn carried_over_event_keeps_its_interval_timer() {
+            // Admitting e3 closes [e1, e2] and carries e3 into a fresh batch. That
+            // batch must flush on the interval by itself — without another event,
+            // flush, or shutdown (review finding: the timer used to be cleared).
+            let server = MockServer::start();
+            let mock = path_mock(&server, CAPTURE_AI_PATH);
+            let clock = ManualClock::new();
+            let mut builder = options(server.base_url());
+            let size = wire_total(&sized_event("e1", 100), &mut builder);
+            let lane = LaneConfig {
+                batch_bytes_target: Some(2 * size + size / 2),
+                ..plain_ai()
+            };
+            let handle = TransportHandle::spawn_lane_with_clock(
+                builder.build().unwrap(),
+                lane,
+                Arc::new(clock.clone()),
+            );
+            handle.enqueue(sized_event("e1", 100));
+            handle.enqueue(sized_event("e2", 100));
+            handle.enqueue(sized_event("e3", 100));
+            handle.tick();
+            mock.assert_calls(1);
+            assert_eq!(handle.pending(), 1);
+            clock.advance(Duration::from_millis(10_000)); // options(): flush_interval 10s
+            handle.tick();
+            mock.assert_calls(2);
+            assert_eq!(handle.pending(), 0);
+            handle.shutdown_blocking();
+        }
+
+        #[test]
+        fn request_shutdown_marks_closed_and_sends_exactly_once() {
+            let server = MockServer::start();
+            let _mock = path_mock(&server, CAPTURE_AI_PATH);
+            let handle = spawn(&mut options(server.base_url()), plain_ai());
+            assert!(!handle.is_closed());
+            let (tx, rx) = mpsc::channel();
+            assert!(handle.request_shutdown(Completion::Blocking(tx)));
+            assert!(
+                handle.is_closed(),
+                "marked before the caller can observe the send"
+            );
+            let (tx2, _rx2) = mpsc::channel();
+            assert!(
+                !handle.request_shutdown(Completion::Blocking(tx2)),
+                "second caller lost"
+            );
+            let _ = rx.recv();
+            handle.join();
+        }
+
+        #[test]
+        fn close_all_blocking_tears_down_both_lanes_and_is_idempotent() {
+            let server = MockServer::start();
+            let ai_mock = path_mock(&server, CAPTURE_AI_PATH);
+            let analytics_mock = path_mock(&server, CAPTURE_PATH);
+            let analytics = spawn(&mut options(server.base_url()), LaneConfig::analytics());
+            let ai = spawn(&mut options(server.base_url()), LaneConfig::ai());
+            analytics.enqueue(Event::new("clicked", "user-1"));
+            ai.enqueue(Event::new("$ai_generation", "user-1"));
+            TransportHandle::close_all_blocking(&[&analytics, &ai]);
+            TransportHandle::close_all_blocking(&[&analytics, &ai]);
+            analytics_mock.assert_calls(1);
+            ai_mock.assert_calls(1);
+            assert!(analytics.is_closed() && ai.is_closed());
+            // Enqueue after close is a silent no-op on both lanes.
+            analytics.enqueue(Event::new("late", "user-1"));
+            ai.enqueue(Event::new("late", "user-1"));
+            assert_eq!(analytics.pending() + ai.pending(), 0);
+        }
     }
 }
