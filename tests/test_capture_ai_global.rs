@@ -4,7 +4,7 @@
 //! `OnceLock`, so this must not share a process with any other global test.
 
 use httpmock::prelude::*;
-use posthog_rs::{ClientOptionsBuilder, Event};
+use posthog_rs::{CaptureCompression, ClientOptionsBuilder, Event};
 use serde_json::json;
 
 fn ok_mock<'a>(server: &'a MockServer, path: &str) -> httpmock::Mock<'a> {
@@ -49,6 +49,7 @@ fn global_capture_ai_posts_to_the_ai_endpoint_only() {
         .api_key("phc_test_token".to_string())
         .host(server.base_url())
         .flush_interval_ms(60_000u64)
+        .capture_ai_compression(CaptureCompression::Zstd)
         .build()
         .unwrap();
 

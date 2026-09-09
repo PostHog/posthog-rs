@@ -234,13 +234,11 @@ pub(crate) struct Prepared {
 }
 
 /// Per-lane settings for an inline immediate capture. The analytics lane sends
-/// one request with the client's compression; the AI lane forces its codec and
-/// splits the batch by bytes.
+/// one request; the AI lane splits the batch by bytes. Each reads its own
+/// compression option.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ImmediateLane {
     pub(crate) endpoint: Endpoint,
-    /// `None`: use `ClientOptions::capture_compression`.
-    pub(crate) compression_override: Option<CaptureCompression>,
     /// `None`: everything goes in one request.
     pub(crate) batch_bytes_target: Option<usize>,
 }
@@ -249,7 +247,6 @@ impl ImmediateLane {
     pub(crate) fn analytics() -> Self {
         Self {
             endpoint: Endpoint::Capture,
-            compression_override: None,
             batch_bytes_target: None,
         }
     }
@@ -257,13 +254,16 @@ impl ImmediateLane {
     pub(crate) fn ai() -> Self {
         Self {
             endpoint: Endpoint::CaptureAi,
-            compression_override: Some(super::transport::AI_COMPRESSION),
             batch_bytes_target: Some(super::transport::AI_BATCH_BYTES_TARGET),
         }
     }
 
+    /// The codec for this lane's request bodies, from the lane's client option.
     pub(crate) fn compression(&self, opts: &ClientOptions) -> Option<CaptureCompression> {
-        self.compression_override.or(opts.capture_compression)
+        match self.endpoint {
+            Endpoint::CaptureAi => opts.capture_ai_compression,
+            _ => opts.capture_compression,
+        }
     }
 }
 
@@ -1079,7 +1079,18 @@ mod tests {
         assert_eq!(analytics.compression(&opts), Some(CaptureCompression::Gzip));
         let ai = ImmediateLane::ai();
         assert_eq!(ai.endpoint, Endpoint::CaptureAi);
-        assert_eq!(ai.compression(&opts), Some(CaptureCompression::Zstd));
+        assert_eq!(
+            ai.compression(&opts),
+            None,
+            "AI lane is raw unless its own option is set"
+        );
+        let mut with_ai = ClientOptionsBuilder::default();
+        with_ai
+            .api_key("phc_test".to_string())
+            .capture_ai_compression(CaptureCompression::Zstd);
+        let with_ai = with_ai.build().unwrap();
+        assert_eq!(analytics.compression(&with_ai), None);
+        assert_eq!(ai.compression(&with_ai), Some(CaptureCompression::Zstd));
         assert_eq!(
             ai.batch_bytes_target,
             Some(super::super::transport::AI_BATCH_BYTES_TARGET)

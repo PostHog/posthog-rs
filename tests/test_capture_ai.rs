@@ -2,8 +2,8 @@
 //! server, for both client flavors.
 //!
 //! The lane is asserted from the outside only: which path each method hits,
-//! that AI bodies are zstd-compressed regardless of the client's compression
-//! setting, that `flush`/`shutdown`/`Drop` drain both lanes, that the lane is
+//! that `capture_ai_compression` (not `capture_compression`) governs AI bodies
+//! and they are raw by default, that `flush`/`shutdown`/`Drop` drain both lanes, that the lane is
 //! never started unless used, that the real 8 MiB ceiling and 5 MiB batch
 //! target apply, and that the backend's per-event verdicts reach `on_error`
 //! and the immediate-call summaries with their detail strings intact. The SDK
@@ -33,7 +33,9 @@ fn options(base_url: String) -> ClientOptionsBuilder {
         .host(base_url)
         .max_capture_attempts(1u32)
         .flush_interval_ms(60_000u64)
-        .shutdown_timeout_ms(5_000u64);
+        .shutdown_timeout_ms(5_000u64)
+        // The recommended AI-lane codec; `ai_lane_is_raw_by_default` covers unset.
+        .capture_ai_compression(CaptureCompression::Zstd);
     builder
 }
 
@@ -173,7 +175,28 @@ mod async_client {
     }
 
     #[tokio::test]
-    async fn client_compression_setting_does_not_change_ai_lane_zstd() {
+    async fn ai_lane_is_raw_by_default() {
+        let server = MockServer::start();
+        let ai = server.mock(|when, then| {
+            when.method(POST)
+                .path(AI_PATH)
+                .header_missing("content-encoding")
+                .body_includes("\"event\":\"$ai_generation\"");
+            then.status(200).json_body(json!({ "results": {} }));
+        });
+        let mut builder = ClientOptionsBuilder::default();
+        builder
+            .api_key("phc_test_token".to_string())
+            .host(server.base_url())
+            .flush_interval_ms(60_000u64);
+        let client = client(&mut builder).await;
+        client.capture_ai(ai_event("$ai_generation"));
+        client.flush().await;
+        ai.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn capture_compression_does_not_apply_to_the_ai_lane() {
         let server = MockServer::start();
         let ai = ai_mock_expecting(&server, "\"event\":\"$ai_span\"");
         let analytics = server.mock(|when, then| {
@@ -381,7 +404,28 @@ mod blocking {
     }
 
     #[test]
-    fn client_compression_setting_does_not_change_ai_lane_zstd() {
+    fn ai_lane_is_raw_by_default() {
+        let server = MockServer::start();
+        let ai = server.mock(|when, then| {
+            when.method(POST)
+                .path(AI_PATH)
+                .header_missing("content-encoding")
+                .body_includes("\"event\":\"$ai_generation\"");
+            then.status(200).json_body(json!({ "results": {} }));
+        });
+        let mut builder = ClientOptionsBuilder::default();
+        builder
+            .api_key("phc_test_token".to_string())
+            .host(server.base_url())
+            .flush_interval_ms(60_000u64);
+        let client = client(&mut builder);
+        client.capture_ai(ai_event("$ai_generation"));
+        client.flush();
+        ai.assert_calls(1);
+    }
+
+    #[test]
+    fn capture_compression_does_not_apply_to_the_ai_lane() {
         let server = MockServer::start();
         let ai = ai_mock_expecting(&server, "\"event\":\"$ai_span\"");
         let analytics = server.mock(|when, then| {

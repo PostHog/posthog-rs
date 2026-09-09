@@ -36,7 +36,7 @@ All event-producing SDK paths now use the same capture endpoint, including error
 
 ### AI events
 
-Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog_rs::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size and zstd-compressed, with the backend's 8 MiB per-event ceiling applied locally.
+Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog_rs::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size, with the backend's 8 MiB per-event ceiling applied locally. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
 
 `capture` never reroutes by event name. Sending an AI event through `capture` worked on the V0 path because the backend diverted it; on the V1 analytics endpoint the backend will refuse it as a per-event `drop` once both lanes enforce their event sets, and it will not be ingested. Move those calls to `capture_ai`. Custom events that merely start with `$ai_` and are not PostHog AI event names stay on `capture`.
 

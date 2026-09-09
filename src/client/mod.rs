@@ -241,6 +241,17 @@ pub struct ClientOptions {
     #[builder(default, setter(strip_option))]
     pub(crate) capture_compression: Option<CaptureCompression>,
 
+    /// Compression for `capture_ai*` bodies; unset (default) sends them
+    /// uncompressed. Prefer `Zstd`: AI events are large JSON.
+    #[builder(default, setter(strip_option))]
+    pub(crate) capture_ai_compression: Option<CaptureCompression>,
+
+    /// Maximum `capture_ai*` events buffered before new ones are dropped
+    /// (default: 1000). Lower than `max_queue_size` because AI events can be
+    /// multi-MB; a single warning is logged while the queue is full.
+    #[builder(default = "1000")]
+    pub(crate) capture_ai_max_queue_size: usize,
+
     /// Hooks to modify, filter, or sample events before they are sent.
     #[builder(default, setter(custom))]
     pub(crate) before_send: Vec<BeforeSendHook>,

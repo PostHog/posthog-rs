@@ -147,10 +147,6 @@ pub(crate) const AI_BATCH_BYTES_TARGET: usize = 5 * 1024 * 1024;
 /// v1 backend — not on the whole serialized event as the v0 path did.
 pub(crate) const AI_MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
-/// AI events are multi-KB to multi-MB JSON; zstd is the best codec the v1
-/// endpoint accepts, so the lane pins it regardless of `capture_compression`.
-pub(crate) const AI_COMPRESSION: CaptureCompression = CaptureCompression::Zstd;
-
 /// Everything that differs between the analytics and AI transport lanes. One
 /// worker/pipeline implementation serves both; a lane is chosen by the public
 /// method the caller used, never by an argument on it.
@@ -158,8 +154,6 @@ pub(crate) const AI_COMPRESSION: CaptureCompression = CaptureCompression::Zstd;
 pub(crate) struct LaneConfig {
     pub(crate) endpoint: Endpoint,
     pub(crate) thread_name: &'static str,
-    /// `Some`: force this codec. `None`: use `ClientOptions::capture_compression`.
-    pub(crate) compression_override: Option<CaptureCompression>,
     /// `Some`: byte-based batching with this soft target (events are built and
     /// measured when buffered). `None`: count-based only, built at send time.
     pub(crate) batch_bytes_target: Option<usize>,
@@ -175,7 +169,6 @@ impl LaneConfig {
         Self {
             endpoint: Endpoint::Capture,
             thread_name: WORKER_THREAD_NAME,
-            compression_override: None,
             batch_bytes_target: None,
             max_event_bytes: None,
         }
@@ -185,9 +178,24 @@ impl LaneConfig {
         Self {
             endpoint: Endpoint::CaptureAi,
             thread_name: AI_WORKER_THREAD_NAME,
-            compression_override: Some(AI_COMPRESSION),
             batch_bytes_target: Some(AI_BATCH_BYTES_TARGET),
             max_event_bytes: Some(AI_MAX_EVENT_BYTES),
+        }
+    }
+
+    /// The client option that configures this lane's body compression.
+    pub(crate) fn compression(&self, options: &ClientOptions) -> Option<CaptureCompression> {
+        match self.endpoint {
+            Endpoint::CaptureAi => options.capture_ai_compression,
+            _ => options.capture_compression,
+        }
+    }
+
+    /// The client option that bounds this lane's queue.
+    pub(crate) fn max_queue_size(&self, options: &ClientOptions) -> usize {
+        match self.endpoint {
+            Endpoint::CaptureAi => options.capture_ai_max_queue_size,
+            _ => options.max_queue_size,
         }
     }
 }
@@ -221,7 +229,7 @@ impl TransportHandle {
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Control>();
         let len = Arc::new(AtomicUsize::new(0));
-        let max_queue_size = options.max_queue_size;
+        let max_queue_size = lane.max_queue_size(&options);
         let worker_len = len.clone();
         let worker_clock = Arc::clone(&clock);
         let worker = thread::Builder::new()
@@ -357,6 +365,16 @@ impl TransportHandle {
     #[cfg(test)]
     pub(crate) fn close_blocking(&self) {
         Self::close_all_blocking(&[self]);
+    }
+
+    /// Request shutdown without waiting: used when a lane is spawned by a call
+    /// that raced `shutdown`, so the new worker stops accepting events at once
+    /// and drains; `Drop` later joins it via `close_all_blocking`.
+    pub(crate) fn request_close(&self) {
+        if self.begin_close() {
+            let (tx, _rx) = mpsc::channel();
+            let _ = self.send_control(Control::Shutdown(Completion::Blocking(tx)));
+        }
     }
 
     /// [`close_blocking`](Self::close_blocking) across several lanes at once,
@@ -978,12 +996,9 @@ impl Pipeline {
         }
     }
 
-    /// The codec for this lane's request bodies: the lane's pin if it has one,
-    /// otherwise the client's `capture_compression`.
+    /// The codec for this lane's request bodies, from the lane's client option.
     fn compression(&self) -> Option<CaptureCompression> {
-        self.lane
-            .compression_override
-            .or(self.options.capture_compression)
+        self.lane.compression(&self.options)
     }
 
     /// Send caller-order events that have not been built yet: defaults +
@@ -2139,12 +2154,10 @@ mod tests {
             })
         }
 
-        /// The AI lane with compression off, so body matchers can read the JSON.
+        /// The AI lane; bodies are raw unless a test sets `capture_ai_compression`,
+        /// so body matchers can read the JSON.
         fn plain_ai() -> LaneConfig {
-            LaneConfig {
-                compression_override: None,
-                ..LaneConfig::ai()
-            }
+            LaneConfig::ai()
         }
 
         fn spawn(builder: &mut ClientOptionsBuilder, lane: LaneConfig) -> TransportHandle {
@@ -2182,21 +2195,62 @@ mod tests {
         fn lane_configs_pin_the_decided_limits() {
             let ai = LaneConfig::ai();
             assert_eq!(ai.endpoint, Endpoint::CaptureAi);
-            assert_eq!(ai.compression_override, Some(CaptureCompression::Zstd));
             assert_eq!(ai.batch_bytes_target, Some(5 * 1024 * 1024));
             assert_eq!(ai.max_event_bytes, Some(8 * 1024 * 1024));
             let analytics = LaneConfig::analytics();
             assert_eq!(analytics.endpoint, Endpoint::Capture);
-            assert_eq!(analytics.compression_override, None);
             assert_eq!(analytics.batch_bytes_target, None);
             assert_eq!(analytics.max_event_bytes, None);
+
+            // Each lane reads its own option; defaults are raw bodies, 10000 and
+            // 1000 queue slots.
+            let opts = options("http://localhost:0".to_string()).build().unwrap();
+            assert_eq!(analytics.compression(&opts), None);
+            assert_eq!(ai.compression(&opts), None);
+            assert_eq!(analytics.max_queue_size(&opts), 10_000);
+            assert_eq!(ai.max_queue_size(&opts), 1_000);
+            let mut builder = options("http://localhost:0".to_string());
+            builder
+                .capture_compression(CaptureCompression::Gzip)
+                .capture_ai_compression(CaptureCompression::Zstd)
+                .max_queue_size(7usize)
+                .capture_ai_max_queue_size(3usize);
+            let opts = builder.build().unwrap();
+            assert_eq!(analytics.compression(&opts), Some(CaptureCompression::Gzip));
+            assert_eq!(ai.compression(&opts), Some(CaptureCompression::Zstd));
+            assert_eq!(analytics.max_queue_size(&opts), 7);
+            assert_eq!(ai.max_queue_size(&opts), 3);
+        }
+
+        #[test]
+        fn ai_queue_is_bounded_by_its_own_option() {
+            // Two slots on the AI lane, plenty on analytics: the third AI event is
+            // dropped at enqueue while the analytics lane accepts all three.
+            let server = MockServer::start();
+            let ai_mock = path_mock(&server, CAPTURE_AI_PATH);
+            let analytics_mock = path_mock(&server, CAPTURE_PATH);
+            let mut builder = options(server.base_url());
+            builder.capture_ai_max_queue_size(2usize);
+            let analytics = spawn(&mut builder, LaneConfig::analytics());
+            let ai = spawn(&mut builder, plain_ai());
+            for _ in 0..3 {
+                analytics.enqueue(Event::new("clicked", "user-1"));
+                ai.enqueue(Event::new("$ai_generation", "user-1"));
+            }
+            assert_eq!(ai.pending(), 2, "third AI event dropped by the lane's cap");
+            assert_eq!(analytics.pending(), 3);
+            analytics.flush_blocking();
+            ai.flush_blocking();
+            analytics_mock.assert_calls(1);
+            ai_mock.assert_calls(1);
+            TransportHandle::close_all_blocking(&[&analytics, &ai]);
         }
 
         #[test]
         fn ai_lane_posts_zstd_to_ai_path_and_analytics_lane_is_unchanged() {
-            // One server, both lanes. The AI lane must hit `/i/v1/ai/events` with a
-            // zstd body regardless of the client's compression setting; the
-            // analytics lane keeps the client's setting (none here) and path.
+            // One server, both lanes. With `capture_ai_compression(Zstd)` the AI
+            // lane hits `/i/v1/ai/events` with a zstd body while the analytics
+            // lane keeps its own setting (none here) and path.
             let server = MockServer::start();
             let ai_mock = server.mock(|when, then| {
                 when.method(POST)
@@ -2220,8 +2274,10 @@ mod tests {
                     .json_body(serde_json::json!({ "results": {} }));
             });
 
-            let analytics = spawn(&mut options(server.base_url()), LaneConfig::analytics());
-            let ai = spawn(&mut options(server.base_url()), LaneConfig::ai());
+            let mut builder = options(server.base_url());
+            builder.capture_ai_compression(CaptureCompression::Zstd);
+            let analytics = spawn(&mut builder, LaneConfig::analytics());
+            let ai = spawn(&mut builder, LaneConfig::ai());
             analytics.enqueue(Event::new("clicked", "user-1"));
             ai.enqueue(Event::new("$ai_generation", "user-1"));
             analytics.flush_blocking();
@@ -2243,22 +2299,30 @@ mod tests {
         }
 
         #[test]
-        fn client_compression_applies_to_analytics_but_not_to_ai_lane() {
+        fn compression_options_are_per_lane() {
+            // `capture_compression` governs analytics only: the AI lane stays raw
+            // unless `capture_ai_compression` is set, and vice versa.
+            fn expect_encoding<'a>(
+                server: &'a MockServer,
+                path: &str,
+                encoding: Option<&str>,
+            ) -> httpmock::Mock<'a> {
+                let path = path.to_string();
+                let encoding = encoding.map(str::to_string);
+                server.mock(move |when, then| {
+                    let when = when.method(POST).path(path);
+                    match &encoding {
+                        Some(enc) => when.header("content-encoding", enc.clone()),
+                        None => when.header_missing("content-encoding"),
+                    };
+                    then.status(200)
+                        .json_body(serde_json::json!({ "results": {} }));
+                })
+            }
             let server = MockServer::start();
-            let ai_mock = server.mock(|when, then| {
-                when.method(POST)
-                    .path(CAPTURE_AI_PATH)
-                    .header("content-encoding", "zstd");
-                then.status(200)
-                    .json_body(serde_json::json!({ "results": {} }));
-            });
-            let analytics_mock = server.mock(|when, then| {
-                when.method(POST)
-                    .path(CAPTURE_PATH)
-                    .header("content-encoding", "gzip");
-                then.status(200)
-                    .json_body(serde_json::json!({ "results": {} }));
-            });
+
+            let mut ai_raw = expect_encoding(&server, CAPTURE_AI_PATH, None);
+            let mut analytics_gzip = expect_encoding(&server, CAPTURE_PATH, Some("gzip"));
             let mut builder = options(server.base_url());
             builder.capture_compression(CaptureCompression::Gzip);
             let analytics = spawn(&mut builder, LaneConfig::analytics());
@@ -2267,8 +2331,24 @@ mod tests {
             ai.enqueue(Event::new("$ai_generation", "user-1"));
             analytics.flush_blocking();
             ai.flush_blocking();
-            analytics_mock.assert_calls(1);
-            ai_mock.assert_calls(1);
+            analytics_gzip.assert_calls(1);
+            ai_raw.assert_calls(1);
+            TransportHandle::close_all_blocking(&[&analytics, &ai]);
+            ai_raw.delete();
+            analytics_gzip.delete();
+
+            let ai_br = expect_encoding(&server, CAPTURE_AI_PATH, Some("br"));
+            let analytics_raw = expect_encoding(&server, CAPTURE_PATH, None);
+            let mut builder = options(server.base_url());
+            builder.capture_ai_compression(CaptureCompression::Br);
+            let analytics = spawn(&mut builder, LaneConfig::analytics());
+            let ai = spawn(&mut builder, LaneConfig::ai());
+            analytics.enqueue(Event::new("clicked", "user-1"));
+            ai.enqueue(Event::new("$ai_generation", "user-1"));
+            analytics.flush_blocking();
+            ai.flush_blocking();
+            analytics_raw.assert_calls(1);
+            ai_br.assert_calls(1);
             TransportHandle::close_all_blocking(&[&analytics, &ai]);
         }
 

@@ -153,12 +153,14 @@ impl Client {
     /// # Remarks
     ///
     /// Fire-and-forget, like [`Client::capture`], on a separate lane: its own
-    /// background worker, queue, retry state, and endpoint, so a multi-MB AI
-    /// event can never delay or displace analytics events. The lane batches by
-    /// size (about 5 MiB per request), sends zstd-compressed bodies, and drops
-    /// an event locally — with a warning naming only the event and its byte
-    /// size — when its serialized properties exceed 8 MiB, the backend's
-    /// per-event ceiling. The worker starts on the first call.
+    /// background worker, queue (`capture_ai_max_queue_size`), retry state, and
+    /// endpoint, so a multi-MB AI event can never delay or displace analytics
+    /// events. The lane batches by size (about 5 MiB per request), compresses
+    /// bodies per `capture_ai_compression` (unset sends them raw; zstd is
+    /// recommended), and drops an event locally — with a warning naming only
+    /// the event and its byte size — when its serialized properties exceed
+    /// 8 MiB, the backend's per-event ceiling. The worker starts on the first
+    /// call.
     ///
     /// The SDK does not inspect the event name. The backend accepts only its
     /// AI event names on this endpoint and reports anything else as a per-event
@@ -175,17 +177,36 @@ impl Client {
     /// The AI lane's transport, spawned on first use. `None` for disabled
     /// clients and once shutdown has begun (so a late `capture_ai` cannot start
     /// a worker nobody will stop).
+    ///
+    /// Shutdown marks the analytics lane closed *before* it snapshots the lanes
+    /// to drain, so re-checking after `get_or_init` covers every ordering: a
+    /// lane spawned before that mark is in the snapshot; one spawned after it
+    /// sees the mark here and is closed immediately (`Drop` joins it).
     fn ai_transport(&self) -> Option<&Arc<TransportHandle>> {
         let analytics = self.transport.as_ref()?;
         if analytics.is_closed() {
             return None;
         }
-        Some(self.ai_transport.get_or_init(|| {
+        let ai = self.ai_transport.get_or_init(|| {
             Arc::new(TransportHandle::spawn_lane(
                 self.options.clone(),
                 LaneConfig::ai(),
             ))
-        }))
+        });
+        Self::ai_lane_unless_closing(analytics, ai)
+    }
+
+    /// The post-init half of [`Self::ai_transport`]: hand out the AI lane unless
+    /// shutdown began meanwhile, in which case close it and hand out nothing.
+    fn ai_lane_unless_closing<'a>(
+        analytics: &TransportHandle,
+        ai: &'a Arc<TransportHandle>,
+    ) -> Option<&'a Arc<TransportHandle>> {
+        if analytics.is_closed() {
+            ai.request_close();
+            return None;
+        }
+        Some(ai)
     }
 
     /// Every transport lane that exists: analytics, plus the AI lane once it
@@ -534,7 +555,7 @@ impl Client {
     /// # Behavior
     ///
     /// Like [`Client::capture_batch_immediate`], but on the AI endpoint with
-    /// zstd compression, and the batch is split into requests of about 5 MiB
+    /// `capture_ai_compression`, and the batch is split into requests of about 5 MiB
     /// each, sent in order. Each request retries transient failures and
     /// per-event `retry` verdicts per the client's retry configuration; the
     /// summary merges every request's verdicts. Unlike the background lane, no
@@ -998,6 +1019,27 @@ mod teardown_tests {
         );
         client.shutdown();
         assert!(first.is_closed(), "shutdown closes the AI lane too");
+    }
+
+    #[test]
+    fn ai_lane_spawned_during_shutdown_is_closed_by_the_recheck() {
+        // Simulate the race: shutdown has marked the analytics lane closed but the
+        // AI lane already came into being (here: spawned earlier). `ai_transport`
+        // must see the mark after `get_or_init` and close the AI lane instead of
+        // handing it out.
+        let client = client(lane_test_client_options("http://localhost:0".to_string()));
+        client.capture_ai(Event::new("$ai_generation", "user-1"));
+        let ai = Arc::clone(client.ai_transport.get().unwrap());
+        let analytics = client.transport.as_ref().unwrap();
+        assert!(Client::ai_lane_unless_closing(analytics, &ai).is_some());
+        analytics.request_close(); // what `shutdown` does before its lane snapshot
+        assert!(Client::ai_lane_unless_closing(analytics, &ai).is_none());
+        assert!(
+            ai.is_closed(),
+            "the re-check requested the AI lane's shutdown"
+        );
+        assert!(client.ai_transport().is_none());
+        client.shutdown();
     }
 
     #[test]
