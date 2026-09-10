@@ -1,0 +1,26 @@
+services:
+  sdk-adapter:
+    build:
+      context: ..
+      dockerfile: compliance/Dockerfile
+    environment:
+      - COMPRESSION=gzip
+    ports:
+      - "8080:8080"
+    networks:
+      - test-network
+
+  test-harness:
+    image: ghcr.io/posthog/sdk-test-harness:0.10.0
+    # No --suite filter: the harness selects suites from the capabilities the
+    # adapter advertises on /health, which is exactly what CI does. Filtering
+    # was only ever needed to pick v0 vs v1 apart.
+    command: ["run", "--adapter-url", "http://sdk-adapter:8080", "--mock-url", "http://test-harness:8081", "--concurrency", "10"]
+    networks:
+      - test-network
+    depends_on:
+      - sdk-adapter
+
+networks:
+  test-network:
+    driver: bridge

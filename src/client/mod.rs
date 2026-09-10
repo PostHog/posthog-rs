@@ -24,8 +24,8 @@ pub use summary::CaptureSummary;
 ///
 /// When set on [`ClientOptions`], capture requests are compressed and the
 /// matching `Content-Encoding` header is sent. The variant string matches the
-/// HTTP `Content-Encoding` token the server expects. The V0 pipeline supports
-/// `Gzip` only; V1 supports all variants.
+/// HTTP `Content-Encoding` token the server expects. All four variants are
+/// accepted by the capture endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureCompression {
     Gzip,
@@ -48,12 +48,9 @@ impl CaptureCompression {
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+mod capture;
 mod retry;
 mod transport;
-#[cfg(not(feature = "capture-v1"))]
-mod v0_capture;
-#[cfg(feature = "capture-v1")]
-mod v1_capture;
 #[cfg(not(feature = "async-client"))]
 pub use blocking::client;
 #[cfg(not(feature = "async-client"))]
@@ -194,20 +191,17 @@ pub struct ClientOptions {
     #[builder(default = "false")]
     local_evaluation_only: bool,
 
-    /// Maximum number of attempts for V1 capture requests (default: 3).
+    /// Maximum number of attempts for capture requests (default: 3).
     /// Includes the initial attempt, so `3` means 1 initial + 2 retries.
     #[builder(default = "3")]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) max_capture_attempts: u32,
 
     /// Initial retry backoff duration in milliseconds (default: 200)
     #[builder(default = "200")]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) retry_initial_backoff_ms: u64,
 
     /// Maximum retry backoff duration in milliseconds (default: 30000)
     #[builder(default = "30000")]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) retry_max_backoff_ms: u64,
 
     /// Number of buffered events that triggers an automatic flush (default: 100).
@@ -232,20 +226,31 @@ pub struct ClientOptions {
     /// Maximum time `shutdown()` and `Drop` spend draining buffered and
     /// retrying events before abandoning the rest, in milliseconds (default:
     /// 30000). This bounds the drain itself, including any delivery the drain
-    /// starts. It does not bound work already underway: the single background
-    /// worker performs one blocking send at a time, so an automatic flush or
-    /// drain in progress when shutdown is requested runs to completion first —
-    /// up to `request_timeout_seconds` per in-flight batch, so a large
-    /// auto-drain can delay teardown by several request timeouts. `flush()` is
-    /// unaffected.
+    /// starts. It does not bound work already underway: each background
+    /// worker (analytics, and the AI lane once used) performs one blocking send
+    /// at a time, so an automatic flush or drain in progress when shutdown is
+    /// requested runs to completion first — up to `request_timeout_seconds`
+    /// per in-flight batch, so a large auto-drain can delay teardown by several
+    /// request timeouts. The lanes drain concurrently, so the budget is shared,
+    /// not doubled. `flush()` is unaffected.
     #[builder(default = "30000")]
     pub(crate) shutdown_timeout_ms: u64,
 
     /// Optional request-body compression. When `None` (default), bodies are
-    /// sent uncompressed. The V0 pipeline supports `Gzip` only; V1 supports all
-    /// variants.
+    /// sent uncompressed. The capture endpoint supports all variants.
     #[builder(default, setter(strip_option))]
     pub(crate) capture_compression: Option<CaptureCompression>,
+
+    /// Compression for `capture_ai*` bodies; unset (default) sends them
+    /// uncompressed. Prefer `Zstd`: AI events are large JSON.
+    #[builder(default, setter(strip_option))]
+    pub(crate) capture_ai_compression: Option<CaptureCompression>,
+
+    /// Maximum `capture_ai*` events buffered before new ones are dropped
+    /// (default: 1000). Lower than `max_queue_size` because AI events can be
+    /// multi-MB; a single warning is logged while the queue is full.
+    #[builder(default = "1000")]
+    pub(crate) capture_ai_max_queue_size: usize,
 
     /// Hooks to modify, filter, or sample events before they are sent.
     #[builder(default, setter(custom))]
@@ -274,10 +279,9 @@ pub struct ClientOptions {
 
 /// Resolved client-level default properties for capture requests.
 ///
-/// Built once from [`ClientOptions`] and threaded through all event-producing
-/// paths (V0 capture, V0 flag-called host, V1 capture) so each default is
-/// applied in exactly one place with caller-wins (`entry().or_insert`)
-/// semantics.
+/// Built once from [`ClientOptions`] and threaded through every event-producing
+/// path so each default is applied in exactly one place with caller-wins
+/// (`entry().or_insert`) semantics.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CaptureDefaults {
     pub(crate) disable_geoip: bool,
@@ -406,18 +410,6 @@ impl ClientOptionsBuilder {
     pub fn build(&self) -> Result<ClientOptions, ClientOptionsBuilderError> {
         Ok(self.build_unchecked()?.sanitize())
     }
-
-    /// Deprecated alias for [`secret_key`](Self::secret_key).
-    ///
-    /// Kept for backwards compatibility; forwards to `secret_key`. The last
-    /// builder call wins if both are set.
-    #[deprecated(
-        note = "use `secret_key` instead; it accepts a Personal API Key or a Project Secret API Key"
-    )]
-    pub fn personal_api_key<VALUE: Into<String>>(&mut self, value: VALUE) -> &mut Self {
-        self.secret_key = Some(Some(value.into()));
-        self
-    }
 }
 
 impl From<&str> for ClientOptions {
@@ -459,39 +451,6 @@ mod tests {
         assert_eq!(options.host.as_deref(), Some("https://eu.posthog.com/"));
         assert_eq!(options.secret_key, None);
         assert_eq!(options.endpoints().api_host(), EU_INGESTION_ENDPOINT);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn personal_api_key_forwards_to_secret_key_last_call_wins() {
-        let resolve = |calls: &[(&str, &str)]| {
-            let mut builder = ClientOptionsBuilder::default();
-            builder.api_key("test-api-key".to_string());
-            for (which, val) in calls {
-                match *which {
-                    "secret" => builder.secret_key(*val),
-                    _ => builder.personal_api_key(*val),
-                };
-            }
-            builder.build().unwrap().secret_key
-        };
-
-        assert_eq!(
-            resolve(&[("secret", "phs_secret")]).as_deref(),
-            Some("phs_secret")
-        );
-        assert_eq!(
-            resolve(&[("personal", "phx_personal")]).as_deref(),
-            Some("phx_personal")
-        );
-        assert_eq!(
-            resolve(&[("personal", "phx_personal"), ("secret", "phs_secret")]).as_deref(),
-            Some("phs_secret")
-        );
-        assert_eq!(
-            resolve(&[("secret", "phs_secret"), ("personal", "phx_personal")]).as_deref(),
-            Some("phx_personal")
-        );
     }
 
     #[test]

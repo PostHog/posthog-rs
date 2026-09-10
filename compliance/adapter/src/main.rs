@@ -30,7 +30,6 @@ const DEFAULT_TEST_ID: &str = "_global";
 /// options. Mirrors (in inverse) the SDK's internal `OPTIONS_EXTRACTION_TABLE`;
 /// agreement is enforced by the capture_v1 compliance suite (`assert_event_option`),
 /// so any drift fails CI rather than shipping silently.
-#[cfg(feature = "capture-v1")]
 const HARNESS_OPTION_TO_PROP: &[(&str, &str)] = &[
     ("cookieless_mode", "$cookieless_mode"),
     ("disable_skew_correction", "$ignore_sent_at"),
@@ -71,7 +70,6 @@ struct CaptureRequest {
     properties: Option<serde_json::Value>,
     #[serde(default)]
     timestamp: Option<String>,
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     #[serde(default)]
     options: Option<serde_json::Value>,
 }
@@ -140,24 +138,56 @@ fn compression_capability(c: CaptureCompression) -> &'static str {
     }
 }
 
-async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let mut capabilities: Vec<String> = Vec::new();
-    if cfg!(feature = "capture-v1") {
-        capabilities.push("capture_v1".to_string());
-    } else {
-        capabilities.push("capture_v0".to_string());
+async fn build_client(options: posthog_rs::ClientOptions) -> Client {
+    #[cfg(feature = "async-client")]
+    {
+        posthog_rs::client(options).await
     }
+    #[cfg(not(feature = "async-client"))]
+    {
+        posthog_rs::client(options)
+    }
+}
+
+async fn evaluate_flags(
+    client: &Client,
+    distinct_id: String,
+    options: EvaluateFlagsOptions,
+) -> Result<posthog_rs::FeatureFlagEvaluations, posthog_rs::Error> {
+    #[cfg(feature = "async-client")]
+    {
+        client.evaluate_flags(distinct_id, options).await
+    }
+    #[cfg(not(feature = "async-client"))]
+    {
+        client.evaluate_flags(distinct_id, options)
+    }
+}
+
+async fn flush_client(client: &Client) {
+    #[cfg(feature = "async-client")]
+    client.flush().await;
+    #[cfg(not(feature = "async-client"))]
+    client.flush();
+}
+
+async fn shutdown_client(client: &Client) {
+    #[cfg(feature = "async-client")]
+    client.shutdown().await;
+    #[cfg(not(feature = "async-client"))]
+    client.shutdown();
+}
+
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    // `capture_v1` is the harness contract key that selects the capture suite
+    // (see `requires:` in contracts/capture_analytics_v1_tests.yaml) — it is a
+    // frozen external string, not an internal name.
+    let mut capabilities: Vec<String> = vec!["capture_v1".to_string()];
     if let Some(algo) = state.compression {
         capabilities.push(compression_capability(algo).to_string());
     }
     Json(HealthResponse {
-        // Per-build name so the v0 and v1 compliance jobs post distinct PR
-        // comments instead of overwriting one shared report.
-        sdk_name: if cfg!(feature = "capture-v1") {
-            "posthog-rs-v1"
-        } else {
-            "posthog-rs-v0"
-        },
+        sdk_name: "posthog-rs",
         sdk_version: env!("CARGO_PKG_VERSION"),
         adapter_version: env!("CARGO_PKG_VERSION"),
         capabilities,
@@ -213,7 +243,7 @@ async fn init(
 
     match builder.build() {
         Ok(opts) => {
-            let client = posthog_rs::client(opts).await;
+            let client = build_client(opts).await;
             s.client = Some(Arc::new(client));
             Json(serde_json::json!({ "success": true })).into_response()
         }
@@ -249,7 +279,6 @@ async fn capture_event(
             let _ = event.set_timestamp(ts);
         }
     }
-    #[cfg(feature = "capture-v1")]
     if let Some(opts_val) = req.options {
         if let Some(obj) = opts_val.as_object() {
             for (k, v) in obj {
@@ -316,16 +345,14 @@ async fn get_feature_flag(
     };
 
     let key = req.key;
-    let options = EvaluateFlagsOptions {
-        groups: req.groups,
-        person_properties: req.person_properties,
-        group_properties: req.group_properties,
-        only_evaluate_locally: false,
-        disable_geoip: req.disable_geoip,
-        flag_keys: Some(vec![key.clone()]),
-    };
+    let mut options = EvaluateFlagsOptions::default();
+    options.groups = req.groups;
+    options.person_properties = req.person_properties;
+    options.group_properties = req.group_properties;
+    options.disable_geoip = req.disable_geoip;
+    options.flag_keys = Some(vec![key.clone()]);
 
-    match client.evaluate_flags(req.distinct_id, options).await {
+    match evaluate_flags(&client, req.distinct_id, options).await {
         Ok(flags) => {
             let value = flags.get_flag(&key);
             Json(serde_json::json!({ "success": true, "value": value })).into_response()
@@ -363,7 +390,7 @@ async fn flush(
     };
 
     let before = client.pending_events() as u64;
-    client.flush().await;
+    flush_client(&client).await;
     let flushed = before.saturating_sub(client.pending_events() as u64);
 
     Json(serde_json::json!({
@@ -391,7 +418,7 @@ async fn shutdown(
         }
     };
 
-    client.shutdown().await;
+    shutdown_client(&client).await;
     Json(serde_json::json!({ "success": true })).into_response()
 }
 
@@ -442,17 +469,17 @@ async fn reset(
 #[tokio::main]
 async fn main() {
     let compression = parse_compression();
-    let mode_str = if cfg!(feature = "capture-v1") {
-        "v1"
-    } else {
-        "v0"
-    };
     let compression_str = match compression {
         Some(algo) => compression_capability(algo),
         None => "none",
     };
+    let client_mode = if cfg!(feature = "async-client") {
+        "async"
+    } else {
+        "blocking"
+    };
     eprintln!(
-        "Starting posthog-rs SDK adapter (capture={mode_str}, compression={compression_str}, parallel={SUPPORTS_PARALLEL})"
+        "Starting posthog-rs SDK adapter (client={client_mode}, compression={compression_str}, parallel={SUPPORTS_PARALLEL})"
     );
 
     let state = AppState {

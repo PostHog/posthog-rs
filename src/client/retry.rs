@@ -1,4 +1,4 @@
-//! Runtime-agnostic retry primitives shared by the V0 and V1 capture paths.
+//! Runtime-agnostic retry primitives shared by client request paths.
 
 use std::time::{Duration, SystemTime};
 
@@ -8,9 +8,9 @@ use reqwest::header::HeaderMap;
 use super::ClientOptions;
 use crate::error::Error;
 
-/// Outcome of one capture attempt, computed without any I/O so both the async
-/// and blocking clients (and both V0 and V1) can share the decision logic and
-/// keep only the transport-specific loop.
+/// Outcome of one capture attempt, computed without any I/O so the async and
+/// blocking clients can share the decision logic and keep only the
+/// transport-specific loop.
 #[derive(Debug)]
 pub(crate) enum Step {
     Done,
@@ -36,14 +36,28 @@ pub(crate) fn is_retryable_status(status: u16) -> bool {
     matches!(status, 408 | 500 | 502 | 503 | 504)
 }
 
-/// V0 retry decision. Beyond the shared retryable set, V0 retries 429 — but
-/// only when the server sent a `Retry-After` (an explicit "try again in N"
-/// instruction). A bare 429 stays terminal (`Error::RateLimit`), preserving
-/// long-standing v0 behavior. The V1 endpoint never returns 429, so this is
-/// intentionally scoped to V0.
-#[cfg(not(feature = "capture-v1"))]
-pub(crate) fn should_retry_v0(status: u16, has_retry_after: bool) -> bool {
-    is_retryable_status(status) || (status == 429 && has_retry_after)
+/// Classify transport errors from remote feature-flag requests.
+pub(crate) fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
+    if err.is_timeout() {
+        return true;
+    }
+
+    let mut source = std::error::Error::source(err);
+    while let Some(error) = source {
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::UnexpectedEof
+            );
+        }
+        source = std::error::Error::source(error);
+    }
+
+    !err.to_string()
+        .to_lowercase()
+        .contains("connection refused")
 }
 
 /// Parse `Retry-After` as either delay-seconds or an HTTP-date.
@@ -114,41 +128,6 @@ pub(crate) fn backoff_duration(
     clamped_retry_after.map_or(configured_delay, |d| configured_delay.max(d))
 }
 
-/// Sans-IO decision for a completed V0 capture response. `attempt` is the
-/// just-finished attempt number (1-based); the backoff for the next attempt
-/// uses `attempt` directly so the first retry waits exactly
-/// `retry_initial_backoff_ms`.
-#[cfg(not(feature = "capture-v1"))]
-pub(crate) fn v0_after_response(
-    opts: &ClientOptions,
-    attempt: u32,
-    status: u16,
-    retry_after: Option<Duration>,
-    body: &str,
-) -> Step {
-    if should_retry_v0(status, retry_after.is_some()) && attempt < opts.max_capture_attempts {
-        return Step::Backoff(backoff_duration(opts, attempt, retry_after));
-    }
-    match Error::from_http_response(status, body.to_string()) {
-        Some(err) => Step::Fail(err),
-        None => Step::Done,
-    }
-}
-
-/// Sans-IO decision for a V0 transport error (no HTTP response). Retries
-/// transport failures until the attempt budget is exhausted.
-#[cfg(not(feature = "capture-v1"))]
-pub(crate) fn v0_after_transport_error(
-    opts: &ClientOptions,
-    attempt: u32,
-    err_msg: String,
-) -> Step {
-    if attempt >= opts.max_capture_attempts {
-        return Step::Fail(Error::Connection(err_msg));
-    }
-    Step::Backoff(backoff_duration(opts, attempt, None))
-}
-
 fn is_retryable_feature_flags_status(status: u16) -> bool {
     matches!(status, 502 | 504)
 }
@@ -185,6 +164,10 @@ pub(crate) fn feature_flags_after_transport_error(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener};
+    use std::thread;
+
     use reqwest::header::{HeaderMap, HeaderValue};
 
     use super::*;
@@ -198,6 +181,17 @@ mod tests {
             .retry_max_backoff_ms(5000u64)
             .build()
             .unwrap()
+    }
+
+    fn has_io_error_kind(err: &reqwest::Error, expected: std::io::ErrorKind) -> bool {
+        let mut source = std::error::Error::source(err);
+        while let Some(error) = source {
+            if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+                return io_error.kind() == expected;
+            }
+            source = std::error::Error::source(error);
+        }
+        false
     }
 
     #[test]
@@ -222,21 +216,75 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "capture-v1"))]
     #[test]
-    fn v0_retries_429_only_with_retry_after() {
-        assert!(should_retry_v0(429, true));
-        assert!(!should_retry_v0(429, false));
-        // The shared retryable set applies regardless of Retry-After.
-        for code in [408, 500, 502, 503, 504] {
-            assert!(should_retry_v0(code, false));
-            assert!(should_retry_v0(code, true));
-        }
-        // Genuinely terminal statuses stay terminal either way.
-        for code in [400, 401, 402, 403, 413, 415] {
-            assert!(!should_retry_v0(code, false));
-            assert!(!should_retry_v0(code, true));
-        }
+    fn feature_flags_timeout_error_is_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+
+        let err = client.get(url).send().unwrap_err();
+
+        assert!(err.is_timeout());
+        assert!(is_retryable_feature_flags_error(&err));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn feature_flags_unexpected_eof_error_is_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n")
+                .unwrap();
+            let _ = stream.shutdown(Shutdown::Both);
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+
+        let err = client.get(url).send().unwrap().bytes().unwrap_err();
+
+        assert!(has_io_error_kind(&err, std::io::ErrorKind::UnexpectedEof));
+        assert!(is_retryable_feature_flags_error(&err));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn feature_flags_connection_refused_error_is_not_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+
+        let err = client.get(url).send().unwrap_err();
+
+        assert!(!is_retryable_feature_flags_error(&err));
+    }
+
+    #[test]
+    fn feature_flags_unknown_error_is_retryable() {
+        let err = reqwest::blocking::Client::new()
+            .get("ftp://example.com")
+            .send()
+            .unwrap_err();
+
+        assert!(is_retryable_feature_flags_error(&err));
     }
 
     #[test]
@@ -354,99 +402,11 @@ mod tests {
         );
     }
 
-    // -- v0 sans-IO decisions ------------------------------------------------
-
-    #[cfg(not(feature = "capture-v1"))]
-    fn schedule_opts() -> ClientOptions {
-        ClientOptionsBuilder::default()
-            .api_key("phc_test".to_string())
-            .max_capture_attempts(10u32)
-            .retry_initial_backoff_ms(100u64)
-            .retry_max_backoff_ms(1_000_000u64)
-            .build()
-            .unwrap()
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    fn backoff_ms(step: Step) -> u64 {
-        match step {
-            Step::Backoff(d) => d.as_millis() as u64,
-            _ => panic!("expected Step::Backoff"),
-        }
-    }
+    // -- Feature flag sans-I/O decisions -------------------------------------
 
     /// The schedule the call sites actually produce. Guards the `attempt + 1`
     /// off-by-one: the first retry must wait exactly `retry_initial_backoff_ms`
     /// (100ms here), not double it.
-    #[cfg(not(feature = "capture-v1"))]
-    #[test]
-    fn v0_backoff_schedule_starts_at_initial() {
-        let opts = schedule_opts();
-        // attempt = the just-finished attempt; first retry follows attempt 1.
-        assert_eq!(
-            backoff_ms(v0_after_response(&opts, 1, 503, None, "")),
-            100,
-            "first retry must honor retry_initial_backoff_ms exactly"
-        );
-        assert_eq!(backoff_ms(v0_after_response(&opts, 2, 503, None, "")), 200);
-        assert_eq!(backoff_ms(v0_after_response(&opts, 3, 503, None, "")), 400);
-        // Same schedule for transport errors.
-        assert_eq!(
-            backoff_ms(v0_after_transport_error(&opts, 1, "timeout".into())),
-            100
-        );
-        assert_eq!(
-            backoff_ms(v0_after_transport_error(&opts, 2, "timeout".into())),
-            200
-        );
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    #[test]
-    fn v0_after_response_terminal_and_success() {
-        let opts = schedule_opts();
-        // 2xx -> Done.
-        assert!(matches!(
-            v0_after_response(&opts, 1, 200, None, ""),
-            Step::Done
-        ));
-        // Bare 429 (no Retry-After) -> terminal RateLimit, no retry.
-        assert!(matches!(
-            v0_after_response(&opts, 1, 429, None, ""),
-            Step::Fail(Error::RateLimit)
-        ));
-        // 429 + Retry-After -> retried.
-        assert!(matches!(
-            v0_after_response(&opts, 1, 429, Some(Duration::from_secs(1)), ""),
-            Step::Backoff(_)
-        ));
-        // Non-retryable 4xx -> terminal.
-        assert!(matches!(
-            v0_after_response(&opts, 1, 400, None, "bad"),
-            Step::Fail(Error::BadRequest(_))
-        ));
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    #[test]
-    fn v0_exhausts_attempt_budget() {
-        let opts = ClientOptionsBuilder::default()
-            .api_key("phc_test".to_string())
-            .max_capture_attempts(3u32)
-            .retry_initial_backoff_ms(1u64)
-            .retry_max_backoff_ms(5u64)
-            .build()
-            .unwrap();
-        // Retryable status on the final attempt surfaces the error instead of backing off.
-        assert!(matches!(
-            v0_after_response(&opts, 3, 503, None, "boom"),
-            Step::Fail(Error::ServerError { .. })
-        ));
-        assert!(matches!(
-            v0_after_transport_error(&opts, 3, "timeout".into()),
-            Step::Fail(Error::Connection(_))
-        ));
-    }
 
     #[test]
     fn feature_flags_http_status_uses_retry_budget_for_502_and_504_only() {

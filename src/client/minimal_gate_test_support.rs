@@ -5,11 +5,13 @@
 #![cfg(test)]
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use crate::feature_flag_evaluations::{FeatureFlagEvaluationsHost, FlagCalledEventParams};
+use crate::feature_flag_evaluations::{
+    FeatureFlagEvaluations, FeatureFlagEvaluationsHost, FlagCalledEventParams,
+};
 use crate::feature_flags::{FeatureFlag, FeatureFlagCondition, FeatureFlagFilters};
-use crate::local_evaluation::LocalEvaluationResponse;
+use crate::local_evaluation::{FlagCache, LocalEvaluationResponse};
 
 #[derive(Default)]
 pub(super) struct RecordingHost {
@@ -52,4 +54,45 @@ pub(super) fn definitions(has_experiment: Option<bool>, gate: bool) -> LocalEval
         cohorts: HashMap::new(),
         minimal_flag_called_events: gate,
     }
+}
+
+pub(super) struct GateTestFixture {
+    pub(super) cache: FlagCache,
+    pub(super) host: Arc<RecordingHost>,
+}
+
+pub(super) fn gate_test_fixture(has_experiment: Option<bool>, gate: bool) -> GateTestFixture {
+    let cache = FlagCache::new();
+    cache.update(definitions(has_experiment, gate));
+    GateTestFixture {
+        cache,
+        host: Arc::new(RecordingHost::default()),
+    }
+}
+
+pub(super) fn assert_gate_was_pinned(
+    snapshot: &FeatureFlagEvaluations,
+    host: &RecordingHost,
+    expected_minimal: bool,
+) {
+    assert!(snapshot.is_enabled("gated"));
+    let captured = host.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].minimal, expected_minimal,
+        "event must reflect the gate pinned at evaluation, not the mutated cache"
+    );
+}
+
+pub(super) fn assert_has_experiment_was_threaded(
+    snapshot: &FeatureFlagEvaluations,
+    host: &RecordingHost,
+) {
+    assert!(snapshot.is_enabled("gated"));
+    let captured = host.captured.lock().unwrap();
+    assert_eq!(
+        captured[0].properties.get("$feature_flag_has_experiment"),
+        Some(&serde_json::json!(false))
+    );
+    assert!(captured[0].minimal);
 }

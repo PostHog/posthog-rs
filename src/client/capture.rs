@@ -1,9 +1,7 @@
-//! Shared, runtime-agnostic helpers for the V1 capture pipeline.
+//! Shared, runtime-agnostic helpers for the capture pipeline.
 //! Each client keeps only the I/O; this module owns everything else.
 
 use std::{collections::HashMap, time::Duration};
-
-pub(crate) const V1_CAPTURE_PATH: &str = "/i/v1/analytics/events";
 
 use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
@@ -11,19 +9,20 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::retry::{backoff_duration, is_retryable_status};
-// Re-exported so the V1 capture loops in the client modules can reach them as
-// `v1_capture::parse_retry_after` / `v1_capture::Step`.
+// Re-exported so the capture loops in the client modules can reach them as
+// `capture::parse_retry_after` / `capture::Step`.
 pub(crate) use super::retry::{parse_retry_after, Step};
 use super::{
-    common::{apply_before_send_hooks, apply_capture_defaults, apply_runtime_context},
+    common::{apply_runtime_context, preprocess_capture_event},
     CaptureCompression, CaptureDefaults, ClientOptions,
 };
+use crate::capture_event::{
+    BatchRequestRef, CaptureErrorResponse, CaptureEvent, CaptureResponse, EventResult, EventStatus,
+};
 use crate::client::get_default_user_agent;
+use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::event::{is_minimal_flag_called_property, Event};
-use crate::event_v1::{
-    CaptureResponse, EventResult, EventStatus, V1BatchRequestRef, V1ErrorResponse, V1Event,
-};
 
 // ---------------------------------------------------------------------------
 // Request building
@@ -35,34 +34,114 @@ pub(crate) fn build_events_at(
     events: &[Event],
     defaults: &CaptureDefaults,
     now: DateTime<Utc>,
-) -> Vec<V1Event> {
+) -> Vec<CaptureEvent> {
     events
         .iter()
-        .map(|event| {
-            let mut event = event.clone();
-            apply_runtime_context(&mut event);
-            let minimal = event.is_minimal_flag_called();
-            let mut v1 = V1Event::from_event_at(&event, now);
-            if let serde_json::Value::Object(ref mut map) = v1.properties {
-                if defaults.disable_geoip {
-                    map.entry("$geoip_disable")
-                        .or_insert(serde_json::Value::Bool(true));
-                }
-                if defaults.is_server {
-                    map.entry("$is_server")
-                        .or_insert(serde_json::Value::Bool(true));
-                }
-                // Final step for minimized `$feature_flag_called` events: drop
-                // everything outside the allowlist. Wire-lifted keys
-                // ($session_id/$window_id/$process_person_profile) already moved
-                // off `properties` and are preserved on the event elsewhere.
-                if minimal {
-                    map.retain(|key, _| is_minimal_flag_called_property(key));
-                }
-            }
-            v1
-        })
+        .map(|event| build_event_at(event, defaults, now))
         .collect()
+}
+
+/// Build one V1 wire event: runtime context, client defaults (caller wins),
+/// and the minimized-`$feature_flag_called` allowlist.
+pub(crate) fn build_event_at(
+    event: &Event,
+    defaults: &CaptureDefaults,
+    now: DateTime<Utc>,
+) -> CaptureEvent {
+    let mut event = event.clone();
+    apply_runtime_context(&mut event);
+    let minimal = event.is_minimal_flag_called();
+    let mut v1 = CaptureEvent::from_event_at(&event, now);
+    if let serde_json::Value::Object(ref mut map) = v1.properties {
+        if defaults.disable_geoip {
+            map.entry("$geoip_disable")
+                .or_insert(serde_json::Value::Bool(true));
+        }
+        if defaults.is_server {
+            map.entry("$is_server")
+                .or_insert(serde_json::Value::Bool(true));
+        }
+        // Final step for minimized `$feature_flag_called` events: drop
+        // everything outside the allowlist. Wire-lifted keys
+        // ($session_id/$window_id/$process_person_profile) already moved
+        // off `properties` and are preserved on the event elsewhere.
+        if minimal {
+            map.retain(|key, _| is_minimal_flag_called_property(key));
+        }
+    }
+    v1
+}
+
+// ---------------------------------------------------------------------------
+// Byte accounting (AI lane)
+// ---------------------------------------------------------------------------
+
+/// Serialized size of one wire event, measured without allocating the JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EventSize {
+    /// Bytes of the whole serialized [`CaptureEvent`]; what a batch body grows
+    /// by when this event is appended (excluding the `,` separator).
+    pub(crate) total: usize,
+    /// Bytes of the serialized `properties` object alone — the denominator the
+    /// capture backend applies its per-event AI ceiling to.
+    pub(crate) properties: usize,
+}
+
+/// `io::Write` that only counts, so sizes cost one serializer pass and no
+/// allocation. Serialization is deterministic for a given value, so the count
+/// equals the bytes the request body will carry.
+struct CountingWriter(usize);
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+    let mut w = CountingWriter(0);
+    // Serialization of an already-built `CaptureEvent` cannot fail short of an
+    // allocation error; a failure here would also fail at send time, where it
+    // is reported. Treat it as size 0 so the event is not dropped twice.
+    let _ = serde_json::to_writer(&mut w, value);
+    w.0
+}
+
+pub(crate) fn measure_event(event: &CaptureEvent) -> EventSize {
+    EventSize {
+        total: json_len(event),
+        properties: json_len(&event.properties),
+    }
+}
+
+/// Split measured events into batches under a soft byte target using the
+/// guarded check-before-append rule: a batch is closed only when it is
+/// non-empty and the next event would push it past `target`, so an event
+/// larger than the target still ships alone (worst-case body =
+/// `max(target, largest event)`). Order is preserved.
+pub(crate) fn chunk_by_bytes(
+    events: Vec<(CaptureEvent, usize)>,
+    target: usize,
+) -> Vec<Vec<CaptureEvent>> {
+    let mut batches: Vec<Vec<CaptureEvent>> = Vec::new();
+    let mut current: Vec<CaptureEvent> = Vec::new();
+    let mut current_bytes = 0usize;
+    for (event, bytes) in events {
+        if !current.is_empty() && current_bytes + bytes > target {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current.push(event);
+        current_bytes += bytes;
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
 }
 
 #[cfg(test)]
@@ -142,54 +221,101 @@ pub(crate) fn maybe_compress(
 // Inline (immediate) capture preparation
 // ---------------------------------------------------------------------------
 
-/// Everything an inline immediate V1 capture needs after event preparation:
+/// Everything an inline immediate capture needs after event preparation:
 /// built once, then reused across retry attempts. The async and blocking
 /// clients share this (it is I/O-free) and keep only the send loop.
-pub(crate) struct PreparedV1 {
+pub(crate) struct Prepared {
     pub(crate) url: String,
     pub(crate) request_id: Uuid,
     pub(crate) created_at: String,
     pub(crate) historical_migration: Option<bool>,
-    pub(crate) pending: Vec<V1Event>,
+    pub(crate) pending: Vec<CaptureEvent>,
     pub(crate) submitted: usize,
 }
 
-/// Prepare an inline immediate V1 capture: apply client defaults + `before_send`,
+/// Per-lane settings for an inline immediate capture. The analytics lane sends
+/// one request; the AI lane splits the batch by bytes. Each reads its own
+/// compression option.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImmediateLane {
+    pub(crate) endpoint: Endpoint,
+    /// `None`: everything goes in one request.
+    pub(crate) batch_bytes_target: Option<usize>,
+}
+
+impl ImmediateLane {
+    pub(crate) fn analytics() -> Self {
+        Self {
+            endpoint: Endpoint::Capture,
+            batch_bytes_target: None,
+        }
+    }
+
+    pub(crate) fn ai() -> Self {
+        Self {
+            endpoint: Endpoint::CaptureAi,
+            batch_bytes_target: Some(super::transport::AI_BATCH_BYTES_TARGET),
+        }
+    }
+
+    /// The codec for this lane's request bodies, from the lane's client option.
+    pub(crate) fn compression(&self, opts: &ClientOptions) -> Option<CaptureCompression> {
+        match self.endpoint {
+            Endpoint::CaptureAi => opts.capture_ai_compression,
+            _ => opts.capture_compression,
+        }
+    }
+}
+
+/// Prepare an inline immediate capture: apply client defaults + `before_send`,
 /// then build the wire events and the per-request identity (request id,
-/// `created_at`, URL). Returns `None` when nothing survives filtering (an empty
-/// or fully `before_send`-dropped batch), so the caller returns a default
-/// summary without sending.
+/// `created_at`, URL) for each request. Returns an empty `Vec` when nothing
+/// survives filtering (an empty or fully `before_send`-dropped batch), so the
+/// caller returns a default summary without sending. The analytics lane always
+/// yields exactly one `Prepared`; the AI lane yields one per byte-sized chunk,
+/// in order.
 pub(crate) fn prepare_immediate(
     opts: &ClientOptions,
+    lane: ImmediateLane,
     events: Vec<Event>,
     historical_migration: bool,
-) -> Option<PreparedV1> {
+) -> Vec<Prepared> {
     let defaults = opts.capture_defaults();
     let events: Vec<Event> = events
         .into_iter()
-        .filter_map(|mut event| {
-            apply_capture_defaults(&mut event, &defaults);
-            apply_before_send_hooks(&opts.before_send, event)
-        })
+        .filter_map(|event| preprocess_capture_event(event, &defaults, &opts.before_send))
         .collect();
     if events.is_empty() {
-        return None;
+        return Vec::new();
     }
 
-    let request_id = Uuid::now_v7();
-    let created_at = Utc::now().to_rfc3339();
     let historical_migration = historical_migration.then_some(true);
-    let url = opts.endpoints().build_custom_url(V1_CAPTURE_PATH);
-    let pending = build_events_at(&events, &defaults, Utc::now());
-    let submitted = pending.len();
-    Some(PreparedV1 {
-        url,
-        request_id,
-        created_at,
-        historical_migration,
-        pending,
-        submitted,
-    })
+    let url = opts.endpoints().build_url(lane.endpoint);
+    let built = build_events_at(&events, &defaults, Utc::now());
+    let chunks = match lane.batch_bytes_target {
+        Some(target) => chunk_by_bytes(
+            built
+                .into_iter()
+                .map(|event| {
+                    let bytes = measure_event(&event).total;
+                    (event, bytes)
+                })
+                .collect(),
+            target,
+        ),
+        None => vec![built],
+    };
+    chunks
+        .into_iter()
+        .map(|pending| Prepared {
+            url: url.clone(),
+            request_id: Uuid::now_v7(),
+            created_at: Utc::now().to_rfc3339(),
+            historical_migration,
+            submitted: pending.len(),
+            pending,
+        })
+        .collect()
 }
 
 /// Build the headers and (optionally compressed) body for one immediate V1
@@ -197,20 +323,21 @@ pub(crate) fn prepare_immediate(
 /// and the attempt number advances between retries. I/O-free.
 pub(crate) fn build_attempt_parts(
     opts: &ClientOptions,
+    compression: Option<CaptureCompression>,
     request_id: &Uuid,
     attempt: u32,
     created_at: &str,
     historical_migration: Option<bool>,
-    pending: &[V1Event],
+    pending: &[CaptureEvent],
 ) -> Result<(HeaderMap, Vec<u8>), Error> {
-    let request = V1BatchRequestRef {
+    let request = BatchRequestRef {
         created_at,
         historical_migration,
         batch: pending,
     };
     let payload = serde_json::to_vec(&request).map_err(|e| Error::Serialization(e.to_string()))?;
     let mut headers = build_headers_at(opts, request_id, attempt, Utc::now());
-    let body = maybe_compress(opts.capture_compression, &mut headers, payload);
+    let body = maybe_compress(compression, &mut headers, payload);
     Ok((headers, body))
 }
 
@@ -233,11 +360,11 @@ pub(crate) fn count_results(resp: &CaptureResponse) -> HashMap<(String, Option<S
 /// O(n) consuming pass: records terminal results, returns only retry events.
 /// Events absent from `results` are silently dropped.
 pub(crate) fn process_batch_response(
-    pending: Vec<V1Event>,
+    pending: Vec<CaptureEvent>,
     results: &HashMap<Uuid, EventResult>,
     final_results: &mut HashMap<Uuid, EventResult>,
     is_final_attempt: bool,
-) -> Vec<V1Event> {
+) -> Vec<CaptureEvent> {
     let mut next = Vec::new();
     for v1 in pending {
         match results.get(&v1.uuid) {
@@ -274,7 +401,7 @@ pub(crate) fn after_transport_error(
         request_id = %request_id,
         attempt,
         error = %err_msg,
-        "V1 capture request failed, will retry"
+        "Capture request failed, will retry"
     );
     Step::Backoff(backoff_duration(opts, attempt, None))
 }
@@ -287,7 +414,7 @@ pub(crate) fn after_response(
     status: u16,
     retry_after: Option<Duration>,
     body: &str,
-    pending: &mut Vec<V1Event>,
+    pending: &mut Vec<CaptureEvent>,
     final_results: &mut HashMap<Uuid, EventResult>,
 ) -> Step {
     // The backend sends exactly 200 today; accept the whole 2xx class so a
@@ -304,7 +431,7 @@ pub(crate) fn after_response(
                 request_id = %request_id,
                 attempt,
                 results = ?result_counts,
-                "V1 capture batch response"
+                "Capture batch response"
             );
         }
 
@@ -323,7 +450,7 @@ pub(crate) fn after_response(
             Step::Backoff(backoff_duration(opts, attempt, retry_after))
         }
     } else if is_retryable_status(status) {
-        let error_desc = serde_json::from_str::<V1ErrorResponse>(body)
+        let error_desc = serde_json::from_str::<CaptureErrorResponse>(body)
             .ok()
             .and_then(|e| e.error_description)
             .unwrap_or_else(|| body.to_string());
@@ -333,23 +460,25 @@ pub(crate) fn after_response(
             attempt,
             status,
             error = %error_desc,
-            "V1 capture request failed, will retry"
+            "Capture request failed, will retry"
         );
 
         if attempt >= opts.max_capture_attempts {
-            Step::Fail(
-                Error::from_http_response(status, body.to_string())
-                    .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))),
-            )
+            Step::Fail(terminal_response_error(status, body))
         } else {
             Step::Backoff(backoff_duration(opts, attempt, retry_after))
         }
     } else {
-        Step::Fail(
-            Error::from_http_response(status, body.to_string())
-                .unwrap_or_else(|| Error::Connection(format!("HTTP {status}"))),
-        )
+        Step::Fail(terminal_response_error(status, body))
     }
+}
+
+/// Convert a terminal HTTP response into its status-specific SDK error. The
+/// fallback preserves the prior defensive behavior if a success status ever
+/// reaches a terminal branch.
+fn terminal_response_error(status: u16, body: &str) -> Error {
+    Error::from_http_response(status, body.to_string())
+        .unwrap_or_else(|| Error::Connection(format!("HTTP {status}")))
 }
 
 #[cfg(test)]
@@ -359,9 +488,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::capture_event::{CaptureEvent, CaptureResponse, EventResult, EventStatus};
     use crate::client::ClientOptionsBuilder;
     use crate::event::MINIMAL_FLAG_CALLED_EVENT_PROPERTIES;
-    use crate::event_v1::{CaptureResponse, EventResult, EventStatus, V1Event};
 
     fn test_opts() -> ClientOptions {
         ClientOptionsBuilder::default()
@@ -374,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn minimal_flag_called_event_v1_keeps_only_allowlisted_properties() {
+    fn minimal_flag_called_event_keeps_only_allowlisted_properties() {
         use std::collections::HashSet;
 
         let mut event = Event::new("$feature_flag_called", "user-1");
@@ -420,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn non_minimal_flag_called_event_v1_keeps_everything() {
+    fn non_minimal_flag_called_event_keeps_everything() {
         let mut event = Event::new("$feature_flag_called", "user-1");
         event
             .insert_prop("$feature/my-flag", serde_json::json!(true))
@@ -442,8 +571,8 @@ mod tests {
         assert_eq!(map.get("$feature/my-flag"), Some(&serde_json::json!(true)));
     }
 
-    fn dummy_v1_event() -> V1Event {
-        V1Event {
+    fn dummy_event() -> CaptureEvent {
+        CaptureEvent {
             event: "$pageview".into(),
             uuid: Uuid::now_v7(),
             distinct_id: "user-1".into(),
@@ -488,8 +617,8 @@ mod tests {
 
     #[test]
     fn process_batch_retry_kept_when_not_final() {
-        let e1 = dummy_v1_event();
-        let e2 = dummy_v1_event();
+        let e1 = dummy_event();
+        let e2 = dummy_event();
         let results = HashMap::from([
             (e1.uuid, event_result(EventStatus::Ok, None)),
             (
@@ -512,7 +641,7 @@ mod tests {
 
     #[test]
     fn process_batch_retry_finalized_when_final() {
-        let e1 = dummy_v1_event();
+        let e1 = dummy_event();
         let results = HashMap::from([(
             e1.uuid,
             event_result(EventStatus::Retry, Some("not_persisted")),
@@ -525,9 +654,9 @@ mod tests {
 
     #[test]
     fn process_batch_terminal_results_finalized() {
-        let ok_ev = dummy_v1_event();
-        let drop_ev = dummy_v1_event();
-        let warn_ev = dummy_v1_event();
+        let ok_ev = dummy_event();
+        let drop_ev = dummy_event();
+        let warn_ev = dummy_event();
         let results = HashMap::from([
             (ok_ev.uuid, event_result(EventStatus::Ok, None)),
             (
@@ -552,7 +681,7 @@ mod tests {
 
     #[test]
     fn process_batch_missing_uuid_silently_dropped() {
-        let e = dummy_v1_event();
+        let e = dummy_event();
         let results = HashMap::new();
         let mut final_results = HashMap::new();
         let next = process_batch_response(vec![e.clone()], &results, &mut final_results, false);
@@ -565,7 +694,7 @@ mod tests {
     /// Guards the `attempt + 1` off-by-one on the V1 call sites: the first
     /// retry must wait exactly `retry_initial_backoff_ms`, not double it.
     #[test]
-    fn v1_backoff_schedule_starts_at_initial() {
+    fn backoff_schedule_starts_at_initial() {
         let opts = ClientOptionsBuilder::default()
             .api_key("phc_test".to_string())
             .max_capture_attempts(10u32)
@@ -594,7 +723,7 @@ mod tests {
 
         // Same schedule via a retryable HTTP response.
         let body = r#"{"error":"service_unavailable"}"#;
-        let mut pending = vec![dummy_v1_event()];
+        let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
         let step = after_response(
             &opts,
@@ -633,7 +762,7 @@ mod tests {
     fn after_response_200_all_ok_is_done() {
         let opts = test_opts();
         let rid = Uuid::now_v7();
-        let e = dummy_v1_event();
+        let e = dummy_event();
         let body = serde_json::json!({
             "results": { e.uuid.to_string(): { "result": "ok" } }
         })
@@ -658,8 +787,8 @@ mod tests {
     fn after_response_200_partial_retry_backs_off() {
         let opts = test_opts();
         let rid = Uuid::now_v7();
-        let e1 = dummy_v1_event();
-        let e2 = dummy_v1_event();
+        let e1 = dummy_event();
+        let e2 = dummy_event();
         let body = serde_json::json!({
             "results": {
                 e1.uuid.to_string(): { "result": "ok" },
@@ -690,7 +819,7 @@ mod tests {
         let opts = test_opts();
         let rid = Uuid::now_v7();
         let body = r#"{"error":"service_unavailable"}"#;
-        let mut pending = vec![dummy_v1_event()];
+        let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
         let step = after_response(
             &opts,
@@ -710,7 +839,7 @@ mod tests {
         let opts = test_opts();
         let rid = Uuid::now_v7();
         let body = r#"{"error":"service_unavailable"}"#;
-        let mut pending = vec![dummy_v1_event()];
+        let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
         let step = after_response(
             &opts,
@@ -722,7 +851,13 @@ mod tests {
             &mut pending,
             &mut final_results,
         );
-        assert!(matches!(step, Step::Fail(_)));
+        match step {
+            Step::Fail(Error::ServerError { status, message }) => {
+                assert_eq!(status, 503);
+                assert_eq!(message, body);
+            }
+            other => panic!("expected status-preserving ServerError, got {:?}", other),
+        }
     }
 
     #[test]
@@ -730,7 +865,7 @@ mod tests {
         let opts = test_opts();
         let rid = Uuid::now_v7();
         let body = r#"{"error":"billing_limit_exceeded"}"#;
-        let mut pending = vec![dummy_v1_event()];
+        let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
         let step = after_response(
             &opts,
@@ -742,26 +877,40 @@ mod tests {
             &mut pending,
             &mut final_results,
         );
-        assert!(matches!(step, Step::Fail(Error::BillingLimitExceeded(_))));
+        match step {
+            Step::Fail(Error::BillingLimitExceeded(message)) => assert_eq!(message, body),
+            other => panic!(
+                "expected body-preserving BillingLimitExceeded, got {:?}",
+                other
+            ),
+        }
     }
 
+    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
     #[test]
-    fn after_response_malformed_200_body_fails() {
-        let opts = test_opts();
-        let rid = Uuid::now_v7();
-        let mut pending = vec![dummy_v1_event()];
-        let mut final_results = HashMap::new();
-        let step = after_response(
-            &opts,
-            &rid,
-            1,
-            200,
-            None,
-            "not json",
-            &mut pending,
-            &mut final_results,
-        );
-        assert!(matches!(step, Step::Fail(Error::Serialization(_))));
+    fn after_response_malformed_200_and_201_bodies_fail() {
+        for (case, status) in [("standard success", 200), ("alternate 2xx", 201)] {
+            let opts = test_opts();
+            let rid = Uuid::now_v7();
+            let mut pending = vec![dummy_event()];
+            let mut final_results = HashMap::new();
+            let step = after_response(
+                &opts,
+                &rid,
+                1,
+                status,
+                None,
+                "not json",
+                &mut pending,
+                &mut final_results,
+            );
+            assert!(
+                matches!(step, Step::Fail(Error::Serialization(_))),
+                "{} (HTTP {}) should fail with a Serialization error",
+                case,
+                status
+            );
+        }
     }
 
     /// C3: any 2xx with a well-formed body is success, not a connection error.
@@ -770,7 +919,7 @@ mod tests {
         let opts = test_opts();
         let rid = Uuid::now_v7();
         for status in [201u16, 202, 204, 207, 299] {
-            let e = dummy_v1_event();
+            let e = dummy_event();
             let body = serde_json::json!({
                 "results": { e.uuid.to_string(): { "result": "ok" } }
             })
@@ -796,26 +945,6 @@ mod tests {
         }
     }
 
-    /// C3: a 2xx with an unreadable body is a Serialization error, not success.
-    #[test]
-    fn after_response_alternate_2xx_malformed_body_fails() {
-        let opts = test_opts();
-        let rid = Uuid::now_v7();
-        let mut pending = vec![dummy_v1_event()];
-        let mut final_results = HashMap::new();
-        let step = after_response(
-            &opts,
-            &rid,
-            1,
-            201,
-            None,
-            "not json",
-            &mut pending,
-            &mut final_results,
-        );
-        assert!(matches!(step, Step::Fail(Error::Serialization(_))));
-    }
-
     /// A body-less 2xx (e.g. 204 from beacon mode) is terminal on the first
     /// attempt: Serialization error, no retry, final_results left empty.
     /// posthog-rs never opts into beacon mode, so this is a safety net.
@@ -823,7 +952,7 @@ mod tests {
     fn after_response_204_empty_body_is_terminal_serialization_error() {
         let opts = test_opts();
         let rid = Uuid::now_v7();
-        let mut pending = vec![dummy_v1_event()];
+        let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
         let step = after_response(
             &opts,
@@ -869,5 +998,179 @@ mod tests {
         // user-agent mirrors the same identity string.
         let ua = headers.get("user-agent").unwrap().to_str().unwrap();
         assert_eq!(ua, expected);
+    }
+
+    // -- byte accounting (AI lane) -------------------------------------------
+
+    fn sized(name: &str, bytes: usize) -> CaptureEvent {
+        let mut e = dummy_event();
+        e.event = name.into();
+        e.properties = serde_json::json!({ "blob": "x".repeat(bytes) });
+        e
+    }
+
+    #[test]
+    fn measure_event_matches_the_serialized_bytes() {
+        let e = sized("$ai_generation", 500);
+        let size = measure_event(&e);
+        assert_eq!(size.total, serde_json::to_vec(&e).unwrap().len());
+        assert_eq!(
+            size.properties,
+            serde_json::to_vec(&e.properties).unwrap().len()
+        );
+        assert!(size.properties < size.total);
+        // `properties` is what the backend's AI ceiling is charged against, so it
+        // must exclude the envelope fields: exactly `{"blob":"xxx…"}`.
+        assert_eq!(size.properties, "{\"blob\":\"\"}".len() + 500);
+    }
+
+    #[test]
+    fn chunk_by_bytes_is_guarded_check_before_append_with_carryover() {
+        let s = 100;
+        let events: Vec<(CaptureEvent, usize)> = ["e1", "e2", "e3"]
+            .iter()
+            .map(|n| (sized(n, 10), s))
+            .collect();
+        let names = |batches: &Vec<Vec<CaptureEvent>>| -> Vec<Vec<String>> {
+            batches
+                .iter()
+                .map(|b| b.iter().map(|e| e.event.clone()).collect())
+                .collect()
+        };
+
+        // Target between 2S and 3S: [e1, e2] closes when e3 would overflow it.
+        let batches = chunk_by_bytes(events.clone(), 2 * s + s / 2);
+        assert_eq!(names(&batches), vec![vec!["e1", "e2"], vec!["e3"]]);
+
+        // Target exactly 2S: two fit (`>` not `>=`), the third carries over.
+        let batches = chunk_by_bytes(events.clone(), 2 * s);
+        assert_eq!(names(&batches), vec![vec!["e1", "e2"], vec!["e3"]]);
+
+        // Target below one event: every event ships alone; nothing is lost.
+        let batches = chunk_by_bytes(events.clone(), s / 2);
+        assert_eq!(names(&batches), vec![vec!["e1"], vec!["e2"], vec!["e3"]]);
+
+        // A huge target keeps everything together, in order.
+        let batches = chunk_by_bytes(events.clone(), usize::MAX);
+        assert_eq!(names(&batches), vec![vec!["e1", "e2", "e3"]]);
+
+        // Order is preserved when a big event lands between small ones.
+        let mixed = vec![
+            (sized("a", 10), s),
+            (sized("big", 10), 10 * s),
+            (sized("b", 10), s),
+        ];
+        let batches = chunk_by_bytes(mixed, 2 * s);
+        assert_eq!(names(&batches), vec![vec!["a"], vec!["big"], vec!["b"]]);
+
+        assert!(chunk_by_bytes(Vec::new(), s).is_empty());
+    }
+
+    #[test]
+    fn immediate_lanes_pick_endpoint_compression_and_chunking() {
+        let mut builder = ClientOptionsBuilder::default();
+        builder
+            .api_key("phc_test".to_string())
+            .capture_compression(CaptureCompression::Gzip);
+        let opts = builder.build().unwrap();
+
+        let analytics = ImmediateLane::analytics();
+        assert_eq!(analytics.endpoint, Endpoint::Capture);
+        assert_eq!(analytics.compression(&opts), Some(CaptureCompression::Gzip));
+        let ai = ImmediateLane::ai();
+        assert_eq!(ai.endpoint, Endpoint::CaptureAi);
+        assert_eq!(
+            ai.compression(&opts),
+            None,
+            "AI lane is raw unless its own option is set"
+        );
+        let mut with_ai = ClientOptionsBuilder::default();
+        with_ai
+            .api_key("phc_test".to_string())
+            .capture_ai_compression(CaptureCompression::Zstd);
+        let with_ai = with_ai.build().unwrap();
+        assert_eq!(analytics.compression(&with_ai), None);
+        assert_eq!(ai.compression(&with_ai), Some(CaptureCompression::Zstd));
+        assert_eq!(
+            ai.batch_bytes_target,
+            Some(super::super::transport::AI_BATCH_BYTES_TARGET)
+        );
+
+        // Analytics: one request, whatever the size.
+        let events: Vec<Event> = (0..3)
+            .map(|i| {
+                let mut e = Event::new(format!("e{i}"), "user-1".to_string());
+                e.insert_prop("blob", "x".repeat(4096)).unwrap();
+                e
+            })
+            .collect();
+        let prepared = prepare_immediate(&opts, analytics, events.clone(), false);
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].submitted, 3);
+        assert!(prepared[0].url.ends_with("/i/v1/analytics/events"));
+
+        // AI: split by bytes. Shrink the target to fit exactly two of the three
+        // (equal-size) events, so the third needs a second request; identity
+        // (request id, created_at) is per request.
+        let size = measure_event(&build_event_at(
+            &events[0],
+            &opts.capture_defaults(),
+            Utc::now(),
+        ))
+        .total;
+        let small_target = ImmediateLane {
+            batch_bytes_target: Some(2 * size + size / 2),
+            ..ai
+        };
+        let prepared = prepare_immediate(&opts, small_target, events.clone(), true);
+        assert_eq!(prepared.len(), 2);
+        assert_eq!(prepared[0].pending.len(), 2);
+        assert_eq!(prepared[1].pending.len(), 1);
+        assert_eq!(prepared[0].submitted + prepared[1].submitted, 3);
+        assert_ne!(prepared[0].request_id, prepared[1].request_id);
+        assert!(prepared.iter().all(|p| p.url.ends_with("/i/v1/ai/events")));
+        assert!(prepared
+            .iter()
+            .all(|p| p.historical_migration == Some(true)));
+
+        // Nothing surviving before_send → nothing to send.
+        let mut filtered = ClientOptionsBuilder::default();
+        filtered
+            .api_key("phc_test".to_string())
+            .before_send(|_| None);
+        let filtered = filtered.build().unwrap();
+        assert!(prepare_immediate(&filtered, ai, events, false).is_empty());
+    }
+
+    #[test]
+    fn build_attempt_parts_uses_the_lane_compression() {
+        let opts = test_opts();
+        let pending = vec![dummy_event()];
+        let (headers, body) = build_attempt_parts(
+            &opts,
+            Some(CaptureCompression::Zstd),
+            &Uuid::now_v7(),
+            1,
+            "2026-05-28T12:00:00Z",
+            None,
+            &pending,
+        )
+        .unwrap();
+        assert_eq!(headers.get("content-encoding").unwrap(), "zstd");
+        let decoded = zstd::decode_all(body.as_slice()).unwrap();
+        assert!(String::from_utf8_lossy(&decoded).contains("\"event\":\"$pageview\""));
+
+        let (headers, body) = build_attempt_parts(
+            &opts,
+            None,
+            &Uuid::now_v7(),
+            1,
+            "2026-05-28T12:00:00Z",
+            None,
+            &pending,
+        )
+        .unwrap();
+        assert!(headers.get("content-encoding").is_none());
+        assert!(String::from_utf8_lossy(&body).contains("\"event\":\"$pageview\""));
     }
 }

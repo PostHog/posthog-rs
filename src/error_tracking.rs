@@ -688,14 +688,7 @@ impl Exception {
             }
             trim_to_max_frames(&mut frames, MAX_FRAMES);
             // Only report modules still referenced after trimming.
-            debug_images = captured_images
-                .into_iter()
-                .filter(|image| {
-                    frames
-                        .iter()
-                        .any(|f| f.image_addr.as_deref() == Some(image.image_addr.as_str()))
-                })
-                .collect();
+            debug_images = referenced_images(captured_images, &frames);
             items[0].stacktrace = Some(ExceptionStacktrace::raw(frames));
         }
 
@@ -832,6 +825,12 @@ pub(crate) struct DebugImage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code_file: Option<String>,
     pub arch: String,
+}
+
+impl DebugImage {
+    fn has_usable_debug_id(&self) -> bool {
+        !self.debug_id.is_empty()
+    }
 }
 
 /// A module mapped into the process, used to attach load addresses to frames
@@ -1016,7 +1015,7 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
         // Only send addresses the server can actually resolve: without a
         // module carrying a debug id there is no `$debug_images` entry to
         // match, and the frame should pass through as purely client-resolved.
-        let resolvable = module.is_some_and(|m| !m.image.debug_id.is_empty());
+        let resolvable = module.is_some_and(|m| m.image.has_usable_debug_id());
 
         // One physical frame resolves to multiple symbols when the compiler
         // inlined functions into it; `resolve_frame` yields those layers
@@ -1226,18 +1225,19 @@ fn capture_raw_frames(
     // expects.
     frames.reverse();
 
-    let images = referenced_images(modules, &frames);
+    let images = referenced_images(modules.into_iter().map(|module| module.image), &frames);
     (frames, images)
 }
 
-/// Only report modules that frames actually point into, and only those with a
-/// usable debug id; the final filtering against the trimmed frame list happens
-/// in `write_into`.
-fn referenced_images(modules: Vec<LoadedModule>, frames: &[StackFrame]) -> Vec<DebugImage> {
-    modules
+/// Only report images with a usable debug id that are referenced by a frame
+/// surviving all capture-time stripping and client-policy trimming.
+fn referenced_images(
+    images: impl IntoIterator<Item = DebugImage>,
+    frames: &[StackFrame],
+) -> Vec<DebugImage> {
+    images
         .into_iter()
-        .filter(|m| !m.image.debug_id.is_empty())
-        .map(|m| m.image)
+        .filter(DebugImage::has_usable_debug_id)
         .filter(|image| {
             frames
                 .iter()
@@ -1321,7 +1321,7 @@ fn capture_raw_panic_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
     // Flip innermost-first into canonical wire order: outermost frame first,
     // panic site last (see `capture_raw_frames` for why one reverse suffices).
     frames.reverse();
-    let images = referenced_images(modules, &frames);
+    let images = referenced_images(modules.into_iter().map(|module| module.image), &frames);
     (frames, images)
 }
 
@@ -1653,8 +1653,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+    use crate::capture_event::CaptureEvent;
     use crate::client::ClientOptionsBuilder;
-    use crate::event::InnerEvent;
 
     #[derive(Debug)]
     struct OuterError {
@@ -1695,9 +1695,10 @@ mod tests {
 
     impl StdError for BorrowedError<'_> {}
 
-    fn built_event_json(mut event: Event) -> Value {
-        event.prepare_for_v0();
-        serde_json::to_value(InnerEvent::new(event, "api-key".to_string())).unwrap()
+    /// Serialize through the capture wire builder so these tests assert the
+    /// shape actually put on the wire.
+    fn built_event_json(event: Event) -> Value {
+        serde_json::to_value(CaptureEvent::from_event(&event)).unwrap()
     }
 
     fn event_json_with(exception: Exception, options: &ErrorTrackingOptions) -> Value {
@@ -1773,7 +1774,7 @@ mod tests {
     }
 
     /// Match the panic `$exception` event inside the transport's batch envelope
-    /// (`batch[0]`) — the same event shape for the V0 and V1 wire formats.
+    /// (`batch[0]`).
     fn request_has_panic_payload(req: &HttpMockRequest) -> bool {
         let Ok(body) = serde_json::from_slice::<Value>(req.body_ref()) else {
             return false;
@@ -1803,7 +1804,8 @@ mod tests {
         });
 
         event["event"] == "$exception"
-            // V0 injects `$process_person_profile` into properties; V1 keeps it
+            // `$process_person_profile` is lifted into the typed options object;
+            // tolerate the properties spelling too for hand-built payloads.
             // in the typed `options` object.
             && (event["properties"]["$process_person_profile"] == false
                 || event["options"]["process_person_profile"] == false)
@@ -2373,6 +2375,72 @@ mod tests {
         assert!(find_module(&modules, 0x5000).is_none()); // past the last module
     }
 
+    fn test_stack_frame(function: String, image_addr: Option<&str>) -> StackFrame {
+        StackFrame {
+            filename: None,
+            line_no: None,
+            function,
+            lang: "rust".to_string(),
+            in_app: true,
+            synthetic: false,
+            platform: "native".to_string(),
+            instruction_addr: image_addr.map(|_| "0x1234".to_string()),
+            symbol_addr: None,
+            image_addr: image_addr.map(str::to_string),
+            client_resolved: true,
+            inline: false,
+        }
+    }
+
+    fn test_debug_image(debug_id: &str, image_addr: &str) -> DebugImage {
+        DebugImage {
+            image_type: "elf".to_string(),
+            debug_id: debug_id.to_string(),
+            code_id: None,
+            image_addr: image_addr.to_string(),
+            image_size: None,
+            image_vmaddr: None,
+            code_file: None,
+            arch: "x86_64".to_string(),
+        }
+    }
+
+    #[test]
+    fn debug_image_referenced_only_by_trimmed_frame_is_omitted() {
+        let mut exception = Exception::from_message("TrimmedImage", "trim image frame", false);
+        exception.captured_frames = Some(
+            (0..=MAX_FRAMES)
+                .map(|index| {
+                    test_stack_frame(format!("frame_{index}"), (index == 0).then_some("0x1000"))
+                })
+                .collect(),
+        );
+        exception.captured_images = vec![test_debug_image("debug-id", "0x1000")];
+
+        let json = event_json(exception);
+        let frames = json["properties"]["$exception_list"][0]["stacktrace"]["frames"]
+            .as_array()
+            .unwrap();
+
+        assert_eq!(frames.len(), MAX_FRAMES);
+        assert_eq!(frames[0]["function"], "frame_1");
+        assert!(json["properties"]["$debug_images"].is_null());
+    }
+
+    #[test]
+    fn debug_images_with_empty_debug_ids_are_omitted() {
+        let mut exception = Exception::from_message("EmptyDebugId", "empty debug id", false);
+        exception.captured_frames = Some(vec![test_stack_frame(
+            "referencing_frame".to_string(),
+            Some("0x1000"),
+        )]);
+        exception.captured_images = vec![test_debug_image("", "0x1000")];
+
+        let json = event_json(exception);
+
+        assert!(json["properties"]["$debug_images"].is_null());
+    }
+
     #[test]
     fn captured_stacks_reference_loaded_debug_images() {
         let json = event_json(Exception::from_message(
@@ -2456,7 +2524,9 @@ mod tests {
         let json = event_json(Exception::from_message("Error", "no user context", true));
 
         assert_eq!(json["event"], "$exception");
-        assert_eq!(json["properties"]["$process_person_profile"], false);
+        // Lifted out of `properties` into the typed wire options object.
+        assert_eq!(json["options"]["process_person_profile"], false);
+        assert!(json["properties"]["$process_person_profile"].is_null());
     }
 
     #[test]
@@ -2865,7 +2935,9 @@ mod tests {
         let json = built_event_json(event);
 
         assert_eq!(json["event"], "$exception");
-        assert_eq!(json["properties"]["$process_person_profile"], false);
+        // Lifted out of `properties` into the typed wire options object.
+        assert_eq!(json["options"]["process_person_profile"], false);
+        assert!(json["properties"]["$process_person_profile"].is_null());
         assert_eq!(json["properties"]["$exception_level"], "error");
     }
 

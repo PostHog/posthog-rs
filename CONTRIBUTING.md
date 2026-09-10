@@ -13,7 +13,7 @@ From the repository root:
 ```bash
 cargo build --verbose
 cargo test --verbose
-cargo test --verbose --features e2e-test --no-default-features
+cargo test --verbose --features e2e-test,tls --no-default-features
 cargo fmt -- --check
 cargo clippy -- -D warnings
 scripts/check-public-api.sh

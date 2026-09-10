@@ -10,10 +10,7 @@
 use httpmock::prelude::*;
 use serde_json::{json, Value};
 
-#[cfg(feature = "capture-v1")]
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
-#[cfg(not(feature = "capture-v1"))]
-const CAPTURE_PATH: &str = "/batch/";
 
 const PREVIOUS_ID: &str = "anon-abc123";
 const DISTINCT_ID: &str = "user-42";

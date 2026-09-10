@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 #[cfg(feature = "error-tracking")]
 use std::error::Error as StdError;
 use std::sync::{Arc, OnceLock};
@@ -7,52 +7,27 @@ use std::time::Duration;
 use reqwest::{header::CONTENT_TYPE, header::USER_AGENT, Client as HttpClient};
 use serde::Serialize;
 use serde_json::json;
-use tracing::{debug, instrument, trace, warn};
+#[cfg(feature = "error-tracking")]
+use tracing::trace;
+use tracing::{instrument, warn};
 
 use super::get_default_user_agent;
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
 use crate::feature_flag_evaluations::{
-    EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
-    FlagCalledEventParams,
+    EvaluateFlagsOptions, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
 };
 use crate::feature_flags::{match_feature_flag, FeatureFlag, FeatureFlagsResponse, FlagValue};
 use crate::local_evaluation::{AsyncFlagPoller, FlagCache, LocalEvaluationConfig, LocalEvaluator};
 use crate::{Error, Event};
 
-fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
-    if err.is_timeout() {
-        return true;
-    }
-
-    let mut source = std::error::Error::source(err);
-    while let Some(error) = source {
-        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
-            return matches!(
-                io_error.kind(),
-                std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::TimedOut
-                    | std::io::ErrorKind::UnexpectedEof
-            );
-        }
-        source = std::error::Error::source(error);
-    }
-
-    !err.to_string()
-        .to_lowercase()
-        .contains("connection refused")
-}
-
+use super::capture::ImmediateLane;
 use super::common::{
-    already_reported, build_dedup_key, extract_flag_details, flag_called_event,
-    flag_event_dedup_cache, local_record, remote_record_from_detail, report_flags_error,
-    DetailedFlagsResponse, FlagEventDedupCache,
+    extract_flag_details, report_flags_error, DetailedFlagsResponse, EvaluationState, FlagEventHost,
 };
-use super::transport::{Completion, Control, TransportHandle};
+use super::transport::{Completion, Control, LaneConfig, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
-#[cfg(not(feature = "capture-v1"))]
-use reqwest::header::CONTENT_ENCODING;
 
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
@@ -61,54 +36,11 @@ pub struct Client {
     local_evaluator: Option<LocalEvaluator>,
     _flag_poller: Option<AsyncFlagPoller>,
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
-    /// Background event transport. `None` for disabled clients.
+    /// Background analytics event transport. `None` for disabled clients.
     transport: Option<Arc<TransportHandle>>,
-}
-
-/// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
-/// `$feature_flag_called` events through the same background capture transport
-/// as any other event.
-struct AsyncFlagEventHost {
-    options: ClientOptions,
-    transport: Option<Arc<TransportHandle>>,
-    dedup_cache: FlagEventDedupCache,
-}
-
-impl AsyncFlagEventHost {
-    fn from_options(options: &ClientOptions, transport: Option<Arc<TransportHandle>>) -> Self {
-        Self {
-            options: options.clone(),
-            transport,
-            dedup_cache: flag_event_dedup_cache(),
-        }
-    }
-
-    fn enqueue(&self, event: Event) {
-        if let Some(transport) = &self.transport {
-            transport.enqueue(event);
-        }
-    }
-}
-
-impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
-    fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
-        let dedup_key = build_dedup_key(&params.key, params.response.as_ref(), &params.groups);
-        if already_reported(&self.dedup_cache, &params.distinct_id, &dedup_key) {
-            return;
-        }
-
-        if let Some(event) =
-            flag_called_event(params, self.options.disable_geoip, self.options.is_server)
-        {
-            self.enqueue(event);
-        }
-    }
-
-    fn log_warning(&self, message: &str) {
-        // Surface filter-helper misuse via tracing — users can silence these
-        // with their tracing-subscriber level filter (e.g. `posthog_rs=error`).
-        warn!("{message}");
-    }
+    /// Background AI event transport, spawned on the first `capture_ai*` call
+    /// so clients that never emit AI events pay for no extra thread.
+    ai_transport: OnceLock<Arc<TransportHandle>>,
 }
 
 /// Construct an async PostHog client from an API key or [`ClientOptions`].
@@ -139,7 +71,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
                 let cache = FlagCache::new();
 
                 let config = LocalEvaluationConfig {
-                    personal_api_key: secret_key.clone(),
+                    secret_key: secret_key.clone(),
                     project_api_key: options.api_key.clone(),
                     api_host: options.endpoints().api_host(),
                     poll_interval: Duration::from_secs(options.poll_interval_seconds),
@@ -152,9 +84,12 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
                 (Some(LocalEvaluator::new(cache)), Some(poller))
             } else {
-                warn!(
-                "Local evaluation enabled but secret_key not set, falling back to API evaluation"
-            );
+                let warning = if options.local_evaluation_only {
+                    "Missing secret_key; local-only evaluation will return empty results"
+                } else {
+                    "Local evaluation enabled without secret_key; using remote API fallback"
+                };
+                warn!("{warning}");
                 (None, None)
             }
         } else {
@@ -174,6 +109,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         _flag_poller: flag_poller,
         flag_event_host: OnceLock::new(),
         transport,
+        ai_transport: OnceLock::new(),
     }
 }
 
@@ -192,11 +128,89 @@ impl Client {
     /// once it is delivered, and delivery failures are not surfaced to the
     /// caller. Disabled clients and a full queue drop the event (the latter
     /// with a single warning).
+    ///
+    /// Use [`Client::capture_ai`] for LLM analytics events (`$ai_generation`,
+    /// `$ai_span`, …): `capture` never reroutes by event name, and the
+    /// analytics endpoint does not accept AI events.
     #[instrument(skip(self, event), level = "debug")]
     pub fn capture(&self, event: Event) {
         if let Some(transport) = &self.transport {
             transport.enqueue(event);
         }
+    }
+
+    /// Capture an AI (LLM analytics) event, sending it to PostHog's AI
+    /// ingestion endpoint.
+    ///
+    /// # Parameters
+    ///
+    /// - `event`: The AI event (`$ai_generation`, `$ai_span`, `$ai_trace`,
+    ///   `$ai_embedding`, …) with its `$ai_*` properties.
+    ///
+    /// # Remarks
+    ///
+    /// Fire-and-forget, like [`Client::capture`], on a separate lane: its own
+    /// background worker, queue (`capture_ai_max_queue_size`), retry state, and
+    /// endpoint, so a multi-MB AI event can never delay or displace analytics
+    /// events. The lane batches by size (about 5 MiB per request), compresses
+    /// bodies per `capture_ai_compression` (unset sends them raw; zstd is
+    /// recommended), and drops an event locally — with a warning naming only
+    /// the event and its byte size — when its serialized properties exceed
+    /// 8 MiB, the backend's per-event ceiling. The worker starts on the first
+    /// call.
+    ///
+    /// The SDK does not inspect the event name. The backend accepts only its
+    /// AI event names on this endpoint and reports anything else as a per-event
+    /// `drop`, which reaches an `on_error` hook (see
+    /// [`CaptureFailure::endpoint`](crate::CaptureFailure::endpoint)) or, with no
+    /// hook, one aggregate warning per batch.
+    #[instrument(skip(self, event), level = "debug")]
+    pub fn capture_ai(&self, event: Event) {
+        if let Some(transport) = self.ai_transport() {
+            transport.enqueue(event);
+        }
+    }
+
+    /// The AI lane's transport, spawned on first use. `None` for disabled
+    /// clients and once shutdown has begun (so a late `capture_ai` cannot start
+    /// a worker nobody will stop).
+    ///
+    /// `shutdown`/`Drop` mark the analytics lane closed *before* they read the
+    /// AI lane to drain (see `close_lanes`), so re-checking after `get_or_init`
+    /// covers every ordering: a lane initialized before that mark is seen by
+    /// the closing side; one initialized after it sees the mark here and is
+    /// closed immediately (`Drop` joins it).
+    fn ai_transport(&self) -> Option<&Arc<TransportHandle>> {
+        let analytics = self.transport.as_ref()?;
+        if analytics.is_closed() {
+            return None;
+        }
+        let ai = self.ai_transport.get_or_init(|| {
+            Arc::new(TransportHandle::spawn_lane(
+                self.options.clone(),
+                LaneConfig::ai(),
+            ))
+        });
+        Self::ai_lane_unless_closing(analytics, ai)
+    }
+
+    /// The post-init half of [`Self::ai_transport`]: hand out the AI lane unless
+    /// shutdown began meanwhile, in which case close it and hand out nothing.
+    fn ai_lane_unless_closing<'a>(
+        analytics: &TransportHandle,
+        ai: &'a Arc<TransportHandle>,
+    ) -> Option<&'a Arc<TransportHandle>> {
+        if analytics.is_closed() {
+            ai.request_close();
+            return None;
+        }
+        Some(ai)
+    }
+
+    /// Every transport lane that exists: analytics, plus the AI lane once it
+    /// has been spawned. Empty for disabled clients.
+    fn lanes(&self) -> impl Iterator<Item = &Arc<TransportHandle>> {
+        self.transport.iter().chain(self.ai_transport.get())
     }
 
     /// Merge two distinct IDs onto the same person by sending a `$create_alias`
@@ -289,14 +303,19 @@ impl Client {
     /// everything queued before this call. Transient failures are kept for retry
     /// (the call still returns without error). A no-op for disabled clients.
     pub async fn flush(&self) {
-        let Some(transport) = &self.transport else {
-            return;
-        };
-        if transport.is_closed() {
-            return;
+        // Request every lane's flush first, then await them, so the lanes drain
+        // concurrently rather than back to back.
+        let mut waits = Vec::new();
+        for transport in self.lanes() {
+            if transport.is_closed() {
+                continue;
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if transport.send_control(Control::Flush(Completion::Async(tx))) {
+                waits.push(rx);
+            }
         }
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if transport.send_control(Control::Flush(Completion::Async(tx))) {
+        for rx in waits {
             let _ = rx.await;
         }
     }
@@ -320,7 +339,7 @@ impl Client {
     /// `flush_blocking_timeout`.
     #[cfg(test)]
     pub(crate) fn flush_blocking(&self) {
-        if let Some(transport) = &self.transport {
+        for transport in self.lanes() {
             transport.flush_blocking();
         }
     }
@@ -360,21 +379,72 @@ impl Client {
     /// disabled clients. When called from a transport callback, queues shutdown
     /// without waiting for or joining the current worker thread.
     pub async fn shutdown(&self) {
-        let Some(transport) = &self.transport else {
+        let Some(analytics) = &self.transport else {
             return;
         };
-        let on_worker = transport.on_worker_thread();
-        if transport.begin_close() {
+        // Order matters: mark the analytics lane closed FIRST. `ai_transport()`
+        // re-checks that mark after initializing, so every AI lane that exists
+        // after this line either shows up in the read below or closes itself.
+        // Reading the AI lane before marking would let a first `capture_ai`
+        // slip a worker in between that this shutdown never drains.
+        let mut waits = Vec::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if analytics.request_shutdown(Completion::Async(tx)) {
+            waits.push(rx);
+        }
+        let mut lanes: Vec<&TransportHandle> = vec![analytics.as_ref()];
+        if let Some(ai) = self.ai_transport.get() {
+            lanes.push(ai.as_ref());
             let (tx, rx) = tokio::sync::oneshot::channel();
-            if transport.send_control(Control::Shutdown(Completion::Async(tx))) && !on_worker {
-                let _ = rx.await;
+            if ai.request_shutdown(Completion::Async(tx)) {
+                waits.push(rx);
             }
+        }
+        // From a worker's own callback, only queue the shutdowns: waiting for or
+        // joining the current worker would deadlock.
+        if lanes.iter().any(|t| t.on_worker_thread()) {
+            return;
+        }
+        // Requests are queued on both lanes before awaiting, so their drains
+        // overlap within one `shutdown_timeout_ms`.
+        for rx in waits {
+            let _ = rx.await;
         }
         // Always join for external callers — even if this caller lost the
         // `begin_close` race or its shutdown wait was cancelled — so every
-        // external shutdown/drop path waits for the worker and the flush stays
-        // durable. Joining from the worker itself would deadlock.
-        if !on_worker {
+        // external shutdown/drop path waits for the workers and the flush stays
+        // durable.
+        for transport in lanes {
+            transport.join();
+        }
+    }
+
+    /// Blocking form of [`Self::shutdown`] with the same lane ordering, for
+    /// `Drop`.
+    fn close_lanes_blocking(&self) {
+        let Some(analytics) = &self.transport else {
+            return;
+        };
+        let mut waits = Vec::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        if analytics.request_shutdown(Completion::Blocking(tx)) {
+            waits.push(rx);
+        }
+        let mut lanes: Vec<&TransportHandle> = vec![analytics.as_ref()];
+        if let Some(ai) = self.ai_transport.get() {
+            lanes.push(ai.as_ref());
+            let (tx, rx) = std::sync::mpsc::channel();
+            if ai.request_shutdown(Completion::Blocking(tx)) {
+                waits.push(rx);
+            }
+        }
+        if lanes.iter().any(|t| t.on_worker_thread()) {
+            return;
+        }
+        for rx in waits {
+            let _ = rx.recv();
+        }
+        for transport in lanes {
             transport.join();
         }
     }
@@ -476,15 +546,40 @@ impl Client {
     /// Fire-and-forget, like [`Client::capture`]. The batch is enqueued per event
     /// rather than atomically, so if the bounded queue fills partway through, the
     /// remaining events are dropped (with the usual single full-queue warning).
+    #[instrument(
+        skip(self, events),
+        fields(event_count = events.len(), historical_migration),
+        level = "debug"
+    )]
     pub fn capture_batch(&self, events: Vec<Event>, historical_migration: bool) {
         if let Some(transport) = &self.transport {
-            if historical_migration {
-                transport.enqueue_historical(events);
-            } else {
-                for event in events {
-                    transport.enqueue(event);
-                }
-            }
+            transport.enqueue_batch(events, historical_migration);
+        }
+    }
+
+    /// Capture a batch of AI events on the AI lane.
+    ///
+    /// # Parameters
+    ///
+    /// - `events`: AI events to send.
+    /// - `historical_migration`: Kept for parity with [`Client::capture_batch`]
+    ///   and passed through to the backend, which currently ignores it for AI
+    ///   events.
+    ///
+    /// # Remarks
+    ///
+    /// Fire-and-forget, like [`Client::capture_ai`]. Events are enqueued per
+    /// event, so if the bounded queue fills partway through, the remaining
+    /// events are dropped (with the usual single full-queue warning). The lane
+    /// splits the batch into requests of about 5 MiB each.
+    #[instrument(
+        skip(self, events),
+        fields(event_count = events.len(), historical_migration),
+        level = "debug"
+    )]
+    pub fn capture_ai_batch(&self, events: Vec<Event>, historical_migration: bool) {
+        if let Some(transport) = self.ai_transport() {
+            transport.enqueue_batch(events, historical_migration);
         }
     }
 
@@ -507,6 +602,63 @@ impl Client {
         self.capture_batch_immediate(vec![event], false).await
     }
 
+    /// Capture a single AI event and await confirmation that the request
+    /// completed.
+    ///
+    /// The immediate-delivery counterpart to [`Client::capture_ai`]. This is a
+    /// convenience wrapper over [`Client::capture_ai_batch_immediate`] with a
+    /// one-event batch; see it for full semantics.
+    #[must_use = "the delivery outcome should be inspected"]
+    pub async fn capture_ai_immediate(&self, event: Event) -> Result<CaptureSummary, Error> {
+        self.capture_ai_batch_immediate(vec![event], false).await
+    }
+
+    /// Capture a batch of AI events and await confirmation that every request
+    /// completed, returning a [`CaptureSummary`] describing the outcome.
+    ///
+    /// The immediate-delivery counterpart to [`Client::capture_ai_batch`].
+    ///
+    /// # Parameters
+    ///
+    /// - `events`: AI events to send.
+    /// - `historical_migration`: Kept for parity with
+    ///   [`Client::capture_batch_immediate`] and passed through to the backend,
+    ///   which currently ignores it for AI events.
+    ///
+    /// # Behavior
+    ///
+    /// Like [`Client::capture_batch_immediate`], but on the AI endpoint with
+    /// `capture_ai_compression`, and the batch is split into requests of about 5 MiB
+    /// each, sent in order. Each request retries transient failures and
+    /// per-event `retry` verdicts per the client's retry configuration; the
+    /// summary merges every request's verdicts. Unlike the background lane, no
+    /// event is dropped locally for size: an oversize event is sent and comes
+    /// back as a per-event `drop` (`ai_event_too_big`) in the summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] as soon as one request is rejected with a terminal
+    /// status or exhausts its retry budget; requests sent before it may already
+    /// have persisted. An `Err` therefore means "not confirmed", not "nothing
+    /// was stored".
+    #[must_use = "the delivery outcome should be inspected"]
+    #[instrument(
+        skip(self, events),
+        fields(event_count = events.len(), historical_migration),
+        level = "debug"
+    )]
+    pub async fn capture_ai_batch_immediate(
+        &self,
+        events: Vec<Event>,
+        historical_migration: bool,
+    ) -> Result<CaptureSummary, Error> {
+        if self.options.is_disabled() || events.is_empty() {
+            return Ok(CaptureSummary::default());
+        }
+        self.send_immediate(ImmediateLane::ai(), events, historical_migration)
+            .await
+    }
+
     /// Capture a batch of events and await confirmation that the request
     /// completed, returning a [`CaptureSummary`] describing the outcome.
     ///
@@ -523,8 +675,8 @@ impl Client {
     /// # Behavior
     ///
     /// Sends inline (bypassing the background worker) and retries transient
-    /// failures per the client's retry configuration. On the `capture-v1`
-    /// pipeline a returned `Ok` can still report unpersisted events — inspect
+    /// failures per the client's retry configuration. A returned `Ok` can still
+    /// report unpersisted events — inspect
     /// [`CaptureSummary::all_persisted`]. Does NOT fire `on_error` hooks: the
     /// returned `Result` is the delivery signal. Disabled clients and an empty
     /// (or fully `before_send`-filtered) batch return a default `CaptureSummary`.
@@ -547,142 +699,91 @@ impl Client {
         if self.options.is_disabled() || events.is_empty() {
             return Ok(CaptureSummary::default());
         }
-        self.send_immediate(events, historical_migration).await
+        self.send_immediate(ImmediateLane::analytics(), events, historical_migration)
+            .await
     }
 
-    /// Inline V1 capture: prepare once via the shared sans-IO helpers, then loop
-    /// send/classify, awaiting `tokio::time::sleep` between retries. The setup and
-    /// classification are shared with the blocking client; only this loop differs.
-    #[cfg(feature = "capture-v1")]
+    /// Inline capture: prepare once via the shared sans-I/O helpers, then for
+    /// each prepared request loop send/classify, awaiting `tokio::time::sleep`
+    /// between retries. The setup and classification are shared with the
+    /// blocking client; only this loop differs. The analytics lane yields one
+    /// request; the AI lane yields one per byte-sized chunk, sent in order, and
+    /// the first terminal failure ends the call.
     async fn send_immediate(
         &self,
+        lane: ImmediateLane,
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureSummary, Error> {
-        use super::v1_capture::{self, Step};
+        use super::capture::{self, Step};
 
-        let Some(mut prep) =
-            v1_capture::prepare_immediate(&self.options, events, historical_migration)
-        else {
-            return Ok(CaptureSummary::default());
-        };
+        let compression = lane.compression(&self.options);
+        let mut submitted = 0;
         let mut final_results = HashMap::new();
-        let mut attempt: u32 = 1;
 
-        loop {
-            let (headers, body) = v1_capture::build_attempt_parts(
-                &self.options,
-                &prep.request_id,
-                attempt,
-                &prep.created_at,
-                prep.historical_migration,
-                &prep.pending,
-            )?;
-
-            let step = match self
-                .client
-                .post(&prep.url)
-                .headers(headers)
-                .body(body)
-                .send()
-                .await
-            {
-                Err(e) => v1_capture::after_transport_error(
+        for mut prep in
+            capture::prepare_immediate(&self.options, lane, events, historical_migration)
+        {
+            let mut attempt: u32 = 1;
+            loop {
+                let (headers, body) = capture::build_attempt_parts(
                     &self.options,
+                    compression,
                     &prep.request_id,
                     attempt,
-                    e.to_string(),
-                ),
-                Ok(response) => {
-                    let status = response.status().as_u16();
-                    let retry_after = v1_capture::parse_retry_after(response.headers());
-                    let text = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    v1_capture::after_response(
+                    &prep.created_at,
+                    prep.historical_migration,
+                    &prep.pending,
+                )?;
+
+                let step = match self
+                    .client
+                    .post(&prep.url)
+                    .headers(headers)
+                    .body(body)
+                    .send()
+                    .await
+                {
+                    Err(e) => capture::after_transport_error(
                         &self.options,
                         &prep.request_id,
                         attempt,
-                        status,
-                        retry_after,
-                        &text,
-                        &mut prep.pending,
-                        &mut final_results,
-                    )
-                }
-            };
+                        e.to_string(),
+                    ),
+                    Ok(response) => {
+                        let status = response.status().as_u16();
+                        let retry_after = capture::parse_retry_after(response.headers());
+                        let text = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Unknown error".to_string());
+                        capture::after_response(
+                            &self.options,
+                            &prep.request_id,
+                            attempt,
+                            status,
+                            retry_after,
+                            &text,
+                            &mut prep.pending,
+                            &mut final_results,
+                        )
+                    }
+                };
 
-            match step {
-                Step::Done => {
-                    return Ok(CaptureSummary::from_results(prep.submitted, final_results))
-                }
-                Step::Fail(e) => return Err(e),
-                Step::Backoff(delay) => {
-                    attempt += 1;
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-    }
-
-    /// Inline V0 capture: prepare the batch body once via the shared sans-IO
-    /// helpers, then loop send/classify. A `2xx` persists the whole batch.
-    #[cfg(not(feature = "capture-v1"))]
-    async fn send_immediate(
-        &self,
-        events: Vec<Event>,
-        historical_migration: bool,
-    ) -> Result<CaptureSummary, Error> {
-        use super::retry::{self, v0_after_response, v0_after_transport_error, Step};
-        use super::v0_capture;
-
-        let Some(prep) =
-            v0_capture::prepare_immediate(&self.options, events, historical_migration)?
-        else {
-            return Ok(CaptureSummary::default());
-        };
-
-        let mut attempt: u32 = 1;
-        loop {
-            let mut request = self
-                .client
-                .post(&prep.url)
-                .header(CONTENT_TYPE, "application/json")
-                .header(USER_AGENT, get_default_user_agent())
-                .body(prep.body.clone());
-            if let Some(token) = prep.encoding {
-                request = request.header(CONTENT_ENCODING, token);
-            }
-            #[cfg(feature = "test-harness")]
-            if let Some(ref extra) = self.options.extra_capture_headers {
-                for (k, v) in extra {
-                    request = request.header(k.as_str(), v.as_str());
-                }
-            }
-
-            let step = match request.send().await {
-                Err(e) => v0_after_transport_error(&self.options, attempt, e.to_string()),
-                Ok(response) => {
-                    let status = response.status().as_u16();
-                    let retry_after = retry::parse_retry_after(response.headers());
-                    let text = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    v0_after_response(&self.options, attempt, status, retry_after, &text)
-                }
-            };
-
-            match step {
-                Step::Done => return Ok(CaptureSummary::delivered(prep.kept)),
-                Step::Fail(e) => return Err(e),
-                Step::Backoff(delay) => {
-                    attempt += 1;
-                    tokio::time::sleep(delay).await;
+                match step {
+                    Step::Done => {
+                        submitted += prep.submitted;
+                        break;
+                    }
+                    Step::Fail(e) => return Err(e),
+                    Step::Backoff(delay) => {
+                        attempt += 1;
+                        tokio::time::sleep(delay).await;
+                    }
                 }
             }
         }
+        Ok(CaptureSummary::from_results(submitted, final_results))
     }
 
     /// Number of events accepted but not yet delivered or dropped — those still
@@ -693,356 +794,7 @@ impl Client {
     /// for the SDK compliance harness and is not part of the normal public API.
     #[cfg(feature = "test-harness")]
     pub fn pending_events(&self) -> usize {
-        self.transport.as_ref().map_or(0, |t| t.pending())
-    }
-
-    /// Get all remote feature flags and payloads for a user.
-    ///
-    /// For new code, prefer [`Client::evaluate_flags`] so flag reads are
-    /// deduplicated and can be attached to captured events with
-    /// [`Event::with_flags`](crate::Event::with_flags).
-    ///
-    /// # Parameters
-    ///
-    /// - `distinct_id`: User distinct ID.
-    /// - `groups`: Optional group keys for group-targeted flags.
-    /// - `person_properties`: Optional person properties for release
-    ///   conditions.
-    /// - `group_properties`: Optional group properties for group-targeted
-    ///   release conditions.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(feature_flags, feature_flag_payloads)`, each keyed by flag
-    /// key. Disabled clients return two empty maps.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Connection`] for request failures or non-success HTTP
-    /// statuses, and [`Error::Serialization`] when the response cannot be
-    /// parsed.
-    #[must_use = "feature flags result should be used"]
-    pub async fn get_feature_flags<S: Into<String>>(
-        &self,
-        distinct_id: S,
-        groups: Option<HashMap<String, String>>,
-        person_properties: Option<HashMap<String, serde_json::Value>>,
-        group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
-    ) -> Result<
-        (
-            HashMap<String, FlagValue>,
-            HashMap<String, serde_json::Value>,
-        ),
-        Error,
-    > {
-        if self.options.is_disabled() {
-            trace!("Client is disabled, skipping feature flags request");
-            return Ok((HashMap::new(), HashMap::new()));
-        }
-
-        let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
-
-        let mut payload = json!({
-            "api_key": self.options.api_key,
-            "distinct_id": distinct_id.into(),
-        });
-
-        if let Some(groups) = groups {
-            payload["groups"] = json!(groups);
-        }
-
-        if let Some(person_properties) = person_properties {
-            payload["person_properties"] = json!(person_properties);
-        }
-
-        if let Some(group_properties) = group_properties {
-            payload["group_properties"] = json!(group_properties);
-        }
-
-        // Add geoip disable parameter if configured
-        if self.options.disable_geoip {
-            payload["disable_geoip"] = json!(true);
-        }
-
-        let response = self
-            .send_feature_flags_request(&flags_endpoint, &payload)
-            .await?;
-
-        let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            let err = Error::Connection(format!("API request failed with status {status}: {text}"));
-            report_flags_error(
-                &self.options.on_error,
-                &flags_endpoint,
-                distinct_id,
-                Some(status.as_u16()),
-                Some(&text),
-                &err,
-            );
-            return Err(err);
-        }
-
-        let status = response.status().as_u16();
-        let flags_response = match response.json::<FeatureFlagsResponse>().await {
-            Ok(r) => r,
-            Err(e) => {
-                let err =
-                    Error::Serialization(format!("Failed to parse feature flags response: {e}"));
-                report_flags_error(
-                    &self.options.on_error,
-                    &flags_endpoint,
-                    distinct_id,
-                    Some(status),
-                    None,
-                    &err,
-                );
-                return Err(err);
-            }
-        };
-
-        Ok(flags_response.normalize())
-    }
-
-    /// Get a specific feature flag value for a user.
-    ///
-    /// # Parameters
-    ///
-    /// - `key`: Feature flag key.
-    /// - `distinct_id`: User distinct ID.
-    /// - `groups`: Optional group keys for group-targeted flags.
-    /// - `person_properties`: Optional person properties for release
-    ///   conditions.
-    /// - `group_properties`: Optional group properties for group-targeted
-    ///   release conditions.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Some(value))` when the flag is returned, `Ok(None)` when it is not
-    /// returned or local-only evaluation cannot resolve it.
-    ///
-    /// # Errors
-    ///
-    /// Returns errors from remote `/flags` requests or response parsing.
-    #[must_use = "feature flag result should be used"]
-    #[instrument(skip_all, level = "debug")]
-    #[deprecated(
-        since = "0.6.0",
-        note = "Use Client::evaluate_flags() to fetch a snapshot, then call .get_flag(key) on it. \
-                The snapshot deduplicates $feature_flag_called events and supports attaching \
-                rich metadata to captured events via Event::with_flags()."
-    )]
-    pub async fn get_feature_flag<K: Into<String>, D: Into<String>>(
-        &self,
-        key: K,
-        distinct_id: D,
-        groups: Option<HashMap<String, String>>,
-        person_properties: Option<HashMap<String, serde_json::Value>>,
-        group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
-    ) -> Result<Option<FlagValue>, Error> {
-        let key_str = key.into();
-        let distinct_id_str = distinct_id.into();
-
-        // Try local evaluation first if available
-        if let Some(ref evaluator) = self.local_evaluator {
-            let empty_props = HashMap::new();
-            let empty_groups: HashMap<String, String> = HashMap::new();
-            let empty_group_props: HashMap<String, HashMap<String, serde_json::Value>> =
-                HashMap::new();
-            let mut local_props;
-            let props = if let Some(props) = person_properties.as_ref() {
-                local_props = props.clone();
-                local_props
-                    .entry("distinct_id".to_string())
-                    .or_insert_with(|| json!(distinct_id_str.clone()));
-                &local_props
-            } else {
-                local_props = empty_props;
-                local_props.insert("distinct_id".to_string(), json!(distinct_id_str.clone()));
-                &local_props
-            };
-            let groups_ref = groups.as_ref().unwrap_or(&empty_groups);
-            let group_props_ref = group_properties.as_ref().unwrap_or(&empty_group_props);
-            match evaluator.evaluate_flag(
-                &key_str,
-                &distinct_id_str,
-                props,
-                groups_ref,
-                group_props_ref,
-            ) {
-                Ok(Some(value)) => {
-                    debug!(flag = %key_str, ?value, "Flag evaluated locally");
-                    return Ok(Some(value));
-                }
-                Ok(None) => {
-                    if self.options.local_evaluation_only {
-                        debug!(flag = %key_str, "Flag not found locally, skipping remote fallback");
-                        return Ok(None);
-                    }
-                    debug!(flag = %key_str, "Flag not found locally, falling back to API");
-                }
-                Err(e) => {
-                    if self.options.local_evaluation_only {
-                        debug!(flag = %key_str, error = %e.message, "Inconclusive local evaluation, skipping remote fallback");
-                        return Ok(None);
-                    }
-                    debug!(flag = %key_str, error = %e.message, "Inconclusive local evaluation, falling back to API");
-                }
-            }
-        }
-
-        // Fall back to API
-        trace!(flag = %key_str, "Fetching flag from API");
-        let (feature_flags, _payloads) = self
-            .get_feature_flags(distinct_id_str, groups, person_properties, group_properties)
-            .await?;
-        Ok(feature_flags.get(&key_str).cloned())
-    }
-
-    /// Check if a feature flag is enabled for a user.
-    ///
-    /// # Returns
-    ///
-    /// `true` for `FlagValue::Boolean(true)` or any multivariate variant,
-    /// `false` for disabled or missing flags.
-    ///
-    /// # Errors
-    ///
-    /// Returns errors from [`Client::get_feature_flag`].
-    #[must_use = "feature flag enabled check result should be used"]
-    #[deprecated(
-        since = "0.6.0",
-        note = "Use Client::evaluate_flags() to fetch a snapshot, then call .is_enabled(key) \
-                on it. The snapshot deduplicates $feature_flag_called events and supports \
-                attaching rich metadata to captured events via Event::with_flags()."
-    )]
-    #[allow(deprecated)] // calls deprecated get_feature_flag internally
-    pub async fn is_feature_enabled<K: Into<String>, D: Into<String>>(
-        &self,
-        key: K,
-        distinct_id: D,
-        groups: Option<HashMap<String, String>>,
-        person_properties: Option<HashMap<String, serde_json::Value>>,
-        group_properties: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
-    ) -> Result<bool, Error> {
-        let flag_value = self
-            .get_feature_flag(
-                key.into(),
-                distinct_id.into(),
-                groups,
-                person_properties,
-                group_properties,
-            )
-            .await?;
-        Ok(match flag_value {
-            Some(FlagValue::Boolean(b)) => b,
-            Some(FlagValue::String(_)) => true, // Variants are considered enabled
-            None => false,
-        })
-    }
-
-    /// Get a feature flag payload for a user.
-    ///
-    /// # Parameters
-    ///
-    /// - `key`: Feature flag key.
-    /// - `distinct_id`: User distinct ID.
-    ///
-    /// # Returns
-    ///
-    /// The JSON payload for the flag, if one was returned. This method does not
-    /// emit `$feature_flag_called` events.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Connection`] for request failures and
-    /// [`Error::Serialization`] when the response cannot be parsed.
-    #[must_use = "feature flag payload result should be used"]
-    #[deprecated(
-        since = "0.6.0",
-        note = "Use Client::evaluate_flags() to fetch a snapshot, then call \
-                .get_flag_payload(key) on it. Reading the payload from a snapshot is \
-                event-free, matching this method's behavior, and avoids the per-call \
-                /flags request."
-    )]
-    pub async fn get_feature_flag_payload<K: Into<String>, D: Into<String>>(
-        &self,
-        key: K,
-        distinct_id: D,
-    ) -> Result<Option<serde_json::Value>, Error> {
-        if self.options.is_disabled() {
-            trace!("Client is disabled, skipping feature flag payload request");
-            return Ok(None);
-        }
-
-        let key_str = key.into();
-        let flags_endpoint = self.options.endpoints().build_url(Endpoint::Flags);
-
-        let mut payload = json!({
-            "api_key": self.options.api_key,
-            "distinct_id": distinct_id.into(),
-        });
-
-        // Add geoip disable parameter if configured
-        if self.options.disable_geoip {
-            payload["disable_geoip"] = json!(true);
-        }
-
-        let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
-        let response = match self
-            .client
-            .post(&flags_endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let err = Error::Connection(e.to_string());
-                report_flags_error(
-                    &self.options.on_error,
-                    &flags_endpoint,
-                    distinct_id,
-                    None,
-                    None,
-                    &err,
-                );
-                return Err(err);
-            }
-        };
-
-        if !response.status().is_success() {
-            return Ok(None);
-        }
-
-        let status = response.status().as_u16();
-        let flags_response: FeatureFlagsResponse = match response.json().await {
-            Ok(r) => r,
-            Err(e) => {
-                let err = Error::Serialization(format!("Failed to parse response: {e}"));
-                report_flags_error(
-                    &self.options.on_error,
-                    &flags_endpoint,
-                    distinct_id,
-                    Some(status),
-                    None,
-                    &err,
-                );
-                return Err(err);
-            }
-        };
-
-        let (_flags, payloads) = flags_response.normalize();
-        Ok(payloads.get(&key_str).cloned())
+        self.lanes().map(|t| t.pending()).sum()
     }
 
     /// Evaluate a supplied feature flag definition locally.
@@ -1136,116 +888,22 @@ impl Client {
             ));
         }
 
-        let mut options = options;
-        options.groups.get_or_insert_with(HashMap::new);
-        options.group_properties.get_or_insert_with(HashMap::new);
-
-        let mut records: HashMap<String, EvaluatedFlagRecord> = HashMap::new();
-        let mut locally_evaluated_keys: HashSet<String> = HashSet::new();
-
-        if let Some(evaluator) = &self.local_evaluator {
-            let mut person_props_owned = options.person_properties.clone().unwrap_or_default();
-            person_props_owned
-                .entry("distinct_id".to_string())
-                .or_insert_with(|| json!(distinct_id.clone()));
-            let groups_owned = options.groups.clone().unwrap_or_default();
-            let group_props_owned = options.group_properties.clone().unwrap_or_default();
-            let local_results = evaluator.evaluate_all_flags_with_details(
-                &distinct_id,
-                &person_props_owned,
-                &groups_owned,
-                &group_props_owned,
-            );
-            // Pin the gate from the poller's current definitions snapshot at the
-            // point local evaluation succeeded, so it travels with these records
-            // rather than being re-read from shared state at event time.
-            let local_minimal_gate = evaluator.cache().minimal_flag_called_events();
-            for (key, result) in local_results {
-                if let Some(filter) = &options.flag_keys {
-                    if !filter.iter().any(|k| k == &key) {
-                        continue;
-                    }
-                }
-                if let Ok(value) = result.result {
-                    records.insert(
-                        key.clone(),
-                        local_record(
-                            value,
-                            result.payload,
-                            result.has_experiment,
-                            local_minimal_gate,
-                        ),
-                    );
-                    locally_evaluated_keys.insert(key);
-                }
-            }
+        let mut state = EvaluationState::new(distinct_id, options, self.local_evaluator.as_ref());
+        if state.should_fetch_remote(self.options.local_evaluation_only) {
+            let response = self
+                .fetch_flag_details(state.distinct_id(), state.options())
+                .await;
+            state.apply_remote_result(response)?;
         }
 
-        let mut request_id: Option<String> = None;
-        let mut errors_while_computing = false;
-        let mut quota_limited = false;
-
-        // Skip the remote round-trip when local evaluation has already covered
-        // every requested flag. Without `flag_keys` we have to assume the caller
-        // wants every flag the project has and still hit `/flags` to discover
-        // any not loaded by the poller.
-        let local_covers_request = options
-            .flag_keys
-            .as_ref()
-            .is_some_and(|keys| keys.iter().all(|k| locally_evaluated_keys.contains(k)));
-
-        if !options.only_evaluate_locally && !local_covers_request {
-            // Don't lose successful local evaluations if `/flags` fails — degrade
-            // to a snapshot built from the local results we already have. The
-            // alternative (returning Err) wastes useful data and surprises
-            // callers who would otherwise get partial coverage.
-            match self.fetch_flag_details(&distinct_id, &options).await {
-                Ok(response) => {
-                    request_id = response.request_id;
-                    errors_while_computing = response.errors_while_computing_flags;
-                    quota_limited = response.quota_limited;
-                    // The remote response is the source of these flags' values,
-                    // so it is also the source of their minimization gate.
-                    let remote_minimal_gate = response.minimal_flag_called_events;
-                    for (key, detail) in response.flags {
-                        if locally_evaluated_keys.contains(&key) {
-                            continue;
-                        }
-                        records.insert(key, remote_record_from_detail(detail, remote_minimal_gate));
-                    }
-                }
-                Err(e) => {
-                    if records.is_empty() {
-                        return Err(e);
-                    }
-                    debug!(
-                        error = e.to_string(),
-                        local_count = records.len(),
-                        "/flags fetch failed; returning snapshot from local results only"
-                    );
-                    errors_while_computing = true;
-                }
-            }
-        }
-
-        Ok(FeatureFlagEvaluations::new(
-            host,
-            distinct_id,
-            records,
-            options.groups.unwrap_or_default(),
-            options.disable_geoip,
-            request_id,
-            None,
-            errors_while_computing,
-            quota_limited,
-        ))
+        Ok(state.into_evaluations(host))
     }
 
     fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {
         self.flag_event_host
             .get_or_init(|| {
-                Arc::new(AsyncFlagEventHost::from_options(
-                    &self.options,
+                Arc::new(FlagEventHost::new(
+                    self.options.capture_defaults(),
                     self.transport.clone(),
                 )) as Arc<dyn FeatureFlagEvaluationsHost>
             })
@@ -1297,7 +955,7 @@ impl Client {
                     match super::retry::feature_flags_after_transport_error(
                         &self.options,
                         attempt,
-                        is_retryable_feature_flags_error(&e),
+                        super::retry::is_retryable_feature_flags_error(&e),
                         err_msg,
                     ) {
                         super::retry::FeatureFlagsTransportStep::Backoff(delay) => {
@@ -1397,9 +1055,7 @@ impl Drop for Client {
     /// callback instead queues shutdown without waiting for or joining the current
     /// worker thread.
     fn drop(&mut self) {
-        if let Some(transport) = &self.transport {
-            transport.close_blocking();
-        }
+        self.close_lanes_blocking();
     }
 }
 
@@ -1407,6 +1063,118 @@ impl Drop for Client {
 mod teardown_tests {
     use super::*;
     use std::sync::{mpsc, Mutex};
+
+    fn lane_test_client_options(host: String) -> ClientOptions {
+        lane_test_client_options_with_key("phc_test", host)
+    }
+
+    /// An empty API key yields a disabled client (no transport at all).
+    fn lane_test_client_options_with_key(api_key: &str, host: String) -> ClientOptions {
+        crate::ClientOptionsBuilder::default()
+            .api_key(api_key.to_string())
+            .host(host)
+            .flush_interval_ms(60_000u64)
+            .shutdown_timeout_ms(1_000u64)
+            .max_capture_attempts(1u32)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ai_lane_is_not_spawned_until_capture_ai_is_called() {
+        let client = client(lane_test_client_options("http://localhost:0".to_string())).await;
+        client.capture(Event::new("clicked", "user-1"));
+        client.flush().await;
+        assert!(
+            client.ai_transport.get().is_none(),
+            "analytics use never starts the AI lane"
+        );
+
+        client.capture_ai(Event::new("$ai_generation", "user-1"));
+        let first = Arc::clone(
+            client
+                .ai_transport
+                .get()
+                .expect("spawned on first capture_ai"),
+        );
+        client.capture_ai(Event::new("$ai_span", "user-1"));
+        assert!(
+            Arc::ptr_eq(&first, client.ai_transport.get().unwrap()),
+            "spawned exactly once"
+        );
+        client.shutdown().await;
+        assert!(first.is_closed(), "shutdown closes the AI lane too");
+    }
+
+    #[tokio::test]
+    async fn ai_lane_spawned_during_shutdown_is_closed_by_the_recheck() {
+        // Simulate the race: shutdown has marked the analytics lane closed but the
+        // AI lane already came into being (here: spawned earlier). `ai_transport`
+        // must see the mark after `get_or_init` and close the AI lane instead of
+        // handing it out.
+        let client = client(lane_test_client_options("http://localhost:0".to_string())).await;
+        client.capture_ai(Event::new("$ai_generation", "user-1"));
+        let ai = Arc::clone(client.ai_transport.get().unwrap());
+        let analytics = client.transport.as_ref().unwrap();
+        assert!(Client::ai_lane_unless_closing(analytics, &ai).is_some());
+        analytics.request_close(); // what `shutdown` does before its lane snapshot
+        assert!(Client::ai_lane_unless_closing(analytics, &ai).is_none());
+        assert!(
+            ai.is_closed(),
+            "the re-check requested the AI lane's shutdown"
+        );
+        assert!(client.ai_transport().is_none());
+        client.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_racing_a_first_capture_ai_always_closes_the_ai_lane() {
+        // Review finding: a first `capture_ai` landing between shutdown's lane
+        // read and its close mark could leave an AI worker running after
+        // `shutdown` returned. Race the two repeatedly; whatever the interleaving,
+        // any AI lane that exists once shutdown returns must be closed.
+        for _ in 0..100 {
+            let client =
+                Arc::new(client(lane_test_client_options("http://localhost:0".to_string())).await);
+            let racer = Arc::clone(&client);
+            let t = std::thread::spawn(move || {
+                racer.capture_ai(Event::new("$ai_generation", "user-1"));
+            });
+            client.shutdown().await;
+            t.join().unwrap();
+            if let Some(ai) = client.ai_transport.get() {
+                assert!(ai.is_closed(), "AI lane left open after shutdown returned");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_ai_after_shutdown_does_not_spawn_a_lane() {
+        let client = client(lane_test_client_options("http://localhost:0".to_string())).await;
+        client.shutdown().await;
+        client.capture_ai(Event::new("$ai_generation", "user-1"));
+        assert!(client.ai_transport.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn disabled_client_ignores_capture_ai() {
+        let client = client(lane_test_client_options_with_key(
+            "",
+            "http://localhost:0".to_string(),
+        ))
+        .await;
+        assert!(client.transport.is_none());
+        client.capture_ai(Event::new("$ai_generation", "user-1"));
+        client.capture_ai_batch(vec![Event::new("$ai_generation", "user-1")], false);
+        assert!(client.ai_transport.get().is_none());
+        let summary = client
+            .capture_ai_immediate(Event::new("$ai_generation", "user-1"))
+            .await
+            .unwrap();
+        assert_eq!(summary.submitted(), 0);
+        client.flush().await;
+        client.shutdown().await;
+    }
 
     #[tokio::test]
     async fn shutdown_from_worker_callback_closes_without_blocking() {
@@ -1491,7 +1259,9 @@ mod teardown_tests {
 #[cfg(test)]
 mod minimal_gate_tests {
     use super::*;
-    use crate::client::minimal_gate_test_support::{definitions, RecordingHost};
+    use crate::client::minimal_gate_test_support::{
+        assert_gate_was_pinned, assert_has_experiment_was_threaded, definitions, gate_test_fixture,
+    };
 
     fn test_client(cache: FlagCache, host: Arc<dyn FeatureFlagEvaluationsHost>) -> Client {
         let options = ClientOptions::from(("phc_test", "http://localhost:0"));
@@ -1502,6 +1272,7 @@ mod minimal_gate_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            ai_transport: OnceLock::new(),
         };
         client
             .flag_event_host
@@ -1529,67 +1300,46 @@ mod minimal_gate_tests {
     /// evaluation and event capture must not reshape the event.
     #[tokio::test]
     async fn local_gate_pinned_at_evaluation_survives_cache_mutation_to_off() {
-        let cache = FlagCache::new();
-        cache.update(definitions(Some(false), true)); // gate ON at evaluation
-        let host = Arc::new(RecordingHost::default());
-        let client = test_client(cache.clone(), Arc::clone(&host) as _);
+        let fixture = gate_test_fixture(Some(false), true);
+        let client = test_client(fixture.cache.clone(), Arc::clone(&fixture.host) as _);
 
         let snapshot = evaluate(&client).await;
         // Poller refresh flips the gate OFF after the snapshot was produced.
-        cache.update(definitions(Some(false), false));
+        fixture.cache.update(definitions(Some(false), false));
 
-        assert!(snapshot.is_enabled("gated"));
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(captured.len(), 1);
-        assert!(
-            captured[0].minimal,
-            "event must reflect the gate pinned at evaluation (on), not the mutated cache (off)"
-        );
+        assert_gate_was_pinned(&snapshot, fixture.host.as_ref(), true);
     }
 
     #[tokio::test]
     async fn local_gate_pinned_at_evaluation_survives_cache_mutation_to_on() {
-        let cache = FlagCache::new();
-        cache.update(definitions(Some(false), false)); // gate OFF at evaluation
-        let host = Arc::new(RecordingHost::default());
-        let client = test_client(cache.clone(), Arc::clone(&host) as _);
+        let fixture = gate_test_fixture(Some(false), false);
+        let client = test_client(fixture.cache.clone(), Arc::clone(&fixture.host) as _);
 
         let snapshot = evaluate(&client).await;
         // Poller refresh flips the gate ON after the snapshot was produced.
-        cache.update(definitions(Some(false), true));
+        fixture.cache.update(definitions(Some(false), true));
 
-        assert!(snapshot.is_enabled("gated"));
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(captured.len(), 1);
-        assert!(
-            !captured[0].minimal,
-            "event must reflect the gate pinned at evaluation (off), not the mutated cache (on)"
-        );
+        assert_gate_was_pinned(&snapshot, fixture.host.as_ref(), false);
     }
 
     #[tokio::test]
     async fn local_has_experiment_is_threaded_from_definitions() {
-        let cache = FlagCache::new();
-        cache.update(definitions(Some(false), true));
-        let host = Arc::new(RecordingHost::default());
-        let client = test_client(cache, Arc::clone(&host) as _);
+        let fixture = gate_test_fixture(Some(false), true);
+        let client = test_client(fixture.cache.clone(), Arc::clone(&fixture.host) as _);
 
-        assert!(evaluate(&client).await.is_enabled("gated"));
-        let captured = host.captured.lock().unwrap();
-        assert_eq!(
-            captured[0].properties.get("$feature_flag_has_experiment"),
-            Some(&serde_json::json!(false))
-        );
-        assert!(captured[0].minimal);
+        let snapshot = evaluate(&client).await;
+        assert_has_experiment_was_threaded(&snapshot, fixture.host.as_ref());
     }
 }
 
 #[cfg(test)]
 mod local_payload_tests {
     use super::*;
-    use crate::client::local_payload_test_support::payload_definitions;
+    use crate::client::local_payload_test_support::{
+        assert_payload_is_absent_without_match, assert_payload_is_keyed_by_matched_variant,
+        assert_payloads_match_remote_shape, payload_definitions,
+    };
     use crate::client::minimal_gate_test_support::RecordingHost;
-    use serde_json::json;
 
     async fn snapshot() -> FeatureFlagEvaluations {
         let cache = FlagCache::new();
@@ -1602,6 +1352,7 @@ mod local_payload_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            ai_transport: OnceLock::new(),
         };
         client
             .flag_event_host
@@ -1626,53 +1377,18 @@ mod local_payload_tests {
     #[tokio::test]
     async fn local_evaluation_surfaces_payloads_matching_the_remote_shape() {
         let snapshot = snapshot().await;
-
-        assert_eq!(
-            snapshot.get_flag_payload("json-string-payload"),
-            Some(json!({"color": "blue"}))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("parsed-payload"),
-            Some(json!({"color": "blue"}))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("quoted-string-payload"),
-            Some(json!("just text"))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("undecodable-payload"),
-            Some(json!("not json"))
-        );
+        assert_payloads_match_remote_shape(&snapshot);
     }
 
     #[tokio::test]
     async fn local_payload_is_keyed_by_the_matched_variant() {
         let snapshot = snapshot().await;
-
-        assert_eq!(
-            snapshot.get_flag("variant-payload"),
-            Some(FlagValue::String("test".to_string()))
-        );
-        assert_eq!(
-            snapshot.get_flag_payload("variant-payload"),
-            Some(json!({"tier": 2}))
-        );
+        assert_payload_is_keyed_by_matched_variant(&snapshot);
     }
 
     #[tokio::test]
     async fn local_payload_is_absent_without_a_matching_payload() {
         let snapshot = snapshot().await;
-
-        assert_eq!(snapshot.get_flag_payload("no-payload"), None);
-        assert_eq!(snapshot.get_flag_payload("not-a-flag"), None);
-
-        // A missing key also yields `None`, so pin the flag down first:
-        // it was evaluated, it evaluated false, and its "true" payload
-        // stayed behind.
-        assert_eq!(
-            snapshot.get_flag("disabled-with-payload"),
-            Some(FlagValue::Boolean(false))
-        );
-        assert_eq!(snapshot.get_flag_payload("disabled-with-payload"), None);
+        assert_payload_is_absent_without_match(&snapshot);
     }
 }
