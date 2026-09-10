@@ -293,6 +293,9 @@ pub struct EvaluationContext<'a> {
     pub group_properties: &'a HashMap<String, HashMap<String, serde_json::Value>>,
     /// Mapping from PostHog group type index to group type name.
     pub group_type_mapping: &'a HashMap<String, String>,
+    /// Matching semantics pinned to the definitions snapshot. Exactly `2` uses
+    /// explicit equality; `1` (and other versions) uses legacy boolean coercion.
+    pub property_matching_version: i64,
 }
 
 /// Configuration for multivariate (A/B/n) feature flags.
@@ -587,6 +590,27 @@ pub fn match_feature_flag(
     group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     group_type_mapping: &HashMap<String, String>,
 ) -> Result<FlagValue, InconclusiveMatchError> {
+    match_feature_flag_with_version(
+        flag,
+        distinct_id,
+        person_properties,
+        groups,
+        group_properties,
+        group_type_mapping,
+        1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn match_feature_flag_with_version(
+    flag: &FeatureFlag,
+    distinct_id: &str,
+    person_properties: &HashMap<String, serde_json::Value>,
+    groups: &HashMap<String, String>,
+    group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
+    group_type_mapping: &HashMap<String, String>,
+    property_matching_version: i64,
+) -> Result<FlagValue, InconclusiveMatchError> {
     if !flag.active {
         return Ok(FlagValue::Boolean(false));
     }
@@ -621,7 +645,13 @@ pub fn match_feature_flag(
             }
         };
 
-        match is_condition_match(flag, &effective_bucketing, &condition, effective_properties) {
+        match is_condition_match(
+            flag,
+            &effective_bucketing,
+            &condition,
+            effective_properties,
+            property_matching_version,
+        ) {
             Ok(ConditionMatch::Match) => {
                 if let Some(variant_override) = &condition.variant {
                     // Check if variant is valid
@@ -692,10 +722,11 @@ fn is_condition_match(
     bucketing_id: &str,
     condition: &FeatureFlagCondition,
     properties: &HashMap<String, serde_json::Value>,
+    property_matching_version: i64,
 ) -> Result<ConditionMatch, InconclusiveMatchError> {
     // Check properties first
     for prop in &condition.properties {
-        if !match_property(prop, properties)? {
+        if !match_property_with_version(prop, properties, property_matching_version)? {
             return Ok(ConditionMatch::NoMatch);
         }
     }
@@ -868,8 +899,8 @@ pub fn match_property_with_context(
         return match_flag_dependency_property(property, ctx);
     }
 
-    // Fall back to regular property matching
-    match_property(property, properties)
+    // Use the same snapshot version for direct and recursive cohort leaves.
+    match_property_with_version(property, properties, ctx.property_matching_version)
 }
 
 /// Evaluate cohort membership referenced by a flag property (`type = "cohort"`).
@@ -1169,13 +1200,14 @@ fn match_flag_dependency_property(
     // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues).
     // Group context flows through from the outer ctx so dependent group/mixed flags can resolve.
     let empty_props = HashMap::new();
-    let flag_value = match_feature_flag(
+    let flag_value = match_feature_flag_with_version(
         flag,
         ctx.distinct_id,
         &empty_props,
         ctx.groups,
         ctx.group_properties,
         ctx.group_type_mapping,
+        ctx.property_matching_version,
     )?;
 
     // Compare the flag value with the expected value
@@ -1400,9 +1432,18 @@ fn parse_target_semver(
     })
 }
 
+#[cfg(test)]
 fn match_property(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
+) -> Result<bool, InconclusiveMatchError> {
+    match_property_with_version(property, properties, 1)
+}
+
+fn match_property_with_version(
+    property: &Property,
+    properties: &HashMap<String, serde_json::Value>,
+    property_matching_version: i64,
 ) -> Result<bool, InconclusiveMatchError> {
     let value = match properties.get(&property.key) {
         Some(v) => v,
@@ -1431,8 +1472,8 @@ fn match_property(
     };
 
     Ok(match property.operator.as_str() {
-        "exact" => compute_exact_match(&property.value, value),
-        "is_not" => !compute_exact_match(&property.value, value),
+        "exact" => compute_exact_match(&property.value, value, property_matching_version),
+        "is_not" => !compute_exact_match(&property.value, value, property_matching_version),
         "is_set" => true,      // We already know the property exists
         "is_not_set" => false, // We already know the property exists
         "icontains" => {
@@ -1559,12 +1600,20 @@ fn match_property(
     })
 }
 
-fn compute_exact_match(value: &serde_json::Value, override_value: &serde_json::Value) -> bool {
-    if is_truthy_or_falsy_property_value(value) {
+fn compute_exact_match(
+    value: &serde_json::Value,
+    override_value: &serde_json::Value,
+    property_matching_version: i64,
+) -> bool {
+    if property_matching_version != 2 && is_truthy_or_falsy_property_value(value) {
         return is_truthy_property_value(value) == is_truthy_property_value(override_value);
     }
 
     if let Some(values) = value.as_array() {
+        // Empty filters retain recursive legacy truthiness in both versions.
+        if values.is_empty() {
+            return is_truthy_property_value(override_value);
+        }
         return values
             .iter()
             .any(|candidate| compare_values(candidate, override_value));
@@ -2538,6 +2587,7 @@ mod tests {
         properties.insert("country".to_string(), json!("US"));
 
         let ctx = EvaluationContext {
+            property_matching_version: 1,
             cohorts: &cohorts,
             flags: &HashMap::new(),
             distinct_id: "user-123",
@@ -2579,6 +2629,7 @@ mod tests {
         properties.insert("status".to_string(), json!("active"));
 
         let ctx = EvaluationContext {
+            property_matching_version: 1,
             cohorts: &cohorts,
             flags: &HashMap::new(),
             distinct_id: "user-123",
@@ -2607,6 +2658,7 @@ mod tests {
 
         let properties = HashMap::new();
         let ctx = EvaluationContext {
+            property_matching_version: 1,
             cohorts: &cohorts,
             flags: &HashMap::new(),
             distinct_id: "user-123",
@@ -2624,6 +2676,7 @@ mod tests {
     /// which is all cohort-membership tests need.
     fn cohort_ctx(cohorts: &HashMap<String, CohortDefinition>) -> EvaluationContext<'_> {
         EvaluationContext {
+            property_matching_version: 1,
             cohorts,
             flags: EMPTY_FLAGS.get_or_init(HashMap::new),
             distinct_id: "user-123",
@@ -3177,6 +3230,7 @@ mod tests {
 
         let properties = HashMap::new();
         let ctx = EvaluationContext {
+            property_matching_version: 1,
             cohorts: &HashMap::new(),
             flags: &flags,
             distinct_id: "user-123",
@@ -3218,6 +3272,7 @@ mod tests {
 
         let properties = HashMap::new();
         let ctx = EvaluationContext {
+            property_matching_version: 1,
             cohorts: &HashMap::new(),
             flags: &flags,
             distinct_id: "user-123",
@@ -3275,6 +3330,7 @@ mod tests {
 
         let properties = HashMap::new();
         let ctx = EvaluationContext {
+            property_matching_version: 1,
             cohorts: &HashMap::new(),
             flags: &flags,
             distinct_id: "user-gets-control", // This distinct_id should deterministically get "control"
@@ -3301,6 +3357,7 @@ mod tests {
 
         let properties = HashMap::new();
         let ctx = EvaluationContext {
+            property_matching_version: 1,
             cohorts: &HashMap::new(),
             flags: &flags,
             distinct_id: "user-123",
@@ -4522,6 +4579,7 @@ mod tests {
             fn $name() {
                 let flag = early_exit_flag($early_exit);
                 let ctx = EvaluationContext {
+                    property_matching_version: 1,
                     cohorts: &HashMap::new(),
                     flags: &HashMap::new(),
                     distinct_id: "user-123",

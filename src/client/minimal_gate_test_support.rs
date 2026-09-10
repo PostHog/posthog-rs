@@ -47,6 +47,7 @@ fn gated_flag(has_experiment: Option<bool>) -> FeatureFlag {
 
 pub(super) fn definitions(has_experiment: Option<bool>, gate: bool) -> LocalEvaluationResponse {
     LocalEvaluationResponse {
+        property_matching_version: 1,
         flags: vec![gated_flag(has_experiment)],
         group_type_mapping: HashMap::new(),
         cohorts: HashMap::new(),
