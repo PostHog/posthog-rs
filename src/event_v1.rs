@@ -14,18 +14,46 @@ use crate::event::Event;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Options(serde_json::Map<String, serde_json::Value>);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct V1Event {
     pub event: String,
     pub uuid: Uuid,
     pub distinct_id: String,
     pub timestamp: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub window_id: Option<String>,
     pub(crate) options: Options,
     pub properties: serde_json::Value,
+}
+
+impl Serialize for V1Event {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let fields =
+            6 + usize::from(self.session_id.is_some()) + usize::from(self.window_id.is_some());
+        let mut wire = serializer.serialize_struct("V1Event", fields)?;
+        wire.serialize_field("event", &self.event)?;
+        wire.serialize_field("uuid", &self.uuid)?;
+        wire.serialize_field("distinct_id", &self.distinct_id)?;
+        wire.serialize_field("timestamp", &self.timestamp)?;
+        if let Some(session_id) = &self.session_id {
+            wire.serialize_field("session_id", session_id)?;
+        }
+        if let Some(window_id) = &self.window_id {
+            wire.serialize_field("window_id", window_id)?;
+        }
+        wire.serialize_field("options", &self.options)?;
+        wire.serialize_field(
+            "properties",
+            &crate::property_serialization::EventProperties {
+                event: &self.event,
+                properties: &self.properties,
+            },
+        )?;
+        wire.end()
+    }
 }
 
 impl V1Event {
