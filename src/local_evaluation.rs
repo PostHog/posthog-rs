@@ -235,17 +235,12 @@ pub struct LocalEvaluationConfig {
     pub request_timeout: Duration,
 }
 
-/// Take the result of building a poller's HTTP client. On failure, log a
-/// warning and return `None` so the poller degrades to doing nothing instead
-/// of panicking. TLS trust-store setup makes `build()` fallible: a container
-/// without CA certificates fails here.
+/// Leave the poller disabled when HTTP initialization fails.
 fn http_client_or_warn<C, E: std::fmt::Debug>(result: Result<C, E>) -> Option<C> {
     match result {
         Ok(client) => Some(client),
         Err(err) => {
-            // Debug, not Display: `reqwest::Error` displays a builder failure
-            // as the bare text `builder error` and keeps the cause in its
-            // source, which only Debug prints.
+            // Debug includes the underlying builder error.
             warn!(error = ?err, "Failed to build HTTP client; flag polling is disabled");
             None
         }
@@ -274,6 +269,9 @@ pub struct FlagPoller {
 
 impl FlagPoller {
     /// Create a synchronous flag definition poller.
+    ///
+    /// If the HTTP client cannot be built, logs a warning and leaves polling
+    /// disabled. [`Self::load_flags`] then returns [`Error::Connection`].
     ///
     /// # Parameters
     ///
@@ -502,6 +500,9 @@ pub struct AsyncFlagPoller {
 #[cfg(feature = "async-client")]
 impl AsyncFlagPoller {
     /// Create an asynchronous flag definition poller.
+    ///
+    /// If the HTTP client cannot be built, logs a warning and leaves polling
+    /// disabled. [`Self::load_flags`] then returns [`Error::Connection`].
     ///
     /// # Parameters
     ///

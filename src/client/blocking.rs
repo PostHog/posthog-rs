@@ -130,6 +130,8 @@ impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
 ///
 /// Passing a blank API key creates a disabled client. Enable the default
 /// `async-client` feature to use the async client instead.
+/// If the HTTP client cannot be built, logs a warning and creates a disabled
+/// client instead.
 pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let mut options = options.into().sanitize();
     let client = http_client_or_disable(
@@ -184,9 +186,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
 }
 
 impl Client {
-    /// Borrow the HTTP client. `None` when the client could not be built, in
-    /// which case the client is disabled and callers must not reach the
-    /// network.
+    /// The HTTP client, or [`Error::Connection`] if initialization failed.
     fn http(&self) -> Result<&HttpClient, Error> {
         self.client.as_ref().ok_or_else(|| {
             Error::Connection("HTTP client is unavailable; PostHog client is disabled".to_string())

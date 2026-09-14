@@ -337,10 +337,8 @@ fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// Take the result of building the HTTP client. On failure, log a warning and
-/// disable `options` so the SDK degrades to a no-op client instead of
-/// panicking. TLS trust-store setup makes `build()` fallible: a container
-/// without CA certificates fails here.
+/// Disable the client when HTTP initialization fails, for example when the
+/// system has no CA certificates.
 pub(super) fn http_client_or_disable<C, E: std::fmt::Debug>(
     result: Result<C, E>,
     options: &mut ClientOptions,
@@ -348,10 +346,7 @@ pub(super) fn http_client_or_disable<C, E: std::fmt::Debug>(
     match result {
         Ok(client) => Some(client),
         Err(err) => {
-            // Debug, not Display: `reqwest::Error` displays a builder failure
-            // as the bare text `builder error` and keeps the cause — the
-            // missing certificates, say — in its source, which only Debug
-            // prints.
+            // Debug includes the underlying builder error.
             warn!("Failed to build HTTP client ({err:?}); disabling PostHog client");
             options.disabled = true;
             None
