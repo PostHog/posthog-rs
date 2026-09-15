@@ -153,6 +153,7 @@ pub fn posthog_rs::ClientOptions::from((&str, &str)) -> Self
 pub struct posthog_rs::ClientOptionsBuilder
 impl posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::api_key(&mut self, alloc::string::String) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::background_transport(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::blocking_http_client<VALUE: core::convert::Into<reqwest::blocking::client::Client>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::capture_compression(&mut self, posthog_rs::CaptureCompression) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::disable_geoip(&mut self, bool) -> &mut Self

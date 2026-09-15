@@ -192,6 +192,14 @@ pub struct ClientOptions {
     #[builder(default = "false")]
     disabled: bool,
 
+    /// Start the background batching worker used by `capture`/`capture_batch`/
+    /// `alias`/`group_identify`. When `false`, no worker thread or blocking HTTP
+    /// client is created: fire-and-forget captures are dropped (one warn), while
+    /// `capture_immediate`/`capture_batch_immediate` and feature-flag calls work
+    /// normally and `Drop`/`shutdown` never block.
+    #[builder(default = "true")]
+    pub(crate) background_transport: bool,
+
     /// Disable automatic GeoIP enrichment for capture and flag requests.
     #[builder(default = "false")]
     disable_geoip: bool,
