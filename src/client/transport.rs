@@ -706,10 +706,15 @@ struct Pipeline {
 #[cfg(feature = "capture-v1")]
 impl Pipeline {
     fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build()
-            .unwrap_or_default();
+        // A caller-supplied client is used as-is: it owns its own timeout, TLS
+        // backend, proxies and pool, so `request_timeout_seconds` is not applied.
+        let http = match options.blocking_http_client.clone() {
+            Some(http) => http,
+            None => reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(options.request_timeout_seconds))
+                .build()
+                .unwrap_or_default(),
+        };
         let url = options
             .endpoints()
             .build_custom_url(super::v1_capture::V1_CAPTURE_PATH);
@@ -986,10 +991,15 @@ struct Pipeline {
 #[cfg(not(feature = "capture-v1"))]
 impl Pipeline {
     fn new(options: &ClientOptions, clock: Arc<dyn Clock>, len: Arc<AtomicUsize>) -> Self {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build()
-            .unwrap_or_default();
+        // A caller-supplied client is used as-is: it owns its own timeout, TLS
+        // backend, proxies and pool, so `request_timeout_seconds` is not applied.
+        let http = match options.blocking_http_client.clone() {
+            Some(http) => http,
+            None => reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(options.request_timeout_seconds))
+                .build()
+                .unwrap_or_default(),
+        };
         let url_base = options
             .endpoints()
             .build_url(crate::endpoints::Endpoint::Batch);

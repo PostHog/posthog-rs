@@ -128,10 +128,15 @@ impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
 /// must be awaited. Passing a blank API key creates a disabled client.
 pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let options = options.into().sanitize();
-    let client = HttpClient::builder()
-        .timeout(Duration::from_secs(options.request_timeout_seconds))
-        .build()
-        .unwrap(); // Unwrap here is as safe as `HttpClient::new`
+    // A caller-supplied client is used as-is: it owns its own timeout, TLS
+    // backend, proxies and pool, so `request_timeout_seconds` is not applied.
+    let client = match options.http_client.clone() {
+        Some(client) => client,
+        None => HttpClient::builder()
+            .timeout(Duration::from_secs(options.request_timeout_seconds))
+            .build()
+            .unwrap(), // Unwrap here is as safe as `HttpClient::new`
+    };
 
     let (local_evaluator, flag_poller) =
         if options.enable_local_evaluation && !options.is_disabled() {
@@ -148,6 +153,9 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
                 let mut poller = AsyncFlagPoller::new(config, cache.clone());
                 poller.set_on_error(options.on_error.clone());
+                if let Some(http_client) = options.http_client.clone() {
+                    poller.set_http_client(http_client);
+                }
                 poller.start().await;
 
                 (Some(LocalEvaluator::new(cache)), Some(poller))

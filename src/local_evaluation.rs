@@ -284,6 +284,18 @@ impl FlagPoller {
         self.on_error = hooks;
     }
 
+    /// Replace the HTTP client with a caller-supplied one. Called by the client
+    /// builder before [`FlagPoller::start`]; not part of the public flag-poller
+    /// API. Kept here rather than on `LocalEvaluationConfig` so the public
+    /// config struct stays unchanged.
+    ///
+    /// The supplied client is used as-is, so `config.request_timeout` does not
+    /// apply to it.
+    #[cfg_attr(feature = "async-client", allow(dead_code))]
+    pub(crate) fn set_http_client(&mut self, client: reqwest::blocking::Client) {
+        self.client = client;
+    }
+
     /// Start the polling thread.
     ///
     /// Performs an initial synchronous load, then refreshes definitions in the
@@ -304,13 +316,11 @@ impl FlagPoller {
         let cache = self.cache.clone();
         let stop_signal = self.stop_signal.clone();
         let on_error = self.on_error.clone();
+        // Reuse the poller's client rather than building a second one, so a
+        // caller-supplied client is used by the polling loop too.
+        let client = self.client.clone();
 
         let handle = std::thread::spawn(move || {
-            let client = reqwest::blocking::Client::builder()
-                .timeout(config.request_timeout)
-                .build()
-                .unwrap();
-
             let mut last_etag: Option<String> = None;
 
             loop {
@@ -497,6 +507,17 @@ impl AsyncFlagPoller {
     /// [`AsyncFlagPoller::start`]; not part of the public flag-poller API.
     pub(crate) fn set_on_error(&mut self, hooks: Vec<OnErrorHook>) {
         self.on_error = hooks;
+    }
+
+    /// Replace the HTTP client with a caller-supplied one. Called by the client
+    /// builder before [`AsyncFlagPoller::start`]; not part of the public
+    /// flag-poller API. Kept here rather than on `LocalEvaluationConfig` so the
+    /// public config struct stays unchanged.
+    ///
+    /// The supplied client is used as-is, so `config.request_timeout` does not
+    /// apply to it.
+    pub(crate) fn set_http_client(&mut self, client: reqwest::Client) {
+        self.client = client;
     }
 
     /// Start the polling task.
