@@ -11,7 +11,14 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use posthog_rs::{CaptureCompression, Client, ClientOptionsBuilder, EvaluateFlagsOptions, Event};
+use posthog_rs::{CaptureCompression, ClientOptionsBuilder, EvaluateFlagsOptions, Event};
+
+#[cfg(not(feature = "async-client"))]
+mod blocking_client;
+#[cfg(not(feature = "async-client"))]
+use blocking_client::{client, Client};
+#[cfg(feature = "async-client")]
+use posthog_rs::{client, Client};
 
 const SUPPORTS_PARALLEL: bool = true;
 
@@ -104,7 +111,7 @@ impl TestIdParam {
 
 #[derive(Serialize)]
 struct HealthResponse {
-    sdk_name: &'static str,
+    sdk_name: String,
     sdk_version: &'static str,
     adapter_version: &'static str,
     capabilities: Vec<String>,
@@ -140,6 +147,21 @@ fn compression_capability(c: CaptureCompression) -> &'static str {
     }
 }
 
+fn profile_name(compression: Option<CaptureCompression>) -> String {
+    let protocol = if cfg!(feature = "capture-v1") {
+        "v1"
+    } else {
+        "v0"
+    };
+    let runtime = if cfg!(feature = "async-client") {
+        "async"
+    } else {
+        "blocking"
+    };
+    let codec = compression.map(compression_capability).unwrap_or("none");
+    format!("posthog-rs-{protocol}-{runtime}-{codec}")
+}
+
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let mut capabilities: Vec<String> = Vec::new();
     if cfg!(feature = "capture-v1") {
@@ -151,13 +173,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         capabilities.push(compression_capability(algo).to_string());
     }
     Json(HealthResponse {
-        // Per-build name so the v0 and v1 compliance jobs post distinct PR
-        // comments instead of overwriting one shared report.
-        sdk_name: if cfg!(feature = "capture-v1") {
-            "posthog-rs-v1"
-        } else {
-            "posthog-rs-v0"
-        },
+        // The reusable workflow keys PR comments by SDK name, not artifact name.
+        sdk_name: profile_name(state.compression),
         sdk_version: env!("CARGO_PKG_VERSION"),
         adapter_version: env!("CARGO_PKG_VERSION"),
         capabilities,
@@ -213,7 +230,7 @@ async fn init(
 
     match builder.build() {
         Ok(opts) => {
-            let client = posthog_rs::client(opts).await;
+            let client = client(opts).await;
             s.client = Some(Arc::new(client));
             Json(serde_json::json!({ "success": true })).into_response()
         }
@@ -471,9 +488,72 @@ async fn main() {
         .route("/reset", post(reset))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse()
+        .expect("PORT must be a valid port number");
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port))
         .await
-        .expect("failed to bind to port 8080");
-    eprintln!("Listening on 0.0.0.0:8080");
+        .expect("failed to bind adapter listener");
+    eprintln!("Listening on 0.0.0.0:{port}");
     axum::serve(listener, app).await.expect("server error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn health_identifies_each_codec_profile() {
+        let mut names = std::collections::HashSet::new();
+        for compression in [
+            None,
+            Some(CaptureCompression::Gzip),
+            Some(CaptureCompression::Deflate),
+            Some(CaptureCompression::Br),
+            Some(CaptureCompression::Zstd),
+        ] {
+            if !cfg!(feature = "capture-v1")
+                && matches!(
+                    compression,
+                    Some(
+                        CaptureCompression::Deflate
+                            | CaptureCompression::Br
+                            | CaptureCompression::Zstd
+                    )
+                )
+            {
+                continue;
+            }
+            let Json(response) = health(State(AppState {
+                instances: Arc::new(Mutex::new(HashMap::new())),
+                compression,
+            }))
+            .await;
+            assert!(names.insert(response.sdk_name.clone()));
+            assert!(response
+                .sdk_name
+                .contains(if cfg!(feature = "async-client") {
+                    "-async-"
+                } else {
+                    "-blocking-"
+                }));
+            assert!(response
+                .capabilities
+                .contains(&if cfg!(feature = "capture-v1") {
+                    "capture_v1".to_string()
+                } else {
+                    "capture_v0".to_string()
+                }));
+            if let Some(codec) = compression {
+                assert!(response
+                    .capabilities
+                    .contains(&compression_capability(codec).to_string()));
+            }
+            assert_eq!(
+                response.capabilities.len(),
+                1 + usize::from(compression.is_some())
+            );
+        }
+    }
 }

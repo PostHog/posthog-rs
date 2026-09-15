@@ -26,10 +26,22 @@ permissions:
 
 jobs:
   test-rust-sdk-v1:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - codec: gzip
+            dockerfile: compliance/v1/Dockerfile
+          - codec: deflate
+            dockerfile: compliance/v1/deflate.Dockerfile
+          - codec: br
+            dockerfile: compliance/v1/br.Dockerfile
+          - codec: zstd
+            dockerfile: compliance/v1/zstd.Dockerfile
     uses: PostHog/posthog-sdk-test-harness/.github/workflows/test-sdk-action.yml@6d19abb9c81e2262dacbe340e7dddda9c871c178
     with:
-      adapter-dockerfile: compliance/v1/Dockerfile
+      adapter-dockerfile: ${{ matrix.dockerfile }}
       adapter-context: .
-      test-harness-version: "0.10.0"
-      report-name: rust-sdk-compliance-report-v1
+      test-harness-version: "1.0.0"
+      report-name: rust-sdk-compliance-report-v1-${{ matrix.codec }}
       concurrency: 10

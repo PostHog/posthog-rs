@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-posthog-rs = { path = "../..", features = ["async-client", "test-harness"] }
+posthog-rs = { path = "../..", default-features = false, features = ["test-harness"] }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -14,4 +14,7 @@ uuid = { version = "1", features = ["v7"] }
 chrono = "0.4"
 
 [features]
+default = ["async-client", "error-tracking"]
+async-client = ["posthog-rs/async-client"]
+error-tracking = ["posthog-rs/error-tracking"]
 capture-v1 = ["posthog-rs/capture-v1"]

@@ -4,15 +4,15 @@ services:
       context: ../..
       dockerfile: compliance/v1/Dockerfile
     environment:
-      - COMPRESSION=gzip
+      - COMPRESSION=${COMPRESSION:-gzip}
     ports:
       - "8080:8080"
     networks:
       - test-network
 
   test-harness:
-    image: ghcr.io/posthog/sdk-test-harness:0.10.0
-    command: ["run", "--adapter-url", "http://sdk-adapter:8080", "--mock-url", "http://test-harness:8081", "--concurrency", "10", "--suite", "capture_v1"]
+    image: ghcr.io/posthog/sdk-test-harness:1.0.0
+    command: ["run", "--adapter-url", "http://sdk-adapter:8080", "--mock-url", "http://test-harness:8081", "--concurrency", "10"]
     networks:
       - test-network
     depends_on:
