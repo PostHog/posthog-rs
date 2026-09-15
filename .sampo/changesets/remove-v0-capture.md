@@ -1,5 +1,5 @@
 ---
-cargo/posthog-rs: major
+cargo/posthog: major
 ---
 
 Remove the legacy V0 capture pipeline. Capture V1 (`POST /i/v1/analytics/events`) is now the only capture implementation and the `capture-v1` Cargo feature has been removed.

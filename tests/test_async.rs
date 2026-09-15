@@ -3,9 +3,9 @@
 use httpmock::prelude::*;
 use serde_json::json;
 
-async fn create_test_client(base_url: String) -> posthog_rs::Client {
-    let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
-    posthog_rs::client(options).await
+async fn create_test_client(base_url: String) -> posthog::Client {
+    let options: posthog::ClientOptions = ("test_api_key", base_url.as_str()).into();
+    posthog::client(options).await
 }
 
 #[tokio::test]
@@ -20,7 +20,7 @@ async fn test_malformed_response() {
     let client = create_test_client(server.base_url()).await;
 
     let result = client
-        .evaluate_flags("test-user", posthog_rs::EvaluateFlagsOptions::default())
+        .evaluate_flags("test-user", posthog::EvaluateFlagsOptions::default())
         .await;
 
     assert!(result.is_err());
@@ -56,21 +56,21 @@ async fn assert_disabled_client_is_noop(api_key: Option<&str>) {
         }));
     });
 
-    let mut options_builder = posthog_rs::ClientOptionsBuilder::default();
+    let mut options_builder = posthog::ClientOptionsBuilder::default();
     if let Some(api_key) = api_key {
         options_builder.api_key(api_key.to_string());
     }
     let options = options_builder.host(server.base_url()).build().unwrap();
     assert!(options.is_disabled());
 
-    let client = posthog_rs::client(options).await;
-    let event = posthog_rs::Event::new("test_event", "user1");
+    let client = posthog::client(options).await;
+    let event = posthog::Event::new("test_event", "user1");
 
     client.capture(event.clone());
     client.capture_batch(vec![event], false);
 
     let flags = client
-        .evaluate_flags("test-user", posthog_rs::EvaluateFlagsOptions::default())
+        .evaluate_flags("test-user", posthog::EvaluateFlagsOptions::default())
         .await
         .unwrap();
     assert!(flags.keys().is_empty());

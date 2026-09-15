@@ -4,7 +4,7 @@
 //! httpmock server and asserts the hook observes the failure.
 
 use httpmock::prelude::*;
-use posthog_rs::PostHogError;
+use posthog::PostHogError;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -69,7 +69,7 @@ fn local_eval_sink() -> (LocalEvalSink, impl Fn(&PostHogError<'_>) + Send + 'sta
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
-    use posthog_rs::EvaluateFlagsOptions;
+    use posthog::EvaluateFlagsOptions;
     use std::thread;
     use std::time::Duration;
 
@@ -81,8 +81,8 @@ mod blocking {
             then.status(500).body("boom");
         });
         let (recorded, hook) = flags_sink();
-        let client = posthog_rs::client(
-            posthog_rs::ClientOptionsBuilder::default()
+        let client = posthog::client(
+            posthog::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
                 .on_error(hook)
@@ -121,8 +121,8 @@ mod blocking {
             then.status(500).body("boom");
         });
         let (recorded, hook) = flags_sink();
-        let client = posthog_rs::client(
-            posthog_rs::ClientOptionsBuilder::default()
+        let client = posthog::client(
+            posthog::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
                 .secret_key("phx_test".to_string())
@@ -152,8 +152,8 @@ mod blocking {
             then.status(401).body("unauthorized");
         });
         let (recorded, hook) = local_eval_sink();
-        let _client = posthog_rs::client(
-            posthog_rs::ClientOptionsBuilder::default()
+        let _client = posthog::client(
+            posthog::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
                 .secret_key("phx_test".to_string())
@@ -192,7 +192,7 @@ mod blocking {
         // The hook needs a handle to the client that owns it; a `Weak` cell
         // breaks the ownership cycle (Client -> hook -> cell -> Client) so the
         // client still drops normally at end of test.
-        let cell: Arc<OnceLock<Weak<posthog_rs::Client>>> = Arc::new(OnceLock::new());
+        let cell: Arc<OnceLock<Weak<posthog::Client>>> = Arc::new(OnceLock::new());
         let depth = Arc::new(AtomicUsize::new(0));
         let cell_for_hook = cell.clone();
         let depth_for_hook = depth.clone();
@@ -207,8 +207,8 @@ mod blocking {
             }
         };
 
-        let client = Arc::new(posthog_rs::client(
-            posthog_rs::ClientOptionsBuilder::default()
+        let client = Arc::new(posthog::client(
+            posthog::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
                 .on_error(hook)
@@ -251,8 +251,8 @@ mod blocking {
             then.status(401).body("unauthorized");
         });
         let (recorded, hook) = local_eval_sink();
-        let _client = posthog_rs::client(
-            posthog_rs::ClientOptionsBuilder::default()
+        let _client = posthog::client(
+            posthog::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
                 .secret_key("phx_test".to_string())
@@ -281,7 +281,7 @@ mod blocking {
 #[cfg(feature = "async-client")]
 mod async_tests {
     use super::*;
-    use posthog_rs::EvaluateFlagsOptions;
+    use posthog::EvaluateFlagsOptions;
 
     #[tokio::test]
     async fn flags_failure_reports_status_endpoint_and_body() {
@@ -291,8 +291,8 @@ mod async_tests {
             then.status(500).body("boom");
         });
         let (recorded, hook) = flags_sink();
-        let client = posthog_rs::client(
-            posthog_rs::ClientOptionsBuilder::default()
+        let client = posthog::client(
+            posthog::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
                 .on_error(hook)
@@ -330,8 +330,8 @@ mod async_tests {
             then.status(500).body("boom");
         });
         let (recorded, hook) = flags_sink();
-        let client = posthog_rs::client(
-            posthog_rs::ClientOptionsBuilder::default()
+        let client = posthog::client(
+            posthog::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
                 .secret_key("phx_test".to_string())
@@ -366,8 +366,8 @@ mod async_tests {
             then.status(401).body("unauthorized");
         });
         let (recorded, hook) = local_eval_sink();
-        let _client = posthog_rs::client(
-            posthog_rs::ClientOptionsBuilder::default()
+        let _client = posthog::client(
+            posthog::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
                 .secret_key("phx_test".to_string())
@@ -396,8 +396,8 @@ mod async_tests {
             then.status(401).body("unauthorized");
         });
         let (recorded, hook) = local_eval_sink();
-        let _client = posthog_rs::client(
-            posthog_rs::ClientOptionsBuilder::default()
+        let _client = posthog::client(
+            posthog::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
                 .secret_key("phx_test".to_string())

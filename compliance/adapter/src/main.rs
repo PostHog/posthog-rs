@@ -11,7 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use posthog_rs::{CaptureCompression, Client, ClientOptionsBuilder, EvaluateFlagsOptions, Event};
+use posthog::{CaptureCompression, Client, ClientOptionsBuilder, EvaluateFlagsOptions, Event};
 
 const SUPPORTS_PARALLEL: bool = true;
 
@@ -138,14 +138,14 @@ fn compression_capability(c: CaptureCompression) -> &'static str {
     }
 }
 
-async fn build_client(options: posthog_rs::ClientOptions) -> Client {
+async fn build_client(options: posthog::ClientOptions) -> Client {
     #[cfg(feature = "async-client")]
     {
-        posthog_rs::client(options).await
+        posthog::client(options).await
     }
     #[cfg(not(feature = "async-client"))]
     {
-        posthog_rs::client(options)
+        posthog::client(options)
     }
 }
 
@@ -153,7 +153,7 @@ async fn evaluate_flags(
     client: &Client,
     distinct_id: String,
     options: EvaluateFlagsOptions,
-) -> Result<posthog_rs::FeatureFlagEvaluations, posthog_rs::Error> {
+) -> Result<posthog::FeatureFlagEvaluations, posthog::Error> {
     #[cfg(feature = "async-client")]
     {
         client.evaluate_flags(distinct_id, options).await

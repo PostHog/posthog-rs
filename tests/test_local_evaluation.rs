@@ -3,8 +3,8 @@ mod common;
 use common::default_user_agent;
 use httpmock::prelude::*;
 #[cfg(feature = "async-client")]
-use posthog_rs::{AsyncFlagPoller, ClientOptionsBuilder, EvaluateFlagsOptions};
-use posthog_rs::{
+use posthog::{AsyncFlagPoller, ClientOptionsBuilder, EvaluateFlagsOptions};
+use posthog::{
     FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache, FlagPoller, FlagValue,
     LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator, Property,
 };
@@ -415,7 +415,7 @@ async fn test_local_evaluation_with_mock_server() {
         .build()
         .unwrap();
 
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
 
     // Give it a moment to load initial flags
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -489,7 +489,7 @@ async fn test_client_adds_distinct_id_for_local_evaluation_only() {
         .build()
         .unwrap();
 
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let flags = client
@@ -582,7 +582,7 @@ async fn test_local_evaluation_returns_payloads_without_calling_flags() {
         .build()
         .unwrap();
 
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let mut options = EvaluateFlagsOptions::default();
@@ -646,7 +646,7 @@ async fn test_local_evaluation_with_mock_server_sends_default_user_agent() {
         .build()
         .unwrap();
 
-    let _client = posthog_rs::client(options).await;
+    let _client = posthog::client(options).await;
 
     // Give it a moment to load initial flags
     tokio::time::sleep(Duration::from_millis(100)).await;

@@ -111,7 +111,7 @@ pub(crate) fn get_default_user_agent() -> String {
 /// # Example
 ///
 /// ```ignore
-/// use posthog_rs::ClientOptionsBuilder;
+/// use posthog::ClientOptionsBuilder;
 ///
 /// let options = ClientOptionsBuilder::default()
 ///     .api_key("your-project-api-key".to_string())

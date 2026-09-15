@@ -96,7 +96,7 @@ const PANIC_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_milli
 /// # Examples
 ///
 /// ```
-/// use posthog_rs::{ErrorTrackingOptionsBuilder, TraceContext};
+/// use posthog::{ErrorTrackingOptionsBuilder, TraceContext};
 ///
 /// let options = ErrorTrackingOptionsBuilder::default()
 ///     .capture_stacktrace(true)
@@ -383,7 +383,7 @@ fn build_panic_event(
 /// # Examples
 ///
 /// ```
-/// use posthog_rs::CaptureExceptionOptions;
+/// use posthog::CaptureExceptionOptions;
 ///
 /// let options = CaptureExceptionOptions::new()
 ///     .distinct_id("user-123")
@@ -395,7 +395,7 @@ fn build_panic_event(
 ///     )
 ///     .fingerprint("checkout-error")
 ///     .level("warning");
-/// # Ok::<(), posthog_rs::Error>(())
+/// # Ok::<(), posthog::Error>(())
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct CaptureExceptionOptions {
@@ -1344,7 +1344,7 @@ fn is_panic_dispatcher_frame(function: &str) -> bool {
 fn is_internal_capture_frame(function: &str) -> bool {
     // Demanglers differ on qualified-path rendering across toolchain versions:
     // older output is `Exception::from_error`, newer output wraps the type as
-    // `<posthog_rs::error_tracking::Exception>::from_error::<T>`. Strip the
+    // `<posthog::error_tracking::Exception>::from_error::<T>`. Strip the
     // angle brackets before matching so both forms hit.
     let function: String = function.replace(['<', '>'], "");
     function.starts_with("backtrace::")
@@ -1632,7 +1632,7 @@ fn default_in_app_function(function: &str) -> bool {
             | "futures_core"
             | "futures_util"
             | "log"
-            | "posthog_rs"
+            | "posthog"
             | "reqwest"
             | "std"
             | "stable_eyre"
@@ -2172,8 +2172,8 @@ mod tests {
             "rust_begin_unwind",
             "__rust_try",
             "backtrace::backtrace::trace",
-            "posthog_rs::error_tracking::capture_panic",
-            "posthog_rs::error_tracking::install_hook::{{closure}}",
+            "posthog::error_tracking::capture_panic",
+            "posthog::error_tracking::install_hook::{{closure}}",
             "core::ops::function::FnOnce::call_once",
             "tokio::runtime::task::raw::poll",
             "futures_util::future::FutureExt::poll",
@@ -2233,10 +2233,10 @@ mod tests {
         // `<path::Type>::method::<T>` — the strip must catch both, or an SDK
         // frame survives at the crash-site end of the canonical order.
         for name in [
-            "posthog_rs::error_tracking::Exception::from_error",
-            "<posthog_rs::error_tracking::Exception>::from_error::<posthog_rs::error_tracking::tests::OuterError>",
-            "<posthog_rs::error_tracking::Exception>::from_message",
-            "<posthog_rs::client::Client>::capture_exception::<E>",
+            "posthog::error_tracking::Exception::from_error",
+            "<posthog::error_tracking::Exception>::from_error::<posthog::error_tracking::tests::OuterError>",
+            "<posthog::error_tracking::Exception>::from_message",
+            "<posthog::client::Client>::capture_exception::<E>",
         ] {
             assert!(is_internal_capture_frame(name), "should strip {name:?}");
         }
@@ -2575,9 +2575,7 @@ mod tests {
         assert!(options.is_in_app_frame(None, Some("checkout_service::submit")));
         assert!(!options.is_in_app_frame(None, Some("std::rt::lang_start")));
         assert!(!options.is_in_app_frame(None, Some("core::ops::function::FnOnce::call_once")));
-        assert!(
-            !options.is_in_app_frame(None, Some("posthog_rs::client::Client::capture_exception"))
-        );
+        assert!(!options.is_in_app_frame(None, Some("posthog::client::Client::capture_exception")));
         assert!(!options.is_in_app_frame(None, Some("_main")));
 
         let options = ErrorTrackingOptionsBuilder::default()
