@@ -254,7 +254,7 @@ impl ErrorTrackingOptionsBuilder {
 /// disabled client installs nothing and returns `Ok(())`.
 #[cfg(test)]
 fn install_panic_hook(client: Arc<Client>) -> Result<(), Error> {
-    if client.is_disabled() {
+    if client.is_disabled() || !client.has_background_transport() {
         return Ok(());
     }
     install_hook(move |panic_info| capture_panic(&client, panic_info))
@@ -281,9 +281,13 @@ pub(crate) fn maybe_install_global_panic_hook() {
 
 /// Whether `init_global` should auto-install the panic hook for this client.
 /// A disabled client can't send, so it must not latch the single process-wide
-/// hook.
+/// hook. Neither can a client built with `background_transport(false)`: the
+/// hook enqueues onto the worker, so without one the panic event would be
+/// built and dropped.
 fn should_capture_global_panics(client: &Client) -> bool {
-    !client.is_disabled() && client.error_tracking_options().capture_panics()
+    !client.is_disabled()
+        && client.has_background_transport()
+        && client.error_tracking_options().capture_panics()
 }
 
 /// Latch the single process-wide panic hook, then install one that runs
@@ -333,7 +337,7 @@ fn capture_panic(client: &Client, panic_info: &panic::PanicInfo<'_>) -> Result<(
     // by the worker that's busy running this hook — and would recurse: the
     // captured `$exception` re-enters `before_send` on the worker and panics
     // again. Skip it.
-    if client.is_disabled() || client.on_transport_worker() {
+    if client.is_disabled() || !client.has_background_transport() || client.on_transport_worker() {
         return Ok(());
     }
     let et_options = client.error_tracking_options();

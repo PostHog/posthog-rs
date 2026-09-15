@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "error-tracking")]
 use std::error::Error as StdError;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Once, OnceLock};
 use std::time::Duration;
 
 use reqwest::{header::CONTENT_TYPE, header::USER_AGENT, Client as HttpClient};
@@ -61,8 +61,13 @@ pub struct Client {
     local_evaluator: Option<LocalEvaluator>,
     _flag_poller: Option<AsyncFlagPoller>,
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
-    /// Background event transport. `None` for disabled clients.
+    /// Background event transport. `None` for disabled clients and when
+    /// `background_transport` is off.
     transport: Option<Arc<TransportHandle>>,
+    /// Warn once when a fire-and-forget capture is dropped because the
+    /// background worker was disabled, so the drop is discoverable without
+    /// logging per event.
+    no_transport_warning: Once,
 }
 
 /// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
@@ -128,10 +133,15 @@ impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
 /// must be awaited. Passing a blank API key creates a disabled client.
 pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let options = options.into().sanitize();
-    let client = HttpClient::builder()
-        .timeout(Duration::from_secs(options.request_timeout_seconds))
-        .build()
-        .unwrap(); // Unwrap here is as safe as `HttpClient::new`
+    // A caller-supplied client is used as-is: it owns its own timeout, TLS
+    // backend, proxies and pool, so `request_timeout_seconds` is not applied.
+    let client = match options.http_client.clone() {
+        Some(client) => client,
+        None => HttpClient::builder()
+            .timeout(Duration::from_secs(options.request_timeout_seconds))
+            .build()
+            .unwrap(), // Unwrap here is as safe as `HttpClient::new`
+    };
 
     let (local_evaluator, flag_poller) =
         if options.enable_local_evaluation && !options.is_disabled() {
@@ -148,6 +158,9 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
                 let mut poller = AsyncFlagPoller::new(config, cache.clone());
                 poller.set_on_error(options.on_error.clone());
+                if let Some(http_client) = options.http_client.clone() {
+                    poller.set_http_client(http_client);
+                }
                 poller.start().await;
 
                 (Some(LocalEvaluator::new(cache)), Some(poller))
@@ -161,7 +174,9 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
             (None, None)
         };
 
-    let transport = if options.is_disabled() {
+    // No worker thread (and no blocking HTTP client) when the client is
+    // disabled or the caller opted out of background batching.
+    let transport = if options.is_disabled() || !options.background_transport {
         None
     } else {
         Some(Arc::new(TransportHandle::spawn(options.clone())))
@@ -174,6 +189,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         _flag_poller: flag_poller,
         flag_event_host: OnceLock::new(),
         transport,
+        no_transport_warning: Once::new(),
     }
 }
 
@@ -191,12 +207,32 @@ impl Client {
     /// batches, sends, and retries it. Returns once the event is queued — not
     /// once it is delivered, and delivery failures are not surfaced to the
     /// caller. Disabled clients and a full queue drop the event (the latter
-    /// with a single warning).
+    /// with a single warning). Clients built with `background_transport(false)`
+    /// have no worker, so the event is dropped with a single warning; use
+    /// [`Client::capture_immediate`] instead.
     #[instrument(skip(self, event), level = "debug")]
     pub fn capture(&self, event: Event) {
-        if let Some(transport) = &self.transport {
-            transport.enqueue(event);
+        match &self.transport {
+            Some(transport) => transport.enqueue(event),
+            None => self.warn_if_no_background_transport(),
         }
+    }
+
+    /// Warn once that a fire-and-forget capture was dropped for want of a
+    /// background worker. Stays silent for disabled clients, where dropping
+    /// events is the documented point of the option.
+    fn warn_if_no_background_transport(&self) {
+        if self.options.is_disabled() {
+            return;
+        }
+        self.no_transport_warning.call_once(|| {
+            warn!(
+                "dropping fire-and-forget event: this client was built with \
+                 background_transport(false), so there is no batching worker. \
+                 Use capture_immediate/capture_batch_immediate instead. \
+                 This warning is logged once."
+            );
+        });
     }
 
     /// Merge two distinct IDs onto the same person by sending a `$create_alias`
@@ -306,6 +342,15 @@ impl Client {
     #[cfg(feature = "error-tracking")]
     pub(crate) fn is_disabled(&self) -> bool {
         self.options.is_disabled()
+    }
+
+    /// Whether a background worker exists to accept fire-and-forget events.
+    /// False for disabled clients and for `background_transport(false)`, where
+    /// the panic hook must not latch the process-wide hook only to drop the
+    /// `$exception` it builds.
+    #[cfg(feature = "error-tracking")]
+    pub(crate) fn has_background_transport(&self) -> bool {
+        self.transport.is_some()
     }
 
     /// The client's Error Tracking options, used by the panic hook to build
@@ -477,13 +522,15 @@ impl Client {
     /// rather than atomically, so if the bounded queue fills partway through, the
     /// remaining events are dropped (with the usual single full-queue warning).
     pub fn capture_batch(&self, events: Vec<Event>, historical_migration: bool) {
-        if let Some(transport) = &self.transport {
-            if historical_migration {
-                transport.enqueue_historical(events);
-            } else {
-                for event in events {
-                    transport.enqueue(event);
-                }
+        let Some(transport) = &self.transport else {
+            self.warn_if_no_background_transport();
+            return;
+        };
+        if historical_migration {
+            transport.enqueue_historical(events);
+        } else {
+            for event in events {
+                transport.enqueue(event);
             }
         }
     }
@@ -1502,6 +1549,7 @@ mod minimal_gate_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            no_transport_warning: Once::new(),
         };
         client
             .flag_event_host
@@ -1602,6 +1650,7 @@ mod local_payload_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            no_transport_warning: Once::new(),
         };
         client
             .flag_event_host

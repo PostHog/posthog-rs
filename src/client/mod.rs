@@ -141,6 +141,36 @@ pub struct ClientOptions {
     #[builder(default = "30")]
     request_timeout_seconds: u64,
 
+    /// Custom async [`reqwest::Client`] used for every async request the SDK
+    /// makes: capture, remote `/flags`, and the local-evaluation poller.
+    ///
+    /// Supply one to own the transport configuration yourself — TLS backend and
+    /// crypto provider, proxies, connection pool, and default headers. The
+    /// client is used exactly as given, so `request_timeout_seconds` is **not**
+    /// applied to it; configure timeouts on the client you pass in. When `None`
+    /// (default), the SDK builds its own client with `request_timeout_seconds`.
+    ///
+    /// Only used by the async client (default `async-client` feature); the
+    /// blocking client uses `blocking_http_client`.
+    #[builder(setter(into, strip_option), default)]
+    // The builder setter stays available in every feature combination so the
+    // option is not a compile error to set, but only the async client reads it.
+    #[cfg_attr(not(feature = "async-client"), allow(dead_code))]
+    pub(crate) http_client: Option<reqwest::Client>,
+
+    /// Custom [`reqwest::blocking::Client`] used for every blocking request the
+    /// SDK makes: the background capture transport (used by both the async and
+    /// blocking clients), the blocking client's inline requests, and the
+    /// blocking local-evaluation poller.
+    ///
+    /// Supply one to own the transport configuration yourself — TLS backend and
+    /// crypto provider, proxies, connection pool, and default headers. The
+    /// client is used exactly as given, so `request_timeout_seconds` is **not**
+    /// applied to it; configure timeouts on the client you pass in. When `None`
+    /// (default), the SDK builds its own client with `request_timeout_seconds`.
+    #[builder(setter(into, strip_option), default)]
+    pub(crate) blocking_http_client: Option<reqwest::blocking::Client>,
+
     /// Secret key used for local feature flag evaluation and remote config.
     ///
     /// Accepts either a Personal API Key (`phx_...`) or a Project Secret API
@@ -161,6 +191,14 @@ pub struct ClientOptions {
     /// tests.
     #[builder(default = "false")]
     disabled: bool,
+
+    /// Start the background batching worker used by `capture`/`capture_batch`/
+    /// `alias`/`group_identify`. When `false`, no worker thread or blocking HTTP
+    /// client is created: fire-and-forget captures are dropped (one warn), while
+    /// `capture_immediate`/`capture_batch_immediate` and feature-flag calls work
+    /// normally and `Drop`/`shutdown` never block.
+    #[builder(default = "true")]
+    pub(crate) background_transport: bool,
 
     /// Disable automatic GeoIP enrichment for capture and flag requests.
     #[builder(default = "false")]
