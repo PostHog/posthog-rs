@@ -265,6 +265,18 @@ pub struct LocalEvaluationConfig {
     pub request_timeout: Duration,
 }
 
+/// Leave the poller disabled when HTTP initialization fails.
+fn http_client_or_warn<C, E: std::fmt::Debug>(result: Result<C, E>) -> Option<C> {
+    match result {
+        Ok(client) => Some(client),
+        Err(err) => {
+            // Debug includes the underlying builder error.
+            warn!(error = ?err, "Failed to build HTTP client; flag polling is disabled");
+            None
+        }
+    }
+}
+
 /// Synchronous poller for feature flag definitions.
 ///
 /// Runs a background thread that periodically fetches flag definitions from
@@ -274,7 +286,9 @@ pub struct LocalEvaluationConfig {
 pub struct FlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
-    client: reqwest::blocking::Client,
+    /// `None` when the HTTP client could not be built, which leaves the poller
+    /// unable to fetch anything.
+    client: Option<reqwest::blocking::Client>,
     stop_signal: Arc<AtomicBool>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Observability hooks, injected by the client builder before `start`.
@@ -286,15 +300,19 @@ pub struct FlagPoller {
 impl FlagPoller {
     /// Create a synchronous flag definition poller.
     ///
+    /// If the HTTP client cannot be built, logs a warning and leaves polling
+    /// disabled. [`Self::load_flags`] then returns [`Error::Connection`].
+    ///
     /// # Parameters
     ///
     /// - `config`: Credentials, host, polling interval, and request timeout.
     /// - `cache`: Shared cache updated by the poller.
     pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(config.request_timeout)
-            .build()
-            .unwrap();
+        let client = http_client_or_warn(
+            reqwest::blocking::Client::builder()
+                .timeout(config.request_timeout)
+                .build(),
+        );
 
         Self {
             config,
@@ -304,6 +322,13 @@ impl FlagPoller {
             thread_handle: None,
             on_error: Vec::new(),
         }
+    }
+
+    /// The HTTP client, or [`Error::Connection`] when it could not be built.
+    fn http(&self) -> Result<&reqwest::blocking::Client, Error> {
+        self.client.as_ref().ok_or_else(|| {
+            Error::Connection("HTTP client is unavailable; flag polling is disabled".to_string())
+        })
     }
 
     /// Register `on_error` hooks. Called by the client builder before
@@ -319,6 +344,13 @@ impl FlagPoller {
     /// Performs an initial synchronous load, then refreshes definitions in the
     /// background until [`FlagPoller::stop`] is called or the poller is dropped.
     pub fn start(&mut self) {
+        // Without an HTTP client the thread could only log failures, so keep
+        // the poller stopped instead of starting it.
+        let Some(client) = self.client.clone() else {
+            warn!("No HTTP client; not starting the feature flag poller");
+            return;
+        };
+
         info!(
             poll_interval_secs = self.config.poll_interval.as_secs(),
             "Starting feature flag poller"
@@ -336,11 +368,6 @@ impl FlagPoller {
         let on_error = self.on_error.clone();
 
         let handle = std::thread::spawn(move || {
-            let client = reqwest::blocking::Client::builder()
-                .timeout(config.request_timeout)
-                .build()
-                .unwrap();
-
             let mut last_etag: Option<String> = None;
 
             loop {
@@ -421,7 +448,7 @@ impl FlagPoller {
         );
 
         let response = match self
-            .client
+            .http()?
             .get(&url)
             .header(
                 "Authorization",
@@ -488,7 +515,9 @@ impl Drop for FlagPoller {
 pub struct AsyncFlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
-    client: reqwest::Client,
+    /// `None` when the HTTP client could not be built, which leaves the poller
+    /// unable to fetch anything.
+    client: Option<reqwest::Client>,
     stop_signal: Arc<AtomicBool>,
     task_handle: Option<tokio::task::JoinHandle<()>>,
     is_running: Arc<tokio::sync::RwLock<bool>>,
@@ -502,15 +531,19 @@ pub struct AsyncFlagPoller {
 impl AsyncFlagPoller {
     /// Create an asynchronous flag definition poller.
     ///
+    /// If the HTTP client cannot be built, logs a warning and leaves polling
+    /// disabled. [`Self::load_flags`] then returns [`Error::Connection`].
+    ///
     /// # Parameters
     ///
     /// - `config`: Credentials, host, polling interval, and request timeout.
     /// - `cache`: Shared cache updated by the poller.
     pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(config.request_timeout)
-            .build()
-            .unwrap();
+        let client = http_client_or_warn(
+            reqwest::Client::builder()
+                .timeout(config.request_timeout)
+                .build(),
+        );
 
         Self {
             config,
@@ -521,6 +554,13 @@ impl AsyncFlagPoller {
             is_running: Arc::new(tokio::sync::RwLock::new(false)),
             on_error: Vec::new(),
         }
+    }
+
+    /// The HTTP client, or [`Error::Connection`] when it could not be built.
+    fn http(&self) -> Result<&reqwest::Client, Error> {
+        self.client.as_ref().ok_or_else(|| {
+            Error::Connection("HTTP client is unavailable; flag polling is disabled".to_string())
+        })
     }
 
     /// Register `on_error` hooks. Called by the client builder before
@@ -535,6 +575,13 @@ impl AsyncFlagPoller {
     /// background until [`AsyncFlagPoller::stop`] is called or the poller is
     /// dropped.
     pub async fn start(&mut self) {
+        // Without an HTTP client the task could only log failures, so keep the
+        // poller stopped instead of starting it.
+        let Some(client) = self.client.clone() else {
+            warn!("No HTTP client; not starting the feature flag poller");
+            return;
+        };
+
         // Check if already running
         {
             let mut is_running = self.is_running.write().await;
@@ -560,7 +607,6 @@ impl AsyncFlagPoller {
         let cache = self.cache.clone();
         let stop_signal = self.stop_signal.clone();
         let is_running = self.is_running.clone();
-        let client = self.client.clone();
         let on_error = self.on_error.clone();
 
         let task = tokio::spawn(async move {
@@ -651,7 +697,7 @@ impl AsyncFlagPoller {
         );
 
         let response = match self
-            .client
+            .http()?
             .get(&url)
             .header(
                 "Authorization",
@@ -963,6 +1009,43 @@ mod tests {
             cohorts: HashMap::new(),
             minimal_flag_called_events: false,
         }
+    }
+
+    fn poller_config() -> LocalEvaluationConfig {
+        LocalEvaluationConfig {
+            personal_api_key: "phx_test".to_string(),
+            project_api_key: "phc_test".to_string(),
+            api_host: "http://localhost:1".to_string(),
+            poll_interval: Duration::from_secs(30),
+            request_timeout: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn a_poller_without_an_http_client_reports_an_error_and_does_not_start() {
+        let mut poller = FlagPoller::new(poller_config(), FlagCache::new());
+        poller.client = None;
+
+        assert!(matches!(poller.load_flags(), Err(Error::Connection(_))));
+
+        poller.start();
+        assert!(poller.thread_handle.is_none());
+    }
+
+    #[cfg(feature = "async-client")]
+    #[tokio::test]
+    async fn an_async_poller_without_an_http_client_reports_an_error_and_does_not_start() {
+        let mut poller = AsyncFlagPoller::new(poller_config(), FlagCache::new());
+        poller.client = None;
+
+        assert!(matches!(
+            poller.load_flags().await,
+            Err(Error::Connection(_))
+        ));
+
+        poller.start().await;
+        assert!(poller.task_handle.is_none());
+        assert!(!poller.is_running().await);
     }
 
     #[test]

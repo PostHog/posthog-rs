@@ -60,7 +60,7 @@ jobs:
     if: always() && needs.check-changesets.outputs.has-changesets == 'true'
     environment: "Release"
     permissions:
-      contents: write
+      contents: read
       actions: write
       id-token: write
     steps:
