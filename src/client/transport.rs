@@ -713,7 +713,11 @@ fn run_worker(
     let shutdown_timeout =
         Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT);
     let mut buffer = LiveBuffer::for_lane(&lane);
-    let mut pipeline = Pipeline::new(&options, lane, Arc::clone(&clock), len);
+    let Some(mut pipeline) = Pipeline::new(&options, lane, Arc::clone(&clock), Arc::clone(&len))
+    else {
+        drain_pending_completions(&rx, &len);
+        return;
+    };
 
     let mut buffer_since: Option<Instant> = None;
     // Caller-formed historical batches awaiting their own (chunked) send. Queued
@@ -952,6 +956,25 @@ fn drain_historical(
     }
 }
 
+/// Build the worker's blocking HTTP client.
+///
+/// `build()` is fallible — it sets up the TLS trust store, and the blocking
+/// client also spawns its own thread and runtime — and `Default` is not a safe
+/// fallback: it calls `Client::new`, which panics on exactly those failures.
+/// Return `None` instead so the worker can stop without panicking.
+fn build_http(options: &ClientOptions) -> Option<reqwest::blocking::Client> {
+    match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(options.request_timeout_seconds))
+        .build()
+    {
+        Ok(http) => Some(http),
+        Err(e) => {
+            warn!("posthog-rs: failed to build the transport HTTP client: {e:?}");
+            None
+        }
+    }
+}
+
 // ===========================================================================
 // Capture pipeline
 // ===========================================================================
@@ -985,13 +1008,10 @@ impl Pipeline {
         lane: LaneConfig,
         clock: Arc<dyn Clock>,
         len: Arc<AtomicUsize>,
-    ) -> Self {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build()
-            .unwrap_or_default();
+    ) -> Option<Self> {
+        let http = build_http(options)?;
         let url = options.endpoints().build_url(lane.endpoint);
-        Self {
+        Some(Self {
             http,
             options: options.clone(),
             lane,
@@ -999,7 +1019,7 @@ impl Pipeline {
             clock,
             len,
             retries: VecDeque::new(),
-        }
+        })
     }
 
     /// The codec for this lane's request bodies, from the lane's client option.

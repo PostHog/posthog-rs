@@ -1,7 +1,7 @@
 use crate::client::{apply_on_error_hooks, get_default_user_agent, OnErrorHook};
 use crate::feature_flags::{
-    match_feature_flag, match_feature_flag_with_context, CohortDefinition, EvaluationContext,
-    FeatureFlag, FlagValue, InconclusiveMatchError,
+    match_feature_flag_with_context, match_feature_flag_with_version, CohortDefinition,
+    EvaluationContext, FeatureFlag, FlagValue, InconclusiveMatchError,
 };
 use crate::{Error, LocalEvaluationFailure, PostHogError};
 use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH, USER_AGENT};
@@ -72,6 +72,14 @@ pub struct LocalEvaluationResponse {
     /// strict property allowlist. Absent fails safe to `false` (full event).
     #[serde(default)]
     pub minimal_flag_called_events: bool,
+    /// Property equality semantics for this snapshot. Exactly `2` selects
+    /// explicit matching; absent metadata and other versions use legacy matching.
+    #[serde(default = "legacy_property_matching_version")]
+    pub property_matching_version: i64,
+}
+
+fn legacy_property_matching_version() -> i64 {
+    1
 }
 
 impl LocalEvaluationResponse {
@@ -85,6 +93,7 @@ impl LocalEvaluationResponse {
             group_type_mapping: HashMap::new(),
             cohorts: HashMap::new(),
             minimal_flag_called_events: false,
+            property_matching_version: legacy_property_matching_version(),
         }
     }
 }
@@ -120,87 +129,34 @@ pub struct Cohort {
 /// (which updates it) and the evaluator (which reads from it).
 #[derive(Clone)]
 pub struct FlagCache {
-    flags: Arc<RwLock<HashMap<String, FeatureFlag>>>,
-    group_type_mapping: Arc<RwLock<HashMap<String, String>>>,
-    cohorts: Arc<RwLock<HashMap<String, Cohort>>>,
-    /// The `minimal_flag_called_events` gate from the most recent definitions
-    /// poll. Read once when a local evaluation succeeds and pinned onto that
-    /// flag's record, so the minimization decision reflects the definitions
-    /// snapshot that produced the value.
-    minimal_flag_called_events: Arc<AtomicBool>,
+    // One lock keeps definitions and their matching version together, including
+    // when a poll replaces them while an evaluation follows cohort/dependency leaves.
+    snapshot: Arc<RwLock<FlagSnapshot>>,
 }
 
-impl Default for FlagCache {
+struct FlagSnapshot {
+    flags: HashMap<String, FeatureFlag>,
+    group_type_mapping: HashMap<String, String>,
+    cohorts: HashMap<String, Cohort>,
+    minimal_flag_called_events: bool,
+    property_matching_version: i64,
+}
+
+impl Default for FlagSnapshot {
     fn default() -> Self {
-        Self::new()
+        Self {
+            flags: HashMap::new(),
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+            minimal_flag_called_events: false,
+            property_matching_version: legacy_property_matching_version(),
+        }
     }
 }
 
-impl FlagCache {
-    /// Create an empty shared flag cache.
-    pub fn new() -> Self {
-        Self {
-            flags: Arc::new(RwLock::new(HashMap::new())),
-            group_type_mapping: Arc::new(RwLock::new(HashMap::new())),
-            cohorts: Arc::new(RwLock::new(HashMap::new())),
-            minimal_flag_called_events: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// Replace cached flags, group type mappings, and cohorts from a local
-    /// evaluation API response.
-    pub fn update(&self, response: LocalEvaluationResponse) {
-        let flag_count = response.flags.len();
-        let mut flags = self.flags.write().unwrap();
-        flags.clear();
-        for flag in response.flags {
-            flags.insert(flag.key.clone(), flag);
-        }
-
-        let mut mapping = self.group_type_mapping.write().unwrap();
-        *mapping = response.group_type_mapping;
-
-        let mut cohorts = self.cohorts.write().unwrap();
-        *cohorts = response.cohorts;
-
-        self.minimal_flag_called_events
-            .store(response.minimal_flag_called_events, Ordering::Relaxed);
-
-        debug!(flag_count, "Updated flag cache");
-    }
-
-    /// Whether the most recent definitions poll enabled minimal
-    /// `$feature_flag_called` events. `false` until definitions load, so a
-    /// missing signal always yields full events.
-    pub fn minimal_flag_called_events(&self) -> bool {
-        self.minimal_flag_called_events.load(Ordering::Relaxed)
-    }
-
-    /// Return a cached feature flag by key.
-    pub fn get_flag(&self, key: &str) -> Option<FeatureFlag> {
-        self.flags.read().unwrap().get(key).cloned()
-    }
-
-    /// Return all cached feature flag definitions.
-    pub fn get_all_flags(&self) -> Vec<FeatureFlag> {
-        self.flags.read().unwrap().values().cloned().collect()
-    }
-
-    /// Return a cached cohort by ID.
-    pub fn get_cohort(&self, id: &str) -> Option<Cohort> {
-        self.cohorts.read().unwrap().get(id).cloned()
-    }
-
-    /// Return all cached cohorts, keyed by cohort ID.
-    pub fn get_all_cohorts(&self) -> HashMap<String, Cohort> {
-        self.cohorts.read().unwrap().clone()
-    }
-
-    /// Get all cohorts as CohortDefinitions for evaluation context
-    pub fn get_cohort_definitions(&self) -> HashMap<String, CohortDefinition> {
+impl FlagSnapshot {
+    fn cohort_definitions(&self) -> HashMap<String, CohortDefinition> {
         self.cohorts
-            .read()
-            .unwrap()
             .iter()
             .map(|(k, v)| {
                 (
@@ -213,22 +169,97 @@ impl FlagCache {
             })
             .collect()
     }
+}
+
+impl Default for FlagCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FlagCache {
+    /// Create an empty shared flag cache.
+    pub fn new() -> Self {
+        Self {
+            snapshot: Arc::new(RwLock::new(FlagSnapshot::default())),
+        }
+    }
+
+    /// Replace cached flags, group type mappings, and cohorts from a local
+    /// evaluation API response.
+    pub fn update(&self, response: LocalEvaluationResponse) {
+        let flag_count = response.flags.len();
+        let snapshot = FlagSnapshot {
+            flags: response
+                .flags
+                .into_iter()
+                .map(|flag| (flag.key.clone(), flag))
+                .collect(),
+            group_type_mapping: response.group_type_mapping,
+            cohorts: response.cohorts,
+            minimal_flag_called_events: response.minimal_flag_called_events,
+            property_matching_version: response.property_matching_version,
+        };
+        *self.snapshot.write().unwrap() = snapshot;
+
+        debug!(flag_count, "Updated flag cache");
+    }
+
+    /// Whether the most recent definitions poll enabled minimal
+    /// `$feature_flag_called` events. `false` until definitions load, so a
+    /// missing signal always yields full events.
+    pub fn minimal_flag_called_events(&self) -> bool {
+        self.snapshot.read().unwrap().minimal_flag_called_events
+    }
+
+    /// Return a cached feature flag by key.
+    pub fn get_flag(&self, key: &str) -> Option<FeatureFlag> {
+        self.snapshot.read().unwrap().flags.get(key).cloned()
+    }
+
+    /// Return all cached feature flag definitions.
+    pub fn get_all_flags(&self) -> Vec<FeatureFlag> {
+        self.snapshot
+            .read()
+            .unwrap()
+            .flags
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Return a cached cohort by ID.
+    pub fn get_cohort(&self, id: &str) -> Option<Cohort> {
+        self.snapshot.read().unwrap().cohorts.get(id).cloned()
+    }
+
+    /// Return all cached cohorts, keyed by cohort ID.
+    pub fn get_all_cohorts(&self) -> HashMap<String, Cohort> {
+        self.snapshot.read().unwrap().cohorts.clone()
+    }
+
+    /// Get all cohorts as CohortDefinitions for evaluation context
+    pub fn get_cohort_definitions(&self) -> HashMap<String, CohortDefinition> {
+        self.snapshot.read().unwrap().cohort_definitions()
+    }
 
     /// Get all flags as a HashMap for evaluation context
     pub fn get_flags_map(&self) -> HashMap<String, FeatureFlag> {
-        self.flags.read().unwrap().clone()
+        self.snapshot.read().unwrap().flags.clone()
     }
 
     /// Get the group type mapping (group type index → group type name).
     pub fn get_group_type_mapping(&self) -> HashMap<String, String> {
-        self.group_type_mapping.read().unwrap().clone()
+        self.snapshot.read().unwrap().group_type_mapping.clone()
     }
 
     /// Remove all cached flags, group type mappings, and cohorts.
     pub fn clear(&self) {
-        self.flags.write().unwrap().clear();
-        self.group_type_mapping.write().unwrap().clear();
-        self.cohorts.write().unwrap().clear();
+        let mut snapshot = self.snapshot.write().unwrap();
+        snapshot.flags.clear();
+        snapshot.group_type_mapping.clear();
+        snapshot.cohorts.clear();
+        snapshot.property_matching_version = legacy_property_matching_version();
     }
 }
 
@@ -254,6 +285,18 @@ pub struct LocalEvaluationConfig {
     pub request_timeout: Duration,
 }
 
+/// Leave the poller disabled when HTTP initialization fails.
+fn http_client_or_warn<C, E: std::fmt::Debug>(result: Result<C, E>) -> Option<C> {
+    match result {
+        Ok(client) => Some(client),
+        Err(err) => {
+            // Debug includes the underlying builder error.
+            warn!(error = ?err, "Failed to build HTTP client; flag polling is disabled");
+            None
+        }
+    }
+}
+
 /// Synchronous poller for feature flag definitions.
 ///
 /// Runs a background thread that periodically fetches flag definitions from
@@ -263,7 +306,9 @@ pub struct LocalEvaluationConfig {
 pub struct FlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
-    client: reqwest::blocking::Client,
+    /// `None` when the HTTP client could not be built, which leaves the poller
+    /// unable to fetch anything.
+    client: Option<reqwest::blocking::Client>,
     stop_signal: Arc<AtomicBool>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Observability hooks, injected by the client builder before `start`.
@@ -275,15 +320,19 @@ pub struct FlagPoller {
 impl FlagPoller {
     /// Create a synchronous flag definition poller.
     ///
+    /// If the HTTP client cannot be built, logs a warning and leaves polling
+    /// disabled. [`Self::load_flags`] then returns [`Error::Connection`].
+    ///
     /// # Parameters
     ///
     /// - `config`: Credentials, host, polling interval, and request timeout.
     /// - `cache`: Shared cache updated by the poller.
     pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(config.request_timeout)
-            .build()
-            .unwrap();
+        let client = http_client_or_warn(
+            reqwest::blocking::Client::builder()
+                .timeout(config.request_timeout)
+                .build(),
+        );
 
         Self {
             config,
@@ -293,6 +342,13 @@ impl FlagPoller {
             thread_handle: None,
             on_error: Vec::new(),
         }
+    }
+
+    /// The HTTP client, or [`Error::Connection`] when it could not be built.
+    fn http(&self) -> Result<&reqwest::blocking::Client, Error> {
+        self.client.as_ref().ok_or_else(|| {
+            Error::Connection("HTTP client is unavailable; flag polling is disabled".to_string())
+        })
     }
 
     /// Register `on_error` hooks. Called by the client builder before
@@ -308,6 +364,13 @@ impl FlagPoller {
     /// Performs an initial synchronous load, then refreshes definitions in the
     /// background until [`FlagPoller::stop`] is called or the poller is dropped.
     pub fn start(&mut self) {
+        // Without an HTTP client the thread could only log failures, so keep
+        // the poller stopped instead of starting it.
+        let Some(client) = self.client.clone() else {
+            warn!("No HTTP client; not starting the feature flag poller");
+            return;
+        };
+
         info!(
             poll_interval_secs = self.config.poll_interval.as_secs(),
             "Starting feature flag poller"
@@ -325,11 +388,6 @@ impl FlagPoller {
         let on_error = self.on_error.clone();
 
         let handle = std::thread::spawn(move || {
-            let client = reqwest::blocking::Client::builder()
-                .timeout(config.request_timeout)
-                .build()
-                .unwrap();
-
             let mut last_etag: Option<String> = None;
 
             loop {
@@ -407,7 +465,7 @@ impl FlagPoller {
         );
 
         let response = match self
-            .client
+            .http()?
             .get(&url)
             .header(
                 "Authorization",
@@ -474,7 +532,9 @@ impl Drop for FlagPoller {
 pub struct AsyncFlagPoller {
     config: LocalEvaluationConfig,
     cache: FlagCache,
-    client: reqwest::Client,
+    /// `None` when the HTTP client could not be built, which leaves the poller
+    /// unable to fetch anything.
+    client: Option<reqwest::Client>,
     stop_signal: Arc<AtomicBool>,
     task_handle: Option<tokio::task::JoinHandle<()>>,
     is_running: Arc<tokio::sync::RwLock<bool>>,
@@ -488,15 +548,19 @@ pub struct AsyncFlagPoller {
 impl AsyncFlagPoller {
     /// Create an asynchronous flag definition poller.
     ///
+    /// If the HTTP client cannot be built, logs a warning and leaves polling
+    /// disabled. [`Self::load_flags`] then returns [`Error::Connection`].
+    ///
     /// # Parameters
     ///
     /// - `config`: Credentials, host, polling interval, and request timeout.
     /// - `cache`: Shared cache updated by the poller.
     pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(config.request_timeout)
-            .build()
-            .unwrap();
+        let client = http_client_or_warn(
+            reqwest::Client::builder()
+                .timeout(config.request_timeout)
+                .build(),
+        );
 
         Self {
             config,
@@ -507,6 +571,13 @@ impl AsyncFlagPoller {
             is_running: Arc::new(tokio::sync::RwLock::new(false)),
             on_error: Vec::new(),
         }
+    }
+
+    /// The HTTP client, or [`Error::Connection`] when it could not be built.
+    fn http(&self) -> Result<&reqwest::Client, Error> {
+        self.client.as_ref().ok_or_else(|| {
+            Error::Connection("HTTP client is unavailable; flag polling is disabled".to_string())
+        })
     }
 
     /// Register `on_error` hooks. Called by the client builder before
@@ -521,6 +592,13 @@ impl AsyncFlagPoller {
     /// background until [`AsyncFlagPoller::stop`] is called or the poller is
     /// dropped.
     pub async fn start(&mut self) {
+        // Without an HTTP client the task could only log failures, so keep the
+        // poller stopped instead of starting it.
+        let Some(client) = self.client.clone() else {
+            warn!("No HTTP client; not starting the feature flag poller");
+            return;
+        };
+
         // Check if already running
         {
             let mut is_running = self.is_running.write().await;
@@ -546,7 +624,6 @@ impl AsyncFlagPoller {
         let cache = self.cache.clone();
         let stop_signal = self.stop_signal.clone();
         let is_running = self.is_running.clone();
-        let client = self.client.clone();
         let on_error = self.on_error.clone();
 
         let task = tokio::spawn(async move {
@@ -637,7 +714,7 @@ impl AsyncFlagPoller {
         );
 
         let response = match self
-            .client
+            .http()?
             .get(&url)
             .header(
                 "Authorization",
@@ -771,23 +848,22 @@ impl LocalEvaluator {
         groups: &HashMap<String, String>,
         group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     ) -> Result<Option<FlagValue>, InconclusiveMatchError> {
-        match self.cache.get_flag(key) {
+        let snapshot = self.cache.snapshot.read().unwrap();
+        match snapshot.flags.get(key) {
             Some(flag) => {
-                // Build evaluation context with cohorts, flags, and group info
-                let cohorts = self.cache.get_cohort_definitions();
-                let flags = self.cache.get_flags_map();
-                let group_type_mapping = self.cache.get_group_type_mapping();
+                let cohorts = snapshot.cohort_definitions();
 
                 let ctx = EvaluationContext {
                     cohorts: &cohorts,
-                    flags: &flags,
+                    flags: &snapshot.flags,
                     distinct_id,
                     groups,
                     group_properties,
-                    group_type_mapping: &group_type_mapping,
+                    group_type_mapping: &snapshot.group_type_mapping,
+                    property_matching_version: snapshot.property_matching_version,
                 };
 
-                let result = match_feature_flag_with_context(&flag, person_properties, &ctx);
+                let result = match_feature_flag_with_context(flag, person_properties, &ctx);
                 trace!(key, ?result, "Local flag evaluation");
                 result.map(Some)
             }
@@ -825,16 +901,17 @@ impl LocalEvaluator {
         groups: &HashMap<String, String>,
         group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     ) -> Result<Option<FlagValue>, InconclusiveMatchError> {
-        match self.cache.get_flag(key) {
+        let snapshot = self.cache.snapshot.read().unwrap();
+        match snapshot.flags.get(key) {
             Some(flag) => {
-                let group_type_mapping = self.cache.get_group_type_mapping();
-                let result = match_feature_flag(
-                    &flag,
+                let result = match_feature_flag_with_version(
+                    flag,
                     distinct_id,
                     person_properties,
                     groups,
                     group_properties,
-                    &group_type_mapping,
+                    &snapshot.group_type_mapping,
+                    snapshot.property_matching_version,
                 );
                 trace!(key, ?result, "Local flag evaluation (simple)");
                 result.map(Some)
@@ -883,20 +960,20 @@ impl LocalEvaluator {
         let mut results = HashMap::new();
 
         // Build one definitions snapshot for evaluation and its metadata.
-        let cohorts = self.cache.get_cohort_definitions();
-        let flags = self.cache.get_flags_map();
-        let group_type_mapping = self.cache.get_group_type_mapping();
+        let snapshot = self.cache.snapshot.read().unwrap();
+        let cohorts = snapshot.cohort_definitions();
 
         let ctx = EvaluationContext {
             cohorts: &cohorts,
-            flags: &flags,
+            flags: &snapshot.flags,
             distinct_id,
             groups,
             group_properties,
-            group_type_mapping: &group_type_mapping,
+            group_type_mapping: &snapshot.group_type_mapping,
+            property_matching_version: snapshot.property_matching_version,
         };
 
-        for flag in flags.values() {
+        for flag in snapshot.flags.values() {
             let result = match_feature_flag_with_context(flag, person_properties, &ctx);
             let payload = result
                 .as_ref()
@@ -929,6 +1006,7 @@ mod tests {
         has_experiment: bool,
     ) -> LocalEvaluationResponse {
         LocalEvaluationResponse {
+            property_matching_version: 1,
             flags: vec![FeatureFlag {
                 key: "snapshot-flag".to_string(),
                 active,
@@ -948,6 +1026,43 @@ mod tests {
             cohorts: HashMap::new(),
             minimal_flag_called_events: false,
         }
+    }
+
+    fn poller_config() -> LocalEvaluationConfig {
+        LocalEvaluationConfig {
+            secret_key: "phx_test".to_string(),
+            project_api_key: "phc_test".to_string(),
+            api_host: "http://localhost:1".to_string(),
+            poll_interval: Duration::from_secs(30),
+            request_timeout: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn a_poller_without_an_http_client_reports_an_error_and_does_not_start() {
+        let mut poller = FlagPoller::new(poller_config(), FlagCache::new());
+        poller.client = None;
+
+        assert!(matches!(poller.load_flags(), Err(Error::Connection(_))));
+
+        poller.start();
+        assert!(poller.thread_handle.is_none());
+    }
+
+    #[cfg(feature = "async-client")]
+    #[tokio::test]
+    async fn an_async_poller_without_an_http_client_reports_an_error_and_does_not_start() {
+        let mut poller = AsyncFlagPoller::new(poller_config(), FlagCache::new());
+        poller.client = None;
+
+        assert!(matches!(
+            poller.load_flags().await,
+            Err(Error::Connection(_))
+        ));
+
+        poller.start().await;
+        assert!(poller.task_handle.is_none());
+        assert!(!poller.is_running().await);
     }
 
     #[test]
