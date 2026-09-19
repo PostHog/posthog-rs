@@ -10,12 +10,17 @@ pub const EU_INGESTION_ENDPOINT: &str = "https://eu.i.posthog.com";
 pub const DEFAULT_HOST: &str = US_INGESTION_ENDPOINT;
 
 /// API endpoints used by the SDK for different operations.
-#[derive(Debug, Clone)]
+///
+/// `#[non_exhaustive]`: new endpoints can be added without breaking callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Endpoint {
-    /// Event capture endpoint
+    /// Analytics event capture endpoint (`capture`, `capture_batch`, and their
+    /// immediate variants).
     Capture,
-    /// Batch event capture endpoint
-    Batch,
+    /// AI event capture endpoint (`capture_ai`, `capture_ai_batch`, and their
+    /// immediate variants). A separate lane with its own size limits.
+    CaptureAi,
     /// Feature flags endpoint
     Flags,
     /// Local evaluation endpoint
@@ -26,13 +31,20 @@ impl Endpoint {
     /// Get the URL path for this endpoint.
     pub fn path(&self) -> &str {
         match self {
-            Endpoint::Capture => "/i/v0/e/",
-            Endpoint::Batch => "/batch/",
+            Endpoint::Capture => CAPTURE_PATH,
+            Endpoint::CaptureAi => CAPTURE_AI_PATH,
             Endpoint::Flags => "/flags/?v=2",
             Endpoint::LocalEvaluation => "/flags/definitions/?send_cohorts",
         }
     }
 }
+
+/// Path of the analytics capture endpoint.
+pub(crate) const CAPTURE_PATH: &str = "/i/v1/analytics/events";
+
+/// Path of the AI capture endpoint. Same request/response contract as
+/// [`CAPTURE_PATH`]; served by a separate deployment with larger size limits.
+pub(crate) const CAPTURE_AI_PATH: &str = "/i/v1/ai/events";
 
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -173,7 +185,12 @@ mod tests {
 
         assert_eq!(
             manager.build_url(Endpoint::Capture),
-            format!("{}/i/v0/e/", US_INGESTION_ENDPOINT)
+            format!("{}/i/v1/analytics/events", US_INGESTION_ENDPOINT)
+        );
+
+        assert_eq!(
+            manager.build_url(Endpoint::CaptureAi),
+            format!("{}/i/v1/ai/events", US_INGESTION_ENDPOINT)
         );
 
         assert_eq!(

@@ -1,6 +1,6 @@
 //! Exercise real TLS initialization failures through the public constructors.
 //! Linux uses SSL_CERT_FILE / SSL_CERT_DIR for its platform trust store.
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "tls"))]
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -101,18 +101,10 @@ fn client_without_ca_certificates_is_noop() {
                 .expect("disabled capture should succeed without sending");
             assert_eq!(summary.submitted(), 0);
 
-            let (flags, payloads) =
-                complete(client.get_feature_flags("test_user".to_string(), None, None, None))
-                    .expect("disabled flags should return empty results");
-            assert!(flags.is_empty());
-            assert!(payloads.is_empty());
-            #[allow(deprecated)]
-            let payload = complete(client.get_feature_flag_payload("test_flag", "test_user"))
-                .expect("disabled payload request should succeed");
-            assert_eq!(payload, None);
             let evaluations = complete(client.evaluate_flags("test_user", Default::default()))
                 .expect("disabled evaluation should succeed");
             assert_eq!(evaluations.get_flag("test_flag"), None);
+            assert_eq!(evaluations.get_flag_payload("test_flag"), None);
 
             complete(client.flush());
             complete(client.shutdown());
@@ -123,7 +115,7 @@ fn client_without_ca_certificates_is_noop() {
 
 fn poller_config(host: String) -> LocalEvaluationConfig {
     LocalEvaluationConfig {
-        personal_api_key: "phx_test".to_string(),
+        secret_key: "phx_test".to_string(),
         project_api_key: "phc_test".to_string(),
         api_host: host,
         poll_interval: Duration::from_secs(30),

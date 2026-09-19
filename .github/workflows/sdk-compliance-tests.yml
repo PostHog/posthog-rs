@@ -1,0 +1,105 @@
+name: SDK Compliance Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'compliance/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/sdk-compliance-tests.yml'
+  pull_request:
+    branches: [main, v1]
+    paths:
+      - 'src/**'
+      - 'compliance/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/sdk-compliance-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  test-rust-sdk:
+    name: ${{ matrix.client }} / ${{ matrix.compression }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [async, blocking]
+        compression: [gzip, deflate, br, zstd]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ matrix.client }}-${{ matrix.compression }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout SDK repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to container registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull test harness
+        run: docker pull ghcr.io/posthog/sdk-test-harness:0.10.0
+
+      - name: Build SDK adapter
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: compliance/Dockerfile
+          build-args: CLIENT_MODE=${{ matrix.client }}
+          tags: sdk-adapter:test
+          load: true
+          cache-from: type=gha,scope=compliance-${{ matrix.client }}
+          cache-to: type=gha,mode=max,scope=compliance-${{ matrix.client }}
+
+      - name: Create Docker network
+        run: docker network create test-network
+
+      - name: Start SDK adapter
+        run: |
+          docker run -d \
+            --name sdk-adapter \
+            --network test-network \
+            -e COMPRESSION=${{ matrix.compression }} \
+            sdk-adapter:test
+
+      - name: Run compliance suite
+        run: |
+          mkdir -p report
+          docker run --rm \
+            --name test-harness \
+            --network test-network \
+            -v "${GITHUB_WORKSPACE}/report:/report" \
+            ghcr.io/posthog/sdk-test-harness:0.10.0 \
+            run \
+            --adapter-url http://sdk-adapter:8080 \
+            --mock-url http://test-harness:8081 \
+            --output text \
+            --report /report/sdk-compliance-report.md \
+            --sdk-type server \
+            --concurrency 10
+
+      - name: Upload compliance report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-sdk-compliance-${{ matrix.client }}-${{ matrix.compression }}
+          path: report/sdk-compliance-report.md
+
+      - name: Stop containers
+        if: always()
+        run: |
+          docker stop sdk-adapter || true
+          docker rm sdk-adapter || true
+          docker network rm test-network || true

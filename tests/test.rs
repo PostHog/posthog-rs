@@ -58,7 +58,7 @@ fn get_client_blocking() {
     client.capture(event);
 }
 
-#[cfg(all(feature = "e2e-test", feature = "capture-v1", feature = "async-client"))]
+#[cfg(all(feature = "e2e-test", feature = "async-client"))]
 #[tokio::test]
 async fn get_client_v1_async() {
     use dotenv::dotenv;
