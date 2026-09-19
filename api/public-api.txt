@@ -227,6 +227,7 @@ pub posthog_rs::EvaluationContext::flags: &'a std::collections::hash::map::HashM
 pub posthog_rs::EvaluationContext::group_properties: &'a std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>
 pub posthog_rs::EvaluationContext::group_type_mapping: &'a std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub posthog_rs::EvaluationContext::groups: &'a std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
+pub posthog_rs::EvaluationContext::property_matching_version: i64
 pub struct posthog_rs::Event
 impl posthog_rs::Event
 pub fn posthog_rs::Event::add_group(&mut self, &str, &str)
@@ -337,6 +338,7 @@ pub posthog_rs::LocalEvaluationResponse::cohorts: std::collections::hash::map::H
 pub posthog_rs::LocalEvaluationResponse::flags: alloc::vec::Vec<posthog_rs::FeatureFlag>
 pub posthog_rs::LocalEvaluationResponse::group_type_mapping: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub posthog_rs::LocalEvaluationResponse::minimal_flag_called_events: bool
+pub posthog_rs::LocalEvaluationResponse::property_matching_version: i64
 pub struct posthog_rs::LocalEvaluator
 impl posthog_rs::LocalEvaluator
 pub fn posthog_rs::LocalEvaluator::cache(&self) -> &posthog_rs::FlagCache
