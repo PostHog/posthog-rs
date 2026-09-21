@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.25.5 — 2026-09-15
+
+### Patch changes
+
+- [af85090](https://github.com/posthog/posthog-rs/commit/af85090a57ca6e357f15125ff4248e6b9e6b5ee6) Do not panic when the HTTP client cannot be built. A container without CA certificates makes the reqwest builder fail, which stopped the calling program. The client now logs a warning, disables itself, and lets the program continue. The feature flag pollers degrade the same way: they log a warning and stay stopped instead of panicking. — Thanks @posthog[bot]!
+
 ## 0.25.4 — 2026-08-31
 
 ### Patch changes

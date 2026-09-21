@@ -57,6 +57,7 @@ pub(super) fn payload_definitions() -> LocalEvaluationResponse {
     };
 
     LocalEvaluationResponse {
+        property_matching_version: 1,
         flags: vec![
             // The definitions endpoint JSON-encodes payloads, so the common
             // case is an object stored as a string.

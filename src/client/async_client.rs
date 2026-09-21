@@ -46,8 +46,8 @@ fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
 
 use super::common::{
     already_reported, build_dedup_key, extract_flag_details, flag_called_event,
-    flag_event_dedup_cache, local_record, remote_record_from_detail, report_flags_error,
-    DetailedFlagsResponse, FlagEventDedupCache,
+    flag_event_dedup_cache, http_client_or_disable, local_record, remote_record_from_detail,
+    report_flags_error, DetailedFlagsResponse, FlagEventDedupCache,
 };
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
@@ -57,7 +57,7 @@ use reqwest::header::CONTENT_ENCODING;
 /// A [`Client`] facilitates interactions with the PostHog API over HTTP.
 pub struct Client {
     options: ClientOptions,
-    client: HttpClient,
+    client: Option<HttpClient>,
     local_evaluator: Option<LocalEvaluator>,
     _flag_poller: Option<AsyncFlagPoller>,
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
@@ -131,16 +131,20 @@ impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
 ///
 /// This constructor is available with the default `async-client` feature and
 /// must be awaited. Passing a blank API key creates a disabled client.
+/// If the HTTP client cannot be built, logs a warning and creates a disabled
+/// client instead.
 pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
-    let options = options.into().sanitize();
+    let mut options = options.into().sanitize();
     // A caller-supplied client is used as-is: it owns its own timeout, TLS
     // backend, proxies and pool, so `request_timeout_seconds` is not applied.
     let client = match options.http_client.clone() {
-        Some(client) => client,
-        None => HttpClient::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build()
-            .unwrap(), // Unwrap here is as safe as `HttpClient::new`
+        Some(client) => Some(client),
+        None => http_client_or_disable(
+            HttpClient::builder()
+                .timeout(Duration::from_secs(options.request_timeout_seconds))
+                .build(),
+            &mut options,
+        ),
     };
 
     let (local_evaluator, flag_poller) =
@@ -194,6 +198,13 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 }
 
 impl Client {
+    /// The HTTP client, or [`Error::Connection`] if initialization failed.
+    fn http(&self) -> Result<&HttpClient, Error> {
+        self.client.as_ref().ok_or_else(|| {
+            Error::Connection("HTTP client is unavailable; PostHog client is disabled".to_string())
+        })
+    }
+
     /// Capture the provided event, sending it to PostHog.
     ///
     /// # Parameters
@@ -627,7 +638,7 @@ impl Client {
             )?;
 
             let step = match self
-                .client
+                .http()?
                 .post(&prep.url)
                 .headers(headers)
                 .body(body)
@@ -693,7 +704,7 @@ impl Client {
         let mut attempt: u32 = 1;
         loop {
             let mut request = self
-                .client
+                .http()?
                 .post(&prep.url)
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, get_default_user_agent())
@@ -1041,7 +1052,7 @@ impl Client {
 
         let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
         let response = match self
-            .client
+            .http()?
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .header(USER_AGENT, get_default_user_agent())
@@ -1307,7 +1318,7 @@ impl Client {
         let mut attempt = 1;
         loop {
             let request = self
-                .client
+                .http()?
                 .post(flags_endpoint)
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, get_default_user_agent())
@@ -1544,7 +1555,7 @@ mod minimal_gate_tests {
         let options = ClientOptions::from(("phc_test", "http://localhost:0"));
         let client = Client {
             options,
-            client: HttpClient::builder().build().unwrap(),
+            client: Some(HttpClient::builder().build().unwrap()),
             local_evaluator: Some(LocalEvaluator::new(cache)),
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
@@ -1645,7 +1656,7 @@ mod local_payload_tests {
         let options = ClientOptions::from(("phc_test", "http://localhost:0"));
         let client = Client {
             options,
-            client: HttpClient::builder().build().unwrap(),
+            client: Some(HttpClient::builder().build().unwrap()),
             local_evaluator: Some(LocalEvaluator::new(cache)),
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
