@@ -155,10 +155,14 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
             Some(Arc::new(TransportHandle::spawn(transport_options)))
         }
     };
-    let transport = if has_custom_blocking_client {
-        tokio::task::spawn_blocking(spawn_transport)
-            .await
-            .unwrap_or(None)
+    let transport = if has_custom_blocking_client && tokio::runtime::Handle::try_current().is_ok() {
+        match tokio::task::spawn_blocking(spawn_transport).await {
+            Ok(transport) => transport,
+            Err(error) => {
+                warn!("posthog-rs: failed to initialize background transport: {error}");
+                None
+            }
+        }
     } else {
         spawn_transport()
     };
@@ -207,13 +211,9 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 
 impl Client {
     fn flags_request_timeout(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if self.options.http_client.is_some() {
-            request
-        } else {
-            request.timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-        }
+        request.timeout(Duration::from_secs(
+            self.options.feature_flags_request_timeout_seconds,
+        ))
     }
 
     /// The HTTP client, or [`Error::Connection`] if initialization failed.

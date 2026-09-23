@@ -138,16 +138,31 @@ pub struct ClientOptions {
 
     /// Optional async HTTP client for immediate capture, flags, and local evaluation.
     /// Defaults to an SDK-created client. Clones share the supplied connection pool.
-    /// Configure timeouts and TLS on the supplied reqwest client; SDK request timeout
-    /// options are not applied to it. Background capture uses `blocking_http_client`.
+    /// Configure bounded timeouts and TLS on the supplied reqwest client.
+    /// `request_timeout_seconds` is not applied; remote flags still use
+    /// `feature_flags_request_timeout_seconds`. Without a client timeout, capture
+    /// and local-evaluation initialization can wait indefinitely.
+    /// Background capture uses `blocking_http_client`.
+    ///
+    /// Only supply clients whose default headers and cookies are safe to send to
+    /// PostHog. Do not share clients carrying credentials for unrelated services;
+    /// the SDK cannot inspect or filter those defaults.
     #[cfg(feature = "async-client")]
     #[builder(default, setter(strip_option))]
     http_client: Option<reqwest::Client>,
 
     /// Optional blocking HTTP client for blocking requests and background capture.
     /// Defaults to SDK-created clients. Clones share the supplied connection pool.
-    /// Configure bounded timeouts and TLS on the supplied reqwest client; SDK request
-    /// timeout options are not applied to it, except for shutdown drain deadlines.
+    /// Configure bounded timeouts and TLS on the supplied reqwest client.
+    /// `request_timeout_seconds` is not applied; remote flags still use
+    /// `feature_flags_request_timeout_seconds`, and shutdown draining applies its
+    /// deadline. Without a client timeout, an already-running request can prevent
+    /// shutdown or drop from completing.
+    ///
+    /// Only supply clients whose default headers and cookies are safe to send to
+    /// PostHog. Do not share clients carrying credentials for unrelated services;
+    /// the SDK cannot inspect or filter those defaults.
+    ///
     /// Create and finally drop application-owned blocking clients, including handles
     /// held in options and builders, outside async runtimes. SDK shutdown does not
     /// invalidate application-held clones. Both setters require a compatible reqwest
@@ -191,8 +206,9 @@ pub struct ClientOptions {
     #[builder(default = "true")]
     is_server: bool,
 
-    /// Timeout in seconds for remote `/flags` requests using SDK-created clients.
-    /// Defaults to `3`.
+    /// Per-request timeout in seconds for remote `/flags` requests. Defaults to `3`.
+    /// Also applies to supplied HTTP clients, replacing their request timeout even
+    /// when that timeout is shorter. Capture and local-evaluation polling are unaffected.
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
 

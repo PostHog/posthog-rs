@@ -17,7 +17,7 @@ fn options(server: &MockServer) -> ClientOptionsBuilder {
         .api_key("phc_test".to_string())
         .host(server.base_url())
         .request_timeout_seconds(0)
-        .feature_flags_request_timeout_seconds(0)
+        .feature_flags_request_timeout_seconds(5)
         .feature_flags_request_max_retries(0)
         .flush_interval_ms(60_000);
     builder
@@ -90,6 +90,48 @@ mod asynchronous {
         })
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn constructs_with_custom_blocking_client_without_tokio() {
+        for disabled in [false, true] {
+            let options = ClientOptionsBuilder::default()
+                .api_key("phc_test".to_string())
+                .disabled(disabled)
+                .blocking_http_client(reqwest::blocking::Client::new())
+                .build()
+                .unwrap();
+            let client = futures::executor::block_on(posthog_rs::client(options));
+            drop(client);
+        }
+    }
+
+    #[tokio::test]
+    async fn flags_deadline_applies_to_custom_client() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200)
+                .delay(Duration::from_millis(1500))
+                .json_body(serde_json::json!({"featureFlags": {"flag": true}}));
+        });
+        let client = posthog_rs::client(
+            options(&server)
+                .http_client(reqwest::Client::new())
+                .feature_flags_request_timeout_seconds(1)
+                .build()
+                .unwrap(),
+        )
+        .await;
+        assert!(client
+            .get_feature_flag("flag", "user", None, None, None)
+            .await
+            .is_err());
+        assert!(client
+            .get_feature_flag_payload("flag", "user")
+            .await
+            .is_err());
+        client.shutdown().await;
     }
 
     #[tokio::test]
@@ -250,7 +292,7 @@ mod asynchronous {
     }
 
     #[tokio::test]
-    async fn supplied_short_timeout_is_not_overridden_for_flags() {
+    async fn flags_deadline_overrides_supplied_short_timeout() {
         let server = MockServer::start();
         let flags = flags_mock(&server, "async");
         let http = reqwest::Client::builder()
@@ -269,8 +311,8 @@ mod asynchronous {
         assert!(client
             .get_feature_flag("flag", "user", None, None, None)
             .await
-            .is_err());
-        assert!(flags.calls() <= 1);
+            .is_ok());
+        flags.assert_calls(1);
         client.shutdown().await;
     }
 }
@@ -280,7 +322,30 @@ mod blocking {
     use super::*;
 
     #[test]
-    fn supplied_short_timeout_is_not_overridden_for_flags() {
+    fn flags_deadline_applies_to_custom_client() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200)
+                .delay(Duration::from_millis(1500))
+                .json_body(serde_json::json!({"featureFlags": {"flag": true}}));
+        });
+        let client = posthog_rs::client(
+            options(&server)
+                .blocking_http_client(reqwest::blocking::Client::new())
+                .feature_flags_request_timeout_seconds(1)
+                .build()
+                .unwrap(),
+        );
+        assert!(client
+            .get_feature_flag("flag", "user", None, None, None)
+            .is_err());
+        assert!(client.get_feature_flag_payload("flag", "user").is_err());
+        client.shutdown();
+    }
+
+    #[test]
+    fn flags_deadline_overrides_supplied_short_timeout() {
         let server = MockServer::start();
         let _flags = flags_mock(&server, "blocking");
         let http = reqwest::blocking::Client::builder()
@@ -297,7 +362,7 @@ mod blocking {
         );
         assert!(client
             .get_feature_flag("flag", "user", None, None, None)
-            .is_err());
+            .is_ok());
         client.shutdown();
     }
 

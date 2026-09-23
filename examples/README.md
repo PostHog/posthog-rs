@@ -92,13 +92,23 @@ other client settings. Pass clones to share pools with your application. Use a
 compatible version of the SDK's reqwest dependency (currently `0.13`); other HTTP
 libraries and incompatible reqwest versions are not accepted.
 
-Configure bounded timeouts on supplied clients. Neither `request_timeout_seconds`
-nor `feature_flags_request_timeout_seconds` overrides them. During background
+Only supply clients whose default headers and cookies are safe to send to PostHog.
+Do not reuse clients carrying `Authorization`, API keys, or other credentials for
+unrelated services. Reqwest does not expose those defaults for the SDK to inspect
+or filter. Use a separate client with safe defaults when necessary.
+
+Configure bounded timeouts on supplied clients. `request_timeout_seconds` does
+not override them. Remote `/flags` requests still apply
+`feature_flags_request_timeout_seconds` (default: 3 seconds), replacing the
+client's request timeout even if it is shorter. During background
 shutdown draining, the SDK sets a per-request timeout to the remaining shutdown
 deadline; this replaces the supplied client's request timeout for that request.
 An already-running request still uses the supplied client's timeout and can delay
-shutdown. SDK authentication, request headers, batching, and retries remain in
-place; account for any additional retries configured by your application.
+shutdown. With no client timeout, capture or local-evaluation initialization can
+wait indefinitely, and an already-running background request can prevent
+`shutdown()` or `Drop` from completing. SDK authentication, request headers,
+batching, and retries remain in place; account for any additional retries
+configured by your application.
 
 Construct and finally drop application-owned blocking clients (including copies
 held in options/builders) outside an async runtime, or in `spawn_blocking`. The

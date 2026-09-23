@@ -199,13 +199,9 @@ impl Client {
         &self,
         request: reqwest::blocking::RequestBuilder,
     ) -> reqwest::blocking::RequestBuilder {
-        if self.options.blocking_http_client.is_some() {
-            request
-        } else {
-            request.timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-        }
+        request.timeout(Duration::from_secs(
+            self.options.feature_flags_request_timeout_seconds,
+        ))
     }
 
     /// The HTTP client, or [`Error::Connection`] if initialization failed.
