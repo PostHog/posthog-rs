@@ -71,6 +71,44 @@ Shows:
 - Attaching a distinct ID
 - Adding custom exception properties
 
+### 5. Custom HTTP Clients
+
+```bash
+export POSTHOG_API_TOKEN=phc_your_project_key
+cargo run --example custom_http_clients
+# Blocking SDK:
+cargo run --example custom_http_clients --no-default-features
+```
+
+Use `ClientOptionsBuilder::http_client(reqwest::Client)` for async immediate
+capture, remote flags, and local-evaluation polling. Use
+`blocking_http_client(reqwest::blocking::Client)` for the blocking SDK and
+background capture in **both** SDK modes. The async setter is only available
+with `async-client`. Either option can be omitted; that path keeps SDK-created
+clients and existing defaults.
+
+Supplied clients retain their connection pools, TLS configuration, proxies, and
+other client settings. Pass clones to share pools with your application. Use a
+compatible version of the SDK's reqwest dependency (currently `0.13`); other HTTP
+libraries and incompatible reqwest versions are not accepted.
+
+Configure bounded timeouts on supplied clients. Neither `request_timeout_seconds`
+nor `feature_flags_request_timeout_seconds` overrides them. During background
+shutdown draining, the SDK sets a per-request timeout to the remaining shutdown
+deadline; this replaces the supplied client's request timeout for that request.
+An already-running request still uses the supplied client's timeout and can delay
+shutdown. SDK authentication, request headers, batching, and retries remain in
+place; account for any additional retries configured by your application.
+
+Construct and finally drop application-owned blocking clients (including copies
+held in options/builders) outside an async runtime, or in `spawn_blocking`. The
+SDK releases its own blocking-client handles off the async runtime. Shutting down
+the SDK does not invalidate client clones retained by the application.
+
+Custom HTTP clients are separate from TLS crypto-provider selection. The
+`tls-no-provider` feature proposed in #245 is on `v1`, not this `main` branch;
+changing the provider does not change the reqwest client types.
+
 ## Key Concepts
 
 ### Feature Flag Types

@@ -136,8 +136,27 @@ pub struct ClientOptions {
     #[builder(default)]
     api_key: String,
 
+    /// Optional async HTTP client for immediate capture, flags, and local evaluation.
+    /// Defaults to an SDK-created client. Clones share the supplied connection pool.
+    /// Configure timeouts and TLS on the supplied reqwest client; SDK request timeout
+    /// options are not applied to it. Background capture uses `blocking_http_client`.
+    #[cfg(feature = "async-client")]
+    #[builder(default, setter(strip_option))]
+    http_client: Option<reqwest::Client>,
+
+    /// Optional blocking HTTP client for blocking requests and background capture.
+    /// Defaults to SDK-created clients. Clones share the supplied connection pool.
+    /// Configure bounded timeouts and TLS on the supplied reqwest client; SDK request
+    /// timeout options are not applied to it, except for shutdown drain deadlines.
+    /// Create and finally drop application-owned blocking clients, including handles
+    /// held in options and builders, outside async runtimes. SDK shutdown does not
+    /// invalidate application-held clones. Both setters require a compatible reqwest
+    /// version (currently 0.13).
+    #[builder(default, setter(strip_option))]
+    blocking_http_client: Option<reqwest::blocking::Client>,
+
     /// Request timeout in seconds for capture, batch, and local evaluation
-    /// definition requests. Defaults to `30`.
+    /// definition requests using SDK-created clients. Defaults to `30`.
     #[builder(default = "30")]
     request_timeout_seconds: u64,
 
@@ -172,7 +191,8 @@ pub struct ClientOptions {
     #[builder(default = "true")]
     is_server: bool,
 
-    /// Timeout in seconds for remote `/flags` requests. Defaults to `3`.
+    /// Timeout in seconds for remote `/flags` requests using SDK-created clients.
+    /// Defaults to `3`.
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
 
@@ -235,8 +255,9 @@ pub struct ClientOptions {
     /// starts. It does not bound work already underway: the single background
     /// worker performs one blocking send at a time, so an automatic flush or
     /// drain in progress when shutdown is requested runs to completion first —
-    /// up to `request_timeout_seconds` per in-flight batch, so a large
-    /// auto-drain can delay teardown by several request timeouts. `flush()` is
+    /// up to `request_timeout_seconds` (or the supplied blocking client's timeout)
+    /// per in-flight batch, so a large auto-drain can delay teardown by several
+    /// request timeouts. `flush()` is
     /// unaffected.
     #[builder(default = "30000")]
     pub(crate) shutdown_timeout_ms: u64,

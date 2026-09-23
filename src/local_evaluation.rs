@@ -308,11 +308,21 @@ impl FlagPoller {
     /// - `config`: Credentials, host, polling interval, and request timeout.
     /// - `cache`: Shared cache updated by the poller.
     pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
-        let client = http_client_or_warn(
-            reqwest::blocking::Client::builder()
-                .timeout(config.request_timeout)
-                .build(),
-        );
+        Self::with_http_client(config, cache, None)
+    }
+
+    pub(crate) fn with_http_client(
+        config: LocalEvaluationConfig,
+        cache: FlagCache,
+        client: Option<reqwest::blocking::Client>,
+    ) -> Self {
+        let client = client.or_else(|| {
+            http_client_or_warn(
+                reqwest::blocking::Client::builder()
+                    .timeout(config.request_timeout)
+                    .build(),
+            )
+        });
 
         Self {
             config,
@@ -539,11 +549,21 @@ impl AsyncFlagPoller {
     /// - `config`: Credentials, host, polling interval, and request timeout.
     /// - `cache`: Shared cache updated by the poller.
     pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
-        let client = http_client_or_warn(
-            reqwest::Client::builder()
-                .timeout(config.request_timeout)
-                .build(),
-        );
+        Self::with_http_client(config, cache, None)
+    }
+
+    pub(crate) fn with_http_client(
+        config: LocalEvaluationConfig,
+        cache: FlagCache,
+        client: Option<reqwest::Client>,
+    ) -> Self {
+        let client = client.or_else(|| {
+            http_client_or_warn(
+                reqwest::Client::builder()
+                    .timeout(config.request_timeout)
+                    .build(),
+            )
+        });
 
         Self {
             config,

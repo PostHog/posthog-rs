@@ -153,6 +153,7 @@ pub fn posthog_rs::ClientOptions::from((&str, &str)) -> Self
 pub struct posthog_rs::ClientOptionsBuilder
 impl posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::api_key(&mut self, alloc::string::String) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::blocking_http_client(&mut self, reqwest::blocking::client::Client) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::capture_compression(&mut self, posthog_rs::CaptureCompression) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::disable_geoip(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::disabled(&mut self, bool) -> &mut Self
@@ -163,6 +164,7 @@ pub fn posthog_rs::ClientOptionsBuilder::feature_flags_request_timeout_seconds(&
 pub fn posthog_rs::ClientOptionsBuilder::flush_at(&mut self, usize) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::flush_interval_ms(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::host<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::http_client(&mut self, reqwest::async_impl::client::Client) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::is_server(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::local_evaluation_only(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::max_batch_size(&mut self, usize) -> &mut Self

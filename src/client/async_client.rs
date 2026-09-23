@@ -131,11 +131,37 @@ impl FeatureFlagEvaluationsHost for AsyncFlagEventHost {
 pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let mut options = options.into().sanitize();
     let client = http_client_or_disable(
-        HttpClient::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build(),
+        options.http_client.clone().map_or_else(
+            || {
+                HttpClient::builder()
+                    .timeout(Duration::from_secs(options.request_timeout_seconds))
+                    .build()
+            },
+            Ok,
+        ),
         &mut options,
     );
+
+    // Keep the last SDK-owned blocking client handle off the async runtime,
+    // including disabled initialization and cancellation during polling startup.
+    let blocking_http_client = options.blocking_http_client.take();
+    let has_custom_blocking_client = blocking_http_client.is_some();
+    let mut transport_options = options.clone();
+    transport_options.blocking_http_client = blocking_http_client;
+    let spawn_transport = move || {
+        if transport_options.is_disabled() {
+            None
+        } else {
+            Some(Arc::new(TransportHandle::spawn(transport_options)))
+        }
+    };
+    let transport = if has_custom_blocking_client {
+        tokio::task::spawn_blocking(spawn_transport)
+            .await
+            .unwrap_or(None)
+    } else {
+        spawn_transport()
+    };
 
     let (local_evaluator, flag_poller) =
         if options.enable_local_evaluation && !options.is_disabled() {
@@ -150,7 +176,11 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
                     request_timeout: Duration::from_secs(options.request_timeout_seconds),
                 };
 
-                let mut poller = AsyncFlagPoller::new(config, cache.clone());
+                let mut poller = AsyncFlagPoller::with_http_client(
+                    config,
+                    cache.clone(),
+                    options.http_client.clone(),
+                );
                 poller.set_on_error(options.on_error.clone());
                 poller.start().await;
 
@@ -165,12 +195,6 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
             (None, None)
         };
 
-    let transport = if options.is_disabled() {
-        None
-    } else {
-        Some(Arc::new(TransportHandle::spawn(options.clone())))
-    };
-
     Client {
         options,
         client,
@@ -182,6 +206,16 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 }
 
 impl Client {
+    fn flags_request_timeout(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.options.http_client.is_some() {
+            request
+        } else {
+            request.timeout(Duration::from_secs(
+                self.options.feature_flags_request_timeout_seconds,
+            ))
+        }
+    }
+
     /// The HTTP client, or [`Error::Connection`] if initialization failed.
     fn http(&self) -> Result<&HttpClient, Error> {
         self.client.as_ref().ok_or_else(|| {
@@ -1004,18 +1038,14 @@ impl Client {
         }
 
         let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
-        let response = match self
+        let request = self
             .http()?
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .header(USER_AGENT, get_default_user_agent())
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-            .await
-        {
+            .json(&payload);
+        let request = self.flags_request_timeout(request);
+        let response = match request.send().await {
             Ok(r) => r,
             Err(e) => {
                 let err = Error::Connection(e.to_string());
@@ -1275,10 +1305,8 @@ impl Client {
                 .post(flags_endpoint)
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, get_default_user_agent())
-                .json(payload)
-                .timeout(Duration::from_secs(
-                    self.options.feature_flags_request_timeout_seconds,
-                ));
+                .json(payload);
+            let request = self.flags_request_timeout(request);
             #[cfg(feature = "test-harness")]
             let request = {
                 let mut request = request;
