@@ -1,7 +1,10 @@
 use std::cell::Cell;
 use std::fmt::Debug;
+use std::sync::Arc;
 use serde_json::{Map, Value};
 use tracing::field::{Field, Visit};
+use tracing::Metadata;
+
 
 thread_local! {
     static IS_CAPTURING: Cell<bool> = const { Cell::new(false) };
@@ -99,5 +102,29 @@ impl Visit for Visitor {
             field.name().to_string(),
             Value::String(format!("{value:?}")),
         );
+    }
+}
+
+pub enum EventNamer {
+    Target,
+    Name,
+    TargetAndName,
+    Custom(Arc<dyn Fn(&Metadata<'_>) -> String + Send + Sync>),
+}
+
+impl Default for EventNamer {
+    fn default() -> Self {
+        Self::Target
+    }
+}
+
+impl EventNamer {
+    fn name(&self, metadata: &Metadata<'_>) -> String {
+        match self {
+            Self::Target => metadata.target().to_string(),
+            Self::Name => metadata.name().to_string(),
+            Self::TargetAndName => format!("{}.{}", metadata.target(), metadata.name()),
+            Self::Custom(namer) => namer(metadata),
+        }
     }
 }
