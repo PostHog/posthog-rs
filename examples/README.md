@@ -71,6 +71,58 @@ Shows:
 - Attaching a distinct ID
 - Adding custom exception properties
 
+### 5. Custom HTTP Clients
+
+```bash
+export POSTHOG_API_TOKEN=phc_your_project_key
+cargo run --example custom_http_clients
+# Blocking SDK:
+cargo run --example custom_http_clients --no-default-features
+```
+
+Use `ClientOptionsBuilder::http_client(reqwest::Client)` for async immediate
+capture, remote flags, and local-evaluation polling. Use
+`blocking_http_client(reqwest::blocking::Client)` for the blocking SDK and
+background capture in **both** SDK modes. The async setter is only available
+with `async-client`. Either option can be omitted; that path keeps SDK-created
+clients and existing defaults.
+
+Supplied clients retain their connection pools, TLS configuration, proxies, and
+other client settings. Pass clones to share pools with your application. Use a
+compatible version of the SDK's reqwest dependency (currently `0.13`); other HTTP
+libraries and incompatible reqwest versions are not accepted.
+
+Only supply clients whose default headers and cookies are safe to send to PostHog.
+Do not reuse clients carrying `Authorization`, API keys, or other credentials for
+unrelated services. Reqwest does not expose those defaults for the SDK to inspect
+or filter. Use a separate client with safe defaults when necessary.
+
+The SDK applies both timeout options even with custom clients:
+
+- `request_timeout_seconds` (default: 30 seconds) applies to immediate capture,
+  background capture, and initial and periodic local-evaluation requests.
+- `feature_flags_request_timeout_seconds` (default: 3 seconds) applies to remote
+  `/flags` requests.
+
+These options replace the client's request timeout, even if the client's timeout
+is shorter. Other settings, such as connect timeouts, remain configured on the
+client. Set the SDK options to customize PostHog request timeouts.
+
+During background shutdown draining, each request is additionally capped at the
+remaining shutdown deadline. An already-running request can still delay shutdown
+until its SDK request timeout expires. SDK authentication, request headers,
+batching, and retries remain in place; account for any additional retries
+configured by your application.
+
+Construct and finally drop application-owned blocking clients (including copies
+held in options/builders) outside an async runtime, or in `spawn_blocking`. The
+SDK releases its own blocking-client handles off the async runtime. Shutting down
+the SDK does not invalidate client clones retained by the application.
+
+Custom HTTP clients are separate from TLS crypto-provider selection. The
+`tls-no-provider` feature proposed in #245 is on `v1`, not this `main` branch;
+changing the provider does not change the reqwest client types.
+
 ## Key Concepts
 
 ### Feature Flag Types

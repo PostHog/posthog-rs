@@ -1,5 +1,13 @@
 # posthog-rs
 
+## 0.26.0 — 2026-09-21
+
+### Minor changes
+
+- [6bc074f](https://github.com/posthog/posthog-rs/commit/6bc074fa707efc3e2c0bf9a27f95f89ad534014c) Honor definition snapshots' `property_matching_version` during local flag evaluation, including group conditions, recursive cohorts, and flag dependencies. Version 2 uses explicit case-insensitive equality instead of legacy boolean coercion; missing metadata and other versions retain legacy matching. Empty filters retain recursive truthiness in both versions. Keep matching semantics and definitions together across cache refreshes and version-only updates.
+
+  `LocalEvaluationResponse` and `EvaluationContext` struct literals now require a `property_matching_version` field (use `1` for legacy behavior); older serialized definitions still load without it. The context-free `match_feature_flag` helper remains legacy. — Thanks @marandaneto!
+
 ## 0.25.5 — 2026-09-15
 
 ### Patch changes

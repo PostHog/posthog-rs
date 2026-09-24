@@ -34,6 +34,7 @@ use super::{CaptureSummary, ClientOptions};
 pub struct Client {
     options: ClientOptions,
     client: Option<HttpClient>,
+    blocking_http_client: BlockingHttpClient,
     local_evaluator: Option<LocalEvaluator>,
     _flag_poller: Option<AsyncFlagPoller>,
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
@@ -42,6 +43,21 @@ pub struct Client {
     /// Background AI event transport, spawned on the first `capture_ai*` call
     /// so clients that never emit AI events pay for no extra thread.
     ai_transport: OnceLock<Arc<TransportHandle>>,
+}
+
+struct BlockingHttpClient(Option<reqwest::blocking::Client>);
+
+impl Drop for BlockingHttpClient {
+    fn drop(&mut self) {
+        if let Some(client) = self.0.take() {
+            // The final reqwest blocking handle cannot be dropped on an async runtime.
+            if tokio::runtime::Handle::try_current().is_ok() {
+                std::thread::spawn(move || drop(client));
+            } else {
+                drop(client);
+            }
+        }
+    }
 }
 
 /// Construct an async PostHog client from an API key or [`ClientOptions`].
@@ -64,11 +80,41 @@ pub struct Client {
 pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let mut options = options.into().sanitize();
     let client = http_client_or_disable(
-        HttpClient::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build(),
+        options.http_client.clone().map_or_else(
+            || {
+                HttpClient::builder()
+                    .timeout(Duration::from_secs(options.request_timeout_seconds))
+                    .build()
+            },
+            Ok,
+        ),
         &mut options,
     );
+
+    // Keep the last SDK-owned blocking client handle off the async runtime,
+    // including disabled initialization and cancellation during polling startup.
+    let blocking_http_client = BlockingHttpClient(options.blocking_http_client.take());
+    let has_custom_blocking_client = blocking_http_client.0.is_some();
+    let mut transport_options = options.clone();
+    transport_options.blocking_http_client = blocking_http_client.0.clone();
+    let spawn_transport = move || {
+        if transport_options.is_disabled() {
+            None
+        } else {
+            Some(Arc::new(TransportHandle::spawn(transport_options)))
+        }
+    };
+    let transport = if has_custom_blocking_client && tokio::runtime::Handle::try_current().is_ok() {
+        match tokio::task::spawn_blocking(spawn_transport).await {
+            Ok(transport) => transport,
+            Err(error) => {
+                warn!("posthog-rs: failed to initialize background transport: {error}");
+                None
+            }
+        }
+    } else {
+        spawn_transport()
+    };
 
     let (local_evaluator, flag_poller) =
         if options.enable_local_evaluation && !options.is_disabled() {
@@ -83,7 +129,11 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
                     request_timeout: Duration::from_secs(options.request_timeout_seconds),
                 };
 
-                let mut poller = AsyncFlagPoller::new(config, cache.clone());
+                let mut poller = AsyncFlagPoller::with_http_client(
+                    config,
+                    cache.clone(),
+                    options.http_client.clone(),
+                );
                 poller.set_on_error(options.on_error.clone());
                 poller.start().await;
 
@@ -101,15 +151,10 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
             (None, None)
         };
 
-    let transport = if options.is_disabled() {
-        None
-    } else {
-        Some(Arc::new(TransportHandle::spawn(options.clone())))
-    };
-
     Client {
         options,
         client,
+        blocking_http_client,
         local_evaluator,
         _flag_poller: flag_poller,
         flag_event_host: OnceLock::new(),
@@ -119,6 +164,12 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
 }
 
 impl Client {
+    fn flags_request_timeout(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        request.timeout(Duration::from_secs(
+            self.options.feature_flags_request_timeout_seconds,
+        ))
+    }
+
     /// The HTTP client, or [`Error::Connection`] if initialization failed.
     fn http(&self) -> Result<&HttpClient, Error> {
         self.client.as_ref().ok_or_else(|| {
@@ -198,10 +249,9 @@ impl Client {
             return None;
         }
         let ai = self.ai_transport.get_or_init(|| {
-            Arc::new(TransportHandle::spawn_lane(
-                self.options.clone(),
-                LaneConfig::ai(),
-            ))
+            let mut options = self.options.clone();
+            options.blocking_http_client = self.blocking_http_client.0.clone();
+            Arc::new(TransportHandle::spawn_lane(options, LaneConfig::ai()))
         });
         Self::ai_lane_unless_closing(analytics, ai)
     }
@@ -751,6 +801,7 @@ impl Client {
                 let step = match self
                     .http()?
                     .post(&prep.url)
+                    .timeout(Duration::from_secs(self.options.request_timeout_seconds))
                     .headers(headers)
                     .body(body)
                     .send()
@@ -934,10 +985,8 @@ impl Client {
                 .post(flags_endpoint)
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, get_default_user_agent())
-                .json(payload)
-                .timeout(Duration::from_secs(
-                    self.options.feature_flags_request_timeout_seconds,
-                ));
+                .json(payload);
+            let request = self.flags_request_timeout(request);
             #[cfg(feature = "test-harness")]
             let request = {
                 let mut request = request;
@@ -1279,6 +1328,7 @@ mod minimal_gate_tests {
         let options = ClientOptions::from(("phc_test", "http://localhost:0"));
         let client = Client {
             options,
+            blocking_http_client: BlockingHttpClient(None),
             client: Some(HttpClient::builder().build().unwrap()),
             local_evaluator: Some(LocalEvaluator::new(cache)),
             _flag_poller: None,
@@ -1359,6 +1409,7 @@ mod local_payload_tests {
         let options = ClientOptions::from(("phc_test", "http://localhost:0"));
         let client = Client {
             options,
+            blocking_http_client: BlockingHttpClient(None),
             client: Some(HttpClient::builder().build().unwrap()),
             local_evaluator: Some(LocalEvaluator::new(cache)),
             _flag_poller: None,
