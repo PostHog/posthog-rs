@@ -128,3 +128,31 @@ impl EventNamer {
         }
     }
 }
+
+pub enum DistinctIdSource {
+    Field,
+    Static(String),
+    Provider(Arc<dyn Fn() -> Option<String> + Send + Sync>),
+    Anonymous,
+}
+
+impl Default for DistinctIdSource {
+    fn default() -> Self {
+        Self::Field
+    }
+}
+
+impl DistinctIdSource {
+    fn resolve(&self, field: Option<Value>) -> Option<String> {
+        match self {
+            Self::Field => field.and_then(|value| match value {
+                Value::String(s) if !s.is_empty() => Some(s),
+                Value::Null => None,
+                value => Some(value.to_string()),
+            }),
+            Self::Static(value) => Some(value.clone()),
+            Self::Provider(provider) => provider(),
+            Self::Anonymous => None,
+        }
+    }
+}
