@@ -97,16 +97,20 @@ Do not reuse clients carrying `Authorization`, API keys, or other credentials fo
 unrelated services. Reqwest does not expose those defaults for the SDK to inspect
 or filter. Use a separate client with safe defaults when necessary.
 
-Configure bounded timeouts on supplied clients. `request_timeout_seconds` does
-not override them. Remote `/flags` requests still apply
-`feature_flags_request_timeout_seconds` (default: 3 seconds), replacing the
-client's request timeout even if it is shorter. During background
-shutdown draining, the SDK sets a per-request timeout to the remaining shutdown
-deadline; this replaces the supplied client's request timeout for that request.
-An already-running request still uses the supplied client's timeout and can delay
-shutdown. With no client timeout, capture or local-evaluation initialization can
-wait indefinitely, and an already-running background request can prevent
-`shutdown()` or `Drop` from completing. SDK authentication, request headers,
+The SDK applies both timeout options even with custom clients:
+
+- `request_timeout_seconds` (default: 30 seconds) applies to immediate capture,
+  background capture, and initial and periodic local-evaluation requests.
+- `feature_flags_request_timeout_seconds` (default: 3 seconds) applies to remote
+  `/flags` requests.
+
+These options replace the client's request timeout, even if the client's timeout
+is shorter. Other settings, such as connect timeouts, remain configured on the
+client. Set the SDK options to customize PostHog request timeouts.
+
+During background shutdown draining, each request is additionally capped at the
+remaining shutdown deadline. An already-running request can still delay shutdown
+until its SDK request timeout expires. SDK authentication, request headers,
 batching, and retries remain in place; account for any additional retries
 configured by your application.
 

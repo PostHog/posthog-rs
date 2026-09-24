@@ -138,11 +138,11 @@ pub struct ClientOptions {
 
     /// Optional async HTTP client for immediate capture, flags, and local evaluation.
     /// Defaults to an SDK-created client. Clones share the supplied connection pool.
-    /// Configure bounded timeouts and TLS on the supplied reqwest client.
-    /// `request_timeout_seconds` is not applied; remote flags still use
-    /// `feature_flags_request_timeout_seconds`. Without a client timeout, capture
-    /// and local-evaluation initialization can wait indefinitely.
-    /// Background capture uses `blocking_http_client`.
+    /// The SDK still applies `request_timeout_seconds` to capture and local
+    /// evaluation, and `feature_flags_request_timeout_seconds` to remote flags.
+    /// These options replace the supplied client's request timeout, even when the
+    /// client's timeout is shorter. Background capture uses `blocking_http_client`;
+    /// see its documentation for the limits of `shutdown_timeout_ms`.
     ///
     /// Only supply clients whose default headers and cookies are safe to send to
     /// PostHog. Do not share clients carrying credentials for unrelated services;
@@ -153,11 +153,17 @@ pub struct ClientOptions {
 
     /// Optional blocking HTTP client for blocking requests and background capture.
     /// Defaults to SDK-created clients. Clones share the supplied connection pool.
-    /// Configure bounded timeouts and TLS on the supplied reqwest client.
-    /// `request_timeout_seconds` is not applied; remote flags still use
-    /// `feature_flags_request_timeout_seconds`, and shutdown draining applies its
-    /// deadline. Without a client timeout, an already-running request can prevent
-    /// shutdown or drop from completing.
+    /// The SDK still applies `request_timeout_seconds` to capture and local
+    /// evaluation, and `feature_flags_request_timeout_seconds` to remote flags.
+    /// These options replace the supplied client's request timeout, even when the
+    /// client's timeout is shorter.
+    ///
+    /// `shutdown_timeout_ms` bounds shutdown draining and caps requests started
+    /// during that drain at the remaining deadline. It does not interrupt work
+    /// already underway. An in-flight request can delay `shutdown()` or `Drop`
+    /// until `request_timeout_seconds` expires; an automatic multi-batch flush
+    /// already underway can delay teardown by several request timeouts.
+    /// It is not a hard limit on the total time spent waiting for the worker.
     ///
     /// Only supply clients whose default headers and cookies are safe to send to
     /// PostHog. Do not share clients carrying credentials for unrelated services;
@@ -170,8 +176,10 @@ pub struct ClientOptions {
     #[builder(default, setter(strip_option))]
     blocking_http_client: Option<reqwest::blocking::Client>,
 
-    /// Request timeout in seconds for capture, batch, and local evaluation
-    /// definition requests using SDK-created clients. Defaults to `30`.
+    /// Per-request timeout in seconds for capture, batch, and local evaluation
+    /// definition requests. Defaults to `30`.
+    /// Also applies to custom HTTP clients, replacing their request timeout even
+    /// when that timeout is shorter. Remote flags use `feature_flags_request_timeout_seconds`.
     #[builder(default = "30")]
     request_timeout_seconds: u64,
 
@@ -207,8 +215,9 @@ pub struct ClientOptions {
     is_server: bool,
 
     /// Per-request timeout in seconds for remote `/flags` requests. Defaults to `3`.
-    /// Also applies to supplied HTTP clients, replacing their request timeout even
-    /// when that timeout is shorter. Capture and local-evaluation polling are unaffected.
+    /// Also applies to custom HTTP clients, replacing their request timeout even
+    /// when that timeout is shorter. Capture and local-evaluation polling use
+    /// `request_timeout_seconds`.
     #[builder(default = "3")]
     feature_flags_request_timeout_seconds: u64,
 
@@ -271,8 +280,8 @@ pub struct ClientOptions {
     /// starts. It does not bound work already underway: the single background
     /// worker performs one blocking send at a time, so an automatic flush or
     /// drain in progress when shutdown is requested runs to completion first —
-    /// up to `request_timeout_seconds` (or the supplied blocking client's timeout)
-    /// per in-flight batch, so a large auto-drain can delay teardown by several
+    /// up to `request_timeout_seconds` per in-flight batch, including with a custom
+    /// blocking client, so a large auto-drain can delay teardown by several
     /// request timeouts. `flush()` is
     /// unaffected.
     #[builder(default = "30000")]

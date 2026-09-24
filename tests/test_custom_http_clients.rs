@@ -135,7 +135,76 @@ mod asynchronous {
     }
 
     #[tokio::test]
-    async fn routes_all_requests_and_preserves_caller_timeouts() {
+    async fn sdk_timeout_applies_to_custom_immediate_capture() {
+        let server = MockServer::start();
+        let mut event = Event::new("test", "user");
+        let _capture = capture_mock(&server, "async", &mut event);
+        let client = posthog_rs::client(
+            options(&server)
+                .http_client(http())
+                .max_capture_attempts(1)
+                .build()
+                .unwrap(),
+        )
+        .await;
+        assert!(client.capture_immediate(event).await.is_err());
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sdk_timeout_applies_to_custom_background_capture() {
+        let server = MockServer::start();
+        let mut event = Event::new("test", "user");
+        let _capture = capture_mock(&server, "blocking", &mut event);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let client = posthog_rs::client(
+            options(&server)
+                .blocking_http_client(blocking_http().await)
+                .max_capture_attempts(1)
+                .on_error(move |_| {
+                    tx.send(()).unwrap();
+                })
+                .build()
+                .unwrap(),
+        )
+        .await;
+        client.capture(event);
+        client.flush().await;
+        assert!(
+            rx.try_recv().is_ok(),
+            "background timeout must report a failure"
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sdk_timeout_applies_to_custom_polling() {
+        let server = MockServer::start();
+        let _definitions = definitions_mock(&server, "async");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = posthog_rs::client(
+            options(&server)
+                .http_client(http())
+                .enable_local_evaluation(true)
+                .secret_key("phx_test")
+                .poll_interval_seconds(1)
+                .on_error(move |_| {
+                    tx.send(()).unwrap();
+                })
+                .build()
+                .unwrap(),
+        )
+        .await;
+        assert!(rx.try_recv().is_ok(), "initial polling must time out");
+        tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn routes_all_requests_with_custom_clients() {
         let server = MockServer::start();
         let mut immediate = Event::new("immediate", "user");
         let mut queued = Event::new("queued", "user");
@@ -147,6 +216,7 @@ mod asynchronous {
         let blocking = blocking_http().await;
         let client = posthog_rs::client(
             options(&server)
+                .request_timeout_seconds(5)
                 .http_client(http.clone())
                 .blocking_http_client(blocking.clone())
                 .enable_local_evaluation(true)
@@ -256,6 +326,7 @@ mod asynchronous {
         let client = posthog_rs::client(
             options(&server)
                 .blocking_http_client(blocking_http().await)
+                .request_timeout_seconds(5)
                 .shutdown_timeout_ms(50)
                 .build()
                 .unwrap(),
@@ -278,6 +349,7 @@ mod asynchronous {
         });
         let mut builder = options(&server);
         builder
+            .request_timeout_seconds(5)
             .http_client(http())
             .blocking_http_client(blocking_http().await)
             .enable_local_evaluation(true)
@@ -366,8 +438,79 @@ mod blocking {
         client.shutdown();
     }
 
+    fn http() -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder()
+            .default_headers(headers("blocking"))
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
     #[test]
-    fn routes_all_requests_and_preserves_caller_timeouts() {
+    fn sdk_timeout_applies_to_custom_immediate_capture() {
+        let server = MockServer::start();
+        let mut event = Event::new("test", "user");
+        let _capture = capture_mock(&server, "blocking", &mut event);
+        let client = posthog_rs::client(
+            options(&server)
+                .blocking_http_client(http())
+                .max_capture_attempts(1)
+                .build()
+                .unwrap(),
+        );
+        assert!(client.capture_immediate(event).is_err());
+        client.shutdown();
+    }
+
+    #[test]
+    fn sdk_timeout_applies_to_custom_background_capture() {
+        let server = MockServer::start();
+        let mut event = Event::new("test", "user");
+        let _capture = capture_mock(&server, "blocking", &mut event);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let client = posthog_rs::client(
+            options(&server)
+                .blocking_http_client(http())
+                .max_capture_attempts(1)
+                .on_error(move |_| {
+                    tx.send(()).unwrap();
+                })
+                .build()
+                .unwrap(),
+        );
+        client.capture(event);
+        client.flush();
+        assert!(
+            rx.try_recv().is_ok(),
+            "background timeout must report a failure"
+        );
+        client.shutdown();
+    }
+
+    #[test]
+    fn sdk_timeout_applies_to_custom_polling() {
+        let server = MockServer::start();
+        let _definitions = definitions_mock(&server, "blocking");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let client = posthog_rs::client(
+            options(&server)
+                .blocking_http_client(http())
+                .enable_local_evaluation(true)
+                .secret_key("phx_test")
+                .poll_interval_seconds(1)
+                .on_error(move |_| {
+                    tx.send(()).unwrap();
+                })
+                .build()
+                .unwrap(),
+        );
+        assert!(rx.try_recv().is_ok(), "initial polling must time out");
+        rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        client.shutdown();
+    }
+
+    #[test]
+    fn routes_all_requests_with_custom_clients() {
         let server = MockServer::start();
         let mut event = Event::new("test", "user");
         let capture = capture_mock(&server, "blocking", &mut event);
@@ -380,6 +523,7 @@ mod blocking {
             .unwrap();
         let client = posthog_rs::client(
             options(&server)
+                .request_timeout_seconds(5)
                 .blocking_http_client(http.clone())
                 .enable_local_evaluation(true)
                 .secret_key("phx_test")

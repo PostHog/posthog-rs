@@ -393,6 +393,7 @@ impl FlagPoller {
 
                 let mut request = client
                     .get(&url)
+                    .timeout(config.request_timeout)
                     .header(
                         "Authorization",
                         format!("Bearer {}", config.personal_api_key),
@@ -466,6 +467,7 @@ impl FlagPoller {
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
             .header(USER_AGENT, get_default_user_agent())
+            .timeout(self.config.request_timeout)
             .send()
         {
             Ok(r) => r,
@@ -650,6 +652,7 @@ impl AsyncFlagPoller {
 
                         let mut request = client
                             .get(&url)
+                            .timeout(config.request_timeout)
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
                             .header("X-PostHog-Project-Api-Key", &config.project_api_key)
                             .header(USER_AGENT, get_default_user_agent());
@@ -725,6 +728,7 @@ impl AsyncFlagPoller {
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
             .header(USER_AGENT, get_default_user_agent())
+            .timeout(self.config.request_timeout)
             .send()
             .await
         {

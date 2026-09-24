@@ -594,6 +594,7 @@ impl Client {
             let step = match self
                 .http()?
                 .post(&prep.url)
+                .timeout(Duration::from_secs(self.options.request_timeout_seconds))
                 .headers(headers)
                 .body(body)
                 .send()
@@ -658,6 +659,7 @@ impl Client {
             let mut request = self
                 .http()?
                 .post(&prep.url)
+                .timeout(Duration::from_secs(self.options.request_timeout_seconds))
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, get_default_user_agent())
                 .body(prep.body.clone());

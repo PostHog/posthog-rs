@@ -11,6 +11,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut options = ClientOptionsBuilder::default();
     options
         .api_key(api_key)
+        .request_timeout_seconds(10)
+        .feature_flags_request_timeout_seconds(3)
         .blocking_http_client(blocking_http.clone());
 
     #[cfg(feature = "async-client")]

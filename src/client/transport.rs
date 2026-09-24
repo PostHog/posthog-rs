@@ -390,23 +390,18 @@ fn dec_len(len: &AtomicUsize, n: usize) {
 }
 
 /// Per-request timeout for a send. On the shutdown/disconnect path (`deadline`
-/// is `Some`) the request is capped at the time left before the deadline, and
-/// at the SDK timeout when using an SDK-created client. Reqwest does not expose
-/// a supplied client's timeout, so the drain deadline replaces it on that path.
-/// Off that path, the client's configured timeout is left unchanged.
+/// is `Some`) the request is capped at the time left before the deadline and
+/// at the SDK timeout, including when using a supplied client.
 fn bound_request(
     request: reqwest::blocking::RequestBuilder,
     deadline: Option<Instant>,
     now: Instant,
-    request_timeout: Option<Duration>,
+    request_timeout: Duration,
 ) -> reqwest::blocking::RequestBuilder {
-    match deadline {
-        Some(d) => {
-            let remaining = d.saturating_duration_since(now);
-            request.timeout(request_timeout.map_or(remaining, |timeout| remaining.min(timeout)))
-        }
-        None => request,
-    }
+    let timeout = deadline.map_or(request_timeout, |d| {
+        d.saturating_duration_since(now).min(request_timeout)
+    });
+    request.timeout(timeout)
 }
 
 /// Time until the next scheduled wakeup: the buffer's flush-interval deadline or
@@ -825,10 +820,7 @@ impl Pipeline {
             self.http.post(&self.url).headers(headers).body(body),
             deadline,
             self.clock.now(),
-            self.options
-                .blocking_http_client
-                .is_none()
-                .then(|| Duration::from_secs(self.options.request_timeout_seconds)),
+            Duration::from_secs(self.options.request_timeout_seconds),
         );
         // The final attempt's status and (on a non-2xx) raw body, kept so the
         // `on_error` hook can surface them. The body is only retained when a hook
@@ -1103,10 +1095,7 @@ impl Pipeline {
             request,
             deadline,
             self.clock.now(),
-            self.options
-                .blocking_http_client
-                .is_none()
-                .then(|| Duration::from_secs(self.options.request_timeout_seconds)),
+            Duration::from_secs(self.options.request_timeout_seconds),
         );
 
         let mut http_status: Option<u16> = None;
