@@ -103,10 +103,15 @@ impl Visit for Visitor {
     }
 }
 
+/// Controls how tracing metadata is turned into a PostHog event name.
 pub enum EventNamer {
+    /// Use the tracing target as the event name.
     Target,
+    /// Use the tracing callsite name as the event name.
     Name,
+    /// Combine the tracing target and callsite name.
     TargetAndName,
+    /// Derive the event name from the tracing metadata.
     Custom(Arc<dyn Fn(&Metadata<'_>) -> String + Send + Sync>),
 }
 
@@ -155,6 +160,46 @@ impl DistinctIdSource {
     }
 }
 
+/// Captures selected `tracing` events as PostHog events.
+///
+/// Tracing fields are stored as PostHog properties, while the existing
+/// PostHog client handles batching and delivery.
+///
+/// Use `tracing_subscriber` filters to control which events are captured.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use tracing_subscriber::layer::SubscriberExt;
+///
+/// let layer = posthog_rs::PostHogLayer::new(Arc::new(client));
+///
+/// tracing_subscriber::registry()
+///     .with(layer)
+///     .init();
+///
+/// tracing::info!(
+///     target: "posthog",
+///     distinct_id = "user-123",
+///     feature = "checkout",
+///     "checkout started",
+/// );
+/// ```
+///
+/// SDK internal `posthog_rs` targets are ignored automatically.
+///
+/// For short lived progrms, flush the client before exiting.
+///
+/// ```no_run
+/// client.flush();
+/// ```
+///
+/// With the async client:
+///
+/// ```no_run
+/// client.flush().await;
+/// ```
 pub struct PostHogLayer {
     client: Arc<Client>,
     event_namer: EventNamer,
@@ -163,6 +208,10 @@ pub struct PostHogLayer {
 }
 
 impl PostHogLayer {
+  /// Creates a layer backed by the given PostHog client.
+  ///
+  /// By default, the tracing target is used as the PostHog event name and
+  /// `distinct_id` is read from the tracing fields.
     pub fn new(client: Arc<Client>) -> Self {
         Self {
             client,
@@ -172,16 +221,44 @@ impl PostHogLayer {
         }
     }
 
+    /// Sets how tracing events are named in PostHog.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// let layer = PostHogLayer::new(client)
+    ///     .with_event_namer(EventNamer::TargetAndName);
+    /// ```
     pub fn with_event_namer(mut self, event_namer: EventNamer) -> Self {
         self.event_namer = event_namer;
         self
     }
 
+    /// Sets a fixed distinct ID for all captured events.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// let layer = PostHogLayer::new(client)
+    ///     .with_distinct_id("user-123");
+    /// ```
     pub fn with_distinct_id(mut self, distinct_id: impl Into<String>) -> Self {
         self.distinct_id = DistinctIdSource::Static(distinct_id.into());
         self
     }
 
+    /// Gets the distinct ID for each captured event from a callback.
+    ///
+    /// Return `None` to create an anonymous PostHog event.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// let layer = PostHogLayer::new(client)
+    ///     .with_distinct_id_provider(|| {
+    ///         Some("user-123".to_owned())
+    ///     });
+    /// ```
     pub fn with_distinct_id_provider<F>(mut self, provider: F) -> Self
     where
         F: Fn() -> Option<String> + Send + Sync + 'static,
@@ -190,11 +267,25 @@ impl PostHogLayer {
         self
     }
 
+    /// Captures events without a caller-provided distinct ID.
     pub fn anonymous(mut self) -> Self {
         self.distinct_id = DistinctIdSource::Anonymous;
         self
     }
 
+    /// Adds a property to every captured PostHog event.
+    ///
+    /// Event fields with the same name override shared properties.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// let layer = PostHogLayer::new(client)
+    ///     .with_property("service", "checkout");
+    ///
+    /// tracing::info!(service = "api", "request handled");
+    /// // The event contains `service = "api"`.
+    /// ```
     pub fn with_property(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.properties.insert(key.into(), value.into());
         self
