@@ -27,6 +27,7 @@ os_info = "3.14"
 sha1 = "0.11"
 regex = "1.10"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["registry", "std"] }
 tokio = { version = "1", features = [
     "rt",
     "sync",
@@ -54,6 +55,7 @@ async-client = ["tokio"]
 capture-v1 = ["brotli", "zstd"]
 test-harness = []
 error-tracking = ["dep:backtrace", "dep:findshlibs"]
+tracing-subscriber = ["dep:tracing-subscriber"]
 
 [workspace]
 members = [".", "compliance/adapter"]

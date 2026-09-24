@@ -100,6 +100,8 @@ mod feature_flag_evaluations;
 mod feature_flags;
 mod global;
 mod local_evaluation;
+#[cfg(feature = "tracing-subscriber")]
+mod tracing_layer;
 
 // Public interface - any change to this is breaking!
 // Client
@@ -112,6 +114,8 @@ pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
 pub use client::{CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError};
+#[cfg(feature = "tracing-subscriber")]
+pub use tracing_layer::{EventNamer, PostHogLayer};
 
 // Endpoints
 pub use endpoints::{
