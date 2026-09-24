@@ -1,8 +1,11 @@
-use std::{cell::Cell, fmt::Debug, sync::Arc};
-use serde_json::{Map, Value};
-use tracing::{field::{Field, Visit}, Event as TracingEvent, Metadata, Subscriber};
-use tracing_subscriber::layer::{Context, Layer};
 use crate::{Client, Event};
+use serde_json::{Map, Value};
+use std::{cell::Cell, fmt::Debug, sync::Arc};
+use tracing::{
+    field::{Field, Visit},
+    Event as TracingEvent, Metadata, Subscriber,
+};
+use tracing_subscriber::layer::{Context, Layer};
 
 thread_local! {
     static IS_CAPTURING: Cell<bool> = const { Cell::new(false) };
@@ -71,7 +74,8 @@ impl Visit for Visitor {
     #[inline]
     fn record_f64(&mut self, field: &Field, value: f64) {
         if let Some(num) = serde_json::Number::from_f64(value) {
-            self.fields.insert(field.name().to_string(), Value::Number(num));
+            self.fields
+                .insert(field.name().to_string(), Value::Number(num));
         } else {
             self.fields.insert(field.name().to_string(), Value::Null);
         }
@@ -79,7 +83,8 @@ impl Visit for Visitor {
 
     #[inline]
     fn record_str(&mut self, field: &Field, value: &str) {
-        self.fields.insert(field.name().to_string(), Value::String(value.to_string()));
+        self.fields
+            .insert(field.name().to_string(), Value::String(value.to_string()));
     }
 
     #[inline]
@@ -92,7 +97,8 @@ impl Visit for Visitor {
 
     #[inline]
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
-        self.fields.insert(field.name().to_string(), Value::String(value.to_string()));
+        self.fields
+            .insert(field.name().to_string(), Value::String(value.to_string()));
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
@@ -208,10 +214,10 @@ pub struct PostHogLayer {
 }
 
 impl PostHogLayer {
-  /// Creates a layer backed by the given PostHog client.
-  ///
-  /// By default, the tracing target is used as the PostHog event name and
-  /// `distinct_id` is read from the tracing fields.
+    /// Creates a layer backed by the given PostHog client.
+    ///
+    /// By default, the tracing target is used as the PostHog event name and
+    /// `distinct_id` is read from the tracing fields.
     pub fn new(client: Arc<Client>) -> Self {
         Self {
             client,

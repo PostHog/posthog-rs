@@ -9,14 +9,7 @@ use std::{
 };
 
 use httpmock::prelude::*;
-use posthog_rs::{
-    Client,
-    ClientOptions,
-    ClientOptionsBuilder,
-    Event,
-    EventNamer,
-    PostHogLayer,
-};
+use posthog_rs::{Client, ClientOptions, ClientOptionsBuilder, Event, EventNamer, PostHogLayer};
 use serde_json::Value;
 use tracing::{Metadata, Subscriber};
 use tracing_subscriber::{
@@ -105,17 +98,12 @@ impl Debug for DebugValue {
 #[tokio::test]
 async fn captures_event_with_field_and_context_fidelity() {
     let events = capture_events();
-    let client = Arc::new(
-        client_with_hook(
-            "http://127.0.0.1:1",
-            capture_hook(Arc::clone(&events)),
-        )
-        .await,
-    );
+    let client =
+        Arc::new(client_with_hook("http://127.0.0.1:1", capture_hook(Arc::clone(&events))).await);
 
     let layer = PostHogLayer::new(Arc::clone(&client))
-      .with_event_namer(EventNamer::Custom(Arc::new(|_| {"trace_event".to_owned()})))
-      .with_property("service", "static");
+        .with_event_namer(EventNamer::Custom(Arc::new(|_| "trace_event".to_owned())))
+        .with_property("service", "static");
 
     let subscriber = tracing_subscriber::registry().with(layer);
 
@@ -123,20 +111,20 @@ async fn captures_event_with_field_and_context_fidelity() {
     let debug_value = DebugValue;
 
     tracing::subscriber::with_default(subscriber, || {
-      tracing::trace!(
-          src = "posthog",
-          field1 = "one",
-          field2 = "two",
-          distinct_id = "user-123",
-          service = "dynamic",
-          signed = i64::MIN,
-          unsigned = u64::MAX,
-          amount = 49.95_f64,
-          successful = true,
-          display_field = %display_value,
-          debug_field = ?debug_value,
-          "payment completed"
-      );
+        tracing::trace!(
+            src = "posthog",
+            field1 = "one",
+            field2 = "two",
+            distinct_id = "user-123",
+            service = "dynamic",
+            signed = i64::MIN,
+            unsigned = u64::MAX,
+            amount = 49.95_f64,
+            successful = true,
+            display_field = %display_value,
+            debug_field = ?debug_value,
+            "payment completed"
+        );
     });
 
     flush(&client).await;
@@ -173,21 +161,16 @@ impl<S> Layer<S> for CountingLayer
 where
     S: Subscriber,
 {
-  fn on_event(&self, _event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-      self.count.fetch_add(1, Ordering::Relaxed);
-  }
+    fn on_event(&self, _event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[tokio::test]
 async fn filters_events_per_layer_and_excludes_sdk_targets() {
     let events = capture_events();
-    let client = Arc::new(
-        client_with_hook(
-            "http://127.0.0.1:1",
-            capture_hook(Arc::clone(&events)),
-        )
-        .await,
-    );
+    let client =
+        Arc::new(client_with_hook("http://127.0.0.1:1", capture_hook(Arc::clone(&events))).await);
 
     let seen_by_other_layer = Arc::new(AtomicUsize::new(0));
 
@@ -229,10 +212,7 @@ async fn filters_events_per_layer_and_excludes_sdk_targets() {
             "never capture this"
         );
 
-        assert_eq!(
-            seen_by_other_layer.load(Ordering::Relaxed),
-            4
-        );
+        assert_eq!(seen_by_other_layer.load(Ordering::Relaxed), 4);
     });
 
     flush(&client).await;
@@ -240,22 +220,14 @@ async fn filters_events_per_layer_and_excludes_sdk_targets() {
     let events = events.lock().unwrap();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(
-        events[0]["properties"]["marker"],
-        "captured"
-    );
+    assert_eq!(events[0]["properties"]["marker"], "captured");
 }
 
 #[tokio::test]
 async fn prevents_reentrant_capture_and_resets_guard() {
     let events = capture_events();
-    let client = Arc::new(
-        client_with_hook(
-            "http://127.0.0.1:1",
-            capture_hook(Arc::clone(&events)),
-        )
-        .await,
-    );
+    let client =
+        Arc::new(client_with_hook("http://127.0.0.1:1", capture_hook(Arc::clone(&events))).await);
 
     let provider_calls = Arc::new(AtomicUsize::new(0));
 
@@ -282,10 +254,10 @@ async fn prevents_reentrant_capture_and_resets_guard() {
     let layer = PostHogLayer::new(Arc::clone(&client))
         .with_distinct_id_provider(provider)
         .with_filter(
-          Targets::new()
-              .with_target("posthog", LevelFilter::INFO)
-              .with_target("posthog_rs", LevelFilter::INFO)
-              .with_default(LevelFilter::OFF),
+            Targets::new()
+                .with_target("posthog", LevelFilter::INFO)
+                .with_target("posthog_rs", LevelFilter::INFO)
+                .with_default(LevelFilter::OFF),
         );
 
     let subscriber = tracing_subscriber::registry().with(layer);
@@ -303,10 +275,7 @@ async fn prevents_reentrant_capture_and_resets_guard() {
             "second event"
         );
 
-        assert_eq!(
-            provider_calls.load(Ordering::SeqCst),
-            2
-        );
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
     });
 
     flush(&client).await;
@@ -315,23 +284,11 @@ async fn prevents_reentrant_capture_and_resets_guard() {
 
     assert_eq!(events.len(), 2);
 
-    assert_eq!(
-        events[0]["distinct_id"],
-        "user-123"
-    );
-    assert_eq!(
-        events[0]["properties"]["marker"],
-        "first"
-    );
+    assert_eq!(events[0]["distinct_id"], "user-123");
+    assert_eq!(events[0]["properties"]["marker"], "first");
 
-    assert_eq!(
-        events[1]["properties"]["marker"],
-        "second"
-    );
-    assert_eq!(
-        events[1]["properties"]["$process_person_profile"],
-        false
-    );
+    assert_eq!(events[1]["properties"]["marker"], "second");
+    assert_eq!(events[1]["properties"]["$process_person_profile"], false);
 
     let second_distinct_id = events[1]["distinct_id"]
         .as_str()
@@ -369,9 +326,7 @@ async fn captures_tracing_event_through_client_transport() {
         then.status(200);
     });
 
-    let client = Arc::new(
-        client_without_hook(&server.base_url()).await
-    );
+    let client = Arc::new(client_without_hook(&server.base_url()).await);
 
     let layer = PostHogLayer::new(Arc::clone(&client)).with_filter(
         Targets::new()
