@@ -1,10 +1,8 @@
-use std::cell::Cell;
-use std::fmt::Debug;
-use std::sync::Arc;
+use std::{cell::Cell, fmt::Debug, sync::Arc};
 use serde_json::{Map, Value};
-use tracing::field::{Field, Visit};
-use tracing::Metadata;
-
+use tracing::{field::{Field, Visit}, Event as TracingEvent, Metadata, Subscriber};
+use tracing_subscriber::layer::{Context, Layer};
+use crate::{Client, Event};
 
 thread_local! {
     static IS_CAPTURING: Cell<bool> = const { Cell::new(false) };
@@ -154,5 +152,98 @@ impl DistinctIdSource {
             Self::Provider(provider) => provider(),
             Self::Anonymous => None,
         }
+    }
+}
+
+pub struct PostHogLayer {
+    client: Arc<Client>,
+    event_namer: EventNamer,
+    distinct_id: DistinctIdSource,
+    properties: Map<String, Value>,
+}
+
+impl PostHogLayer {
+    pub fn new(client: Arc<Client>) -> Self {
+        Self {
+            client,
+            event_namer: EventNamer::Target,
+            distinct_id: DistinctIdSource::Field,
+            properties: Map::new(),
+        }
+    }
+
+    pub fn with_event_namer(mut self, event_namer: EventNamer) -> Self {
+        self.event_namer = event_namer;
+        self
+    }
+
+    pub fn with_distinct_id(mut self, distinct_id: impl Into<String>) -> Self {
+        self.distinct_id = DistinctIdSource::Static(distinct_id.into());
+        self
+    }
+
+    pub fn with_distinct_id_provider<F>(mut self, provider: F) -> Self
+    where
+        F: Fn() -> Option<String> + Send + Sync + 'static,
+    {
+        self.distinct_id = DistinctIdSource::Provider(Arc::new(provider));
+        self
+    }
+
+    pub fn anonymous(mut self) -> Self {
+        self.distinct_id = DistinctIdSource::Anonymous;
+        self
+    }
+
+    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.properties.insert(key.into(), value.into());
+        self
+    }
+}
+
+#[inline]
+fn is_sdk_target(target: &str) -> bool {
+    target == "posthog_rs" || target.starts_with("posthog_rs::")
+}
+
+impl<S> Layer<S> for PostHogLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &TracingEvent<'_>, _ctx: Context<'_, S>) {
+        let metadata = event.metadata();
+
+        if is_sdk_target(metadata.target()) {
+            return;
+        }
+
+        // for OOMs
+        let _guard = match CapturingGuard::try_acquire() {
+            Some(guard) => guard,
+            None => return,
+        };
+
+        let mut visitor = Visitor::default();
+        event.record(&mut visitor);
+
+        let distinct_id = self
+            .distinct_id
+            .resolve(visitor.fields.remove("distinct_id"));
+
+        let event_name = self.event_namer.name(metadata);
+
+        let mut posthog_event = match distinct_id {
+            Some(id) => Event::new(event_name, id),
+            None => Event::new_anon(event_name),
+        };
+
+        let mut fields = self.properties.clone();
+        fields.extend(visitor.fields);
+
+        for (key, value) in fields {
+            _ = posthog_event.insert_prop(key, value);
+        }
+
+        self.client.capture(posthog_event);
     }
 }
