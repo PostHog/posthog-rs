@@ -135,9 +135,14 @@ impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
 pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let mut options = options.into().sanitize();
     let client = http_client_or_disable(
-        HttpClient::builder()
-            .timeout(Duration::from_secs(options.request_timeout_seconds))
-            .build(),
+        options.blocking_http_client.clone().map_or_else(
+            || {
+                HttpClient::builder()
+                    .timeout(Duration::from_secs(options.request_timeout_seconds))
+                    .build()
+            },
+            Ok,
+        ),
         &mut options,
     );
 
@@ -154,7 +159,11 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
                     request_timeout: Duration::from_secs(options.request_timeout_seconds),
                 };
 
-                let mut poller = FlagPoller::new(config, cache.clone());
+                let mut poller = FlagPoller::with_http_client(
+                    config,
+                    cache.clone(),
+                    options.blocking_http_client.clone(),
+                );
                 poller.set_on_error(options.on_error.clone());
                 poller.start();
 
@@ -186,6 +195,15 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
 }
 
 impl Client {
+    fn flags_request_timeout(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> reqwest::blocking::RequestBuilder {
+        request.timeout(Duration::from_secs(
+            self.options.feature_flags_request_timeout_seconds,
+        ))
+    }
+
     /// The HTTP client, or [`Error::Connection`] if initialization failed.
     fn http(&self) -> Result<&HttpClient, Error> {
         self.client.as_ref().ok_or_else(|| {
@@ -576,6 +594,7 @@ impl Client {
             let step = match self
                 .http()?
                 .post(&prep.url)
+                .timeout(Duration::from_secs(self.options.request_timeout_seconds))
                 .headers(headers)
                 .body(body)
                 .send()
@@ -640,6 +659,7 @@ impl Client {
             let mut request = self
                 .http()?
                 .post(&prep.url)
+                .timeout(Duration::from_secs(self.options.request_timeout_seconds))
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, get_default_user_agent())
                 .body(prep.body.clone());
@@ -973,17 +993,14 @@ impl Client {
         }
 
         let distinct_id = payload.get("distinct_id").and_then(|v| v.as_str());
-        let response = match self
+        let request = self
             .http()?
             .post(&flags_endpoint)
             .header(CONTENT_TYPE, "application/json")
             .header(USER_AGENT, get_default_user_agent())
-            .json(&payload)
-            .timeout(Duration::from_secs(
-                self.options.feature_flags_request_timeout_seconds,
-            ))
-            .send()
-        {
+            .json(&payload);
+        let request = self.flags_request_timeout(request);
+        let response = match request.send() {
             Ok(r) => r,
             Err(e) => {
                 let err = Error::Connection(e.to_string());
@@ -1243,10 +1260,8 @@ impl Client {
                 .post(flags_endpoint)
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, get_default_user_agent())
-                .json(payload)
-                .timeout(Duration::from_secs(
-                    self.options.feature_flags_request_timeout_seconds,
-                ));
+                .json(payload);
+            let request = self.flags_request_timeout(request);
             #[cfg(feature = "test-harness")]
             let request = {
                 let mut request = request;

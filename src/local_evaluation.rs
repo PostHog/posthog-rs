@@ -308,11 +308,21 @@ impl FlagPoller {
     /// - `config`: Credentials, host, polling interval, and request timeout.
     /// - `cache`: Shared cache updated by the poller.
     pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
-        let client = http_client_or_warn(
-            reqwest::blocking::Client::builder()
-                .timeout(config.request_timeout)
-                .build(),
-        );
+        Self::with_http_client(config, cache, None)
+    }
+
+    pub(crate) fn with_http_client(
+        config: LocalEvaluationConfig,
+        cache: FlagCache,
+        client: Option<reqwest::blocking::Client>,
+    ) -> Self {
+        let client = client.or_else(|| {
+            http_client_or_warn(
+                reqwest::blocking::Client::builder()
+                    .timeout(config.request_timeout)
+                    .build(),
+            )
+        });
 
         Self {
             config,
@@ -383,6 +393,7 @@ impl FlagPoller {
 
                 let mut request = client
                     .get(&url)
+                    .timeout(config.request_timeout)
                     .header(
                         "Authorization",
                         format!("Bearer {}", config.personal_api_key),
@@ -456,6 +467,7 @@ impl FlagPoller {
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
             .header(USER_AGENT, get_default_user_agent())
+            .timeout(self.config.request_timeout)
             .send()
         {
             Ok(r) => r,
@@ -539,11 +551,21 @@ impl AsyncFlagPoller {
     /// - `config`: Credentials, host, polling interval, and request timeout.
     /// - `cache`: Shared cache updated by the poller.
     pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self {
-        let client = http_client_or_warn(
-            reqwest::Client::builder()
-                .timeout(config.request_timeout)
-                .build(),
-        );
+        Self::with_http_client(config, cache, None)
+    }
+
+    pub(crate) fn with_http_client(
+        config: LocalEvaluationConfig,
+        cache: FlagCache,
+        client: Option<reqwest::Client>,
+    ) -> Self {
+        let client = client.or_else(|| {
+            http_client_or_warn(
+                reqwest::Client::builder()
+                    .timeout(config.request_timeout)
+                    .build(),
+            )
+        });
 
         Self {
             config,
@@ -630,6 +652,7 @@ impl AsyncFlagPoller {
 
                         let mut request = client
                             .get(&url)
+                            .timeout(config.request_timeout)
                             .header("Authorization", format!("Bearer {}", config.personal_api_key))
                             .header("X-PostHog-Project-Api-Key", &config.project_api_key)
                             .header(USER_AGENT, get_default_user_agent());
@@ -705,6 +728,7 @@ impl AsyncFlagPoller {
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
             .header(USER_AGENT, get_default_user_agent())
+            .timeout(self.config.request_timeout)
             .send()
             .await
         {

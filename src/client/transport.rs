@@ -390,23 +390,18 @@ fn dec_len(len: &AtomicUsize, n: usize) {
 }
 
 /// Per-request timeout for a send. On the shutdown/disconnect path (`deadline`
-/// is `Some`) the request is capped at the time left before the deadline — never
-/// more than the configured request timeout — so a stalled endpoint that accepts
-/// but never responds can't push teardown past `shutdown_timeout_ms`. Off that
-/// path it keeps the full configured timeout.
+/// is `Some`) the request is capped at the time left before the deadline and
+/// at the SDK timeout, including when using a supplied client.
 fn bound_request(
     request: reqwest::blocking::RequestBuilder,
     deadline: Option<Instant>,
     now: Instant,
-    request_timeout_seconds: u64,
+    request_timeout: Duration,
 ) -> reqwest::blocking::RequestBuilder {
-    match deadline {
-        Some(d) => request.timeout(
-            d.saturating_duration_since(now)
-                .min(Duration::from_secs(request_timeout_seconds)),
-        ),
-        None => request,
-    }
+    let timeout = deadline.map_or(request_timeout, |d| {
+        d.saturating_duration_since(now).min(request_timeout)
+    });
+    request.timeout(timeout)
 }
 
 /// Time until the next scheduled wakeup: the buffer's flush-interval deadline or
@@ -687,6 +682,9 @@ fn drain_historical(
 /// fallback: it calls `Client::new`, which panics on exactly those failures.
 /// Return `None` instead so the worker can stop without panicking.
 fn build_http(options: &ClientOptions) -> Option<reqwest::blocking::Client> {
+    if let Some(client) = &options.blocking_http_client {
+        return Some(client.clone());
+    }
     match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(options.request_timeout_seconds))
         .build()
@@ -822,7 +820,7 @@ impl Pipeline {
             self.http.post(&self.url).headers(headers).body(body),
             deadline,
             self.clock.now(),
-            self.options.request_timeout_seconds,
+            Duration::from_secs(self.options.request_timeout_seconds),
         );
         // The final attempt's status and (on a non-2xx) raw body, kept so the
         // `on_error` hook can surface them. The body is only retained when a hook
@@ -1097,7 +1095,7 @@ impl Pipeline {
             request,
             deadline,
             self.clock.now(),
-            self.options.request_timeout_seconds,
+            Duration::from_secs(self.options.request_timeout_seconds),
         );
 
         let mut http_status: Option<u16> = None;
