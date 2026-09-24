@@ -18,6 +18,7 @@ cargo run --example feature_flags --features async-client
 ```
 
 Shows:
+
 - Boolean feature flag checks
 - A/B test variants (multivariate flags)
 - Property-based targeting
@@ -35,6 +36,7 @@ cargo run --example local_evaluation --features async-client
 ```
 
 Shows:
+
 - Performance comparison (API vs local evaluation)
 - Setting up local evaluation with polling
 - Batch flag evaluation
@@ -50,6 +52,7 @@ cargo run --example advanced_config --features async-client
 ```
 
 Shows:
+
 - Basic client setup (US region)
 - EU region configuration (GDPR compliance)
 - Self-hosted instance configuration
@@ -67,6 +70,7 @@ cargo run --example error_tracking
 ```
 
 Shows:
+
 - Capturing a Rust error as a PostHog Error Tracking event
 - Attaching a distinct ID
 - Adding custom exception properties
@@ -123,11 +127,30 @@ Custom HTTP clients are separate from TLS crypto-provider selection. The
 `tls-no-provider` feature proposed in #245 is on `v1`, not this `main` branch;
 changing the provider does not change the reqwest client types.
 
+### 6. Tracing
+
+Captures selected `tracing` events as PostHog events:
+
+```bash
+cargo run --example tracing --features tracing-subscriber
+```
+
+Shows:
+
+- Capturing tracing events as PostHog events
+- Filtering events with `tracing-subscriber`
+- Configuring event names, identity, and shared properties
+- Flushing events before shutdown
+
+The `tracing-subscriber` feature is optional. The integration supports both
+async and blocking clients.
+
 ## Key Concepts
 
 ### Feature Flag Types
 
 1. **Boolean Flags**: Simple on/off toggles
+
    ```rust
    FlagValue::Boolean(true)  // enabled
    FlagValue::Boolean(false) // disabled
