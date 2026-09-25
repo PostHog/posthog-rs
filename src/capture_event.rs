@@ -3,16 +3,12 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::debug;
 use uuid::Uuid;
 
-use crate::constants::{OptionKind, OPTIONS_EXTRACTION_TABLE, SESSION_ID_PROP, WINDOW_ID_PROP};
+use crate::constants::{
+    LEGACY_OPTION_PROPERTIES, PROCESS_PERSON_PROFILE_OPT, SESSION_ID_PROP, WINDOW_ID_PROP,
+};
 use crate::event::Event;
-
-/// Crate-internal capture options, derived from `event.properties`.
-/// Serializes as a JSON object; an empty map produces `"options":{}`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct Options(serde_json::Map<String, serde_json::Value>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureEvent {
@@ -24,7 +20,8 @@ pub struct CaptureEvent {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
-    pub(crate) options: Options,
+    /// Always serialized, as `{}` when empty.
+    pub(crate) options: serde_json::Map<String, Value>,
     pub properties: serde_json::Value,
 }
 
@@ -60,26 +57,7 @@ impl CaptureEvent {
             .map(|ts| ts.and_utc().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
             .unwrap_or_else(|| now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
 
-        // Extract magic keys from properties into the wire options map. The key is
-        // always removed from properties (these sentinels must never reach the
-        // backend properties); the value is coerced to the type the backend's
-        // strict `Options` struct expects. A value that can't be coerced is
-        // dropped so the backend applies its default, rather than 400-ing the
-        // whole batch on a type mismatch.
-        let mut options_map = serde_json::Map::new();
-        for &(prop_key, wire_key, kind) in OPTIONS_EXTRACTION_TABLE {
-            if let Some(val) = properties.remove(prop_key) {
-                match coerce_option(kind, val) {
-                    Some(coerced) => {
-                        options_map.insert(wire_key.to_string(), coerced);
-                    }
-                    None => debug!(
-                        prop = prop_key,
-                        "capture options: dropping mistyped value; backend will apply its default"
-                    ),
-                }
-            }
-        }
+        let options = merge_options(event, &mut properties);
 
         let session_id = properties
             .remove(SESSION_ID_PROP)
@@ -95,46 +73,47 @@ impl CaptureEvent {
             timestamp,
             session_id,
             window_id,
-            options: Options(options_map),
+            options,
             properties: serde_json::to_value(properties)
                 .unwrap_or(serde_json::Value::Object(Default::default())),
         }
     }
 }
 
-/// Coerce a lifted property value to the type the backend `Options` field
-/// expects, returning the canonical wire value or `None` if uninterpretable.
-fn coerce_option(kind: OptionKind, val: Value) -> Option<Value> {
-    match kind {
-        OptionKind::Bool => coerce_bool(val).map(Value::Bool),
-        OptionKind::Str => coerce_string(val).map(Value::String),
-    }
-}
+/// Build the wire `options` map. The SDK sends every value as given and never
+/// checks types: PostHog validates options, applies defaults, and ignores keys
+/// it does not know.
+///
+/// - Caller options come first.
+/// - A legacy `$` property fills its option only when the caller left that
+///   option unset. `null` counts as unset, as it does in PostHog.
+/// - Legacy properties are always removed from `properties`, so they are
+///   never stored as event properties.
+/// - An event with groups always processes persons: ingestion attaches group
+///   properties only to events that process persons.
+fn merge_options(
+    event: &Event,
+    properties: &mut HashMap<String, Value>,
+) -> serde_json::Map<String, Value> {
+    let mut options: serde_json::Map<String, Value> = event
+        .options()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
-/// Coerce a value to bool, mirroring posthog-go: native bool passes through;
-/// the strings `"true"`/`"1"` (and `"false"`/`"0"`), trimmed and
-/// case-insensitive, are accepted; any non-zero number is true and zero is
-/// false. Returns `None` when the value is not interpretable as a boolean.
-fn coerce_bool(val: Value) -> Option<bool> {
-    match val {
-        Value::Bool(b) => Some(b),
-        Value::String(s) => match s.trim().to_lowercase().as_str() {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        },
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0),
-        _ => None,
+    for &(prop_key, option_key) in LEGACY_OPTION_PROPERTIES {
+        if let Some(legacy) = properties.remove(prop_key) {
+            if options.get(option_key).map_or(true, Value::is_null) {
+                options.insert(option_key.to_string(), legacy);
+            }
+        }
     }
-}
 
-/// Coerce a value to string. The backend's `product_tour_id` is
-/// `Option<String>`; non-string types are not interpretable.
-fn coerce_string(val: Value) -> Option<String> {
-    match val {
-        Value::String(s) => Some(s),
-        _ => None,
+    if !event.groups().is_empty() {
+        options.insert(PROCESS_PERSON_PROFILE_OPT.to_string(), Value::Bool(true));
     }
+
+    options
 }
 
 /// Owned variant used by tests; the capture pipeline uses [`BatchRequestRef`].
@@ -206,6 +185,7 @@ pub struct CaptureErrorResponse {
 mod tests {
     use super::*;
     use crate::Event;
+    use serde_json::json;
     use uuid::Uuid;
 
     // -- from_event basics ---------------------------------------------------
@@ -302,124 +282,100 @@ mod tests {
         assert!(!props.contains_key("$ignore_sent_at"));
     }
 
-    // -- options type coercion -----------------------------------------------
+    // -- options merge ---------------------------------------------------------
 
-    /// Lift one magic property and return the parsed (options, properties)
-    /// objects so a case can assert both the wire value and the strip.
-    fn lift_one(
-        prop_key: &str,
-        val: serde_json::Value,
+    /// The wire `options` and `properties` objects built for `event`.
+    fn wire_parts(
+        event: &Event,
     ) -> (
-        serde_json::Map<String, serde_json::Value>,
-        serde_json::Map<String, serde_json::Value>,
+        serde_json::Map<String, Value>,
+        serde_json::Map<String, Value>,
     ) {
-        let mut event = Event::new("test", "user-1");
-        event.insert_prop(prop_key, val).unwrap();
-        let wire = CaptureEvent::from_event(&event);
-        let json = serde_json::to_value(&wire).unwrap();
-        let options = json.get("options").unwrap().as_object().unwrap().clone();
+        let wire = CaptureEvent::from_event(event);
         let props = wire.properties.as_object().unwrap().clone();
-        (options, props)
+        (wire.options, props)
     }
 
     #[test]
-    fn options_bool_coercion() {
-        // (input value, expected wire bool or None when omitted). Covers native
-        // bool, the string/numeric forms the backend tolerates, and
-        // uninterpretable values that must be dropped (not shipped mistyped).
-        let cases: [(serde_json::Value, Option<bool>); 13] = [
-            (serde_json::json!(true), Some(true)),
-            (serde_json::json!(false), Some(false)),
-            (serde_json::json!("true"), Some(true)),
-            (serde_json::json!("false"), Some(false)),
-            (serde_json::json!("TRUE"), Some(true)),
-            (serde_json::json!("  True  "), Some(true)),
-            (serde_json::json!("1"), Some(true)),
-            (serde_json::json!("0"), Some(false)),
-            (serde_json::json!(1), Some(true)),
-            (serde_json::json!(0), Some(false)),
-            (serde_json::json!(2), Some(true)),
-            (serde_json::json!("yes"), None),
-            (serde_json::json!(null), None),
+    fn legacy_properties_fill_only_unset_options() {
+        // (caller option, legacy property, expected wire option). The values are
+        // not the types PostHog expects, because the SDK must not check them.
+        let cases: [(Option<Value>, Option<Value>, Option<Value>); 6] = [
+            (Some(json!("caller")), None, Some(json!("caller"))),
+            (None, Some(json!("legacy")), Some(json!("legacy"))),
+            (
+                Some(json!("caller")),
+                Some(json!("legacy")),
+                Some(json!("caller")),
+            ),
+            (
+                Some(Value::Null),
+                Some(json!("legacy")),
+                Some(json!("legacy")),
+            ),
+            (Some(Value::Null), None, Some(Value::Null)),
+            (None, None, None),
         ];
-        // Assert one representative bool key end-to-end, then confirm every bool
-        // key in the table shares the path with a single non-coercible value.
-        for (input, expected) in cases {
-            let (options, props) = lift_one("$cookieless_mode", input.clone());
-            assert_eq!(
-                options.get("cookieless_mode"),
-                expected.map(serde_json::Value::Bool).as_ref(),
-                "cookieless_mode input={:?}",
-                input
-            );
-            // Always stripped from properties, even when coercion fails.
-            assert!(
-                !props.contains_key("$cookieless_mode"),
-                "magic key must be stripped, input={:?}",
-                input
-            );
-        }
-
-        // All three bool option keys behave identically: a non-coercible value
-        // is dropped, a coercible one is normalized — and either way the magic
-        // key is stripped from properties (it must never reach the backend props).
-        for (prop_key, wire_key) in [
-            ("$cookieless_mode", "cookieless_mode"),
-            ("$ignore_sent_at", "disable_skew_correction"),
-            ("$process_person_profile", "process_person_profile"),
-        ] {
-            let (bad, bad_props) = lift_one(prop_key, serde_json::json!(["nope"]));
-            assert!(
-                !bad.contains_key(wire_key),
-                "{}: array must be dropped",
-                wire_key
-            );
-            assert!(
-                !bad_props.contains_key(prop_key),
-                "{}: magic key must be stripped even when coercion fails",
-                prop_key
-            );
-            let (good, good_props) = lift_one(prop_key, serde_json::json!("1"));
-            assert_eq!(
-                good.get(wire_key),
-                Some(&serde_json::json!(true)),
-                "{}: \"1\" must coerce to true",
-                wire_key
-            );
-            assert!(
-                !good_props.contains_key(prop_key),
-                "{}: magic key must be stripped on coercion success",
-                prop_key
-            );
+        for &(prop_key, option_key) in LEGACY_OPTION_PROPERTIES {
+            for (option, legacy, expected) in &cases {
+                let mut event = Event::new("test", "user-1");
+                if let Some(value) = option {
+                    event.insert_option(option_key, value).unwrap();
+                }
+                if let Some(value) = legacy {
+                    event.insert_prop(prop_key, value).unwrap();
+                }
+                let (options, props) = wire_parts(&event);
+                assert_eq!(
+                    options.get(option_key),
+                    expected.as_ref(),
+                    "{option_key}: option={option:?} legacy={legacy:?}"
+                );
+                assert!(
+                    !props.contains_key(prop_key),
+                    "{} must never reach properties",
+                    prop_key
+                );
+            }
         }
     }
 
     #[test]
-    fn options_product_tour_id_coercion() {
-        // product_tour_id is Option<String>: only strings pass; other JSON
-        // types are dropped so the backend doesn't 400 on the batch.
-        let cases: [(serde_json::Value, Option<&str>); 5] = [
-            (serde_json::json!("tour-42"), Some("tour-42")),
-            (serde_json::json!(""), Some("")),
-            (serde_json::json!(42), None),
-            (serde_json::json!(true), None),
-            (serde_json::json!(["a"]), None),
-        ];
-        for (input, expected) in cases {
-            let (options, props) = lift_one("$product_tour_id", input.clone());
-            assert_eq!(
-                options.get("product_tour_id"),
-                expected
-                    .map(|s| serde_json::Value::String(s.to_string()))
-                    .as_ref(),
-                "product_tour_id input={:?}",
-                input
-            );
-            assert!(
-                !props.contains_key("$product_tour_id"),
-                "magic key must be stripped, input={:?}",
-                input
-            );
+    fn caller_options_are_sent_as_given() {
+        let given = json!({
+            "process_person_profile": "not-a-bool",
+            "future_option": {"nested": [1, "two", null]},
+            "ratio": 1.5,
+            "unset": null,
+        });
+        let mut event = Event::new("test", "user-1");
+        for (key, value) in given.as_object().unwrap() {
+            event.insert_option(key, value).unwrap();
+        }
+        let (options, _) = wire_parts(&event);
+        assert_eq!(Value::Object(options), given);
+    }
+
+    #[test]
+    fn groups_force_person_processing() {
+        // The group upgrade wins over an opt-out from either source, in either
+        // call order.
+        let mut option_first = Event::new("test", "user-1");
+        option_first
+            .insert_option("process_person_profile", false)
+            .unwrap();
+        option_first.add_group("company", "acme");
+
+        let mut property_after = Event::new("test", "user-1");
+        property_after.add_group("company", "acme");
+        property_after
+            .insert_prop("$process_person_profile", false)
+            .unwrap();
+
+        for event in [option_first, property_after] {
+            let (options, props) = wire_parts(&event);
+            assert_eq!(options.get("process_person_profile"), Some(&json!(true)));
+            assert!(!props.contains_key("$process_person_profile"));
         }
     }
 

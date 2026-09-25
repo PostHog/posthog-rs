@@ -107,6 +107,7 @@ pub fn posthog_rs::CaptureExceptionOptions::fingerprint<S: core::convert::Into<a
 pub fn posthog_rs::CaptureExceptionOptions::group<N: core::convert::Into<alloc::string::String>, I: core::convert::Into<alloc::string::String>>(self, N, I) -> Self
 pub fn posthog_rs::CaptureExceptionOptions::level<S: core::convert::Into<alloc::string::String>>(self, S) -> Self
 pub fn posthog_rs::CaptureExceptionOptions::new() -> Self
+pub fn posthog_rs::CaptureExceptionOptions::option<K: core::convert::Into<alloc::string::String>, V: serde_core::ser::Serialize>(self, K, V) -> core::result::Result<Self, posthog_rs::Error>
 pub fn posthog_rs::CaptureExceptionOptions::property<K: core::convert::Into<alloc::string::String>, V: serde_core::ser::Serialize>(self, K, V) -> core::result::Result<Self, posthog_rs::Error>
 pub fn posthog_rs::CaptureExceptionOptions::trace_context<T: core::convert::Into<alloc::string::String>, S: core::convert::Into<alloc::string::String>>(self, T, S) -> Self
 #[non_exhaustive] pub struct posthog_rs::CaptureFailure<'a>
@@ -241,10 +242,13 @@ impl posthog_rs::Event
 pub fn posthog_rs::Event::add_group(&mut self, &str, &str)
 pub fn posthog_rs::Event::distinct_id(&self) -> &str
 pub fn posthog_rs::Event::event_name(&self) -> &str
+pub fn posthog_rs::Event::insert_option<K: core::convert::Into<alloc::string::String>, V: serde_core::ser::Serialize>(&mut self, K, V) -> core::result::Result<(), posthog_rs::Error>
 pub fn posthog_rs::Event::insert_prop<K: core::convert::Into<alloc::string::String>, P: serde_core::ser::Serialize>(&mut self, K, P) -> core::result::Result<(), posthog_rs::Error>
 pub fn posthog_rs::Event::new<S: core::convert::Into<alloc::string::String>>(S, S) -> Self
 pub fn posthog_rs::Event::new_anon<S: core::convert::Into<alloc::string::String>>(S) -> Self
+pub fn posthog_rs::Event::options(&self) -> &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub fn posthog_rs::Event::properties(&self) -> &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub fn posthog_rs::Event::remove_option(&mut self, &str) -> core::option::Option<serde_json::value::Value>
 pub fn posthog_rs::Event::remove_prop(&mut self, &str) -> core::option::Option<serde_json::value::Value>
 pub fn posthog_rs::Event::set_timestamp<Tz>(&mut self, chrono::datetime::DateTime<Tz>) -> core::result::Result<(), posthog_rs::Error> where Tz: chrono::offset::TimeZone
 pub fn posthog_rs::Event::set_uuid(&mut self, uuid::Uuid)

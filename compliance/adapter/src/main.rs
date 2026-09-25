@@ -27,7 +27,7 @@ const DEFAULT_TEST_ID: &str = "_global";
 // capture/flush/shutdown and tracks how many captures it handed off.
 
 /// Harness wire-option key -> the magic property the SDK re-lifts into V1
-/// options. Mirrors (in inverse) the SDK's internal `OPTIONS_EXTRACTION_TABLE`;
+/// options. Mirrors (in inverse) the SDK's internal `LEGACY_OPTION_PROPERTIES`;
 /// agreement is enforced by the capture_v1 compliance suite (`assert_event_option`),
 /// so any drift fails CI rather than shipping silently.
 const HARNESS_OPTION_TO_PROP: &[(&str, &str)] = &[

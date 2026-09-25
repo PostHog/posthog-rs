@@ -42,6 +42,34 @@ Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai
 
 The backend decides which names belong on the AI lane and reports a misrouted or oversize event as a per-event `drop` inside a `200`. That verdict reaches an `on_error` hook (`CaptureFailure::endpoint()` says which lane) or the returned `CaptureSummary` for the immediate variants; without a hook the SDK logs one aggregate warning per batch.
 
+### Event options
+
+Capture V1 reads per-event processing controls, such as person profile processing, from an `options` map that is sent next to `properties`. Set them with `Event::insert_option`, or with `CaptureExceptionOptions::option` for exceptions. They work the same on `capture` and `capture_ai`.
+
+```rust
+let mut event = posthog_rs::Event::new("signed_up", "user-123");
+event.insert_option("process_person_profile", false)?;
+client.capture(event);
+```
+
+Keys are strings and values are any JSON value. The SDK sends options as given, so a new option that PostHog adds needs no SDK upgrade. PostHog validates them: it ignores keys it does not know, and drops the event if a known key has a value it cannot use. That drop reaches `on_error` as a per-event `drop` with the detail `invalid_options`. `before_send` hooks can read and change options with `Event::options`, `insert_option`, and `remove_option`.
+
+The legacy properties still work. The SDK moves each one into its option and removes it from `properties`:
+
+| Legacy property | Option |
+| --- | --- |
+| `$process_person_profile` | `process_person_profile` |
+| `$cookieless_mode` | `cookieless_mode` |
+| `$ignore_sent_at` | `disable_skew_correction` |
+| `$product_tour_id` | `product_tour_id` |
+
+When both are set, the option wins. An option set to `null` counts as not set, so the legacy property applies.
+
+Two behaviors differ from the 0.x `capture-v1` feature:
+
+- The SDK no longer converts legacy property values to the type PostHog expects. A value PostHog cannot use, such as `"$process_person_profile": "no"`, used to be removed so the event was sent without it. Now PostHog drops the event as `invalid_options`. Values PostHog accepts, such as `"false"` or `0`, behave as before.
+- Events with groups (`Event::add_group` or `CaptureExceptionOptions::group`) always process person profiles, because group analytics needs them. Setting `process_person_profile` to `false` on a group event no longer turns processing off.
+
 ### Compression
 
 `CaptureCompression::Gzip`, `Deflate`, `Br`, and `Zstd` now all apply their corresponding `Content-Encoding`. In older default V0 builds, only gzip was supported and selecting another variant could send an uncompressed body. Check any proxy or WAF in front of PostHog before enabling Brotli or Zstandard.

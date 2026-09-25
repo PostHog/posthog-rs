@@ -437,6 +437,24 @@ async fn capture_exhausts_retries() {
     mock.assert_hits(3);
 }
 
+/// Matcher: the only event carries exactly the merged options, and no legacy
+/// option property reaches `properties`.
+fn request_has_merged_event_options(req: &HttpMockRequest) -> bool {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
+        return false;
+    };
+    let event = &body["batch"][0];
+    event["options"]
+        == json!({
+            "process_person_profile": false,
+            "cookieless_mode": true,
+            "disable_skew_correction": true,
+            "future_option": {"nested": [1, "two"]},
+        })
+        && event["properties"].get("$process_person_profile").is_none()
+        && event["properties"].get("$cookieless_mode").is_none()
+}
+
 #[tokio::test]
 async fn capture_sends_event_options() {
     let server = MockServer::start();
@@ -444,8 +462,7 @@ async fn capture_sends_event_options() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/i/v1/analytics/events")
-            .body_includes("\"cookieless_mode\":true")
-            .body_includes("\"process_person_profile\":false");
+            .is_true(request_has_merged_event_options);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({
@@ -453,10 +470,31 @@ async fn capture_sends_event_options() {
             }));
     });
 
-    let client = create_capture_client(server.base_url()).await;
+    let options = ClientOptionsBuilder::default()
+        .api_key("phc_test_token".to_string())
+        .host(server.base_url())
+        .max_capture_attempts(1u32)
+        // Hooks see options before they are sent, and can change them.
+        .before_send(|mut event| {
+            event.insert_option("disable_skew_correction", true).ok()?;
+            event.remove_option("removed_by_hook");
+            Some(event)
+        })
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(options).await;
+
     let mut event = Event::new("test", "user-1");
+    // The option wins over its legacy property; an unset option takes it.
+    event
+        .insert_option("process_person_profile", false)
+        .unwrap();
+    event.insert_prop("$process_person_profile", true).unwrap();
     event.insert_prop("$cookieless_mode", true).unwrap();
-    event.insert_prop("$process_person_profile", false).unwrap();
+    event
+        .insert_option("future_option", json!({"nested": [1, "two"]}))
+        .unwrap();
+    event.insert_option("removed_by_hook", 1).unwrap();
 
     client.capture(event);
     client.flush().await;

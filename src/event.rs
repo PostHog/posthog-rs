@@ -65,6 +65,8 @@ pub struct Event {
     event: String,
     distinct_id: String,
     properties: HashMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    options: HashMap<String, serde_json::Value>,
     groups: HashMap<String, String>,
     timestamp: Option<NaiveDateTime>,
     uuid: Uuid,
@@ -90,6 +92,7 @@ impl Event {
             event: event.into(),
             distinct_id: distinct_id.into(),
             properties: HashMap::new(),
+            options: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
@@ -119,6 +122,7 @@ impl Event {
             event: event.into(),
             distinct_id: Uuid::now_v7().to_string(),
             properties,
+            options: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
@@ -152,6 +156,46 @@ impl Event {
         self.properties.remove(key)
     }
 
+    /// Set a capture option for this event, such as `"process_person_profile"`.
+    ///
+    /// Options tell PostHog how to process the event. They are not stored as
+    /// event properties.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: Option name.
+    /// - `value`: Any value that can be serialized to JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Serialization`] if `value` cannot be serialized.
+    ///
+    /// # Remarks
+    ///
+    /// The SDK sends options as given, without checking keys or value types.
+    /// PostHog ignores keys it does not know, and drops the event if a known
+    /// key has a value it cannot use.
+    ///
+    /// An option wins over the legacy `$` property that controls the same
+    /// behavior, such as `$process_person_profile`. A `null` value counts as
+    /// not set, so the legacy property applies. Events with groups always
+    /// process persons (see [`Event::add_group`]).
+    pub fn insert_option<K: Into<String>, V: Serialize>(
+        &mut self,
+        key: K,
+        value: V,
+    ) -> Result<(), Error> {
+        let as_json =
+            serde_json::to_value(value).map_err(|e| Error::Serialization(e.to_string()))?;
+        let _ = self.options.insert(key.into(), as_json);
+        Ok(())
+    }
+
+    /// Remove a capture option from the event and return its previous value, if any.
+    pub fn remove_option(&mut self, key: &str) -> Option<serde_json::Value> {
+        self.options.remove(key)
+    }
+
     /// Capture this as a group event.
     ///
     /// See <https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events>.
@@ -165,7 +209,8 @@ impl Event {
     ///
     /// Group events cannot be personless, and will be automatically upgraded to
     /// include person profile processing if they were anonymous. This might lead
-    /// to "empty" person profiles being created.
+    /// to "empty" person profiles being created. The upgrade also wins over a
+    /// `process_person_profile` option or property set to `false`.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
         self.properties.insert(
             crate::constants::PROCESS_PERSON_PROFILE_PROP.into(),
@@ -227,6 +272,7 @@ impl Event {
             event: "$create_alias".to_string(),
             distinct_id: previous_id,
             properties,
+            options: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
@@ -286,6 +332,7 @@ impl Event {
             event: "$groupidentify".to_string(),
             distinct_id,
             properties: props,
+            options: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
@@ -349,6 +396,11 @@ impl Event {
     /// Return the event properties.
     pub fn properties(&self) -> &HashMap<String, serde_json::Value> {
         &self.properties
+    }
+
+    /// Return the event's capture options, as set by [`Event::insert_option`].
+    pub fn options(&self) -> &HashMap<String, serde_json::Value> {
+        &self.options
     }
 
     /// Insert a default property only if the caller hasn't already set it.
@@ -429,6 +481,36 @@ mod test {
         event.set_timestamp(caller).unwrap();
         event.ensure_timestamp(now);
         assert_eq!(event.timestamp, Some(caller.naive_utc()));
+    }
+
+    #[test]
+    fn options_insert_replace_and_remove() {
+        let mut event = Event::new("test", "user1");
+        event.insert_option("process_person_profile", true).unwrap();
+        event
+            .insert_option("process_person_profile", false)
+            .unwrap();
+        event.insert_option("future_option", vec![1, 2]).unwrap();
+        assert_eq!(
+            event.options().get("process_person_profile"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            event.remove_option("future_option"),
+            Some(serde_json::json!([1, 2]))
+        );
+        assert_eq!(event.remove_option("future_option"), None);
+        assert_eq!(event.options().len(), 1);
+        // Options never leak into properties.
+        assert!(event.properties().is_empty());
+
+        // JSON object keys must be strings, so a tuple-keyed map cannot serialize.
+        let unserializable: std::collections::HashMap<(u8, u8), u8> = [((1, 2), 3)].into();
+        let err = event
+            .insert_option("bad", unserializable)
+            .expect_err("a map with non-string keys cannot serialize");
+        assert!(matches!(err, Error::Serialization(_)));
+        assert!(!event.options().contains_key("bad"));
     }
 
     #[test]
