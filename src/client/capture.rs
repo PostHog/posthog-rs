@@ -977,8 +977,9 @@ mod tests {
 
     // -- build_headers SDK identity -------------------------------------------
 
-    /// C4: pins the wire identity `posthog-rs/<semver>` — the name must equal
-    /// v0's `$lib` so capture's `$lib`/`$lib_version` materialization is correct.
+    /// C4: pins the wire identity `posthog-rs/<semver>`. The name must stay the
+    /// `$lib` value earlier releases sent, so capture's `$lib`/`$lib_version`
+    /// materialization stays correct.
     #[test]
     fn build_headers_sdk_info_is_canonical_lib_slash_version() {
         let opts = test_opts();

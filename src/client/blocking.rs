@@ -526,9 +526,7 @@ impl Client {
         Ok(())
     }
 
-    /// Capture a collection of events with a single request.
-    ///
-    /// Events are sent to the `/batch/` endpoint.
+    /// Capture a collection of events.
     ///
     /// # Parameters
     ///
