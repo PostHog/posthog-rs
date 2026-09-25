@@ -80,17 +80,9 @@ impl CaptureEvent {
     }
 }
 
-/// Build the wire `options` map. The SDK sends every value as given and never
-/// checks types: PostHog validates options, applies defaults, and ignores keys
-/// it does not know.
-///
-/// - Caller options come first.
-/// - A legacy `$` property fills its option only when the caller left that
-///   option unset. `null` counts as unset, as it does in PostHog.
-/// - Legacy properties are always removed from `properties`, so they are
-///   never stored as event properties.
-/// - An event with groups always processes persons: ingestion attaches group
-///   properties only to events that process persons.
+/// Caller options are sent as given for PostHog to validate; a legacy `$`
+/// property only fills an unset (missing or `null`) option and is always
+/// removed from `properties`.
 fn merge_options(
     event: &Event,
     properties: &mut HashMap<String, Value>,
@@ -109,6 +101,7 @@ fn merge_options(
         }
     }
 
+    // Ingestion attaches group properties only to events that process persons.
     if !event.groups().is_empty() {
         options.insert(PROCESS_PERSON_PROFILE_OPT.to_string(), Value::Bool(true));
     }
@@ -298,8 +291,8 @@ mod tests {
 
     #[test]
     fn legacy_properties_fill_only_unset_options() {
-        // (caller option, legacy property, expected wire option). The values are
-        // not the types PostHog expects, because the SDK must not check them.
+        // (caller option, legacy property, expected); values are mistyped on
+        // purpose because the SDK must not check them.
         let cases: [(Option<Value>, Option<Value>, Option<Value>); 6] = [
             (Some(json!("caller")), None, Some(json!("caller"))),
             (None, Some(json!("legacy")), Some(json!("legacy"))),

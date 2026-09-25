@@ -156,10 +156,8 @@ impl Event {
         self.properties.remove(key)
     }
 
-    /// Set a capture option for this event, such as `"process_person_profile"`.
-    ///
-    /// Options tell PostHog how to process the event. They are not stored as
-    /// event properties.
+    /// Set a capture option that tells PostHog how to process the event, such
+    /// as `"process_person_profile"`.
     ///
     /// # Parameters
     ///
@@ -172,14 +170,9 @@ impl Event {
     ///
     /// # Remarks
     ///
-    /// The SDK sends options as given, without checking keys or value types.
-    /// PostHog ignores keys it does not know, and drops the event if a known
-    /// key has a value it cannot use.
-    ///
-    /// An option wins over the legacy `$` property that controls the same
-    /// behavior, such as `$process_person_profile`. A `null` value counts as
-    /// not set, so the legacy property applies. Events with groups always
-    /// process persons (see [`Event::add_group`]).
+    /// Sent unchecked: PostHog ignores unknown keys and drops the event if a
+    /// known key has an unusable value. A non-`null` option wins over its legacy
+    /// `$` property, such as `$process_person_profile`.
     pub fn insert_option<K: Into<String>, V: Serialize>(
         &mut self,
         key: K,
@@ -207,10 +200,8 @@ impl Event {
     ///
     /// # Remarks
     ///
-    /// Group events cannot be personless, and will be automatically upgraded to
-    /// include person profile processing if they were anonymous. This might lead
-    /// to "empty" person profiles being created. The upgrade also wins over a
-    /// `process_person_profile` option or property set to `false`.
+    /// Group events always process person profiles, even when
+    /// `process_person_profile` is `false`, which can create "empty" profiles.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
         self.properties.insert(
             crate::constants::PROCESS_PERSON_PROFILE_PROP.into(),

@@ -432,8 +432,7 @@ impl CaptureExceptionOptions {
         Ok(self)
     }
 
-    /// Set a capture option on the exception event, such as
-    /// `"process_person_profile"`. Behaves like [`Event::insert_option`].
+    /// Set a capture option on the exception event; see [`Event::insert_option`].
     pub fn option<K: Into<String>, V: Serialize>(
         mut self,
         key: K,
