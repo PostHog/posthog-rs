@@ -64,9 +64,8 @@ struct CaptureRequest {
 }
 
 impl CaptureRequest {
-    /// Build the event the way an SDK user does: properties through
-    /// `insert_prop` and options through `insert_option`, both unchanged.
-    /// Returns the event's UUID so `/capture` can report it.
+    /// Build the event as an SDK user would, with properties and options
+    /// unchanged, and return its UUID.
     fn into_event(self) -> (Event, uuid::Uuid) {
         let mut event = Event::new(self.event, self.distinct_id);
         if let Some(props) = self.properties {
@@ -498,7 +497,7 @@ mod tests {
         serde_json::from_value(body).expect("valid /capture body")
     }
 
-    /// The event exactly as the SDK would serialize it before sending.
+    /// The built event's serde fields and the UUID `/capture` reports.
     fn event_json(req: CaptureRequest) -> (Value, uuid::Uuid) {
         let (event, uuid) = req.into_event();
         (serde_json::to_value(&event).unwrap(), uuid)
@@ -506,8 +505,8 @@ mod tests {
 
     #[test]
     fn options_and_properties_reach_the_sdk_unchanged() {
-        // Unknown keys, wrong types and nulls are for PostHog to judge, and a
-        // legacy `$` property stays a property: the SDK owns the fallback.
+        // PostHog judges option values and the SDK owns the legacy fallback, so
+        // nothing is translated here.
         let options = json!({
             "process_person_profile": "not-a-bool",
             "future_option": {"nested": [1, "two"]},
