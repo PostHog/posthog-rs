@@ -143,8 +143,7 @@ pub(crate) const AI_BATCH_BYTES_TARGET: usize = 5 * 1024 * 1024;
 /// Per-event ceiling on the serialized `properties` object of an AI event,
 /// mirroring the backend's `AI_MAX_EVENT_BYTES` (strictly greater is refused
 /// with `ai_event_too_big`). Events over it are dropped locally so a doomed
-/// multi-MB upload is never attempted. Measured on `properties` only, as the
-/// backend measures it.
+/// multi-MB upload is never attempted.
 pub(crate) const AI_MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Everything that differs between the analytics and AI transport lanes. One
@@ -1734,11 +1733,8 @@ mod tests {
 
     #[test]
     fn event_timestamp_is_capture_time_not_publish_time() {
-        // An event captured at T0 but flushed 10s later must carry T0 as its
-        // event `timestamp` (when it occurred), while the batch envelope carries
-        // the publish time (`created_at`). The check is encoded in the matcher:
-        // the request only matches when publish - timestamp ~= 10s, proving the
-        // stamp happens at enqueue, not at send.
+        // The matcher accepts only a ~10s gap between `created_at` (publish) and
+        // the event `timestamp`, proving the timestamp is stamped at enqueue.
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method(POST).matches(|req| {
