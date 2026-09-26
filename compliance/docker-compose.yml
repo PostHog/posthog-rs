@@ -11,7 +11,7 @@ services:
       - test-network
 
   test-harness:
-    image: ghcr.io/posthog/sdk-test-harness:0.10.0
+    image: ghcr.io/posthog/sdk-test-harness:1.10.0
     # No --suite filter: the harness selects suites from the capabilities the
     # adapter advertises on /health, which is exactly what CI does. Filtering
     # was only ever needed to pick v0 vs v1 apart.
