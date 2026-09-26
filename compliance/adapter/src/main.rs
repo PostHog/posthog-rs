@@ -61,6 +61,9 @@ struct CaptureRequest {
     timestamp: Option<String>,
     #[serde(default)]
     options: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Sent only on `/capture_ai`; the event keeps it on the wire.
+    #[serde(default)]
+    uuid: Option<uuid::Uuid>,
 }
 
 impl CaptureRequest {
@@ -85,7 +88,7 @@ impl CaptureRequest {
                 .insert_option(key, value)
                 .expect("a JSON value always serializes");
         }
-        let uuid = uuid::Uuid::now_v7();
+        let uuid = self.uuid.unwrap_or_else(uuid::Uuid::now_v7);
         event.set_uuid(uuid);
         (event, uuid)
     }
@@ -196,10 +199,10 @@ async fn shutdown_client(client: &Client) {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    // `capture_v1` is the harness contract key that selects the capture suite
-    // (see `requires:` in contracts/capture_analytics_v1_tests.yaml) — it is a
-    // frozen external string, not an internal name.
-    let mut capabilities: Vec<String> = vec!["capture_v1".to_string()];
+    // Frozen harness contract keys that select suites and tests via `requires:`.
+    let mut capabilities: Vec<String> = ["capture_v1", "capture_ai_v1", "event_options"]
+        .map(String::from)
+        .to_vec();
     if let Some(algo) = state.compression {
         capabilities.push(compression_capability(algo).to_string());
     }
@@ -276,11 +279,35 @@ async fn init(
     }
 }
 
+/// The SDK capture method a harness request goes through.
+#[derive(Clone, Copy)]
+enum Lane {
+    Analytics,
+    Ai,
+}
+
 async fn capture_event(
     State(state): State<AppState>,
     Query(params): Query<TestIdParam>,
     Json(req): Json<CaptureRequest>,
 ) -> impl IntoResponse {
+    enqueue(state, params, req, Lane::Analytics).await
+}
+
+async fn capture_ai_event(
+    State(state): State<AppState>,
+    Query(params): Query<TestIdParam>,
+    Json(req): Json<CaptureRequest>,
+) -> impl IntoResponse {
+    enqueue(state, params, req, Lane::Ai).await
+}
+
+async fn enqueue(
+    state: AppState,
+    params: TestIdParam,
+    req: CaptureRequest,
+    lane: Lane,
+) -> axum::response::Response {
     let key = params.key().to_string();
     let (event, uuid) = req.into_event();
 
@@ -300,9 +327,11 @@ async fn capture_event(
         (client, s.historical_migration)
     };
 
-    // capture_batch carries the historical_migration flag through to the worker;
-    // a single-event vec is just a non-blocking enqueue.
-    client.capture_batch(vec![event], historical_migration);
+    // The batch methods carry historical_migration; a one-event vec is still a non-blocking enqueue.
+    match lane {
+        Lane::Analytics => client.capture_batch(vec![event], historical_migration),
+        Lane::Ai => client.capture_ai_batch(vec![event], historical_migration),
+    }
 
     Json(serde_json::json!({ "success": true, "uuid": uuid.to_string() })).into_response()
 }
@@ -473,6 +502,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/init", post(init))
         .route("/capture", post(capture_event))
+        .route("/capture_ai", post(capture_ai_event))
         .route("/get_feature_flag", post(get_feature_flag))
         .route("/flush", post(flush))
         .route("/shutdown", post(shutdown))
@@ -527,6 +557,16 @@ mod tests {
     fn returned_uuid_is_the_event_uuid() {
         let (event, uuid) = event_json(request(json!({"distinct_id": "u", "event": "e"})));
         assert_eq!(event["uuid"], uuid.to_string());
+    }
+
+    #[test]
+    fn supplied_uuid_is_kept() {
+        let supplied = "0198c0de-0000-7000-8000-000000000abc";
+        let (event, uuid) = event_json(request(
+            json!({"distinct_id": "u", "event": "e", "uuid": supplied}),
+        ));
+        assert_eq!(uuid.to_string(), supplied);
+        assert_eq!(event["uuid"], supplied);
     }
 
     #[test]
