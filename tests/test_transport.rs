@@ -5,13 +5,17 @@
 //! `batch` array).
 #![cfg(feature = "async-client")]
 
+mod common;
+
+use serde_json::json;
 use std::time::Duration;
 
 use httpmock::prelude::*;
 use posthog_rs::{Client, ClientOptionsBuilder, Event};
 
-async fn client_with(host: String, flush_at: usize, max_attempts: u32) -> Client {
-    let options = ClientOptionsBuilder::default()
+fn options(host: String, flush_at: usize, max_attempts: u32) -> ClientOptionsBuilder {
+    let mut options = ClientOptionsBuilder::default();
+    options
         .api_key("phc_test".to_string())
         .host(host)
         .flush_at(flush_at)
@@ -24,10 +28,12 @@ async fn client_with(host: String, flush_at: usize, max_attempts: u32) -> Client
         .flush_interval_ms(600_000u64)
         .max_capture_attempts(max_attempts)
         .retry_initial_backoff_ms(600_000u64)
-        .retry_max_backoff_ms(600_000u64)
-        .build()
-        .unwrap();
-    posthog_rs::client(options).await
+        .retry_max_backoff_ms(600_000u64);
+    options
+}
+
+async fn client_with(host: String, flush_at: usize, max_attempts: u32) -> Client {
+    posthog_rs::client(options(host, flush_at, max_attempts).build().unwrap()).await
 }
 
 /// Poll a mock until it has been hit `want` times (for worker-timed paths such
@@ -89,8 +95,18 @@ async fn flush_keeps_events_retryable_then_delivers_after_success() {
         then.status(503);
     });
 
-    let client = client_with(server.base_url(), 100, 5).await;
-    client.capture(Event::new("Save", "user-123"));
+    let (errors, hook) = common::capture_error_sink();
+    let client = posthog_rs::client(
+        options(server.base_url(), 100, 5)
+            .on_error(hook)
+            .build()
+            .unwrap(),
+    )
+    .await;
+    let mut event = Event::new("Save", "user-123");
+    let id = uuid::Uuid::now_v7();
+    event.set_uuid(id);
+    client.capture(event);
 
     // First flush attempts once; the 503 keeps the event queued for retry.
     client.flush().await;
@@ -101,7 +117,8 @@ async fn flush_keeps_events_retryable_then_delivers_after_success() {
     let ok = server.mock(|when, then| {
         when.method(POST)
             .matches(|r| body_contains(r, "\"event\":\"Save\""));
-        then.status(200);
+        then.status(200)
+            .json_body(json!({"results": {id.to_string(): {"result": "ok"}}}));
     });
     client.flush().await;
     ok.assert_hits(1);
@@ -109,6 +126,7 @@ async fn flush_keeps_events_retryable_then_delivers_after_success() {
     // Delivered: a third flush sends nothing more.
     client.flush().await;
     ok.assert_hits(1);
+    assert!(errors.try_recv().is_err());
 }
 
 // --- shutdown --------------------------------------------------------------
@@ -166,7 +184,11 @@ async fn shutdown_does_not_throw_on_delivery_failure() {
 async fn batcher_flushes_when_size_threshold_reached() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
-        when.method(POST);
+        when.method(POST).matches(|request| {
+            let body: serde_json::Value = serde_json::from_slice(request.body_ref()).unwrap();
+            let batch = body["batch"].as_array().unwrap();
+            batch.len() == 2 && batch[0]["event"] == "First" && batch[1]["event"] == "Second"
+        });
         then.status(200);
     });
 
@@ -177,6 +199,8 @@ async fn batcher_flushes_when_size_threshold_reached() {
     client.capture(Event::new("Second", "user-123"));
 
     wait_for_hits(&mock, 1);
+    client.flush().await;
+    mock.assert_hits(1);
 }
 
 #[tokio::test]
@@ -204,19 +228,57 @@ async fn batcher_preserves_fifo_order_within_a_batch() {
 // --- http-client -----------------------------------------------------------
 
 #[tokio::test]
+async fn panicking_error_hook_does_not_stop_worker_or_later_hooks() {
+    let server = MockServer::start();
+    let rejected = server.mock(|when, then| {
+        when.method(POST);
+        then.status(400).body("invalid event");
+    });
+    let (errors, hook) = common::capture_error_sink();
+    let client = posthog_rs::client(
+        options(server.base_url(), 100, 3)
+            .on_error(|_| panic!("broken observer"))
+            .on_error(hook)
+            .build()
+            .unwrap(),
+    )
+    .await;
+    for name in ["First", "Second"] {
+        client.capture(Event::new(name, "user"));
+        client.flush().await;
+        assert_eq!(errors.try_recv().expect("later hook must run").0, Some(400));
+    }
+    client.shutdown().await;
+    rejected.assert_calls(2);
+    assert!(errors.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn successful_status_drains_the_queue() {
     let server = MockServer::start();
+    let id = uuid::Uuid::now_v7();
     let mock = server.mock(|when, then| {
         when.method(POST);
-        then.status(200);
+        then.status(200)
+            .json_body(json!({"results": {id.to_string(): {"result": "ok"}}}));
     });
 
-    let client = client_with(server.base_url(), 100, 3).await;
-    client.capture(Event::new("Save", "user-123"));
+    let (errors, hook) = common::capture_error_sink();
+    let client = posthog_rs::client(
+        options(server.base_url(), 100, 3)
+            .on_error(hook)
+            .build()
+            .unwrap(),
+    )
+    .await;
+    let mut event = Event::new("Save", "user-123");
+    event.set_uuid(id);
+    client.capture(event);
     client.flush().await;
     mock.assert_hits(1);
 
     // Nothing left to send.
     client.flush().await;
     mock.assert_hits(1);
+    assert!(errors.try_recv().is_err());
 }

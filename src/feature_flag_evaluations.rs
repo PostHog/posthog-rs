@@ -538,6 +538,7 @@ mod tests {
             "u1",
         );
         assert!(snap.get_flag_payload("alpha").is_none());
+        assert!(snap.only_accessed().keys().is_empty());
         assert!(host.captured.lock().unwrap().is_empty());
     }
 
@@ -633,6 +634,8 @@ mod tests {
             snap.get_flag_payload("alpha"),
             Some(json!({"hello": "world"}))
         );
+        assert!(snap.only_accessed().keys().is_empty());
+        assert!(host.captured.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -732,10 +735,13 @@ mod tests {
             "u1",
         );
         let _ = snap.is_enabled("alpha");
-        let child = snap.only_accessed();
-        let _ = child.is_enabled("alpha");
-        // Parent's accessed set is still {"alpha"}, not affected by child reads.
-        assert_eq!(snap.snapshot_accessed().len(), 1);
+        let child = snap.only(&["alpha", "beta"]);
+        assert_eq!(child.only_accessed().keys(), vec!["alpha"]);
+        assert!(!child.is_enabled("beta"));
+        assert_eq!(snap.only_accessed().keys(), vec!["alpha"]);
+        let mut child_keys = child.only_accessed().keys();
+        child_keys.sort();
+        assert_eq!(child_keys, vec!["alpha", "beta"]);
     }
 
     /// Build a snapshot holding a single flag with an explicit experiment

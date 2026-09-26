@@ -502,6 +502,7 @@ async fn assert_disabled_client_is_noop(api_key: Option<&str>) {
         None
     );
 
+    client.flush().await;
     capture_mock.assert_hits(0);
     batch_mock.assert_hits(0);
     flags_mock.assert_hits(0);
@@ -519,7 +520,7 @@ async fn test_capture_batch_empty_is_noop() {
 
     let client = create_test_client(server.base_url()).await;
     client.capture_batch(vec![], false);
-
+    client.flush().await;
     batch_mock.assert_hits(0);
 }
 
@@ -576,15 +577,26 @@ async fn test_capture_batch_rate_limit() {
         then.status(429);
     });
 
-    let client = create_test_client(server.base_url()).await;
+    let (errors, hook) = common::capture_error_sink();
+    let client = posthog_rs::client(
+        posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .on_error(hook)
+            .build()
+            .unwrap(),
+    )
+    .await;
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    // Capture is now infallible; a terminal 429 is attempted once on flush and
-    // then dropped (the rate-limit is logged, not returned to the caller).
     client.capture_batch(vec![event], true);
     client.flush().await;
-
-    batch_mock.assert();
+    client.shutdown().await;
+    let (status, error) = errors.try_recv().expect("terminal capture failure");
+    assert_eq!(status, Some(429));
+    assert!(error.contains("RateLimit"), "{}", error);
+    assert!(errors.try_recv().is_err());
+    batch_mock.assert_hits(1);
 }
 
 #[cfg(not(feature = "capture-v1"))]
@@ -597,15 +609,30 @@ async fn test_capture_batch_bad_request() {
         then.status(400).body("invalid payload");
     });
 
-    let client = create_test_client(server.base_url()).await;
+    let (errors, hook) = common::capture_error_sink();
+    let client = posthog_rs::client(
+        posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .on_error(hook)
+            .build()
+            .unwrap(),
+    )
+    .await;
 
     let event = posthog_rs::Event::new("test_event", "user1");
-    // Capture is now infallible; a terminal 400 is attempted once on flush and
-    // then dropped (the bad-request is logged, not returned to the caller).
     client.capture_batch(vec![event], false);
     client.flush().await;
-
-    batch_mock.assert();
+    client.shutdown().await;
+    let (status, error) = errors.try_recv().expect("terminal capture failure");
+    assert_eq!(status, Some(400));
+    assert!(
+        error.contains("BadRequest") && error.contains("invalid payload"),
+        "{}",
+        error
+    );
+    assert!(errors.try_recv().is_err());
+    batch_mock.assert_hits(1);
 }
 
 #[cfg(not(feature = "capture-v1"))]

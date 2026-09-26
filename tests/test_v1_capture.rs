@@ -9,6 +9,8 @@
 //! instead lets the worker retry on its own schedule so the header delay is
 //! observable. Wire-format assertions are unchanged from the synchronous model.
 
+mod common;
+
 use std::time::Duration;
 
 use httpmock::prelude::*;
@@ -921,7 +923,16 @@ async fn v1_capture_accepts_alternate_2xx_status() {
             }));
     });
 
-    let client = create_v1_client(server.base_url()).await;
+    let (errors, hook) = common::capture_error_sink();
+    let client = posthog_rs::client(
+        ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host(server.base_url())
+            .on_error(hook)
+            .build()
+            .unwrap(),
+    )
+    .await;
     let mut event = Event::new("test", "user-1");
     event.set_uuid(uuid);
 
@@ -932,6 +943,7 @@ async fn v1_capture_accepts_alternate_2xx_status() {
     mock.assert_hits(1);
     client.flush().await;
     mock.assert_hits(1);
+    assert!(errors.try_recv().is_err());
 }
 
 /// C4: pins the wire identity `posthog-rs/<semver>` that capture parses
@@ -978,12 +990,20 @@ async fn v1_capture_batch_empty_is_noop() {
 
 #[tokio::test]
 async fn v1_capture_disabled_client_noop() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST);
+        then.status(200);
+    });
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test".to_string())
+        .host(server.base_url())
         .disabled(true)
         .build()
         .unwrap();
     let client = posthog_rs::client(options).await;
 
     client.capture(Event::new("test", "user-1"));
+    client.flush().await;
+    mock.assert_hits(0);
 }

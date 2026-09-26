@@ -513,6 +513,34 @@ mod tests {
     }
 
     #[test]
+    fn panicking_on_error_hook_does_not_skip_later_hooks() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first = calls.clone();
+        let second = calls.clone();
+        let hooks = vec![
+            OnErrorHook::new(move |_| {
+                first.lock().unwrap().push("first");
+                panic!("broken hook");
+            }),
+            OnErrorHook::new(move |_| second.lock().unwrap().push("second")),
+        ];
+        for _ in 0..2 {
+            report_flags_error(
+                &hooks,
+                "http://localhost/flags/",
+                Some("user"),
+                Some(500),
+                Some("failure"),
+                &Error::Connection("failure".into()),
+            );
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["first", "second", "first", "second"]
+        );
+    }
+
+    #[test]
     fn http_client_build_failure_disables_client() {
         let mut options = crate::ClientOptionsBuilder::default()
             .api_key("phc_test".to_string())
