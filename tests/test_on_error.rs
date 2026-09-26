@@ -266,7 +266,14 @@ mod blocking {
         // Initial load fails synchronously during construction (1 hit). Wait
         // for the background loop to fire at least one more poll — the hook
         // firing is proof the poll ran.
-        thread::sleep(Duration::from_millis(1500));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while recorded.lock().unwrap().len() < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "recurring poll did not report failure"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
 
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert!(
@@ -412,7 +419,13 @@ mod async_tests {
         // start() awaits the initial load (1 hit). Wait for the background
         // task's interval to fire at least one more poll — the hook firing is
         // proof the poll ran.
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while recorded.lock().unwrap().len() < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("recurring poll did not report failure");
 
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert!(

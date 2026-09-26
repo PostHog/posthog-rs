@@ -28,6 +28,61 @@ fn capture_path_mock(server: &MockServer) -> httpmock::Mock<'_> {
     })
 }
 
+fn capture_events_mock<'a>(
+    server: &'a MockServer,
+    expected: Vec<(&'static str, Value)>,
+) -> httpmock::Mock<'a> {
+    server.mock(|when, then| {
+        when.method(POST)
+            .path(CAPTURE_PATH)
+            .matches(move |request| {
+                let Ok(body) = serde_json::from_slice::<Value>(request.body_ref()) else {
+                    return false;
+                };
+                let Some(batch) = body["batch"].as_array() else {
+                    return false;
+                };
+                batch.len() == expected.len()
+                    && batch.iter().zip(&expected).all(|(event, (name, props))| {
+                        event["event"] == *name
+                            && props
+                                .as_object()
+                                .unwrap()
+                                .iter()
+                                .all(|(key, value)| event["properties"].get(key) == Some(value))
+                    })
+            });
+        then.status(200).json_body(json!({"results": {}}));
+    })
+}
+
+fn read_flags_request(stream: &mut std::net::TcpStream) -> std::io::Result<String> {
+    // macOS inherits the listener's nonblocking mode on accepted sockets.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut request = Vec::new();
+    let mut buf = [0; 1024];
+    loop {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        request.extend_from_slice(&buf[..n]);
+        if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&request[..end]);
+            let length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                .unwrap_or(0);
+            if request.len() >= end + 4 + length {
+                return Ok(String::from_utf8_lossy(&request).into_owned());
+            }
+        }
+    }
+}
+
 fn flags_response_fixture() -> Value {
     json!({
         "flags": {
@@ -137,28 +192,16 @@ fn start_flaky_flags_server(success_body: String) -> FlakyFlagsServer {
         {
             match listener.accept() {
                 Ok((mut stream, _addr)) => {
+                    let Ok(request) = read_flags_request(&mut stream) else {
+                        continue;
+                    };
                     let attempt = thread_attempts.fetch_add(1, Ordering::SeqCst) + 1;
                     if attempt == 1 {
                         let _ = stream.shutdown(Shutdown::Both);
                         continue;
                     }
 
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                    let mut request = Vec::new();
-                    let mut buf = [0; 1024];
-                    loop {
-                        match stream.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                request.extend_from_slice(&buf[..n]);
-                                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    if String::from_utf8_lossy(&request).contains("POST /flags/?v=2") {
+                    if request.starts_with("POST /flags/?v=2 ") {
                         thread_saw_flags_path.store(true, Ordering::SeqCst);
                     }
 
@@ -213,7 +256,10 @@ fn start_resetting_flags_server(expected_attempts: usize) -> ResettingFlagsServe
             && started.elapsed() < Duration::from_secs(5)
         {
             match listener.accept() {
-                Ok((stream, _addr)) => {
+                Ok((mut stream, _addr)) => {
+                    if read_flags_request(&mut stream).is_err() {
+                        continue;
+                    }
                     thread_attempts.fetch_add(1, Ordering::SeqCst);
                     let _ = stream.shutdown(Shutdown::Both);
                 }
@@ -267,23 +313,11 @@ fn start_status_then_success_flags_server(
         {
             match listener.accept() {
                 Ok((mut stream, _addr)) => {
+                    let Ok(request) = read_flags_request(&mut stream) else {
+                        continue;
+                    };
                     let attempt = thread_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                    let mut request = Vec::new();
-                    let mut buf = [0; 1024];
-                    loop {
-                        match stream.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                request.extend_from_slice(&buf[..n]);
-                                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    if String::from_utf8_lossy(&request).contains("POST /flags/?v=2") {
+                    if request.starts_with("POST /flags/?v=2 ") {
                         thread_saw_flags_path.store(true, Ordering::SeqCst);
                     }
 
@@ -349,6 +383,7 @@ mod blocking {
         keys.sort();
         assert_eq!(keys, vec!["alpha", "beta", "variant-flag"]);
         flags_mock.assert_hits(1);
+        client.flush();
         capture_mock.assert_hits(0);
     }
 
@@ -501,6 +536,7 @@ mod blocking {
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .unwrap();
         flags_mock.assert_hits(1);
+        client.flush();
         capture_mock.assert_hits(0);
     }
 
@@ -511,7 +547,27 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = capture_path_mock(&server);
+        let alpha_mock = capture_events_mock(
+            &server,
+            vec![(
+                "$feature_flag_called",
+                json!({
+                    "$feature_flag": "alpha", "$feature_flag_response": true,
+                    "$feature_flag_id": 101, "$feature_flag_version": 4,
+                    "$feature_flag_reason": "Matched condition set 1",
+                    "$feature_flag_request_id": "req-abc-123", "$is_server": true
+                }),
+            )],
+        );
+        let variant_mock = capture_events_mock(
+            &server,
+            vec![(
+                "$feature_flag_called",
+                json!({
+                    "$feature_flag": "variant-flag", "$feature_flag_response": "test"
+                }),
+            )],
+        );
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -530,8 +586,8 @@ mod blocking {
         );
         client.flush();
 
-        // Two unique (flag, value) combos => two events; repeats deduped.
-        capture_mock.assert_hits(2);
+        alpha_mock.assert_hits(1);
+        variant_mock.assert_hits(1);
     }
 
     #[test]
@@ -548,6 +604,7 @@ mod blocking {
             .unwrap();
         let payload = snapshot.get_flag_payload("variant-flag");
         assert_eq!(payload, Some(json!({"hello": "world"})));
+        client.flush();
         capture_mock.assert_hits(0);
     }
 
@@ -614,7 +671,16 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = capture_path_mock(&server);
+        let capture_mock = capture_events_mock(
+            &server,
+            vec![(
+                "$feature_flag_called",
+                json!({
+                    "$feature_flag": "alpha", "$feature_flag_response": true,
+                    "$groups": {"organization": "org-a"}
+                }),
+            )],
+        );
         let client = create_test_client(server.base_url());
         let snap = client
             .evaluate_flags(
@@ -723,6 +789,7 @@ mod blocking {
             .unwrap();
         assert!(snapshot.keys().is_empty());
         assert!(!snapshot.is_enabled("alpha"));
+        client.flush();
         flags_mock.assert_hits(0);
         capture_mock.assert_hits(0);
     }
@@ -735,12 +802,16 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path(CAPTURE_PATH);
-            then.status(200)
-                .header("content-type", "application/json")
-                .json_body(json!({ "results": {} }));
-        });
+        let capture_mock = capture_events_mock(
+            &server,
+            vec![(
+                "checkout-started",
+                json!({
+                    "$feature/alpha": true, "$feature/beta": false, "$feature/variant-flag": "test",
+                    "$active_feature_flags": ["alpha", "variant-flag"]
+                }),
+            )],
+        );
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -810,18 +881,31 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(response);
         });
-        capture_path_mock(&server);
+        let capture_mock = capture_events_mock(
+            &server,
+            vec![
+                (
+                    "$feature_flag_called",
+                    json!({
+                        "$feature_flag": "alpha", "$feature_flag_error": "errors_while_computing_flags"
+                    }),
+                ),
+                (
+                    "$feature_flag_called",
+                    json!({
+                        "$feature_flag": "does-not-exist", "$feature_flag_error": "errors_while_computing_flags,flag_missing"
+                    }),
+                ),
+            ],
+        );
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .unwrap();
-        // Access a present flag to trigger the event; assert error is set
-        // even though the flag itself wasn't missing.
         assert!(snapshot.is_enabled("alpha"));
-        // event ships through capture pipeline; we just verify the snapshot
-        // tracks the response-level error by also accessing a missing flag
-        // which should produce the comma-joined form.
         assert!(snapshot.get_flag("does-not-exist").is_none());
+        client.flush();
+        capture_mock.assert_hits(1);
     }
 
     // Demonstrates that the snapshot can deserialise the legacy shape too;
@@ -1157,7 +1241,24 @@ mod async_tests {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = capture_path_mock(&server);
+        let alpha_mock = capture_events_mock(
+            &server,
+            vec![(
+                "$feature_flag_called",
+                json!({
+                    "$feature_flag": "alpha", "$feature_flag_response": true
+                }),
+            )],
+        );
+        let variant_mock = capture_events_mock(
+            &server,
+            vec![(
+                "$feature_flag_called",
+                json!({
+                    "$feature_flag": "variant-flag", "$feature_flag_response": "test"
+                }),
+            )],
+        );
         let client = create_test_client(server.base_url()).await;
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -1175,7 +1276,8 @@ mod async_tests {
             Some(FlagValue::String("test".into()))
         );
         client.flush().await;
-        capture_mock.assert_hits(2);
+        alpha_mock.assert_hits(1);
+        variant_mock.assert_hits(1);
     }
 
     #[cfg(not(feature = "capture-v1"))]
@@ -1386,12 +1488,16 @@ mod async_tests {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = server.mock(|when, then| {
-            when.method(POST).path(CAPTURE_PATH);
-            then.status(200)
-                .header("content-type", "application/json")
-                .json_body(json!({ "results": {} }));
-        });
+        let capture_mock = capture_events_mock(
+            &server,
+            vec![(
+                "checkout-started",
+                json!({
+                    "$feature/alpha": true, "$feature/beta": false, "$feature/variant-flag": "test",
+                    "$active_feature_flags": ["alpha", "variant-flag"]
+                }),
+            )],
+        );
         let client = create_test_client(server.base_url()).await;
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())

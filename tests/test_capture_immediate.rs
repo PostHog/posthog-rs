@@ -136,18 +136,26 @@ mod async_v1 {
     async fn partial_retry_pruned_and_resent_within_one_call() {
         let server = MockServer::start();
         let uuid = uuid::Uuid::now_v7();
+        let persisted_uuid = uuid::Uuid::now_v7();
         let retry = server.mock(|when, then| {
             when.method(POST)
                 .path("/i/v1/analytics/events")
                 .header("posthog-attempt", "1");
-            then.status(200).json_body(
-                json!({ "results": { uuid.to_string(): { "result": "retry", "details": "not_persisted" } } }),
-            );
+            then.status(200).json_body(json!({ "results": {
+                    uuid.to_string(): { "result": "retry", "details": "not_persisted" },
+                    persisted_uuid.to_string(): { "result": "ok" }
+                } }));
         });
         let ok = server.mock(|when, then| {
             when.method(POST)
                 .path("/i/v1/analytics/events")
-                .header("posthog-attempt", "2");
+                .header("posthog-attempt", "2")
+                .matches(move |request| {
+                    let body: serde_json::Value =
+                        serde_json::from_slice(request.body_ref()).unwrap();
+                    let batch = body["batch"].as_array().unwrap();
+                    batch.len() == 1 && batch[0]["uuid"] == uuid.to_string()
+                });
             then.status(200)
                 .json_body(json!({ "results": { uuid.to_string(): { "result": "ok" } } }));
         });
@@ -156,9 +164,24 @@ mod async_v1 {
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
 
-        let summary = client.capture_immediate(event).await.unwrap();
+        let mut persisted = Event::new("already-persisted", "user-1");
+        persisted.set_uuid(persisted_uuid);
+        let summary = client
+            .capture_batch_immediate(vec![persisted, event], false)
+            .await
+            .unwrap();
         retry.assert_hits(1);
         ok.assert_hits(1);
+        assert_eq!(summary.submitted(), 2);
+        assert_eq!(summary.event_results().len(), 2);
+        assert_eq!(
+            summary.event_results()[&uuid].result,
+            posthog_rs::EventStatus::Ok
+        );
+        assert_eq!(
+            summary.event_results()[&persisted_uuid].result,
+            posthog_rs::EventStatus::Ok
+        );
         assert!(summary.all_persisted());
         assert_eq!(summary.not_persisted(), 0);
     }
@@ -245,7 +268,15 @@ mod async_v1 {
         )
         .await;
 
-        let _ = client.capture_immediate(Event::new("test", "user-1")).await;
+        let error = client
+            .capture_immediate(Event::new("test", "user-1"))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            posthog_rs::Error::ServerError { status: 500, .. }
+        ));
+        _mock.assert_hits(2);
         assert_eq!(
             *count.lock().unwrap(),
             0,
@@ -455,7 +486,15 @@ mod async_v0 {
         )
         .await;
 
-        let _ = client.capture_immediate(Event::new("test", "user-1")).await;
+        let error = client
+            .capture_immediate(Event::new("test", "user-1"))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            posthog_rs::Error::ServerError { status: 500, .. }
+        ));
+        _mock.assert_hits(2);
         assert_eq!(*count.lock().unwrap(), 0);
     }
 
@@ -609,7 +648,14 @@ mod blocking_v1 {
                 .build()
                 .unwrap(),
         );
-        let _ = client.capture_immediate(Event::new("test", "user-1"));
+        let error = client
+            .capture_immediate(Event::new("test", "user-1"))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            posthog_rs::Error::ServerError { status: 500, .. }
+        ));
+        _mock.assert_hits(2);
         assert_eq!(*count.lock().unwrap(), 0);
     }
 }
@@ -714,7 +760,14 @@ mod blocking_v0 {
                 .build()
                 .unwrap(),
         );
-        let _ = client.capture_immediate(Event::new("test", "user-1"));
+        let error = client
+            .capture_immediate(Event::new("test", "user-1"))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            posthog_rs::Error::ServerError { status: 500, .. }
+        ));
+        _mock.assert_hits(2);
         assert_eq!(*count.lock().unwrap(), 0);
     }
 }
