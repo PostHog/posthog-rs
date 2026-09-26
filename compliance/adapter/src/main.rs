@@ -245,7 +245,9 @@ async fn init(
 
     if req.enable_compression.unwrap_or(false) {
         if let Some(algo) = state.compression {
-            builder.capture_compression(algo);
+            builder
+                .capture_compression(algo)
+                .capture_ai_compression(algo);
         }
     }
 
