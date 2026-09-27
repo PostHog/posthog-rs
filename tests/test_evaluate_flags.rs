@@ -568,6 +568,7 @@ mod blocking {
                 }),
             )],
         );
+        let unexpected_capture = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -588,6 +589,7 @@ mod blocking {
 
         alpha_mock.assert_hits(1);
         variant_mock.assert_hits(1);
+        unexpected_capture.assert_hits(0);
     }
 
     #[test]
@@ -681,6 +683,7 @@ mod blocking {
                 }),
             )],
         );
+        let unexpected_capture = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snap = client
             .evaluate_flags(
@@ -696,6 +699,7 @@ mod blocking {
         assert!(snap.is_enabled("alpha"));
         client.flush();
         capture_mock.assert_hits(1);
+        unexpected_capture.assert_hits(0);
     }
 
     #[test]
@@ -812,6 +816,7 @@ mod blocking {
                 }),
             )],
         );
+        let unexpected_capture = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -823,6 +828,7 @@ mod blocking {
         // One /flags request, one capture request — no second flag fetch.
         flags_mock.assert_hits(1);
         capture_mock.assert_hits(1);
+        unexpected_capture.assert_hits(0);
     }
 
     #[test]
@@ -898,6 +904,7 @@ mod blocking {
                 ),
             ],
         );
+        let unexpected_capture = capture_path_mock(&server);
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -906,6 +913,7 @@ mod blocking {
         assert!(snapshot.get_flag("does-not-exist").is_none());
         client.flush();
         capture_mock.assert_hits(1);
+        unexpected_capture.assert_hits(0);
     }
 
     // Demonstrates that the snapshot can deserialise the legacy shape too;
@@ -1259,6 +1267,7 @@ mod async_tests {
                 }),
             )],
         );
+        let unexpected_capture = capture_path_mock(&server);
         let client = create_test_client(server.base_url()).await;
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -1278,6 +1287,7 @@ mod async_tests {
         client.flush().await;
         alpha_mock.assert_hits(1);
         variant_mock.assert_hits(1);
+        unexpected_capture.assert_hits(0);
     }
 
     #[cfg(not(feature = "capture-v1"))]
@@ -1498,6 +1508,7 @@ mod async_tests {
                 }),
             )],
         );
+        let unexpected_capture = capture_path_mock(&server);
         let client = create_test_client(server.base_url()).await;
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -1509,5 +1520,6 @@ mod async_tests {
         client.flush().await;
         flags_mock.assert_hits(1);
         capture_mock.assert_hits(1);
+        unexpected_capture.assert_hits(0);
     }
 }
