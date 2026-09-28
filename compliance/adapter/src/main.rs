@@ -25,17 +25,6 @@ const DEFAULT_TEST_ID: &str = "_global";
 
 // The SDK now owns batching, retry, and the queue; the adapter just forwards
 // capture/flush/shutdown and tracks how many captures it handed off.
-
-/// Harness wire-option key -> the magic property the SDK re-lifts into V1
-/// options. Mirrors (in inverse) the SDK's internal `LEGACY_OPTION_PROPERTIES`;
-/// agreement is enforced by the capture_v1 compliance suite (`assert_event_option`),
-/// so any drift fails CI rather than shipping silently.
-const HARNESS_OPTION_TO_PROP: &[(&str, &str)] = &[
-    ("cookieless_mode", "$cookieless_mode"),
-    ("disable_skew_correction", "$ignore_sent_at"),
-    ("product_tour_id", "$product_tour_id"),
-    ("process_person_profile", "$process_person_profile"),
-];
 #[derive(Default)]
 struct AdapterState {
     client: Option<Arc<Client>>,
@@ -71,7 +60,38 @@ struct CaptureRequest {
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
-    options: Option<serde_json::Value>,
+    options: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Sent only on `/capture_ai`; the event keeps it on the wire.
+    #[serde(default)]
+    uuid: Option<uuid::Uuid>,
+}
+
+impl CaptureRequest {
+    /// Build the event as an SDK user would, with properties and options
+    /// unchanged, and return its UUID.
+    fn into_event(self) -> (Event, uuid::Uuid) {
+        let mut event = Event::new(self.event, self.distinct_id);
+        if let Some(props) = self.properties {
+            if let Some(obj) = props.as_object() {
+                for (k, v) in obj {
+                    let _ = event.insert_prop(k.clone(), v.clone());
+                }
+            }
+        }
+        if let Some(ts_str) = self.timestamp {
+            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&ts_str) {
+                let _ = event.set_timestamp(ts);
+            }
+        }
+        for (key, value) in self.options.unwrap_or_default() {
+            event
+                .insert_option(key, value)
+                .expect("a JSON value always serializes");
+        }
+        let uuid = self.uuid.unwrap_or_else(uuid::Uuid::now_v7);
+        event.set_uuid(uuid);
+        (event, uuid)
+    }
 }
 
 #[derive(Deserialize)]
@@ -179,10 +199,10 @@ async fn shutdown_client(client: &Client) {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    // `capture_v1` is the harness contract key that selects the capture suite
-    // (see `requires:` in contracts/capture_analytics_v1_tests.yaml) — it is a
-    // frozen external string, not an internal name.
-    let mut capabilities: Vec<String> = vec!["capture_v1".to_string()];
+    // Frozen harness contract keys that select suites and tests via `requires:`.
+    let mut capabilities: Vec<String> = ["capture_v1", "capture_ai_v1", "event_options"]
+        .map(String::from)
+        .to_vec();
     if let Some(algo) = state.compression {
         capabilities.push(compression_capability(algo).to_string());
     }
@@ -225,7 +245,9 @@ async fn init(
 
     if req.enable_compression.unwrap_or(false) {
         if let Some(algo) = state.compression {
-            builder.capture_compression(algo);
+            builder
+                .capture_compression(algo)
+                .capture_ai_compression(algo);
         }
     }
 
@@ -259,47 +281,37 @@ async fn init(
     }
 }
 
+/// The SDK capture method a harness request goes through.
+#[derive(Clone, Copy)]
+enum Lane {
+    Analytics,
+    Ai,
+}
+
 async fn capture_event(
     State(state): State<AppState>,
     Query(params): Query<TestIdParam>,
     Json(req): Json<CaptureRequest>,
 ) -> impl IntoResponse {
-    let key = params.key().to_string();
+    enqueue(state, params, req, Lane::Analytics).await
+}
 
-    let mut event = Event::new(req.event, req.distinct_id);
-    if let Some(props) = req.properties {
-        if let Some(obj) = props.as_object() {
-            for (k, v) in obj {
-                let _ = event.insert_prop(k.clone(), v.clone());
-            }
-        }
-    }
-    if let Some(ts_str) = req.timestamp {
-        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&ts_str) {
-            let _ = event.set_timestamp(ts);
-        }
-    }
-    if let Some(opts_val) = req.options {
-        if let Some(obj) = opts_val.as_object() {
-            for (k, v) in obj {
-                // Translate the harness wire-option key to the magic property the
-                // SDK re-lifts into V1 options. Unknown keys fall back to $<key>.
-                // Agreement with the SDK's extraction is enforced by the capture_v1
-                // compliance suite, so drift fails CI.
-                match HARNESS_OPTION_TO_PROP
-                    .iter()
-                    .find(|(opt, _)| *opt == k.as_str())
-                {
-                    Some((_, prop_key)) => {
-                        let _ = event.insert_prop(*prop_key, v.clone());
-                    }
-                    None => {
-                        let _ = event.insert_prop(format!("${k}"), v.clone());
-                    }
-                }
-            }
-        }
-    }
+async fn capture_ai_event(
+    State(state): State<AppState>,
+    Query(params): Query<TestIdParam>,
+    Json(req): Json<CaptureRequest>,
+) -> impl IntoResponse {
+    enqueue(state, params, req, Lane::Ai).await
+}
+
+async fn enqueue(
+    state: AppState,
+    params: TestIdParam,
+    req: CaptureRequest,
+    lane: Lane,
+) -> axum::response::Response {
+    let key = params.key().to_string();
+    let (event, uuid) = req.into_event();
 
     // Snapshot the client out of the lock so the (non-blocking) enqueue and any
     // awaits don't hold the instances mutex.
@@ -317,12 +329,13 @@ async fn capture_event(
         (client, s.historical_migration)
     };
 
-    // capture_batch carries the historical_migration flag through to the worker;
-    // a single-event vec is just a non-blocking enqueue.
-    client.capture_batch(vec![event], historical_migration);
+    // The batch methods carry historical_migration; a one-event vec is still a non-blocking enqueue.
+    match lane {
+        Lane::Analytics => client.capture_batch(vec![event], historical_migration),
+        Lane::Ai => client.capture_ai_batch(vec![event], historical_migration),
+    }
 
-    let uuid = uuid::Uuid::now_v7().to_string();
-    Json(serde_json::json!({ "success": true, "uuid": uuid })).into_response()
+    Json(serde_json::json!({ "success": true, "uuid": uuid.to_string() })).into_response()
 }
 
 async fn get_feature_flag(
@@ -491,6 +504,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/init", post(init))
         .route("/capture", post(capture_event))
+        .route("/capture_ai", post(capture_ai_event))
         .route("/get_feature_flag", post(get_feature_flag))
         .route("/flush", post(flush))
         .route("/shutdown", post(shutdown))
@@ -503,4 +517,63 @@ async fn main() {
         .expect("failed to bind to port 8080");
     eprintln!("Listening on 0.0.0.0:8080");
     axum::serve(listener, app).await.expect("server error");
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    use super::CaptureRequest;
+
+    fn request(body: Value) -> CaptureRequest {
+        serde_json::from_value(body).expect("valid /capture body")
+    }
+
+    /// The built event's serde fields and the UUID `/capture` reports.
+    fn event_json(req: CaptureRequest) -> (Value, uuid::Uuid) {
+        let (event, uuid) = req.into_event();
+        (serde_json::to_value(&event).unwrap(), uuid)
+    }
+
+    #[test]
+    fn options_and_properties_reach_the_sdk_unchanged() {
+        // PostHog judges option values and the SDK owns the legacy fallback, so
+        // nothing is translated here.
+        let options = json!({
+            "process_person_profile": "not-a-bool",
+            "future_option": {"nested": [1, "two"]},
+            "cookieless_mode": null,
+        });
+        let properties = json!({"$cookieless_mode": true, "plan": "pro"});
+        let (event, _) = event_json(request(json!({
+            "distinct_id": "user-1",
+            "event": "signed_up",
+            "properties": properties,
+            "options": options,
+        })));
+        assert_eq!(event["options"], options);
+        assert_eq!(event["properties"], properties);
+    }
+
+    #[test]
+    fn returned_uuid_is_the_event_uuid() {
+        let (event, uuid) = event_json(request(json!({"distinct_id": "u", "event": "e"})));
+        assert_eq!(event["uuid"], uuid.to_string());
+    }
+
+    #[test]
+    fn supplied_uuid_is_kept() {
+        let supplied = "0198c0de-0000-7000-8000-000000000abc";
+        let (event, uuid) = event_json(request(
+            json!({"distinct_id": "u", "event": "e", "uuid": supplied}),
+        ));
+        assert_eq!(uuid.to_string(), supplied);
+        assert_eq!(event["uuid"], supplied);
+    }
+
+    #[test]
+    fn non_object_options_are_rejected() {
+        let body = json!({"distinct_id": "u", "event": "e", "options": ["cookieless_mode"]});
+        assert!(serde_json::from_value::<CaptureRequest>(body).is_err());
+    }
 }
