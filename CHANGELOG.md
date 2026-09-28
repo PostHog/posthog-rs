@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.27.0 — 2026-09-24
+
+### Minor changes
+
+- [fedcb87](https://github.com/posthog/posthog-rs/commit/fedcb872ce5448716deec0a08c56c4785a67e0dd) Add optional async and blocking reqwest clients for sharing application HTTP configuration and connection pools across capture, feature flags, and local evaluation. SDK request and feature flag timeout options also apply to supplied clients. — Thanks @marandaneto!
+
 ## 0.26.0 — 2026-09-21
 
 ### Minor changes
