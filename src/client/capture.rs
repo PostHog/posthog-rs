@@ -977,8 +977,8 @@ mod tests {
 
     // -- build_headers SDK identity -------------------------------------------
 
-    /// C4: pins the wire identity `posthog-rs/<semver>` — the name must equal
-    /// v0's `$lib` so capture's `$lib`/`$lib_version` materialization is correct.
+    /// Capture derives `$lib`/`$lib_version` from this header, so the name must
+    /// stay `posthog-rs`.
     #[test]
     fn build_headers_sdk_info_is_canonical_lib_slash_version() {
         let opts = test_opts();
