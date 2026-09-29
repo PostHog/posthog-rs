@@ -175,6 +175,29 @@ mod async_client {
     }
 
     #[tokio::test]
+    async fn capture_ai_sends_event_options() {
+        let server = MockServer::start();
+        let ai = server.mock(|when, then| {
+            when.method(POST).path(AI_PATH).is_true(|req| {
+                let body: serde_json::Value = serde_json::from_str(&zstd_body(req)).unwrap();
+                body["batch"][0]["options"]
+                    == json!({"process_person_profile": false, "future_option": 1})
+            });
+            then.status(200).json_body(json!({ "results": {} }));
+        });
+        let client = client(&mut options(server.base_url())).await;
+        let mut event = ai_event("$ai_generation");
+        event
+            .insert_option("process_person_profile", false)
+            .unwrap();
+        event.insert_option("future_option", 1).unwrap();
+        client.capture_ai(event);
+        client.flush().await;
+        ai.assert_calls(1);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn ai_lane_is_raw_by_default() {
         let server = MockServer::start();
         let ai = server.mock(|when, then| {

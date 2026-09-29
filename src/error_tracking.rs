@@ -373,7 +373,8 @@ fn build_panic_event(
 }
 
 /// Optional context for `capture_exception_with`: person identity, custom
-/// properties, groups, trace context, and exception fingerprint/level.
+/// properties, capture options, groups, trace context, and exception
+/// fingerprint/level.
 ///
 /// All fields are optional. An empty options set (`new()` / `Default`)
 /// captures the exception personlessly with no extra context. With the
@@ -401,6 +402,7 @@ fn build_panic_event(
 pub struct CaptureExceptionOptions {
     distinct_id: Option<String>,
     properties: Vec<(String, Value)>,
+    options: Vec<(String, Value)>,
     groups: Vec<(String, String)>,
     trace_context: Option<TraceContext>,
     fingerprint: Option<String>,
@@ -427,6 +429,17 @@ impl CaptureExceptionOptions {
     ) -> Result<Self, Error> {
         let value = serde_json::to_value(value).map_err(|e| Error::Serialization(e.to_string()))?;
         self.properties.push((key.into(), value));
+        Ok(self)
+    }
+
+    /// Set a capture option on the exception event; see [`Event::insert_option`].
+    pub fn option<K: Into<String>, V: Serialize>(
+        mut self,
+        key: K,
+        value: V,
+    ) -> Result<Self, Error> {
+        let value = serde_json::to_value(value).map_err(|e| Error::Serialization(e.to_string()))?;
+        self.options.push((key.into(), value));
         Ok(self)
     }
 
@@ -481,6 +494,7 @@ where
     let CaptureExceptionOptions {
         distinct_id,
         properties,
+        options,
         groups,
         trace_context,
         fingerprint,
@@ -503,6 +517,9 @@ where
     };
     for (key, value) in properties {
         event.insert_prop(key, value)?;
+    }
+    for (key, value) in options {
+        event.insert_option(key, value)?;
     }
     for (group_name, group_id) in groups {
         event.add_group(&group_name, &group_id);
@@ -2948,6 +2965,8 @@ mod tests {
             .distinct_id("user-1")
             .property("route", "/checkout")
             .unwrap()
+            .option("cookieless_mode", true)
+            .unwrap()
             .group("company", "acme")
             .trace_context("00000000000000000000000000000123", "0000000000000456")
             .fingerprint("checkout-error")
@@ -2958,6 +2977,8 @@ mod tests {
 
         assert_eq!(json["distinct_id"], "user-1");
         assert_eq!(json["properties"]["route"], "/checkout");
+        assert_eq!(json["options"]["cookieless_mode"], true);
+        assert!(json["properties"].get("cookieless_mode").is_none());
         assert_eq!(json["properties"]["$groups"]["company"], "acme");
         assert_eq!(
             json["properties"]["$trace_id"],
