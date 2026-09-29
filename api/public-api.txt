@@ -121,6 +121,7 @@ pub fn posthog_rs::CaptureFailure<'a>::event_results(&self) -> &std::collections
 pub fn posthog_rs::CaptureFailure<'a>::historical_migration(&self) -> bool
 pub fn posthog_rs::CaptureFailure<'a>::request_id(&self) -> core::option::Option<&uuid::Uuid>
 pub fn posthog_rs::CaptureFailure<'a>::status(&self) -> core::option::Option<u16>
+pub fn posthog_rs::CaptureFailure<'a>::verdict_summary(&self) -> alloc::string::String
 #[non_exhaustive] pub struct posthog_rs::CaptureResponse
 pub posthog_rs::CaptureResponse::results: std::collections::hash::map::HashMap<uuid::Uuid, posthog_rs::EventResult>
 #[non_exhaustive] pub struct posthog_rs::CaptureSummary

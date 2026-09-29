@@ -40,7 +40,7 @@ Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai
 
 `capture` never reroutes by event name. Sending an AI event through `capture` worked on the V0 path because the backend diverted it; on the V1 analytics endpoint the backend will refuse it as a per-event `drop` once both lanes enforce their event sets, and it will not be ingested. Move those calls to `capture_ai`. Custom events that merely start with `$ai_` and are not PostHog AI event names stay on `capture`.
 
-The backend decides which names belong on the AI lane and reports a misrouted or oversize event as a per-event `drop` inside a `200`. That verdict reaches an `on_error` hook (`CaptureFailure::endpoint()` says which lane) or the returned `CaptureSummary` for the immediate variants; without a hook the SDK logs one aggregate warning per batch, with counts per reason.
+The backend decides which names belong on the AI lane and reports a misrouted or oversize event as a per-event `drop` inside a `200`. That verdict reaches an `on_error` hook (`CaptureFailure::endpoint()` says which lane) or the returned `CaptureSummary` for the immediate variants; without a hook the SDK logs one aggregate warning per batch with drop and retry totals. To log every drop and retry reason, call `CaptureFailure::verdict_summary()` in an `on_error` hook; it returns one line such as `drop/invalid_options=2, retry/not_persisted=1`.
 
 ### Event options
 
