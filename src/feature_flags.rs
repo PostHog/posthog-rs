@@ -1912,7 +1912,7 @@ mod tests {
 
     #[test]
     fn test_multivariate_variants() {
-        let flag = FeatureFlag {
+        let mut flag = FeatureFlag {
             key: "test-flag".to_string(),
             active: true,
             has_experiment: None,
@@ -1941,23 +1941,37 @@ mod tests {
             },
         };
 
-        let properties = HashMap::new();
-        let result = match_feature_flag(
-            &flag,
-            "user-123",
-            &properties,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
-
-        match result {
-            FlagValue::String(variant) => {
-                assert!(variant == "control" || variant == "test");
-            }
-            _ => panic!("Expected string variant"),
+        // Independently computed SHA-1 variant buckets: user-0 = 0.0334, user-1 = 0.5658.
+        for (user, override_variant, expected) in [
+            ("user-0", None, "control"),
+            ("user-1", None, "test"),
+            ("user-0", Some("test"), "test"),
+            ("user-1", Some("control"), "control"),
+            ("user-0", Some("unknown"), "control"),
+            ("user-1", Some("unknown"), "test"),
+        ] {
+            flag.filters.groups[0].variant = override_variant.map(str::to_string);
+            let result = match_feature_flag(
+                &flag,
+                user,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                result,
+                FlagValue::String(expected.into()),
+                "{user}, {override_variant:?}"
+            );
         }
+
+        let variants = &mut flag.filters.multivariate.as_mut().unwrap().variants;
+        variants[0].rollout_percentage = 0.0;
+        variants[1].rollout_percentage = 50.0;
+        assert_eq!(get_matching_variant(&flag, "user-0"), Some("test".into()));
+        assert_eq!(get_matching_variant(&flag, "user-1"), None);
     }
 
     #[test]
@@ -3320,8 +3334,7 @@ mod tests {
             },
         );
 
-        // Check if user is in "control" variant
-        let prop = Property {
+        let mut prop = Property {
             key: "$feature/ab-test-flag".to_string(),
             value: json!("control"),
             operator: "exact".to_string(),
@@ -3333,15 +3346,16 @@ mod tests {
             property_matching_version: 1,
             cohorts: &HashMap::new(),
             flags: &flags,
-            distinct_id: "user-gets-control", // This distinct_id should deterministically get "control"
+            distinct_id: "user-0",
             groups: &HashMap::new(),
             group_properties: &HashMap::new(),
             group_type_mapping: &HashMap::new(),
         };
 
-        // The result depends on the hash - we just check it doesn't error
-        let result = match_property_with_context(&prop, &properties, &ctx);
-        assert!(result.is_ok());
+        // Independently computed SHA-1 variant bucket for ab-test-flag.user-0: 0.3772.
+        assert!(match_property_with_context(&prop, &properties, &ctx).unwrap());
+        prop.value = json!("test");
+        assert!(!match_property_with_context(&prop, &properties, &ctx).unwrap());
     }
 
     #[test]

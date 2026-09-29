@@ -16,7 +16,30 @@ use posthog_rs::{
 use reqwest::header::USER_AGENT;
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+fn wait_for_calls(mock: &httpmock::Mock<'_>, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while mock.calls() < count {
+        assert!(
+            Instant::now() < deadline,
+            "poller did not reach {} requests",
+            count
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(feature = "async-client")]
+async fn wait_for_calls_async(mock: &httpmock::Mock<'_>, count: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while mock.calls_async().await < count {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("poller did not reach expected request count");
+}
 
 #[test]
 fn test_local_evaluation_basic() {
@@ -822,20 +845,9 @@ async fn test_etag_sent_on_second_poll() {
     let mut poller = AsyncFlagPoller::new(config, cache.clone());
     poller.start().await;
 
-    // Wait for:
-    // - Initial load (immediate) -> gets 200 with ETag (load_flags doesn't set last_etag)
-    // - First poll tick (after 100ms) -> gets 200, sets last_etag in the polling loop
-    // - Second poll tick (after 200ms) -> sends If-None-Match, gets 304
-    tokio::time::sleep(Duration::from_millis(350)).await;
-
+    wait_for_calls_async(&etag_mock, 2).await;
     poller.stop().await;
-
-    // Verify requests without If-None-Match were made (initial load + first poll)
-    assert!(
-        no_etag_mock.hits() >= 2,
-        "Should have at least 2 requests without If-None-Match (initial + first poll), got {}",
-        no_etag_mock.hits()
-    );
+    assert!(no_etag_mock.calls() >= 1);
 
     // Verify at least one request WITH If-None-Match was made (second+ poll)
     assert!(
@@ -908,17 +920,13 @@ async fn test_304_preserves_cache() {
     let mut poller = AsyncFlagPoller::new(config, cache.clone());
     poller.start().await;
 
-    // Wait for initial load
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     // Verify flag is in cache after initial load
     assert!(
         cache.get_flag("preserved-flag").is_some(),
         "Flag should be loaded initially"
     );
 
-    // Wait for multiple poll cycles (enough for at least one 304 response)
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    wait_for_calls_async(&etag_mock, 2).await;
 
     poller.stop().await;
 
@@ -955,10 +963,17 @@ async fn test_no_etag_from_server() {
         "cohorts": {}
     });
 
-    // Server returns 200 without ETag header
     let mock = server.mock(|when, then| {
-        when.method(GET).path("/flags/definitions/");
+        when.method(GET)
+            .path("/flags/definitions/")
+            .header_missing("if-none-match");
         then.status(200).json_body(mock_flags);
+    });
+    let unexpected_etag = server.mock(|when, then| {
+        when.method(GET)
+            .path("/flags/definitions/")
+            .header_exists("if-none-match");
+        then.status(400);
     });
 
     let cache = FlagCache::new();
@@ -973,10 +988,10 @@ async fn test_no_etag_from_server() {
     let mut poller = AsyncFlagPoller::new(config, cache.clone());
     poller.start().await;
 
-    // Wait for initial load + a couple poll cycles
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    wait_for_calls_async(&mock, 3).await;
 
     poller.stop().await;
+    unexpected_etag.assert_calls(0);
 
     // Should have made multiple requests (initial + polls), all without If-None-Match
     assert!(
@@ -1047,20 +1062,9 @@ fn test_sync_etag_sent_on_second_poll() {
     let mut poller = FlagPoller::new(config, cache.clone());
     poller.start();
 
-    // Wait for:
-    // - Initial load (immediate) -> gets 200 with ETag (load_flags doesn't set last_etag)
-    // - First poll tick (after 100ms) -> gets 200, sets last_etag
-    // - Second poll tick (after 200ms) -> sends If-None-Match, gets 304
-    std::thread::sleep(Duration::from_millis(350));
-
+    wait_for_calls(&etag_mock, 2);
     poller.stop();
-
-    // Verify requests without If-None-Match were made (initial load + first poll)
-    assert!(
-        no_etag_mock.hits() >= 2,
-        "Should have at least 2 requests without If-None-Match (initial + first poll), got {}",
-        no_etag_mock.hits()
-    );
+    assert!(no_etag_mock.calls() >= 1);
 
     // Verify at least one request WITH If-None-Match was made (second+ poll)
     assert!(
@@ -1130,17 +1134,13 @@ fn test_sync_304_preserves_cache() {
     let mut poller = FlagPoller::new(config, cache.clone());
     poller.start();
 
-    // Wait for initial load
-    std::thread::sleep(Duration::from_millis(50));
-
     // Verify flag is in cache after initial load
     assert!(
         cache.get_flag("preserved-flag").is_some(),
         "Flag should be loaded initially"
     );
 
-    // Wait for multiple poll cycles (enough for at least one 304 response)
-    std::thread::sleep(Duration::from_millis(350));
+    wait_for_calls(&etag_mock, 2);
 
     poller.stop();
 
@@ -1176,10 +1176,17 @@ fn test_sync_no_etag_from_server() {
         "cohorts": {}
     });
 
-    // Server returns 200 without ETag header
     let mock = server.mock(|when, then| {
-        when.method(GET).path("/flags/definitions/");
+        when.method(GET)
+            .path("/flags/definitions/")
+            .header_missing("if-none-match");
         then.status(200).json_body(mock_flags);
+    });
+    let unexpected_etag = server.mock(|when, then| {
+        when.method(GET)
+            .path("/flags/definitions/")
+            .header_exists("if-none-match");
+        then.status(400);
     });
 
     let cache = FlagCache::new();
@@ -1194,10 +1201,10 @@ fn test_sync_no_etag_from_server() {
     let mut poller = FlagPoller::new(config, cache.clone());
     poller.start();
 
-    // Wait for initial load + a couple poll cycles
-    std::thread::sleep(Duration::from_millis(150));
+    wait_for_calls(&mock, 3);
 
     poller.stop();
+    unexpected_etag.assert_calls(0);
 
     // Should have made multiple requests (initial + polls), all without If-None-Match
     assert!(

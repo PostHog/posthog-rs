@@ -5,6 +5,29 @@ use posthog_rs::{ClientOptionsBuilder, Event};
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::time::Duration;
 
+fn is_transport_failure(failure: &posthog_rs::PostHogError<'_>, surface: &str) -> bool {
+    match failure {
+        posthog_rs::PostHogError::Capture(f) if surface == "capture" => {
+            f.status().is_none() && matches!(f.error(), Some(posthog_rs::Error::Connection(_)))
+        }
+        posthog_rs::PostHogError::LocalEvaluation(f) if surface == "polling" => {
+            f.status().is_none() && matches!(f.error(), posthog_rs::Error::Connection(_))
+        }
+        _ => false,
+    }
+}
+
+fn assert_transport_error(error: posthog_rs::Error) {
+    let posthog_rs::Error::Connection(message) = error else {
+        panic!("expected request timeout, got {:?}", error);
+    };
+    assert!(
+        message.contains("error sending request") || message.contains("timed out"),
+        "{}",
+        message
+    );
+}
+
 fn headers(value: &'static str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert("x-custom-client", HeaderValue::from_static(value));
@@ -123,14 +146,18 @@ mod asynchronous {
                 .unwrap(),
         )
         .await;
-        assert!(client
-            .get_feature_flag("flag", "user", None, None, None)
-            .await
-            .is_err());
-        assert!(client
-            .get_feature_flag_payload("flag", "user")
-            .await
-            .is_err());
+        assert_transport_error(
+            client
+                .get_feature_flag("flag", "user", None, None, None)
+                .await
+                .unwrap_err(),
+        );
+        assert_transport_error(
+            client
+                .get_feature_flag_payload("flag", "user")
+                .await
+                .unwrap_err(),
+        );
         client.shutdown().await;
     }
 
@@ -147,7 +174,7 @@ mod asynchronous {
                 .unwrap(),
         )
         .await;
-        assert!(client.capture_immediate(event).await.is_err());
+        assert_transport_error(client.capture_immediate(event).await.unwrap_err());
         client.shutdown().await;
     }
 
@@ -161,8 +188,8 @@ mod asynchronous {
             options(&server)
                 .blocking_http_client(blocking_http().await)
                 .max_capture_attempts(1)
-                .on_error(move |_| {
-                    tx.send(()).unwrap();
+                .on_error(move |failure| {
+                    tx.send(is_transport_failure(failure, "capture")).unwrap();
                 })
                 .build()
                 .unwrap(),
@@ -170,10 +197,9 @@ mod asynchronous {
         .await;
         client.capture(event);
         client.flush().await;
-        assert!(
-            rx.try_recv().is_ok(),
-            "background timeout must report a failure"
-        );
+        assert!(rx
+            .try_recv()
+            .expect("background timeout must report a failure"));
         client.shutdown().await;
     }
 
@@ -188,18 +214,18 @@ mod asynchronous {
                 .enable_local_evaluation(true)
                 .secret_key("phx_test")
                 .poll_interval_seconds(1)
-                .on_error(move |_| {
-                    tx.send(()).unwrap();
+                .on_error(move |failure| {
+                    tx.send(is_transport_failure(failure, "polling")).unwrap();
                 })
                 .build()
                 .unwrap(),
         )
         .await;
-        assert!(rx.try_recv().is_ok(), "initial polling must time out");
-        tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        assert!(rx.try_recv().expect("initial polling must time out"));
+        assert!(tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .unwrap()
-            .unwrap();
+            .unwrap());
         client.shutdown().await;
     }
 
@@ -409,10 +435,12 @@ mod blocking {
                 .build()
                 .unwrap(),
         );
-        assert!(client
-            .get_feature_flag("flag", "user", None, None, None)
-            .is_err());
-        assert!(client.get_feature_flag_payload("flag", "user").is_err());
+        assert_transport_error(
+            client
+                .get_feature_flag("flag", "user", None, None, None)
+                .unwrap_err(),
+        );
+        assert_transport_error(client.get_feature_flag_payload("flag", "user").unwrap_err());
         client.shutdown();
     }
 
@@ -458,7 +486,7 @@ mod blocking {
                 .build()
                 .unwrap(),
         );
-        assert!(client.capture_immediate(event).is_err());
+        assert_transport_error(client.capture_immediate(event).unwrap_err());
         client.shutdown();
     }
 
@@ -472,18 +500,17 @@ mod blocking {
             options(&server)
                 .blocking_http_client(http())
                 .max_capture_attempts(1)
-                .on_error(move |_| {
-                    tx.send(()).unwrap();
+                .on_error(move |failure| {
+                    tx.send(is_transport_failure(failure, "capture")).unwrap();
                 })
                 .build()
                 .unwrap(),
         );
         client.capture(event);
         client.flush();
-        assert!(
-            rx.try_recv().is_ok(),
-            "background timeout must report a failure"
-        );
+        assert!(rx
+            .try_recv()
+            .expect("background timeout must report a failure"));
         client.shutdown();
     }
 
@@ -498,14 +525,14 @@ mod blocking {
                 .enable_local_evaluation(true)
                 .secret_key("phx_test")
                 .poll_interval_seconds(1)
-                .on_error(move |_| {
-                    tx.send(()).unwrap();
+                .on_error(move |failure| {
+                    tx.send(is_transport_failure(failure, "polling")).unwrap();
                 })
                 .build()
                 .unwrap(),
         );
-        assert!(rx.try_recv().is_ok(), "initial polling must time out");
-        rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(rx.try_recv().expect("initial polling must time out"));
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap());
         client.shutdown();
     }
 

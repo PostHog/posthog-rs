@@ -714,12 +714,20 @@ fn v1_blocking_capture_batch_empty_is_noop() {
 
 #[test]
 fn v1_blocking_disabled_client_noop() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST);
+        then.status(200);
+    });
     let options = ClientOptionsBuilder::default()
         .api_key("phc_test".to_string())
+        .host(server.base_url())
         .disabled(true)
         .build()
         .unwrap();
     let client = posthog_rs::client(options);
 
     client.capture(Event::new("test", "user-1"));
+    client.flush();
+    mock.assert_hits(0);
 }

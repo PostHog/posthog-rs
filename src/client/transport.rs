@@ -1571,6 +1571,8 @@ mod tests {
             "shutdown blocked for {:?}; in-flight send was not bounded by shutdown_timeout_ms",
             elapsed
         );
+        _stall.assert_calls(1);
+        assert_eq!(handle.pending(), 0);
     }
 
     /// Parse an RFC3339 wire timestamp and normalize it to UTC.
@@ -1656,7 +1658,26 @@ mod tests {
         // A historical batch takes its own path: queued off the live buffer and
         // sent in its own chunks (forced out here by a flush), never via the buffer.
         let server = MockServer::start();
-        let mock = ok_mock(&server);
+        let chunks: Vec<_> = vec![vec!["H1", "H2"], vec!["H3"]]
+            .into_iter()
+            .map(|names| {
+                server.mock(|when, then| {
+                    when.method(POST).matches(move |request| {
+                        let body: serde_json::Value =
+                            serde_json::from_slice(request.body_ref()).unwrap();
+                        let batch = body["batch"].as_array().unwrap();
+                        body["historical_migration"] == true
+                            && batch.len() == names.len()
+                            && batch
+                                .iter()
+                                .zip(&names)
+                                .all(|(event, name)| event["event"] == *name)
+                    });
+                    then.status(200)
+                        .json_body(serde_json::json!({"results": {}}));
+                })
+            })
+            .collect();
         let clock = ManualClock::new();
         let handle = TransportHandle::spawn_with_clock(
             options(server.base_url())
@@ -1673,8 +1694,10 @@ mod tests {
         ]);
         handle.flush_blocking(); // flush forces the queued historical batch out
 
-        mock.assert_hits(2); // 3 events / max_batch_size 2 -> two requests
-        assert_eq!(handle.pending(), 0, "all historical events delivered");
+        for chunk in chunks {
+            chunk.assert_calls(1);
+        }
+        assert_eq!(handle.pending(), 0, "all historical chunks finalized");
         handle.shutdown_blocking();
     }
 

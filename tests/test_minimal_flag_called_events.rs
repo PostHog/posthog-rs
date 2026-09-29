@@ -16,7 +16,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use posthog_rs::EvaluateFlagsOptions;
 
@@ -96,7 +96,9 @@ impl Drop for RecordingServer {
 }
 
 fn read_request(stream: &mut std::net::TcpStream) -> Option<(String, Vec<u8>)> {
-    stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+    // macOS inherits the listener's nonblocking mode on accepted sockets.
+    stream.set_nonblocking(false).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 2048];
     // Read until headers are complete.
@@ -125,9 +127,9 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<(String, Vec<u8>)> {
     let mut body = buf[header_end..].to_vec();
     while body.len() < content_length {
         match stream.read(&mut chunk) {
-            Ok(0) => break,
+            Ok(0) => return None,
             Ok(n) => body.extend_from_slice(&chunk[..n]),
-            Err(_) => break,
+            Err(_) => return None,
         }
     }
     Some((headers, body))
@@ -201,18 +203,9 @@ async fn captured_flag_called_properties(
     let _ = snapshot.is_enabled(flag_key);
     client.flush().await;
 
-    // Poll briefly for the capture request the background worker sends.
-    let started = Instant::now();
-    loop {
-        if let Some(props) = extract_flag_called(&server.captured.lock().unwrap()) {
-            return props;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "no $feature_flag_called event was captured"
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
+    let props = extract_flag_called(&server.captured.lock().unwrap())
+        .expect("no $feature_flag_called event was captured after flush");
+    props
 }
 
 fn extract_flag_called(bodies: &[Vec<u8>]) -> Option<serde_json::Map<String, Value>> {
