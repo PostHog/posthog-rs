@@ -75,6 +75,7 @@ async fn assert_disabled_client_is_noop(api_key: Option<&str>) {
         .unwrap();
     assert!(flags.keys().is_empty());
 
+    client.flush().await;
     capture_mock.assert_hits(0);
     flags_mock.assert_hits(0);
 }
