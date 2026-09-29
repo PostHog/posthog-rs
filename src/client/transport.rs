@@ -1209,7 +1209,7 @@ impl Pipeline {
                 // A 2xx whose per-event verdicts include `drop` or `retry`-on-final
                 // (events the backend will not persist): surface them even though
                 // the request itself succeeded (`error` is `None`). Without a hook
-                // this is one aggregate line per batch — never one per event, so
+                // this is one aggregate line per batch with counts per reason — never one per event, so
                 // a misrouted integration at volume cannot flood the logs, and
                 // never naming payloads. The per-event detail lives on the
                 // project's Ingestion Warnings page.
@@ -1217,8 +1217,9 @@ impl Pipeline {
                 if lost > 0 {
                     if self.options.on_error.is_empty() {
                         warn!(
-                            "posthog-rs: {lost} event(s) not persisted by {} (per-event verdicts)",
-                            self.lane.endpoint
+                            "posthog-rs: {lost} event(s) not persisted by {}: {}",
+                            self.lane.endpoint,
+                            undelivered_summary(&batch.final_results)
                         );
                     } else {
                         self.fire_capture(
@@ -1337,6 +1338,61 @@ fn undelivered_results(results: &HashMap<Uuid, crate::capture_event::EventResult
         .values()
         .filter(|r| matches!(r.result, EventStatus::Retry | EventStatus::Drop))
         .count()
+}
+
+/// Most reasons one no-hook log line names; the rest are summed as `other`.
+const MAX_LOGGED_REASONS: usize = 5;
+/// Longest server-sent reason the no-hook log line shows, in characters.
+const MAX_LOGGED_REASON_CHARS: usize = 64;
+
+/// Describe undelivered events for the no-hook log line, for example
+/// `2 dropped (invalid_options=2), 1 out of retries (not_persisted=1)`.
+fn undelivered_summary(results: &HashMap<Uuid, crate::capture_event::EventResult>) -> String {
+    use crate::capture_event::EventStatus;
+    let mut budget = MAX_LOGGED_REASONS;
+    let mut parts = Vec::new();
+    for (status, label) in [
+        (EventStatus::Drop, "dropped"),
+        (EventStatus::Retry, "out of retries"),
+    ] {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for r in results.values().filter(|r| r.result == status) {
+            *counts.entry(log_reason(r.details.as_deref())).or_insert(0) += 1;
+        }
+        if counts.is_empty() {
+            continue;
+        }
+        let total: usize = counts.values().sum();
+        let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let shown = ranked.len().min(budget);
+        budget -= shown;
+        let mut reasons: Vec<String> = ranked[..shown]
+            .iter()
+            .map(|(reason, n)| format!("{reason}={n}"))
+            .collect();
+        let other: usize = ranked[shown..].iter().map(|(_, n)| n).sum();
+        if other > 0 {
+            reasons.push(format!("other={other}"));
+        }
+        parts.push(format!("{total} {label} ({})", reasons.join(", ")));
+    }
+    parts.join(", ")
+}
+
+/// Clip a server-sent reason and strip control characters so it cannot break the log line.
+fn log_reason(details: Option<&str>) -> String {
+    let reason: String = details
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_LOGGED_REASON_CHARS)
+        .collect();
+    if reason.trim().is_empty() {
+        "unspecified".to_string()
+    } else {
+        reason
+    }
 }
 
 #[cfg(test)]
@@ -2018,6 +2074,84 @@ mod tests {
             (Uuid::now_v7(), mk(EventStatus::Drop)),
         ]);
         assert_eq!(undelivered_results(&results), 2);
+    }
+
+    fn verdicts(
+        entries: &[(crate::capture_event::EventStatus, Option<&str>)],
+    ) -> HashMap<Uuid, crate::capture_event::EventResult> {
+        entries
+            .iter()
+            .map(|(result, details)| {
+                (
+                    Uuid::now_v7(),
+                    crate::capture_event::EventResult {
+                        result: result.clone(),
+                        details: details.map(str::to_string),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn undelivered_summary_counts_drops_and_retries_by_reason() {
+        use crate::capture_event::EventStatus::{Drop, Ok, Retry, Warning};
+        let results = verdicts(&[
+            (Drop, Some("invalid_options")),
+            (Drop, Some("invalid_options")),
+            (Drop, Some("missing_distinct_id")),
+            (Retry, Some("not_persisted")),
+            (Ok, None),
+            (Warning, Some("person_processing_disabled")),
+        ]);
+        assert_eq!(
+            undelivered_summary(&results),
+            "3 dropped (invalid_options=2, missing_distinct_id=1), 1 out of retries (not_persisted=1)"
+        );
+        assert_eq!(
+            undelivered_summary(&verdicts(&[(Retry, Some("not_persisted"))])),
+            "1 out of retries (not_persisted=1)"
+        );
+    }
+
+    #[test]
+    fn undelivered_summary_names_at_most_five_reasons() {
+        use crate::capture_event::EventStatus::{Drop, Retry};
+        let mut entries: Vec<(crate::capture_event::EventStatus, Option<&str>)> = Vec::new();
+        for (reason, n) in [
+            ("r1", 6),
+            ("r2", 5),
+            ("r3", 4),
+            ("r4", 3),
+            ("r5", 2),
+            ("r6", 1),
+        ] {
+            entries.extend(std::iter::repeat((Drop, Some(reason))).take(n));
+        }
+        entries.push((Retry, Some("not_persisted")));
+        assert_eq!(
+            undelivered_summary(&verdicts(&entries)),
+            "21 dropped (r1=6, r2=5, r3=4, r4=3, r5=2, other=1), 1 out of retries (other=1)"
+        );
+    }
+
+    #[test]
+    fn undelivered_summary_sanitizes_server_reasons() {
+        use crate::capture_event::EventStatus::Drop;
+        let long = "x".repeat(100);
+        let results = verdicts(&[
+            (Drop, Some(long.as_str())),
+            (Drop, Some("bad\nreason")),
+            (Drop, None),
+            (Drop, Some(" ")),
+        ]);
+        assert_eq!(
+            undelivered_summary(&results),
+            format!(
+                "4 dropped (unspecified=2, badreason=1, {}=1)",
+                "x".repeat(64)
+            )
+        );
     }
 
     #[test]
