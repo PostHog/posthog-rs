@@ -52,7 +52,7 @@ event.insert_option("process_person_profile", false)?;
 client.capture(event);
 ```
 
-Keys are strings and values are any JSON value. The SDK sends options as given, so a new option that PostHog adds needs no SDK upgrade. PostHog validates them: it ignores keys it does not know, and drops the event if a known key has a value it cannot use. That drop reaches `on_error` as a per-event `drop` with the detail `invalid_options`. `before_send` hooks can read and change options with `Event::options`, `insert_option`, and `remove_option`.
+Keys are strings and values are any JSON value. The SDK sends options as given, so a new option that PostHog adds needs no SDK upgrade. PostHog validates them: it ignores keys it does not know, converts common forms of a known key's value (for a boolean, `"yes"`, `"off"` or `0`), and drops the event if a known key has a value it cannot read. That drop reaches `on_error` as a per-event `drop` with the detail `invalid_options`. `before_send` hooks can read and change options with `Event::options`, `insert_option`, and `remove_option`.
 
 The legacy properties still work. The SDK moves each one into its option and removes it from `properties`:
 
@@ -67,8 +67,12 @@ When both are set, the option wins. An option set to `null` counts as not set, s
 
 Two behaviors differ from the 0.x `capture-v1` feature:
 
-- The SDK no longer converts legacy property values to the type PostHog expects. A value PostHog cannot use, such as `"$process_person_profile": "no"`, used to be removed so the event was sent without it. Now PostHog drops the event as `invalid_options`. Values PostHog accepts, such as `"false"` or `0`, behave as before.
+- The SDK no longer converts legacy property values to the type PostHog expects. A value PostHog cannot read, such as `"$process_person_profile": "maybe"`, used to be removed so the event was sent without it. Now PostHog drops the event as `invalid_options`. Values PostHog accepts, such as `"false"` or `0`, behave as before.
 - Events with groups (`Event::add_group` or `CaptureExceptionOptions::group`) always process person profiles, because group analytics needs them. Setting `process_person_profile` to `false` on a group event no longer turns processing off.
+
+One behavior differs from 0.x without `capture-v1`, which used the V0 endpoint:
+
+- PostHog now reads common forms of an option value, so `"$process_person_profile": "false"` turns person processing off. The V0 endpoint ignored that string. A value PostHog cannot read now drops the event, where the V0 endpoint kept the event and ignored the value.
 
 ### Compression
 
