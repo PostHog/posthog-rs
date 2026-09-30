@@ -75,12 +75,10 @@ fn request_does_not_disable_person_processing(req: &HttpMockRequest) -> bool {
         return false;
     };
 
-    let path = if cfg!(feature = "capture-v1") {
-        "/options/process_person_profile"
-    } else {
-        "/properties/$process_person_profile"
-    };
-    event.pointer(path).and_then(Value::as_bool) != Some(false)
+    event
+        .pointer("/options/process_person_profile")
+        .and_then(Value::as_bool)
+        != Some(false)
 }
 
 /// PostHog deduplicates on event UUID, so a constructor that reused one would
