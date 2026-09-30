@@ -1821,9 +1821,8 @@ mod tests {
         });
 
         event["event"] == "$exception"
-            // `$process_person_profile` is lifted into the typed options object;
-            // tolerate the properties spelling too for hand-built payloads.
-            // in the typed `options` object.
+            // The SDK moves `$process_person_profile` into `options`, and a hand-built
+            // payload may still carry the properties spelling.
             && (event["properties"]["$process_person_profile"] == false
                 || event["options"]["process_person_profile"] == false)
             && event["properties"]["$exception_level"] == "fatal"
