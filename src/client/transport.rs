@@ -523,6 +523,8 @@ fn dec_len(len: &AtomicUsize, n: usize) {
     if n == 0 {
         return;
     }
+    // Rust 1.99 renames this to `try_update`, which the 1.78 minimum lacks.
+    #[allow(deprecated)]
     let _ = len.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         debug_assert!(
             current >= n,
