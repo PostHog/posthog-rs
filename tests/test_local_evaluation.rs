@@ -1,8 +1,3 @@
-// Some tests in this file exercise the deprecated single-flag methods
-// alongside the local-evaluation cache; tolerate the deprecation warnings
-// during the transition window.
-#![allow(deprecated)]
-
 mod common;
 
 use common::default_user_agent;
@@ -67,13 +62,7 @@ fn test_local_evaluation_basic() {
     };
 
     // Update cache with the flag
-    let response = LocalEvaluationResponse {
-        property_matching_version: 1,
-        flags: vec![flag],
-        group_type_mapping: HashMap::new(),
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    };
+    let response = LocalEvaluationResponse::new(vec![flag]);
     cache.update(response);
 
     // Test evaluation
@@ -331,13 +320,7 @@ fn test_local_evaluation_with_properties() {
     };
 
     // Update cache
-    let response = LocalEvaluationResponse {
-        property_matching_version: 1,
-        flags: vec![flag],
-        group_type_mapping: HashMap::new(),
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    };
+    let response = LocalEvaluationResponse::new(vec![flag]);
     cache.update(response);
 
     // Test with matching properties
@@ -464,11 +447,12 @@ async fn test_local_evaluation_with_mock_server() {
     let mut properties = HashMap::new();
     properties.insert("email".to_string(), json!("test@company.com"));
 
-    let result = client
-        .get_feature_flag("feature-b", "user-123", None, Some(properties), None)
-        .await;
+    let mut options = EvaluateFlagsOptions::default();
+    options.person_properties = Some(properties);
+    options.flag_keys = Some(vec!["feature-b".to_string()]);
+    let flags = client.evaluate_flags("user-123", options).await.unwrap();
 
-    assert!(result.unwrap() == Some(FlagValue::Boolean(true)));
+    assert_eq!(flags.get_flag("feature-b"), Some(FlagValue::Boolean(true)));
 
     eval_mock.assert();
 }
@@ -521,8 +505,9 @@ async fn test_client_adds_distinct_id_for_local_evaluation_only() {
     let options = ClientOptionsBuilder::default()
         .host(server.base_url())
         .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
+        .secret_key("test_personal_key".to_string())
         .enable_local_evaluation(true)
+        .local_evaluation_only(true)
         .poll_interval_seconds(60)
         .build()
         .unwrap();
@@ -530,11 +515,15 @@ async fn test_client_adds_distinct_id_for_local_evaluation_only() {
     let client = posthog_rs::client(options).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let result = client
-        .get_feature_flag("distinct-id-flag", "user-123", None, None, None)
-        .await;
+    let flags = client
+        .evaluate_flags("user-123", EvaluateFlagsOptions::default())
+        .await
+        .unwrap();
 
-    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    assert_eq!(
+        flags.get_flag("distinct-id-flag"),
+        Some(FlagValue::Boolean(true))
+    );
     eval_mock.assert();
     flags_mock.assert_hits(0);
 }
@@ -610,7 +599,7 @@ async fn test_local_evaluation_returns_payloads_without_calling_flags() {
     let options = ClientOptionsBuilder::default()
         .host(server.base_url())
         .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
+        .secret_key("test_personal_key".to_string())
         .enable_local_evaluation(true)
         .poll_interval_seconds(60)
         .build()
@@ -619,18 +608,14 @@ async fn test_local_evaluation_returns_payloads_without_calling_flags() {
     let client = posthog_rs::client(options).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    let mut options = EvaluateFlagsOptions::default();
+    options.flag_keys = Some(vec![
+        "bool-flag".to_string(),
+        "variant-flag".to_string(),
+        "no-payload-flag".to_string(),
+    ]);
     let snapshot = client
-        .evaluate_flags(
-            "user-123",
-            EvaluateFlagsOptions {
-                flag_keys: Some(vec![
-                    "bool-flag".to_string(),
-                    "variant-flag".to_string(),
-                    "no-payload-flag".to_string(),
-                ]),
-                ..Default::default()
-            },
-        )
+        .evaluate_flags("user-123", options)
         .await
         .expect("evaluate_flags");
 
@@ -678,20 +663,16 @@ async fn test_local_evaluation_with_mock_server_sends_default_user_agent() {
     let options = ClientOptionsBuilder::default()
         .host(server.base_url())
         .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
+        .secret_key("test_personal_key".to_string())
         .enable_local_evaluation(true)
         .poll_interval_seconds(60)
         .build()
         .unwrap();
 
-    let client = posthog_rs::client(options).await;
+    let _client = posthog_rs::client(options).await;
 
     // Give it a moment to load initial flags
     tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let _ = client
-        .get_feature_flag("feature-b", "", None, None, None)
-        .await;
 
     eval_mock.assert();
 }
@@ -718,7 +699,7 @@ fn test_sync_local_evaluation_with_mock_server_sends_default_user_agent() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_secs(60),
@@ -763,13 +744,7 @@ fn test_cache_operations() {
         },
     ];
 
-    let response = LocalEvaluationResponse {
-        property_matching_version: 1,
-        flags: flags.clone(),
-        group_type_mapping: HashMap::new(),
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    };
+    let response = LocalEvaluationResponse::new(flags.clone());
 
     cache.update(response);
 
@@ -835,7 +810,7 @@ async fn test_etag_sent_on_second_poll() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -910,7 +885,7 @@ async fn test_304_preserves_cache() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -978,7 +953,7 @@ async fn test_no_etag_from_server() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(50),
@@ -1052,7 +1027,7 @@ fn test_sync_etag_sent_on_second_poll() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -1124,7 +1099,7 @@ fn test_sync_304_preserves_cache() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -1191,7 +1166,7 @@ fn test_sync_no_etag_from_server() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(50),
@@ -1291,13 +1266,9 @@ fn cache_with(flag: FeatureFlag) -> FlagCache {
     let cache = FlagCache::new();
     let mut group_type_mapping = HashMap::new();
     group_type_mapping.insert("0".to_string(), "company".to_string());
-    cache.update(LocalEvaluationResponse {
-        property_matching_version: 1,
-        flags: vec![flag],
-        group_type_mapping,
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    });
+    let mut response = LocalEvaluationResponse::new(vec![flag]);
+    response.group_type_mapping = group_type_mapping;
+    cache.update(response);
     cache
 }
 

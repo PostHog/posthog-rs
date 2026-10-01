@@ -25,13 +25,11 @@ use std::sync::Arc;
 
 use crate::error::Error;
 
-#[cfg(feature = "capture-v1")]
 use std::collections::HashMap;
-#[cfg(feature = "capture-v1")]
 use uuid::Uuid;
 
-#[cfg(feature = "capture-v1")]
-use crate::event_v1::{EventResult, V1ErrorResponse};
+use crate::capture_event::{CaptureErrorResponse, EventResult, EventStatus};
+use crate::endpoints::Endpoint;
 
 type OnErrorFn = dyn Fn(&PostHogError<'_>) + Send + Sync + 'static;
 type SharedOnErrorHook = Arc<OnErrorFn>;
@@ -85,35 +83,33 @@ pub enum PostHogError<'a> {
 ///
 /// Fields are read through accessors; the struct is `#[non_exhaustive]`.
 ///
-/// Does not fire for shutdown-timeout, queue-full, or `before_send` drops —
-/// those are not delivery failures.
+/// Does not fire for shutdown-timeout, queue-full, `before_send`, or local
+/// oversize-AI-event drops — those are not delivery failures.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct CaptureFailure<'a> {
+    pub(crate) endpoint: Endpoint,
     pub(crate) error: Option<&'a Error>,
     pub(crate) status: Option<u16>,
     pub(crate) attempt: u32,
     pub(crate) event_count: usize,
     pub(crate) historical_migration: bool,
-    #[cfg(feature = "capture-v1")]
     pub(crate) request_id: Option<&'a Uuid>,
-    #[cfg(feature = "capture-v1")]
     pub(crate) results: &'a HashMap<Uuid, EventResult>,
-    #[cfg(feature = "capture-v1")]
-    pub(crate) error_response: Option<&'a V1ErrorResponse>,
+    pub(crate) error_response: Option<&'a CaptureErrorResponse>,
 }
 
 impl<'a> CaptureFailure<'a> {
+    /// The capture endpoint the failed batch targeted: [`Endpoint::Capture`]
+    /// for `capture`/`capture_batch`, [`Endpoint::CaptureAi`] for
+    /// `capture_ai`/`capture_ai_batch`. Lets one hook tell the lanes apart.
+    pub fn endpoint(&self) -> Endpoint {
+        self.endpoint
+    }
+
     /// The batch-level cause: a permanent reject, exhausted transport/HTTP
     /// retries, or a serialization failure.
-    #[cfg_attr(
-        not(feature = "capture-v1"),
-        doc = "\nAlways present: every capture failure surfaced to the hook carries a cause."
-    )]
-    #[cfg_attr(
-        feature = "capture-v1",
-        doc = "\n`None` only when the request itself succeeded (`2xx`) but some events were not\npersisted after the retry budget — inspect [`event_results`](Self::event_results)."
-    )]
+    #[doc = "\n`None` only when the request itself succeeded (`2xx`) but some events were not\npersisted after the retry budget — inspect [`event_results`](Self::event_results)."]
     pub fn error(&self) -> Option<&Error> {
         self.error
     }
@@ -130,10 +126,7 @@ impl<'a> CaptureFailure<'a> {
     }
 
     /// Number of events this failure dropped (lost).
-    #[cfg_attr(
-        feature = "capture-v1",
-        doc = "\nCounts only undelivered events (`retry`/`drop`), including any finalized on\nearlier attempts. This can be smaller than [`event_results`](Self::event_results)`.len()`,\nwhich also reports persisted `ok`/`warning` verdicts — filter by status before\ntreating an entry as lost."
-    )]
+    #[doc = "\nCounts only undelivered events (`retry`/`drop`), including any finalized on\nearlier attempts. This can be smaller than [`event_results`](Self::event_results)`.len()`,\nwhich also reports persisted `ok`/`warning` verdicts — filter by status before\ntreating an entry as lost."]
     pub fn event_count(&self) -> usize {
         self.event_count
     }
@@ -143,15 +136,14 @@ impl<'a> CaptureFailure<'a> {
         self.historical_migration
     }
 
-    /// The V1 capture `posthog-request-id` of the final attempt, when one was
-    /// sent. `None` for a serialization failure (no request reached the wire)
-    /// and on the v0 pipeline (which has no request id).
-    #[cfg(feature = "capture-v1")]
+    /// The capture `posthog-request-id` of the final attempt, when one was
+    /// sent. `None` for a serialization failure where no request reached the
+    /// wire.
     pub fn request_id(&self) -> Option<&Uuid> {
         self.request_id
     }
 
-    /// Per-event server verdicts for the batch (V1 capture pipeline only).
+    /// Per-event server verdicts for the capture batch.
     ///
     /// Maps event UUID to its [`EventResult`]. Includes **all** verdicts the
     /// batch collected — persisted (`ok`/`warning`) as well as lost
@@ -161,19 +153,83 @@ impl<'a> CaptureFailure<'a> {
     /// when [`error`](Self::error) is `None` (a `2xx` where events weren't
     /// persisted after retries); possibly partial on a batch-level failure
     /// (only verdicts collected from earlier attempts).
-    #[cfg(feature = "capture-v1")]
     pub fn event_results(&self) -> &HashMap<Uuid, EventResult> {
         self.results
     }
 
-    /// The structured error body returned by the V1 capture backend on a
+    /// One line with every `drop` and `retry` reason in the batch and its count, drops first
+    /// and most frequent first, for example `drop/invalid_options=2, retry/not_persisted=1`,
+    /// or an empty string when nothing was lost.
+    ///
+    /// Reasons come from the server, so the summary strips control characters and line
+    /// separators, cuts each reason to 64 characters, and shows a missing one as `unspecified`.
+    ///
+    /// ```no_run
+    /// use posthog_rs::{ClientOptionsBuilder, PostHogError};
+    ///
+    /// let options = ClientOptionsBuilder::default()
+    ///     .api_key("phc_example".to_string())
+    ///     .on_error(|failure| {
+    ///         if let PostHogError::Capture(capture) = failure {
+    ///             eprintln!(
+    ///                 "{} event(s) lost: {}",
+    ///                 capture.event_count(),
+    ///                 capture.verdict_summary()
+    ///             );
+    ///         }
+    ///     })
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    pub fn verdict_summary(&self) -> String {
+        verdict_summary(self.results)
+    }
+
+    /// The structured error body returned by the capture backend on a
     /// non-`2xx` response (`error`, `error_description`, `error_uri`), when the
     /// body parsed as one. `None` for a transport error, a `2xx`, or an
     /// unrecognizable body — the raw body remains available via
     /// [`error`](Self::error).
-    #[cfg(feature = "capture-v1")]
-    pub fn error_response(&self) -> Option<&V1ErrorResponse> {
+    pub fn error_response(&self) -> Option<&CaptureErrorResponse> {
         self.error_response
+    }
+}
+
+/// Longest server reason a verdict summary shows, in characters.
+const MAX_SUMMARY_REASON_CHARS: usize = 64;
+
+fn verdict_summary(results: &HashMap<Uuid, EventResult>) -> String {
+    let mut entries = Vec::new();
+    for (status, label) in [(EventStatus::Drop, "drop"), (EventStatus::Retry, "retry")] {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for r in results.values().filter(|r| r.result == status) {
+            *counts
+                .entry(summary_reason(r.details.as_deref()))
+                .or_insert(0) += 1;
+        }
+        let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        entries.extend(
+            ranked
+                .into_iter()
+                .map(|(reason, n)| format!("{label}/{reason}={n}")),
+        );
+    }
+    entries.join(", ")
+}
+
+/// Clip a server reason and strip characters that would split the log line it lands in.
+fn summary_reason(details: Option<&str>) -> String {
+    let reason: String = details
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '\u{2028}' | '\u{2029}'))
+        .take(MAX_SUMMARY_REASON_CHARS)
+        .collect();
+    if reason.trim().is_empty() {
+        "unspecified".to_string()
+    } else {
+        reason
     }
 }
 
@@ -241,5 +297,78 @@ impl<'a> LocalEvaluationFailure<'a> {
     /// error).
     pub fn status(&self) -> Option<u16> {
         self.status
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn verdicts(entries: &[(EventStatus, Option<&str>)]) -> HashMap<Uuid, EventResult> {
+    entries
+        .iter()
+        .map(|(result, details)| {
+            (
+                Uuid::now_v7(),
+                EventResult {
+                    result: result.clone(),
+                    details: details.map(str::to_string),
+                },
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use EventStatus::{Drop, Ok, Retry, Warning};
+
+    #[test]
+    fn verdict_summary_lists_every_lost_reason_in_order() {
+        let mut entries: Vec<(EventStatus, Option<&str>)> = Vec::new();
+        for (reason, n) in [
+            ("r1", 1),
+            ("r2", 3),
+            ("r3", 1),
+            ("r4", 2),
+            ("r5", 1),
+            ("r6", 1),
+        ] {
+            entries.extend(std::iter::repeat((Drop, Some(reason))).take(n));
+        }
+        entries.extend([
+            (Retry, Some("not_persisted")),
+            (Ok, None),
+            (Warning, Some("person_processing_disabled")),
+        ]);
+        assert_eq!(
+            verdict_summary(&verdicts(&entries)),
+            "drop/r2=3, drop/r4=2, drop/r1=1, drop/r3=1, drop/r5=1, drop/r6=1, retry/not_persisted=1"
+        );
+    }
+
+    #[test]
+    fn verdict_summary_is_empty_when_nothing_was_lost() {
+        assert_eq!(
+            verdict_summary(&verdicts(&[(Ok, None), (Warning, None)])),
+            ""
+        );
+    }
+
+    #[test]
+    fn verdict_summary_sanitizes_server_reasons() {
+        let long = "x".repeat(100);
+        let results = verdicts(&[
+            (Drop, Some(long.as_str())),
+            (Drop, Some("bad\nreason")),
+            (Drop, Some("split\u{2028}line\u{2029}")),
+            (Drop, None),
+            (Retry, Some(" ")),
+        ]);
+        assert_eq!(
+            verdict_summary(&results),
+            format!(
+                "drop/badreason=1, drop/splitline=1, drop/unspecified=1, drop/{}=1, retry/unspecified=1",
+                "x".repeat(64)
+            )
+        );
     }
 }

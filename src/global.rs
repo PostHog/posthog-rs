@@ -115,6 +115,18 @@ pub fn capture(event: Event) {
     }
 }
 
+/// Capture the provided AI event using the global client.
+///
+/// # Remarks
+///
+/// Fire-and-forget, like [`Client::capture_ai`]. No-op if `init_global` has
+/// not run.
+pub fn capture_ai(event: Event) {
+    if let Some(client) = GLOBAL_CLIENT.get() {
+        client.capture_ai(event);
+    }
+}
+
 /// Flush the global client's queued events, awaiting the worker's next delivery
 /// attempt. No-op if `init_global` has not run.
 ///
