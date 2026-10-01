@@ -61,10 +61,9 @@ pub(crate) fn build_event_at(
             map.entry("$is_server")
                 .or_insert(serde_json::Value::Bool(true));
         }
-        // Final step for minimized `$feature_flag_called` events: drop
-        // everything outside the allowlist. Wire-lifted keys
-        // ($session_id/$window_id/$process_person_profile) already moved
-        // off `properties` and are preserved on the event elsewhere.
+        // Minimized `$feature_flag_called` events keep only allowlisted properties;
+        // `$session_id`, `$window_id` and the four legacy option properties already
+        // moved to top-level fields and `options`, so the allowlist cannot drop them.
         if minimal {
             map.retain(|key, _| is_minimal_flag_called_property(key));
         }

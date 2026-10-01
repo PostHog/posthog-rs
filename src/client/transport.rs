@@ -1209,16 +1209,18 @@ impl Pipeline {
                 // A 2xx whose per-event verdicts include `drop` or `retry`-on-final
                 // (events the backend will not persist): surface them even though
                 // the request itself succeeded (`error` is `None`). Without a hook
-                // this is one aggregate line per batch — never one per event, so
-                // a misrouted integration at volume cannot flood the logs, and
-                // never naming payloads. The per-event detail lives on the
+                // this is one aggregate line per batch with drop and retry totals, never one per
+                // event, so a misrouted integration at volume cannot flood the logs, and it
+                // never names payloads. A hook gets every reason from
+                // `CaptureFailure::verdict_summary`; the per-event detail lives on the
                 // project's Ingestion Warnings page.
                 let lost = batch.pending.len() + undelivered_results(&batch.final_results);
                 if lost > 0 {
                     if self.options.on_error.is_empty() {
                         warn!(
-                            "posthog-rs: {lost} event(s) not persisted by {} (per-event verdicts)",
-                            self.lane.endpoint
+                            "posthog-rs: {lost} event(s) not persisted by {}: {}",
+                            self.lane.endpoint,
+                            undelivered_totals(&batch.final_results)
                         );
                     } else {
                         self.fire_capture(
@@ -1337,6 +1339,23 @@ fn undelivered_results(results: &HashMap<Uuid, crate::capture_event::EventResult
         .values()
         .filter(|r| matches!(r.result, EventStatus::Retry | EventStatus::Drop))
         .count()
+}
+
+/// Describe undelivered events by outcome for the no-hook log line, for example
+/// `2 dropped, 1 out of retries`.
+fn undelivered_totals(results: &HashMap<Uuid, crate::capture_event::EventResult>) -> String {
+    use crate::capture_event::EventStatus;
+    let mut parts = Vec::new();
+    for (status, label) in [
+        (EventStatus::Drop, "dropped"),
+        (EventStatus::Retry, "out of retries"),
+    ] {
+        let n = results.values().filter(|r| r.result == status).count();
+        if n > 0 {
+            parts.push(format!("{n} {label}"));
+        }
+    }
+    parts.join(", ")
 }
 
 #[cfg(test)]
@@ -2044,6 +2063,32 @@ mod tests {
     }
 
     #[test]
+    fn undelivered_totals_counts_drops_and_retries_only() {
+        use crate::capture_event::EventStatus::{Drop, Ok, Retry, Warning};
+        let cases: [(&[(crate::capture_event::EventStatus, Option<&str>)], &str); 4] = [
+            (
+                &[
+                    (Drop, Some("invalid_options")),
+                    (Drop, Some("missing_distinct_id")),
+                    (Retry, Some("not_persisted")),
+                    (Ok, None),
+                    (Warning, Some("person_processing_disabled")),
+                ],
+                "2 dropped, 1 out of retries",
+            ),
+            (&[(Drop, Some("invalid_options"))], "1 dropped"),
+            (&[(Retry, Some("not_persisted"))], "1 out of retries"),
+            (&[(Ok, None)], ""),
+        ];
+        for (entries, expected) in cases {
+            assert_eq!(
+                undelivered_totals(&crate::client::on_error::verdicts(entries)),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn capture_failure_surfaces_request_id_and_error_response() {
         // A non-2xx V1 response with a structured error body must reach the hook
         // as a parsed `error_response`, alongside the request id of the attempt.
@@ -2112,7 +2157,9 @@ mod tests {
                 }));
         });
 
-        let recorded = Arc::new(Mutex::new(Vec::<(Option<u16>, bool, usize, usize)>::new()));
+        let recorded = Arc::new(Mutex::new(
+            Vec::<(Option<u16>, bool, usize, usize, String)>::new(),
+        ));
         let sink = recorded.clone();
         let clock = ManualClock::new();
         let handle = TransportHandle::spawn_with_clock(
@@ -2125,6 +2172,7 @@ mod tests {
                             c.error().is_some(),
                             c.event_count(),
                             c.event_results().len(),
+                            c.verdict_summary(),
                         ));
                     }
                 })
@@ -2147,11 +2195,12 @@ mod tests {
 
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(recorded.len(), 1, "fires exactly once for the lost batch");
-        let (status, has_error, lost, results) = recorded[0];
-        assert_eq!(status, Some(200));
+        let (status, has_error, lost, results, summary) = &recorded[0];
+        assert_eq!(*status, Some(200));
         assert!(!has_error, "a 2xx is not an error");
-        assert_eq!(lost, 2, "counts the dropped event and the final retry");
-        assert_eq!(results, 3, "all verdicts reported, including the ok");
+        assert_eq!(*lost, 2, "counts the dropped event and the final retry");
+        assert_eq!(*results, 3, "all verdicts reported, including the ok");
+        assert_eq!(summary, "drop/not_persisted=1, retry/not_persisted=1");
     }
 
     // -- AI lane -------------------------------------------------------------

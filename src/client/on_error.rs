@@ -28,7 +28,7 @@ use crate::error::Error;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::capture_event::{CaptureErrorResponse, EventResult};
+use crate::capture_event::{CaptureErrorResponse, EventResult, EventStatus};
 use crate::endpoints::Endpoint;
 
 type OnErrorFn = dyn Fn(&PostHogError<'_>) + Send + Sync + 'static;
@@ -157,6 +157,34 @@ impl<'a> CaptureFailure<'a> {
         self.results
     }
 
+    /// One line with every `drop` and `retry` reason in the batch and its count, drops first
+    /// and most frequent first, for example `drop/invalid_options=2, retry/not_persisted=1`,
+    /// or an empty string when nothing was lost.
+    ///
+    /// Reasons come from the server, so the summary strips control characters and line
+    /// separators, cuts each reason to 64 characters, and shows a missing one as `unspecified`.
+    ///
+    /// ```no_run
+    /// use posthog_rs::{ClientOptionsBuilder, PostHogError};
+    ///
+    /// let options = ClientOptionsBuilder::default()
+    ///     .api_key("phc_example".to_string())
+    ///     .on_error(|failure| {
+    ///         if let PostHogError::Capture(capture) = failure {
+    ///             eprintln!(
+    ///                 "{} event(s) lost: {}",
+    ///                 capture.event_count(),
+    ///                 capture.verdict_summary()
+    ///             );
+    ///         }
+    ///     })
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    pub fn verdict_summary(&self) -> String {
+        verdict_summary(self.results)
+    }
+
     /// The structured error body returned by the capture backend on a
     /// non-`2xx` response (`error`, `error_description`, `error_uri`), when the
     /// body parsed as one. `None` for a transport error, a `2xx`, or an
@@ -164,6 +192,44 @@ impl<'a> CaptureFailure<'a> {
     /// [`error`](Self::error).
     pub fn error_response(&self) -> Option<&CaptureErrorResponse> {
         self.error_response
+    }
+}
+
+/// Longest server reason a verdict summary shows, in characters.
+const MAX_SUMMARY_REASON_CHARS: usize = 64;
+
+fn verdict_summary(results: &HashMap<Uuid, EventResult>) -> String {
+    let mut entries = Vec::new();
+    for (status, label) in [(EventStatus::Drop, "drop"), (EventStatus::Retry, "retry")] {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for r in results.values().filter(|r| r.result == status) {
+            *counts
+                .entry(summary_reason(r.details.as_deref()))
+                .or_insert(0) += 1;
+        }
+        let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        entries.extend(
+            ranked
+                .into_iter()
+                .map(|(reason, n)| format!("{label}/{reason}={n}")),
+        );
+    }
+    entries.join(", ")
+}
+
+/// Clip a server reason and strip characters that would split the log line it lands in.
+fn summary_reason(details: Option<&str>) -> String {
+    let reason: String = details
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '\u{2028}' | '\u{2029}'))
+        .take(MAX_SUMMARY_REASON_CHARS)
+        .collect();
+    if reason.trim().is_empty() {
+        "unspecified".to_string()
+    } else {
+        reason
     }
 }
 
@@ -231,5 +297,78 @@ impl<'a> LocalEvaluationFailure<'a> {
     /// error).
     pub fn status(&self) -> Option<u16> {
         self.status
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn verdicts(entries: &[(EventStatus, Option<&str>)]) -> HashMap<Uuid, EventResult> {
+    entries
+        .iter()
+        .map(|(result, details)| {
+            (
+                Uuid::now_v7(),
+                EventResult {
+                    result: result.clone(),
+                    details: details.map(str::to_string),
+                },
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use EventStatus::{Drop, Ok, Retry, Warning};
+
+    #[test]
+    fn verdict_summary_lists_every_lost_reason_in_order() {
+        let mut entries: Vec<(EventStatus, Option<&str>)> = Vec::new();
+        for (reason, n) in [
+            ("r1", 1),
+            ("r2", 3),
+            ("r3", 1),
+            ("r4", 2),
+            ("r5", 1),
+            ("r6", 1),
+        ] {
+            entries.extend(std::iter::repeat((Drop, Some(reason))).take(n));
+        }
+        entries.extend([
+            (Retry, Some("not_persisted")),
+            (Ok, None),
+            (Warning, Some("person_processing_disabled")),
+        ]);
+        assert_eq!(
+            verdict_summary(&verdicts(&entries)),
+            "drop/r2=3, drop/r4=2, drop/r1=1, drop/r3=1, drop/r5=1, drop/r6=1, retry/not_persisted=1"
+        );
+    }
+
+    #[test]
+    fn verdict_summary_is_empty_when_nothing_was_lost() {
+        assert_eq!(
+            verdict_summary(&verdicts(&[(Ok, None), (Warning, None)])),
+            ""
+        );
+    }
+
+    #[test]
+    fn verdict_summary_sanitizes_server_reasons() {
+        let long = "x".repeat(100);
+        let results = verdicts(&[
+            (Drop, Some(long.as_str())),
+            (Drop, Some("bad\nreason")),
+            (Drop, Some("split\u{2028}line\u{2029}")),
+            (Drop, None),
+            (Retry, Some(" ")),
+        ]);
+        assert_eq!(
+            verdict_summary(&results),
+            format!(
+                "drop/badreason=1, drop/splitline=1, drop/unspecified=1, drop/{}=1, retry/unspecified=1",
+                "x".repeat(64)
+            )
+        );
     }
 }
