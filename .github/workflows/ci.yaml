@@ -87,6 +87,14 @@ jobs:
             toolchain: stable
             cache-key: capture-v1
             command: cargo build --verbose --features capture-v1
+          - name: MSRV (capture-v1, async client)
+            toolchain: "1.88.0"
+            cache-key: msrv-async-client
+            command: cargo check --locked --package posthog-rs --lib --features capture-v1
+          - name: MSRV (error-tracking + capture-v1, blocking client)
+            toolchain: "1.88.0"
+            cache-key: msrv-blocking-client
+            command: cargo check --locked --package posthog-rs --lib --no-default-features --features error-tracking,capture-v1
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

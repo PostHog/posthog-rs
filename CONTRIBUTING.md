@@ -4,7 +4,9 @@ Thanks for your interest in improving the PostHog Rust SDK.
 
 ## Prerequisites
 
-- Rust `1.78.0` or newer (see `Cargo.toml`)
+- Rust `1.88.0` or newer (see `Cargo.toml`)
+
+CI checks this minimum with both async and blocking clients, including the `capture-v1` feature.
 
 ## Development commands
 
