@@ -4,7 +4,9 @@ Thanks for your interest in improving the PostHog Rust SDK.
 
 ## Prerequisites
 
-- Rust `1.78.0` or newer (see `Cargo.toml`)
+- Rust `1.78.0` or newer for the SDK library (see `Cargo.toml`). Development and test dependencies may require newer Rust.
+
+CI checks the minimum with both async and blocking clients, including `capture-v1`, using the checked-in lockfile. Dependency ranges still allow customers on newer Rust to use newer releases. When updating the lockfile, keep the library's dependency graph compatible with Rust 1.78 and rerun both MSRV checks; dependency metadata alone can understate the required compiler version.
 
 ## Development commands
 
