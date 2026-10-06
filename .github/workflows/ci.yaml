@@ -93,6 +93,14 @@ jobs:
             command: >-
               cargo build --verbose --no-default-features --features async-client,error-tracking,tls-no-provider
               && ! cargo tree --package posthog-rs --edges normal --invert aws-lc-sys --no-default-features --features async-client,error-tracking,tls-no-provider
+          - name: MSRV (async client)
+            toolchain: "1.78.0"
+            cache-key: msrv-async-client
+            command: cargo check --locked --package posthog-rs --lib
+          - name: MSRV (error-tracking, blocking client)
+            toolchain: "1.78.0"
+            cache-key: msrv-blocking-client
+            command: cargo check --locked --package posthog-rs --lib --no-default-features --features error-tracking
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
