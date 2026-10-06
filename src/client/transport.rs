@@ -378,6 +378,7 @@ fn dec_len(len: &AtomicUsize, n: usize) {
     if n == 0 {
         return;
     }
+    #[allow(deprecated)] // try_update is unavailable on the Rust 1.78 MSRV.
     let _ = len.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         debug_assert!(
             current >= n,
