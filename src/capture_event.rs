@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::constants::{
-    LEGACY_OPTION_PROPERTIES, PROCESS_PERSON_PROFILE_OPT, SESSION_ID_PROP, WINDOW_ID_PROP,
-};
+use crate::constants::{LEGACY_OPTION_PROPERTIES, SESSION_ID_PROP, WINDOW_ID_PROP};
 use crate::event::Event;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,11 +97,6 @@ fn merge_options(
                 options.insert(option_key.to_string(), legacy);
             }
         }
-    }
-
-    // Ingestion attaches group properties only to events that process persons.
-    if !event.groups().is_empty() {
-        options.insert(PROCESS_PERSON_PROFILE_OPT.to_string(), Value::Bool(true));
     }
 
     options
@@ -350,25 +343,34 @@ mod tests {
     }
 
     #[test]
-    fn groups_force_person_processing() {
-        // The group upgrade wins over an opt-out from either source, in either
-        // call order.
-        let mut option_first = Event::new("test", "user-1");
-        option_first
+    fn groups_leave_person_processing_to_the_caller() {
+        let identified = || {
+            let mut event = Event::new("test", "user-1");
+            event.add_group("company", "acme");
+            event
+        };
+        let mut option_opt_out = identified();
+        option_opt_out
             .insert_option("process_person_profile", false)
             .unwrap();
-        option_first.add_group("company", "acme");
-
-        let mut property_after = Event::new("test", "user-1");
-        property_after.add_group("company", "acme");
-        property_after
+        let mut property_opt_out = identified();
+        property_opt_out
             .insert_prop("$process_person_profile", false)
             .unwrap();
+        let mut anon = Event::new_anon("test");
+        anon.add_group("company", "acme");
 
-        for event in [option_first, property_after] {
+        let cases = [
+            (identified(), None),
+            (option_opt_out, Some(json!(false))),
+            (property_opt_out, Some(json!(false))),
+            (anon, Some(json!(false))),
+        ];
+        for (event, expected) in cases {
             let (options, props) = wire_parts(&event);
-            assert_eq!(options.get("process_person_profile"), Some(&json!(true)));
+            assert_eq!(options.get("process_person_profile"), expected.as_ref());
             assert!(!props.contains_key("$process_person_profile"));
+            assert_eq!(props["$groups"], json!({"company": "acme"}));
         }
     }
 
@@ -401,13 +403,6 @@ mod tests {
         let props = wire.properties.as_object().unwrap();
         let groups = props.get("$groups").unwrap().as_object().unwrap();
         assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
-        // add_group forces process_person_profile=true.
-        let json = serde_json::to_value(&wire).unwrap();
-        let options = json.get("options").unwrap().as_object().unwrap();
-        assert_eq!(
-            options.get("process_person_profile"),
-            Some(&serde_json::json!(true))
-        );
     }
 
     // -- event root fields ----------------------------------------------------
@@ -608,22 +603,24 @@ mod tests {
         assert!(!props.contains_key("$process_person_profile"));
     }
 
-    // -- explicit insert_prop wins over constructor default ------------------
+    // -- anon default is an option: only an option overrides it ---------------
 
     #[test]
-    fn explicit_insert_prop_wins_over_anon_default() {
-        let mut event = Event::new_anon("test");
-        // new_anon sets $process_person_profile=false; explicit insert overwrites.
-        event.insert_prop("$process_person_profile", true).unwrap();
-        let wire = CaptureEvent::from_event(&event);
-        let json = serde_json::to_value(&wire).unwrap();
-        let options = json.get("options").unwrap().as_object().unwrap();
-        assert_eq!(
-            options.get("process_person_profile"),
-            Some(&serde_json::json!(true))
-        );
-        let props = wire.properties.as_object().unwrap();
-        assert!(!props.contains_key("$process_person_profile"));
+    fn anon_default_yields_to_an_option_but_not_a_legacy_property() {
+        let mut by_option = Event::new_anon("test");
+        by_option
+            .insert_option("process_person_profile", true)
+            .unwrap();
+        let mut by_property = Event::new_anon("test");
+        by_property
+            .insert_prop("$process_person_profile", true)
+            .unwrap();
+
+        for (event, expected) in [(by_option, json!(true)), (by_property, json!(false))] {
+            let (options, props) = wire_parts(&event);
+            assert_eq!(options.get("process_person_profile"), Some(&expected));
+            assert!(!props.contains_key("$process_person_profile"));
+        }
     }
 
     #[test]
@@ -639,23 +636,5 @@ mod tests {
         );
         let props = wire.properties.as_object().unwrap();
         assert!(!props.contains_key("$process_person_profile"));
-    }
-
-    #[test]
-    fn add_group_overrides_anon_person_profile() {
-        let mut event = Event::new_anon("test");
-        // new_anon sets $process_person_profile=false; add_group forces true.
-        event.add_group("company", "acme");
-        let wire = CaptureEvent::from_event(&event);
-        let json = serde_json::to_value(&wire).unwrap();
-        let options = json.get("options").unwrap().as_object().unwrap();
-        assert_eq!(
-            options.get("process_person_profile"),
-            Some(&serde_json::json!(true))
-        );
-        let props = wire.properties.as_object().unwrap();
-        assert!(!props.contains_key("$process_person_profile"));
-        let groups = props.get("$groups").unwrap().as_object().unwrap();
-        assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
     }
 }

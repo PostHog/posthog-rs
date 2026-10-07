@@ -110,19 +110,22 @@ impl Event {
     ///
     /// # Remarks
     ///
-    /// Generates a random distinct ID and sets `$process_person_profile` to
-    /// `false` so PostHog does not create a person profile for the event.
+    /// Generates a random distinct ID and sets the `process_person_profile`
+    /// option to `false` so PostHog does not create a person profile for the
+    /// event. To process one anyway, set the option with
+    /// [`Event::insert_option`]; a legacy `$process_person_profile` property
+    /// does not override an option.
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
-        let mut properties = HashMap::new();
-        properties.insert(
-            crate::constants::PROCESS_PERSON_PROFILE_PROP.into(),
+        let mut options = HashMap::new();
+        options.insert(
+            crate::constants::PROCESS_PERSON_PROFILE_OPT.into(),
             serde_json::Value::Bool(false),
         );
         Self {
             event: event.into(),
             distinct_id: Uuid::now_v7().to_string(),
-            properties,
-            options: HashMap::new(),
+            properties: HashMap::new(),
+            options,
             groups: HashMap::new(),
             timestamp: None,
             uuid: Uuid::now_v7(),
@@ -200,13 +203,11 @@ impl Event {
     ///
     /// # Remarks
     ///
-    /// Group events always process person profiles, even when
-    /// `process_person_profile` is `false`, which can create "empty" profiles.
+    /// Adding a group does not change person processing. PostHog attaches
+    /// groups for group analytics only to events that process person profiles,
+    /// so an event from [`Event::new_anon`] needs
+    /// `insert_option("process_person_profile", true)` to count for its groups.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
-        self.properties.insert(
-            crate::constants::PROCESS_PERSON_PROFILE_PROP.into(),
-            serde_json::Value::Bool(true),
-        );
         self.groups.insert(group_name.into(), group_id.into());
     }
 
