@@ -516,6 +516,9 @@ mod tests {
             ("$feature_flag_has_experiment", serde_json::json!(false)),
             ("locally_evaluated", serde_json::json!(false)),
             ("custom_super_property", serde_json::json!("leak")), // stripped
+            ("$cookieless_mode", serde_json::json!(true)),
+            ("$ignore_sent_at", serde_json::json!(true)),
+            ("$product_tour_id", serde_json::json!("tour_1")),
         ] {
             event.insert_prop(k, v).unwrap();
         }
@@ -525,6 +528,15 @@ mod tests {
             is_server: true,
         };
         let built = build_events_at(&[event], &defaults, Utc::now());
+        assert_eq!(
+            serde_json::Value::Object(built[0].options.clone()),
+            serde_json::json!({
+                "cookieless_mode": true,
+                "disable_skew_correction": true,
+                "product_tour_id": "tour_1",
+            }),
+            "legacy option properties must become options before the allowlist runs"
+        );
         let map = built[0].properties.as_object().unwrap();
         let keys: HashSet<&str> = map.keys().map(String::as_str).collect();
         let allow: HashSet<&str> = MINIMAL_FLAG_CALLED_EVENT_PROPERTIES
