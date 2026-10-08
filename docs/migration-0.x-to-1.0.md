@@ -34,6 +34,10 @@ The regular `capture` and `capture_batch` methods remain fire-and-forget. They e
 
 All event-producing SDK paths now use the same capture endpoint, including error tracking, `$feature_flag_called` events, historical migration, `before_send`, and terminal failures reported through `on_error`.
 
+### SDK identity
+
+PostHog sets `$lib` and `$lib_version` on every event from the `posthog-sdk-info` request header, which is always `posthog-rs/<version>`. The SDK no longer adds them to properties. If you set them with `insert_prop` or in `before_send`, they are still sent, but PostHog overwrites them, so stored events always report `posthog-rs`. In 0.x the SDK kept a `$lib` or `$lib_version` you set.
+
 ### AI events
 
 Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog_rs::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size, with the backend's 8 MiB per-event ceiling applied locally. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
