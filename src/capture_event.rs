@@ -38,16 +38,15 @@ impl CaptureEvent {
         let mut properties = event.properties().clone();
 
         if !event.groups().is_empty() {
-            properties.insert(
-                "$groups".into(),
-                serde_json::Value::Object(
-                    event
-                        .groups()
-                        .iter()
-                        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                        .collect(),
-                ),
-            );
+            // Groups from `add_group` win key by key over a `$groups` property.
+            let mut groups = match properties.remove("$groups") {
+                Some(serde_json::Value::Object(existing)) => existing,
+                _ => serde_json::Map::new(),
+            };
+            for (k, v) in event.groups() {
+                groups.insert(k.clone(), serde_json::Value::String(v.clone()));
+            }
+            properties.insert("$groups".into(), serde_json::Value::Object(groups));
         }
 
         let timestamp = event
@@ -403,6 +402,25 @@ mod tests {
         let props = wire.properties.as_object().unwrap();
         let groups = props.get("$groups").unwrap().as_object().unwrap();
         assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
+    }
+
+    #[test]
+    fn added_groups_win_key_by_key_over_a_groups_property() {
+        let mut event = Event::new("test", "user-1");
+        event
+            .insert_prop(
+                "$groups",
+                serde_json::json!({"company": "from-property", "project": "p1"}),
+            )
+            .unwrap();
+        event.add_group("company", "acme");
+
+        let wire = CaptureEvent::from_event(&event);
+
+        assert_eq!(
+            wire.properties.get("$groups"),
+            Some(&serde_json::json!({"company": "acme", "project": "p1"}))
+        );
     }
 
     // -- event root fields ----------------------------------------------------

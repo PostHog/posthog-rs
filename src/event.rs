@@ -357,12 +357,16 @@ impl Event {
     /// `send_feature_flags` would otherwise fetch — but without making an
     /// extra `/flags` request.
     ///
+    /// A property already on the event keeps its value, so the caller can
+    /// override a `$feature/<key>` or `$active_feature_flags` value whether it
+    /// is set before or after this call.
+    ///
     /// # Returns
     ///
     /// Returns `self` so calls can be chained before capture.
     pub fn with_flags(&mut self, flags: &FeatureFlagEvaluations) -> &mut Self {
         for (key, value) in flags.event_properties() {
-            self.properties.insert(key, value);
+            self.properties.entry(key).or_insert(value);
         }
         self
     }

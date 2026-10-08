@@ -12,10 +12,7 @@ use super::retry::{backoff_duration, is_retryable_status};
 // Re-exported so the capture loops in the client modules can reach them as
 // `capture::parse_retry_after` / `capture::Step`.
 pub(crate) use super::retry::{parse_retry_after, Step};
-use super::{
-    common::{apply_runtime_context, preprocess_capture_event},
-    CaptureCompression, CaptureDefaults, ClientOptions,
-};
+use super::{common::preprocess_capture_event, CaptureCompression, ClientOptions};
 use crate::capture_event::{
     BatchRequestRef, CaptureErrorResponse, CaptureEvent, CaptureResponse, EventResult, EventStatus,
 };
@@ -30,37 +27,20 @@ use crate::event::{is_minimal_flag_called_property, Event};
 
 /// Build V1 events with an injected `now` so the transport worker can stamp
 /// deterministic event timestamps from its clock.
-pub(crate) fn build_events_at(
-    events: &[Event],
-    defaults: &CaptureDefaults,
-    now: DateTime<Utc>,
-) -> Vec<CaptureEvent> {
+pub(crate) fn build_events_at(events: &[Event], now: DateTime<Utc>) -> Vec<CaptureEvent> {
     events
         .iter()
-        .map(|event| build_event_at(event, defaults, now))
+        .map(|event| build_event_at(event, now))
         .collect()
 }
 
-/// Build one V1 wire event: runtime context, client defaults (caller wins),
-/// and the minimized-`$feature_flag_called` allowlist.
-pub(crate) fn build_event_at(
-    event: &Event,
-    defaults: &CaptureDefaults,
-    now: DateTime<Utc>,
-) -> CaptureEvent {
-    let mut event = event.clone();
-    apply_runtime_context(&mut event);
+/// Build one V1 wire event from a preprocessed event, and apply the
+/// minimized-`$feature_flag_called` allowlist. It adds no SDK values: those
+/// go in before `before_send`, which has the final say over them.
+pub(crate) fn build_event_at(event: &Event, now: DateTime<Utc>) -> CaptureEvent {
     let minimal = event.is_minimal_flag_called();
-    let mut v1 = CaptureEvent::from_event_at(&event, now);
+    let mut v1 = CaptureEvent::from_event_at(event, now);
     if let serde_json::Value::Object(ref mut map) = v1.properties {
-        if defaults.disable_geoip {
-            map.entry("$geoip_disable")
-                .or_insert(serde_json::Value::Bool(true));
-        }
-        if defaults.is_server {
-            map.entry("$is_server")
-                .or_insert(serde_json::Value::Bool(true));
-        }
         // Minimized `$feature_flag_called` events keep only allowlisted properties;
         // `$session_id`, `$window_id` and the four legacy option properties already
         // moved to top-level fields and `options`, so the allowlist cannot drop them.
@@ -290,7 +270,7 @@ pub(crate) fn prepare_immediate(
 
     let historical_migration = historical_migration.then_some(true);
     let url = opts.endpoints().build_url(lane.endpoint);
-    let built = build_events_at(&events, &defaults, Utc::now());
+    let built = build_events_at(&events, Utc::now());
     let chunks = match lane.batch_bytes_target {
         Some(target) => chunk_by_bytes(
             built
@@ -488,8 +468,13 @@ mod tests {
 
     use super::*;
     use crate::capture_event::{CaptureEvent, CaptureResponse, EventResult, EventStatus};
-    use crate::client::ClientOptionsBuilder;
+    use crate::client::{CaptureDefaults, ClientOptionsBuilder};
     use crate::event::MINIMAL_FLAG_CALLED_EVENT_PROPERTIES;
+
+    fn build_preprocessed(event: Event, defaults: &CaptureDefaults) -> CaptureEvent {
+        let event = preprocess_capture_event(event, defaults, &[]).unwrap();
+        build_event_at(&event, Utc::now())
+    }
 
     fn test_opts() -> ClientOptions {
         ClientOptionsBuilder::default()
@@ -527,7 +512,7 @@ mod tests {
             disable_geoip: true,
             is_server: true,
         };
-        let built = build_events_at(&[event], &defaults, Utc::now());
+        let built = [build_preprocessed(event, &defaults)];
         assert_eq!(
             serde_json::Value::Object(built[0].options.clone()),
             serde_json::json!({
@@ -560,6 +545,53 @@ mod tests {
     }
 
     #[test]
+    fn before_send_sees_sdk_values_and_its_removals_hold_on_the_wire() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .disable_geoip(true)
+            .before_send(|mut event| {
+                let seen: Vec<String> = ["$os", "$os_version", "$is_server", "$geoip_disable"]
+                    .iter()
+                    .filter(|key| event.properties().contains_key(**key))
+                    .map(|key| key.to_string())
+                    .collect();
+                event.insert_prop("hook_saw", seen).unwrap();
+                event.remove_prop("$os");
+                event.remove_prop("$is_server");
+                event.remove_prop("$geoip_disable");
+                Some(event)
+            })
+            .build()
+            .unwrap();
+        let mut event = Event::new("test", "user-1");
+        event
+            .insert_prop("$os_version", "caller-os-version")
+            .unwrap();
+
+        let event =
+            preprocess_capture_event(event, &opts.capture_defaults(), &opts.before_send).unwrap();
+        let wire = build_event_at(&event, Utc::now());
+
+        let map = wire.properties.as_object().unwrap();
+        assert_eq!(
+            map.get("hook_saw"),
+            Some(&serde_json::json!([
+                "$os",
+                "$os_version",
+                "$is_server",
+                "$geoip_disable"
+            ]))
+        );
+        assert_eq!(
+            map.get("$os_version"),
+            Some(&serde_json::json!("caller-os-version"))
+        );
+        for key in ["$os", "$is_server", "$geoip_disable"] {
+            assert!(!map.contains_key(key), "{key} came back after the hook");
+        }
+    }
+
+    #[test]
     fn non_minimal_flag_called_event_keeps_everything() {
         let mut event = Event::new("$feature_flag_called", "user-1");
         event
@@ -573,7 +605,7 @@ mod tests {
             disable_geoip: false,
             is_server: false,
         };
-        let built = build_events_at(&[event], &defaults, Utc::now());
+        let built = [build_preprocessed(event, &defaults)];
         let map = built[0].properties.as_object().unwrap();
         assert_eq!(
             map.get("custom_super_property"),
@@ -1123,10 +1155,9 @@ mod tests {
         // AI: split by bytes. Shrink the target to fit exactly two of the three
         // (equal-size) events, so the third needs a second request; identity
         // (request id, created_at) is per request.
-        let size = measure_event(&build_event_at(
-            &events[0],
+        let size = measure_event(&build_preprocessed(
+            events[0].clone(),
             &opts.capture_defaults(),
-            Utc::now(),
         ))
         .total;
         let small_target = ImmediateLane {
