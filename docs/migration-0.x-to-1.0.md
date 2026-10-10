@@ -84,6 +84,10 @@ One behavior differs from 0.x without `capture-v1`, which used the V0 endpoint:
 
 - PostHog now reads common forms of an option value, so `"$process_person_profile": "false"` turns person processing off. The V0 endpoint ignored that string. A value PostHog cannot read now drops the event, where the V0 endpoint kept the event and ignored the value.
 
+### Session and window IDs
+
+The SDK sends `$session_id` and `$window_id` as top-level fields of the event, because capture reads them there and requires strings. A string value, including an empty string, is sent unchanged. Any other value is dropped, and the SDK logs a warning for each drop that names the key and the value's type, never the value. A `null` value counts as unset and drops without a warning. In 0.x without `capture-v1`, the SDK sent any value as a property.
+
 ### Compression
 
 `CaptureCompression::Gzip`, `Deflate`, `Br`, and `Zstd` now all apply their corresponding `Content-Encoding`. In older default V0 builds, only gzip was supported and selecting another variant could send an uncompressed body. Check any proxy or WAF in front of PostHog before enabling Brotli or Zstandard.
