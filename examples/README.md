@@ -119,9 +119,9 @@ held in options/builders) outside an async runtime, or in `spawn_blocking`. The
 SDK releases its own blocking-client handles off the async runtime. Shutting down
 the SDK does not invalidate client clones retained by the application.
 
-Custom HTTP clients are separate from TLS crypto-provider selection. The
-`tls-no-provider` feature proposed in #245 is on `v1`, not this `main` branch;
-changing the provider does not change the reqwest client types.
+Custom HTTP clients are separate from TLS crypto-provider selection with the
+`tls` and `tls-no-provider` features; changing the provider does not change the
+reqwest client types.
 
 ## Key Concepts
 
