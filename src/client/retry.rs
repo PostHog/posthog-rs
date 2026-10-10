@@ -119,13 +119,31 @@ pub(crate) fn backoff_duration(
     attempt: u32,
     retry_after: Option<Duration>,
 ) -> Duration {
-    let base_ms = opts.retry_initial_backoff_ms;
     let max_ms = opts.retry_max_backoff_ms;
-    let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
-    let configured_delay = Duration::from_millis(backoff_ms.min(max_ms));
+    let configured_delay = exponential_backoff(opts.retry_initial_backoff_ms, max_ms, attempt);
     let max_backoff = Duration::from_millis(max_ms);
     let clamped_retry_after = retry_after.map(|d| d.min(max_backoff));
     clamped_retry_after.map_or(configured_delay, |d| configured_delay.max(d))
+}
+
+/// `base_ms` doubled for each attempt after the first, clamped to `max_ms`.
+fn exponential_backoff(base_ms: u64, max_ms: u64, attempt: u32) -> Duration {
+    let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
+    Duration::from_millis(backoff_ms.min(max_ms))
+}
+
+/// Base of the `/flags` retry backoff. It is separate from the capture retry
+/// options and matches the `/flags` backoff of posthog-python and posthog-go.
+const FEATURE_FLAGS_BACKOFF_BASE_MS: u64 = 300;
+/// Ceiling of the `/flags` retry backoff.
+const FEATURE_FLAGS_BACKOFF_MAX_MS: u64 = 30_000;
+
+fn feature_flags_backoff(attempt: u32) -> Duration {
+    exponential_backoff(
+        FEATURE_FLAGS_BACKOFF_BASE_MS,
+        FEATURE_FLAGS_BACKOFF_MAX_MS,
+        attempt,
+    )
 }
 
 fn is_retryable_feature_flags_status(status: u16) -> bool {
@@ -142,7 +160,7 @@ pub(crate) fn feature_flags_after_response(
     if is_retryable_feature_flags_status(status)
         && attempt <= opts.feature_flags_request_max_retries
     {
-        return FeatureFlagsResponseStep::Backoff(backoff_duration(opts, attempt, None));
+        return FeatureFlagsResponseStep::Backoff(feature_flags_backoff(attempt));
     }
     FeatureFlagsResponseStep::Done
 }
@@ -159,7 +177,7 @@ pub(crate) fn feature_flags_after_transport_error(
     if !retryable || attempt > opts.feature_flags_request_max_retries {
         return FeatureFlagsTransportStep::Fail(Error::Connection(err_msg));
     }
-    FeatureFlagsTransportStep::Backoff(backoff_duration(opts, attempt, None))
+    FeatureFlagsTransportStep::Backoff(feature_flags_backoff(attempt))
 }
 
 #[cfg(test)]
@@ -368,8 +386,12 @@ mod tests {
     }
 
     #[test]
-    fn backoff_exponential_growth() {
-        let opts = test_opts();
+    fn backoff_exponential_growth_with_default_options() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("k".to_string())
+            .build()
+            .unwrap();
+        assert_eq!(opts.max_capture_attempts, 4);
         assert_eq!(backoff_duration(&opts, 1, None), Duration::from_millis(100));
         assert_eq!(backoff_duration(&opts, 2, None), Duration::from_millis(200));
         assert_eq!(backoff_duration(&opts, 3, None), Duration::from_millis(400));
@@ -409,6 +431,21 @@ mod tests {
     /// (100ms here), not double it.
 
     #[test]
+    fn feature_flags_backoff_doubles_from_300ms_up_to_30s() {
+        for (attempt, expected_ms) in [(1, 300), (2, 600), (3, 1_200), (7, 19_200), (8, 30_000)] {
+            assert_eq!(
+                feature_flags_backoff(attempt),
+                Duration::from_millis(expected_ms),
+                "attempt={attempt}"
+            );
+        }
+        assert_eq!(
+            feature_flags_backoff(u32::MAX),
+            Duration::from_millis(30_000)
+        );
+    }
+
+    #[test]
     fn feature_flags_http_status_uses_retry_budget_for_502_and_504_only() {
         let opts = ClientOptionsBuilder::default()
             .api_key("phc_test".to_string())
@@ -421,7 +458,7 @@ mod tests {
         for status in [502, 504] {
             assert!(matches!(
                 feature_flags_after_response(&opts, 1, status),
-                FeatureFlagsResponseStep::Backoff(_)
+                FeatureFlagsResponseStep::Backoff(d) if d == Duration::from_millis(300)
             ));
             assert!(matches!(
                 feature_flags_after_response(&opts, 2, status),
@@ -448,7 +485,7 @@ mod tests {
 
         assert!(matches!(
             feature_flags_after_transport_error(&opts, 1, true, "reset".into()),
-            FeatureFlagsTransportStep::Backoff(_)
+            FeatureFlagsTransportStep::Backoff(d) if d == Duration::from_millis(300)
         ));
         assert!(matches!(
             feature_flags_after_transport_error(&opts, 2, true, "reset".into()),
