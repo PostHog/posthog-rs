@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::constants::{LEGACY_OPTION_PROPERTIES, SESSION_ID_PROP, WINDOW_ID_PROP};
+use crate::constants::{
+    LEGACY_OPTION_PROPERTIES, SDK_INFO_PROPERTIES, SESSION_ID_PROP, WINDOW_ID_PROP,
+};
 use crate::event::Event;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +57,9 @@ impl CaptureEvent {
             .unwrap_or_else(|| now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
 
         let options = merge_options(event, &mut properties);
+        for key in SDK_INFO_PROPERTIES {
+            properties.remove(*key);
+        }
 
         let session_id = properties
             .remove(SESSION_ID_PROP)
@@ -164,7 +169,7 @@ pub struct CaptureErrorResponse {
 ///
 /// Note on `$lib`/`$lib_version`: they are never carried in `properties`. The
 /// SDK sends its identity in the `posthog-sdk-info` header and capture
-/// materializes the properties server-side, so that contract is covered by
+/// materializes the properties server-side; the header is covered by
 /// `client::capture::tests::build_headers_sdk_info_is_canonical_lib_slash_version`.
 #[cfg(test)]
 mod tests {
@@ -215,6 +220,20 @@ mod tests {
         );
         let props = wire.properties.as_object().unwrap();
         assert!(!props.contains_key("$process_person_profile"));
+    }
+
+    #[test]
+    fn event_drops_caller_set_lib_properties() {
+        let mut event = Event::new("test_event", "user-1");
+        event.insert_prop("$lib", "custom-lib").unwrap();
+        event.insert_prop("$lib_version", "9.9.9").unwrap();
+        event.insert_prop("plain", "kept").unwrap();
+
+        let wire = CaptureEvent::from_event(&event);
+        let props = wire.properties.as_object().unwrap();
+        assert!(!props.contains_key("$lib"));
+        assert!(!props.contains_key("$lib_version"));
+        assert_eq!(props.get("plain"), Some(&serde_json::json!("kept")));
     }
 
     // -- property -> options extraction --------------------------------------

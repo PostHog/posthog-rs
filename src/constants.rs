@@ -16,6 +16,10 @@ pub(crate) const PRODUCT_TOUR_ID_OPT: &str = "product_tour_id";
 /// Set to `false` by [`crate::Event::new_anon`].
 pub(crate) const PROCESS_PERSON_PROFILE_OPT: &str = "process_person_profile";
 
+/// Capture sets these from the `PostHog-Sdk-Info` header and appends them after
+/// the event's own keys, so a copy left in `properties` is a duplicate JSON key.
+pub(crate) const SDK_INFO_PROPERTIES: &[&str] = &["$lib", "$lib_version"];
+
 /// (legacy property, option) pairs; only these keys have a legacy fallback.
 pub(crate) const LEGACY_OPTION_PROPERTIES: &[(&str, &str)] = &[
     (COOKIELESS_MODE_PROP, COOKIELESS_MODE_OPT),

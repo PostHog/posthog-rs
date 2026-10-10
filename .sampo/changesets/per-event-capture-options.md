@@ -12,3 +12,4 @@ Breaking changes:
 - `Event::new_anon` sets the `process_person_profile` option instead of the legacy property, so only an option can turn processing back on.
 - `$os`, `$os_version`, `$is_server` and `$geoip_disable` are added before `before_send`, only for keys the event leaves unset. The hook sees them and can remove them, and they are not added again after the hook.
 - `Event::with_flags` keeps flag properties the event already has, and `Event::add_group` groups merge into a `$groups` property key by key.
+- A `$lib` or `$lib_version` property you set is removed before the event is sent. PostHog sets both from the SDK's `PostHog-Sdk-Info` header, which always won. `before_send` still sees your value.
