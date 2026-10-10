@@ -69,6 +69,17 @@
 //! }
 //! ```
 //!
+//! # Event options
+//!
+//! Per-event processing controls go in an `options` map next to the
+//! properties. Set them with [`Event::insert_option`]; PostHog validates them.
+//!
+//! ```
+//! let mut event = posthog_rs::Event::new("signed_up", "user-123");
+//! event.insert_option("process_person_profile", false)?;
+//! # Ok::<(), posthog_rs::Error>(())
+//! ```
+//!
 //! # Capture is fire-and-forget
 //!
 //! [`Client::capture`] and [`Client::capture_batch`] are the primary API: they

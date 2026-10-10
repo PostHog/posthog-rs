@@ -1,6 +1,5 @@
 //! Legacy `$` property keys and the capture V1 option keys they fall back to.
 
-/// Set by [`crate::Event::new_anon`] (false) and [`crate::Event::add_group`] (true).
 pub(crate) const PROCESS_PERSON_PROFILE_PROP: &str = "$process_person_profile";
 
 // Property keys moved out of `Event.properties`.
@@ -14,7 +13,12 @@ pub(crate) const WINDOW_ID_PROP: &str = "$window_id";
 pub(crate) const COOKIELESS_MODE_OPT: &str = "cookieless_mode";
 pub(crate) const DISABLE_SKEW_CORRECTION_OPT: &str = "disable_skew_correction";
 pub(crate) const PRODUCT_TOUR_ID_OPT: &str = "product_tour_id";
+/// Set to `false` by [`crate::Event::new_anon`].
 pub(crate) const PROCESS_PERSON_PROFILE_OPT: &str = "process_person_profile";
+
+/// Capture sets these from the `PostHog-Sdk-Info` header and appends them after
+/// the event's own keys, so a copy left in `properties` is a duplicate JSON key.
+pub(crate) const SDK_INFO_PROPERTIES: &[&str] = &["$lib", "$lib_version"];
 
 /// (legacy property, option) pairs; only these keys have a legacy fallback.
 pub(crate) const LEGACY_OPTION_PROPERTIES: &[(&str, &str)] = &[

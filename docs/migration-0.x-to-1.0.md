@@ -65,10 +65,20 @@ The legacy properties still work. The SDK moves each one into its option and rem
 
 When both are set, the option wins. An option set to `null` counts as not set, so the legacy property applies.
 
-Two behaviors differ from the 0.x `capture-v1` feature:
+One behavior differs from the 0.x `capture-v1` feature:
 
 - The SDK no longer converts legacy property values to the type PostHog expects. A value PostHog cannot read, such as `"$process_person_profile": "maybe"`, used to be removed so the event was sent without it. Now PostHog drops the event as `invalid_options`. Values PostHog accepts, such as `"false"` or `0`, behave as before.
-- Events with groups (`Event::add_group` or `CaptureExceptionOptions::group`) always process person profiles, because group analytics needs them. Setting `process_person_profile` to `false` on a group event no longer turns processing off.
+
+Two behaviors differ from every 0.x build:
+
+- `Event::new_anon` sets the `process_person_profile` option to `false` instead of the legacy property. Because an option wins over its legacy property, `insert_prop("$process_person_profile", true)` no longer turns processing back on for an anonymous event. Use `insert_option("process_person_profile", true)`.
+- Adding a group no longer turns on person processing. In 0.x, `Event::add_group` and `CaptureExceptionOptions::group` set `$process_person_profile` to `true`. In 1.0 they leave it unchanged. An event from `Event::new` still processes person profiles by default. An anonymous event with groups (from `Event::new_anon`, or an exception without a distinct ID) now stays personless. PostHog attaches groups for group analytics only to events that process person profiles, so set `insert_option("process_person_profile", true)` on those events if you need them in group analytics.
+
+Values the SDK adds, and the values you set:
+
+- The SDK adds `$os`, `$os_version`, `$is_server` and `$geoip_disable` only when the event does not already have the key, and it adds them before `before_send` runs. The hook sees them and can change or remove them, and the SDK does not add them again after the hook. The default 0.x path (V0) also added them before the hook. The 0.x `capture-v1` path added them while building the request, after the hook, so a hook could not see `$os` or remove any of them.
+- `Event::with_flags` keeps a `$feature/<key>` or `$active_feature_flags` property that the event already has. In 0.x, the flag values replaced it.
+- Groups from `Event::add_group` merge into a `$groups` property key by key, and the added group wins for the same group type. In 0.x, they replaced the whole `$groups` property.
 
 One behavior differs from 0.x without `capture-v1`, which used the V0 endpoint:
 

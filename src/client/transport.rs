@@ -33,7 +33,7 @@ use tracing::warn;
 
 use super::capture::{build_event_at, chunk_by_bytes, measure_event, EventSize};
 use super::common::{apply_on_error_hooks, preprocess_capture_event};
-use super::{CaptureCompression, CaptureDefaults, CaptureFailure, ClientOptions, PostHogError};
+use super::{CaptureCompression, CaptureFailure, ClientOptions, PostHogError};
 use crate::capture_event::CaptureEvent;
 use crate::endpoints::Endpoint;
 use crate::error::Error;
@@ -1053,7 +1053,7 @@ impl Pipeline {
             Some(target) => {
                 let measured: Vec<(CaptureEvent, usize)> = processed
                     .into_iter()
-                    .filter_map(|event| self.build_measured(&event, &defaults))
+                    .filter_map(|event| self.build_measured(&event))
                     .map(|(wire, size)| (wire, size.total))
                     .collect();
                 for chunk in chunk_by_bytes(measured, target) {
@@ -1061,8 +1061,7 @@ impl Pipeline {
                 }
             }
             None => {
-                let pending =
-                    super::capture::build_events_at(&processed, &defaults, self.clock.now_utc());
+                let pending = super::capture::build_events_at(&processed, self.clock.now_utc());
                 self.send_prepared(pending, historical_migration, deadline);
             }
         }
@@ -1101,7 +1100,7 @@ impl Pipeline {
             dec_len(&self.len, 1);
             return None;
         };
-        self.build_measured(&event, &defaults)
+        self.build_measured(&event)
     }
 
     /// Build the wire event and measure it, enforcing the lane's per-event
@@ -1110,12 +1109,8 @@ impl Pipeline {
     /// size: AI payloads may hold unredacted prompts or media that must never
     /// reach the logs. This is a local drop, so `on_error` does not fire (the
     /// backend would have refused it with `ai_event_too_big` anyway).
-    fn build_measured(
-        &self,
-        event: &Event,
-        defaults: &CaptureDefaults,
-    ) -> Option<(CaptureEvent, EventSize)> {
-        let wire = build_event_at(event, defaults, self.clock.now_utc());
+    fn build_measured(&self, event: &Event) -> Option<(CaptureEvent, EventSize)> {
+        let wire = build_event_at(event, self.clock.now_utc());
         let size = measure_event(&wire);
         if let Some(max) = self.lane.max_event_bytes {
             if size.properties > max {
@@ -2271,7 +2266,9 @@ mod tests {
         /// are deterministic: the timestamp and uuid are fixed-width.
         fn wire_total(event: &Event, builder: &mut ClientOptionsBuilder) -> usize {
             let opts = builder.build().unwrap();
-            measure_event(&build_event_at(event, &opts.capture_defaults(), Utc::now())).total
+            let event =
+                preprocess_capture_event(event.clone(), &opts.capture_defaults(), &[]).unwrap();
+            measure_event(&build_event_at(&event, Utc::now())).total
         }
 
         fn worker_thread_name(handle: &TransportHandle) -> Option<String> {
