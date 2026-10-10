@@ -86,6 +86,34 @@
 //! signal. Reach for them only when the caller must know a batch persisted
 //! before advancing its own durable state (for example, a server-side importer
 //! committing an upstream offset); prefer fire-and-forget everywhere else.
+//!
+//! # AI events
+//!
+//! Send LLM analytics events such as `$ai_generation` with
+//! [`Client::capture_ai`], not [`Client::capture`]. They go to the AI endpoint
+//! on their own background lane, and `capture` never reroutes them.
+//!
+//! ```no_run
+//! # fn send(posthog: &posthog_rs::Client) -> Result<(), posthog_rs::Error> {
+//! let mut event = posthog_rs::Event::new("$ai_generation", "user-123");
+//! event.insert_prop("$ai_model", "gpt-4o")?;
+//! posthog.capture_ai(event);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Cargo features
+//!
+//! - `async-client` (default): the async [`Client`]. Without it, [`client`]
+//!   returns the blocking client.
+//! - `error-tracking` (default): exception capture.
+//! - `tls` (default): HTTPS with reqwest's default Rustls crypto provider.
+//! - `tls-no-provider`: HTTPS with a Rustls `CryptoProvider` that the
+//!   application installs before it creates a client. Creating a client
+//!   first panics.
+//!
+//! With `default-features = false`, enable `tls` or `tls-no-provider` to send to
+//! an HTTPS host.
 mod capture_event;
 mod client;
 mod compression;
