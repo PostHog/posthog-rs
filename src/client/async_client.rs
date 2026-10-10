@@ -691,9 +691,11 @@ impl Client {
     /// `capture_ai_compression`, and the batch is split into requests of about 5 MiB
     /// each, sent in order. Each request retries transient failures and
     /// per-event `retry` verdicts per the client's retry configuration; the
-    /// summary merges every request's verdicts. Unlike the background lane, no
-    /// event is dropped locally for size: an oversize event is sent and comes
-    /// back as a per-event `drop` (`ai_event_too_big`) in the summary.
+    /// summary merges every request's verdicts. An event whose serialized
+    /// `properties` are over 8 MiB is not sent, as the backend would refuse it.
+    /// It gets a local `drop` verdict with `details` `ai_event_too_big` in the
+    /// summary, and counts in [`CaptureSummary::submitted`] and
+    /// [`CaptureSummary::not_persisted`].
     ///
     /// # Errors
     ///
@@ -778,12 +780,11 @@ impl Client {
         use super::capture::{self, Step};
 
         let compression = lane.compression(&self.options);
-        let mut submitted = 0;
-        let mut final_results = HashMap::new();
+        let plan = capture::prepare_immediate(&self.options, lane, events, historical_migration);
+        let mut submitted = plan.local_results.len();
+        let mut final_results = plan.local_results;
 
-        for mut prep in
-            capture::prepare_immediate(&self.options, lane, events, historical_migration)
-        {
+        for mut prep in plan.requests {
             let mut attempt: u32 = 1;
             loop {
                 let (headers, body) = capture::build_attempt_parts(

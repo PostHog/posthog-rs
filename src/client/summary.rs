@@ -35,7 +35,10 @@ impl CaptureSummary {
         Self { submitted, results }
     }
 
-    /// Number of events sent on the wire (after `before_send` filtering).
+    /// Number of events that reached a verdict (after `before_send` filtering):
+    /// the events sent on the wire, plus any AI event the SDK did not send
+    /// because it was over the size limit. Such an event has a local `drop`
+    /// verdict in [`event_results`](Self::event_results).
     pub fn submitted(&self) -> usize {
         self.submitted
     }
