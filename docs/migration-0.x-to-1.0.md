@@ -1,6 +1,6 @@
 # Migrating from posthog-rs 0.x to 1.0
 
-Version 1.0 makes the V1 analytics endpoint the SDK's only capture path and removes APIs that were already deprecated in 0.x. This guide describes the changes currently staged on the `v1` branch.
+Version 1.0 makes the V1 analytics endpoint the SDK's only capture path and removes APIs that were already deprecated in 0.x. This guide lists the code changes 1.0 needs and the behavior that differs from 0.x.
 
 ## Cargo features
 
@@ -8,7 +8,7 @@ Remove `capture-v1` from your dependency features. Capture no longer needs a fea
 
 ```toml
 # 0.x while opting into V1 capture
-posthog-rs = { version = "0.25", features = ["capture-v1"] }
+posthog-rs = { version = "0.27", features = ["capture-v1"] }
 
 # 1.0
 posthog-rs = "1"
@@ -26,7 +26,7 @@ posthog-rs = { version = "1", default-features = false, features = ["tls"] }
 
 TLS was previously enabled even with `default-features = false`. In 1.0, choose `tls` to use reqwest's default Rustls provider, or choose `tls-no-provider` when the application installs a process-level Rustls `CryptoProvider`. The latter avoids pulling in `aws-lc-rs` from this SDK, but constructing a client before installing a provider will panic. Cargo features are additive, so `tls-no-provider` only avoids the built-in provider when no dependency enables `tls`.
 
-The V0 capture implementation and its `/i/v0/e/` and batch plumbing have been removed. `Endpoint::Batch` no longer exists, and `Endpoint::Capture` now resolves to `/i/v1/analytics/events`.
+The V0 capture implementation and its `/i/v0/e/` and batch plumbing have been removed. `Endpoint::Batch` no longer exists, and `Endpoint::Capture` now resolves to `/i/v1/analytics/events`. `Endpoint` is now non-exhaustive and has a new `CaptureAi` variant, so a `match` on it needs a wildcard arm.
 
 ## Capture behavior
 
@@ -34,9 +34,19 @@ The regular `capture` and `capture_batch` methods remain fire-and-forget. They e
 
 All event-producing SDK paths now use the same capture endpoint, including error tracking, `$feature_flag_called` events, historical migration, `before_send`, and terminal failures reported through `on_error`.
 
+### Event IDs
+
+The SDK gives every event a UUIDv7 `uuid` and every request a UUIDv7 request ID. If you set your own with `Event::set_uuid`, keep it unique. PostHog rejects the whole request with HTTP 400 `duplicate_event_uuid` when two events in it share a `uuid`, and the SDK does not check for this.
+
+### SDK identity
+
+PostHog sets `$lib` and `$lib_version` on every event from the `posthog-sdk-info` request header, which is always `posthog-rs/<version>`. The SDK no longer adds them to properties. If you set them with `insert_prop` or in `before_send`, the SDK removes them before it sends the event, so stored events always report `posthog-rs`. `before_send` still sees the value you set. In 0.x without `capture-v1`, PostHog stored a `$lib` or `$lib_version` you set. The 0.x `capture-v1` path already sent the header, so PostHog replaced your value.
+
+The SDK no longer sends `$lib_version__major`, `$lib_version__minor` or `$lib_version__patch`. Only the 0.x V0 path sent them. Filter on `$lib_version` instead.
+
 ### AI events
 
-Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog_rs::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size, with the backend's 8 MiB per-event ceiling applied locally. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
+Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog_rs::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size. The background lane drops an event over the backend's 8 MiB per-event limit locally. The immediate variants send it, and the returned `CaptureSummary` carries the backend's `ai_event_too_big` drop. An event too large for the AI endpoint's request size limit gets HTTP 413 instead: `capture_ai_batch_immediate` returns `Error::BadRequest` and does not send the rest of the batch. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
 
 `capture` never reroutes by event name. Sending an AI event through `capture` worked on the V0 path because the backend diverted it; on the V1 analytics endpoint the backend will refuse it as a per-event `drop` once both lanes enforce their event sets, and it will not be ingested. Move those calls to `capture_ai`. Custom events that merely start with `$ai_` and are not PostHog AI event names stay on `capture`.
 
@@ -78,13 +88,17 @@ One behavior differs from 0.x without `capture-v1`, which used the V0 endpoint:
 
 `CaptureCompression::Gzip`, `Deflate`, `Br`, and `Zstd` now all apply their corresponding `Content-Encoding`. In older default V0 builds, only gzip was supported and selecting another variant could send an uncompressed body. Check any proxy or WAF in front of PostHog before enabling Brotli or Zstandard.
 
+Brotli and Zstandard support is always compiled in. `zstd-sys` builds C code with the `cc` crate, so the build needs a C compiler. Every 0.x build already needed one for `aws-lc-sys`, the TLS crypto library.
+
 ### Retry and persistence results
 
 The V1 endpoint returns a result for each event. The SDK retries transient request failures and only the events with retryable results from a partial response.
 
 `CaptureSummary::not_persisted()` and `CaptureSummary::all_persisted()` now use those per-event results. In the V0 path they reported a successful `2xx` as fully persisted without per-event confirmation. Applications that advance durable state after `capture_immediate` should check both that `submitted()` equals the number of intended events and that `all_persisted()` is true, because disabled clients and fully `before_send`-filtered batches submit no events but still report `all_persisted()` as true.
 
-HTTP 429 is not a retryable V1 capture status. The V1 service uses HTTP 402 for billing limits and per-event `drop` or `warning` results in successful responses. `Retry-After` is still honored for retryable failures and retry results.
+The SDK retries network errors and HTTP 408, 500, 502, 503 and 504. Every other status is terminal, including 429. The 0.x V0 path retried a 429 that had a `Retry-After` header. Capture itself does not return 429, but a proxy in front of it can. HTTP 402 means the whole request is over the billing limit. A product quota drops single events inside a `200`, as a per-event `drop` such as `llm_events_over_quota`. `Retry-After` is still honored for retryable statuses and `retry` results.
+
+Without an `on_error` hook, a request that fails for good logs `posthog-rs: dropping <n> event(s) for <endpoint>: <error>`, as in 0.x. The error text can include PostHog's response body. Register an `on_error` hook to choose what to log. A hook can call `capture`, which only queues the event. The immediate methods never call `on_error`.
 
 ### Renamed capture response type
 
@@ -97,6 +111,12 @@ let response: Option<&posthog_rs::V1ErrorResponse> = failure.error_response();
 // 1.0
 let response: Option<&posthog_rs::CaptureErrorResponse> = failure.error_response();
 ```
+
+`CaptureResponse` and `EventResult` are now non-exhaustive, so you cannot build them with a struct literal.
+
+## Error tracking
+
+`$debug_images` lists only images with a debug ID that a sent stack frame points into. In 0.x it could also list an image that only a trimmed frame pointed into.
 
 ## Feature flags
 
@@ -134,13 +154,15 @@ options.disable_geoip = Some(true);
 options.flag_keys = Some(vec!["new-checkout".to_string()]);
 ```
 
+These feature flag types are non-exhaustive too: `FeatureFlagsResponse`, `FlagDetail`, `FlagMetadata`, `FlagReason` and `LocalEvaluationResponse`. A `match` on the `FeatureFlagsResponse` enum needs a wildcard arm. The structs no longer accept struct literals. Build a `LocalEvaluationResponse` with `LocalEvaluationResponse::new` and assign its public fields.
+
 ## Local evaluation credentials
 
 Use `secret_key` terminology throughout configuration. The builder's deprecated `personal_api_key` alias has been removed, and `LocalEvaluationConfig::personal_api_key` is now `secret_key`.
 
 ```rust
 let options = posthog_rs::ClientOptionsBuilder::default()
-    .api_key("phc_project_token")
+    .api_key("phc_project_token".to_string())
     .secret_key("phs_project_secret")
     .enable_local_evaluation(true)
     .build()?;

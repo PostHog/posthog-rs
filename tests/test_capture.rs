@@ -285,7 +285,7 @@ async fn capture_does_not_retry_terminal_results() {
     let resp = json!({
         "results": {
             uuid_ok.to_string(): { "result": "ok" },
-            uuid_drop.to_string(): { "result": "drop", "details": "billing_limit_exceeded" },
+            uuid_drop.to_string(): { "result": "drop", "details": "exceptions_over_quota" },
             uuid_warning.to_string(): { "result": "warning", "details": "person_processing_disabled" }
         }
     });
@@ -838,7 +838,7 @@ async fn capture_prunes_terminal_events_on_partial_retry() {
     let first_resp = json!({
         "results": {
             PARTIAL_UUID_RETRY: { "result": "retry", "details": "not_persisted" },
-            PARTIAL_UUID_DROP: { "result": "drop", "details": "billing_limit_exceeded" }
+            PARTIAL_UUID_DROP: { "result": "drop", "details": "exceptions_over_quota" }
         }
     });
 

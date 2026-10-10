@@ -477,7 +477,7 @@ mod tests {
             "results": {
                 "550e8400-e29b-41d4-a716-446655440000": {"result": "ok"},
                 "550e8400-e29b-41d4-a716-446655440001": {"result": "retry", "details": "not_persisted"},
-                "550e8400-e29b-41d4-a716-446655440002": {"result": "drop", "details": "billing_limit_exceeded"}
+                "550e8400-e29b-41d4-a716-446655440002": {"result": "drop", "details": "llm_events_over_quota"}
             }
         }"#;
 
