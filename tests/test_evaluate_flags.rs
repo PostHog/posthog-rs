@@ -1037,12 +1037,22 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let capture_mock = capture_path_mock(&server);
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path(CAPTURE_PATH)
+                .body_includes("\"$active_feature_flags\":\"caller-value\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "results": {} }));
+        });
         let client = create_test_client(server.base_url());
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .unwrap();
         let mut event = Event::new("checkout-started", "user-1");
+        event
+            .insert_prop("$active_feature_flags", "caller-value")
+            .unwrap();
         event.with_flags(&snapshot);
         client.capture(event);
         client.flush();

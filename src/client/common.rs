@@ -42,7 +42,7 @@ fn runtime_context() -> &'static RuntimeContext {
     })
 }
 
-pub(super) fn apply_runtime_context(event: &mut Event) {
+fn apply_runtime_context(event: &mut Event) {
     let context = runtime_context();
     event.insert_prop_default("$os", serde_json::Value::String(context.os.clone()));
     event.insert_prop_default(
@@ -110,6 +110,9 @@ pub(super) fn preprocess_capture_event(
     defaults: &CaptureDefaults,
     hooks: &[BeforeSendHook],
 ) -> Option<Event> {
+    // SDK values fill only keys the caller left unset, and go in before the
+    // hooks so `before_send` sees them and can change or remove them.
+    apply_runtime_context(&mut event);
     apply_capture_defaults(&mut event, defaults);
     apply_before_send_hooks(hooks, event)
 }

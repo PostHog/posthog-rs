@@ -444,6 +444,11 @@ impl CaptureExceptionOptions {
     }
 
     /// Capture the exception as a group event.
+    ///
+    /// Adding a group does not change person processing. An exception without
+    /// a distinct ID is personless, and PostHog attaches groups for group
+    /// analytics only to events that process person profiles. Set
+    /// `option("process_person_profile", true)` to count it for its groups.
     pub fn group<N: Into<String>, I: Into<String>>(mut self, group_name: N, group_id: I) -> Self {
         self.groups.push((group_name.into(), group_id.into()));
         self
