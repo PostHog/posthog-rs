@@ -1261,8 +1261,10 @@ mod tests {
                 max_event_bytes: Some(limit),
                 ..lane
             };
-            let (at_limit, over) = (event(64), event(65));
-            let (at_limit_uuid, over_uuid) = (at_limit.uuid(), over.uuid());
+            let (mut at_limit, mut over) = (event(64), event(65));
+            let (at_limit_uuid, over_uuid) = (Uuid::now_v7(), Uuid::now_v7());
+            at_limit.set_uuid(at_limit_uuid);
+            over.set_uuid(over_uuid);
             let plan = prepare_immediate(&opts, lane, vec![at_limit, over], false);
             assert_eq!(plan.requests.len(), 1, "{:?}", lane.endpoint);
             assert_eq!(plan.requests[0].submitted, 1);
