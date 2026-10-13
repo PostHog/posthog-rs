@@ -1,7 +1,5 @@
 //! Runtime-agnostic retry primitives shared by client request paths.
 
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -140,12 +138,8 @@ fn jittered_backoff(
 }
 
 /// A uniform factor in `[1 - CAPTURE_RETRY_JITTER, 1 + CAPTURE_RETRY_JITTER)`.
-/// The standard library's randomly keyed hasher supplies the bits, so jitter
-/// needs no RNG dependency; it does not need cryptographic quality.
 fn random_jitter_factor() -> f64 {
-    let bits = RandomState::new().build_hasher().finish();
-    let unit = (bits >> 11) as f64 / (1u64 << 53) as f64;
-    1.0 - CAPTURE_RETRY_JITTER + 2.0 * CAPTURE_RETRY_JITTER * unit
+    1.0 - CAPTURE_RETRY_JITTER + 2.0 * CAPTURE_RETRY_JITTER * fastrand::f64()
 }
 
 /// Backoff before `attempt`: exponential growth from
