@@ -110,6 +110,8 @@ pub(super) fn preprocess_capture_event(
     defaults: &CaptureDefaults,
     hooks: &[BeforeSendHook],
 ) -> Option<Event> {
+    // Queued events already have a uuid from enqueue; this covers immediate sends.
+    event.ensure_uuid();
     // SDK values fill only keys the caller left unset, and go in before the
     // hooks so `before_send` sees them and can change or remove them.
     apply_runtime_context(&mut event);

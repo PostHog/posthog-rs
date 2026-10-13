@@ -11,6 +11,7 @@
 
 mod common;
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use httpmock::prelude::*;
@@ -50,6 +51,19 @@ fn retry_body_only_contains_retry_event(req: &HttpMockRequest) -> bool {
 fn retry_body_prunes_terminal_events(req: &HttpMockRequest) -> bool {
     let body = body_string(req);
     body.contains(PARTIAL_UUID_RETRY) && !body.contains(PARTIAL_UUID_DROP)
+}
+
+/// Matcher: the body carries two events with distinct uuids.
+fn batch_has_two_distinct_uuids(req: &HttpMockRequest) -> bool {
+    let body: serde_json::Value = match serde_json::from_slice(req.body_ref()) {
+        Ok(body) => body,
+        Err(_) => return false,
+    };
+    let uuids: HashSet<&str> = body["batch"]
+        .as_array()
+        .map(|batch| batch.iter().filter_map(|e| e["uuid"].as_str()).collect())
+        .unwrap_or_default();
+    body["batch"].as_array().map(Vec::len) == Some(2) && uuids.len() == 2
 }
 
 /// Poll until a mock has been hit `want` times (for the autonomous retry path
@@ -93,6 +107,32 @@ async fn capture_single_event_success() {
     client.capture(event);
     client.flush().await;
     mock.assert();
+}
+
+#[tokio::test]
+async fn capturing_one_event_twice_sends_two_uuids() {
+    // A reused or cloned `Event` must not resend one uuid: PostHog rejects a
+    // request that contains a uuid twice.
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .is_true(batch_has_two_distinct_uuids);
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": {} }));
+    });
+
+    let client = create_capture_client(server.base_url()).await;
+    let event = Event::new("test_event", "user-1");
+    client.capture(event.clone());
+    client.capture(event.clone());
+    client.flush().await;
+    client
+        .capture_batch_immediate(vec![event.clone(), event], false)
+        .await
+        .unwrap();
+    mock.assert_calls(2);
 }
 
 #[tokio::test]

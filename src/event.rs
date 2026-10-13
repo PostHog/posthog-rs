@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use serde::Serialize;
 use tracing::warn;
 use uuid::Uuid;
@@ -69,7 +69,9 @@ pub struct Event {
     options: HashMap<String, serde_json::Value>,
     groups: HashMap<String, String>,
     timestamp: Option<NaiveDateTime>,
-    uuid: Uuid,
+    /// Assigned once when the client takes the event, unless set with
+    /// [`Event::set_uuid`], so a reused or cloned `Event` never resends a uuid.
+    uuid: Option<Uuid>,
     /// When set, the capture pipeline trims this event's properties to
     /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] as its final enrichment step.
     /// Set only for minimized `$feature_flag_called` events; never serialized.
@@ -87,15 +89,21 @@ impl Event {
     /// - `event`: Event name, such as `"user_signed_up"`.
     /// - `distinct_id`: Stable user or account identifier. For backend events,
     ///   use the same distinct ID your frontend passes to `posthog.identify()`.
+    ///   An empty or whitespace-only ID counts as missing: the event becomes
+    ///   anonymous, as from [`Event::new_anon`].
     pub fn new<S: Into<String>>(event: S, distinct_id: S) -> Self {
+        let distinct_id = distinct_id.into();
+        if distinct_id.trim().is_empty() {
+            return Self::new_anon(event);
+        }
         Self {
             event: event.into(),
-            distinct_id: distinct_id.into(),
+            distinct_id,
             properties: HashMap::new(),
             options: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
-            uuid: Uuid::now_v7(),
+            uuid: None,
             minimal_flag_called: false,
         }
     }
@@ -128,7 +136,7 @@ impl Event {
             options,
             groups: HashMap::new(),
             timestamp: None,
-            uuid: Uuid::now_v7(),
+            uuid: None,
             minimal_flag_called: false,
         }
     }
@@ -220,16 +228,12 @@ impl Event {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidTimestamp`] if the timestamp is in the future.
+    /// Never returns an error; PostHog clamps timestamps far in the future.
+    /// The `Result` stays so existing callers keep compiling.
     pub fn set_timestamp<Tz>(&mut self, timestamp: DateTime<Tz>) -> Result<(), Error>
     where
         Tz: TimeZone,
     {
-        if timestamp > Utc::now() + Duration::seconds(1) {
-            return Err(Error::InvalidTimestamp(String::from(
-                "Events cannot occur in the future",
-            )));
-        }
         self.timestamp = Some(timestamp.naive_utc());
         Ok(())
     }
@@ -267,7 +271,7 @@ impl Event {
             options: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
-            uuid: Uuid::now_v7(),
+            uuid: None,
             minimal_flag_called: false,
         })
     }
@@ -327,7 +331,7 @@ impl Event {
             options: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
-            uuid: Uuid::now_v7(),
+            uuid: None,
             minimal_flag_called: false,
         }))
     }
@@ -344,9 +348,19 @@ impl Event {
 
     /// Override the auto-generated UUID for this event.
     ///
-    /// Useful for deduplication when re-importing historical data.
+    /// Useful for deduplication when re-importing historical data. Every
+    /// capture of an event with this uuid sends the same uuid, and PostHog
+    /// rejects a request that contains one uuid twice.
     pub fn set_uuid(&mut self, uuid: Uuid) {
-        self.uuid = uuid;
+        self.uuid = Some(uuid);
+    }
+
+    /// Assign a v7 uuid if the event has none; the client calls this once when
+    /// it takes the event.
+    pub(crate) fn ensure_uuid(&mut self) {
+        if self.uuid.is_none() {
+            self.uuid = Some(Uuid::now_v7());
+        }
     }
 
     /// Attach the flag state captured by a [`FeatureFlagEvaluations`] snapshot
@@ -381,7 +395,7 @@ impl Event {
         &self.distinct_id
     }
 
-    pub(crate) fn uuid(&self) -> Uuid {
+    pub(crate) fn uuid(&self) -> Option<Uuid> {
         self.uuid
     }
 
@@ -435,27 +449,67 @@ mod test {
 
     use chrono::{DateTime, Utc};
 
+    use uuid::Uuid;
+
     use super::Event;
+    use crate::constants::PROCESS_PERSON_PROFILE_OPT;
     use crate::Error;
 
     #[test]
     fn test_timestamp_is_correctly_set() {
         let mut event = Event::new_anon("test");
         let ts = DateTime::parse_from_rfc3339("2023-01-01T10:00:00+03:00").unwrap();
-        event.set_timestamp(ts).expect("Date is not in the future");
+        event.set_timestamp(ts).unwrap();
         let expected = DateTime::parse_from_rfc3339("2023-01-01T07:00:00Z").unwrap();
         assert_eq!(event.timestamp.unwrap(), expected.naive_utc())
     }
 
     #[test]
-    fn test_timestamp_is_correctly_set_with_future_date() {
+    fn future_timestamp_is_kept_for_posthog_to_handle() {
         let mut event = Event::new_anon("test");
         let ts = Utc::now() + Duration::from_secs(60);
-        event
-            .set_timestamp(ts)
-            .expect_err("Date is in the future, should be rejected");
+        event.set_timestamp(ts).unwrap();
+        assert_eq!(event.timestamp, Some(ts.naive_utc()));
+    }
 
-        assert!(event.timestamp.is_none())
+    #[test]
+    fn blank_distinct_id_makes_an_anonymous_event() {
+        for blank in ["", " ", " \n\t "] {
+            let event = Event::new("test", blank);
+            let generated = Uuid::parse_str(event.distinct_id()).unwrap();
+            assert_eq!(generated.get_version_num(), 7);
+            assert_eq!(
+                event.options().get(PROCESS_PERSON_PROFILE_OPT),
+                Some(&serde_json::json!(false))
+            );
+        }
+        let event = Event::new("test", " user-1 ");
+        assert_eq!(event.distinct_id(), " user-1 ");
+        assert!(event.options().is_empty());
+    }
+
+    #[test]
+    fn uuid_is_assigned_once_per_event_unless_set() {
+        let template = Event::new("test", "user1");
+        assert_eq!(template.uuid(), None);
+
+        // Each clone handed to the client gets its own uuid, kept on reassignment.
+        let mut first = template.clone();
+        let mut second = template.clone();
+        first.ensure_uuid();
+        second.ensure_uuid();
+        let assigned = first.uuid().unwrap();
+        assert_eq!(assigned.get_version_num(), 7);
+        assert_ne!(second.uuid(), Some(assigned));
+        first.ensure_uuid();
+        assert_eq!(first.uuid(), Some(assigned));
+
+        // A caller's uuid is never replaced.
+        let caller = Uuid::now_v7();
+        let mut event = template;
+        event.set_uuid(caller);
+        event.ensure_uuid();
+        assert_eq!(event.uuid(), Some(caller));
     }
 
     #[test]
