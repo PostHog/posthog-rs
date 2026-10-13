@@ -97,6 +97,11 @@ pub(crate) fn measure_event(event: &CaptureEvent) -> EventSize {
     }
 }
 
+/// Serialized size of the whole wire event, for lanes with no `properties` ceiling.
+pub(crate) fn measure_total(event: &CaptureEvent) -> usize {
+    json_len(event)
+}
+
 /// Split measured events into batches under a soft byte target using the
 /// guarded check-before-append rule: a batch is closed only when it is
 /// non-empty and the next event would push it past `target`, so an event

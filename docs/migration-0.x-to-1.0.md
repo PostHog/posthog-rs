@@ -30,7 +30,7 @@ The V0 capture implementation and its `/i/v0/e/` and batch plumbing have been re
 
 ## Capture behavior
 
-The regular `capture` and `capture_batch` methods remain fire-and-forget. They enqueue events for the background worker, which batches and retries delivery. `capture_immediate` and `capture_batch_immediate` still bypass the queue and return a `CaptureSummary` after reaching a terminal result.
+The regular `capture` and `capture_batch` methods remain fire-and-forget. They enqueue events for the background worker, which batches and retries delivery. `capture_immediate` and `capture_batch_immediate` still bypass the queue and return a `CaptureSummary` after reaching a terminal result. The background worker now also splits each analytics batch into requests of at most 5 MiB of serialized events, so a batch of large events no longer exceeds capture's 10 MiB request limit and fails whole. A single event larger than 5 MiB is sent on its own. `before_send` still runs when a batch is sent, and a batch passed to `capture_batch_immediate` is still sent as one request.
 
 All event-producing SDK paths now use the same capture endpoint, including error tracking, `$feature_flag_called` events, historical migration, `before_send`, and terminal failures reported through `on_error`.
 
