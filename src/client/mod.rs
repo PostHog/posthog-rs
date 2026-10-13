@@ -5,7 +5,7 @@ use crate::endpoints::{EndpointManager, DEFAULT_HOST};
 use crate::error_tracking::ErrorTrackingOptions;
 use crate::event::Event;
 use derive_builder::Builder;
-use tracing::warn;
+use tracing::error;
 
 mod common;
 #[cfg(test)]
@@ -97,6 +97,9 @@ impl BeforeSendHook {
 
 pub(crate) const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SDK_USERAGENT_NAME: &str = "posthog-rs";
+
+/// Prefix of a personal API key, which capture always rejects as a project key.
+const PERSONAL_API_KEY_PREFIX: &str = "phx_";
 
 pub(crate) fn get_default_user_agent() -> String {
     format!("{}/{}", SDK_USERAGENT_NAME, CRATE_VERSION)
@@ -356,17 +359,26 @@ impl ClientOptions {
 
     /// Check whether the client is disabled.
     ///
-    /// A client is disabled when configured with `disabled(true)` or when the
-    /// project API key is missing or blank after trimming.
+    /// A client is disabled when configured with `disabled(true)`, when the
+    /// project API key is missing or blank after trimming, or when it is a
+    /// personal API key (`phx_...`), which PostHog never accepts for capture.
     pub fn is_disabled(&self) -> bool {
         self.disabled
     }
 
     fn sanitize(mut self) -> Self {
         self.api_key = self.api_key.trim().to_string();
-        if self.api_key.is_empty() {
-            warn!("api_key is empty after trimming whitespace; disabling PostHog client");
-            self.disabled = true;
+        // An explicitly disabled client needs no key, so it logs nothing.
+        if !self.disabled {
+            if self.api_key.is_empty() {
+                error!("api_key is empty after trimming whitespace; disabling PostHog client");
+                self.disabled = true;
+            } else if self.api_key.starts_with(PERSONAL_API_KEY_PREFIX) {
+                error!(
+                    "api_key is a personal API key ({PERSONAL_API_KEY_PREFIX}...), not a project API key; disabling PostHog client"
+                );
+                self.disabled = true;
+            }
         }
         self.host = Some(match self.host {
             Some(host) => {
@@ -445,9 +457,9 @@ impl ClientOptionsBuilder {
 
     /// Build sanitized [`ClientOptions`].
     ///
-    /// Missing or whitespace-only API keys are allowed and disable the client so
-    /// SDK initialization remains infallible while avoiding requests with an
-    /// empty API key.
+    /// Missing, whitespace-only and personal (`phx_...`) API keys are allowed and
+    /// disable the client with one error log, so SDK initialization remains
+    /// infallible and never sends a key PostHog would reject.
     ///
     /// # Errors
     ///
@@ -481,7 +493,10 @@ impl From<(&str, &str)> for ClientOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::ClientOptionsBuilder;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use super::{ClientOptions, ClientOptionsBuilder};
     use crate::endpoints::{EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT};
 
     #[test]
@@ -517,6 +532,64 @@ mod tests {
 
         assert_eq!(options.api_key, "");
         assert!(options.is_disabled());
+    }
+
+    /// Build options and return them with every log line emitted while building.
+    fn build_logging(builder: &ClientOptionsBuilder) -> (ClientOptions, String) {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(writer.clone()))
+            .finish();
+        let options = tracing::subscriber::with_default(subscriber, || builder.build().unwrap());
+        let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        (options, logged)
+    }
+
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn unusable_api_keys_disable_the_client_with_one_error() {
+        for (api_key, expected) in [
+            ("", "api_key is empty"),
+            (" \n\t ", "api_key is empty"),
+            (" phx_secret123 ", "personal API key"),
+        ] {
+            let mut builder = ClientOptionsBuilder::default();
+            builder.api_key(api_key.to_string());
+            let (options, logged) = build_logging(&builder);
+            assert!(options.is_disabled(), "{api_key:?} must disable the client");
+            assert_eq!(logged.lines().count(), 1, "{logged}");
+            assert!(logged.contains("ERROR"), "{logged}");
+            assert!(logged.contains(expected), "{logged}");
+            assert!(
+                !logged.contains("secret123"),
+                "the key must never be logged"
+            );
+        }
+
+        // A project key enables the client; an explicit disable needs no key and logs nothing.
+        let mut builder = ClientOptionsBuilder::default();
+        builder.api_key("phc_project".to_string());
+        let (options, logged) = build_logging(&builder);
+        assert!(!options.is_disabled());
+        assert!(logged.is_empty(), "{logged}");
+        builder.api_key(String::new()).disabled(true);
+        let (options, logged) = build_logging(&builder);
+        assert!(options.is_disabled());
+        assert!(logged.is_empty(), "{logged}");
     }
 
     #[test]

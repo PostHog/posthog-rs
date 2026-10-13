@@ -157,3 +157,5 @@ let options = posthog_rs::ClientOptionsBuilder::default()
 ```
 
 `secret_key` accepts either a project secret key (`phs_...`) or a personal API key (`phx_...`). Do not send this key as an event property.
+
+A personal API key passed as the project `api_key` now disables the client and logs one error, as an empty key does. PostHog never accepts a personal key for capture, so every request with it failed with a 401. An empty key now logs at the error level instead of warning. A client built with `disabled(true)` logs nothing about its key.
