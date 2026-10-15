@@ -223,6 +223,11 @@ impl TransportHandle {
         }
     }
 
+    #[cfg(not(feature = "async-client"))]
+    pub(crate) fn gate(&self) -> Option<Arc<Gate>> {
+        self.gate.clone()
+    }
+
     pub(crate) fn generation(&self) -> u64 {
         self.gate
             .as_ref()
@@ -504,7 +509,7 @@ fn dec_len(len: &AtomicUsize, n: usize) {
 /// Per-request timeout for a send. On the shutdown/disconnect path (`deadline`
 /// is `Some`) the request is capped at the time left before the deadline and
 /// at the SDK timeout, including when using a supplied client.
-fn bound_request(
+pub(super) fn bound_request(
     request: reqwest::blocking::RequestBuilder,
     deadline: Option<Instant>,
     now: Instant,
@@ -708,6 +713,7 @@ fn run_worker(
                             persistence_errors: gate.persistence_errors.load(Ordering::Relaxed),
                             delivered: gate.delivered.load(Ordering::Relaxed),
                             terminally_dropped: gate.dropped.load(Ordering::Relaxed),
+                            ..DeliveryReport::default()
                         });
                 let _ = completion.send(report);
             }
@@ -940,7 +946,7 @@ fn drain_historical(
 /// client also spawns its own thread and runtime — and `Default` is not a safe
 /// fallback: it calls `Client::new`, which panics on exactly those failures.
 /// Return `None` instead so the worker can stop without panicking.
-fn build_http(options: &ClientOptions) -> Option<reqwest::blocking::Client> {
+pub(super) fn build_http(options: &ClientOptions) -> Option<reqwest::blocking::Client> {
     if let Some(client) = &options.blocking_http_client {
         return Some(client.clone());
     }

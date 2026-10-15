@@ -20,6 +20,8 @@ pub enum Endpoint {
     Flags,
     /// Local evaluation endpoint
     LocalEvaluation,
+    /// Replay `/s/` endpoint
+    Snapshots,
 }
 
 impl Endpoint {
@@ -30,6 +32,7 @@ impl Endpoint {
             Endpoint::Batch => "/batch/",
             Endpoint::Flags => "/flags/?v=2",
             Endpoint::LocalEvaluation => "/flags/definitions/?send_cohorts",
+            Endpoint::Snapshots => "/s/",
         }
     }
 }
@@ -179,6 +182,11 @@ mod tests {
         assert_eq!(
             manager.build_url(Endpoint::Flags),
             format!("{}/flags/?v=2", US_INGESTION_ENDPOINT)
+        );
+
+        assert_eq!(
+            manager.build_url(Endpoint::Snapshots),
+            format!("{}/s/", US_INGESTION_ENDPOINT)
         );
     }
 

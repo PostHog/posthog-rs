@@ -218,6 +218,11 @@ impl Client {
             })
     }
 
+    /// Session replay delivery is only implemented by the blocking client.
+    pub fn capture_replay_snapshot(&self, _event: Event) -> crate::embedding::EnqueueResult {
+        crate::embedding::EnqueueResult::Disabled
+    }
+
     /// Stop admission immediately and schedule durable queue purge.
     pub fn pause_and_purge(&self) {
         if let Some(transport) = &self.transport {
@@ -1269,6 +1274,7 @@ impl Client {
         let mut request_id: Option<String> = None;
         let mut errors_while_computing = false;
         let mut quota_limited = false;
+        let mut session_recording = None;
 
         // Skip the remote round-trip when local evaluation has already covered
         // every requested flag. Without `flag_keys` we have to assume the caller
@@ -1289,6 +1295,7 @@ impl Client {
                     request_id = response.request_id;
                     errors_while_computing = response.errors_while_computing_flags;
                     quota_limited = response.quota_limited;
+                    session_recording = response.session_recording;
                     // The remote response is the source of these flags' values,
                     // so it is also the source of their minimization gate.
                     let remote_minimal_gate = response.minimal_flag_called_events;
@@ -1323,7 +1330,8 @@ impl Client {
             None,
             errors_while_computing,
             quota_limited,
-        ))
+        )
+        .with_session_recording(session_recording))
     }
 
     fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {

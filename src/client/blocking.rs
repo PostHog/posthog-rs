@@ -51,6 +51,7 @@ use super::common::{
     flag_event_dedup_cache, http_client_or_disable, local_record, remote_record_from_detail,
     report_flags_error, DetailedFlagsResponse, FlagEventDedupCache,
 };
+use super::replay::ReplayHandle;
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
 #[cfg(not(feature = "capture-v1"))]
@@ -65,6 +66,8 @@ pub struct Client {
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
     /// Background event transport. `None` for disabled clients.
     transport: Option<Arc<TransportHandle>>,
+    /// Session replay worker. `None` unless embedding enables replay.
+    replay: Option<ReplayHandle>,
 }
 
 /// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
@@ -182,6 +185,12 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
     } else {
         Some(Arc::new(TransportHandle::spawn(options.clone())))
     };
+    let replay = options
+        .embedding
+        .as_ref()
+        .and_then(|config| config.replay)
+        .zip(transport.as_ref().and_then(|t| t.gate()))
+        .and_then(|(limits, gate)| ReplayHandle::spawn(&options, limits, gate));
 
     Client {
         options,
@@ -190,6 +199,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         _flag_poller: flag_poller,
         flag_event_host: OnceLock::new(),
         transport,
+        replay,
     }
 }
 
@@ -203,10 +213,25 @@ impl Client {
             })
     }
 
-    /// Stop admission immediately and schedule durable queue purge.
+    /// Submit a fully prepared `$snapshot` event to the in-memory replay queue.
+    /// Returns `Disabled` unless embedding options enable replay. The host must
+    /// validate the event; frames are batched per `$session_id` and never stored.
+    pub fn capture_replay_snapshot(&self, event: Event) -> crate::embedding::EnqueueResult {
+        self.replay
+            .as_ref()
+            .map_or(crate::embedding::EnqueueResult::Disabled, |r| {
+                r.enqueue(event)
+            })
+    }
+
+    /// Stop admission immediately and schedule durable queue purge. Queued
+    /// replay frames are dropped.
     pub fn pause_and_purge(&self) {
         if let Some(transport) = &self.transport {
             transport.pause_and_purge();
+        }
+        if let Some(replay) = &self.replay {
+            replay.purge();
         }
     }
 
@@ -228,13 +253,22 @@ impl Client {
         if let Some(transport) = &self.transport {
             transport.request_close();
         }
+        if let Some(replay) = &self.replay {
+            replay.request_close();
+        }
     }
 
-    /// Wait for preceding worker commands, including durable writes.
+    /// Wait for preceding worker commands, including durable writes. Replay
+    /// counters are a snapshot; replay has no ordered commands.
     pub fn checkpoint_delivery(&self) -> crate::embedding::DeliveryReport {
-        self.transport
+        let mut report = self
+            .transport
             .as_ref()
-            .map_or_else(Default::default, |t| t.checkpoint())
+            .map_or_else(Default::default, |t| t.checkpoint());
+        if let Some(replay) = &self.replay {
+            (report.replay_pending, report.replay_dropped) = replay.report();
+        }
+        report
     }
 
     fn flags_request_timeout(
@@ -433,8 +467,20 @@ impl Client {
     /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
     /// disabled clients.
     pub fn shutdown(&self) {
+        self.close();
+    }
+
+    /// Both workers drain in parallel against the shared deadline, so replay
+    /// is closed first and joined last.
+    fn close(&self) {
+        if let Some(replay) = &self.replay {
+            replay.request_close();
+        }
         if let Some(transport) = &self.transport {
             transport.close_blocking();
+        }
+        if let Some(replay) = &self.replay {
+            replay.join();
         }
     }
 
@@ -1225,6 +1271,7 @@ impl Client {
         let mut request_id: Option<String> = None;
         let mut errors_while_computing = false;
         let mut quota_limited = false;
+        let mut session_recording = None;
 
         // Skip the remote round-trip when local evaluation has already covered
         // every requested flag. Without `flag_keys` we have to assume the caller
@@ -1245,6 +1292,7 @@ impl Client {
                     request_id = response.request_id;
                     errors_while_computing = response.errors_while_computing_flags;
                     quota_limited = response.quota_limited;
+                    session_recording = response.session_recording;
                     // The remote response is the source of these flags' values,
                     // so it is also the source of their minimization gate.
                     let remote_minimal_gate = response.minimal_flag_called_events;
@@ -1279,7 +1327,8 @@ impl Client {
             None,
             errors_while_computing,
             quota_limited,
-        ))
+        )
+        .with_session_recording(session_recording))
     }
 
     fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {
@@ -1429,9 +1478,7 @@ impl Drop for Client {
     /// beforehand makes this a no-op. A drop from a transport callback queues
     /// shutdown without waiting for or joining the current worker thread.
     fn drop(&mut self) {
-        if let Some(transport) = &self.transport {
-            transport.close_blocking();
-        }
+        self.close();
     }
 }
 
@@ -1496,6 +1543,7 @@ mod minimal_gate_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            replay: None,
         };
         client
             .flag_event_host
@@ -1595,6 +1643,7 @@ mod local_payload_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            replay: None,
         };
         client
             .flag_event_host

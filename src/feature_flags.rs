@@ -346,6 +346,14 @@ pub enum FeatureFlagsResponse {
         #[serde(rename = "minimalFlagCalledEvents")]
         #[serde(default)]
         minimal_flag_called_events: bool,
+        /// Session replay remote config: an object when recording is enabled,
+        /// `false` when disabled, absent on older servers.
+        #[serde(
+            rename = "sessionRecording",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        session_recording: Option<serde_json::Value>,
     },
     /// Legacy format from older decide endpoint
     Legacy {
@@ -359,6 +367,14 @@ pub enum FeatureFlagsResponse {
         /// Any errors that occurred during evaluation
         #[serde(default)]
         errors: Option<Vec<String>>,
+        /// Session replay remote config: an object when recording is enabled,
+        /// `false` when disabled, absent on older servers.
+        #[serde(
+            rename = "sessionRecording",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        session_recording: Option<serde_json::Value>,
     },
 }
 

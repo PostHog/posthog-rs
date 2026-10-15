@@ -214,6 +214,7 @@ pub(super) struct DetailedFlagsResponse {
     /// response. Pinned here so it travels with the flags it evaluated, rather
     /// than being re-read from shared state when an event is later captured.
     pub(super) minimal_flag_called_events: bool,
+    pub(super) session_recording: Option<serde_json::Value>,
 }
 
 pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFlagsResponse {
@@ -224,17 +225,20 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
             errors_while_computing_flags,
             quota_limited,
             minimal_flag_called_events,
+            session_recording,
         } => DetailedFlagsResponse {
             flags,
             request_id,
             errors_while_computing_flags,
             quota_limited,
             minimal_flag_called_events,
+            session_recording,
         },
         FeatureFlagsResponse::Legacy {
             feature_flags,
             feature_flag_payloads,
             errors,
+            session_recording,
         } => {
             let mut flags = HashMap::new();
             for (key, value) in feature_flags {
@@ -268,6 +272,7 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
                 // The legacy response shape carries no minimization gate, so it
                 // fails safe to the full event shape.
                 minimal_flag_called_events: false,
+                session_recording,
             }
         }
     }
@@ -555,5 +560,29 @@ mod tests {
 
         assert!(client.is_none());
         assert!(options.is_disabled());
+    }
+
+    fn session_recording(response: serde_json::Value) -> Option<serde_json::Value> {
+        let parsed: FeatureFlagsResponse = serde_json::from_value(response).unwrap();
+        extract_flag_details(parsed).session_recording
+    }
+
+    #[test]
+    fn session_recording_is_retained_from_both_response_shapes() {
+        let config = json!({"endpoint": "/s/", "sampleRate": "0.5"});
+        assert_eq!(
+            session_recording(json!({"flags": {}, "sessionRecording": config})),
+            Some(config.clone())
+        );
+        assert_eq!(
+            session_recording(json!({"flags": {}, "sessionRecording": false})),
+            Some(json!(false))
+        );
+        assert_eq!(
+            session_recording(json!({"featureFlags": {"a": true}, "sessionRecording": config})),
+            Some(config)
+        );
+        assert_eq!(session_recording(json!({"flags": {}})), None);
+        assert_eq!(session_recording(json!({"featureFlags": {}})), None);
     }
 }

@@ -49,6 +49,8 @@ impl CaptureCompression {
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+#[cfg(not(feature = "async-client"))]
+mod replay;
 mod retry;
 mod transport;
 #[cfg(not(feature = "capture-v1"))]
@@ -474,9 +476,12 @@ impl ClientOptionsBuilder {
                 || embedding.sdk_name.trim().is_empty()
                 || embedding.sdk_version.trim().is_empty()
                 || options.shutdown_timeout_ms == 0
+                || embedding
+                    .replay
+                    .is_some_and(|replay| replay.validate().is_err())
             {
                 return Err(ClientOptionsBuilderError::ValidationError(
-                    "Embedding requires legacy ingestion, a positive shutdown budget, SDK identity, and no local evaluation or Rust before-send hooks".into(),
+                    "Embedding requires legacy ingestion, a positive shutdown budget, SDK identity, no local evaluation or Rust before-send hooks, and valid replay limits".into(),
                 ));
             }
         }
