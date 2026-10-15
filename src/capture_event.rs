@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::constants::{
@@ -61,12 +62,8 @@ impl CaptureEvent {
             properties.remove(*key);
         }
 
-        let session_id = properties
-            .remove(SESSION_ID_PROP)
-            .and_then(|v| v.as_str().map(String::from));
-        let window_id = properties
-            .remove(WINDOW_ID_PROP)
-            .and_then(|v| v.as_str().map(String::from));
+        let session_id = lift_string_property(&mut properties, SESSION_ID_PROP);
+        let window_id = lift_string_property(&mut properties, WINDOW_ID_PROP);
 
         Self {
             event: event.event_name().to_string(),
@@ -80,6 +77,22 @@ impl CaptureEvent {
                 .unwrap_or(serde_json::Value::Object(Default::default())),
         }
     }
+}
+
+/// Capture rejects the whole request when one of these fields is not a string,
+/// so any other value is dropped. `null` counts as unset and drops silently.
+/// The warning names the type, never the value.
+fn lift_string_property(properties: &mut HashMap<String, Value>, key: &str) -> Option<String> {
+    let value_type = match properties.remove(key)? {
+        Value::String(s) => return Some(s),
+        Value::Null => return None,
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    warn!("posthog-rs: dropping {key}: a {value_type} value is not a string");
+    None
 }
 
 /// Caller options are sent as given for PostHog to validate; a legacy `$`
@@ -407,6 +420,64 @@ mod tests {
         let props = wire.properties.as_object().unwrap();
         assert!(!props.contains_key("$session_id"));
         assert!(!props.contains_key("$window_id"));
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn event_session_window_lift_only_strings() {
+        let cases = [
+            (json!("sess-123"), Some("sess-123"), None),
+            (json!(""), Some(""), None),
+            (json!(null), None, None),
+            (json!(42), None, Some("number")),
+            (json!(true), None, Some("bool")),
+            (json!(["secret-a"]), None, Some("array")),
+            (json!({"k": "secret-o"}), None, Some("object")),
+        ];
+        for (value, expected, warned_type) in cases {
+            let logs = CapturedLogs::default();
+            let writer = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish();
+
+            let mut event = Event::new("test", "user-1");
+            event.insert_prop("$session_id", value.clone()).unwrap();
+            event.insert_prop("$window_id", value.clone()).unwrap();
+            let wire =
+                tracing::subscriber::with_default(subscriber, || CaptureEvent::from_event(&event));
+
+            assert_eq!(wire.session_id.as_deref(), expected, "{value}");
+            assert_eq!(wire.window_id.as_deref(), expected, "{value}");
+            let props = wire.properties.as_object().unwrap();
+            assert!(!props.contains_key("$session_id"));
+            assert!(!props.contains_key("$window_id"));
+
+            let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+            match warned_type {
+                Some(value_type) => {
+                    for key in ["$session_id", "$window_id"] {
+                        let line = format!("dropping {key}: a {value_type} value is not a string");
+                        assert!(output.contains(&line), "{}", output);
+                    }
+                    assert!(!output.contains("secret"), "{}", output);
+                }
+                None => assert!(output.is_empty(), "{}", output),
+            }
+        }
     }
 
     // -- groups --------------------------------------------------------------
