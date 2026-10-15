@@ -33,11 +33,22 @@ use tracing::warn;
 
 use super::capture::{build_event_at, chunk_by_bytes, measure_event, EventSize};
 use super::common::{apply_on_error_hooks, preprocess_capture_event};
+#[cfg(feature = "embedding")]
+use super::embedding::Gate;
 use super::{CaptureCompression, CaptureFailure, ClientOptions, PostHogError};
 use crate::capture_event::CaptureEvent;
+#[cfg(feature = "embedding")]
+use crate::embedding::{DeliveryReport, EnqueueResult};
 use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::Event;
+
+#[cfg(feature = "embedding")]
+#[path = "embedding_pipeline.rs"]
+mod embedding_pipeline;
+#[cfg(all(test, feature = "embedding"))]
+#[path = "embedding_transport_tests.rs"]
+mod embedding_tests;
 
 /// Messages sent from producers (`capture`/`flush`/`shutdown`) to the worker.
 pub(crate) enum Control {
@@ -45,7 +56,18 @@ pub(crate) enum Control {
     // shutdown message (clippy::large_enum_variant).
     Capture {
         event: Box<Event>,
+        #[cfg(feature = "embedding")]
+        generation: u64,
     },
+    #[cfg(feature = "embedding")]
+    Purge,
+    #[cfg(feature = "embedding")]
+    Resume {
+        generation: u64,
+        completion: mpsc::Sender<bool>,
+    },
+    #[cfg(feature = "embedding")]
+    Checkpoint(mpsc::Sender<DeliveryReport>),
     /// A caller-formed historical-migration batch, sent as-is (chunked) on its
     /// own path so the live `Capture` buffer stays non-historical.
     HistoricalBatch {
@@ -112,6 +134,8 @@ impl Clock for SystemClock {
 /// client can stay a plain field while `capture`/`flush`/`shutdown` take `&self`.
 pub(crate) struct TransportHandle {
     tx: mpsc::Sender<Control>,
+    #[cfg(feature = "embedding")]
+    gate: Option<Arc<Gate>>,
     /// Pending `Capture` events not yet pulled by the worker. Gates the bounded queue.
     len: Arc<AtomicUsize>,
     /// Set once `shutdown`/`Drop` begins; blocks further enqueue and control sends.
@@ -231,13 +255,46 @@ impl TransportHandle {
         let max_queue_size = lane.max_queue_size(&options);
         let worker_len = len.clone();
         let worker_clock = Arc::clone(&clock);
+        #[cfg(feature = "embedding")]
+        let gate = options
+            .embedding
+            .as_ref()
+            .filter(|_| lane.endpoint == Endpoint::Capture)
+            .map(|config| {
+                Arc::new(Gate::new(
+                    config,
+                    Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT),
+                ))
+            });
+        #[cfg(feature = "embedding")]
+        let worker_gate = gate.clone();
+        #[cfg(feature = "embedding")]
+        let (ready_tx, ready_rx) = mpsc::channel();
         let worker = thread::Builder::new()
             .name(lane.thread_name.to_string())
-            .spawn(move || run_worker(options, lane, rx, worker_len, worker_clock))
+            .spawn(move || {
+                run_worker(
+                    options,
+                    lane,
+                    rx,
+                    worker_len,
+                    worker_clock,
+                    #[cfg(feature = "embedding")]
+                    worker_gate,
+                    #[cfg(feature = "embedding")]
+                    ready_tx,
+                )
+            })
             .ok();
+        #[cfg(feature = "embedding")]
+        if gate.is_some() {
+            let _ = ready_rx.recv();
+        }
         let worker_id = worker.as_ref().map(|handle| handle.thread().id());
         Self {
             tx,
+            #[cfg(feature = "embedding")]
+            gate,
             len,
             closed: AtomicBool::new(false),
             worker: Mutex::new(worker),
@@ -251,11 +308,94 @@ impl TransportHandle {
     /// Non-blocking enqueue. Drops (with a single warning) when the queue is full
     /// or the client is closed.
     pub(crate) fn enqueue(&self, event: Event) {
+        #[cfg(feature = "embedding")]
+        if self.gate.is_some() {
+            let _ = self.enqueue_checked(event);
+            return;
+        }
         if self.closed.load(Ordering::Acquire) {
             return;
         }
         if try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
             self.send_reserved(event);
+        }
+    }
+
+    #[cfg(feature = "embedding")]
+    pub(crate) fn enqueue_checked(&self, event: Event) -> EnqueueResult {
+        let _admission = self
+            .gate
+            .as_ref()
+            .map(|gate| gate.admission.lock().unwrap_or_else(|e| e.into_inner()));
+        if self.gate.is_none() {
+            return EnqueueResult::Disabled;
+        }
+        if self.closed.load(Ordering::Acquire) {
+            return EnqueueResult::Closed;
+        }
+        if self
+            .gate
+            .as_ref()
+            .is_some_and(|gate| !gate.enabled.load(Ordering::Acquire))
+        {
+            return EnqueueResult::Disabled;
+        }
+        if !try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
+            return EnqueueResult::QueueFull;
+        }
+        let generation = self
+            .gate
+            .as_ref()
+            .map_or(0, |gate| gate.generation.load(Ordering::Acquire));
+        if self.send_prepared_reserved(event, generation) {
+            EnqueueResult::Accepted
+        } else {
+            EnqueueResult::Closed
+        }
+    }
+
+    #[cfg(feature = "embedding")]
+    pub(crate) fn pause_and_purge(&self) {
+        if let Some(gate) = &self.gate {
+            let _admission = gate.admission.lock().unwrap_or_else(|e| e.into_inner());
+            gate.enabled.store(false, Ordering::Release);
+            gate.generation.fetch_add(1, Ordering::AcqRel);
+            gate.purge_required.store(true, Ordering::Release);
+            let _ = self.tx.send(Control::Purge);
+        }
+    }
+
+    #[cfg(feature = "embedding")]
+    pub(crate) fn generation(&self) -> u64 {
+        self.gate
+            .as_ref()
+            .map_or(0, |gate| gate.generation.load(Ordering::Acquire))
+    }
+
+    #[cfg(feature = "embedding")]
+    pub(crate) fn resume(&self, generation: u64) -> bool {
+        if self.closed.load(Ordering::Acquire) || self.gate.is_none() {
+            return false;
+        }
+        let (tx, rx) = mpsc::channel();
+        let gate = self.gate.as_ref().expect("embedding gate checked above");
+        let admitted = {
+            let _admission = gate.admission.lock().unwrap_or_else(|e| e.into_inner());
+            self.send_control(Control::Resume {
+                generation,
+                completion: tx,
+            })
+        };
+        admitted && rx.recv().unwrap_or(false)
+    }
+
+    #[cfg(feature = "embedding")]
+    pub(crate) fn checkpoint(&self) -> DeliveryReport {
+        let (tx, rx) = mpsc::channel();
+        if self.send_control(Control::Checkpoint(tx)) {
+            rx.recv().unwrap_or_default()
+        } else {
+            DeliveryReport::default()
         }
     }
 
@@ -265,6 +405,10 @@ impl TransportHandle {
     /// lock the panic site holds). A full queue silently drops the `$exception`.
     #[cfg(feature = "error-tracking")]
     pub(crate) fn enqueue_panic(&self, event: Event) {
+        #[cfg(feature = "embedding")]
+        if self.gate.is_some() {
+            return;
+        }
         if self.closed.load(Ordering::Acquire) {
             return;
         }
@@ -283,11 +427,32 @@ impl TransportHandle {
             .tx
             .send(Control::Capture {
                 event: Box::new(event),
+                #[cfg(feature = "embedding")]
+                generation: 0,
             })
             .is_err()
         {
             // Worker gone; release the slot we reserved.
             dec_len(&self.len, 1);
+        }
+    }
+
+    #[cfg(feature = "embedding")]
+    fn send_prepared_reserved(&self, mut event: Event, generation: u64) -> bool {
+        event.ensure_timestamp(self.clock.now_utc());
+        if self
+            .tx
+            .send(Control::Capture {
+                event: Box::new(event),
+                generation,
+            })
+            .is_err()
+        {
+            // Worker gone; release the slot we reserved.
+            dec_len(&self.len, 1);
+            false
+        } else {
+            true
         }
     }
 
@@ -310,6 +475,11 @@ impl TransportHandle {
     /// slot per event up to the bound, dropping any overflow with the usual
     /// once-per-episode full warning.
     fn enqueue_historical(&self, mut events: Vec<Event>) {
+        #[cfg(feature = "embedding")]
+        if self.gate.is_some() {
+            warn!("posthog-rs: embedding supports prepared live analytics only");
+            return;
+        }
         if self.closed.load(Ordering::Acquire) {
             return;
         }
@@ -354,7 +524,20 @@ impl TransportHandle {
     /// Mark closed. Returns `true` for the caller that won the transition (so
     /// shutdown is idempotent and only one caller drives teardown).
     pub(crate) fn begin_close(&self) -> bool {
-        !self.closed.swap(true, Ordering::AcqRel)
+        #[cfg(feature = "embedding")]
+        let _admission = self
+            .gate
+            .as_ref()
+            .map(|gate| gate.admission.lock().unwrap_or_else(|e| e.into_inner()));
+        let first = !self.closed.swap(true, Ordering::AcqRel);
+        #[cfg(feature = "embedding")]
+        if first {
+            if let Some(gate) = &self.gate {
+                *gate.deadline.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(self.clock.now() + gate.budget);
+            }
+        }
+        first
     }
 
     /// Synchronously close and join the worker for external callers. When called
@@ -699,6 +882,8 @@ fn run_worker(
     rx: mpsc::Receiver<Control>,
     len: Arc<AtomicUsize>,
     clock: Arc<dyn Clock>,
+    #[cfg(feature = "embedding")] gate: Option<Arc<Gate>>,
+    #[cfg(feature = "embedding")] ready: mpsc::Sender<()>,
 ) {
     let flush_at = options.flush_at.max(1);
     let max_batch_size = options.max_batch_size.max(1);
@@ -715,7 +900,37 @@ fn run_worker(
         return;
     };
 
-    let mut buffer_since: Option<Instant> = None;
+    #[cfg(feature = "embedding")]
+    {
+        pipeline.gate = gate.clone();
+        if let (Some(config), Some(gate)) = (&options.embedding, &gate) {
+            if gate.enabled.load(Ordering::Acquire) {
+                match config.store.load() {
+                    Ok(events) => {
+                        let overflow: Vec<_> = events
+                            .iter()
+                            .skip(options.max_queue_size)
+                            .map(Event::uuid)
+                            .collect();
+                        if config.store.remove(&overflow).is_err() {
+                            gate.persistence_error();
+                        }
+                        let restored: Vec<_> =
+                            events.into_iter().take(options.max_queue_size).collect();
+                        len.fetch_add(restored.len(), Ordering::AcqRel);
+                        buffer = LiveBuffer::Deferred(restored);
+                    }
+                    Err(_) => gate.persistence_error(),
+                }
+            } else if config.store.purge().is_err() {
+                gate.persistence_error();
+            } else {
+                gate.purge_required.store(false, Ordering::Release);
+            }
+        }
+        let _ = ready.send(());
+    }
+    let mut buffer_since: Option<Instant> = (!buffer.is_empty()).then(|| clock.now());
     // Caller-formed historical batches awaiting their own (chunked) send. Queued
     // rather than sent inline, and timed on the flush interval like the live
     // buffer, so the worker is blocked on `recv` when a Shutdown arrives and can
@@ -754,7 +969,28 @@ fn run_worker(
         };
 
         match wake {
-            Wake::Msg(Control::Capture { event }) => {
+            Wake::Msg(Control::Capture {
+                event,
+                #[cfg(feature = "embedding")]
+                generation,
+            }) => {
+                #[cfg(feature = "embedding")]
+                if let Some(gate) = &gate {
+                    if !gate.enabled.load(Ordering::Acquire)
+                        || generation != gate.generation.load(Ordering::Acquire)
+                        || gate
+                            .deadline(None)
+                            .is_some_and(|deadline| clock.now() >= deadline)
+                    {
+                        dec_len(&len, 1);
+                        continue;
+                    }
+                    if let Some(config) = &options.embedding {
+                        if config.store.put(&event).is_err() {
+                            gate.persistence_error();
+                        }
+                    }
+                }
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
                 // decremented by the pipeline once a batch is delivered or dropped.
@@ -767,6 +1003,57 @@ fn run_worker(
                     max_batch_size,
                 );
             }
+            #[cfg(feature = "embedding")]
+            Wake::Msg(Control::Purge) => {
+                dec_len(
+                    &len,
+                    buffer.len() + historical.iter().map(Vec::len).sum::<usize>(),
+                );
+                buffer.clear();
+                historical.clear();
+                buffer_since = None;
+                historical_since = None;
+                pipeline.purge();
+            }
+            #[cfg(feature = "embedding")]
+            Wake::Msg(Control::Resume {
+                generation,
+                completion,
+            }) => {
+                if let Some(gate) = &gate {
+                    if generation != gate.generation.load(Ordering::Acquire) {
+                        let _ = completion.send(false);
+                        continue;
+                    }
+                    let purged = if gate.purge_required.load(Ordering::Acquire) {
+                        pipeline.purge()
+                    } else {
+                        true
+                    };
+                    let _admission = gate.admission.lock().unwrap_or_else(|e| e.into_inner());
+                    let current = generation == gate.generation.load(Ordering::Acquire);
+                    let enabled = purged && current && gate.deadline(None).is_none();
+                    if current {
+                        gate.enabled.store(enabled, Ordering::Release);
+                    }
+                    let _ = completion.send(enabled);
+                } else {
+                    let _ = completion.send(false);
+                }
+            }
+            #[cfg(feature = "embedding")]
+            Wake::Msg(Control::Checkpoint(completion)) => {
+                let report =
+                    gate.as_ref()
+                        .map_or_else(DeliveryReport::default, |gate| DeliveryReport {
+                            pending: len.load(Ordering::Acquire),
+                            persistence_errors: gate.persistence_errors.load(Ordering::Relaxed),
+                            delivered: gate.delivered.load(Ordering::Relaxed),
+                            terminally_dropped: gate.dropped.load(Ordering::Relaxed),
+                        });
+                let _ = completion.send(report);
+            }
+
             Wake::Msg(Control::HistoricalBatch { mut events }) => {
                 // Queue the chunks off the live buffer (which stays non-historical
                 // — no per-event flag, no homogeneity flush). Below `flush_at` they
@@ -883,6 +1170,16 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             Control::Tick(c) => c.signal(),
             Control::Capture { .. } => dec_len(len, 1),
             Control::HistoricalBatch { events } => dec_len(len, events.len()),
+            #[cfg(feature = "embedding")]
+            Control::Purge => {}
+            #[cfg(feature = "embedding")]
+            Control::Resume { completion, .. } => {
+                let _ = completion.send(false);
+            }
+            #[cfg(feature = "embedding")]
+            Control::Checkpoint(completion) => {
+                let _ = completion.send(DeliveryReport::default());
+            }
         }
     }
 }
@@ -999,6 +1296,8 @@ struct Pipeline {
     clock: Arc<dyn Clock>,
     len: Arc<AtomicUsize>,
     retries: VecDeque<RetryBatch>,
+    #[cfg(feature = "embedding")]
+    gate: Option<Arc<Gate>>,
 }
 
 impl Pipeline {
@@ -1018,6 +1317,8 @@ impl Pipeline {
             clock,
             len,
             retries: VecDeque::new(),
+            #[cfg(feature = "embedding")]
+            gate: None,
         })
     }
 
@@ -1041,6 +1342,10 @@ impl Pipeline {
         let processed: Vec<Event> = events
             .into_iter()
             .filter_map(|event| {
+                #[cfg(feature = "embedding")]
+                if self.gate.is_some() {
+                    return Some(event);
+                }
                 preprocess_capture_event(event, &defaults, &self.options.before_send)
             })
             .collect();
@@ -1129,6 +1434,18 @@ impl Pipeline {
         use super::capture::{self, Step};
         use crate::capture_event::{BatchRequestRef, CaptureErrorResponse};
 
+        #[cfg(feature = "embedding")]
+        let deadline = self
+            .gate
+            .as_ref()
+            .map_or(deadline, |gate| gate.deadline(deadline));
+        #[cfg(feature = "embedding")]
+        if self.gate.as_ref().is_some_and(|gate| {
+            !gate.enabled.load(Ordering::Acquire) || deadline.is_some_and(|d| self.clock.now() >= d)
+        }) {
+            dec_len(&self.len, batch.pending.len());
+            return;
+        }
         let req = BatchRequestRef {
             created_at: &batch.created_at,
             historical_migration: batch.historical_migration.then_some(true),
@@ -1158,17 +1475,33 @@ impl Pipeline {
         let body = capture::maybe_compress(self.compression(), &mut headers, payload);
 
         let count = batch.pending.len();
+        let request_timeout = Duration::from_secs(self.options.request_timeout_seconds);
+        #[cfg(feature = "embedding")]
+        let request_timeout = self
+            .gate
+            .as_ref()
+            .map_or(request_timeout, |gate| request_timeout.min(gate.budget));
         let request = bound_request(
             self.http.post(&self.url).headers(headers).body(body),
             deadline,
             self.clock.now(),
-            Duration::from_secs(self.options.request_timeout_seconds),
+            request_timeout,
         );
         // The final attempt's status and (on a non-2xx) raw body, kept so the
         // `on_error` hook can surface them. The body is only retained when a hook
         // is registered, so the common path stays allocation-neutral.
         let mut http_status: Option<u16> = None;
         let mut response_body: Option<String> = None;
+        #[cfg(feature = "embedding")]
+        let sent = if self.gate.is_some() {
+            batch.pending.clone()
+        } else {
+            Vec::new()
+        };
+        #[cfg(feature = "embedding")]
+        let mut response_retry_after = None;
+        #[cfg(feature = "embedding")]
+        let mut body_transport_error = false;
         let step = match request.send() {
             Err(e) => capture::after_transport_error(
                 &self.options,
@@ -1180,22 +1513,57 @@ impl Pipeline {
                 let status = resp.status().as_u16();
                 http_status = Some(status);
                 let retry_after = capture::parse_retry_after(resp.headers());
-                let text = resp.text().unwrap_or_else(|_| "Unknown error".to_string());
-                let step = capture::after_response(
-                    &self.options,
-                    &batch.request_id,
-                    batch.attempt,
-                    status,
-                    retry_after,
-                    &text,
-                    &mut batch.pending,
-                    &mut batch.final_results,
-                );
-                if !self.options.on_error.is_empty() && !(200..=299).contains(&status) {
-                    response_body = Some(text);
+                #[cfg(feature = "embedding")]
+                {
+                    response_retry_after = retry_after;
                 }
-                step
+                match resp.text() {
+                    #[cfg(feature = "embedding")]
+                    Err(error) if self.gate.is_some() && (200..=299).contains(&status) => {
+                        // Headers alone do not acknowledge durable events. A
+                        // truncated/timed-out body is a transport failure, not
+                        // a terminal malformed-response verdict.
+                        body_transport_error = true;
+                        capture::after_transport_error(
+                            &self.options,
+                            &batch.request_id,
+                            batch.attempt,
+                            error.to_string(),
+                        )
+                    }
+                    text => {
+                        let text = text.unwrap_or_else(|_| "Unknown error".to_string());
+                        let step = capture::after_response(
+                            &self.options,
+                            &batch.request_id,
+                            batch.attempt,
+                            status,
+                            retry_after,
+                            &text,
+                            &mut batch.pending,
+                            &mut batch.final_results,
+                        );
+                        if !self.options.on_error.is_empty() && !(200..=299).contains(&status) {
+                            response_body = Some(text);
+                        }
+                        step
+                    }
+                }
             }
+        };
+
+        #[cfg(feature = "embedding")]
+        let step = {
+            let mut step = step;
+            self.durable_disposition(
+                &mut batch,
+                &mut step,
+                http_status,
+                response_retry_after,
+                body_transport_error,
+                sent,
+            );
+            step
         };
 
         // Events that left `pending` (the ok/drop/warning subset) are terminal.
@@ -1364,17 +1732,17 @@ mod tests {
     /// Test clock with manually advanced virtual time, so interval and backoff
     /// timing are exercised without real sleeps.
     #[derive(Clone)]
-    struct ManualClock {
+    pub(super) struct ManualClock {
         inner: Arc<Mutex<(Instant, DateTime<Utc>)>>,
     }
 
     impl ManualClock {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 inner: Arc::new(Mutex::new((Instant::now(), Utc::now()))),
             }
         }
-        fn advance(&self, by: Duration) {
+        pub(super) fn advance(&self, by: Duration) {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.0 += by;
             g.1 += chrono::Duration::from_std(by).expect("test duration fits chrono");
@@ -1487,6 +1855,8 @@ mod tests {
             .unwrap();
         tx.send(Control::Capture {
             event: Box::new(Event::new("dropped", "user-1")),
+            #[cfg(feature = "embedding")]
+            generation: 0,
         })
         .unwrap();
         tx.send(Control::HistoricalBatch {

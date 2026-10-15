@@ -12,6 +12,7 @@ SDK usage examples and code snippets live in the official documentation so they 
 ## Documentation
 
 - [Rust library docs](https://posthog.com/docs/libraries/rust)
+- [Native SDK embedding](docs/embedding.md) (optional `embedding` feature)
 
 ## Contributing
 

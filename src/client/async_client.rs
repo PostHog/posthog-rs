@@ -11,7 +11,6 @@ use serde_json::json;
 use tracing::trace;
 use tracing::{instrument, warn};
 
-use super::get_default_user_agent;
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
@@ -163,11 +162,13 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
     }
 }
 
+#[cfg(feature = "embedding")]
+#[path = "embedding_client.rs"]
+mod embedding_client;
+
 impl Client {
     fn flags_request_timeout(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        request.timeout(Duration::from_secs(
-            self.options.feature_flags_request_timeout_seconds,
-        ))
+        request.timeout(self.options.flags_timeout())
     }
 
     /// The HTTP client, or [`Error::Connection`] if initialization failed.
@@ -982,7 +983,7 @@ impl Client {
                 .http()?
                 .post(flags_endpoint)
                 .header(CONTENT_TYPE, "application/json")
-                .header(USER_AGENT, get_default_user_agent())
+                .header(USER_AGENT, self.options.user_agent())
                 .json(payload);
             let request = self.flags_request_timeout(request);
             #[cfg(feature = "test-harness")]

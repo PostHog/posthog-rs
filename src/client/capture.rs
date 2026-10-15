@@ -16,7 +16,6 @@ use super::{common::preprocess_capture_event, CaptureCompression, ClientOptions}
 use crate::capture_event::{
     BatchRequestRef, CaptureErrorResponse, CaptureEvent, CaptureResponse, EventResult, EventStatus,
 };
-use crate::client::get_default_user_agent;
 use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::event::{is_minimal_flag_called_property, Event};
@@ -136,7 +135,7 @@ pub(crate) fn build_headers_at(
     attempt: u32,
     now: DateTime<Utc>,
 ) -> HeaderMap {
-    let sdk_info = get_default_user_agent();
+    let sdk_info = opts.user_agent();
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

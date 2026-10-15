@@ -140,12 +140,16 @@ pub use error_tracking::{
 
 // Event
 pub use event::Event;
+#[cfg(feature = "embedding")]
+pub mod embedding;
 
 // Capture wire types
 pub use capture_event::{CaptureErrorResponse, CaptureResponse, EventResult, EventStatus};
 
 // Feature Flags
 pub use feature_flag_evaluations::{EvaluateFlagsOptions, FeatureFlagEvaluations};
+#[cfg(feature = "embedding")]
+pub use feature_flag_evaluations::{ExportedFeatureFlag, FeatureFlagSnapshot};
 pub use feature_flags::{
     match_feature_flag, match_feature_flag_with_context, match_property_with_context,
     CohortDefinition, EvaluationContext, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters,

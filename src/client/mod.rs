@@ -8,6 +8,8 @@ use derive_builder::Builder;
 use tracing::warn;
 
 mod common;
+#[cfg(feature = "embedding")]
+mod embedding;
 #[cfg(test)]
 mod local_payload_test_support;
 #[cfg(test)]
@@ -122,6 +124,13 @@ pub(crate) fn get_default_user_agent() -> String {
 #[derive(Builder, Clone)]
 #[builder(build_fn(name = "build_unchecked", private))]
 pub struct ClientOptions {
+    /// Native analytics delivery and persistence. The host supplies enriched
+    /// events and owns before-send hooks. Requests are capped by the shutdown
+    /// budget, including requests that are already running when close starts.
+    #[cfg(feature = "embedding")]
+    #[builder(default, setter(strip_option))]
+    pub(crate) embedding: Option<crate::embedding::EmbeddingOptions>,
+
     /// Host URL for the PostHog API. Defaults to the US ingestion endpoint.
     /// App hosts such as `https://eu.posthog.com` are normalized to ingestion
     /// hosts before requests are sent.
@@ -335,6 +344,23 @@ pub(crate) struct CaptureDefaults {
 }
 
 impl ClientOptions {
+    pub(crate) fn user_agent(&self) -> String {
+        #[cfg(feature = "embedding")]
+        if let Some(config) = &self.embedding {
+            return format!("{}/{}", config.sdk_name, config.sdk_version);
+        }
+        get_default_user_agent()
+    }
+
+    pub(crate) fn flags_timeout(&self) -> std::time::Duration {
+        let timeout = std::time::Duration::from_secs(self.feature_flags_request_timeout_seconds);
+        #[cfg(feature = "embedding")]
+        if self.embedding.is_some() {
+            return timeout.min(std::time::Duration::from_millis(self.shutdown_timeout_ms));
+        }
+        timeout
+    }
+
     /// Build the resolved capture defaults for this client configuration.
     pub(crate) fn capture_defaults(&self) -> CaptureDefaults {
         CaptureDefaults {
@@ -454,7 +480,25 @@ impl ClientOptionsBuilder {
     /// Returns [`ClientOptionsBuilderError`] if a required builder value is
     /// invalid according to the generated builder.
     pub fn build(&self) -> Result<ClientOptions, ClientOptionsBuilderError> {
-        Ok(self.build_unchecked()?.sanitize())
+        let options = self.build_unchecked()?.sanitize();
+        #[cfg(feature = "embedding")]
+        if let Some(embedding) = &options.embedding {
+            let valid_identity = [&embedding.sdk_name, &embedding.sdk_version]
+                .iter()
+                .all(|part| {
+                    !part.is_empty() && part.bytes().all(|b| b.is_ascii_graphic() && b != b'/')
+                });
+            if options.enable_local_evaluation
+                || !options.before_send.is_empty()
+                || !valid_identity
+                || options.shutdown_timeout_ms == 0
+            {
+                return Err(ClientOptionsBuilderError::ValidationError(
+                    "Embedding requires a positive shutdown budget, valid SDK identity, and no local evaluation or Rust before-send hooks".into(),
+                ));
+            }
+        }
+        Ok(options)
     }
 }
 

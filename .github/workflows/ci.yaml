@@ -54,7 +54,9 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: |
+          cargo clippy -- -D warnings
+          cargo clippy --features embedding -- -D warnings
 
   public-api:
     name: Public API
@@ -156,6 +158,12 @@ jobs:
           - name: Unit test (default features)
             cache-key: default-features
             command: cargo test --verbose
+          - name: Unit test (embedding, async client)
+            cache-key: embedding-async
+            command: cargo test --verbose --features embedding
+          - name: Unit test (embedding, blocking client)
+            cache-key: embedding-blocking
+            command: cargo test --verbose --no-default-features --features embedding,tls
           - name: Unit test (workspace)
             cache-key: workspace
             command: cargo test --workspace --verbose

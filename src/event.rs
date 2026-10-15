@@ -61,11 +61,12 @@ pub(crate) fn is_minimal_flag_called_property(key: &str) -> bool {
 /// See the [PostHog documentation](https://posthog.com/docs/data/events)
 /// for a detailed explanation of PostHog Events.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "embedding", derive(serde::Deserialize))]
 pub struct Event {
     event: String,
     distinct_id: String,
     properties: HashMap<String, serde_json::Value>,
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     options: HashMap<String, serde_json::Value>,
     groups: HashMap<String, String>,
     timestamp: Option<NaiveDateTime>,
@@ -78,6 +79,27 @@ pub struct Event {
 }
 
 impl Event {
+    /// Construct a fully enriched event for a client configured with embedding
+    /// options. The host owns timestamp validation and all event properties.
+    #[cfg(feature = "embedding")]
+    pub fn from_prepared(
+        event: String,
+        distinct_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        timestamp: DateTime<Utc>,
+        uuid: Uuid,
+    ) -> Self {
+        Self {
+            event,
+            distinct_id,
+            properties,
+            timestamp: Some(timestamp.naive_utc()),
+            uuid,
+            groups: HashMap::new(),
+            options: HashMap::new(),
+            minimal_flag_called: false,
+        }
+    }
     /// Create a new identified [`Event`]. Unless you have a distinct ID you can
     /// associate with a user, you probably want to use [`Event::new_anon`]
     /// instead.
@@ -381,6 +403,12 @@ impl Event {
         &self.distinct_id
     }
 
+    #[cfg(feature = "embedding")]
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+
+    #[cfg(not(feature = "embedding"))]
     pub(crate) fn uuid(&self) -> Uuid {
         self.uuid
     }

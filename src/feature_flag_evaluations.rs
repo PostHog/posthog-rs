@@ -43,6 +43,32 @@ pub(crate) struct EvaluatedFlagRecord {
     pub minimal_flag_called_events: bool,
 }
 
+/// Side-effect-free export for host SDK caches and exposure tracking.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg(feature = "embedding")]
+pub struct FeatureFlagSnapshot {
+    pub flags: HashMap<String, ExportedFeatureFlag>,
+    pub request_id: Option<String>,
+    pub evaluated_at: Option<i64>,
+    pub errors_while_computing: bool,
+    pub quota_limited: bool,
+}
+
+/// A value, optional payload, and the evaluation metadata tied to that value.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg(feature = "embedding")]
+pub struct ExportedFeatureFlag {
+    pub value: FlagValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+    pub id: Option<u64>,
+    pub version: Option<u32>,
+    pub reason: Option<String>,
+    pub locally_evaluated: bool,
+    pub has_experiment: Option<bool>,
+    pub minimal_flag_called_events: bool,
+}
+
 /// Parameters dispatched to [`FeatureFlagEvaluationsHost::capture_flag_called_event_if_needed`]
 /// each time a snapshot method records a flag access.
 #[derive(Debug, Clone)]
@@ -128,6 +154,37 @@ pub struct FeatureFlagEvaluations {
 }
 
 impl FeatureFlagEvaluations {
+    /// Copy values, payloads, and evaluation metadata without recording any
+    /// access or emitting `$feature_flag_called` events.
+    #[must_use]
+    #[cfg(feature = "embedding")]
+    pub fn export(&self) -> FeatureFlagSnapshot {
+        FeatureFlagSnapshot {
+            flags: self
+                .flags
+                .iter()
+                .map(|(key, flag)| {
+                    (
+                        key.clone(),
+                        ExportedFeatureFlag {
+                            value: flag_value_for(flag),
+                            payload: flag.payload.clone(),
+                            id: flag.id,
+                            version: flag.version,
+                            reason: flag.reason.clone(),
+                            locally_evaluated: flag.locally_evaluated,
+                            has_experiment: flag.has_experiment,
+                            minimal_flag_called_events: flag.minimal_flag_called_events,
+                        },
+                    )
+                })
+                .collect(),
+            request_id: self.request_id.clone(),
+            evaluated_at: self.evaluated_at,
+            errors_while_computing: self.errors_while_computing,
+            quota_limited: self.quota_limited,
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         host: Arc<dyn FeatureFlagEvaluationsHost>,

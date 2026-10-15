@@ -9,6 +9,7 @@ edition = "2018"
 rust-version = "1.78.0"
 
 [dependencies]
+fs2 = { version = "0.4", optional = true }
 reqwest = { version = "0.13.2", default-features = false, features = [
     "blocking",
     "json",
@@ -54,6 +55,8 @@ default = ["async-client", "error-tracking", "tls"]
 e2e-test = []
 async-client = ["tokio"]
 test-harness = []
+# Durable analytics delivery and host-owned event preparation for native SDKs.
+embedding = ["dep:fs2"]
 error-tracking = ["dep:backtrace", "dep:findshlibs"]
 tls = ["reqwest/rustls"]
 tls-no-provider = ["reqwest/rustls-no-provider"]
