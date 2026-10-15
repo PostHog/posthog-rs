@@ -51,6 +51,9 @@ pub struct FeatureFlagSnapshot {
     pub evaluated_at: Option<i64>,
     pub errors_while_computing: bool,
     pub quota_limited: bool,
+    /// The `sessionRecording` value from the `/flags` response, or `None` when
+    /// absent or the snapshot was not produced by a remote request.
+    pub session_recording: Option<Value>,
 }
 
 /// A value, optional payload, and the evaluation metadata tied to that value.
@@ -144,6 +147,7 @@ pub struct FeatureFlagEvaluations {
     evaluated_at: Option<i64>,
     errors_while_computing: bool,
     quota_limited: bool,
+    session_recording: Option<Value>,
     accessed: Mutex<HashSet<String>>,
 }
 
@@ -176,7 +180,13 @@ impl FeatureFlagEvaluations {
             evaluated_at: self.evaluated_at,
             errors_while_computing: self.errors_while_computing,
             quota_limited: self.quota_limited,
+            session_recording: self.session_recording.clone(),
         }
+    }
+
+    pub(crate) fn with_session_recording(mut self, session_recording: Option<Value>) -> Self {
+        self.session_recording = session_recording;
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -201,6 +211,7 @@ impl FeatureFlagEvaluations {
             evaluated_at,
             errors_while_computing,
             quota_limited,
+            session_recording: None,
             accessed: Mutex::new(HashSet::new()),
         }
     }
@@ -351,6 +362,7 @@ impl FeatureFlagEvaluations {
             evaluated_at: self.evaluated_at,
             errors_while_computing: self.errors_while_computing,
             quota_limited: self.quota_limited,
+            session_recording: self.session_recording.clone(),
             accessed: Mutex::new(self.snapshot_accessed()),
         }
     }
@@ -979,5 +991,24 @@ mod tests {
         assert_eq!(props.get("$feature/gamma"), Some(&json!(true)));
         let active = props.get("$active_feature_flags").unwrap();
         assert_eq!(active, &json!(["alpha", "gamma"]));
+    }
+
+    #[test]
+    fn export_carries_session_recording_and_serializes_absence_as_null() {
+        let host: Arc<dyn FeatureFlagEvaluationsHost> = Arc::new(RecordingHost::default());
+        let absent = serde_json::to_value(build(Arc::clone(&host), "user").export()).unwrap();
+        assert_eq!(absent["session_recording"], Value::Null);
+        assert!(absent
+            .as_object()
+            .unwrap()
+            .contains_key("session_recording"));
+
+        let config = json!({"endpoint": "/s/"});
+        let snap = build(host, "user").with_session_recording(Some(config.clone()));
+        assert_eq!(snap.export().session_recording, Some(config.clone()));
+        assert_eq!(
+            snap.only(&["alpha"]).export().session_recording,
+            Some(config)
+        );
     }
 }

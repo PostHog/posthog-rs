@@ -11,6 +11,7 @@ use crate::feature_flag_evaluations::{EvaluatedFlagRecord, FlagCalledEventParams
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
 use crate::Error;
 use crate::Event;
+use serde::Deserialize;
 use tracing::{error, warn};
 
 /// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
@@ -214,10 +215,24 @@ pub(super) struct DetailedFlagsResponse {
     /// response. Pinned here so it travels with the flags it evaluated, rather
     /// than being re-read from shared state when an event is later captured.
     pub(super) minimal_flag_called_events: bool,
+    pub(super) session_recording: Option<serde_json::Value>,
 }
 
-pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFlagsResponse {
-    match response {
+/// A `/flags` body: the public response shape plus the session replay remote
+/// config, which stays off the public [`FeatureFlagsResponse`] variants.
+#[derive(Deserialize)]
+pub(super) struct FlagsResponseEnvelope {
+    #[serde(flatten)]
+    response: FeatureFlagsResponse,
+    /// An object when recording is enabled, `false` when disabled, absent on
+    /// older servers.
+    #[serde(rename = "sessionRecording", default)]
+    session_recording: Option<serde_json::Value>,
+}
+
+pub(super) fn extract_flag_details(envelope: FlagsResponseEnvelope) -> DetailedFlagsResponse {
+    let session_recording = envelope.session_recording;
+    match envelope.response {
         FeatureFlagsResponse::V2 {
             flags,
             request_id,
@@ -230,6 +245,7 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
             errors_while_computing_flags,
             quota_limited,
             minimal_flag_called_events,
+            session_recording,
         },
         FeatureFlagsResponse::Legacy {
             feature_flags,
@@ -268,6 +284,7 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
                 // The legacy response shape carries no minimization gate, so it
                 // fails safe to the full event shape.
                 minimal_flag_called_events: false,
+                session_recording,
             }
         }
     }
@@ -555,5 +572,74 @@ mod tests {
 
         assert!(client.is_none());
         assert!(options.is_disabled());
+    }
+
+    fn session_recording(response: serde_json::Value) -> Option<serde_json::Value> {
+        let parsed: FlagsResponseEnvelope = serde_json::from_value(response).unwrap();
+        extract_flag_details(parsed).session_recording
+    }
+
+    #[test]
+    fn session_recording_is_retained_from_both_response_shapes() {
+        let config = json!({"endpoint": "/s/", "sampleRate": "0.5"});
+        assert_eq!(
+            session_recording(json!({"flags": {}, "sessionRecording": config})),
+            Some(config.clone())
+        );
+        assert_eq!(
+            session_recording(json!({"flags": {}, "sessionRecording": false})),
+            Some(json!(false))
+        );
+        assert_eq!(
+            session_recording(json!({"featureFlags": {"a": true}, "sessionRecording": config})),
+            Some(config)
+        );
+        assert_eq!(session_recording(json!({"flags": {}})), None);
+        assert_eq!(session_recording(json!({"featureFlags": {}})), None);
+    }
+
+    #[test]
+    fn flags_envelope_parses_both_response_shapes_like_the_bare_response() {
+        let detail = |details: DetailedFlagsResponse| {
+            json!({
+                "flags": details.flags,
+                "request_id": details.request_id,
+                "errors": details.errors_while_computing_flags,
+                "quota_limited": details.quota_limited,
+                "minimal": details.minimal_flag_called_events,
+            })
+        };
+        let v2 = json!({
+            "flags": {"beta": {
+                "key": "beta",
+                "enabled": true,
+                "variant": "test",
+                "reason": {"code": "condition_match", "condition_index": 0, "description": "matched"},
+                "metadata": {"id": 7, "version": 2, "payload": "{\"a\":1}"}
+            }},
+            "errorsWhileComputingFlags": true,
+            "quotaLimited": true,
+            "requestId": "req-1",
+            "minimalFlagCalledEvents": true,
+            "sessionRecording": {"endpoint": "/s/"}
+        });
+        let legacy = json!({
+            "featureFlags": {"a": true, "b": "variant"},
+            "featureFlagPayloads": {"a": {"x": 1}},
+            "errors": ["boom"],
+            "sessionRecording": false
+        });
+        for body in [v2, legacy] {
+            let bare = FlagsResponseEnvelope {
+                response: serde_json::from_value(body.clone()).unwrap(),
+                session_recording: None,
+            };
+            let enveloped: FlagsResponseEnvelope = serde_json::from_value(body.clone()).unwrap();
+            assert_eq!(
+                detail(extract_flag_details(enveloped)),
+                detail(extract_flag_details(bare)),
+                "{body}"
+            );
+        }
     }
 }

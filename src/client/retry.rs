@@ -41,7 +41,8 @@ pub(crate) fn is_retryable_status(status: u16) -> bool {
 /// instruction). A bare 429 stays terminal (`Error::RateLimit`), preserving
 /// long-standing v0 behavior. The V1 endpoint never returns 429, so this is
 /// intentionally scoped to V0.
-#[cfg(not(feature = "capture-v1"))]
+// Also used by session replay, which exists only in the blocking client.
+#[cfg(any(not(feature = "capture-v1"), not(feature = "async-client")))]
 pub(crate) fn should_retry_v0(status: u16, has_retry_after: bool) -> bool {
     is_retryable_status(status) || (status == 429 && has_retry_after)
 }
@@ -118,7 +119,7 @@ pub(crate) fn backoff_duration(
 /// just-finished attempt number (1-based); the backoff for the next attempt
 /// uses `attempt` directly so the first retry waits exactly
 /// `retry_initial_backoff_ms`.
-#[cfg(not(feature = "capture-v1"))]
+#[cfg(any(not(feature = "capture-v1"), not(feature = "async-client")))]
 pub(crate) fn v0_after_response(
     opts: &ClientOptions,
     attempt: u32,
@@ -137,7 +138,7 @@ pub(crate) fn v0_after_response(
 
 /// Sans-IO decision for a V0 transport error (no HTTP response). Retries
 /// transport failures until the attempt budget is exhausted.
-#[cfg(not(feature = "capture-v1"))]
+#[cfg(any(not(feature = "capture-v1"), not(feature = "async-client")))]
 pub(crate) fn v0_after_transport_error(
     opts: &ClientOptions,
     attempt: u32,

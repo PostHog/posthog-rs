@@ -72,6 +72,7 @@ fn options(store: Arc<Store>) -> ClientOptions {
             sdk_name: "posthog-unreal".into(),
             sdk_version: "0.0.1".into(),
             enabled: true,
+            replay: None,
         })
         .shutdown_timeout_ms(100u64)
         .build()

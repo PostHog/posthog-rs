@@ -49,6 +49,8 @@ impl CaptureCompression {
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+#[cfg(not(feature = "async-client"))]
+mod replay;
 mod retry;
 mod transport;
 #[cfg(not(feature = "capture-v1"))]
@@ -468,15 +470,23 @@ impl ClientOptionsBuilder {
     pub fn build(&self) -> Result<ClientOptions, ClientOptionsBuilderError> {
         let options = self.build_unchecked()?.sanitize();
         if let Some(embedding) = &options.embedding {
+            if cfg!(feature = "async-client") && embedding.replay.is_some() {
+                return Err(ClientOptionsBuilderError::ValidationError(
+                    "replay delivery requires the blocking client".into(),
+                ));
+            }
             if cfg!(feature = "capture-v1")
                 || options.enable_local_evaluation
                 || !options.before_send.is_empty()
                 || embedding.sdk_name.trim().is_empty()
                 || embedding.sdk_version.trim().is_empty()
                 || options.shutdown_timeout_ms == 0
+                || embedding
+                    .replay
+                    .is_some_and(|replay| replay.validate().is_err())
             {
                 return Err(ClientOptionsBuilderError::ValidationError(
-                    "Embedding requires legacy ingestion, a positive shutdown budget, SDK identity, and no local evaluation or Rust before-send hooks".into(),
+                    "Embedding requires legacy ingestion, a positive shutdown budget, SDK identity, no local evaluation or Rust before-send hooks, and valid replay limits".into(),
                 ));
             }
         }
@@ -599,5 +609,46 @@ mod tests {
 
         assert_eq!(options.api_key, "");
         assert!(options.is_disabled());
+    }
+
+    #[cfg(all(feature = "async-client", not(feature = "capture-v1")))]
+    #[test]
+    fn async_client_rejects_replay_options() {
+        use crate::embedding::{EmbeddingOptions, EventStore, ReplayOptions};
+        use crate::Event;
+
+        struct NullStore;
+        impl EventStore for NullStore {
+            fn load(&self) -> std::io::Result<Vec<Event>> {
+                Ok(Vec::new())
+            }
+            fn put(&self, _event: &Event) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn remove(&self, _ids: &[uuid::Uuid]) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn purge(&self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let build = |replay| {
+            ClientOptionsBuilder::default()
+                .api_key("phc_test".to_string())
+                .embedding(EmbeddingOptions {
+                    store: std::sync::Arc::new(NullStore),
+                    sdk_name: "posthog-unreal".into(),
+                    sdk_version: "0.0.1".into(),
+                    enabled: true,
+                    replay,
+                })
+                .build()
+        };
+        let Err(error) = build(Some(ReplayOptions::default())) else {
+            panic!("replay options accepted by the async client");
+        };
+        assert!(error.to_string().contains("requires the blocking client"));
+        assert!(build(None).is_ok());
     }
 }

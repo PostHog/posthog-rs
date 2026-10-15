@@ -46,7 +46,7 @@ fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
 use super::common::{
     already_reported, build_dedup_key, extract_flag_details, flag_called_event,
     flag_event_dedup_cache, http_client_or_disable, local_record, remote_record_from_detail,
-    report_flags_error, DetailedFlagsResponse, FlagEventDedupCache,
+    report_flags_error, DetailedFlagsResponse, FlagEventDedupCache, FlagsResponseEnvelope,
 };
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
@@ -1269,6 +1269,7 @@ impl Client {
         let mut request_id: Option<String> = None;
         let mut errors_while_computing = false;
         let mut quota_limited = false;
+        let mut session_recording = None;
 
         // Skip the remote round-trip when local evaluation has already covered
         // every requested flag. Without `flag_keys` we have to assume the caller
@@ -1289,6 +1290,7 @@ impl Client {
                     request_id = response.request_id;
                     errors_while_computing = response.errors_while_computing_flags;
                     quota_limited = response.quota_limited;
+                    session_recording = response.session_recording;
                     // The remote response is the source of these flags' values,
                     // so it is also the source of their minimization gate.
                     let remote_minimal_gate = response.minimal_flag_called_events;
@@ -1323,7 +1325,8 @@ impl Client {
             None,
             errors_while_computing,
             quota_limited,
-        ))
+        )
+        .with_session_recording(session_recording))
     }
 
     fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {
@@ -1451,7 +1454,7 @@ impl Client {
         }
 
         let status = response.status().as_u16();
-        let parsed = match response.json::<FeatureFlagsResponse>().await {
+        let parsed = match response.json::<FlagsResponseEnvelope>().await {
             Ok(p) => p,
             Err(e) => {
                 let err =

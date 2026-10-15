@@ -502,11 +502,10 @@ pub struct InnerEvent {
 }
 
 impl InnerEvent {
-    /// Construct a V0 single-event wire event. Expects that
-    /// [`Event::prepare_for_v0`] has already been called so properties are fully
-    /// decorated.
-    #[cfg(test)]
-    pub fn new(event: Event, api_key: String) -> Self {
+    /// Construct a V0 wire event that carries its own `api_key`, as `/s/`
+    /// requires. Properties are sent as-is.
+    #[cfg(any(test, not(feature = "async-client")))]
+    pub(crate) fn new(event: Event, api_key: String) -> Self {
         Self::from_event(event, Some(api_key))
     }
 
