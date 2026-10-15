@@ -218,11 +218,6 @@ impl Client {
             })
     }
 
-    /// Session replay delivery is only implemented by the blocking client.
-    pub fn capture_replay_snapshot(&self, _event: Event) -> crate::embedding::EnqueueResult {
-        crate::embedding::EnqueueResult::Disabled
-    }
-
     /// Stop admission immediately and schedule durable queue purge.
     pub fn pause_and_purge(&self) {
         if let Some(transport) = &self.transport {

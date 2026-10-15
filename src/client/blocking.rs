@@ -471,15 +471,21 @@ impl Client {
     }
 
     /// Both workers drain in parallel against the shared deadline, so replay
-    /// is closed first and joined last.
+    /// is closed first and joined last. On the transport worker (a callback
+    /// dropping its client) the replay worker exits on its own deadline instead
+    /// of blocking that thread.
     fn close(&self) {
         if let Some(replay) = &self.replay {
             replay.request_close();
         }
+        let on_transport_worker = self
+            .transport
+            .as_ref()
+            .is_some_and(|transport| transport.on_worker_thread());
         if let Some(transport) = &self.transport {
             transport.close_blocking();
         }
-        if let Some(replay) = &self.replay {
+        if let Some(replay) = self.replay.as_ref().filter(|_| !on_transport_worker) {
             replay.join();
         }
     }

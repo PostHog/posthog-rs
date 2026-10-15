@@ -30,6 +30,7 @@ pub struct EmbeddingOptions {
     /// Restore persisted consent before constructing the client.
     pub enabled: bool,
     /// Enables `Client::capture_replay_snapshot`. `None` leaves replay disabled.
+    /// Blocking client only: the builder rejects it under `async-client`.
     pub replay: Option<ReplayOptions>,
 }
 

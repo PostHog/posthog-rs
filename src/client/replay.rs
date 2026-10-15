@@ -25,6 +25,15 @@ use crate::Event;
 
 const WORKER_THREAD_NAME: &str = "posthog-replay";
 
+enum Outcome {
+    Delivered,
+    /// Opted out mid-delivery: purged, not a delivery failure.
+    Purged,
+    Dropped,
+    /// HTTP 413 for a multi-frame batch; resend the frames one at a time.
+    TooLarge,
+}
+
 struct Frame {
     session_id: String,
     generation: u64,
@@ -263,19 +272,37 @@ impl Worker {
         } else {
             Vec::new()
         };
-        let delivered = live.is_empty() || self.send(&live, deadline);
+        let dropped = self.send_shrinking(&live, generation, deadline);
         let mut queue = self.shared.lock();
         queue.in_flight = 0;
         queue.bytes -= bytes;
-        if !delivered {
-            queue.dropped += live.len();
+        queue.dropped += dropped;
+    }
+
+    /// Like posthog-unity's `ReplayQueue`, a 413 splits the batch and only a
+    /// single frame that is still too large is dropped. Returns the drop count.
+    fn send_shrinking(
+        &self,
+        frames: &[Frame],
+        generation: u64,
+        deadline: Option<Instant>,
+    ) -> usize {
+        if frames.is_empty() {
+            return 0;
+        }
+        match self.send(frames, generation, deadline) {
+            Outcome::Delivered | Outcome::Purged => 0,
+            Outcome::Dropped => frames.len(),
+            Outcome::TooLarge => frames
+                .chunks(1)
+                .map(|frame| self.send_shrinking(frame, generation, deadline))
+                .sum(),
         }
     }
 
     /// Retries like `/batch/` (attempt budget, backoff, `Retry-After`), but
-    /// never waits past the deadline. 413 and other terminal statuses drop the
-    /// batch. Returns `false` when the frames were dropped.
-    fn send(&self, frames: &[Frame], deadline: Option<Instant>) -> bool {
+    /// never waits past the deadline. Terminal statuses drop the batch.
+    fn send(&self, frames: &[Frame], generation: u64, deadline: Option<Instant>) -> Outcome {
         let mut json =
             Vec::with_capacity(frames.iter().map(|f| f.json.len() + 1).sum::<usize>() + 1);
         json.push(b'[');
@@ -300,9 +327,12 @@ impl Worker {
         let mut failure = String::from("shutdown deadline reached");
         let mut attempt = 1;
         loop {
-            if !self.gate.enabled.load(Ordering::Acquire) {
-                // Opted out mid-delivery: purged, not a delivery failure.
-                return true;
+            // An opt-out bumps the generation, so a later opt-in during the
+            // backoff must not resend frames captured before it.
+            if !self.gate.enabled.load(Ordering::Acquire)
+                || self.gate.generation.load(Ordering::Acquire) != generation
+            {
+                return Outcome::Purged;
             }
             let deadline = self.gate.deadline(deadline);
             let now = Instant::now();
@@ -319,13 +349,16 @@ impl Worker {
                     Err(e) => v0_after_transport_error(&self.options, attempt, e.to_string()),
                     Ok(response) => {
                         let status = response.status().as_u16();
+                        if status == 413 && frames.len() > 1 {
+                            return Outcome::TooLarge;
+                        }
                         let retry_after = parse_retry_after(response.headers());
                         let body = response.text().unwrap_or_default();
                         v0_after_response(&self.options, attempt, status, retry_after, &body)
                     }
                 };
             match step {
-                Step::Done => return true,
+                Step::Done => return Outcome::Delivered,
                 Step::Fail(e) => {
                     failure = e.to_string();
                     break;
@@ -344,7 +377,7 @@ impl Worker {
             "posthog-rs: dropping {} replay frame(s): {failure}",
             frames.len()
         );
-        false
+        Outcome::Dropped
     }
 
     /// Wait out `delay`, returning early if close is requested meanwhile so the

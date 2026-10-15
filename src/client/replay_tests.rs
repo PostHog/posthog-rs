@@ -196,6 +196,62 @@ fn payload_too_large_is_dropped_without_retry_and_server_errors_use_the_attempt_
 }
 
 #[test]
+fn oversized_batch_is_resent_one_frame_at_a_time() {
+    let server = MockServer::start();
+    let pair = server.mock(|when, then| {
+        when.method(POST)
+            .path("/s/")
+            .is_true(|req| sessions(req) == ["a", "a"]);
+        then.status(413);
+    });
+    let single_a = snapshot_mock(&server, |req| sessions(req) == ["a"]);
+    let handle = spawn(
+        &options(&server.base_url(), None),
+        limits(64 * PADDING, 64 * PADDING),
+    );
+    assert_eq!(handle.enqueue(frame("a")), EnqueueResult::Accepted);
+    assert_eq!(handle.enqueue(frame("a")), EnqueueResult::Accepted);
+    close(&handle);
+    pair.assert_calls(1);
+    single_a.assert_calls(2);
+    assert_eq!(handle.report(), (0, 0));
+}
+
+#[test]
+fn opt_out_and_opt_in_during_backoff_does_not_resend_stale_frames() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/s/");
+        then.status(503).header("Retry-After", "1");
+    });
+    let replay = ReplayOptions {
+        flush_interval_ms: 100,
+        ..ReplayOptions::default()
+    };
+    let client = crate::client(options_with(&server.base_url(), Some(replay), 1_000));
+    assert_eq!(
+        client.capture_replay_snapshot(frame("a")),
+        EnqueueResult::Accepted
+    );
+    let started = Instant::now();
+    while mock.calls() == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "no first attempt"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    client.pause_and_purge();
+    assert!(client.resume_delivery(client.delivery_generation()));
+    // Outlast the backoff so the retry runs while delivery is enabled again.
+    thread::sleep(Duration::from_millis(1_200));
+    client.shutdown();
+    mock.assert_calls(1);
+    let report = client.checkpoint_delivery();
+    assert_eq!((report.replay_pending, report.replay_dropped), (0, 0));
+}
+
+#[test]
 fn backoff_never_waits_past_the_shutdown_deadline() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
@@ -239,6 +295,76 @@ fn opt_out_purges_queued_frames_and_resume_reopens_admission() {
     client.shutdown();
     after_resume.assert_calls(1);
     assert_eq!(client.checkpoint_delivery().replay_dropped, 0);
+}
+
+/// Drops the client from the transport worker when it persists an event, like
+/// a host store that tears down its owner.
+struct DropOnPut {
+    client: Mutex<Option<crate::Client>>,
+    dropped: Mutex<std::sync::mpsc::Sender<()>>,
+}
+
+impl EventStore for DropOnPut {
+    fn load(&self) -> io::Result<Vec<Event>> {
+        Ok(Vec::new())
+    }
+    fn put(&self, _event: &Event) -> io::Result<()> {
+        let client = self.client.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if client.is_some() {
+            drop(client);
+            let _ = self
+                .dropped
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .send(());
+        }
+        Ok(())
+    }
+    fn remove(&self, _ids: &[Uuid]) -> io::Result<()> {
+        Ok(())
+    }
+    fn purge(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn drop_from_transport_worker_does_not_wait_for_replay_drain() {
+    // Never answers, so a replay drain runs to the shutdown deadline. Not an
+    // httpmock server: the detached replay worker must not hit a pooled server
+    // that a later test reuses.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+    let store = Arc::new(DropOnPut {
+        client: Mutex::new(None),
+        dropped: Mutex::new(dropped_tx),
+    });
+    let options = crate::ClientOptionsBuilder::default()
+        .api_key("phc_test".into())
+        .host(format!("http://{}", silent.local_addr().unwrap()))
+        .flush_at(1usize)
+        .shutdown_timeout_ms(2_000u64)
+        .embedding(EmbeddingOptions {
+            store: Arc::clone(&store) as Arc<dyn EventStore>,
+            sdk_name: "posthog-unreal".into(),
+            sdk_version: "0.0.1".into(),
+            enabled: true,
+            replay: Some(ReplayOptions::default()),
+        })
+        .build()
+        .unwrap();
+    let client = crate::client(options);
+    assert_eq!(
+        client.capture_replay_snapshot(frame("a")),
+        EnqueueResult::Accepted
+    );
+    let mut slot = store.client.lock().unwrap_or_else(|e| e.into_inner());
+    slot.insert(client)
+        .capture(Event::new("drop-in-callback", "user"));
+    drop(slot);
+    dropped_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("client drop waited for the replay worker");
 }
 
 #[test]

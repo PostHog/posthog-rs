@@ -470,6 +470,11 @@ impl ClientOptionsBuilder {
     pub fn build(&self) -> Result<ClientOptions, ClientOptionsBuilderError> {
         let options = self.build_unchecked()?.sanitize();
         if let Some(embedding) = &options.embedding {
+            if cfg!(feature = "async-client") && embedding.replay.is_some() {
+                return Err(ClientOptionsBuilderError::ValidationError(
+                    "replay delivery requires the blocking client".into(),
+                ));
+            }
             if cfg!(feature = "capture-v1")
                 || options.enable_local_evaluation
                 || !options.before_send.is_empty()
@@ -604,5 +609,46 @@ mod tests {
 
         assert_eq!(options.api_key, "");
         assert!(options.is_disabled());
+    }
+
+    #[cfg(feature = "async-client")]
+    #[test]
+    fn async_client_rejects_replay_options() {
+        use crate::embedding::{EmbeddingOptions, EventStore, ReplayOptions};
+        use crate::Event;
+
+        struct NullStore;
+        impl EventStore for NullStore {
+            fn load(&self) -> std::io::Result<Vec<Event>> {
+                Ok(Vec::new())
+            }
+            fn put(&self, _event: &Event) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn remove(&self, _ids: &[uuid::Uuid]) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn purge(&self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let build = |replay| {
+            ClientOptionsBuilder::default()
+                .api_key("phc_test".to_string())
+                .embedding(EmbeddingOptions {
+                    store: std::sync::Arc::new(NullStore),
+                    sdk_name: "posthog-unreal".into(),
+                    sdk_version: "0.0.1".into(),
+                    enabled: true,
+                    replay,
+                })
+                .build()
+        };
+        let Err(error) = build(Some(ReplayOptions::default())) else {
+            panic!("replay options accepted by the async client");
+        };
+        assert!(error.to_string().contains("requires the blocking client"));
+        assert!(build(None).is_ok());
     }
 }
