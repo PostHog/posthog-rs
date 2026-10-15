@@ -8,6 +8,7 @@ use derive_builder::Builder;
 use tracing::warn;
 
 mod common;
+mod embedding;
 #[cfg(test)]
 mod local_payload_test_support;
 #[cfg(test)]
@@ -125,6 +126,13 @@ pub(crate) fn get_default_user_agent() -> String {
 #[derive(Builder, Clone)]
 #[builder(build_fn(name = "build_unchecked", private))]
 pub struct ClientOptions {
+    /// Native client delivery and persistence. Events are already enriched;
+    /// Rust does not add defaults or run before-send hooks. Legacy ingestion
+    /// only. Request durations are capped by the shutdown budget so an in-flight
+    /// request cannot exceed that budget when close starts.
+    #[builder(default, setter(strip_option))]
+    pub(crate) embedding: Option<crate::embedding::EmbeddingOptions>,
+
     /// Host URL for the PostHog API. Defaults to the US ingestion endpoint.
     /// App hosts such as `https://eu.posthog.com` are normalized to ingestion
     /// hosts before requests are sent.
@@ -331,6 +339,14 @@ pub(crate) struct CaptureDefaults {
 }
 
 impl ClientOptions {
+    pub(crate) fn user_agent(&self) -> String {
+        self.embedding
+            .as_ref()
+            .map_or_else(get_default_user_agent, |config| {
+                format!("{}/{}", config.sdk_name, config.sdk_version)
+            })
+    }
+
     /// Build the resolved capture defaults for this client configuration.
     pub(crate) fn capture_defaults(&self) -> CaptureDefaults {
         CaptureDefaults {
@@ -450,7 +466,21 @@ impl ClientOptionsBuilder {
     /// Returns [`ClientOptionsBuilderError`] if a required builder value is
     /// invalid according to the generated builder.
     pub fn build(&self) -> Result<ClientOptions, ClientOptionsBuilderError> {
-        Ok(self.build_unchecked()?.sanitize())
+        let options = self.build_unchecked()?.sanitize();
+        if let Some(embedding) = &options.embedding {
+            if cfg!(feature = "capture-v1")
+                || options.enable_local_evaluation
+                || !options.before_send.is_empty()
+                || embedding.sdk_name.trim().is_empty()
+                || embedding.sdk_version.trim().is_empty()
+                || options.shutdown_timeout_ms == 0
+            {
+                return Err(ClientOptionsBuilderError::ValidationError(
+                    "Embedding requires legacy ingestion, a positive shutdown budget, SDK identity, and no local evaluation or Rust before-send hooks".into(),
+                ));
+            }
+        }
+        Ok(options)
     }
 
     /// Deprecated alias for [`secret_key`](Self::secret_key).

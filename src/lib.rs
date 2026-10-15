@@ -130,13 +130,16 @@ pub use error_tracking::{
 
 // Event
 pub use event::Event;
+pub mod embedding;
 
 // V1 Capture types
 #[cfg(feature = "capture-v1")]
 pub use event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse};
 
 // Feature Flags
-pub use feature_flag_evaluations::{EvaluateFlagsOptions, FeatureFlagEvaluations};
+pub use feature_flag_evaluations::{
+    EvaluateFlagsOptions, ExportedFeatureFlag, FeatureFlagEvaluations, FeatureFlagSnapshot,
+};
 pub use feature_flags::{
     match_feature_flag, match_feature_flag_with_context, match_property_with_context,
     CohortDefinition, EvaluationContext, FeatureFlag, FeatureFlagCondition, FeatureFlagFilters,

@@ -63,7 +63,7 @@ pub(crate) fn is_minimal_flag_called_property(key: &str) -> bool {
 /// website. Examples include button clicks, pageviews, query completions, and signups.
 /// See the [PostHog documentation](https://posthog.com/docs/data/events)
 /// for a detailed explanation of PostHog Events.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     event: String,
     distinct_id: String,
@@ -79,6 +79,26 @@ pub struct Event {
 }
 
 impl Event {
+    /// Construct a fully enriched event for a client configured with embedding
+    /// options. The host owns timestamp validation and all event properties.
+    pub fn from_prepared(
+        event: String,
+        distinct_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        timestamp: DateTime<Utc>,
+        uuid: Uuid,
+    ) -> Self {
+        Self {
+            event,
+            distinct_id,
+            properties,
+            timestamp: Some(timestamp.naive_utc()),
+            uuid,
+            groups: HashMap::new(),
+            minimal_flag_called: false,
+        }
+    }
+
     /// Create a new identified [`Event`]. Unless you have a distinct ID you can
     /// associate with a user, you probably want to use [`Event::new_anon`]
     /// instead.
@@ -344,7 +364,7 @@ impl Event {
     }
 
     #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
-    pub(crate) fn uuid(&self) -> Uuid {
+    pub fn uuid(&self) -> Uuid {
         self.uuid
     }
 

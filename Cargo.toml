@@ -34,6 +34,7 @@ tokio = { version = "1", features = [
     "macros",
 ], optional = true }
 flate2 = "1.0"
+fs2 = "0.4"
 brotli = { version = "9.0", optional = true }
 zstd = { version = "0.14", optional = true }
 

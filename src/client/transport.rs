@@ -26,7 +26,9 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use super::common::apply_on_error_hooks;
+use super::embedding::Gate;
 use super::{CaptureFailure, ClientOptions, PostHogError};
+use crate::embedding::{DeliveryReport, EnqueueResult};
 use crate::error::Error;
 use crate::Event;
 
@@ -36,7 +38,14 @@ pub(crate) enum Control {
     // shutdown message (clippy::large_enum_variant).
     Capture {
         event: Box<Event>,
+        generation: u64,
     },
+    Purge,
+    Resume {
+        generation: u64,
+        completion: mpsc::Sender<bool>,
+    },
+    Checkpoint(mpsc::Sender<DeliveryReport>),
     /// A caller-formed historical-migration batch, sent as-is (chunked) on its
     /// own path so the live `Capture` buffer stays non-historical.
     HistoricalBatch {
@@ -103,6 +112,7 @@ impl Clock for SystemClock {
 /// client can stay a plain field while `capture`/`flush`/`shutdown` take `&self`.
 pub(crate) struct TransportHandle {
     tx: mpsc::Sender<Control>,
+    gate: Option<Arc<Gate>>,
     /// Pending `Capture` events not yet pulled by the worker. Gates the bounded queue.
     len: Arc<AtomicUsize>,
     /// Set once `shutdown`/`Drop` begins; blocks further enqueue and control sends.
@@ -139,13 +149,25 @@ impl TransportHandle {
         let max_queue_size = options.max_queue_size;
         let worker_len = len.clone();
         let worker_clock = Arc::clone(&clock);
+        let gate = options.embedding.as_ref().map(|config| {
+            Arc::new(Gate::new(
+                config,
+                Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT),
+            ))
+        });
+        let worker_gate = gate.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
         let worker = thread::Builder::new()
             .name(WORKER_THREAD_NAME.to_string())
-            .spawn(move || run_worker(options, rx, worker_len, worker_clock))
+            .spawn(move || run_worker(options, rx, worker_len, worker_clock, worker_gate, ready_tx))
             .ok();
+        if gate.is_some() {
+            let _ = ready_rx.recv();
+        }
         let worker_id = worker.as_ref().map(|handle| handle.thread().id());
         Self {
             tx,
+            gate,
             len,
             closed: AtomicBool::new(false),
             worker: Mutex::new(worker),
@@ -159,11 +181,76 @@ impl TransportHandle {
     /// Non-blocking enqueue. Drops (with a single warning) when the queue is full
     /// or the client is closed.
     pub(crate) fn enqueue(&self, event: Event) {
+        let _ = self.enqueue_checked(event);
+    }
+
+    pub(crate) fn enqueue_checked(&self, event: Event) -> EnqueueResult {
+        let _admission = self
+            .gate
+            .as_ref()
+            .map(|gate| gate.admission.lock().unwrap_or_else(|e| e.into_inner()));
         if self.closed.load(Ordering::Acquire) {
-            return;
+            return EnqueueResult::Closed;
         }
-        if try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
-            self.send_reserved(event);
+        if self
+            .gate
+            .as_ref()
+            .is_some_and(|gate| !gate.enabled.load(Ordering::Acquire))
+        {
+            return EnqueueResult::Disabled;
+        }
+        if !try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
+            return EnqueueResult::QueueFull;
+        }
+        let generation = self
+            .gate
+            .as_ref()
+            .map_or(0, |gate| gate.generation.load(Ordering::Acquire));
+        if self.send_reserved(event, generation) {
+            EnqueueResult::Accepted
+        } else {
+            EnqueueResult::Closed
+        }
+    }
+
+    pub(crate) fn pause_and_purge(&self) {
+        if let Some(gate) = &self.gate {
+            let _admission = gate.admission.lock().unwrap_or_else(|e| e.into_inner());
+            gate.enabled.store(false, Ordering::Release);
+            gate.generation.fetch_add(1, Ordering::AcqRel);
+            gate.purge_required.store(true, Ordering::Release);
+            let _ = self.tx.send(Control::Purge);
+        }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.gate
+            .as_ref()
+            .map_or(0, |gate| gate.generation.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn resume(&self, generation: u64) -> bool {
+        if self.closed.load(Ordering::Acquire) || self.gate.is_none() {
+            return false;
+        }
+        let (tx, rx) = mpsc::channel();
+        let gate = self.gate.as_ref().expect("embedding gate checked above");
+        let admitted = {
+            let _admission = gate.admission.lock().unwrap_or_else(|e| e.into_inner());
+            self.send_control(Control::Resume {
+                generation,
+                completion: tx,
+            })
+        };
+        admitted && rx.recv().unwrap_or(false)
+    }
+
+    pub(crate) fn checkpoint(&self) -> DeliveryReport {
+        let (tx, rx) = mpsc::channel();
+        if self.send_control(Control::Checkpoint(tx)) {
+            rx.recv().unwrap_or_default()
+        } else {
+            DeliveryReport::default()
         }
     }
 
@@ -177,7 +264,7 @@ impl TransportHandle {
             return;
         }
         if reserve_slot(&self.len, self.max_queue_size).is_some() {
-            self.send_reserved(event);
+            self.send_reserved(event, 0);
         }
     }
 
@@ -185,17 +272,21 @@ impl TransportHandle {
     /// retried event records when it occurred, not when it was finally sent —
     /// then hand it to the worker, releasing the reserved slot if the worker is
     /// gone. The slot must already be reserved by the caller.
-    fn send_reserved(&self, mut event: Event) {
+    fn send_reserved(&self, mut event: Event, generation: u64) -> bool {
         event.ensure_timestamp(self.clock.now_utc());
         if self
             .tx
             .send(Control::Capture {
                 event: Box::new(event),
+                generation,
             })
             .is_err()
         {
             // Worker gone; release the slot we reserved.
             dec_len(&self.len, 1);
+            false
+        } else {
+            true
         }
     }
 
@@ -248,7 +339,18 @@ impl TransportHandle {
     /// Mark closed. Returns `true` for the caller that won the transition (so
     /// shutdown is idempotent and only one caller drives teardown).
     pub(crate) fn begin_close(&self) -> bool {
-        !self.closed.swap(true, Ordering::AcqRel)
+        let _admission = self
+            .gate
+            .as_ref()
+            .map(|gate| gate.admission.lock().unwrap_or_else(|e| e.into_inner()));
+        let first = !self.closed.swap(true, Ordering::AcqRel);
+        if first {
+            if let Some(gate) = &self.gate {
+                *gate.deadline.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(self.clock.now() + gate.budget);
+            }
+        }
+        first
     }
 
     /// Synchronously close and join the worker for external callers. When called
@@ -265,6 +367,15 @@ impl TransportHandle {
         }
         if !on_worker {
             self.join();
+        }
+    }
+
+    /// Close admission and set the shared deadline without waiting. Used by
+    /// native hosts before waiting for calls already using this client.
+    pub(crate) fn request_close(&self) {
+        if self.begin_close() {
+            let (tx, _) = mpsc::channel();
+            self.send_control(Control::Shutdown(Completion::Blocking(tx)));
         }
     }
 
@@ -434,6 +545,8 @@ fn run_worker(
     rx: mpsc::Receiver<Control>,
     len: Arc<AtomicUsize>,
     clock: Arc<dyn Clock>,
+    gate: Option<Arc<Gate>>,
+    ready: mpsc::Sender<()>,
 ) {
     let flush_at = options.flush_at.max(1);
     let max_batch_size = options.max_batch_size.max(1);
@@ -452,14 +565,39 @@ fn run_worker(
         return;
     };
 
+    pipeline.gate = gate.clone();
     let mut buffer: Vec<Event> = Vec::new();
-    let mut buffer_since: Option<Instant> = None;
+    if let (Some(config), Some(gate)) = (&options.embedding, &gate) {
+        if gate.enabled.load(Ordering::Acquire) {
+            match config.store.load() {
+                Ok(events) => {
+                    let overflow: Vec<_> = events
+                        .iter()
+                        .skip(options.max_queue_size)
+                        .map(Event::uuid)
+                        .collect();
+                    if config.store.remove(&overflow).is_err() {
+                        gate.persistence_error();
+                    }
+                    buffer = events.into_iter().take(options.max_queue_size).collect();
+                    len.fetch_add(buffer.len(), Ordering::AcqRel);
+                }
+                Err(_) => gate.persistence_error(),
+            }
+        } else if config.store.purge().is_err() {
+            gate.persistence_error();
+        } else {
+            gate.purge_required.store(false, Ordering::Release);
+        }
+    }
+    let mut buffer_since: Option<Instant> = (!buffer.is_empty()).then(|| clock.now());
     // Caller-formed historical batches awaiting their own (chunked) send. Queued
     // rather than sent inline, and timed on the flush interval like the live
     // buffer, so the worker is blocked on `recv` when a Shutdown arrives and can
     // bound/abandon them under the deadline instead of racing the send.
     let mut historical: VecDeque<Vec<Event>> = VecDeque::new();
     let mut historical_since: Option<Instant> = None;
+    let _ = ready.send(());
 
     loop {
         #[cfg(test)]
@@ -492,7 +630,28 @@ fn run_worker(
         };
 
         match wake {
-            Wake::Msg(Control::Capture { event }) => {
+            Wake::Msg(Control::Capture { event, generation }) => {
+                if gate.as_ref().is_some_and(|gate| {
+                    !gate.enabled.load(Ordering::Acquire)
+                        || generation != gate.generation.load(Ordering::Acquire)
+                }) {
+                    dec_len(&len, 1);
+                    continue;
+                }
+                if gate.as_ref().is_some_and(|gate| {
+                    gate.deadline(None)
+                        .is_some_and(|deadline| clock.now() >= deadline)
+                }) {
+                    // Memory admission is not durable acknowledgement. Do not
+                    // start another filesystem operation after the close budget.
+                    dec_len(&len, 1);
+                    continue;
+                }
+                if let (Some(config), Some(gate)) = (&options.embedding, &gate) {
+                    if config.store.put(&event).is_err() {
+                        gate.persistence_error();
+                    }
+                }
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
                 // decremented by the pipeline once a batch is delivered or dropped.
@@ -504,6 +663,53 @@ fn run_worker(
                     send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                     buffer_since = None;
                 }
+            }
+            Wake::Msg(Control::Purge) => {
+                dec_len(
+                    &len,
+                    buffer.len() + historical.iter().map(Vec::len).sum::<usize>(),
+                );
+                buffer.clear();
+                historical.clear();
+                buffer_since = None;
+                historical_since = None;
+                pipeline.purge();
+            }
+            Wake::Msg(Control::Resume {
+                generation,
+                completion,
+            }) => {
+                if let Some(gate) = &gate {
+                    if generation != gate.generation.load(Ordering::Acquire) {
+                        let _ = completion.send(false);
+                        continue;
+                    }
+                    let purged = if gate.purge_required.load(Ordering::Acquire) {
+                        pipeline.purge()
+                    } else {
+                        true
+                    };
+                    let _admission = gate.admission.lock().unwrap_or_else(|e| e.into_inner());
+                    let current = generation == gate.generation.load(Ordering::Acquire);
+                    let enabled = purged && current;
+                    if current {
+                        gate.enabled.store(enabled, Ordering::Release);
+                    }
+                    let _ = completion.send(enabled);
+                } else {
+                    let _ = completion.send(false);
+                }
+            }
+            Wake::Msg(Control::Checkpoint(completion)) => {
+                let report =
+                    gate.as_ref()
+                        .map_or_else(DeliveryReport::default, |gate| DeliveryReport {
+                            pending: len.load(Ordering::Acquire),
+                            persistence_errors: gate.persistence_errors.load(Ordering::Relaxed),
+                            delivered: gate.delivered.load(Ordering::Relaxed),
+                            terminally_dropped: gate.dropped.load(Ordering::Relaxed),
+                        });
+                let _ = completion.send(report);
             }
             Wake::Msg(Control::HistoricalBatch { mut events }) => {
                 // Queue the chunks off the live buffer (which stays non-historical
@@ -620,6 +826,7 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             #[cfg(test)]
             Control::Tick(c) => c.signal(),
             Control::Capture { .. } => dec_len(len, 1),
+            Control::Purge | Control::Resume { .. } | Control::Checkpoint(_) => {}
             Control::HistoricalBatch { events } => dec_len(len, events.len()),
         }
     }
@@ -630,6 +837,57 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
 /// path: those attempts are final (warn-and-drop on transient failure instead of
 /// scheduling a retry), and once the deadline passes the rest of the buffer is
 /// dropped so teardown can't hang on a slow endpoint.
+impl Pipeline {
+    fn effective_deadline(&self, supplied: Option<Instant>) -> Option<Instant> {
+        self.gate
+            .as_ref()
+            .map_or(supplied, |gate| gate.deadline(supplied))
+    }
+
+    fn purge(&mut self) -> bool {
+        #[cfg(not(feature = "capture-v1"))]
+        let count = self.retries.iter().map(|batch| batch.count).sum();
+        #[cfg(feature = "capture-v1")]
+        let count = self.retries.iter().map(|batch| batch.pending.len()).sum();
+        dec_len(&self.len, count);
+        self.retries.clear();
+        if let (Some(config), Some(gate)) = (&self.options.embedding, &self.gate) {
+            let generation = gate.generation.load(Ordering::Acquire);
+            match config.store.purge() {
+                Ok(()) => {
+                    let _admission = gate.admission.lock().unwrap_or_else(|e| e.into_inner());
+                    if generation == gate.generation.load(Ordering::Acquire) {
+                        gate.purge_required.store(false, Ordering::Release);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Err(_) => {
+                    gate.persistence_error();
+                    false
+                }
+            }
+        } else {
+            true
+        }
+    }
+
+    #[cfg(not(feature = "capture-v1"))]
+    fn acknowledge(&self, ids: &[uuid::Uuid], dropped: bool) {
+        if let (Some(config), Some(gate)) = (&self.options.embedding, &self.gate) {
+            if config.store.remove(ids).is_err() {
+                gate.persistence_error();
+            }
+            if dropped {
+                gate.dropped.fetch_add(ids.len(), Ordering::Relaxed);
+            } else {
+                gate.delivered.fetch_add(ids.len(), Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 fn send_buffer(
     pipeline: &mut Pipeline,
     buffer: &mut Vec<Event>,
@@ -723,6 +981,7 @@ struct Pipeline {
     http: reqwest::blocking::Client,
     options: ClientOptions,
     url: String,
+    gate: Option<Arc<Gate>>,
     clock: Arc<dyn Clock>,
     len: Arc<AtomicUsize>,
     retries: VecDeque<RetryBatch>,
@@ -740,6 +999,7 @@ impl Pipeline {
             http,
             options: options.clone(),
             url,
+            gate: None,
             clock,
             len,
             retries: VecDeque::new(),
@@ -990,6 +1250,7 @@ fn undelivered_results(results: &HashMap<Uuid, crate::event_v1::EventResult>) ->
 struct RetryBatch {
     body: Vec<u8>,
     encoding: Option<&'static str>,
+    ids: Vec<uuid::Uuid>,
     count: usize,
     historical_migration: bool,
     attempt: u32,
@@ -1001,6 +1262,7 @@ struct Pipeline {
     http: reqwest::blocking::Client,
     options: ClientOptions,
     url_base: String,
+    gate: Option<Arc<Gate>>,
     clock: Arc<dyn Clock>,
     len: Arc<AtomicUsize>,
     retries: VecDeque<RetryBatch>,
@@ -1018,6 +1280,7 @@ impl Pipeline {
             http,
             options: options.clone(),
             url_base,
+            gate: None,
             clock,
             len,
             retries: VecDeque::new(),
@@ -1032,14 +1295,25 @@ impl Pipeline {
     ) {
         let defaults = self.options.capture_defaults();
         let count = events.len();
-        let (payload, kept) = match super::v0_capture::build_batch_payload(
-            events,
-            self.options.api_key.clone(),
-            historical_migration,
-            self.clock.now_utc(),
-            &defaults,
-            &self.options.before_send,
-        ) {
+        let ids = events.iter().map(Event::uuid).collect();
+        let payload = if self.options.embedding.is_some() {
+            super::v0_capture::build_prepared_batch_payload(
+                events,
+                self.options.api_key.clone(),
+                historical_migration,
+                self.clock.now_utc(),
+            )
+        } else {
+            super::v0_capture::build_batch_payload(
+                events,
+                self.options.api_key.clone(),
+                historical_migration,
+                self.clock.now_utc(),
+                &defaults,
+                &self.options.before_send,
+            )
+        };
+        let (payload, kept) = match payload {
             Ok(Some(pair)) => pair,
             Ok(None) => {
                 // Every event dropped by before_send (terminal).
@@ -1065,6 +1339,7 @@ impl Pipeline {
             body,
             encoding,
             count: kept,
+            ids,
             historical_migration,
             attempt: 1,
             next_at: self.clock.now(),
@@ -1073,10 +1348,21 @@ impl Pipeline {
     }
 
     fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
-        use super::get_default_user_agent;
         use super::retry::{v0_after_response, v0_after_transport_error, Step};
         use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 
+        let deadline = self.effective_deadline(deadline);
+        if self
+            .gate
+            .as_ref()
+            .is_some_and(|gate| !gate.enabled.load(Ordering::Acquire))
+            || deadline.is_some_and(|d| self.clock.now() >= d)
+        {
+            // Consent purges the store via its ordered command. Close retains
+            // unacknowledged durable events for the next process.
+            dec_len(&self.len, batch.count);
+            return;
+        }
         // v0 capture reads the compression hint from the query param, not the header.
         let url = match batch.encoding {
             Some(token) => format!("{}?compression={token}", self.url_base),
@@ -1086,7 +1372,7 @@ impl Pipeline {
             .http
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, get_default_user_agent())
+            .header(USER_AGENT, self.options.user_agent())
             .body(batch.body.clone());
         if let Some(token) = batch.encoding {
             request = request.header(reqwest::header::CONTENT_ENCODING, token);
@@ -1096,7 +1382,13 @@ impl Pipeline {
             request,
             deadline,
             self.clock.now(),
-            Duration::from_secs(self.options.request_timeout_seconds),
+            self.gate.as_ref().map_or(
+                Duration::from_secs(self.options.request_timeout_seconds),
+                |gate| {
+                    gate.budget
+                        .min(Duration::from_secs(self.options.request_timeout_seconds))
+                },
+            ),
         );
 
         let mut http_status: Option<u16> = None;
@@ -1114,7 +1406,10 @@ impl Pipeline {
         };
 
         match step {
-            Step::Done => dec_len(&self.len, batch.count),
+            Step::Done => {
+                self.acknowledge(&batch.ids, false);
+                dec_len(&self.len, batch.count);
+            }
             Step::Fail(e) => {
                 if self.options.on_error.is_empty() {
                     warn!("posthog-rs: dropping {} event(s): {e}", batch.count);
@@ -1127,6 +1422,7 @@ impl Pipeline {
                         batch.count,
                     );
                 }
+                self.acknowledge(&batch.ids, true);
                 dec_len(&self.len, batch.count);
             }
             Step::Backoff(delay) => {
@@ -1197,6 +1493,10 @@ impl Pipeline {
         apply_on_error_hooks(&self.options.on_error, &failure);
     }
 }
+
+#[cfg(all(test, not(feature = "capture-v1")))]
+#[path = "embedding_transport_tests.rs"]
+mod embedding_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1330,6 +1630,7 @@ mod tests {
             .unwrap();
         tx.send(Control::Capture {
             event: Box::new(Event::new("dropped", "user-1")),
+            generation: 0,
         })
         .unwrap();
         tx.send(Control::HistoricalBatch {

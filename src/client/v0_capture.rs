@@ -47,7 +47,7 @@ pub(crate) fn build_batch_payload(
     defaults: &CaptureDefaults,
     before_send: &[BeforeSendHook],
 ) -> Result<Option<(String, usize)>, Error> {
-    let inner_events: Vec<InnerEvent> = events
+    let events: Vec<Event> = events
         .into_iter()
         .filter_map(|mut event| {
             prepare_event(&mut event, defaults);
@@ -56,11 +56,22 @@ pub(crate) fn build_batch_payload(
                 // events, drop everything outside the allowlist so a hook cannot
                 // reintroduce properties it strips.
                 event.apply_minimal_flag_called_allowlist();
-                InnerEvent::new_for_batch(event)
+                event
             })
         })
         .collect();
 
+    build_prepared_batch_payload(events, api_key, historical_migration, sent_at)
+}
+
+/// Serialize fully formed host SDK events without enrichment or hooks.
+pub(crate) fn build_prepared_batch_payload(
+    events: Vec<Event>,
+    api_key: String,
+    historical_migration: bool,
+    sent_at: DateTime<Utc>,
+) -> Result<Option<(String, usize)>, Error> {
+    let inner_events: Vec<_> = events.into_iter().map(InnerEvent::new_for_batch).collect();
     if inner_events.is_empty() {
         return Ok(None);
     }
