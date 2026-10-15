@@ -61,11 +61,15 @@ fn limits(max_queue_bytes: usize, max_batch_bytes: usize) -> ReplayOptions {
 }
 
 fn frame(session: &str) -> Event {
+    frame_padded(session, PADDING)
+}
+
+fn frame_padded(session: &str, padding: usize) -> Event {
     let mut properties = HashMap::new();
     properties.insert("$session_id".to_string(), json!(session));
     properties.insert(
         "$snapshot_data".to_string(),
-        json!([{"type": 4, "timestamp": 1, "data": {"href": "x".repeat(PADDING)}}]),
+        json!([{"type": 4, "timestamp": 1, "data": {"href": "x".repeat(padding)}}]),
     );
     Event::from_prepared(
         "$snapshot".into(),
@@ -255,6 +259,65 @@ fn opt_out_and_opt_in_during_backoff_does_not_resend_stale_frames() {
     thread::sleep(Duration::from_millis(1_200));
     client.shutdown();
     mock.assert_calls(1);
+    let report = client.checkpoint_delivery();
+    assert_eq!((report.replay_pending, report.replay_dropped), (0, 0));
+}
+
+#[test]
+fn opt_out_during_a_retry_after_backoff_frees_the_queue_for_fresh_frames() {
+    let server = MockServer::start();
+    let stale = server.mock(|when, then| {
+        when.method(POST)
+            .path("/s/")
+            .is_true(|req| sessions(req) == ["stale"]);
+        then.status(503).header("Retry-After", "60");
+    });
+    let fresh = snapshot_mock(&server, |req| sessions(req) == ["fresh"]);
+    // Two of these frames overflow the minimum 1 MiB queue, so the fresh one is
+    // only admitted once the stale in-flight batch has released its bytes.
+    let padding = 600 * 1024;
+    let replay = ReplayOptions {
+        max_queue_bytes: 1024 * 1024,
+        max_batch_bytes: 64 * 1024,
+        flush_interval_ms: 100,
+    };
+    let client = crate::client(options_with(&server.base_url(), Some(replay), 60_000));
+    assert_eq!(
+        client.capture_replay_snapshot(frame_padded("stale", padding)),
+        EnqueueResult::Accepted
+    );
+    let started = Instant::now();
+    while stale.calls() == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "no first attempt"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Let the worker settle into the 60 s backoff before opting out.
+    thread::sleep(Duration::from_millis(200));
+    client.pause_and_purge();
+    assert!(client.resume_delivery(client.delivery_generation()));
+    let resumed = Instant::now();
+    let accepted = loop {
+        match client.capture_replay_snapshot(frame_padded("fresh", padding)) {
+            EnqueueResult::QueueFull if resumed.elapsed() < Duration::from_secs(1) => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => break result,
+        }
+    };
+    assert_eq!(accepted, EnqueueResult::Accepted);
+    while fresh.calls() == 0 {
+        assert!(
+            resumed.elapsed() < Duration::from_secs(3),
+            "fresh frame stuck behind the stale backoff"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    client.shutdown();
+    stale.assert_calls(1);
+    fresh.assert_calls(1);
     let report = client.checkpoint_delivery();
     assert_eq!((report.replay_pending, report.replay_dropped), (0, 0));
 }

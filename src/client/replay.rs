@@ -19,7 +19,6 @@ use super::retry::{parse_retry_after, v0_after_response, v0_after_transport_erro
 use super::transport::{bound_request, build_http};
 use super::ClientOptions;
 use crate::embedding::{EnqueueResult, ReplayOptions};
-use crate::endpoints::Endpoint;
 use crate::event::InnerEvent;
 use crate::Event;
 
@@ -87,7 +86,7 @@ impl ReplayHandle {
             shared: Arc::clone(&shared),
             gate: Arc::clone(&gate),
             http: build_http(options)?,
-            url: options.endpoints().build_url(Endpoint::Snapshots),
+            url: options.endpoints().build_custom_url("/s/"),
             user_agent: options.user_agent(),
             request_timeout: Duration::from_secs(options.request_timeout_seconds).min(gate.budget),
             limits,
@@ -153,6 +152,8 @@ impl ReplayHandle {
         let purged: usize = queue.frames.drain(..).map(|frame| frame.json.len()).sum();
         queue.bytes -= purged;
         queue.since = None;
+        // Cut a retry backoff short so the stale in-flight batch releases its bytes.
+        self.shared.wake.notify_all();
     }
 
     /// `(pending, dropped)` frame counts.
@@ -400,7 +401,7 @@ impl Worker {
                         failure = String::from("retry backoff exceeds the shutdown deadline");
                         break;
                     }
-                    self.backoff(until);
+                    self.backoff(until, generation);
                     attempt += 1;
                 }
             }
@@ -413,10 +414,16 @@ impl Worker {
     }
 
     /// Wait until `until`, or the shutdown deadline if earlier; a close
-    /// requested meanwhile can set that deadline.
-    fn backoff(&self, until: Instant) {
+    /// requested meanwhile can set that deadline. An opt-out ends the wait,
+    /// since the batch is purged anyway.
+    fn backoff(&self, until: Instant, generation: u64) {
         let mut queue = self.shared.lock();
         loop {
+            if !self.gate.enabled.load(Ordering::Acquire)
+                || self.gate.generation.load(Ordering::Acquire) != generation
+            {
+                break;
+            }
             let bound = self.deadline(&queue).map_or(until, |d| d.min(until));
             let left = bound.saturating_duration_since(Instant::now());
             if left.is_zero() {

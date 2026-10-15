@@ -69,7 +69,6 @@ pub posthog_rs::Endpoint::Batch
 pub posthog_rs::Endpoint::Capture
 pub posthog_rs::Endpoint::Flags
 pub posthog_rs::Endpoint::LocalEvaluation
-pub posthog_rs::Endpoint::Snapshots
 impl posthog_rs::Endpoint
 pub fn posthog_rs::Endpoint::path(&self) -> &str
 impl core::fmt::Display for posthog_rs::Endpoint
