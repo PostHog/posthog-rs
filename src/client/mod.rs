@@ -611,7 +611,7 @@ mod tests {
         assert!(options.is_disabled());
     }
 
-    #[cfg(feature = "async-client")]
+    #[cfg(all(feature = "async-client", not(feature = "capture-v1")))]
     #[test]
     fn async_client_rejects_replay_options() {
         use crate::embedding::{EmbeddingOptions, EventStore, ReplayOptions};

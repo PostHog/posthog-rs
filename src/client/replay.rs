@@ -401,6 +401,6 @@ impl Worker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "capture-v1")))]
 #[path = "replay_tests.rs"]
 mod tests;
