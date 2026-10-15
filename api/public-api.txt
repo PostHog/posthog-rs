@@ -113,14 +113,12 @@ pub posthog_rs::FeatureFlagsResponse::Legacy
 pub posthog_rs::FeatureFlagsResponse::Legacy::errors: core::option::Option<alloc::vec::Vec<alloc::string::String>>
 pub posthog_rs::FeatureFlagsResponse::Legacy::feature_flag_payloads: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub posthog_rs::FeatureFlagsResponse::Legacy::feature_flags: std::collections::hash::map::HashMap<alloc::string::String, posthog_rs::FlagValue>
-pub posthog_rs::FeatureFlagsResponse::Legacy::session_recording: core::option::Option<serde_json::value::Value>
 pub posthog_rs::FeatureFlagsResponse::V2
 pub posthog_rs::FeatureFlagsResponse::V2::errors_while_computing_flags: bool
 pub posthog_rs::FeatureFlagsResponse::V2::flags: std::collections::hash::map::HashMap<alloc::string::String, posthog_rs::FlagDetail>
 pub posthog_rs::FeatureFlagsResponse::V2::minimal_flag_called_events: bool
 pub posthog_rs::FeatureFlagsResponse::V2::quota_limited: bool
 pub posthog_rs::FeatureFlagsResponse::V2::request_id: core::option::Option<alloc::string::String>
-pub posthog_rs::FeatureFlagsResponse::V2::session_recording: core::option::Option<serde_json::value::Value>
 impl posthog_rs::FeatureFlagsResponse
 pub fn posthog_rs::FeatureFlagsResponse::normalize(self) -> (std::collections::hash::map::HashMap<alloc::string::String, posthog_rs::FlagValue>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>)
 pub enum posthog_rs::FlagValue

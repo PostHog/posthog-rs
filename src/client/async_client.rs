@@ -46,7 +46,7 @@ fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
 use super::common::{
     already_reported, build_dedup_key, extract_flag_details, flag_called_event,
     flag_event_dedup_cache, http_client_or_disable, local_record, remote_record_from_detail,
-    report_flags_error, DetailedFlagsResponse, FlagEventDedupCache,
+    report_flags_error, DetailedFlagsResponse, FlagEventDedupCache, FlagsResponseEnvelope,
 };
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
@@ -1454,7 +1454,7 @@ impl Client {
         }
 
         let status = response.status().as_u16();
-        let parsed = match response.json::<FeatureFlagsResponse>().await {
+        let parsed = match response.json::<FlagsResponseEnvelope>().await {
             Ok(p) => p,
             Err(e) => {
                 let err =

@@ -77,8 +77,16 @@ fn frame(session: &str) -> Event {
 }
 
 fn spawn(options: &ClientOptions, limits: ReplayOptions) -> ReplayHandle {
+    spawn_with_budget(options, limits, Duration::from_millis(2_000))
+}
+
+fn spawn_with_budget(
+    options: &ClientOptions,
+    limits: ReplayOptions,
+    budget: Duration,
+) -> ReplayHandle {
     let config = options.embedding.as_ref().unwrap();
-    let gate = Arc::new(Gate::new(config, Duration::from_millis(2_000)));
+    let gate = Arc::new(Gate::new(config, budget));
     ReplayHandle::spawn(options, limits, gate).unwrap()
 }
 
@@ -268,6 +276,56 @@ fn backoff_never_waits_past_the_shutdown_deadline() {
     assert!(started.elapsed() < Duration::from_secs(2));
     mock.assert_calls(1);
     assert_eq!(handle.report(), (0, 1));
+}
+
+#[test]
+fn close_requested_during_a_request_bounds_the_retry_after_backoff() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/s/");
+        then.status(503)
+            .header("Retry-After", "60")
+            .delay(Duration::from_millis(500));
+    });
+    let replay = ReplayOptions {
+        flush_interval_ms: 50,
+        ..limits(64 * PADDING, 64 * PADDING)
+    };
+    let handle = spawn(&options_with(&server.base_url(), None, 60_000), replay);
+    assert_eq!(handle.enqueue(frame("a")), EnqueueResult::Accepted);
+    let started = Instant::now();
+    while handle.shared.lock().in_flight == 0 {
+        assert!(started.elapsed() < Duration::from_secs(2), "never sent");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Close while the delayed response is still pending.
+    thread::sleep(Duration::from_millis(200));
+    let closed = Instant::now();
+    close(&handle);
+    assert!(closed.elapsed() < Duration::from_secs(3));
+    mock.assert_calls(1);
+    assert_eq!(handle.report(), (0, 1));
+}
+
+#[test]
+fn queue_left_at_the_shutdown_deadline_is_dropped_at_once() {
+    // Never answers; joined below, so no worker outlives the test.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let handle = spawn_with_budget(
+        &options(&format!("http://{}", silent.local_addr().unwrap()), None),
+        limits(64 * PADDING, 3 * PADDING / 2),
+        Duration::from_millis(300),
+    );
+    const FRAMES: usize = 20;
+    for _ in 0..FRAMES {
+        assert_eq!(handle.enqueue(frame("a")), EnqueueResult::Accepted);
+    }
+    let started = Instant::now();
+    close(&handle);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(handle.report(), (0, FRAMES));
+    let queue = handle.shared.lock();
+    assert_eq!((queue.bytes, queue.since), (0, None));
 }
 
 #[test]

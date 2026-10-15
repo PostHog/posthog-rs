@@ -48,7 +48,8 @@ struct Queue {
     /// When the oldest unsent frame was queued.
     since: Option<Instant>,
     in_flight: usize,
-    closing: bool,
+    /// Set by the close request: its fallback shutdown deadline.
+    close_deadline: Option<Instant>,
     dropped: usize,
 }
 
@@ -125,7 +126,7 @@ impl ReplayHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut queue = self.shared.lock();
-        if queue.closing {
+        if queue.close_deadline.is_some() {
             return EnqueueResult::Closed;
         }
         if !self.gate.enabled.load(Ordering::Acquire) {
@@ -162,7 +163,10 @@ impl ReplayHandle {
 
     /// Close admission and let the worker drain within the shutdown deadline.
     pub(crate) fn request_close(&self) {
-        self.shared.lock().closing = true;
+        self.shared
+            .lock()
+            .close_deadline
+            .get_or_insert_with(|| Instant::now() + self.gate.budget);
         self.shared.wake.notify_all();
     }
 
@@ -189,12 +193,12 @@ struct Worker {
 impl Worker {
     fn run(self) {
         let interval = Duration::from_millis(self.limits.flush_interval_ms);
-        let mut close_deadline: Option<Instant> = None;
         loop {
-            let (batch, closing) = {
+            let batch = {
                 let mut queue = self.shared.lock();
                 loop {
-                    if queue.closing || queue.bytes >= self.limits.max_batch_bytes {
+                    if queue.close_deadline.is_some() || queue.bytes >= self.limits.max_batch_bytes
+                    {
                         break;
                     }
                     match queue.since {
@@ -219,24 +223,43 @@ impl Worker {
                         }
                     }
                 }
+                if queue.close_deadline.is_some() && self.expired(&queue) {
+                    Self::drop_queued(&mut queue);
+                }
                 if queue.frames.is_empty() {
-                    if queue.closing {
+                    if queue.close_deadline.is_some() {
                         return;
                     }
                     queue.since = None;
                     continue;
                 }
-                (self.take_batch(&mut queue), queue.closing)
+                self.take_batch(&mut queue)
             };
-            let deadline = if closing {
-                let fallback =
-                    *close_deadline.get_or_insert_with(|| Instant::now() + self.gate.budget);
-                self.gate.deadline(Some(fallback))
-            } else {
-                self.gate.deadline(None)
-            };
-            self.deliver(batch, deadline);
+            self.deliver(batch);
         }
+    }
+
+    /// The gate's deadline, or the close request's fallback when earlier.
+    fn deadline(&self, queue: &Queue) -> Option<Instant> {
+        self.gate.deadline(queue.close_deadline)
+    }
+
+    fn expired(&self, queue: &Queue) -> bool {
+        self.deadline(queue).is_some_and(|d| Instant::now() >= d)
+    }
+
+    /// Past the shutdown deadline nothing more can be sent, so the rest of the
+    /// queue is dropped at once instead of batch by batch.
+    fn drop_queued(queue: &mut Queue) {
+        if queue.frames.is_empty() {
+            return;
+        }
+        let frames = queue.frames.len();
+        let bytes: usize = queue.frames.drain(..).map(|frame| frame.json.len()).sum();
+        queue.bytes -= bytes;
+        queue.since = None;
+        queue.dropped += frames;
+        warn!("posthog-rs: dropping {frames} replay frame(s): shutdown deadline reached");
     }
 
     /// Consecutive frames of the front frame's session, up to `max_batch_bytes`
@@ -261,7 +284,7 @@ impl Worker {
         batch
     }
 
-    fn deliver(&self, batch: Vec<Frame>, deadline: Option<Instant>) {
+    fn deliver(&self, batch: Vec<Frame>) {
         let bytes: usize = batch.iter().map(|frame| frame.json.len()).sum();
         let generation = self.gate.generation.load(Ordering::Acquire);
         let live: Vec<Frame> = if self.gate.enabled.load(Ordering::Acquire) {
@@ -272,7 +295,16 @@ impl Worker {
         } else {
             Vec::new()
         };
-        let dropped = self.send_shrinking(&live, generation, deadline);
+        let expired = self.expired(&self.shared.lock());
+        let dropped = if expired && !live.is_empty() {
+            warn!(
+                "posthog-rs: dropping {} replay frame(s): shutdown deadline reached",
+                live.len()
+            );
+            live.len()
+        } else {
+            self.send_shrinking(&live, generation)
+        };
         let mut queue = self.shared.lock();
         queue.in_flight = 0;
         queue.bytes -= bytes;
@@ -281,28 +313,23 @@ impl Worker {
 
     /// Like posthog-unity's `ReplayQueue`, a 413 splits the batch and only a
     /// single frame that is still too large is dropped. Returns the drop count.
-    fn send_shrinking(
-        &self,
-        frames: &[Frame],
-        generation: u64,
-        deadline: Option<Instant>,
-    ) -> usize {
+    fn send_shrinking(&self, frames: &[Frame], generation: u64) -> usize {
         if frames.is_empty() {
             return 0;
         }
-        match self.send(frames, generation, deadline) {
+        match self.send(frames, generation) {
             Outcome::Delivered | Outcome::Purged => 0,
             Outcome::Dropped => frames.len(),
             Outcome::TooLarge => frames
                 .chunks(1)
-                .map(|frame| self.send_shrinking(frame, generation, deadline))
+                .map(|frame| self.send_shrinking(frame, generation))
                 .sum(),
         }
     }
 
     /// Retries like `/batch/` (attempt budget, backoff, `Retry-After`), but
     /// never waits past the deadline. Terminal statuses drop the batch.
-    fn send(&self, frames: &[Frame], generation: u64, deadline: Option<Instant>) -> Outcome {
+    fn send(&self, frames: &[Frame], generation: u64) -> Outcome {
         let mut json =
             Vec::with_capacity(frames.iter().map(|f| f.json.len() + 1).sum::<usize>() + 1);
         json.push(b'[');
@@ -334,7 +361,7 @@ impl Worker {
             {
                 return Outcome::Purged;
             }
-            let deadline = self.gate.deadline(deadline);
+            let deadline = self.deadline(&self.shared.lock());
             let now = Instant::now();
             if deadline.is_some_and(|d| now >= d) {
                 break;
@@ -364,11 +391,16 @@ impl Worker {
                     break;
                 }
                 Step::Backoff(delay) => {
-                    if deadline.is_some_and(|d| Instant::now() + delay >= d) {
+                    // Re-read: close may have been requested during the request.
+                    let until = Instant::now() + delay;
+                    if self
+                        .deadline(&self.shared.lock())
+                        .is_some_and(|d| until >= d)
+                    {
                         failure = String::from("retry backoff exceeds the shutdown deadline");
                         break;
                     }
-                    self.backoff(delay);
+                    self.backoff(until);
                     attempt += 1;
                 }
             }
@@ -380,14 +412,13 @@ impl Worker {
         Outcome::Dropped
     }
 
-    /// Wait out `delay`, returning early if close is requested meanwhile so the
-    /// next attempt runs against the shutdown deadline.
-    fn backoff(&self, delay: Duration) {
-        let until = Instant::now() + delay;
+    /// Wait until `until`, or the shutdown deadline if earlier; a close
+    /// requested meanwhile can set that deadline.
+    fn backoff(&self, until: Instant) {
         let mut queue = self.shared.lock();
-        let closing = queue.closing;
-        while queue.closing == closing {
-            let left = until.saturating_duration_since(Instant::now());
+        loop {
+            let bound = self.deadline(&queue).map_or(until, |d| d.min(until));
+            let left = bound.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
