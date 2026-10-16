@@ -273,12 +273,13 @@ impl TransportHandle {
         }
     }
 
-    /// Stamp the capture (enqueue) time on the producer side — so a batched or
-    /// retried event records when it occurred, not when it was finally sent —
-    /// then hand it to the worker, releasing the reserved slot if the worker is
+    /// Stamp the capture (enqueue) time and the event uuid on the producer side —
+    /// so a batched or retried event records when it occurred, not when it was
+    /// finally sent — then hand it to the worker, releasing the reserved slot if the worker is
     /// gone. The slot must already be reserved by the caller.
     fn send_reserved(&self, mut event: Event) {
         event.ensure_timestamp(self.clock.now_utc());
+        event.ensure_uuid();
         if self
             .tx
             .send(Control::Capture {
@@ -318,6 +319,7 @@ impl TransportHandle {
             && try_reserve(&self.len, self.max_queue_size, &self.full_warned)
         {
             events[fitted].ensure_timestamp(self.clock.now_utc());
+            events[fitted].ensure_uuid();
             fitted += 1;
         }
         events.truncate(fitted);
