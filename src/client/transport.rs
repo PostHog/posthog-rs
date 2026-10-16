@@ -1643,15 +1643,16 @@ mod tests {
         );
 
         handle.enqueue(Event::new("Save", "user-1"));
-        handle.flush_blocking(); // attempt 1 -> 503, held with next_at = now + 1s
+        handle.flush_blocking(); // attempt 1 -> 503, held for 1s +/- 25% jitter
         fail.assert_hits(1);
 
-        handle.tick(); // backoff not elapsed -> no retry
+        clock.advance(Duration::from_millis(749));
+        handle.tick(); // below the shortest jittered wait -> no retry
         fail.assert_hits(1);
 
         fail.delete();
         let ok = ok_mock(&server);
-        clock.advance(Duration::from_secs(1)); // now >= next_at
+        clock.advance(Duration::from_millis(501)); // past the longest jittered wait
         handle.tick(); // due -> retried, delivered
         ok.assert_hits(1);
 

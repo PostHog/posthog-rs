@@ -94,7 +94,7 @@ The SDK sends `$session_id` and `$window_id` as top-level fields of the event, b
 
 ### Retry and persistence results
 
-The V1 endpoint returns a result for each event. The SDK retries transient request failures and only the events with retryable results from a partial response.
+The V1 endpoint returns a result for each event. The SDK retries transient request failures and only the events with retryable results from a partial response. Each capture retry wait varies at random by up to 25% either way, so clients that fail together do not retry together; a `Retry-After` header is still the minimum wait.
 
 `CaptureSummary::not_persisted()` and `CaptureSummary::all_persisted()` now use those per-event results. In the V0 path they reported a successful `2xx` as fully persisted without per-event confirmation. Applications that advance durable state after `capture_immediate` should check both that `submitted()` equals the number of intended events and that `all_persisted()` is true, because disabled clients and fully `before_send`-filtered batches submit no events but still report `all_persisted()` as true.
 

@@ -107,6 +107,41 @@ fn datetime_to_system_time(dt: DateTime<Utc>) -> Option<SystemTime> {
     SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs as u64, dt.timestamp_subsec_nanos()))
 }
 
+/// Largest fraction a capture retry wait moves either way, so clients that
+/// fail together do not all retry at the same moment.
+const CAPTURE_RETRY_JITTER: f64 = 0.25;
+
+/// Capture retry wait: the backoff for `attempt` scaled by a random factor in
+/// `[0.75, 1.25)` and clamped to `retry_max_backoff_ms`. `Retry-After` stays
+/// the minimum wait, so jitter never shortens a server-requested delay.
+pub(crate) fn capture_backoff_duration(
+    opts: &ClientOptions,
+    attempt: u32,
+    retry_after: Option<Duration>,
+) -> Duration {
+    jittered_backoff(opts, attempt, retry_after, random_jitter_factor())
+}
+
+fn jittered_backoff(
+    opts: &ClientOptions,
+    attempt: u32,
+    retry_after: Option<Duration>,
+    factor: f64,
+) -> Duration {
+    let max_backoff = Duration::from_millis(opts.retry_max_backoff_ms);
+    let jittered = backoff_duration(opts, attempt, None)
+        .mul_f64(factor)
+        .min(max_backoff);
+    retry_after
+        .map(|d| d.min(max_backoff))
+        .map_or(jittered, |d| jittered.max(d))
+}
+
+/// A uniform factor in `[1 - CAPTURE_RETRY_JITTER, 1 + CAPTURE_RETRY_JITTER)`.
+fn random_jitter_factor() -> f64 {
+    1.0 - CAPTURE_RETRY_JITTER + 2.0 * CAPTURE_RETRY_JITTER * fastrand::f64()
+}
+
 /// Backoff before `attempt`: exponential growth from
 /// `retry_initial_backoff_ms`, clamped to `retry_max_backoff_ms`. When present,
 /// `Retry-After` is treated as a server-provided minimum delay, so the client
@@ -400,6 +435,59 @@ mod tests {
             backoff_duration(&opts, 1, Some(Duration::from_secs(600))),
             Duration::from_millis(opts.retry_max_backoff_ms)
         );
+    }
+
+    #[test]
+    fn capture_backoff_jitter_bounds_cap_and_retry_after() {
+        let opts = test_opts();
+        let ms = Duration::from_millis;
+        let cases: &[(u32, Option<Duration>, f64, Duration)] = &[
+            // The factor scales the configured wait both ways.
+            (1, None, 0.75, ms(75)),
+            (1, None, 1.25, ms(125)),
+            (3, None, 0.75, ms(300)),
+            (3, None, 1.25, ms(500)),
+            // Jitter never pushes a wait past `retry_max_backoff_ms`.
+            (20, None, 1.25, ms(5000)),
+            (20, None, 0.75, ms(3750)),
+            // `Retry-After` stays the minimum, whatever the factor.
+            (1, Some(ms(500)), 0.75, ms(500)),
+            (1, Some(ms(50)), 1.25, ms(125)),
+            (1, Some(Duration::from_secs(600)), 0.75, ms(5000)),
+        ];
+        for &(attempt, retry_after, factor, expected) in cases {
+            assert_eq!(
+                jittered_backoff(&opts, attempt, retry_after, factor),
+                expected,
+                "attempt={attempt} retry_after={retry_after:?} factor={factor}"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_backoff_varies_within_a_quarter_of_the_base() {
+        let opts = test_opts();
+        let waits: Vec<Duration> = (0..200)
+            .map(|_| capture_backoff_duration(&opts, 1, None))
+            .collect();
+        for wait in &waits {
+            assert!(
+                (Duration::from_millis(75)..=Duration::from_millis(125)).contains(wait),
+                "{wait:?} outside 75-125ms"
+            );
+        }
+        assert!(
+            waits.iter().any(|w| *w != waits[0]),
+            "capture retry waits are not jittered"
+        );
+    }
+
+    #[test]
+    fn random_jitter_factor_spans_the_whole_range() {
+        let factors: Vec<f64> = (0..1000).map(|_| random_jitter_factor()).collect();
+        assert!(factors.iter().all(|f| (0.75..1.25).contains(f)));
+        assert!(factors.iter().any(|f| *f < 0.8));
+        assert!(factors.iter().any(|f| *f > 1.2));
     }
 
     // -- Feature flag sans-I/O decisions -------------------------------------
