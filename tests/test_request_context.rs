@@ -105,3 +105,122 @@ async fn dropped_and_panicking_requests_leave_no_context() {
         assert!(RequestContext::current().is_none());
     }
 }
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn queued_batch_and_exception_context_survives_scope_end() {
+    use httpmock::prelude::*;
+    use serde_json::{json, Value};
+    let server = MockServer::start();
+    let capture = server.mock(|when, then| {
+        when.method(POST).is_true(|request| {
+            let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
+            let Some(events) = body["batch"].as_array() else {
+                return false;
+            };
+            !events.is_empty()
+                && events.iter().all(|event| {
+                    let identity = match event["event"].as_str() {
+                        Some("work") => "explicit-user",
+                        Some("batch") => "batch-user",
+                        Some("$exception") => "context-user",
+                        _ => return false,
+                    };
+                    (if cfg!(feature = "capture-v1") {
+                        &event["session_id"]
+                    } else {
+                        &event["properties"]["$session_id"]
+                    }) == "original-session"
+                        && event["distinct_id"] == identity
+                })
+        });
+        then.status(200).json_body(json!({"results": {}}));
+    });
+    let client = posthog_rs::client(
+        posthog_rs::ClientOptionsBuilder::default()
+            .api_key("phc_test".into())
+            .host(server.base_url())
+            .flush_at(100usize)
+            .build()
+            .unwrap(),
+    )
+    .await;
+    RequestContext::new()
+        .distinct_id("context-user")
+        .session_id("original-session")
+        .scope(async {
+            client.capture(Event::new("work", "explicit-user"));
+            client.capture_batch(vec![Event::new("batch", "batch-user")], true);
+            #[cfg(feature = "error-tracking")]
+            client
+                .capture_exception(&std::io::Error::other("operation failed"))
+                .await
+                .unwrap();
+        })
+        .await;
+    RequestContext::new()
+        .session_id("unrelated-session")
+        .scope(async {
+            client.flush().await;
+        })
+        .await;
+    capture.assert_calls(2);
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn flag_snapshot_keeps_originating_context_after_request_ends() {
+    use httpmock::prelude::*;
+    use serde_json::{json, Value};
+    let server = MockServer::start();
+    let flags_request = server.mock(|when, then| {
+        when.method(POST).path("/flags/").is_true(|request| {
+            serde_json::from_slice::<Value>(request.body_ref()).unwrap()["distinct_id"]
+                == "flag-user"
+        });
+        then.status(200)
+            .json_body(json!({"featureFlags": {"feature": true}}));
+    });
+    let capture = server.mock(|when, then| {
+        when.method(POST).is_true(|request| {
+            let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
+            body["batch"][0]["event"] == "$feature_flag_called"
+                && (if cfg!(feature = "capture-v1") {
+                    &body["batch"][0]["session_id"]
+                } else {
+                    &body["batch"][0]["properties"]["$session_id"]
+                }) == "original-session"
+                && body["batch"][0]["properties"]
+                    .get("other-request")
+                    .is_none()
+        });
+        then.status(200).json_body(json!({"results": {}}));
+    });
+    let client = posthog_rs::client(("phc_test", server.base_url().as_str())).await;
+    let context = RequestContext::new()
+        .distinct_id("flag-user")
+        .session_id("original-session");
+    let flags = client
+        .evaluate_flags_with_context(&context, Default::default())
+        .await
+        .unwrap();
+    RequestContext::new()
+        .session_id("unrelated-session")
+        .property("other-request", true)
+        .unwrap()
+        .scope(async {
+            assert!(flags.is_enabled("feature"));
+        })
+        .await;
+    client.flush().await;
+    flags_request.assert_calls(1);
+    capture.assert_calls(1);
+    let empty = client
+        .evaluate_flags_with_context(&RequestContext::new(), Default::default())
+        .await
+        .unwrap();
+    assert!(!empty.is_enabled("feature"));
+    client.flush().await;
+    flags_request.assert_calls(1);
+    capture.assert_calls(1);
+}

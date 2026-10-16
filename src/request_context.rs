@@ -13,8 +13,8 @@ tokio::task_local! {
 /// Analytics defaults for one request. Header identity is not proof of authentication.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RequestContext {
-    distinct_id: Option<String>,
-    properties: HashMap<String, Value>,
+    pub(crate) distinct_id: Option<String>,
+    pub(crate) properties: HashMap<String, Value>,
 }
 
 impl RequestContext {
