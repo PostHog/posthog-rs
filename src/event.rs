@@ -76,6 +76,8 @@ pub struct Event {
     /// Set only for minimized `$feature_flag_called` events; never serialized.
     #[serde(skip)]
     minimal_flag_called: bool,
+    #[serde(skip)]
+    pub(crate) request_context_applied: bool,
 }
 
 impl Event {
@@ -97,6 +99,7 @@ impl Event {
             timestamp: None,
             uuid: Uuid::now_v7(),
             minimal_flag_called: false,
+            request_context_applied: false,
         }
     }
 
@@ -126,6 +129,7 @@ impl Event {
             timestamp: None,
             uuid: Uuid::now_v7(),
             minimal_flag_called: false,
+            request_context_applied: false,
         }
     }
 
@@ -234,6 +238,7 @@ impl Event {
             timestamp: None,
             uuid: Uuid::now_v7(),
             minimal_flag_called: false,
+            request_context_applied: false,
         })
     }
 
@@ -293,6 +298,7 @@ impl Event {
             timestamp: None,
             uuid: Uuid::now_v7(),
             minimal_flag_called: false,
+            request_context_applied: false,
         }))
     }
 

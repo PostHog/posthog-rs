@@ -186,6 +186,7 @@ impl TransportHandle {
     /// then hand it to the worker, releasing the reserved slot if the worker is
     /// gone. The slot must already be reserved by the caller.
     fn send_reserved(&self, mut event: Event) {
+        crate::request_context::apply_current_context(&mut event);
         event.ensure_timestamp(self.clock.now_utc());
         if self
             .tx
@@ -211,6 +212,7 @@ impl TransportHandle {
         while fitted < events.len()
             && try_reserve(&self.len, self.max_queue_size, &self.full_warned)
         {
+            crate::request_context::apply_current_context(&mut events[fitted]);
             events[fitted].ensure_timestamp(self.clock.now_utc());
             fitted += 1;
         }
