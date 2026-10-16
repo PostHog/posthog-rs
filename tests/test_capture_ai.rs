@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use httpmock::prelude::*;
 use posthog_rs::{
-    CaptureCompression, ClientOptionsBuilder, Endpoint, Event, EventStatus, PostHogError,
+    CaptureCompression, CaptureSummary, ClientOptionsBuilder, Endpoint, Event, EventStatus,
+    PostHogError,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -137,6 +138,40 @@ fn three_two_mib_events() -> (Vec<Uuid>, Vec<Event>) {
         })
         .collect();
     (uuids, events)
+}
+
+/// One AI event over the 8 MiB `properties` ceiling and one normal AI event,
+/// as `(oversize uuid, normal uuid, batch)`.
+fn oversize_and_normal_events() -> (Uuid, Uuid, Vec<Event>) {
+    let (too_big, normal) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut oversize = sized_ai_event(8 * MIB + 1);
+    oversize.set_uuid(too_big);
+    let events = vec![oversize, ai_event_with_uuid("$ai_generation", normal)];
+    (too_big, normal, events)
+}
+
+/// The AI path accepting `normal` only from a body that leaves out `too_big`.
+fn ai_mock_without<'a>(server: &'a MockServer, too_big: Uuid, normal: Uuid) -> httpmock::Mock<'a> {
+    server.mock(move |when, then| {
+        when.method(POST).path(AI_PATH).is_true(move |req| {
+            let body = zstd_body(req);
+            body.contains(&normal.to_string()) && !body.contains(&too_big.to_string())
+        });
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({ "results": { normal.to_string(): { "result": "ok" } } }));
+    })
+}
+
+/// The oversize event has a local `drop` verdict and counts as submitted but
+/// not persisted, next to the normal event's `ok`.
+fn assert_local_too_big_drop(summary: &CaptureSummary, too_big: Uuid, normal: Uuid) {
+    assert_eq!(summary.submitted(), 2);
+    assert_eq!(summary.not_persisted(), 1);
+    let verdict = &summary.event_results()[&too_big];
+    assert_eq!(verdict.result, EventStatus::Drop);
+    assert_eq!(verdict.details.as_deref(), Some("ai_event_too_big"));
+    assert_eq!(summary.event_results()[&normal].result, EventStatus::Ok);
 }
 
 fn all_ok(uuids: &[Uuid]) -> serde_json::Value {
@@ -337,32 +372,17 @@ mod async_client {
     }
 
     #[tokio::test]
-    async fn capture_ai_immediate_returns_server_verdicts_including_too_big() {
+    async fn capture_ai_batch_immediate_drops_an_oversize_event_locally() {
         let server = MockServer::start();
-        let too_big = Uuid::now_v7();
-        let ai = server.mock(|when, then| {
-            when.method(POST)
-                .path(AI_PATH)
-                .header("content-encoding", "zstd");
-            then.status(200)
-                .header("content-type", "application/json")
-                .json_body(json!({ "results": {
-                    too_big.to_string(): { "result": "drop", "details": "ai_event_too_big" }
-                }}));
-        });
+        let (too_big, normal, events) = oversize_and_normal_events();
+        let ai = ai_mock_without(&server, too_big, normal);
         let client = client(&mut options(server.base_url())).await;
-        // Over the background lane's local ceiling, yet sent: the immediate path
-        // leaves the size verdict to the backend and returns it.
-        let mut event = sized_ai_event(8 * MIB + 1);
-        event.set_uuid(too_big);
-        let summary = client.capture_ai_immediate(event).await.unwrap();
+        let summary = client
+            .capture_ai_batch_immediate(events, false)
+            .await
+            .unwrap();
         ai.assert_calls(1);
-        assert_eq!(summary.submitted(), 1);
-        assert_eq!(summary.not_persisted(), 1);
-        assert_eq!(
-            summary.event_results()[&too_big].details.as_deref(),
-            Some("ai_event_too_big")
-        );
+        assert_local_too_big_drop(&summary, too_big, normal);
     }
 
     #[tokio::test]
@@ -566,30 +586,14 @@ mod blocking {
     }
 
     #[test]
-    fn capture_ai_immediate_returns_server_verdicts_including_too_big() {
+    fn capture_ai_batch_immediate_drops_an_oversize_event_locally() {
         let server = MockServer::start();
-        let too_big = Uuid::now_v7();
-        let ai = server.mock(|when, then| {
-            when.method(POST)
-                .path(AI_PATH)
-                .header("content-encoding", "zstd");
-            then.status(200)
-                .header("content-type", "application/json")
-                .json_body(json!({ "results": {
-                    too_big.to_string(): { "result": "drop", "details": "ai_event_too_big" }
-                }}));
-        });
+        let (too_big, normal, events) = oversize_and_normal_events();
+        let ai = ai_mock_without(&server, too_big, normal);
         let client = client(&mut options(server.base_url()));
-        let mut event = sized_ai_event(8 * MIB + 1);
-        event.set_uuid(too_big);
-        let summary = client.capture_ai_immediate(event).unwrap();
+        let summary = client.capture_ai_batch_immediate(events, false).unwrap();
         ai.assert_calls(1);
-        assert_eq!(summary.submitted(), 1);
-        assert_eq!(summary.not_persisted(), 1);
-        assert_eq!(
-            summary.event_results()[&too_big].details.as_deref(),
-            Some("ai_event_too_big")
-        );
+        assert_local_too_big_drop(&summary, too_big, normal);
     }
 
     #[test]

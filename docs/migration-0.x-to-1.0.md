@@ -96,6 +96,8 @@ The SDK sends `$session_id` and `$window_id` as top-level fields of the event, b
 
 The V1 endpoint returns a result for each event. The SDK retries transient request failures and only the events with retryable results from a partial response.
 
+Capture now makes 4 attempts by default (`max_capture_attempts`, was 3). The first retry waits 100 ms (`retry_initial_backoff_ms`, was 200 ms), and each later wait doubles up to `retry_max_backoff_ms`. These options apply to `capture` and `capture_ai`. Remote `/flags` retries no longer use them. They wait 300 ms before the first retry (was 200 ms by default) and double up to 30 s. `feature_flags_request_max_retries` still sets how many `/flags` retries the SDK makes.
+
 `CaptureSummary::not_persisted()` and `CaptureSummary::all_persisted()` now use those per-event results. In the V0 path they reported a successful `2xx` as fully persisted without per-event confirmation. Applications that advance durable state after `capture_immediate` should check both that `submitted()` equals the number of intended events and that `all_persisted()` is true, because disabled clients and fully `before_send`-filtered batches submit no events but still report `all_persisted()` as true.
 
 HTTP 429 is not a retryable V1 capture status. The V1 service uses HTTP 402 for billing limits and per-event `drop` or `warning` results in successful responses. `Retry-After` is still honored for retryable failures and retry results.
