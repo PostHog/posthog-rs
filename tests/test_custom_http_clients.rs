@@ -1,7 +1,5 @@
-#![allow(deprecated)]
-
 use httpmock::prelude::*;
-use posthog_rs::{ClientOptionsBuilder, Event};
+use posthog_rs::{ClientOptionsBuilder, EvaluateFlagsOptions, Event};
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::time::Duration;
 
@@ -51,16 +49,21 @@ fn capture_mock<'a>(
     header: &'a str,
     event: &mut Event,
 ) -> httpmock::Mock<'a> {
+    capture_endpoint_mock(server, header, event, "/i/v1/analytics/events")
+}
+
+fn capture_endpoint_mock<'a>(
+    server: &'a MockServer,
+    header: &'a str,
+    event: &mut Event,
+    endpoint: &'a str,
+) -> httpmock::Mock<'a> {
     let id = uuid::Uuid::now_v7();
     event.set_uuid(id);
     server.mock(move |when, then| {
         when.method(POST)
             .header("x-custom-client", header)
-            .path(if cfg!(feature = "capture-v1") {
-                "/i/v1/analytics/events"
-            } else {
-                "/batch/"
-            });
+            .path(endpoint);
         then.status(200)
             .delay(Duration::from_millis(30))
             .json_body(serde_json::json!({"results": {id.to_string(): {"result": "ok"}}}));
@@ -148,13 +151,13 @@ mod asynchronous {
         .await;
         assert_transport_error(
             client
-                .get_feature_flag("flag", "user", None, None, None)
+                .evaluate_flags("user", EvaluateFlagsOptions::default())
                 .await
                 .unwrap_err(),
         );
         assert_transport_error(
             client
-                .get_feature_flag_payload("flag", "user")
+                .evaluate_flags("user", EvaluateFlagsOptions::default())
                 .await
                 .unwrap_err(),
         );
@@ -259,11 +262,11 @@ mod asynchronous {
         client.capture(queued);
         client.flush().await;
         client
-            .get_feature_flag("flag", "user", None, None, None)
+            .evaluate_flags("user", EvaluateFlagsOptions::default())
             .await
             .unwrap();
         client
-            .get_feature_flag_payload("flag", "user")
+            .evaluate_flags("user", EvaluateFlagsOptions::default())
             .await
             .unwrap();
         capture.assert_hits(1);
@@ -278,6 +281,34 @@ mod asynchronous {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn routes_ai_requests_with_custom_clients() {
+        let server = MockServer::start();
+        let mut immediate = Event::new("$ai_generation", "user");
+        let mut queued = Event::new("$ai_generation", "user");
+        let capture = capture_endpoint_mock(&server, "async", &mut immediate, "/i/v1/ai/events");
+        let background = capture_endpoint_mock(&server, "blocking", &mut queued, "/i/v1/ai/events");
+        let mut builder = options(&server);
+        builder
+            .request_timeout_seconds(5)
+            .http_client(http())
+            .blocking_http_client(blocking_http().await);
+        let options = builder.build().unwrap();
+        drop(builder);
+        let client = posthog_rs::client(options).await;
+        assert!(client
+            .capture_ai_immediate(immediate)
+            .await
+            .unwrap()
+            .all_persisted());
+        client.capture_ai(queued);
+        client.flush().await;
+        capture.assert_calls(1);
+        background.assert_calls(1);
+        client.shutdown().await;
+        drop(client);
     }
 
     #[tokio::test]
@@ -320,7 +351,7 @@ mod asynchronous {
         )
         .await;
         client
-            .get_feature_flag("flag", "user", None, None, None)
+            .evaluate_flags("user", EvaluateFlagsOptions::default())
             .await
             .unwrap();
         flags.assert_hits(1);
@@ -407,7 +438,7 @@ mod asynchronous {
         )
         .await;
         assert!(client
-            .get_feature_flag("flag", "user", None, None, None)
+            .evaluate_flags("user", EvaluateFlagsOptions::default())
             .await
             .is_ok());
         flags.assert_calls(1);
@@ -437,10 +468,14 @@ mod blocking {
         );
         assert_transport_error(
             client
-                .get_feature_flag("flag", "user", None, None, None)
+                .evaluate_flags("user", EvaluateFlagsOptions::default())
                 .unwrap_err(),
         );
-        assert_transport_error(client.get_feature_flag_payload("flag", "user").unwrap_err());
+        assert_transport_error(
+            client
+                .evaluate_flags("user", EvaluateFlagsOptions::default())
+                .unwrap_err(),
+        );
         client.shutdown();
     }
 
@@ -461,7 +496,7 @@ mod blocking {
                 .unwrap(),
         );
         assert!(client
-            .get_feature_flag("flag", "user", None, None, None)
+            .evaluate_flags("user", EvaluateFlagsOptions::default())
             .is_ok());
         client.shutdown();
     }
@@ -564,9 +599,11 @@ mod blocking {
         client.capture(event);
         client.flush();
         client
-            .get_feature_flag("flag", "user", None, None, None)
+            .evaluate_flags("user", EvaluateFlagsOptions::default())
             .unwrap();
-        client.get_feature_flag_payload("flag", "user").unwrap();
+        client
+            .evaluate_flags("user", EvaluateFlagsOptions::default())
+            .unwrap();
         assert!(capture.calls() >= 2);
         assert!(flags.calls() >= 2);
         definitions.assert_hits(1);

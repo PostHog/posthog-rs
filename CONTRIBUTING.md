@@ -6,7 +6,7 @@ Thanks for your interest in improving the PostHog Rust SDK.
 
 - Rust `1.78.0` or newer for the SDK library (see `Cargo.toml`). Development and test dependencies may require newer Rust.
 
-CI checks the minimum with both async and blocking clients, including `capture-v1`, using the checked-in lockfile. Dependency ranges still allow customers on newer Rust to use newer releases. When updating the lockfile, keep the library's dependency graph compatible with Rust 1.78 and rerun both MSRV checks; dependency metadata alone can understate the required compiler version.
+CI checks the minimum with both async and blocking clients using the checked-in lockfile. Dependency ranges still allow customers on newer Rust to use newer releases. When updating the lockfile, keep the library's dependency graph compatible with Rust 1.78 and rerun both MSRV checks; dependency metadata alone can understate the required compiler version.
 
 ## Development commands
 
@@ -15,7 +15,7 @@ From the repository root:
 ```bash
 cargo build --verbose
 cargo test --verbose
-cargo test --verbose --features e2e-test --no-default-features
+cargo test --verbose --features e2e-test,tls --no-default-features
 cargo fmt -- --check
 cargo clippy -- -D warnings
 scripts/check-public-api.sh
