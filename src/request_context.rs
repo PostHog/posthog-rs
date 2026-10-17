@@ -111,8 +111,7 @@ impl RequestContext {
 
 pub(crate) fn apply_current_context(event: &mut Event) {
     if !event.request_context_applied {
-        if let Some(context) = RequestContext::current() {
-            context.apply_to_event(event);
-        }
+        #[cfg(feature = "async-client")]
+        let _ = CURRENT.try_with(|context| context.apply_to_event(event));
     }
 }
