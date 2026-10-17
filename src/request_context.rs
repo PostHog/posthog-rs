@@ -57,6 +57,18 @@ impl RequestContext {
             .filter(|value| !value.is_empty())
     }
 
+    #[cfg(feature = "async-client")]
+    pub(crate) fn current_ids() -> (Option<String>, Option<String>) {
+        CURRENT
+            .try_with(|context| {
+                (
+                    context.get_distinct_id().map(str::to_owned),
+                    context.get_session_id().map(str::to_owned),
+                )
+            })
+            .unwrap_or_default()
+    }
+
     /// Returns a snapshot. Spawned tasks must receive and scope an explicit clone.
     pub fn current() -> Option<Self> {
         #[cfg(feature = "async-client")]
