@@ -2,7 +2,6 @@
 //! `blocking`. Those two modules are mutually exclusive under the
 //! `async-client` feature, so this lives outside both to avoid two copies
 //! drifting out of sync.
-#![cfg(test)]
 
 use std::collections::HashMap;
 use std::sync::Mutex;
