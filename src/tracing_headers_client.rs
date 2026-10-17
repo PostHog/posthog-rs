@@ -59,16 +59,10 @@ impl TracingHeadersClient {
             .map(|host| self.allowed_hosts.contains(&host.to_ascii_lowercase()))
             .unwrap_or(false)
         {
-            let context = RequestContext::current();
+            let (distinct_id, session_id) = RequestContext::current_ids();
             for (name, value) in [
-                (
-                    "x-posthog-distinct-id",
-                    context.as_ref().and_then(RequestContext::get_distinct_id),
-                ),
-                (
-                    "x-posthog-session-id",
-                    context.as_ref().and_then(RequestContext::get_session_id),
-                ),
+                ("x-posthog-distinct-id", distinct_id.as_deref()),
+                ("x-posthog-session-id", session_id.as_deref()),
             ] {
                 request.headers_mut().remove(name);
                 if let Some(mut value) = value.and_then(|value| HeaderValue::from_str(value).ok()) {
