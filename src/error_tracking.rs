@@ -1840,7 +1840,7 @@ mod tests {
 
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
-            when.method(POST).matches(request_has_panic_payload);
+            when.method(POST).is_true(request_has_panic_payload);
             then.status(200);
         });
         let options = ClientOptionsBuilder::default()
@@ -1861,7 +1861,7 @@ mod tests {
 
         assert!(result.is_err());
         assert!(previous_called.load(Ordering::Acquire));
-        capture_mock.assert_hits(1);
+        capture_mock.assert_calls(1);
     }
 
     #[test]
@@ -1891,7 +1891,7 @@ mod tests {
         reset.restore();
 
         assert!(result.is_err());
-        capture_mock.assert_hits(0);
+        capture_mock.assert_calls(0);
     }
 
     /// Panics inside Tokio tasks run the hook on a runtime worker thread; the
@@ -1947,7 +1947,7 @@ mod tests {
 
         assert!(result.is_err());
         assert!(current_result.is_err());
-        capture_mock.assert_hits(2);
+        capture_mock.assert_calls(2);
     }
 
     #[test]
@@ -2236,7 +2236,7 @@ mod tests {
             "<posthog_rs::error_tracking::Exception>::from_message",
             "<posthog_rs::client::Client>::capture_exception::<E>",
         ] {
-            assert!(is_internal_capture_frame(name), "should strip {name:?}");
+            assert!(is_internal_capture_frame(name), "should strip {:?}", name);
         }
         assert!(!is_internal_capture_frame(
             "my_app::checkout::Exception_from_error_report"
