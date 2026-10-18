@@ -212,6 +212,14 @@ pub(crate) struct Prepared {
     pub(crate) submitted: usize,
 }
 
+/// The requests of an inline immediate capture, plus the verdicts the SDK
+/// decided locally for events it does not send.
+#[derive(Default)]
+pub(crate) struct ImmediatePlan {
+    pub(crate) requests: Vec<Prepared>,
+    pub(crate) local_results: HashMap<Uuid, EventResult>,
+}
+
 /// Per-lane settings for an inline immediate capture. The analytics lane sends
 /// one request; the AI lane splits the batch by bytes. Each reads its own
 /// compression option.
@@ -220,6 +228,9 @@ pub(crate) struct ImmediateLane {
     pub(crate) endpoint: Endpoint,
     /// `None`: everything goes in one request.
     pub(crate) batch_bytes_target: Option<usize>,
+    /// Ceiling on an event's serialized `properties`. A larger event is not
+    /// sent and gets a local `drop` verdict. `None`: no ceiling.
+    pub(crate) max_event_bytes: Option<usize>,
 }
 
 impl ImmediateLane {
@@ -227,6 +238,7 @@ impl ImmediateLane {
         Self {
             endpoint: Endpoint::Capture,
             batch_bytes_target: None,
+            max_event_bytes: None,
         }
     }
 
@@ -234,6 +246,7 @@ impl ImmediateLane {
         Self {
             endpoint: Endpoint::CaptureAi,
             batch_bytes_target: Some(super::transport::AI_BATCH_BYTES_TARGET),
+            max_event_bytes: Some(super::transport::AI_MAX_EVENT_BYTES),
         }
     }
 
@@ -246,46 +259,80 @@ impl ImmediateLane {
     }
 }
 
+/// The `details` of the local verdict for an AI event over the size ceiling,
+/// the same code the backend uses when it refuses one.
+const AI_EVENT_TOO_BIG: &str = "ai_event_too_big";
+
+/// Measure each event, and keep only those within `max`. An event whose
+/// serialized `properties` are strictly larger than `max` gets a local `drop`
+/// verdict instead, as the backend would refuse it.
+fn measure_within_limit(
+    events: Vec<CaptureEvent>,
+    max: Option<usize>,
+    local_results: &mut HashMap<Uuid, EventResult>,
+) -> Vec<(CaptureEvent, usize)> {
+    events
+        .into_iter()
+        .filter_map(|event| {
+            let size = measure_event(&event);
+            if max.is_some_and(|max| size.properties > max) {
+                local_results.insert(
+                    event.uuid,
+                    EventResult {
+                        result: EventStatus::Drop,
+                        details: Some(AI_EVENT_TOO_BIG.to_string()),
+                    },
+                );
+                return None;
+            }
+            Some((event, size.total))
+        })
+        .collect()
+}
+
 /// Prepare an inline immediate capture: apply client defaults + `before_send`,
 /// then build the wire events and the per-request identity (request id,
-/// `created_at`, URL) for each request. Returns an empty `Vec` when nothing
+/// `created_at`, URL) for each request. Returns no requests when nothing
 /// survives filtering (an empty or fully `before_send`-dropped batch), so the
 /// caller returns a default summary without sending. The analytics lane always
 /// yields exactly one `Prepared`; the AI lane yields one per byte-sized chunk,
-/// in order.
+/// in order. An event over the lane's `max_event_bytes` is not sent; its local
+/// `drop` verdict is in `local_results`.
 pub(crate) fn prepare_immediate(
     opts: &ClientOptions,
     lane: ImmediateLane,
     events: Vec<Event>,
     historical_migration: bool,
-) -> Vec<Prepared> {
+) -> ImmediatePlan {
     let defaults = opts.capture_defaults();
     let events: Vec<Event> = events
         .into_iter()
         .filter_map(|event| preprocess_capture_event(event, &defaults, &opts.before_send))
         .collect();
     if events.is_empty() {
-        return Vec::new();
+        return ImmediatePlan::default();
     }
+    let mut local_results = HashMap::new();
 
     let historical_migration = historical_migration.then_some(true);
     let url = opts.endpoints().build_url(lane.endpoint);
     let built = build_events_at(&events, Utc::now());
     let chunks = match lane.batch_bytes_target {
         Some(target) => chunk_by_bytes(
-            built
-                .into_iter()
-                .map(|event| {
-                    let bytes = measure_event(&event).total;
-                    (event, bytes)
-                })
-                .collect(),
+            measure_within_limit(built, lane.max_event_bytes, &mut local_results),
             target,
         ),
-        None => vec![built],
+        None if lane.max_event_bytes.is_none() => vec![built],
+        None => vec![
+            measure_within_limit(built, lane.max_event_bytes, &mut local_results)
+                .into_iter()
+                .map(|(event, _)| event)
+                .collect(),
+        ],
     };
-    chunks
+    let requests = chunks
         .into_iter()
+        .filter(|pending| !pending.is_empty())
         .map(|pending| Prepared {
             url: url.clone(),
             request_id: Uuid::now_v7(),
@@ -294,7 +341,11 @@ pub(crate) fn prepare_immediate(
             submitted: pending.len(),
             pending,
         })
-        .collect()
+        .collect();
+    ImmediatePlan {
+        requests,
+        local_results,
+    }
 }
 
 /// Build the headers and (optionally compressed) body for one immediate V1
@@ -1147,7 +1198,7 @@ mod tests {
                 e
             })
             .collect();
-        let prepared = prepare_immediate(&opts, analytics, events.clone(), false);
+        let prepared = prepare_immediate(&opts, analytics, events.clone(), false).requests;
         assert_eq!(prepared.len(), 1);
         assert_eq!(prepared[0].submitted, 3);
         assert!(prepared[0].url.ends_with("/i/v1/analytics/events"));
@@ -1164,7 +1215,7 @@ mod tests {
             batch_bytes_target: Some(2 * size + size / 2),
             ..ai
         };
-        let prepared = prepare_immediate(&opts, small_target, events.clone(), true);
+        let prepared = prepare_immediate(&opts, small_target, events.clone(), true).requests;
         assert_eq!(prepared.len(), 2);
         assert_eq!(prepared[0].pending.len(), 2);
         assert_eq!(prepared[1].pending.len(), 1);
@@ -1181,7 +1232,57 @@ mod tests {
             .api_key("phc_test".to_string())
             .before_send(|_| None);
         let filtered = filtered.build().unwrap();
-        assert!(prepare_immediate(&filtered, ai, events, false).is_empty());
+        let plan = prepare_immediate(&filtered, ai, events, false);
+        assert!(plan.requests.is_empty());
+        assert!(plan.local_results.is_empty());
+    }
+
+    #[test]
+    fn prepare_immediate_drops_events_over_the_lane_ceiling_locally() {
+        let mut builder = ClientOptionsBuilder::default();
+        builder.api_key("phc_test".to_string());
+        let opts = builder.build().unwrap();
+        let event = |blob: usize| {
+            let mut e = Event::new("$ai_generation".to_string(), "user-1".to_string());
+            e.insert_prop("blob", "x".repeat(blob)).unwrap();
+            e
+        };
+        let unlimited = ImmediateLane {
+            max_event_bytes: None,
+            ..ImmediateLane::ai()
+        };
+        let sent = prepare_immediate(&opts, unlimited, vec![event(64)], false);
+        let limit = measure_event(&sent.requests[0].pending[0]).properties;
+
+        // An event exactly at the ceiling is sent; one byte over is a local drop.
+        // The analytics lane covers a ceiling without byte chunking.
+        for lane in [ImmediateLane::ai(), ImmediateLane::analytics()] {
+            let lane = ImmediateLane {
+                max_event_bytes: Some(limit),
+                ..lane
+            };
+            let (mut at_limit, mut over) = (event(64), event(65));
+            let (at_limit_uuid, over_uuid) = (Uuid::now_v7(), Uuid::now_v7());
+            at_limit.set_uuid(at_limit_uuid);
+            over.set_uuid(over_uuid);
+            let plan = prepare_immediate(&opts, lane, vec![at_limit, over], false);
+            assert_eq!(plan.requests.len(), 1, "{:?}", lane.endpoint);
+            assert_eq!(plan.requests[0].submitted, 1);
+            assert_eq!(plan.requests[0].pending[0].uuid, at_limit_uuid);
+            assert_eq!(plan.local_results.len(), 1);
+            let verdict = &plan.local_results[&over_uuid];
+            assert_eq!(verdict.result, EventStatus::Drop);
+            assert_eq!(verdict.details.as_deref(), Some("ai_event_too_big"));
+        }
+
+        // Every event over the ceiling: no request, only local verdicts.
+        let lane = ImmediateLane {
+            max_event_bytes: Some(limit),
+            ..ImmediateLane::ai()
+        };
+        let plan = prepare_immediate(&opts, lane, vec![event(65), event(66)], false);
+        assert!(plan.requests.is_empty());
+        assert_eq!(plan.local_results.len(), 2);
     }
 
     #[test]

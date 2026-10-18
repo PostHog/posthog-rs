@@ -236,16 +236,17 @@ pub struct ClientOptions {
     #[builder(default = "false")]
     local_evaluation_only: bool,
 
-    /// Maximum number of attempts for capture requests (default: 3).
-    /// Includes the initial attempt, so `3` means 1 initial + 2 retries.
-    #[builder(default = "3")]
+    /// Maximum number of attempts for capture requests (default: 4).
+    /// Includes the initial attempt, so `4` means 1 initial + 3 retries.
+    #[builder(default = "4")]
     pub(crate) max_capture_attempts: u32,
 
-    /// Initial retry backoff duration in milliseconds (default: 200)
-    #[builder(default = "200")]
+    /// Initial capture retry backoff duration in milliseconds (default: 100).
+    /// Remote `/flags` retries use their own fixed backoff.
+    #[builder(default = "100")]
     pub(crate) retry_initial_backoff_ms: u64,
 
-    /// Maximum retry backoff duration in milliseconds (default: 30000)
+    /// Maximum capture retry backoff duration in milliseconds (default: 30000)
     #[builder(default = "30000")]
     pub(crate) retry_max_backoff_ms: u64,
 
