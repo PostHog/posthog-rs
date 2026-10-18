@@ -42,6 +42,12 @@ Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai
 
 The backend decides which names belong on the AI lane and reports a misrouted or oversize event as a per-event `drop` inside a `200`. That verdict reaches an `on_error` hook (`CaptureFailure::endpoint()` says which lane) or the returned `CaptureSummary` for the immediate variants; without a hook the SDK logs one aggregate warning per batch with drop and retry totals. To log every drop and retry reason, call `CaptureFailure::verdict_summary()` in an `on_error` hook; it returns one line such as `drop/invalid_options=2, retry/not_persisted=1`.
 
+### Event uuid, timestamp and distinct ID
+
+- The SDK assigns an event's uuid when you hand the event to `capture` or `capture_immediate`, not in `Event::new`. Capturing a cloned or reused `Event` twice now sends two uuids. In 0.x both copies shared one uuid, and capture V1 rejects a request that contains a uuid twice. A uuid set with `Event::set_uuid` is still sent as given on every capture.
+- `Event::set_timestamp` accepts timestamps in the future. In 0.x it returned `Error::InvalidTimestamp` for a timestamp more than 1 s ahead. PostHog clamps far-future timestamps, as it does for every other SDK. The method keeps its `Result` return type.
+- `Event::new` with an empty or whitespace-only distinct ID creates an anonymous event, as `Event::new_anon` does. In 0.x it sent the empty ID, and PostHog dropped the event.
+
 ### Event options
 
 Capture V1 reads per-event processing controls, such as person profile processing, from an `options` map that is sent next to `properties`. Set them with `Event::insert_option`, or with `CaptureExceptionOptions::option` for exceptions. They work the same on `capture` and `capture_ai`.

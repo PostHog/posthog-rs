@@ -67,7 +67,9 @@ impl CaptureEvent {
 
         Self {
             event: event.event_name().to_string(),
-            uuid: event.uuid(),
+            // Every send path assigns the uuid first (`preprocess_capture_event`);
+            // the fallback only covers a direct build.
+            uuid: event.uuid().unwrap_or_else(Uuid::now_v7),
             distinct_id: event.distinct_id().to_string(),
             timestamp,
             session_id,
