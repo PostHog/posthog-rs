@@ -8,7 +8,7 @@ use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use tracing::debug;
 use uuid::Uuid;
 
-use super::retry::{backoff_duration, is_retryable_status};
+use super::retry::{capture_backoff_duration, is_retryable_status};
 // Re-exported so the capture loops in the client modules can reach them as
 // `capture::parse_retry_after` / `capture::Step`.
 pub(crate) use super::retry::{parse_retry_after, Step};
@@ -438,7 +438,7 @@ pub(crate) fn after_transport_error(
         error = %err_msg,
         "Capture request failed, will retry"
     );
-    Step::Backoff(backoff_duration(opts, attempt, None))
+    Step::Backoff(capture_backoff_duration(opts, attempt, None))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -482,7 +482,7 @@ pub(crate) fn after_response(
         if pending.is_empty() || is_final {
             Step::Done
         } else {
-            Step::Backoff(backoff_duration(opts, attempt, retry_after))
+            Step::Backoff(capture_backoff_duration(opts, attempt, retry_after))
         }
     } else if is_retryable_status(status) {
         let error_desc = serde_json::from_str::<CaptureErrorResponse>(body)
@@ -501,7 +501,7 @@ pub(crate) fn after_response(
         if attempt >= opts.max_capture_attempts {
             Step::Fail(terminal_response_error(status, body))
         } else {
-            Step::Backoff(backoff_duration(opts, attempt, retry_after))
+            Step::Backoff(capture_backoff_duration(opts, attempt, retry_after))
         }
     } else {
         Step::Fail(terminal_response_error(status, body))
@@ -791,7 +791,8 @@ mod tests {
     // -- backoff schedule ----------------------------------------------------
 
     /// Guards the `attempt + 1` off-by-one on the V1 call sites: the first
-    /// retry must wait exactly `retry_initial_backoff_ms`, not double it.
+    /// retry must wait `retry_initial_backoff_ms` give or take the jitter, not
+    /// double it.
     #[test]
     fn backoff_schedule_starts_at_initial() {
         let opts = ClientOptionsBuilder::default()
@@ -806,35 +807,46 @@ mod tests {
             Step::Backoff(d) => d.as_millis() as u64,
             _ => panic!("expected Step::Backoff"),
         };
-        assert_eq!(
-            ms(after_transport_error(&opts, &rid, 1, "timeout".into())),
-            100,
-            "first retry must honor retry_initial_backoff_ms exactly"
-        );
-        assert_eq!(
-            ms(after_transport_error(&opts, &rid, 2, "timeout".into())),
-            200
-        );
-        assert_eq!(
-            ms(after_transport_error(&opts, &rid, 3, "timeout".into())),
-            400
+        for (attempt, base) in [(1, 100), (2, 200), (3, 400)] {
+            let wait = ms(after_transport_error(
+                &opts,
+                &rid,
+                attempt,
+                "timeout".into(),
+            ));
+            assert!(
+                (base * 3 / 4..=base * 5 / 4).contains(&wait),
+                "attempt {attempt} waited {wait}ms, expected {base}ms +/- 25%"
+            );
+        }
+        let waits: Vec<u64> = (0..50)
+            .map(|_| ms(after_transport_error(&opts, &rid, 3, "timeout".into())))
+            .collect();
+        assert!(
+            waits.iter().any(|w| *w != waits[0]),
+            "capture retries must use the jittered backoff"
         );
 
         // Same schedule via a retryable HTTP response.
         let body = r#"{"error":"service_unavailable"}"#;
         let mut pending = vec![dummy_event()];
         let mut final_results = HashMap::new();
-        let step = after_response(
-            &opts,
-            &rid,
-            1,
-            503,
-            None,
-            body,
-            &mut pending,
-            &mut final_results,
-        );
-        assert_eq!(ms(step), 100);
+        let waits: Vec<u64> = (0..50)
+            .map(|_| {
+                ms(after_response(
+                    &opts,
+                    &rid,
+                    1,
+                    503,
+                    None,
+                    body,
+                    &mut pending,
+                    &mut final_results,
+                ))
+            })
+            .collect();
+        assert!(waits.iter().all(|w| (75..=125).contains(w)));
+        assert!(waits.iter().any(|w| *w != waits[0]));
     }
 
     // -- after_transport_error -----------------------------------------------

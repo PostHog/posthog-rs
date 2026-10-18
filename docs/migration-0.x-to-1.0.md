@@ -100,7 +100,7 @@ The SDK sends `$session_id` and `$window_id` as top-level fields of the event, b
 
 ### Retry and persistence results
 
-The V1 endpoint returns a result for each event. The SDK retries transient request failures and only the events with retryable results from a partial response.
+The V1 endpoint returns a result for each event. The SDK retries transient request failures and only the events with retryable results from a partial response. Each capture retry wait varies at random by up to 25% either way, so clients that fail together do not retry together; a `Retry-After` header is still the minimum wait.
 
 Capture now makes 4 attempts by default (`max_capture_attempts`, was 3). The first retry waits 100 ms (`retry_initial_backoff_ms`, was 200 ms), and each later wait doubles up to `retry_max_backoff_ms`. These options apply to `capture` and `capture_ai`. Remote `/flags` retries no longer use them. They wait 300 ms before the first retry (was 200 ms by default) and double up to 30 s. `feature_flags_request_max_retries` still sets how many `/flags` retries the SDK makes.
 
