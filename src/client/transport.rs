@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use tracing::warn;
 
-use super::capture::{build_event_at, chunk_by_bytes, measure_event, EventSize};
+use super::capture::{build_event_at, chunk_by_bytes, measure_event, measure_total};
 use super::common::{apply_on_error_hooks, preprocess_capture_event};
 use super::{CaptureCompression, CaptureFailure, ClientOptions, PostHogError};
 use crate::capture_event::CaptureEvent;
@@ -134,6 +134,12 @@ const WORKER_THREAD_NAME: &str = "posthog-transport";
 /// Name of the AI-lane worker thread.
 const AI_WORKER_THREAD_NAME: &str = "posthog-transport-ai";
 
+/// Soft byte target for one analytics request body. Capture V1 refuses an
+/// analytics body over 10 MiB before decompression, and this SDK sends bodies
+/// uncompressed by default; check-before-append keeps a multi-event body at or
+/// under the target, a 2x margin.
+pub(crate) const ANALYTICS_BATCH_BYTES_TARGET: usize = 5 * 1024 * 1024;
+
 /// Soft byte target for one AI batch body. The capture-ai deployment caps a
 /// compressed request body at 20 MiB; with the guarded check-before-append rule
 /// the worst-case body is `max(target, largest event)` = 8 MiB, a 2.5x margin.
@@ -153,22 +159,29 @@ pub(crate) const AI_MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) struct LaneConfig {
     pub(crate) endpoint: Endpoint,
     pub(crate) thread_name: &'static str,
-    /// `Some`: byte-based batching with this soft target (events are built and
-    /// measured when buffered). `None`: count-based only, built at send time.
+    /// `Some`: split each request at this soft byte target with the
+    /// check-before-append rule. `None`: count-based only.
     pub(crate) batch_bytes_target: Option<usize>,
+    /// `true`: build and measure each live event when it is buffered, so the
+    /// byte target closes batches as events arrive (`before_send` runs then).
+    /// `false`: buffer the caller's events, then build, measure and split them
+    /// when the batch is sent (`before_send` runs at send time).
+    pub(crate) build_on_admit: bool,
     /// `Some`: drop an event locally when its serialized `properties` exceed
     /// this many bytes. `None`: no local ceiling.
     pub(crate) max_event_bytes: Option<usize>,
 }
 
 impl LaneConfig {
-    /// Today's analytics behavior, unchanged: count-based batches built at send
-    /// time, client-configured compression, no local size ceiling.
+    /// Analytics: events are built at send time, and each send is split into
+    /// requests under the byte target. No per-event ceiling: capture reports an
+    /// oversize event as a per-event `drop` and keeps the rest of the request.
     pub(crate) fn analytics() -> Self {
         Self {
             endpoint: Endpoint::Capture,
             thread_name: WORKER_THREAD_NAME,
-            batch_bytes_target: None,
+            batch_bytes_target: Some(ANALYTICS_BATCH_BYTES_TARGET),
+            build_on_admit: false,
             max_event_bytes: None,
         }
     }
@@ -178,6 +191,7 @@ impl LaneConfig {
             endpoint: Endpoint::CaptureAi,
             thread_name: AI_WORKER_THREAD_NAME,
             batch_bytes_target: Some(AI_BATCH_BYTES_TARGET),
+            build_on_admit: true,
             max_event_bytes: Some(AI_MAX_EVENT_BYTES),
         }
     }
@@ -594,12 +608,13 @@ enum LiveBuffer {
 
 impl LiveBuffer {
     fn for_lane(lane: &LaneConfig) -> Self {
-        match lane.batch_bytes_target {
-            Some(_) => LiveBuffer::Prepared {
+        if lane.build_on_admit {
+            LiveBuffer::Prepared {
                 events: Vec::new(),
                 bytes: 0,
-            },
-            None => LiveBuffer::Deferred(Vec::new()),
+            }
+        } else {
+            LiveBuffer::Deferred(Vec::new())
         }
     }
 
@@ -629,7 +644,8 @@ impl LiveBuffer {
 /// Owns `buffer_since`: it is `Some` exactly while the buffer holds events,
 /// so a carried-over event keeps an interval timer of its own.
 ///
-/// Deferred (analytics): push, flush at `flush_at` events — unchanged behavior.
+/// Deferred (analytics): push, flush at `flush_at` events; the send splits the
+/// batch by bytes when the lane has a byte target.
 ///
 /// Prepared (AI): build + measure now (dropping the event if it fails the
 /// lane's `properties` ceiling), then apply the guarded check-before-append
@@ -662,12 +678,12 @@ fn admit_live(
             let target = pipeline
                 .lane
                 .batch_bytes_target
-                .expect("Prepared buffer implies a byte target");
+                .expect("a lane that builds on admit has a byte target");
             let Some((wire, size)) = pipeline.prepare_measured(event) else {
                 // Dropped locally (before_send or oversize); slot already released.
                 return;
             };
-            if !buffer.is_empty() && buffer_bytes(buffer) + size.total > target {
+            if !buffer.is_empty() && buffer_bytes(buffer) + size > target {
                 send_buffer(pipeline, buffer, max_batch_size, None);
                 *buffer_since = None;
             }
@@ -679,7 +695,7 @@ fn admit_live(
                 *buffer_since = Some(pipeline.clock.now());
             }
             events.push(wire);
-            *bytes += size.total;
+            *bytes += size;
             if events.len() >= flush_at || *bytes >= target {
                 send_buffer(pipeline, buffer, max_batch_size, None);
                 *buffer_since = None;
@@ -1056,7 +1072,6 @@ impl Pipeline {
                 let measured: Vec<(CaptureEvent, usize)> = processed
                     .into_iter()
                     .filter_map(|event| self.build_measured(&event))
-                    .map(|(wire, size)| (wire, size.total))
                     .collect();
                 for chunk in chunk_by_bytes(measured, target) {
                     self.send_prepared(chunk, historical_migration, deadline);
@@ -1091,11 +1106,11 @@ impl Pipeline {
         self.attempt(batch, deadline);
     }
 
-    /// Byte-batched lanes: run defaults + `before_send` on a freshly buffered
-    /// live event, then build and measure it. `None` means the event was
+    /// Lanes that build on admit: run defaults + `before_send` on a freshly
+    /// buffered live event, then build and measure it. `None` means the event was
     /// dropped locally (hook drop or over the lane's ceiling) and its queue slot
     /// released.
-    fn prepare_measured(&self, event: Event) -> Option<(CaptureEvent, EventSize)> {
+    fn prepare_measured(&self, event: Event) -> Option<(CaptureEvent, usize)> {
         let defaults = self.options.capture_defaults();
         let Some(event) = preprocess_capture_event(event, &defaults, &self.options.before_send)
         else {
@@ -1111,20 +1126,22 @@ impl Pipeline {
     /// size: AI payloads may hold unredacted prompts or media that must never
     /// reach the logs. This is a local drop, so `on_error` does not fire (the
     /// backend would have refused it with `ai_event_too_big` anyway).
-    fn build_measured(&self, event: &Event) -> Option<(CaptureEvent, EventSize)> {
+    fn build_measured(&self, event: &Event) -> Option<(CaptureEvent, usize)> {
         let wire = build_event_at(event, self.clock.now_utc());
+        let Some(max) = self.lane.max_event_bytes else {
+            let total = measure_total(&wire);
+            return Some((wire, total));
+        };
         let size = measure_event(&wire);
-        if let Some(max) = self.lane.max_event_bytes {
-            if size.properties > max {
-                warn!(
-                    "posthog-rs: dropping event {:?} for {}: properties are {} bytes, over the {} byte limit",
-                    wire.event, self.lane.endpoint, size.properties, max
-                );
-                dec_len(&self.len, 1);
-                return None;
-            }
+        if size.properties > max {
+            warn!(
+                "posthog-rs: dropping event {:?} for {}: properties are {} bytes, over the {} byte limit",
+                wire.event, self.lane.endpoint, size.properties, max
+            );
+            dec_len(&self.len, 1);
+            return None;
         }
-        Some((wire, size))
+        Some((wire, size.total))
     }
 
     fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
@@ -2288,9 +2305,11 @@ mod tests {
             assert_eq!(ai.endpoint, Endpoint::CaptureAi);
             assert_eq!(ai.batch_bytes_target, Some(5 * 1024 * 1024));
             assert_eq!(ai.max_event_bytes, Some(8 * 1024 * 1024));
+            assert!(ai.build_on_admit);
             let analytics = LaneConfig::analytics();
             assert_eq!(analytics.endpoint, Endpoint::Capture);
-            assert_eq!(analytics.batch_bytes_target, None);
+            assert_eq!(analytics.batch_bytes_target, Some(5 * 1024 * 1024));
+            assert!(!analytics.build_on_admit);
             assert_eq!(analytics.max_event_bytes, None);
 
             // Each lane reads its own option; defaults are raw bodies, 10000 and
@@ -2618,6 +2637,61 @@ mod tests {
             handle.flush_blocking();
             mock.assert_calls(0);
             assert_eq!(handle.pending(), 0);
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn analytics_send_splits_by_bytes_in_order_and_ships_a_big_event_alone() {
+            // Target between 2S and 3S: one flush of [e1, e2, big, e3] sends
+            // [e1, e2], then [big] alone, then [e3]. Nothing goes out before the flush.
+            let server = MockServer::start();
+            let first = body_mock(
+                &server,
+                CAPTURE_PATH,
+                &["\"e1\"", "\"e2\""],
+                &["\"big\"", "\"e3\""],
+            );
+            let big = body_mock(&server, CAPTURE_PATH, &["\"big\""], &["\"e1\"", "\"e3\""]);
+            let last = body_mock(&server, CAPTURE_PATH, &["\"e3\""], &["\"e1\"", "\"big\""]);
+            let mut builder = options(server.base_url());
+            let size = wire_total(&sized_event("e1", 100), &mut builder);
+            let lane = LaneConfig {
+                batch_bytes_target: Some(2 * size + size / 2),
+                ..LaneConfig::analytics()
+            };
+            let handle = spawn(&mut builder, lane);
+            handle.enqueue(sized_event("e1", 100));
+            handle.enqueue(sized_event("e2", 100));
+            handle.enqueue(sized_event("big", 10 * size));
+            handle.enqueue(sized_event("e3", 100));
+            handle.tick();
+            first.assert_calls(0);
+            handle.flush_blocking();
+            first.assert_calls(1);
+            big.assert_calls(1);
+            last.assert_calls(1);
+            assert_eq!(handle.pending(), 0);
+            TransportHandle::close_all_blocking(&[&handle]);
+        }
+
+        #[test]
+        fn analytics_before_send_still_runs_at_send_time() {
+            let server = MockServer::start();
+            let mock = path_mock(&server, CAPTURE_PATH);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = calls.clone();
+            let mut builder = options(server.base_url());
+            builder.before_send(move |event| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Some(event)
+            });
+            let handle = spawn(&mut builder, LaneConfig::analytics());
+            handle.enqueue(Event::new("e1", "user-1"));
+            handle.tick();
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "not run when buffered");
+            handle.flush_blocking();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            mock.assert_calls(1);
             TransportHandle::close_all_blocking(&[&handle]);
         }
 
