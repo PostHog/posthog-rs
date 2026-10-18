@@ -31,7 +31,6 @@ tokio = { version = "1", features = [
     "time",
     "macros",
 ], optional = true }
-fastrand = "2"
 flate2 = "1.0"
 brotli = "9.0"
 zstd = "0.14"
