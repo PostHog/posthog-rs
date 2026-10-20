@@ -48,7 +48,7 @@ The SDK no longer sends `$lib_version__major`, `$lib_version__minor` or `$lib_ve
 
 Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog_rs::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size. The SDK drops an event over the backend's 8 MiB per-event limit locally, on the background lane and in the immediate variants. The immediate variants return that drop in the `CaptureSummary` with the detail `ai_event_too_big`. An event too large for the AI endpoint's request size limit gets HTTP 413 instead: `capture_ai_batch_immediate` returns `Error::BadRequest` and does not send the rest of the batch. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
 
-`capture` never reroutes by event name. Sending an AI event through `capture` worked on the V0 path because the backend diverted it; on the V1 analytics endpoint the backend will refuse it as a per-event `drop` once both lanes enforce their event sets, and it will not be ingested. Move those calls to `capture_ai`. Custom events that merely start with `$ai_` and are not PostHog AI event names stay on `capture`.
+`capture` never reroutes by event name. Send AI events with `capture_ai`. PostHog owns the `$ai_` prefix, so don't use it for your own events. For now the V1 analytics endpoint still accepts `$ai_` events sent through `capture`, but this is temporary, and large AI events always need `capture_ai`.
 
 The backend decides which names belong on the AI lane and reports a misrouted or oversize event as a per-event `drop` inside a `200`. That verdict reaches an `on_error` hook (`CaptureFailure::endpoint()` says which lane) or the returned `CaptureSummary` for the immediate variants; without a hook the SDK logs one aggregate warning per batch with drop and retry totals. To log every drop and retry reason, call `CaptureFailure::verdict_summary()` in an `on_error` hook; it returns one line such as `drop/invalid_options=2, retry/not_persisted=1`.
 
@@ -72,14 +72,13 @@ client.capture(event);
 
 Keys are strings and values are any JSON value. The SDK sends options as given, so a new option that PostHog adds needs no SDK upgrade. PostHog validates them: it ignores keys it does not know, converts common forms of a known key's value (for a boolean, `"yes"`, `"off"` or `0`), and drops the event if a known key has a value it cannot read. That drop reaches `on_error` as a per-event `drop` with the detail `invalid_options`. `before_send` hooks can read and change options with `Event::options`, `insert_option`, and `remove_option`.
 
-The legacy properties still work. The SDK moves each one into its option and removes it from `properties`:
+The legacy option properties, the `$`-prefixed properties legacy capture reads as settings, still work. The SDK moves each one into its option and removes it from `properties`:
 
-| Legacy property | Option |
+| Legacy option property | Option |
 | --- | --- |
 | `$process_person_profile` | `process_person_profile` |
 | `$cookieless_mode` | `cookieless_mode` |
 | `$ignore_sent_at` | `disable_skew_correction` |
-| `$product_tour_id` | `product_tour_id` |
 
 When both are set, the option wins. An option set to `null` counts as not set, so the legacy property applies.
 
