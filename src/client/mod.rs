@@ -535,17 +535,22 @@ mod tests {
         assert!(options.is_disabled());
     }
 
-    /// Build options and return them with every log line emitted while building.
-    fn build_logging(builder: &ClientOptionsBuilder) -> (ClientOptions, String) {
+    /// Run `f` and return its result with every log line it emitted on this thread.
+    pub(super) fn with_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
         let logs = Arc::new(Mutex::new(Vec::new()));
         let writer = logs.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .with_writer(move || LogWriter(writer.clone()))
             .finish();
-        let options = tracing::subscriber::with_default(subscriber, || builder.build().unwrap());
+        let result = tracing::subscriber::with_default(subscriber, f);
         let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        (options, logged)
+        (result, logged)
+    }
+
+    /// Build options and return them with every log line emitted while building.
+    fn build_logging(builder: &ClientOptionsBuilder) -> (ClientOptions, String) {
+        with_logs(|| builder.build().unwrap())
     }
 
     struct LogWriter(Arc<Mutex<Vec<u8>>>);
@@ -571,7 +576,10 @@ mod tests {
             let mut builder = ClientOptionsBuilder::default();
             builder.api_key(api_key.to_string());
             let (options, logged) = build_logging(&builder);
-            assert!(options.is_disabled(), "{api_key:?} must disable the client");
+            assert!(
+                options.is_disabled(),
+                "{expected:?} must disable the client"
+            );
             assert_eq!(logged.lines().count(), 1, "{logged}");
             assert!(logged.contains("ERROR"), "{logged}");
             assert!(logged.contains(expected), "{logged}");

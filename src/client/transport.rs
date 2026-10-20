@@ -1073,7 +1073,14 @@ impl Pipeline {
                     .into_iter()
                     .filter_map(|event| self.build_measured(&event))
                     .collect();
-                for chunk in chunk_by_bytes(measured, target) {
+                let mut chunks = chunk_by_bytes(measured, target).into_iter();
+                while let Some(chunk) = chunks.next() {
+                    if deadline.is_some_and(|d| self.clock.now() >= d) {
+                        let dropped = chunk.len() + chunks.map(|c| c.len()).sum::<usize>();
+                        warn!("posthog-rs: shutdown timeout reached; dropping {dropped} event(s)");
+                        dec_len(&self.len, dropped);
+                        return;
+                    }
                     self.send_prepared(chunk, historical_migration, deadline);
                 }
             }
@@ -1985,6 +1992,63 @@ mod tests {
             handle.pending(),
             0,
             "historical events abandoned under a zero shutdown timeout"
+        );
+    }
+
+    #[test]
+    fn shutdown_deadline_drops_the_remaining_byte_chunks() {
+        // A 1-byte target sends each event as its own request. The deadline
+        // passes while the first request is in flight, so the other chunks are
+        // dropped with one warning instead of being built into doomed requests.
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .delay(Duration::from_millis(500))
+                .json_body(serde_json::json!({ "results": {} }));
+        });
+        let clock = ManualClock::new();
+        let len = Arc::new(AtomicUsize::new(3));
+        let mut pipeline = Pipeline::new(
+            &options(server.base_url()).build().unwrap(),
+            LaneConfig {
+                batch_bytes_target: Some(1),
+                ..LaneConfig::analytics()
+            },
+            Arc::new(clock.clone()),
+            Arc::clone(&len),
+        )
+        .unwrap();
+        let events = vec![
+            Event::new("a", "user-1"),
+            Event::new("b", "user-1"),
+            Event::new("c", "user-1"),
+        ];
+        let deadline = clock.now() + Duration::from_secs(10);
+
+        let ((), logged) = crate::client::tests::with_logs(|| {
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let give_up = Instant::now() + Duration::from_secs(10);
+                    while mock.calls() == 0 && Instant::now() < give_up {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    clock.advance(Duration::from_secs(60));
+                });
+                pipeline.send_batch(events, false, Some(deadline));
+            })
+        });
+
+        mock.assert_calls(1);
+        assert_eq!(
+            len.load(Ordering::SeqCst),
+            0,
+            "dropped chunks leave nothing in flight"
+        );
+        assert_eq!(logged.lines().count(), 1, "{logged}");
+        assert!(
+            logged.contains("shutdown timeout reached; dropping 2 event(s)"),
+            "{logged}"
         );
     }
 

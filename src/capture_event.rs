@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::warn;
@@ -10,6 +10,20 @@ use crate::constants::{
     LEGACY_OPTION_PROPERTIES, SDK_INFO_PROPERTIES, SESSION_ID_PROP, WINDOW_ID_PROP,
 };
 use crate::event::Event;
+
+/// RFC 3339 UTC with 3, 6 or 9 fractional digits: the fewest that keep every
+/// non-zero digit, so finer caller or clock precision is never truncated.
+fn wire_timestamp(ts: DateTime<Utc>) -> String {
+    let nanos = ts.timestamp_subsec_nanos();
+    let precision = if nanos % 1_000_000 == 0 {
+        SecondsFormat::Millis
+    } else if nanos % 1_000 == 0 {
+        SecondsFormat::Micros
+    } else {
+        SecondsFormat::Nanos
+    };
+    ts.to_rfc3339_opts(precision, true)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureEvent {
@@ -52,10 +66,7 @@ impl CaptureEvent {
             properties.insert("$groups".into(), serde_json::Value::Object(groups));
         }
 
-        let timestamp = event
-            .timestamp()
-            .map(|ts| ts.and_utc().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
-            .unwrap_or_else(|| now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
+        let timestamp = wire_timestamp(event.timestamp().map_or(now, |ts| ts.and_utc()));
 
         let options = merge_options(event, &mut properties);
         for key in SDK_INFO_PROPERTIES {
@@ -211,14 +222,32 @@ mod tests {
     }
 
     #[test]
-    fn event_preserves_utc_timestamp_serialization() {
-        let mut event = Event::new("test_event", "user-1");
-        event
-            .set_timestamp(DateTime::parse_from_rfc3339("2023-01-01T10:00:00.123+03:00").unwrap())
-            .unwrap();
+    fn wire_timestamp_is_utc_and_keeps_sub_millisecond_precision() {
+        for (input, expected) in [
+            ("2023-01-01T10:00:00.123+03:00", "2023-01-01T07:00:00.123Z"),
+            ("2023-01-01T07:00:00Z", "2023-01-01T07:00:00.000Z"),
+            ("2023-01-01T07:00:00.123456Z", "2023-01-01T07:00:00.123456Z"),
+            (
+                "2023-01-01T07:00:00.123456789Z",
+                "2023-01-01T07:00:00.123456789Z",
+            ),
+            ("2023-01-01T07:00:00.000001Z", "2023-01-01T07:00:00.000001Z"),
+            ("2023-01-01T07:00:00.120000Z", "2023-01-01T07:00:00.120Z"),
+        ] {
+            let ts = DateTime::parse_from_rfc3339(input).unwrap();
+            let mut event = Event::new("test_event", "user-1");
+            event.set_timestamp(ts).unwrap();
+            assert_eq!(
+                CaptureEvent::from_event(&event).timestamp,
+                expected,
+                "caller {input}"
+            );
 
-        let wire = CaptureEvent::from_event(&event);
-        assert_eq!(wire.timestamp, "2023-01-01T07:00:00.123Z");
+            // A timestamp the SDK stamps from its clock keeps the same precision.
+            let stamped =
+                CaptureEvent::from_event_at(&Event::new("e", "u"), ts.with_timezone(&Utc));
+            assert_eq!(stamped.timestamp, expected, "clock {input}");
+        }
     }
 
     #[test]
