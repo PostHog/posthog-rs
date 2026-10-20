@@ -57,6 +57,8 @@ The backend decides which names belong on the AI lane and reports a misrouted or
 - The SDK assigns an event's uuid when you hand the event to `capture` or `capture_immediate`, not in `Event::new`. Capturing a cloned or reused `Event` twice now sends two uuids. In 0.x both copies shared one uuid, and capture V1 rejects a request that contains a uuid twice. A uuid set with `Event::set_uuid` is still sent as given on every capture.
 - `Event::set_timestamp` accepts timestamps in the future. In 0.x it returned `Error::InvalidTimestamp` for a timestamp more than 1 s ahead. PostHog clamps far-future timestamps, as it does for every other SDK. The method keeps its `Result` return type.
 - `Event::new` with an empty or whitespace-only distinct ID creates an anonymous event, as `Event::new_anon` does. In 0.x it sent the empty ID, and PostHog dropped the event.
+- PostHog drops an event whose distinct ID is over 200 UTF-8 bytes, with the per-event result `distinct_id_too_large`, which reaches `on_error` (or the `CaptureSummary` of an immediate method). 0.x sent events to legacy capture, which shortened the ID to 200 characters and kept the event.
+- `group_identify` sends `$<group_type>_<group_key>` as the distinct ID. If that is over 200 bytes, PostHog drops the event. To set a group with a longer key, capture a `$groupidentify` event yourself with `Event::new("$groupidentify", <your distinct ID>)` and the `$group_type`, `$group_key` and `$group_set` properties.
 
 ### Event options
 
