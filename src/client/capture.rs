@@ -286,6 +286,7 @@ fn measure_within_limit(
                     EventResult {
                         result: EventStatus::Drop,
                         details: Some(AI_EVENT_TOO_BIG.to_string()),
+                        duplicates_dropped: None,
                     },
                 );
                 return None;
@@ -394,6 +395,10 @@ pub(crate) fn count_results(resp: &CaptureResponse) -> HashMap<(String, Option<S
 
 /// O(n) consuming pass: records terminal results, returns only retry events.
 /// Events absent from `results` are silently dropped.
+///
+/// When a result carries `duplicates_dropped: n`, the first event with that
+/// uuid takes the result and the next `n` copies are terminal drops: neither
+/// resent nor recorded, and counted through the first copy's entry.
 pub(crate) fn process_batch_response(
     pending: Vec<CaptureEvent>,
     results: &HashMap<Uuid, EventResult>,
@@ -401,19 +406,23 @@ pub(crate) fn process_batch_response(
     is_final_attempt: bool,
 ) -> Vec<CaptureEvent> {
     let mut next = Vec::new();
+    // `HashMap::new` does not allocate, so batches without duplicates pay nothing.
+    let mut copies_seen: HashMap<Uuid, u32> = HashMap::new();
     for v1 in pending {
-        match results.get(&v1.uuid) {
-            Some(r) if r.result == EventStatus::Retry => {
-                if is_final_attempt {
-                    final_results.insert(v1.uuid, r.clone());
-                } else {
-                    next.push(v1);
-                }
+        let Some(r) = results.get(&v1.uuid) else {
+            continue;
+        };
+        if let Some(dropped) = r.duplicates_dropped {
+            let seen = copies_seen.entry(v1.uuid).or_insert(0);
+            *seen = seen.saturating_add(1);
+            if (1..=dropped).contains(&(*seen - 1)) {
+                continue;
             }
-            Some(r) => {
-                final_results.insert(v1.uuid, r.clone());
-            }
-            None => {}
+        }
+        if r.result == EventStatus::Retry && !is_final_attempt {
+            next.push(v1);
+        } else {
+            final_results.insert(v1.uuid, r.clone());
         }
     }
     next
@@ -687,6 +696,7 @@ mod tests {
         EventResult {
             result: status,
             details: details.map(String::from),
+            duplicates_dropped: None,
         }
     }
 
@@ -786,6 +796,62 @@ mod tests {
         let next = process_batch_response(vec![e.clone()], &results, &mut final_results, false);
         assert!(next.is_empty());
         assert!(final_results.is_empty());
+    }
+
+    /// The first copy of a uuid takes its result; the next `duplicates_dropped`
+    /// copies are terminal and never resent; copies past that count keep the
+    /// plain per-result handling.
+    #[test]
+    fn process_batch_duplicate_copies() {
+        use EventStatus::{Drop, Ok, Retry, Warning};
+        // (first copy's status, later copies, duplicates_dropped, final attempt,
+        //  events resent, finalized status of the uuid)
+        type Case = (
+            EventStatus,
+            usize,
+            u32,
+            bool,
+            &'static [&'static str],
+            Option<EventStatus>,
+        );
+        let cases: [Case; 7] = [
+            (Ok, 1, 1, false, &[], Some(Ok)),
+            (Drop, 2, 2, false, &[], Some(Drop)),
+            (Warning, 1, 1, false, &[], Some(Warning)),
+            (Retry, 2, 2, false, &["first"], None),
+            (Retry, 1, 1, true, &[], Some(Retry)),
+            (Ok, 2, 1, false, &[], Some(Ok)),
+            (Retry, 2, 1, false, &["first", "copy-2"], None),
+        ];
+        for (status, copies, dropped, is_final, resent, finalized) in cases {
+            let first = CaptureEvent {
+                event: "first".into(),
+                ..dummy_event()
+            };
+            let other = dummy_event();
+            let mut pending = vec![first.clone(), other.clone()];
+            pending.extend((1..=copies).map(|i| CaptureEvent {
+                event: format!("copy-{i}"),
+                ..first.clone()
+            }));
+            let mut result = event_result(status.clone(), Some("reason"));
+            result.duplicates_dropped = Some(dropped);
+            let results =
+                HashMap::from([(first.uuid, result), (other.uuid, event_result(Ok, None))]);
+            let mut final_results = HashMap::new();
+            let next = process_batch_response(pending, &results, &mut final_results, is_final);
+
+            let case = format!("{status:?} copies={copies} dropped={dropped} final={is_final}");
+            let next_names: Vec<&str> = next.iter().map(|e| e.event.as_str()).collect();
+            assert_eq!(next_names, resent, "{case}");
+            let entry = final_results.get(&first.uuid);
+            assert_eq!(entry.map(|r| r.result.clone()), finalized, "{case}");
+            if let Some(entry) = entry {
+                assert_eq!(entry.details.as_deref(), Some("reason"), "{case}");
+                assert_eq!(entry.duplicates_dropped, Some(dropped), "{case}");
+            }
+            assert_eq!(final_results[&other.uuid].result, Ok, "{case}");
+        }
     }
 
     // -- backoff schedule ----------------------------------------------------

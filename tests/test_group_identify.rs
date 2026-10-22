@@ -82,7 +82,7 @@ fn request_does_not_disable_person_processing(req: &HttpMockRequest) -> bool {
 }
 
 /// PostHog deduplicates on event UUID, so a constructor that reused one would
-/// have every group identify after the first silently dropped server-side.
+/// have every group identify after the first dropped server-side.
 fn request_has_two_distinct_event_uuids(req: &HttpMockRequest) -> bool {
     let Ok(body) = serde_json::from_slice::<Value>(req.body_ref()) else {
         return false;

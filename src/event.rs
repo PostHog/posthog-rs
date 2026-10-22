@@ -349,8 +349,9 @@ impl Event {
     /// Override the auto-generated UUID for this event.
     ///
     /// Useful for deduplication when re-importing historical data. Every
-    /// capture of an event with this uuid sends the same uuid, and PostHog
-    /// rejects a request that contains one uuid twice.
+    /// capture of an event with this uuid sends the same uuid. When one request
+    /// contains a uuid twice, PostHog keeps the first event and drops the later
+    /// copies, which the SDK reports with the reason `duplicate_event_uuid`.
     pub fn set_uuid(&mut self, uuid: Uuid) {
         self.uuid = Some(uuid);
     }

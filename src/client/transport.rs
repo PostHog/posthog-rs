@@ -34,7 +34,7 @@ use tracing::warn;
 use super::capture::{build_event_at, chunk_by_bytes, measure_event, measure_total};
 use super::common::{apply_on_error_hooks, preprocess_capture_event};
 use super::{CaptureCompression, CaptureFailure, ClientOptions, PostHogError};
-use crate::capture_event::CaptureEvent;
+use crate::capture_event::{duplicates_dropped, CaptureEvent};
 use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::Event;
@@ -1354,14 +1354,16 @@ impl Pipeline {
     }
 }
 
-/// Count events the V1 backend will not persist (`retry`/`drop` verdicts).
-/// `ok`/`warning` were delivered, so they are excluded from the lost tally.
+/// Count events the V1 backend will not persist (`retry`/`drop` verdicts and
+/// dropped duplicate copies). `ok`/`warning` were delivered, so they are
+/// excluded from the lost tally.
 fn undelivered_results(results: &HashMap<Uuid, crate::capture_event::EventResult>) -> usize {
     use crate::capture_event::EventStatus;
     results
         .values()
         .filter(|r| matches!(r.result, EventStatus::Retry | EventStatus::Drop))
         .count()
+        + duplicates_dropped(results)
 }
 
 /// Describe undelivered events by outcome for the no-hook log line, for example
@@ -1373,7 +1375,10 @@ fn undelivered_totals(results: &HashMap<Uuid, crate::capture_event::EventResult>
         (EventStatus::Drop, "dropped"),
         (EventStatus::Retry, "out of retries"),
     ] {
-        let n = results.values().filter(|r| r.result == status).count();
+        let mut n = results.values().filter(|r| r.result == status).count();
+        if status == EventStatus::Drop {
+            n += duplicates_dropped(results);
+        }
         if n > 0 {
             parts.push(format!("{n} {label}"));
         }
@@ -1384,6 +1389,7 @@ fn undelivered_totals(results: &HashMap<Uuid, crate::capture_event::EventResult>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::on_error::duplicate_verdict;
     use crate::client::ClientOptionsBuilder;
     use httpmock::prelude::*;
 
@@ -2133,20 +2139,30 @@ mod tests {
         let mk = |result| EventResult {
             result,
             details: None,
+            duplicates_dropped: None,
         };
         let results = HashMap::from([
             (Uuid::now_v7(), mk(EventStatus::Ok)),
             (Uuid::now_v7(), mk(EventStatus::Warning)),
             (Uuid::now_v7(), mk(EventStatus::Retry)),
             (Uuid::now_v7(), mk(EventStatus::Drop)),
+            duplicate_verdict(EventStatus::Ok, 2),
+            duplicate_verdict(EventStatus::Drop, 1),
         ]);
-        assert_eq!(undelivered_results(&results), 2);
+        // 2 lost verdicts, the drop that also had a duplicate, and 3 dropped copies.
+        assert_eq!(undelivered_results(&results), 6);
     }
 
     #[test]
     fn undelivered_totals_counts_drops_and_retries_only() {
-        use crate::capture_event::EventStatus::{Drop, Ok, Retry, Warning};
-        let cases: [(&[(crate::capture_event::EventStatus, Option<&str>)], &str); 4] = [
+        use crate::capture_event::EventStatus::{self, Drop, Ok, Retry, Warning};
+        // (verdicts, a verdict with dropped duplicate copies, expected)
+        type Case<'a> = (
+            &'a [(EventStatus, Option<&'a str>)],
+            Option<(EventStatus, u32)>,
+            &'a str,
+        );
+        let cases: [Case; 6] = [
             (
                 &[
                     (Drop, Some("invalid_options")),
@@ -2155,17 +2171,19 @@ mod tests {
                     (Ok, None),
                     (Warning, Some("person_processing_disabled")),
                 ],
+                None,
                 "2 dropped, 1 out of retries",
             ),
-            (&[(Drop, Some("invalid_options"))], "1 dropped"),
-            (&[(Retry, Some("not_persisted"))], "1 out of retries"),
-            (&[(Ok, None)], ""),
+            (&[(Drop, Some("invalid_options"))], None, "1 dropped"),
+            (&[(Retry, Some("not_persisted"))], None, "1 out of retries"),
+            (&[(Ok, None)], None, ""),
+            (&[(Ok, None)], Some((Ok, 2)), "2 dropped"),
+            (&[], Some((Retry, 1)), "1 dropped, 1 out of retries"),
         ];
-        for (entries, expected) in cases {
-            assert_eq!(
-                undelivered_totals(&crate::client::on_error::verdicts(entries)),
-                expected
-            );
+        for (entries, duplicate, expected) in cases {
+            let mut results = crate::client::on_error::verdicts(entries);
+            results.extend(duplicate.map(|(status, n)| duplicate_verdict(status, n)));
+            assert_eq!(undelivered_totals(&results), expected);
         }
     }
 
@@ -2282,6 +2300,60 @@ mod tests {
         assert_eq!(*lost, 2, "counts the dropped event and the final retry");
         assert_eq!(*results, 3, "all verdicts reported, including the ok");
         assert_eq!(summary, "drop/not_persisted=1, retry/not_persisted=1");
+    }
+
+    #[test]
+    fn capture_failure_2xx_counts_dropped_duplicate_copies() {
+        // Capture kept the first of two events sharing a uuid and dropped the
+        // second: the hook fires once for the dropped copy.
+        let uuid = Uuid::now_v7();
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({
+                    "results": { uuid.to_string(): { "result": "ok", "duplicates_dropped": 1 } }
+                }));
+        });
+
+        let recorded = Arc::new(Mutex::new(Vec::<(bool, usize, String)>::new()));
+        let sink = recorded.clone();
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .on_error(move |failure| {
+                    if let PostHogError::Capture(c) = failure {
+                        sink.lock().unwrap_or_else(|p| p.into_inner()).push((
+                            c.error().is_some(),
+                            c.event_count(),
+                            c.verdict_summary(),
+                        ));
+                    }
+                })
+                .build()
+                .unwrap(),
+            Arc::new(ManualClock::new()),
+        );
+
+        for name in ["first", "copy"] {
+            let mut event = Event::new(name, "user-1");
+            event.set_uuid(uuid);
+            handle.enqueue(event);
+        }
+        handle.flush_blocking();
+        assert_eq!(
+            handle.pending(),
+            0,
+            "the dropped copy leaves the queue count"
+        );
+        handle.shutdown_blocking();
+
+        mock.assert_hits(1);
+        let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(
+            *recorded,
+            [(false, 1, "drop/duplicate_event_uuid=1".to_string())]
+        );
     }
 
     // -- AI lane -------------------------------------------------------------

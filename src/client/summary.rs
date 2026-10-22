@@ -47,7 +47,7 @@ impl CaptureSummary {
     ///
     /// `submitted` minus the events with an `ok`/`warning` verdict, so it counts
     /// both `drop`/`retry` verdicts and any submitted event the backend omitted
-    /// from its response.
+    /// from its response, including copies dropped as duplicates.
     pub fn not_persisted(&self) -> usize {
         let persisted = self
             .results
@@ -73,6 +73,9 @@ impl CaptureSummary {
     /// (`ok`/`warning`) and unpersisted (`drop`/`retry`) verdicts; filter by
     /// [`EventStatus`](crate::EventStatus) to isolate failures. May omit events
     /// the backend did not report on — see [`not_persisted`](Self::not_persisted).
+    ///
+    /// An entry's [`duplicates_dropped`](EventResult::duplicates_dropped) counts
+    /// lost copies that shared its uuid; they have no entry of their own.
     pub fn event_results(&self) -> &HashMap<Uuid, EventResult> {
         &self.results
     }

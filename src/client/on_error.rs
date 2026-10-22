@@ -28,7 +28,9 @@ use crate::error::Error;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::capture_event::{CaptureErrorResponse, EventResult, EventStatus};
+use crate::capture_event::{
+    duplicates_dropped, CaptureErrorResponse, EventResult, EventStatus, DUPLICATE_EVENT_UUID,
+};
 use crate::endpoints::Endpoint;
 
 type OnErrorFn = dyn Fn(&PostHogError<'_>) + Send + Sync + 'static;
@@ -127,6 +129,10 @@ impl<'a> CaptureFailure<'a> {
 
     /// Number of events this failure dropped (lost).
     #[doc = "\nCounts only undelivered events (`retry`/`drop`), including any finalized on\nearlier attempts. This can be smaller than [`event_results`](Self::event_results)`.len()`,\nwhich also reports persisted `ok`/`warning` verdicts — filter by status before\ntreating an entry as lost."]
+    ///
+    /// It also counts each copy capture dropped because an earlier event in the
+    /// same request had its uuid, as reported by an entry's
+    /// [`duplicates_dropped`](EventResult::duplicates_dropped).
     pub fn event_count(&self) -> usize {
         self.event_count
     }
@@ -153,13 +159,17 @@ impl<'a> CaptureFailure<'a> {
     /// when [`error`](Self::error) is `None` (a `2xx` where events weren't
     /// persisted after retries); possibly partial on a batch-level failure
     /// (only verdicts collected from earlier attempts).
+    ///
+    /// An entry's [`duplicates_dropped`](EventResult::duplicates_dropped) counts
+    /// lost copies that shared its uuid; they have no entry of their own.
     pub fn event_results(&self) -> &HashMap<Uuid, EventResult> {
         self.results
     }
 
     /// One line with every `drop` and `retry` reason in the batch and its count, drops first
     /// and most frequent first, for example `drop/invalid_options=2, retry/not_persisted=1`,
-    /// or an empty string when nothing was lost.
+    /// or an empty string when nothing was lost. Dropped duplicate copies show as
+    /// `drop/duplicate_event_uuid`.
     ///
     /// Reasons come from the server, so the summary strips control characters and line
     /// separators, cuts each reason to 64 characters, and shows a missing one as `unspecified`.
@@ -199,6 +209,7 @@ impl<'a> CaptureFailure<'a> {
 const MAX_SUMMARY_REASON_CHARS: usize = 64;
 
 fn verdict_summary(results: &HashMap<Uuid, EventResult>) -> String {
+    let duplicates = duplicates_dropped(results);
     let mut entries = Vec::new();
     for (status, label) in [(EventStatus::Drop, "drop"), (EventStatus::Retry, "retry")] {
         let mut counts: HashMap<String, usize> = HashMap::new();
@@ -206,6 +217,9 @@ fn verdict_summary(results: &HashMap<Uuid, EventResult>) -> String {
             *counts
                 .entry(summary_reason(r.details.as_deref()))
                 .or_insert(0) += 1;
+        }
+        if status == EventStatus::Drop && duplicates > 0 {
+            *counts.entry(DUPLICATE_EVENT_UUID.to_string()).or_insert(0) += duplicates;
         }
         let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -310,10 +324,24 @@ pub(crate) fn verdicts(entries: &[(EventStatus, Option<&str>)]) -> HashMap<Uuid,
                 EventResult {
                     result: result.clone(),
                     details: details.map(str::to_string),
+                    duplicates_dropped: None,
                 },
             )
         })
         .collect()
+}
+
+/// A verdict whose first copy got `result` while capture dropped `dropped` later copies.
+#[cfg(test)]
+pub(crate) fn duplicate_verdict(result: EventStatus, dropped: u32) -> (Uuid, EventResult) {
+    (
+        Uuid::now_v7(),
+        EventResult {
+            result,
+            details: None,
+            duplicates_dropped: Some(dropped),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -339,18 +367,20 @@ mod tests {
             (Ok, None),
             (Warning, Some("person_processing_disabled")),
         ]);
+        let mut results = verdicts(&entries);
+        results.extend([duplicate_verdict(Ok, 2), duplicate_verdict(Drop, 1)]);
         assert_eq!(
-            verdict_summary(&verdicts(&entries)),
-            "drop/r2=3, drop/r4=2, drop/r1=1, drop/r3=1, drop/r5=1, drop/r6=1, retry/not_persisted=1"
+            verdict_summary(&results),
+            "drop/duplicate_event_uuid=3, drop/r2=3, drop/r4=2, drop/r1=1, drop/r3=1, drop/r5=1, \
+             drop/r6=1, drop/unspecified=1, retry/not_persisted=1"
         );
     }
 
     #[test]
     fn verdict_summary_is_empty_when_nothing_was_lost() {
-        assert_eq!(
-            verdict_summary(&verdicts(&[(Ok, None), (Warning, None)])),
-            ""
-        );
+        let mut results = verdicts(&[(Ok, None), (Warning, None)]);
+        results.extend([duplicate_verdict(Ok, 0)]);
+        assert_eq!(verdict_summary(&results), "");
     }
 
     #[test]

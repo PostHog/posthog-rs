@@ -10,6 +10,54 @@
 //! Exactly one of the two modules below compiles per feature combo:
 //! async XOR blocking.
 
+use httpmock::prelude::*;
+use httpmock::Mock;
+use posthog_rs::{CaptureSummary, Event, EventStatus};
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+/// Two events sharing `uuid`. Capture answers the first request with a `retry`
+/// for the kept first copy and one dropped duplicate, and the second request
+/// only when it resends the first copy alone.
+fn duplicate_copies_retried_once(server: &MockServer, uuid: Uuid) -> (Vec<Event>, [Mock<'_>; 2]) {
+    let first_attempt = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-attempt", "1");
+        then.status(200).json_body(json!({ "results": {
+            uuid.to_string(): { "result": "retry", "details": "not_persisted", "duplicates_dropped": 1 }
+        } }));
+    });
+    let resend = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-attempt", "2")
+            .matches(|request| {
+                let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
+                let batch = body["batch"].as_array().unwrap();
+                batch.len() == 1 && batch[0]["event"] == "first"
+            });
+        then.status(200)
+            .json_body(json!({ "results": { uuid.to_string(): { "result": "ok" } } }));
+    });
+    let events = ["first", "copy"].map(|name| {
+        let mut event = Event::new(name, "user-1");
+        event.set_uuid(uuid);
+        event
+    });
+    (Vec::from(events), [first_attempt, resend])
+}
+
+/// Both copies were submitted; the kept one was persisted and the dropped one was not.
+fn assert_duplicate_copy_not_persisted(summary: &CaptureSummary, mocks: &[Mock<'_>], uuid: Uuid) {
+    for mock in mocks {
+        mock.assert_hits(1);
+    }
+    assert_eq!(summary.submitted(), 2);
+    assert_eq!(summary.not_persisted(), 1);
+    assert_eq!(summary.event_results()[&uuid].result, EventStatus::Ok);
+}
+
 // ---------------------------------------------------------------------------
 // Async capture
 // ---------------------------------------------------------------------------
@@ -184,6 +232,17 @@ mod async_capture {
         );
         assert!(summary.all_persisted());
         assert_eq!(summary.not_persisted(), 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_duplicate_copy_is_not_resent_or_persisted() {
+        let server = MockServer::start();
+        let uuid = uuid::Uuid::now_v7();
+        let (events, mocks) = super::duplicate_copies_retried_once(&server, uuid);
+
+        let client = capture_client(server.base_url()).await;
+        let summary = client.capture_batch_immediate(events, false).await.unwrap();
+        super::assert_duplicate_copy_not_persisted(&summary, &mocks, uuid);
     }
 
     #[tokio::test]
@@ -386,6 +445,17 @@ mod blocking {
         mock.assert_hits(1);
         assert_eq!(summary.not_persisted(), 1);
         assert!(!summary.all_persisted());
+    }
+
+    #[test]
+    fn dropped_duplicate_copy_is_not_resent_or_persisted() {
+        let server = MockServer::start();
+        let uuid = uuid::Uuid::now_v7();
+        let (events, mocks) = super::duplicate_copies_retried_once(&server, uuid);
+
+        let client = capture_client(server.base_url());
+        let summary = client.capture_batch_immediate(events, false).unwrap();
+        super::assert_duplicate_copy_not_persisted(&summary, &mocks, uuid);
     }
 
     #[test]

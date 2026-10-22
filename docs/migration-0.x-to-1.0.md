@@ -36,7 +36,7 @@ All event-producing SDK paths now use the same capture endpoint, including error
 
 ### Event IDs
 
-The SDK gives every event a UUIDv7 `uuid` and every request a UUIDv7 request ID. If you set your own with `Event::set_uuid`, keep it unique. PostHog rejects the whole request with HTTP 400 `duplicate_event_uuid` when two events in it share a `uuid`, and the SDK does not check for this.
+The SDK gives every event a UUIDv7 `uuid` and every request a UUIDv7 request ID. If you set your own with `Event::set_uuid`, keep it unique. When two events in one request share a `uuid`, PostHog keeps the first and drops the later copies. The SDK reports each dropped copy through `on_error` and `CaptureSummary` with the reason `duplicate_event_uuid`. An entry's `EventResult::duplicates_dropped` counts the copies dropped with it.
 
 ### SDK identity
 
