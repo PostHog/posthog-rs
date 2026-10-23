@@ -78,3 +78,45 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and test instructions.
 ## Releasing
 
 See [RELEASING.md](RELEASING.md).
+
+## Application HTTP context
+
+With the `async-client` feature, use `TracingHeadersClient` to pass the current request's
+analytics IDs to selected application hosts. This is separate from event ingestion.
+
+```rust
+use posthog_rs::{RequestContext, TracingHeadersClient};
+
+async fn example() -> Result<(), reqwest::Error> {
+    let http = TracingHeadersClient::new(
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)),
+        ["api.example.com"],
+    )?;
+    let request = http.client().post("https://api.example.com/work")
+        .body("application payload").build()?;
+    let response = RequestContext::new().distinct_id("person").session_id("session")
+        .scope(http.execute(request)).await?;
+    Ok(())
+}
+```
+
+Build requests with `http.client()`, then send them with `http.execute(request)`.
+Calling reqwest's `send` directly does not add context. The helper reads context when
+the execute future runs, so each request uses the active IDs. A spawned task needs
+an explicit `RequestContext::scope` with the context it must carry.
+
+Host entries match exactly after trimming and case normalization. Use hostnames only,
+without schemes, ports, paths, or wildcards. The helper replaces stale PostHog headers
+on matched requests, omits missing or invalid IDs, and leaves other requests unchanged.
+It does not create IDs. Do not set PostHog tracing headers as reqwest client default
+headers: those application-owned defaults can apply to any host.
+
+This opt-in client **disables automatic redirects**, including same-host redirects.
+It returns the original redirect response. This prevents analytics IDs from following
+a redirect to another host. If the application follows a redirect, build a new request
+for the destination and pass it to `execute` to check the host again. Use a separate
+client for automatic redirects. Other builder settings and request fields are retained.
+The helper returns normal HTTP responses and reqwest errors to the caller.
+
+This integration supports asynchronous reqwest 0.13 requests. It does not install a
+global client, change an existing application client, or add OpenTelemetry span support.
