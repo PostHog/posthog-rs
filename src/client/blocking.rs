@@ -556,6 +556,10 @@ impl Client {
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureSummary, Error> {
+        let mut events = events;
+        for event in &mut events {
+            crate::request_context::apply_current_context(event);
+        }
         if self.options.is_disabled() || events.is_empty() {
             return Ok(CaptureSummary::default());
         }
@@ -1083,6 +1087,17 @@ impl Client {
             &group_type_mapping,
         )
         .map_err(|e| Error::InconclusiveMatch(e.message))
+    }
+
+    /// Uses this context's identity and pins defaults for later flag access events.
+    pub fn evaluate_flags_with_context(
+        &self,
+        context: &crate::RequestContext,
+        options: EvaluateFlagsOptions,
+    ) -> Result<FeatureFlagEvaluations, Error> {
+        let mut flags = self.evaluate_flags(context.get_distinct_id().unwrap_or(""), options)?;
+        flags.request_context = context.clone();
+        Ok(flags)
     }
 
     /// Evaluate feature flags for `distinct_id`, returning a

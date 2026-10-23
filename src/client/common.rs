@@ -200,6 +200,7 @@ pub(super) fn flag_called_event(
     if is_server {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
+    params.context.apply_to_event(&mut event);
     Some(event)
 }
 
@@ -379,6 +380,7 @@ mod tests {
             disable_geoip,
             properties,
             minimal: false,
+            context: crate::RequestContext::default(),
         }
     }
 

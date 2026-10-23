@@ -100,6 +100,10 @@ mod feature_flag_evaluations;
 mod feature_flags;
 mod global;
 mod local_evaluation;
+mod request_context;
+#[cfg(feature = "tower")]
+pub mod tower;
+pub use request_context::RequestContext;
 
 // Public interface - any change to this is breaking!
 // Client

@@ -399,8 +399,8 @@ fn build_panic_event(
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct CaptureExceptionOptions {
-    distinct_id: Option<String>,
-    properties: Vec<(String, Value)>,
+    pub(crate) distinct_id: Option<String>,
+    pub(crate) properties: Vec<(String, Value)>,
     groups: Vec<(String, String)>,
     trace_context: Option<TraceContext>,
     fingerprint: Option<String>,
@@ -478,6 +478,10 @@ pub(crate) fn build_exception_event<E>(
 where
     E: StdError + ?Sized,
 {
+    let options = match crate::RequestContext::current() {
+        Some(context) => context.exception_options(options),
+        None => options,
+    };
     let CaptureExceptionOptions {
         distinct_id,
         properties,

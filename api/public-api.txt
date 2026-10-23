@@ -4,6 +4,20 @@
 # Test-only harness features are omitted.
 
 pub mod posthog_rs
+pub mod posthog_rs::tower
+pub struct posthog_rs::tower::PostHogLayer
+impl posthog_rs::tower::PostHogLayer
+pub fn posthog_rs::tower::PostHogLayer::new() -> Self
+impl<S> tower_layer::Layer<S> for posthog_rs::tower::PostHogLayer
+pub type posthog_rs::tower::PostHogLayer::Service = posthog_rs::tower::PostHogService<S>
+pub fn posthog_rs::tower::PostHogLayer::layer(&self, S) -> Self::Service
+pub struct posthog_rs::tower::PostHogService<S>
+impl<S, B> tower_service::Service<http::request::Request<B>> for posthog_rs::tower::PostHogService<S> where S: tower_service::Service<http::request::Request<B>> + core::clone::Clone + core::marker::Send + 'static, <S as tower_service::Service>::Future: core::marker::Send, B: core::marker::Send + 'static
+pub type posthog_rs::tower::PostHogService<S>::Error = <S as tower_service::Service<http::request::Request<B>>>::Error
+pub type posthog_rs::tower::PostHogService<S>::Future = core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<<posthog_rs::tower::PostHogService<S> as tower_service::Service<http::request::Request<B>>>::Response, <posthog_rs::tower::PostHogService<S> as tower_service::Service<http::request::Request<B>>>::Error>> + core::marker::Send)>>
+pub type posthog_rs::tower::PostHogService<S>::Response = <S as tower_service::Service<http::request::Request<B>>>::Response
+pub fn posthog_rs::tower::PostHogService<S>::call(&mut self, http::request::Request<B>) -> Self::Future
+pub fn posthog_rs::tower::PostHogService<S>::poll_ready(&mut self, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), Self::Error>>
 pub enum posthog_rs::CaptureCompression
 pub posthog_rs::CaptureCompression::Br
 pub posthog_rs::CaptureCompression::Deflate
@@ -134,6 +148,7 @@ pub async fn posthog_rs::Client::capture_exception_with<E>(&self, &E, posthog_rs
 pub async fn posthog_rs::Client::capture_immediate(&self, posthog_rs::Event) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
 pub fn posthog_rs::Client::evaluate_feature_flag_locally(&self, &posthog_rs::FeatureFlag, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::Error>
 pub async fn posthog_rs::Client::evaluate_flags<S: core::convert::Into<alloc::string::String>>(&self, S, posthog_rs::EvaluateFlagsOptions) -> core::result::Result<posthog_rs::FeatureFlagEvaluations, posthog_rs::Error>
+pub async fn posthog_rs::Client::evaluate_flags_with_context(&self, &posthog_rs::RequestContext, posthog_rs::EvaluateFlagsOptions) -> core::result::Result<posthog_rs::FeatureFlagEvaluations, posthog_rs::Error>
 pub async fn posthog_rs::Client::flush(&self)
 pub async fn posthog_rs::Client::get_feature_flag<K: core::convert::Into<alloc::string::String>, D: core::convert::Into<alloc::string::String>>(&self, K, D, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>>) -> core::result::Result<core::option::Option<posthog_rs::FlagValue>, posthog_rs::Error>
 pub async fn posthog_rs::Client::get_feature_flag_payload<K: core::convert::Into<alloc::string::String>, D: core::convert::Into<alloc::string::String>>(&self, K, D) -> core::result::Result<core::option::Option<serde_json::value::Value>, posthog_rs::Error>
@@ -358,6 +373,19 @@ pub posthog_rs::Property::key: alloc::string::String
 pub posthog_rs::Property::operator: alloc::string::String
 pub posthog_rs::Property::property_type: core::option::Option<alloc::string::String>
 pub posthog_rs::Property::value: serde_json::value::Value
+pub struct posthog_rs::RequestContext
+impl posthog_rs::RequestContext
+pub fn posthog_rs::RequestContext::apply_to_event(&self, &mut posthog_rs::Event)
+pub fn posthog_rs::RequestContext::current() -> core::option::Option<Self>
+pub fn posthog_rs::RequestContext::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::RequestContext::event(&self, impl core::convert::Into<alloc::string::String>) -> posthog_rs::Event
+pub fn posthog_rs::RequestContext::exception_options(&self, posthog_rs::CaptureExceptionOptions) -> posthog_rs::CaptureExceptionOptions
+pub fn posthog_rs::RequestContext::get_distinct_id(&self) -> core::option::Option<&str>
+pub fn posthog_rs::RequestContext::get_session_id(&self) -> core::option::Option<&str>
+pub fn posthog_rs::RequestContext::new() -> Self
+pub fn posthog_rs::RequestContext::property(self, impl core::convert::Into<alloc::string::String>, impl serde_core::ser::Serialize) -> core::result::Result<Self, posthog_rs::Error>
+pub async fn posthog_rs::RequestContext::scope<F: core::future::future::Future>(self, F) -> <F as core::future::future::Future>::Output
+pub fn posthog_rs::RequestContext::session_id(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub struct posthog_rs::TraceContext
 impl posthog_rs::TraceContext
 pub fn posthog_rs::TraceContext::new<T: core::convert::Into<alloc::string::String>, S: core::convert::Into<alloc::string::String>>(T, S) -> Self

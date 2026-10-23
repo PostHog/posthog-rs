@@ -1601,6 +1601,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 name = "posthog-rs"
 version = "0.27.0"
 dependencies = [
+ "axum",
  "backtrace",
  "brotli",
  "chrono",
@@ -1611,6 +1612,7 @@ dependencies = [
  "findshlibs",
  "flate2",
  "futures",
+ "http",
  "httpmock",
  "os_info",
  "regex",
@@ -1620,6 +1622,9 @@ dependencies = [
  "serde_json",
  "sha1",
  "tokio",
+ "tower",
+ "tower-layer",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
  "uuid",
