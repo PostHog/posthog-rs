@@ -2,6 +2,8 @@
 
 Version 1.0 makes the V1 analytics endpoint the SDK's only capture path and removes APIs that were already deprecated in 0.x. This guide lists the code changes 1.0 needs and the behavior that differs from 0.x.
 
+<!-- TODO(capture-v1): when the public capture v1 SDK upgrade guide is published (PostHog/posthog.com#21386), link it here for details on options, limits and per-event results. -->
+
 ## Cargo features
 
 Remove `capture-v1` from your dependency features. Capture no longer needs a feature flag.
