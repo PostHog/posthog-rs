@@ -15,6 +15,10 @@ const NAMED_CAPTURE_PATTERNS: [&str; 8] = [
     "(?P<name>a)",
 ];
 
+const SERVICE_VALID_NATIVE_SYNTAX_PATTERNS: [&str; 8] = [
+    "(?ii:a)", "(?iim:a)", "(?ii)a", "(?i-i:a)", "(?-ii:a)", r"\é", r"[\é]", r"\😀",
+];
+
 fn definitions(pattern: &str, operator: &str) -> LocalEvaluationResponse {
     serde_json::from_value(json!({
         "flags": [{"key": "regex-flag", "active": true, "filters": {"groups": [{
@@ -110,9 +114,37 @@ fn regex_compatibility_named_captures_are_inconclusive() {
 }
 
 #[test]
+fn regex_compatibility_service_valid_native_syntax_errors_are_inconclusive() {
+    for pattern in SERVICE_VALID_NATIVE_SYNTAX_PATTERNS {
+        for operator in ["regex", "not_regex"] {
+            for input in ["a", "é", "😀", "z"] {
+                for _ in 0..2 {
+                    assert!(
+                        evaluate(pattern, operator, json!(input)).is_err(),
+                        "{} {:?} {:?}",
+                        operator,
+                        pattern,
+                        input
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn regex_compatibility_invalid_is_false_for_both_operators() {
     for operator in ["regex", "not_regex"] {
-        for pattern in ["[", "(", "*", "?*", r"\q", "a{2,1}", "a{0,4294967296}"] {
+        for pattern in [
+            "[",
+            "(",
+            "*",
+            "?*",
+            r"\q",
+            "a{2,1}",
+            "a{0,4294967296}",
+            "(?--i:a)",
+        ] {
             for input in [json!("value"), json!("é"), Value::Null] {
                 assert_eq!(
                     evaluate(pattern, operator, input).unwrap(),
@@ -134,6 +166,11 @@ fn regex_compatibility_shared_patterns_stay_local() {
             ("^pro$", json!("PRO"), false),
             ("(?i)^pro$", json!("PRO"), true),
             ("(?i:pro)", json!("PRO"), true),
+            ("(?im:^pro$)", json!("PRO"), true),
+            ("^é$", json!("é"), true),
+            ("^[é]$", json!("é"), true),
+            (r"^\\é$", json!(r"\é"), true),
+            (r"^\(\?ii:a\)$", json!("(?ii:a)"), true),
             (r"^\d+$", json!("١"), true),
             (r"^\w+$", json!("é"), true),
             (r"^\s$", json!("\u{feff}"), false),
@@ -184,7 +221,10 @@ fn regex_compatibility_compilation_size_failure_is_inconclusive() {
 
 #[test]
 fn regex_compatibility_cohort_negation_preserves_inconclusive() {
-    for pattern in std::iter::once("a(?=b)").chain(NAMED_CAPTURE_PATTERNS.iter().copied()) {
+    for pattern in std::iter::once("a(?=b)")
+        .chain(NAMED_CAPTURE_PATTERNS.iter().copied())
+        .chain(SERVICE_VALID_NATIVE_SYNTAX_PATTERNS.iter().copied())
+    {
         for operator in ["regex", "not_regex"] {
             for negation in [false, true] {
                 let mut response = serde_json::to_value(definitions(pattern, operator)).unwrap();
@@ -225,7 +265,10 @@ async fn regex_compatibility_public_client_fallback_and_local_only() {
     use httpmock::prelude::*;
     use posthog_rs::{ClientOptionsBuilder, EvaluateFlagsOptions};
     use std::time::Duration;
-    for pattern in std::iter::once("a(?=b)").chain(NAMED_CAPTURE_PATTERNS.iter().copied()) {
+    for pattern in std::iter::once("a(?=b)")
+        .chain(NAMED_CAPTURE_PATTERNS.iter().copied())
+        .chain(SERVICE_VALID_NATIVE_SYNTAX_PATTERNS.iter().copied())
+    {
         let server = MockServer::start();
         let mut body = serde_json::to_value(definitions(pattern, "regex")).unwrap();
         for (key, pattern, operator) in [

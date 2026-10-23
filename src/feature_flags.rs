@@ -39,23 +39,26 @@ fn regex_requires_remote_evaluation(pattern: &str) -> bool {
         if character == b'\\' {
             index += 1;
             if let Some(&escaped) = bytes.get(index) {
-                if matches!(
-                    escaped,
-                    b'0'..=b'9'
-                        | b'b'
-                        | b'B'
-                        | b'h'
-                        | b'H'
-                        | b'k'
-                        | b'g'
-                        | b'K'
-                        | b'G'
-                        | b'O'
-                        | b'Z'
-                        | b'e'
-                        | b'<'
-                        | b'>'
-                ) || (class_depth > 0 && matches!(escaped, b'A' | b'z'))
+                // The service accepts escaped Unicode literals that regex rejects.
+                if !escaped.is_ascii()
+                    || matches!(
+                        escaped,
+                        b'0'..=b'9'
+                            | b'b'
+                            | b'B'
+                            | b'h'
+                            | b'H'
+                            | b'k'
+                            | b'g'
+                            | b'K'
+                            | b'G'
+                            | b'O'
+                            | b'Z'
+                            | b'e'
+                            | b'<'
+                            | b'>'
+                    )
+                    || (class_depth > 0 && matches!(escaped, b'A' | b'z'))
                 {
                     return true;
                 }
@@ -84,17 +87,29 @@ fn regex_requires_remote_evaluation(pattern: &str) -> bool {
                     if bytes.get(index + 1) == Some(&b'?') {
                         index += 2;
                         let mut disabled = false;
+                        let mut seen_flags = 0u8;
                         while let Some(&flag) = bytes.get(index) {
-                            match flag {
-                                b'i' | b'm' | b's' | b'U' => {}
-                                b'u' if !disabled => {}
-                                b'-' => disabled = true,
+                            let flag_bit = match flag {
+                                b'i' => 1,
+                                b'm' => 2,
+                                b's' => 4,
+                                b'U' => 8,
+                                b'u' if !disabled => 16,
+                                b'-' => {
+                                    disabled = true;
+                                    0
+                                }
                                 b':' | b')' => break,
                                 // In particular, extended mode changes tokenization and
                                 // native CRLF/disabled-Unicode flags aren't service flags.
                                 // Named-capture naming/uniqueness rules also differ by engine.
                                 _ => return true,
+                            };
+                            // fancy-regex accepts repeated flags that regex rejects.
+                            if seen_flags & flag_bit != 0 {
+                                return true;
                             }
+                            seen_flags |= flag_bit;
                             index += 1;
                         }
                         if bytes.get(index) == Some(&b')')
@@ -166,18 +181,23 @@ fn get_cached_regex(pattern: &str) -> Result<Option<Regex>, InconclusiveMatchErr
     let mut cache_guard = cache
         .lock()
         .map_err(|_| InconclusiveMatchError::new("Regex cache mutex poisoned"))?;
-    let cached = cache_guard.entry(pattern.to_string()).or_insert_with(|| {
-        if regex_requires_remote_evaluation(pattern) {
-            return CachedRegex::Inconclusive;
-        }
-        match Regex::new(pattern) {
-            Ok(regex) => CachedRegex::Compiled(regex),
-            Err(regex::Error::Syntax(_)) => CachedRegex::Invalid,
-            Err(_) => CachedRegex::Inconclusive,
-        }
-    });
+    let cached = if let Some(cached) = cache_guard.get(pattern) {
+        cached.clone()
+    } else {
+        let compiled = if regex_requires_remote_evaluation(pattern) {
+            CachedRegex::Inconclusive
+        } else {
+            match Regex::new(pattern) {
+                Ok(regex) => CachedRegex::Compiled(regex),
+                Err(regex::Error::Syntax(_)) => CachedRegex::Invalid,
+                Err(_) => CachedRegex::Inconclusive,
+            }
+        };
+        cache_guard.insert(pattern.to_string(), compiled.clone());
+        compiled
+    };
     match cached {
-        CachedRegex::Compiled(regex) => Ok(Some(regex.clone())),
+        CachedRegex::Compiled(regex) => Ok(Some(regex)),
         CachedRegex::Invalid => Ok(None),
         CachedRegex::Inconclusive => Err(InconclusiveMatchError::new(
             "Regex requires server-side evaluation",
