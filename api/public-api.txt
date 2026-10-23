@@ -256,6 +256,7 @@ pub fn posthog_rs::Event::set_uuid(&mut self, uuid::Uuid)
 pub fn posthog_rs::Event::with_flags(&mut self, &posthog_rs::FeatureFlagEvaluations) -> &mut Self
 #[non_exhaustive] pub struct posthog_rs::EventResult
 pub posthog_rs::EventResult::details: core::option::Option<alloc::string::String>
+pub posthog_rs::EventResult::duplicates_dropped: core::option::Option<u32>
 pub posthog_rs::EventResult::result: posthog_rs::EventStatus
 pub struct posthog_rs::FeatureFlag
 pub posthog_rs::FeatureFlag::active: bool

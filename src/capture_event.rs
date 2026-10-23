@@ -172,6 +172,24 @@ pub struct EventResult {
     pub result: EventStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    /// Number of later copies of this uuid in the same request that capture
+    /// dropped. `result` and `details` describe the first copy, which capture
+    /// kept; each dropped copy is lost with the reason `duplicate_event_uuid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicates_dropped: Option<u32>,
+}
+
+/// The reason reported for a copy capture dropped because an earlier event in
+/// the same request had its uuid.
+pub(crate) const DUPLICATE_EVENT_UUID: &str = "duplicate_event_uuid";
+
+/// Total copies capture dropped as duplicates across `results`.
+pub(crate) fn duplicates_dropped(results: &HashMap<Uuid, EventResult>) -> usize {
+    results
+        .values()
+        .filter_map(|r| r.duplicates_dropped)
+        .map(|n| n as usize)
+        .sum()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -609,7 +627,7 @@ mod tests {
     fn batch_response_deserializes() {
         let json = r#"{
             "results": {
-                "550e8400-e29b-41d4-a716-446655440000": {"result": "ok"},
+                "550e8400-e29b-41d4-a716-446655440000": {"result": "ok", "duplicates_dropped": 2},
                 "550e8400-e29b-41d4-a716-446655440001": {"result": "retry", "details": "not_persisted"},
                 "550e8400-e29b-41d4-a716-446655440002": {"result": "drop", "details": "llm_events_over_quota"}
             }
@@ -621,8 +639,10 @@ mod tests {
         let resp: CaptureResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.results.len(), 3);
         assert_eq!(resp.results[&u0].result, EventStatus::Ok);
+        assert_eq!(resp.results[&u0].duplicates_dropped, Some(2));
         assert_eq!(resp.results[&u1].result, EventStatus::Retry);
         assert_eq!(resp.results[&u1].details, Some("not_persisted".to_string()));
+        assert_eq!(resp.results[&u1].duplicates_dropped, None);
     }
 
     #[test]
