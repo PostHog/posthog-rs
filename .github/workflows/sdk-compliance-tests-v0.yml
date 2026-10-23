@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   test-rust-sdk-v0:
-    uses: PostHog/posthog-sdk-test-harness/.github/workflows/test-sdk-action.yml@ce8f62fdad9bd9149dd0c2120122872738746835
+    uses: PostHog/posthog-sdk-test-harness/.github/workflows/test-sdk-action.yml@64ffa6ab19166541880c077d349abe18a7e42395
     with:
       adapter-dockerfile: compliance/v0/Dockerfile
       adapter-context: .
