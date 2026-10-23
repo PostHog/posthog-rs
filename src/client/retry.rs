@@ -1,5 +1,7 @@
-//! Runtime-agnostic retry primitives shared by the V0 and V1 capture paths.
+//! Runtime-agnostic retry primitives shared by client request paths.
 
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -8,9 +10,9 @@ use reqwest::header::HeaderMap;
 use super::ClientOptions;
 use crate::error::Error;
 
-/// Outcome of one capture attempt, computed without any I/O so both the async
-/// and blocking clients (and both V0 and V1) can share the decision logic and
-/// keep only the transport-specific loop.
+/// Outcome of one capture attempt, computed without any I/O so the async and
+/// blocking clients can share the decision logic and keep only the
+/// transport-specific loop.
 #[derive(Debug)]
 pub(crate) enum Step {
     Done,
@@ -36,14 +38,28 @@ pub(crate) fn is_retryable_status(status: u16) -> bool {
     matches!(status, 408 | 500 | 502 | 503 | 504)
 }
 
-/// V0 retry decision. Beyond the shared retryable set, V0 retries 429 — but
-/// only when the server sent a `Retry-After` (an explicit "try again in N"
-/// instruction). A bare 429 stays terminal (`Error::RateLimit`), preserving
-/// long-standing v0 behavior. The V1 endpoint never returns 429, so this is
-/// intentionally scoped to V0.
-#[cfg(not(feature = "capture-v1"))]
-pub(crate) fn should_retry_v0(status: u16, has_retry_after: bool) -> bool {
-    is_retryable_status(status) || (status == 429 && has_retry_after)
+/// Classify transport errors from remote feature-flag requests.
+pub(crate) fn is_retryable_feature_flags_error(err: &reqwest::Error) -> bool {
+    if err.is_timeout() {
+        return true;
+    }
+
+    let mut source = std::error::Error::source(err);
+    while let Some(error) = source {
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::UnexpectedEof
+            );
+        }
+        source = std::error::Error::source(error);
+    }
+
+    !err.to_string()
+        .to_lowercase()
+        .contains("connection refused")
 }
 
 /// Parse `Retry-After` as either delay-seconds or an HTTP-date.
@@ -93,6 +109,48 @@ fn datetime_to_system_time(dt: DateTime<Utc>) -> Option<SystemTime> {
     SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs as u64, dt.timestamp_subsec_nanos()))
 }
 
+/// Largest fraction a capture retry wait moves either way, so clients that
+/// fail together do not all retry at the same moment.
+const CAPTURE_RETRY_JITTER: f64 = 0.25;
+
+/// Capture retry wait: the backoff for `attempt` scaled by a random factor in
+/// `[0.75, 1.25)` and clamped to `retry_max_backoff_ms`. `Retry-After` stays
+/// the minimum wait, so jitter never shortens a server-requested delay.
+pub(crate) fn capture_backoff_duration(
+    opts: &ClientOptions,
+    attempt: u32,
+    retry_after: Option<Duration>,
+) -> Duration {
+    jittered_backoff(opts, attempt, retry_after, random_jitter_factor())
+}
+
+fn jittered_backoff(
+    opts: &ClientOptions,
+    attempt: u32,
+    retry_after: Option<Duration>,
+    factor: f64,
+) -> Duration {
+    let max_backoff = Duration::from_millis(opts.retry_max_backoff_ms);
+    let jittered = backoff_duration(opts, attempt, None)
+        .mul_f64(factor)
+        .min(max_backoff);
+    retry_after
+        .map(|d| d.min(max_backoff))
+        .map_or(jittered, |d| jittered.max(d))
+}
+
+/// A uniform factor in `[1 - CAPTURE_RETRY_JITTER, 1 + CAPTURE_RETRY_JITTER)`.
+fn random_jitter_factor() -> f64 {
+    1.0 - CAPTURE_RETRY_JITTER + 2.0 * CAPTURE_RETRY_JITTER * random_unit()
+}
+
+/// A uniform value in `[0, 1)`. std gives every `RandomState` new keys from a
+/// random per-thread seed, so its SipHash output is random with no extra crate.
+fn random_unit() -> f64 {
+    let bits = RandomState::new().build_hasher().finish();
+    (bits >> 11) as f64 / (1u64 << 53) as f64
+}
+
 /// Backoff before `attempt`: exponential growth from
 /// `retry_initial_backoff_ms`, clamped to `retry_max_backoff_ms`. When present,
 /// `Retry-After` is treated as a server-provided minimum delay, so the client
@@ -105,48 +163,31 @@ pub(crate) fn backoff_duration(
     attempt: u32,
     retry_after: Option<Duration>,
 ) -> Duration {
-    let base_ms = opts.retry_initial_backoff_ms;
     let max_ms = opts.retry_max_backoff_ms;
-    let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
-    let configured_delay = Duration::from_millis(backoff_ms.min(max_ms));
+    let configured_delay = exponential_backoff(opts.retry_initial_backoff_ms, max_ms, attempt);
     let max_backoff = Duration::from_millis(max_ms);
     let clamped_retry_after = retry_after.map(|d| d.min(max_backoff));
     clamped_retry_after.map_or(configured_delay, |d| configured_delay.max(d))
 }
 
-/// Sans-IO decision for a completed V0 capture response. `attempt` is the
-/// just-finished attempt number (1-based); the backoff for the next attempt
-/// uses `attempt` directly so the first retry waits exactly
-/// `retry_initial_backoff_ms`.
-#[cfg(not(feature = "capture-v1"))]
-pub(crate) fn v0_after_response(
-    opts: &ClientOptions,
-    attempt: u32,
-    status: u16,
-    retry_after: Option<Duration>,
-    body: &str,
-) -> Step {
-    if should_retry_v0(status, retry_after.is_some()) && attempt < opts.max_capture_attempts {
-        return Step::Backoff(backoff_duration(opts, attempt, retry_after));
-    }
-    match Error::from_http_response(status, body.to_string()) {
-        Some(err) => Step::Fail(err),
-        None => Step::Done,
-    }
+/// `base_ms` doubled for each attempt after the first, clamped to `max_ms`.
+fn exponential_backoff(base_ms: u64, max_ms: u64, attempt: u32) -> Duration {
+    let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
+    Duration::from_millis(backoff_ms.min(max_ms))
 }
 
-/// Sans-IO decision for a V0 transport error (no HTTP response). Retries
-/// transport failures until the attempt budget is exhausted.
-#[cfg(not(feature = "capture-v1"))]
-pub(crate) fn v0_after_transport_error(
-    opts: &ClientOptions,
-    attempt: u32,
-    err_msg: String,
-) -> Step {
-    if attempt >= opts.max_capture_attempts {
-        return Step::Fail(Error::Connection(err_msg));
-    }
-    Step::Backoff(backoff_duration(opts, attempt, None))
+/// Base of the `/flags` retry backoff. It is separate from the capture retry
+/// options and matches the `/flags` backoff of posthog-python and posthog-go.
+const FEATURE_FLAGS_BACKOFF_BASE_MS: u64 = 300;
+/// Ceiling of the `/flags` retry backoff.
+const FEATURE_FLAGS_BACKOFF_MAX_MS: u64 = 30_000;
+
+fn feature_flags_backoff(attempt: u32) -> Duration {
+    exponential_backoff(
+        FEATURE_FLAGS_BACKOFF_BASE_MS,
+        FEATURE_FLAGS_BACKOFF_MAX_MS,
+        attempt,
+    )
 }
 
 fn is_retryable_feature_flags_status(status: u16) -> bool {
@@ -163,7 +204,7 @@ pub(crate) fn feature_flags_after_response(
     if is_retryable_feature_flags_status(status)
         && attempt <= opts.feature_flags_request_max_retries
     {
-        return FeatureFlagsResponseStep::Backoff(backoff_duration(opts, attempt, None));
+        return FeatureFlagsResponseStep::Backoff(feature_flags_backoff(attempt));
     }
     FeatureFlagsResponseStep::Done
 }
@@ -180,11 +221,15 @@ pub(crate) fn feature_flags_after_transport_error(
     if !retryable || attempt > opts.feature_flags_request_max_retries {
         return FeatureFlagsTransportStep::Fail(Error::Connection(err_msg));
     }
-    FeatureFlagsTransportStep::Backoff(backoff_duration(opts, attempt, None))
+    FeatureFlagsTransportStep::Backoff(feature_flags_backoff(attempt))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener};
+    use std::thread;
+
     use reqwest::header::{HeaderMap, HeaderValue};
 
     use super::*;
@@ -198,6 +243,17 @@ mod tests {
             .retry_max_backoff_ms(5000u64)
             .build()
             .unwrap()
+    }
+
+    fn has_io_error_kind(err: &reqwest::Error, expected: std::io::ErrorKind) -> bool {
+        let mut source = std::error::Error::source(err);
+        while let Some(error) = source {
+            if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+                return io_error.kind() == expected;
+            }
+            source = std::error::Error::source(error);
+        }
+        false
     }
 
     #[test]
@@ -222,21 +278,75 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "capture-v1"))]
     #[test]
-    fn v0_retries_429_only_with_retry_after() {
-        assert!(should_retry_v0(429, true));
-        assert!(!should_retry_v0(429, false));
-        // The shared retryable set applies regardless of Retry-After.
-        for code in [408, 500, 502, 503, 504] {
-            assert!(should_retry_v0(code, false));
-            assert!(should_retry_v0(code, true));
-        }
-        // Genuinely terminal statuses stay terminal either way.
-        for code in [400, 401, 402, 403, 413, 415] {
-            assert!(!should_retry_v0(code, false));
-            assert!(!should_retry_v0(code, true));
-        }
+    fn feature_flags_timeout_error_is_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+
+        let err = client.get(url).send().unwrap_err();
+
+        assert!(err.is_timeout());
+        assert!(is_retryable_feature_flags_error(&err));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn feature_flags_unexpected_eof_error_is_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n")
+                .unwrap();
+            let _ = stream.shutdown(Shutdown::Both);
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+
+        let err = client.get(url).send().unwrap().bytes().unwrap_err();
+
+        assert!(has_io_error_kind(&err, std::io::ErrorKind::UnexpectedEof));
+        assert!(is_retryable_feature_flags_error(&err));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn feature_flags_connection_refused_error_is_not_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+
+        let err = client.get(url).send().unwrap_err();
+
+        assert!(!is_retryable_feature_flags_error(&err));
+    }
+
+    #[test]
+    fn feature_flags_unknown_error_is_retryable() {
+        let err = reqwest::blocking::Client::new()
+            .get("ftp://example.com")
+            .send()
+            .unwrap_err();
+
+        assert!(is_retryable_feature_flags_error(&err));
     }
 
     #[test]
@@ -320,8 +430,12 @@ mod tests {
     }
 
     #[test]
-    fn backoff_exponential_growth() {
-        let opts = test_opts();
+    fn backoff_exponential_growth_with_default_options() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("k".to_string())
+            .build()
+            .unwrap();
+        assert_eq!(opts.max_capture_attempts, 4);
         assert_eq!(backoff_duration(&opts, 1, None), Duration::from_millis(100));
         assert_eq!(backoff_duration(&opts, 2, None), Duration::from_millis(200));
         assert_eq!(backoff_duration(&opts, 3, None), Duration::from_millis(400));
@@ -354,98 +468,78 @@ mod tests {
         );
     }
 
-    // -- v0 sans-IO decisions ------------------------------------------------
-
-    #[cfg(not(feature = "capture-v1"))]
-    fn schedule_opts() -> ClientOptions {
-        ClientOptionsBuilder::default()
-            .api_key("phc_test".to_string())
-            .max_capture_attempts(10u32)
-            .retry_initial_backoff_ms(100u64)
-            .retry_max_backoff_ms(1_000_000u64)
-            .build()
-            .unwrap()
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    fn backoff_ms(step: Step) -> u64 {
-        match step {
-            Step::Backoff(d) => d.as_millis() as u64,
-            _ => panic!("expected Step::Backoff"),
+    #[test]
+    fn capture_backoff_jitter_bounds_cap_and_retry_after() {
+        let opts = test_opts();
+        let ms = Duration::from_millis;
+        let cases: &[(u32, Option<Duration>, f64, Duration)] = &[
+            // The factor scales the configured wait both ways.
+            (1, None, 0.75, ms(75)),
+            (1, None, 1.25, ms(125)),
+            (3, None, 0.75, ms(300)),
+            (3, None, 1.25, ms(500)),
+            // Jitter never pushes a wait past `retry_max_backoff_ms`.
+            (20, None, 1.25, ms(5000)),
+            (20, None, 0.75, ms(3750)),
+            // `Retry-After` stays the minimum, whatever the factor.
+            (1, Some(ms(500)), 0.75, ms(500)),
+            (1, Some(ms(50)), 1.25, ms(125)),
+            (1, Some(Duration::from_secs(600)), 0.75, ms(5000)),
+        ];
+        for &(attempt, retry_after, factor, expected) in cases {
+            assert_eq!(
+                jittered_backoff(&opts, attempt, retry_after, factor),
+                expected,
+                "attempt={attempt} retry_after={retry_after:?} factor={factor}"
+            );
         }
     }
+
+    #[test]
+    fn capture_backoff_varies_within_a_quarter_of_the_base() {
+        let opts = test_opts();
+        let waits: Vec<Duration> = (0..200)
+            .map(|_| capture_backoff_duration(&opts, 1, None))
+            .collect();
+        for wait in &waits {
+            assert!(
+                (Duration::from_millis(75)..=Duration::from_millis(125)).contains(wait),
+                "{wait:?} outside 75-125ms"
+            );
+        }
+        assert!(
+            waits.iter().any(|w| *w != waits[0]),
+            "capture retry waits are not jittered"
+        );
+    }
+
+    #[test]
+    fn random_jitter_factor_spans_the_whole_range() {
+        let factors: Vec<f64> = (0..1000).map(|_| random_jitter_factor()).collect();
+        assert!(factors.iter().all(|f| (0.75..1.25).contains(f)));
+        assert!(factors.iter().any(|f| *f < 0.8));
+        assert!(factors.iter().any(|f| *f > 1.2));
+    }
+
+    // -- Feature flag sans-I/O decisions -------------------------------------
 
     /// The schedule the call sites actually produce. Guards the `attempt + 1`
     /// off-by-one: the first retry must wait exactly `retry_initial_backoff_ms`
     /// (100ms here), not double it.
-    #[cfg(not(feature = "capture-v1"))]
-    #[test]
-    fn v0_backoff_schedule_starts_at_initial() {
-        let opts = schedule_opts();
-        // attempt = the just-finished attempt; first retry follows attempt 1.
-        assert_eq!(
-            backoff_ms(v0_after_response(&opts, 1, 503, None, "")),
-            100,
-            "first retry must honor retry_initial_backoff_ms exactly"
-        );
-        assert_eq!(backoff_ms(v0_after_response(&opts, 2, 503, None, "")), 200);
-        assert_eq!(backoff_ms(v0_after_response(&opts, 3, 503, None, "")), 400);
-        // Same schedule for transport errors.
-        assert_eq!(
-            backoff_ms(v0_after_transport_error(&opts, 1, "timeout".into())),
-            100
-        );
-        assert_eq!(
-            backoff_ms(v0_after_transport_error(&opts, 2, "timeout".into())),
-            200
-        );
-    }
 
-    #[cfg(not(feature = "capture-v1"))]
     #[test]
-    fn v0_after_response_terminal_and_success() {
-        let opts = schedule_opts();
-        // 2xx -> Done.
-        assert!(matches!(
-            v0_after_response(&opts, 1, 200, None, ""),
-            Step::Done
-        ));
-        // Bare 429 (no Retry-After) -> terminal RateLimit, no retry.
-        assert!(matches!(
-            v0_after_response(&opts, 1, 429, None, ""),
-            Step::Fail(Error::RateLimit)
-        ));
-        // 429 + Retry-After -> retried.
-        assert!(matches!(
-            v0_after_response(&opts, 1, 429, Some(Duration::from_secs(1)), ""),
-            Step::Backoff(_)
-        ));
-        // Non-retryable 4xx -> terminal.
-        assert!(matches!(
-            v0_after_response(&opts, 1, 400, None, "bad"),
-            Step::Fail(Error::BadRequest(_))
-        ));
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    #[test]
-    fn v0_exhausts_attempt_budget() {
-        let opts = ClientOptionsBuilder::default()
-            .api_key("phc_test".to_string())
-            .max_capture_attempts(3u32)
-            .retry_initial_backoff_ms(1u64)
-            .retry_max_backoff_ms(5u64)
-            .build()
-            .unwrap();
-        // Retryable status on the final attempt surfaces the error instead of backing off.
-        assert!(matches!(
-            v0_after_response(&opts, 3, 503, None, "boom"),
-            Step::Fail(Error::ServerError { .. })
-        ));
-        assert!(matches!(
-            v0_after_transport_error(&opts, 3, "timeout".into()),
-            Step::Fail(Error::Connection(_))
-        ));
+    fn feature_flags_backoff_doubles_from_300ms_up_to_30s() {
+        for (attempt, expected_ms) in [(1, 300), (2, 600), (3, 1_200), (7, 19_200), (8, 30_000)] {
+            assert_eq!(
+                feature_flags_backoff(attempt),
+                Duration::from_millis(expected_ms),
+                "attempt={attempt}"
+            );
+        }
+        assert_eq!(
+            feature_flags_backoff(u32::MAX),
+            Duration::from_millis(30_000)
+        );
     }
 
     #[test]
@@ -461,7 +555,7 @@ mod tests {
         for status in [502, 504] {
             assert!(matches!(
                 feature_flags_after_response(&opts, 1, status),
-                FeatureFlagsResponseStep::Backoff(_)
+                FeatureFlagsResponseStep::Backoff(d) if d == Duration::from_millis(300)
             ));
             assert!(matches!(
                 feature_flags_after_response(&opts, 2, status),
@@ -488,7 +582,7 @@ mod tests {
 
         assert!(matches!(
             feature_flags_after_transport_error(&opts, 1, true, "reset".into()),
-            FeatureFlagsTransportStep::Backoff(_)
+            FeatureFlagsTransportStep::Backoff(d) if d == Duration::from_millis(300)
         ));
         assert!(matches!(
             feature_flags_after_transport_error(&opts, 2, true, "reset".into()),
