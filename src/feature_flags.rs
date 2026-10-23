@@ -7,7 +7,14 @@ use std::fmt;
 use std::sync::{Mutex, OnceLock};
 
 /// Global cache for compiled regexes to avoid recompilation on every flag evaluation
-static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<Regex>>>> = OnceLock::new();
+static REGEX_CACHE: OnceLock<Mutex<HashMap<String, CachedRegex>>> = OnceLock::new();
+
+#[derive(Clone)]
+enum CachedRegex {
+    Compiled(Regex),
+    Invalid,
+    Inconclusive,
+}
 
 /// Salt used for rollout percentage hashing. Intentionally empty to match PostHog's
 /// consistent hashing algorithm across all SDKs. This ensures the same user gets
@@ -18,26 +25,184 @@ const ROLLOUT_HASH_SALT: &str = "";
 /// variant assignment across all PostHog SDKs for the same user/flag combination.
 const VARIANT_HASH_SALT: &str = "variant";
 
-fn get_cached_regex(pattern: &str) -> Option<Regex> {
-    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache_guard = match cache.lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            tracing::warn!(
-                pattern,
-                "Regex cache mutex poisoned, treating as cache miss"
-            );
-            return None;
+// fancy-regex (the flags service) accepts syntax regex does not, and gives some
+// native successes different semantics. Defer these cases rather than negating a
+// compiler failure or guessing at service execution/backtracking behavior.
+fn regex_requires_remote_evaluation(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut index = 0;
+    let mut class_depth = 0usize;
+    let mut has_atom = false;
+    let mut quantifier = 0;
+    while index < bytes.len() {
+        let character = bytes[index];
+        if character == b'\\' {
+            index += 1;
+            if let Some(&escaped) = bytes.get(index) {
+                // The service accepts escaped Unicode literals that regex rejects.
+                if !escaped.is_ascii()
+                    || matches!(
+                        escaped,
+                        b'0'..=b'9'
+                            | b'b'
+                            | b'B'
+                            | b'h'
+                            | b'H'
+                            | b'k'
+                            | b'g'
+                            | b'K'
+                            | b'G'
+                            | b'O'
+                            | b'Z'
+                            | b'e'
+                            | b'<'
+                            | b'>'
+                    )
+                    || (class_depth > 0 && matches!(escaped, b'A' | b'z'))
+                {
+                    return true;
+                }
+                // Braces in Unicode/hex escapes are not repetition operators.
+                if matches!(escaped, b'p' | b'P' | b'x' | b'u' | b'U')
+                    && bytes.get(index + 1) == Some(&b'{')
+                {
+                    while index < bytes.len() && bytes[index] != b'}' {
+                        index += 1;
+                    }
+                }
+            }
+            has_atom = true;
+            quantifier = 0;
+        } else if character == b'[' {
+            class_depth += 1;
+        } else if character == b']' && class_depth > 0 {
+            class_depth -= 1;
+            has_atom = true;
+            quantifier = 0;
+        } else if class_depth == 0 {
+            match character {
+                b'(' => {
+                    has_atom = false;
+                    quantifier = 0;
+                    if bytes.get(index + 1) == Some(&b'?') {
+                        index += 2;
+                        let mut disabled = false;
+                        let mut seen_flags = 0u8;
+                        while let Some(&flag) = bytes.get(index) {
+                            let flag_bit = match flag {
+                                b'i' => 1,
+                                b'm' => 2,
+                                b's' => 4,
+                                b'U' => 8,
+                                b'u' if !disabled => 16,
+                                b'-' => {
+                                    disabled = true;
+                                    0
+                                }
+                                b':' | b')' => break,
+                                // In particular, extended mode changes tokenization and
+                                // native CRLF/disabled-Unicode flags aren't service flags.
+                                // Named-capture naming/uniqueness rules also differ by engine.
+                                _ => return true,
+                            };
+                            // fancy-regex accepts repeated flags that regex rejects.
+                            if seen_flags & flag_bit != 0 {
+                                return true;
+                            }
+                            seen_flags |= flag_bit;
+                            index += 1;
+                        }
+                        if bytes.get(index) == Some(&b')')
+                            && matches!(bytes.get(index + 1), Some(b'*' | b'+' | b'?' | b'{'))
+                        {
+                            return true;
+                        }
+                    }
+                    // Empty groups under repetition can compile natively but fail in service.
+                    if bytes.get(index + 1) == Some(&b')') {
+                        return true;
+                    }
+                }
+                b')' => {
+                    has_atom = true;
+                    quantifier = 0;
+                }
+                b'|' => {
+                    has_atom = false;
+                    quantifier = 0;
+                }
+                b'*' | b'+' | b'?' => {
+                    if quantifier == 1 && character == b'?' {
+                        quantifier = 2; // One lazy suffix is shared, stacked repetition is not.
+                    } else if quantifier != 0 && has_atom {
+                        return true;
+                    } else {
+                        quantifier = 1;
+                    }
+                }
+                b'{' => {
+                    if quantifier != 0
+                        || !has_atom
+                        || !matches!(bytes.get(index + 1), Some(b'0'..=b'9'))
+                    {
+                        return true;
+                    }
+                    // Malformed braces can be literals in the service, not syntax errors.
+                    index += 1;
+                    while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+                        index += 1;
+                    }
+                    if bytes.get(index) == Some(&b',') {
+                        index += 1;
+                        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+                            index += 1;
+                        }
+                    }
+                    if bytes.get(index) != Some(&b'}') {
+                        return true;
+                    }
+                    // Native compilation validates the numeric bounds, including overflow.
+                    quantifier = 1;
+                }
+                b'}' => return true,
+                _ => {
+                    has_atom = true;
+                    quantifier = 0;
+                }
+            }
         }
-    };
-
-    if let Some(cached) = cache_guard.get(pattern) {
-        return cached.clone();
+        index += 1;
     }
+    false
+}
 
-    let compiled = Regex::new(pattern).ok();
-    cache_guard.insert(pattern.to_string(), compiled.clone());
-    compiled
+fn get_cached_regex(pattern: &str) -> Result<Option<Regex>, InconclusiveMatchError> {
+    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache_guard = cache
+        .lock()
+        .map_err(|_| InconclusiveMatchError::new("Regex cache mutex poisoned"))?;
+    let cached = if let Some(cached) = cache_guard.get(pattern) {
+        cached.clone()
+    } else {
+        let compiled = if regex_requires_remote_evaluation(pattern) {
+            CachedRegex::Inconclusive
+        } else {
+            match Regex::new(pattern) {
+                Ok(regex) => CachedRegex::Compiled(regex),
+                Err(regex::Error::Syntax(_)) => CachedRegex::Invalid,
+                Err(_) => CachedRegex::Inconclusive,
+            }
+        };
+        cache_guard.insert(pattern.to_string(), compiled.clone());
+        compiled
+    };
+    match cached {
+        CachedRegex::Compiled(regex) => Ok(Some(regex)),
+        CachedRegex::Invalid => Ok(None),
+        CachedRegex::Inconclusive => Err(InconclusiveMatchError::new(
+            "Regex requires server-side evaluation",
+        )),
+    }
 }
 
 /// The value of a feature flag evaluation.
@@ -1444,19 +1609,12 @@ fn match_property_with_version(
                 .to_ascii_lowercase()
                 .ends_with(&search_str.to_ascii_lowercase())
         }
-        "regex" => {
+        "regex" | "not_regex" => {
             let prop_str = value_to_string(value);
             let regex_str = value_to_string(&property.value);
-            get_cached_regex(&regex_str)
-                .map(|re| re.is_match(&prop_str))
+            get_cached_regex(&regex_str)?
+                .map(|re| re.is_match(&prop_str) != (property.operator == "not_regex"))
                 .unwrap_or(false)
-        }
-        "not_regex" => {
-            let prop_str = value_to_string(value);
-            let regex_str = value_to_string(&property.value);
-            get_cached_regex(&regex_str)
-                .map(|re| !re.is_match(&prop_str))
-                .unwrap_or(true)
         }
         "gt" | "gte" | "lt" | "lte" => compare_numeric(&property.operator, &property.value, value),
         "is_date_before" | "is_date_after" => {
@@ -3385,13 +3543,47 @@ mod tests {
     // ==================== Tests for invalid regex patterns ====================
 
     #[test]
+    fn test_regex_with_invalid_pattern_returns_false() {
+        // Invalid regex pattern (unclosed group)
+        let prop = Property {
+            key: "email".to_string(),
+            value: json!("(unclosed"),
+            operator: "regex".to_string(),
+            property_type: None,
+        };
+
+        let mut properties = HashMap::new();
+        properties.insert("email".to_string(), json!("test@example.com"));
+
+        // Invalid regex should return false (not match)
+        assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    #[test]
+    fn test_not_regex_with_invalid_pattern_returns_false() {
+        // Invalid regex pattern (unclosed group)
+        let prop = Property {
+            key: "email".to_string(),
+            value: json!("(unclosed"),
+            operator: "not_regex".to_string(),
+            property_type: None,
+        };
+
+        let mut properties = HashMap::new();
+        properties.insert("email".to_string(), json!("test@example.com"));
+
+        // A negative operator only negates a valid comparison.
+        assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    #[test]
     fn test_regex_with_various_invalid_patterns() {
         let invalid_patterns = vec![
-            "(unclosed", // Unclosed group
-            "[unclosed", // Unclosed bracket
-            "*invalid",  // Invalid quantifier at start
-            "(?P<bad",   // Unclosed named group
-            r"\",        // Trailing backslash
+            "(unclosed",   // Unclosed group
+            "[unclosed",   // Unclosed bracket
+            "*invalid",    // Invalid quantifier at start
+            "(?:unclosed", // Unclosed noncapturing group
+            r"\",          // Trailing backslash
         ];
 
         for pattern in invalid_patterns {
@@ -3412,14 +3604,14 @@ mod tests {
                 pattern
             );
 
-            // And true for not_regex
+            // Invalid patterns do not match not_regex either
             let not_regex_prop = Property {
                 operator: "not_regex".to_string(),
                 ..prop
             };
             assert!(
-                match_property(&not_regex_prop, &properties).unwrap(),
-                "Invalid pattern '{}' should return true for not_regex",
+                !match_property(&not_regex_prop, &properties).unwrap(),
+                "Invalid pattern '{}' should return false for not_regex",
                 pattern
             );
         }

@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.27.1 — 2026-10-23
+
+### Patch changes
+
+- [7e6527f](https://github.com/posthog/posthog-rs/commit/7e6527f99c0f4e9c1d30225b3691ab57bd14dc33) Fall back to remote feature flag evaluation for unsupported or incompatible regex syntax instead of returning incorrect local results. Invalid local patterns no longer match `not_regex`. — Thanks @marandaneto!
+
 ## 0.27.0 — 2026-09-24
 
 ### Minor changes
