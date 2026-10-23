@@ -47,12 +47,12 @@ async fn capture(client: &Client, batch: bool) {
 /// that isn't driven by `flush()`).
 fn wait_for_hits(mock: &httpmock::Mock, want: usize) {
     for _ in 0..400 {
-        if mock.hits() >= want {
+        if mock.calls() >= want {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(mock.hits(), want, "timed out waiting for {want} hits");
+    assert_eq!(mock.calls(), want, "timed out waiting for {want} hits");
 }
 
 #[tokio::test]
@@ -73,11 +73,11 @@ async fn retryable_status_keeps_retrying_until_attempts_exhausted() {
             client.flush().await;
             client.flush().await;
 
-            mock.assert_hits(3);
+            mock.assert_calls(3);
 
             // Budget exhausted: the event is dropped, so a further flush is a no-op.
             client.flush().await;
-            mock.assert_hits(3);
+            mock.assert_calls(3);
         }
     }
 }
@@ -97,11 +97,11 @@ async fn terminal_status_sends_once() {
             let client = create_v0_client(server.base_url(), 3).await;
             capture(&client, batch).await;
             client.flush().await;
-            mock.assert_hits(1);
+            mock.assert_calls(1);
 
             // Terminal: dropped, not retried.
             client.flush().await;
-            mock.assert_hits(1);
+            mock.assert_calls(1);
         }
     }
 }
@@ -118,7 +118,7 @@ async fn success_sends_once() {
         let client = create_v0_client(server.base_url(), 3).await;
         capture(&client, batch).await;
         client.flush().await;
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 }
 
@@ -140,7 +140,7 @@ async fn retries_resend_identical_event() {
     client.flush().await;
     client.flush().await;
 
-    mock.assert_hits(3);
+    mock.assert_calls(3);
 }
 
 /// Matcher: the request body is valid gzip that decodes to the expected event.
@@ -160,7 +160,7 @@ async fn gzip_sets_header_query_param_and_compresses_body() {
         when.method(POST)
             .header("content-encoding", "gzip")
             .query_param("compression", "gzip")
-            .matches(body_gunzips_to_user1);
+            .is_true(body_gunzips_to_user1);
         then.status(200);
     });
 
@@ -196,11 +196,11 @@ async fn honors_retry_after_header() {
     // resend ~1s out); the second attempt is left to the worker's timer.
     let start = Instant::now();
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
     wait_for_hits(&mock, 2);
     let elapsed = start.elapsed();
 
-    mock.assert_hits(2);
+    mock.assert_calls(2);
     // Exponential backoff here would be ~1ms; only an honored Retry-After: 1
     // produces a gap this large.
     assert!(

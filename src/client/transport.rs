@@ -1448,7 +1448,7 @@ mod tests {
 
         handle.enqueue(Event::new("Delayed", "user-1"));
         handle.tick(); // interval not yet elapsed
-        mock.assert_hits(0);
+        mock.assert_calls(0);
         assert_eq!(
             handle.pending(),
             1,
@@ -1457,7 +1457,7 @@ mod tests {
 
         clock.advance(Duration::from_secs(10));
         handle.tick(); // interval elapsed -> flush, no real sleep
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         assert_eq!(
             handle.pending(),
             0,
@@ -1487,16 +1487,16 @@ mod tests {
 
         handle.enqueue(Event::new("Save", "user-1"));
         handle.flush_blocking(); // attempt 1 -> 503, held with next_at = now + 1s
-        fail.assert_hits(1);
+        fail.assert_calls(1);
 
         handle.tick(); // backoff not elapsed -> no retry
-        fail.assert_hits(1);
+        fail.assert_calls(1);
 
         fail.delete();
         let ok = ok_mock(&server);
         clock.advance(Duration::from_secs(1)); // now >= next_at
         handle.tick(); // due -> retried, delivered
-        ok.assert_hits(1);
+        ok.assert_calls(1);
 
         handle.shutdown_blocking();
     }
@@ -1535,7 +1535,7 @@ mod tests {
 
         handle.flush_blocking(); // 1 kept + 1 filtered by before_send; 503 holds the kept one
 
-        fail.assert_hits(1);
+        fail.assert_calls(1);
         // Only the surviving event remains in flight; the filtered one is terminal.
         assert_eq!(handle.pending(), 1);
 
@@ -1593,7 +1593,7 @@ mod tests {
         // shapes (both nest the event under `batch[0]`).
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
-            when.method(POST).matches(|req| {
+            when.method(POST).is_true(|req| {
                 let Ok(json) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
                     return false;
                 };
@@ -1623,7 +1623,7 @@ mod tests {
         clock.advance(Duration::from_secs(10)); // ...delivered 10s later
         handle.flush_blocking();
 
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         handle.shutdown_blocking();
     }
 
@@ -1646,7 +1646,7 @@ mod tests {
         handle.enqueue(Event::new("Dropped", "user-1"));
         handle.shutdown_blocking(); // deadline already past -> drop, do not send
 
-        mock.assert_hits(0);
+        mock.assert_calls(0);
         assert_eq!(
             handle.pending(),
             0,
@@ -1663,7 +1663,7 @@ mod tests {
             .into_iter()
             .map(|names| {
                 server.mock(|when, then| {
-                    when.method(POST).matches(move |request| {
+                    when.method(POST).is_true(move |request| {
                         let body: serde_json::Value =
                             serde_json::from_slice(request.body_ref()).unwrap();
                         let batch = body["batch"].as_array().unwrap();
@@ -1722,7 +1722,7 @@ mod tests {
         handle.enqueue_historical(vec![Event::new("H", "user-1")]);
         handle.shutdown_blocking(); // deadline already past -> drop, do not send
 
-        mock.assert_hits(0);
+        mock.assert_calls(0);
         assert_eq!(
             handle.pending(),
             0,
@@ -1747,7 +1747,7 @@ mod tests {
         handle.enqueue_historical(vec![Event::new("H1", "user-1"), Event::new("H2", "user-1")]);
         handle.tick(); // sync only; the size threshold already drained it on enqueue
 
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         assert_eq!(
             handle.pending(),
             0,
