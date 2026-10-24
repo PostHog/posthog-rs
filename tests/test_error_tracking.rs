@@ -218,6 +218,7 @@ mod blocking {
 mod async_client {
     use super::*;
     use posthog_rs::CaptureExceptionOptions;
+    use std::sync::{Arc, Mutex};
 
     async fn create_test_client(base_url: String) -> posthog_rs::Client {
         let options = posthog_rs::ClientOptionsBuilder::default()
@@ -344,5 +345,65 @@ mod async_client {
         client.flush().await;
 
         capture_mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn before_send_sees_trace_id_property_without_provider_ids() {
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path(CAPTURE_PATH)
+                .body_includes(r#""$trace_id":"caller-trace-id""#)
+                .body_excludes(r#""$span_id""#);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(ok_response());
+        });
+
+        let seen = Arc::new(Mutex::new(None));
+        let seen_in_hook = Arc::clone(&seen);
+        let options = posthog_rs::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .max_capture_attempts(1u32)
+            .error_tracking(
+                posthog_rs::ErrorTrackingOptionsBuilder::default()
+                    .trace_context_provider(|| {
+                        Some(posthog_rs::TraceContext::new(
+                            "provider-trace-id",
+                            "provider-span-id",
+                        ))
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .before_send(move |event| {
+                let properties = event.properties();
+                *seen_in_hook.lock().unwrap() = Some((
+                    properties.get("$trace_id").cloned(),
+                    properties.get("$span_id").cloned(),
+                ));
+                Some(event)
+            })
+            .build()
+            .unwrap();
+        let client = posthog_rs::client(options).await;
+
+        client
+            .capture_exception_with(
+                &TestError,
+                CaptureExceptionOptions::new()
+                    .property("$trace_id", "caller-trace-id")
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        client.flush().await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some((Some(json!("caller-trace-id")), None))
+        );
+        capture_mock.assert_calls(1);
     }
 }

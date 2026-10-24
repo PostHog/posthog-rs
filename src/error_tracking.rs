@@ -21,6 +21,9 @@ const MAX_ERROR_SOURCES: usize = 50;
 /// Latches the single process-wide panic hook so a second install is rejected.
 static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+const TRACE_ID_PROPERTY: &str = "$trace_id";
+const SPAN_ID_PROPERTY: &str = "$span_id";
+
 /// An atomic trace/span identifier pair used to correlate an exception with
 /// distributed traces and logs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -238,6 +241,9 @@ impl ErrorTrackingOptionsBuilder {
     /// The callback runs synchronously during `capture_exception`. It must be
     /// fast, non-blocking, and must not call back into the PostHog SDK. Panics
     /// are caught and cause trace context to be omitted from that exception.
+    /// The callback is skipped for an exception that sets a `$trace_id` or
+    /// `$span_id` property or an explicit
+    /// [`CaptureExceptionOptions::trace_context`].
     pub fn trace_context_provider<F>(&mut self, provider: F) -> &mut Self
     where
         F: Fn() -> Option<TraceContext> + Send + Sync + 'static,
@@ -380,6 +386,8 @@ fn build_panic_event(
 /// captures the exception personlessly with no extra context. With the
 /// trace-context provider configured on [`ErrorTrackingOptions`], its trace
 /// and span IDs are attached automatically; values set here take precedence.
+/// A `$trace_id` or `$span_id` set with [`CaptureExceptionOptions::property`]
+/// also wins: the provider's IDs are then not added at all.
 ///
 /// # Examples
 ///
@@ -458,7 +466,8 @@ impl CaptureExceptionOptions {
     ///
     /// The IDs are accepted together so an exception can never combine a trace
     /// ID and span ID from different contexts. This pair overrides any context
-    /// returned by the client's trace-context provider.
+    /// returned by the client's trace-context provider, and any `$trace_id` or
+    /// `$span_id` set with [`CaptureExceptionOptions::property`].
     pub fn trace_context<T: Into<String>, S: Into<String>>(
         mut self,
         trace_id: T,
@@ -506,7 +515,18 @@ where
         level,
     } = options;
 
-    let trace_context = trace_context.or_else(|| et_options.trace_context());
+    // A `$trace_id` or `$span_id` property blocks the provider so the event
+    // never mixes the caller's ID with one from another trace context.
+    let properties_set_trace_ids = properties
+        .iter()
+        .any(|(key, _)| key == TRACE_ID_PROPERTY || key == SPAN_ID_PROPERTY);
+    let trace_context = trace_context.or_else(|| {
+        if properties_set_trace_ids {
+            None
+        } else {
+            et_options.trace_context()
+        }
+    });
 
     let mut exception = Exception::from_error(error, et_options.capture_stacktrace());
     if let Some(fingerprint) = fingerprint {
@@ -530,11 +550,11 @@ where
         event.add_group(&group_name, &group_id);
     }
 
-    // Reserved properties are written after user-set properties so they can't
-    // be overridden.
+    // Written after user-set properties so the typed trace context and the
+    // reserved `$exception_*` properties can't be overridden.
     if let Some(trace_context) = trace_context {
-        event.insert_prop("$trace_id", trace_context.trace_id)?;
-        event.insert_prop("$span_id", trace_context.span_id)?;
+        event.insert_prop(TRACE_ID_PROPERTY, trace_context.trace_id)?;
+        event.insert_prop(SPAN_ID_PROPERTY, trace_context.span_id)?;
     }
     exception.write_into(&mut event, et_options)?;
     Ok(event)
@@ -3005,12 +3025,67 @@ mod tests {
             .build()
             .unwrap();
         let error = OuterError { source: InnerError };
-        let event =
-            build_exception_event(&error, CaptureExceptionOptions::new(), &options).unwrap();
+        let event = build_exception_event(
+            &error,
+            CaptureExceptionOptions::new()
+                .property("route", "/checkout")
+                .unwrap(),
+            &options,
+        )
+        .unwrap();
         let json = built_event_json(event);
 
         assert_eq!(json["properties"]["$trace_id"], "provider-trace-id");
         assert_eq!(json["properties"]["$span_id"], "provider-span-id");
+    }
+
+    #[test]
+    fn trace_id_property_blocks_both_provider_ids() {
+        for (key, other_key) in [("$trace_id", "$span_id"), ("$span_id", "$trace_id")] {
+            let provider_called = Arc::new(AtomicBool::new(false));
+            let provider_called_in_callback = Arc::clone(&provider_called);
+            let options = ErrorTrackingOptionsBuilder::default()
+                .trace_context_provider(move || {
+                    provider_called_in_callback.store(true, Ordering::SeqCst);
+                    Some(TraceContext::new("provider-trace-id", "provider-span-id"))
+                })
+                .build()
+                .unwrap();
+            let error = OuterError { source: InnerError };
+            let event = build_exception_event(
+                &error,
+                CaptureExceptionOptions::new()
+                    .property(key, "caller-id")
+                    .unwrap(),
+                &options,
+            )
+            .unwrap();
+            let json = built_event_json(event);
+
+            assert_eq!(json["properties"][key], "caller-id", "{}", key);
+            assert!(json["properties"].get(other_key).is_none(), "{}", key);
+            assert!(!provider_called.load(Ordering::SeqCst), "{}", key);
+        }
+    }
+
+    #[test]
+    fn explicit_trace_context_takes_precedence_over_trace_id_properties() {
+        let error = OuterError { source: InnerError };
+        let event = build_exception_event(
+            &error,
+            CaptureExceptionOptions::new()
+                .property("$trace_id", "property-trace-id")
+                .unwrap()
+                .property("$span_id", "property-span-id")
+                .unwrap()
+                .trace_context("explicit-trace-id", "explicit-span-id"),
+            &ErrorTrackingOptions::default(),
+        )
+        .unwrap();
+        let json = built_event_json(event);
+
+        assert_eq!(json["properties"]["$trace_id"], "explicit-trace-id");
+        assert_eq!(json["properties"]["$span_id"], "explicit-span-id");
     }
 
     #[test]
