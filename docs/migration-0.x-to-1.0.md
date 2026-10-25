@@ -99,6 +99,8 @@ Values the SDK adds, and the values you set:
 - The SDK adds `$os`, `$os_version`, `$is_server` and `$geoip_disable` only when the event does not already have the key, and it adds them before `before_send` runs. The hook sees them and can change or remove them, and the SDK does not add them again after the hook. The default 0.x path (V0) also added them before the hook. The 0.x `capture-v1` path added them while building the request, after the hook, so a hook could not see `$os` or remove any of them.
 - `Event::with_flags` keeps a `$feature/<key>` or `$active_feature_flags` property that the event already has. In 0.x, the flag values replaced it.
 - Groups from `Event::add_group` merge into a `$groups` property key by key, and the added group wins for the same group type. In 0.x, they replaced the whole `$groups` property.
+- The SDK merges those groups into `$groups` before `before_send` runs, so the hook sees them and can change or remove them. The default 0.x path (V0) also merged them before the hook. The 0.x `capture-v1` path merged them while building the request, after the hook. A group the hook adds with `add_group` is still sent.
+- For a minimized `$feature_flag_called` event, the SDK trims the properties to its allowlist before `before_send` runs, so a property the hook adds is sent. In 0.x the trim ran after the hook and removed it.
 
 One behavior differs from 0.x without `capture-v1`, which used the V0 endpoint:
 
@@ -124,7 +126,11 @@ Capture now makes 4 attempts by default (`max_capture_attempts`, was 3). The fir
 
 The SDK retries network errors and HTTP 408, 500, 502, 503 and 504. Every other status is terminal, including 429. The 0.x V0 path retried a 429 that had a `Retry-After` header. Capture itself does not return 429, but a proxy in front of it can. HTTP 402 means the whole request is over the billing limit. A product quota drops single events inside a `200`, as a per-event `drop` such as `llm_events_over_quota`. `Retry-After` is still honored for retryable statuses and `retry` results.
 
-Without an `on_error` hook, a request that fails for good logs `posthog-rs: dropping <n> event(s) for <endpoint>: <error>`, as in 0.x. The error text can include PostHog's response body. Register an `on_error` hook to choose what to log. A hook can call `capture`, which only queues the event. The immediate methods never call `on_error`.
+Without an `on_error` hook, a request that fails for good logs `posthog-rs: dropping <n> event(s) for <endpoint>: <error>`, as in 0.x. The error text can include PostHog's response body. Register an `on_error` hook to choose what to log. The hook must not call back into the SDK (`capture`, `flush` or `shutdown`), because an event sent while handling a failure can fail again and loop. The immediate methods never call `on_error`.
+
+During shutdown, the SDK makes one final attempt per batch. It drops the events that get a retryable failure (a network error, a retryable HTTP status, or a per-event `retry` result), and any events left when `shutdown_timeout_ms` runs out. These drops are logged with a warning that names the endpoint, and they do not reach `on_error`, as in 0.x. Queue-full and `before_send` drops do not reach `on_error` either.
+
+The capture and `/flags` HTTP clients the SDK builds follow a redirect only when it is a 307 or 308 to the same scheme, host and port, at most 5 times in a row. Any other redirect fails the request, so the SDK never sends the request body to another host. 0.x followed up to 10 redirects of any kind to any host, and local evaluation polling still does. A client you pass with `http_client` or `blocking_http_client` keeps its own redirect policy.
 
 ### Renamed capture response type
 

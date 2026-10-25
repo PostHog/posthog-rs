@@ -105,6 +105,32 @@ pub(crate) fn get_default_user_agent() -> String {
     format!("{}/{}", SDK_USERAGENT_NAME, CRATE_VERSION)
 }
 
+/// Most redirects an SDK-built HTTP client follows for one request.
+const MAX_REDIRECTS: usize = 5;
+
+/// Redirect policy for the capture and `/flags` HTTP clients the SDK builds.
+/// Follows only 307 and 308, which keep the method and body, to the origin of
+/// the first request, at most [`MAX_REDIRECTS`] times. Any other redirect comes
+/// back as the response, which fails the request, so a request body never
+/// leaves the configured host.
+pub(crate) fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let keeps_body = matches!(
+            attempt.status(),
+            reqwest::StatusCode::TEMPORARY_REDIRECT | reqwest::StatusCode::PERMANENT_REDIRECT
+        );
+        let same_origin = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| first.origin() == attempt.url().origin());
+        if keeps_body && same_origin && attempt.previous().len() <= MAX_REDIRECTS {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
 /// Configuration options for the PostHog client.
 ///
 /// Use [`ClientOptionsBuilder`] to construct options with custom settings, or
@@ -146,7 +172,9 @@ pub struct ClientOptions {
     ///
     /// Only supply clients whose default headers and cookies are safe to send to
     /// PostHog. Do not share clients carrying credentials for unrelated services;
-    /// the SDK cannot inspect or filter those defaults.
+    /// the SDK cannot inspect or filter those defaults. The SDK keeps the
+    /// supplied client's redirect policy; the capture and `/flags` clients it
+    /// builds follow only 307 and 308 redirects to the same scheme, host and port.
     #[cfg(feature = "async-client")]
     #[builder(default, setter(strip_option))]
     http_client: Option<reqwest::Client>,
@@ -167,7 +195,9 @@ pub struct ClientOptions {
     ///
     /// Only supply clients whose default headers and cookies are safe to send to
     /// PostHog. Do not share clients carrying credentials for unrelated services;
-    /// the SDK cannot inspect or filter those defaults.
+    /// the SDK cannot inspect or filter those defaults. The SDK keeps the
+    /// supplied client's redirect policy; the capture and `/flags` clients it
+    /// builds follow only 307 and 308 redirects to the same scheme, host and port.
     ///
     /// Create and finally drop application-owned blocking clients, including handles
     /// held in options and builders, outside async runtimes. SDK shutdown does not
@@ -443,8 +473,9 @@ impl ClientOptionsBuilder {
     ///
     /// Registering a hook silences the default WARN for terminal capture
     /// reject/exhaustion and serialization failures (the caller now owns that
-    /// signal). Shutdown-timeout, queue-full, and `before_send` drops keep their
-    /// WARN logs and do **not** fire the hook — they are not delivery failures.
+    /// signal). Shutdown-timeout, queue-full, and `before_send` drops, and
+    /// retryable failures on the final shutdown attempt, keep their WARN logs
+    /// and do **not** fire the hook.
     /// The existing `/flags` and poller WARN logs are unaffected.
     pub fn on_error<F>(&mut self, hook: F) -> &mut Self
     where
@@ -497,7 +528,9 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
-    use super::{ClientOptions, ClientOptionsBuilder};
+    use httpmock::prelude::*;
+
+    use super::{redirect_policy, ClientOptions, ClientOptionsBuilder, MAX_REDIRECTS};
     use crate::endpoints::{EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT};
 
     #[test]
@@ -610,5 +643,77 @@ mod tests {
 
         assert_eq!(options.api_key, "");
         assert!(options.is_disabled());
+    }
+
+    fn post_with_redirect_policy(url: String) -> reqwest::blocking::Response {
+        reqwest::blocking::Client::builder()
+            .redirect(redirect_policy())
+            .build()
+            .unwrap()
+            .post(url)
+            .body("payload")
+            .send()
+            .unwrap()
+    }
+
+    #[test]
+    fn redirect_policy_follows_only_same_origin_307_and_308_with_the_body() {
+        for (status, same_origin, followed) in [
+            (307, true, true),
+            (308, true, true),
+            (307, false, false),
+            (308, false, false),
+            (301, true, false),
+            (302, true, false),
+            (303, true, false),
+        ] {
+            let (server, other) = (MockServer::start(), MockServer::start());
+            let target = if same_origin { &server } else { &other };
+            let next = target.mock(|when, then| {
+                when.method(POST).path("/next").body("payload");
+                then.status(200);
+            });
+            let location = target.url("/next");
+            server.mock(|when, then| {
+                when.path("/start");
+                then.status(status).header("location", &location);
+            });
+
+            let response = post_with_redirect_policy(server.url("/start"));
+
+            let case = format!("{status} same_origin={same_origin}");
+            assert_eq!(next.calls(), usize::from(followed), "{case}");
+            let want = if followed { 200 } else { status };
+            assert_eq!(response.status().as_u16(), want, "{case}");
+        }
+    }
+
+    #[test]
+    fn redirect_policy_does_not_follow_a_scheme_change_on_the_same_host() {
+        let server = MockServer::start();
+        let location = format!("https://{}/next", server.address());
+        server.mock(|when, then| {
+            when.path("/start");
+            then.status(307).header("location", &location);
+        });
+
+        let response = post_with_redirect_policy(server.url("/start"));
+
+        assert_eq!(response.status().as_u16(), 307);
+    }
+
+    #[test]
+    fn redirect_policy_stops_after_the_redirect_limit() {
+        let server = MockServer::start();
+        let location = server.url("/loop");
+        let looping = server.mock(|when, then| {
+            when.method(POST).path("/loop");
+            then.status(307).header("location", &location);
+        });
+
+        let response = post_with_redirect_policy(server.url("/loop"));
+
+        assert_eq!(response.status().as_u16(), 307);
+        assert_eq!(looping.calls(), MAX_REDIRECTS + 1);
     }
 }

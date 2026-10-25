@@ -84,6 +84,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
             || {
                 HttpClient::builder()
                     .timeout(Duration::from_secs(options.request_timeout_seconds))
+                    .redirect(super::redirect_policy())
                     .build()
             },
             Ok,

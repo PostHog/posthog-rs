@@ -116,6 +116,10 @@ pub(super) fn preprocess_capture_event(
     // hooks so `before_send` sees them and can change or remove them.
     apply_runtime_context(&mut event);
     apply_capture_defaults(&mut event, defaults);
+    event.merge_groups_into_properties();
+    // Trims after every SDK fill and before the hooks, so properties a hook
+    // adds to a minimized `$feature_flag_called` event are sent.
+    event.apply_minimal_flag_called_allowlist();
     apply_before_send_hooks(hooks, event)
 }
 
@@ -235,8 +239,7 @@ fn flag_called_event(params: FlagCalledEventParams, defaults: &CaptureDefaults) 
     let mut event = Event::new("$feature_flag_called".to_string(), params.distinct_id);
     if params.minimal {
         // Marks the event so the capture pipeline trims it to the minimal
-        // allowlist as its final enrichment step, after system context and SDK
-        // metadata are stamped on.
+        // allowlist after system context and SDK metadata are stamped on.
         event.mark_minimal_flag_called();
     }
     for (k, v) in params.properties {

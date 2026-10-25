@@ -58,6 +58,20 @@ fn assert_duplicate_copy_not_persisted(summary: &CaptureSummary, mocks: &[Mock<'
     assert_eq!(summary.event_results()[&uuid].result, EventStatus::Ok);
 }
 
+/// Capture on `server` redirects with a 307 to `other`, which would accept the
+/// batch. Returns the mock on `other`, which must never be called.
+fn redirect_to_another_origin<'a>(server: &MockServer, other: &'a MockServer) -> Mock<'a> {
+    let location = other.url("/i/v1/analytics/events");
+    server.mock(|when, then| {
+        when.method(POST).path("/i/v1/analytics/events");
+        then.status(307).header("location", &location);
+    });
+    other.mock(|when, then| {
+        when.method(POST);
+        then.status(200).json_body(json!({ "results": {} }));
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Async capture
 // ---------------------------------------------------------------------------
@@ -287,6 +301,18 @@ mod async_capture {
     }
 
     #[tokio::test]
+    async fn redirect_to_another_origin_is_not_followed() {
+        let (server, other) = (MockServer::start(), MockServer::start());
+        let other_mock = super::redirect_to_another_origin(&server, &other);
+
+        let client = capture_client(server.base_url()).await;
+        let result = client.capture_immediate(Event::new("test", "user-1")).await;
+
+        assert!(result.is_err());
+        other_mock.assert_calls(0);
+    }
+
+    #[tokio::test]
     async fn historical_migration_flag_is_sent() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
@@ -477,6 +503,18 @@ mod blocking {
             );
             mock.assert_hits(3);
         }
+    }
+
+    #[test]
+    fn redirect_to_another_origin_is_not_followed() {
+        let (server, other) = (MockServer::start(), MockServer::start());
+        let other_mock = super::redirect_to_another_origin(&server, &other);
+
+        let client = capture_client(server.base_url());
+        let result = client.capture_immediate(Event::new("test", "user-1"));
+
+        assert!(result.is_err());
+        other_mock.assert_calls(0);
     }
 
     #[test]
