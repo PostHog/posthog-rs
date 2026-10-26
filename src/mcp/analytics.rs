@@ -114,6 +114,7 @@ impl Core {
     pub(crate) fn virtual_tool_name(&self, tool: VirtualTool) -> Option<&str> {
         let configured = match tool {
             VirtualTool::MissingCapability => &self.options.missing_capability_tool,
+            VirtualTool::Feedback => &self.options.feedback_tool,
         };
         let name = configured.as_deref()?.trim();
         Some(if name.is_empty() {

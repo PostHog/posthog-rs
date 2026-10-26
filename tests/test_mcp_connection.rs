@@ -476,7 +476,12 @@ async fn the_virtual_tool_is_not_advertised_by_default() {
 
     let tools = client.list_all_tools().await.unwrap();
 
-    assert!(tools.iter().all(|tool| tool.name != "get_more_tools"));
+    for virtual_tool in ["get_more_tools", "send_feedback"] {
+        assert!(
+            tools.iter().all(|tool| tool.name != virtual_tool),
+            "{virtual_tool}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -501,6 +506,96 @@ async fn the_virtual_tool_is_listed_once_on_the_first_page() {
             .count()
     };
     assert_eq!((virtual_on(&first), virtual_on(&second)), (1, 0));
+}
+
+fn feedback_options() -> McpOptions {
+    McpOptionsBuilder::default()
+        .feedback_tool("")
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_feedback_tool_asks_for_a_type_and_a_summary() {
+    let recorder = Recorder::new().await;
+    let client = connect(&recorder, TestServer::new(), feedback_options()).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+
+    let feedback = tools
+        .iter()
+        .find(|tool| tool.name == "send_feedback")
+        .expect("advertised");
+    let schema = serde_json::to_value(&feedback.input_schema).unwrap();
+    assert_eq!(
+        schema["required"],
+        json!(["feedback_type", "summary", "llm_model"])
+    );
+    assert!(schema["properties"].get("context").is_none());
+}
+
+#[tokio::test]
+async fn a_feedback_report_becomes_one_feedback_event() {
+    let full = json!({
+        "feedback_type": "issue",
+        "summary": "query rejects dates for ada@example.com",
+        "details": "tried 7d",
+        "friction_points": "the error names no field",
+        "suggested_improvement": "accept relative dates",
+        "tool_name": "query",
+        "sentiment": "negative",
+        "task_completed": false,
+    });
+    let expected_full = json!({
+        "$mcp_feedback_type": "issue",
+        "$mcp_feedback_summary": "query rejects dates for [redacted]",
+        "$mcp_feedback_details": "tried 7d",
+        "$mcp_feedback_friction_points": "the error names no field",
+        "$mcp_feedback_suggested_improvement": "accept relative dates",
+        "$mcp_feedback_tool": "query",
+        "$mcp_feedback_sentiment": "negative",
+        "$mcp_feedback_task_completed": false,
+        "$mcp_intent": "query rejects dates for [redacted]\n\ntried 7d",
+        "$mcp_intent_source": "context_parameter",
+        "$mcp_resource_name": "send_feedback",
+    });
+    let malformed = json!({
+        "feedback_type": "bogus",
+        "summary": "works",
+        "sentiment": "furious",
+        "task_completed": "yes",
+    });
+    let expected_malformed = json!({
+        "$mcp_feedback_type": "other",
+        "$mcp_feedback_summary": "works",
+        "$mcp_intent": "works",
+    });
+    let absent_from_malformed = [
+        "$mcp_feedback_sentiment",
+        "$mcp_feedback_task_completed",
+        "$mcp_feedback_details",
+    ];
+    let cases = [
+        (full, expected_full, &[][..]),
+        (malformed, expected_malformed, &absent_from_malformed[..]),
+    ];
+
+    for (arguments, expected, absent) in cases {
+        let recorder = Recorder::new().await;
+        let client = connect(&recorder, TestServer::new(), feedback_options()).await;
+
+        let result = call(&client, "send_feedback", arguments).await;
+
+        assert!(texts(&result)[0].starts_with("Your feedback was recorded"));
+        let event = recorder.only("$mcp_feedback").await;
+        for (key, value) in expected.as_object().unwrap() {
+            assert_eq!(property(&event, key), value, "{key}");
+        }
+        for key in absent.iter().chain(["$mcp_parameters"].iter()) {
+            assert!(!event.properties().contains_key(*key), "{key}");
+        }
+        assert!(recorder.named("$mcp_tool_call").await.is_empty());
+    }
 }
 
 #[tokio::test]

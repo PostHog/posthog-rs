@@ -80,6 +80,13 @@ pub struct McpOptions {
     /// one, so give it a name the server's own tools do not use.
     #[builder(setter(into, strip_option))]
     pub(crate) missing_capability_tool: Option<String>,
+    /// Advertise a virtual tool of this name (`send_feedback` when blank)
+    /// that agents call to report a missing capability, a tool that failed or
+    /// confused them, or one that worked well, sent as `$mcp_feedback`. Like
+    /// `missing_capability_tool`, it is answered by
+    /// [`McpAnalytics::instrument`](super::McpAnalytics::instrument) only.
+    #[builder(setter(into, strip_option))]
+    pub(crate) feedback_tool: Option<String>,
     /// The exact build the server runs, sent as `$mcp_server_build` on every
     /// event: an immutable value such as a commit SHA or an image digest, of
     /// 1 to 256 characters. [`McpOptionsBuilder::build`] rejects any other
@@ -103,6 +110,7 @@ impl Default for McpOptions {
             capture_responses: true,
             before_send: None,
             missing_capability_tool: None,
+            feedback_tool: None,
             server_build: None,
         }
     }
@@ -119,6 +127,7 @@ impl std::fmt::Debug for McpOptions {
             .field("capture_parameters", &self.capture_parameters)
             .field("capture_responses", &self.capture_responses)
             .field("missing_capability_tool", &self.missing_capability_tool)
+            .field("feedback_tool", &self.feedback_tool)
             .field("server_build", &self.server_build)
             .finish_non_exhaustive()
     }
