@@ -81,14 +81,14 @@ See [RELEASING.md](RELEASING.md).
 
 ## Application HTTP context
 
-With the `async-client` feature, use `TracingHeadersClient` to pass the current request's
+With the `async-client` feature, use `PostHogReqwestClient` to pass the current request's
 analytics IDs to selected application hosts. This is separate from event ingestion.
 
 ```rust
-use posthog_rs::{RequestContext, TracingHeadersClient};
+use posthog_rs::{PostHogReqwestClient, RequestContext};
 
 async fn example() -> Result<(), reqwest::Error> {
-    let http = TracingHeadersClient::new(
+    let http = PostHogReqwestClient::new(
         reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)),
         ["api.example.com"],
     )?;

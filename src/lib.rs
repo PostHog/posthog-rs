@@ -101,10 +101,10 @@ mod feature_flags;
 mod global;
 mod local_evaluation;
 mod request_context;
+#[cfg(feature = "async-client")]
+mod reqwest_client;
 #[cfg(feature = "tower")]
 pub mod tower;
-#[cfg(feature = "async-client")]
-mod tracing_headers_client;
 pub use request_context::RequestContext;
 
 // Public interface - any change to this is breaking!
@@ -173,4 +173,4 @@ pub use global::is_disabled as global_is_disabled;
 pub use global::shutdown;
 
 #[cfg(feature = "async-client")]
-pub use tracing_headers_client::TracingHeadersClient;
+pub use reqwest_client::PostHogReqwestClient;

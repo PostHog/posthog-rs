@@ -368,6 +368,11 @@ pub posthog_rs::MultivariateFilter::variants: alloc::vec::Vec<posthog_rs::Multiv
 pub struct posthog_rs::MultivariateVariant
 pub posthog_rs::MultivariateVariant::key: alloc::string::String
 pub posthog_rs::MultivariateVariant::rollout_percentage: f64
+pub struct posthog_rs::PostHogReqwestClient
+impl posthog_rs::PostHogReqwestClient
+pub fn posthog_rs::PostHogReqwestClient::client(&self) -> &reqwest::async_impl::client::Client
+pub async fn posthog_rs::PostHogReqwestClient::execute(&self, reqwest::async_impl::request::Request) -> core::result::Result<reqwest::async_impl::response::Response, reqwest::error::Error>
+pub fn posthog_rs::PostHogReqwestClient::new<I, S>(reqwest::async_impl::client::ClientBuilder, I) -> core::result::Result<Self, reqwest::error::Error> where I: core::iter::traits::collect::IntoIterator<Item = S>, S: core::convert::AsRef<str>
 pub struct posthog_rs::Property
 pub posthog_rs::Property::key: alloc::string::String
 pub posthog_rs::Property::operator: alloc::string::String
@@ -389,11 +394,6 @@ pub fn posthog_rs::RequestContext::session_id(self, impl core::convert::Into<all
 pub struct posthog_rs::TraceContext
 impl posthog_rs::TraceContext
 pub fn posthog_rs::TraceContext::new<T: core::convert::Into<alloc::string::String>, S: core::convert::Into<alloc::string::String>>(T, S) -> Self
-pub struct posthog_rs::TracingHeadersClient
-impl posthog_rs::TracingHeadersClient
-pub fn posthog_rs::TracingHeadersClient::client(&self) -> &reqwest::async_impl::client::Client
-pub async fn posthog_rs::TracingHeadersClient::execute(&self, reqwest::async_impl::request::Request) -> core::result::Result<reqwest::async_impl::response::Response, reqwest::error::Error>
-pub fn posthog_rs::TracingHeadersClient::new<I, S>(reqwest::async_impl::client::ClientBuilder, I) -> core::result::Result<Self, reqwest::error::Error> where I: core::iter::traits::collect::IntoIterator<Item = S>, S: core::convert::AsRef<str>
 #[non_exhaustive] pub struct posthog_rs::V1ErrorResponse
 pub posthog_rs::V1ErrorResponse::error: alloc::string::String
 pub posthog_rs::V1ErrorResponse::error_description: core::option::Option<alloc::string::String>

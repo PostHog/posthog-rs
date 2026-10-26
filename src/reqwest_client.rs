@@ -14,12 +14,12 @@ use crate::RequestContext;
 /// client default headers: those defaults belong to the application and can apply to any host.
 /// This client does not change the SDK's event ingestion transport.
 #[derive(Clone)]
-pub struct TracingHeadersClient {
+pub struct PostHogReqwestClient {
     client: Client,
     allowed_hosts: HashSet<String>,
 }
 
-impl TracingHeadersClient {
+impl PostHogReqwestClient {
     /// Builds a dedicated client with automatic redirects disabled.
     ///
     /// Hosts are trimmed and compared without case sensitivity. Each entry must be a hostname

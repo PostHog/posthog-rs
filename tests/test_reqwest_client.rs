@@ -1,7 +1,7 @@
 #![cfg(feature = "async-client")]
 
 use httpmock::prelude::*;
-use posthog_rs::{RequestContext, TracingHeadersClient};
+use posthog_rs::{PostHogReqwestClient, RequestContext};
 use reqwest::{header::HeaderMap, Method};
 
 #[tokio::test]
@@ -34,7 +34,7 @@ async fn exact_hosts_replace_stale_headers_and_preserve_http_requests() {
             .await;
         let mut defaults = HeaderMap::new();
         defaults.insert("x-application", "default".parse().unwrap());
-        let client = TracingHeadersClient::new(
+        let client = PostHogReqwestClient::new(
             reqwest::Client::builder().default_headers(defaults),
             [allowed],
         )
@@ -65,7 +65,7 @@ async fn exact_hosts_replace_stale_headers_and_preserve_http_requests() {
 #[tokio::test]
 async fn context_is_read_when_each_request_runs_and_missing_ids_are_removed() {
     let server = MockServer::start_async().await;
-    let client = TracingHeadersClient::new(reqwest::Client::builder(), ["127.0.0.1"]).unwrap();
+    let client = PostHogReqwestClient::new(reqwest::Client::builder(), ["127.0.0.1"]).unwrap();
     for (distinct_id, session_id) in [
         (Some("first"), Some("one")),
         (Some("second"), None),
@@ -135,7 +135,7 @@ async fn redirects_are_returned_without_forwarding_context() {
                 })
                 .await;
             let client =
-                TracingHeadersClient::new(reqwest::Client::builder(), ["127.0.0.1"]).unwrap();
+                PostHogReqwestClient::new(reqwest::Client::builder(), ["127.0.0.1"]).unwrap();
             let request = client
                 .client()
                 .request(Method::POST, origin.url("/start"))
@@ -159,7 +159,7 @@ async fn redirects_are_returned_without_forwarding_context() {
 #[tokio::test]
 async fn invalid_context_headers_do_not_break_application_requests() {
     let server = MockServer::start_async().await;
-    let client = TracingHeadersClient::new(reqwest::Client::builder(), [" LOCALHOST "]).unwrap();
+    let client = PostHogReqwestClient::new(reqwest::Client::builder(), [" LOCALHOST "]).unwrap();
     for invalid in ["person\nvalue", "person\rvalue", "person\0value", ""] {
         let mock = server
             .mock_async(|when, then| {
@@ -190,7 +190,7 @@ async fn invalid_context_headers_do_not_break_application_requests() {
 #[tokio::test]
 async fn default_configuration_does_not_add_headers_and_transport_errors_reach_the_caller() {
     let server = MockServer::start_async().await;
-    let client = TracingHeadersClient::new(reqwest::Client::builder(), Vec::<&str>::new()).unwrap();
+    let client = PostHogReqwestClient::new(reqwest::Client::builder(), Vec::<&str>::new()).unwrap();
     let mock = server
         .mock_async(|when, then| {
             when.method(GET)
