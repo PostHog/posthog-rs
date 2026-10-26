@@ -97,7 +97,7 @@ fn init_global_for_test(options: posthog_rs::ClientOptions) -> Result<(), postho
 fn init_global_installs_panic_capture_when_enabled() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
-        when.method(POST).matches(is_panic_exception);
+        when.method(POST).is_true(is_panic_exception);
         then.status(200);
     });
 
@@ -123,5 +123,5 @@ fn init_global_installs_panic_capture_when_enabled() {
     // flush is synchronous, so the event has been sent by the time it returns.
     let _ = panic::catch_unwind(AssertUnwindSafe(integration_panic_site));
 
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 }

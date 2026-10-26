@@ -40,12 +40,12 @@ async fn client_with(host: String, flush_at: usize, max_attempts: u32) -> Client
 /// as the size-threshold and interval flushes that aren't driven by `flush()`).
 fn wait_for_hits(mock: &httpmock::Mock, want: usize) {
     for _ in 0..300 {
-        if mock.hits() >= want {
+        if mock.calls() >= want {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(mock.hits(), want, "timed out waiting for {want} hits");
+    assert_eq!(mock.calls(), want, "timed out waiting for {want} hits");
 }
 
 fn body_contains(req: &HttpMockRequest, needle: &str) -> bool {
@@ -59,8 +59,8 @@ async fn flush_immediately_sends_queued_events() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
         when.method(POST)
-            .matches(|r| body_contains(r, "\"event\":\"First\""))
-            .matches(|r| body_contains(r, "\"event\":\"Second\""));
+            .is_true(|r| body_contains(r, "\"event\":\"First\""))
+            .is_true(|r| body_contains(r, "\"event\":\"Second\""));
         then.status(200);
     });
 
@@ -70,7 +70,7 @@ async fn flush_immediately_sends_queued_events() {
     client.flush().await;
 
     // Both events arrive in a single batch request.
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 }
 
 #[tokio::test]
@@ -84,7 +84,7 @@ async fn flush_is_safe_when_queue_is_empty() {
     let client = client_with(server.base_url(), 100, 3).await;
     client.flush().await; // must not panic, must not send
 
-    mock.assert_hits(0);
+    mock.assert_calls(0);
 }
 
 #[tokio::test]
@@ -110,22 +110,22 @@ async fn flush_keeps_events_retryable_then_delivers_after_success() {
 
     // First flush attempts once; the 503 keeps the event queued for retry.
     client.flush().await;
-    fail.assert_hits(1);
+    fail.assert_calls(1);
 
     // Server recovers; the held event is delivered on the next flush.
     fail.delete();
     let ok = server.mock(|when, then| {
         when.method(POST)
-            .matches(|r| body_contains(r, "\"event\":\"Save\""));
+            .is_true(|r| body_contains(r, "\"event\":\"Save\""));
         then.status(200)
             .json_body(json!({"results": {id.to_string(): {"result": "ok"}}}));
     });
     client.flush().await;
-    ok.assert_hits(1);
+    ok.assert_calls(1);
 
     // Delivered: a third flush sends nothing more.
     client.flush().await;
-    ok.assert_hits(1);
+    ok.assert_calls(1);
     assert!(errors.try_recv().is_err());
 }
 
@@ -136,19 +136,19 @@ async fn shutdown_flushes_and_disables_future_capture() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
         when.method(POST)
-            .matches(|r| body_contains(r, "\"event\":\"Save\""));
+            .is_true(|r| body_contains(r, "\"event\":\"Save\""));
         then.status(200);
     });
 
     let client = client_with(server.base_url(), 100, 3).await;
     client.capture(Event::new("Save", "user-123"));
     client.shutdown().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 
     // Captures after shutdown are dropped, not enqueued.
     client.capture(Event::new("After Shutdown", "user-123"));
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 }
 
 #[tokio::test]
@@ -175,7 +175,7 @@ async fn shutdown_does_not_throw_on_delivery_failure() {
     let client = client_with(server.base_url(), 100, 3).await;
     client.capture(Event::new("Save", "user-123"));
     client.shutdown().await; // best-effort: attempts once, drops, does not panic
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 }
 
 // --- event-batcher ---------------------------------------------------------
@@ -184,7 +184,7 @@ async fn shutdown_does_not_throw_on_delivery_failure() {
 async fn batcher_flushes_when_size_threshold_reached() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
-        when.method(POST).matches(|request| {
+        when.method(POST).is_true(|request| {
             let body: serde_json::Value = serde_json::from_slice(request.body_ref()).unwrap();
             let batch = body["batch"].as_array().unwrap();
             batch.len() == 2 && batch[0]["event"] == "First" && batch[1]["event"] == "Second"
@@ -200,14 +200,14 @@ async fn batcher_flushes_when_size_threshold_reached() {
 
     wait_for_hits(&mock, 1);
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 }
 
 #[tokio::test]
 async fn batcher_preserves_fifo_order_within_a_batch() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
-        when.method(POST).matches(|r| {
+        when.method(POST).is_true(|r| {
             let s = String::from_utf8_lossy(r.body_ref());
             match (s.find("First"), s.find("Second"), s.find("Third")) {
                 (Some(a), Some(b), Some(c)) => a < b && b < c,
@@ -275,10 +275,10 @@ async fn successful_status_drains_the_queue() {
     event.set_uuid(id);
     client.capture(event);
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 
     // Nothing left to send.
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
     assert!(errors.try_recv().is_err());
 }
