@@ -20,8 +20,9 @@ use crate::mcp::contract::arguments::CONTEXT;
 use crate::mcp::contract::events;
 use crate::mcp::contract::limits::{MAX_NAME_LENGTH, MAX_TEXT_LENGTH};
 use crate::mcp::contract::properties as key;
+use crate::mcp::contract::REDACTED;
 use crate::mcp::feedback::FeedbackReport;
-use crate::mcp::privacy::TextPass;
+use crate::mcp::privacy::{is_credential_key, TextPass};
 use crate::mcp::tools::virtual_tools::{VirtualTool, FEEDBACK_REPLY, MISSING_CAPABILITY_REPLY};
 
 const FEEDBACK_PROPERTY_PREFIX: &str = "$mcp_feedback_";
@@ -114,7 +115,7 @@ fn feedback_event(call: &PreparedCall, report: &FeedbackReport) -> OutgoingEvent
     event.set_optional(key::FEEDBACK_TASK_COMPLETED, report.task_completed);
     for (name, value) in &report.extras {
         let property = format!("{FEEDBACK_PROPERTY_PREFIX}{name}");
-        event.set_optional(&property, captured_extra(value));
+        event.set_optional(&property, captured_extra(name, value));
     }
     event.bounded(&[key::RESOURCE_NAME, key::FEEDBACK_TYPE])
 }
@@ -124,8 +125,12 @@ fn free_text(text: &str, limit: usize) -> Option<String> {
 }
 
 /// A string as free text, a number or boolean as is, and any other JSON as
-/// text within the same limit, redacted leaf by leaf before it is written.
-fn captured_extra(value: &Value) -> Option<Value> {
+/// text within the same limit, redacted leaf by leaf before it is written. A
+/// field named like a credential is redacted whole, as any such key is.
+fn captured_extra(name: &str, value: &Value) -> Option<Value> {
+    if is_credential_key(name) {
+        return Some(Value::from(REDACTED));
+    }
     match value {
         Value::String(text) => free_text(text, MAX_TEXT_LENGTH).map(Value::from),
         Value::Number(_) | Value::Bool(_) => Some(value.clone()),

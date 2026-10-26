@@ -609,7 +609,8 @@ fn product_area_options() -> McpOptionsBuilder {
         .feedback_field("note", json!({ "type": "string" }))
         .feedback_field("attempts", json!({ "type": "integer" }))
         .feedback_field("filters", json!({ "type": "object" }))
-        .feedback_field("cleared", json!({ "type": "null" }));
+        .feedback_field("cleared", json!({ "type": "null" }))
+        .feedback_field("api_token", json!({ "type": "string" }));
     builder
 }
 
@@ -650,6 +651,7 @@ async fn declared_feedback_fields_are_captured_when_well_formed() {
                 "attempts": 3.0,
                 "filters": { "env": "prod", "password": { "value": "hunter2" }, "card": 4111111111111111u64 },
                 "cleared": null,
+                "api_token": "hunter2",
                 "invented": "never captured",
             }),
             json!({
@@ -658,6 +660,7 @@ async fn declared_feedback_fields_are_captured_when_well_formed() {
                 "$mcp_feedback_attempts": 3.0,
                 "$mcp_feedback_filters": "{\"card\":4111111111111111,\"env\":\"prod\",\"password\":\"[redacted]\"}",
                 "$mcp_feedback_cleared": "null",
+                "$mcp_feedback_api_token": "[redacted]",
             }),
             vec!["$mcp_feedback_invented"],
         ),

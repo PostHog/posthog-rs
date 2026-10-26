@@ -145,10 +145,12 @@ impl FeedbackReport {
     }
 }
 
-/// JSON equality, where `3` and `3.0` are the same number.
+/// JSON equality, where `3` and `3.0` are the same number. Two integers
+/// compare exactly, since an `f64` cannot tell large ones apart.
 fn same_value(left: &Value, right: &Value) -> bool {
+    let has_float = left.is_f64() || right.is_f64();
     match (left.as_f64(), right.as_f64()) {
-        (Some(left), Some(right)) => left == right,
+        (Some(left), Some(right)) if has_float => left == right,
         _ => left == right,
     }
 }
@@ -186,6 +188,11 @@ mod tests {
                 true,
             ),
             (json!({ "type": "number", "enum": [1.5] }), json!(1.5), true),
+            (
+                json!({ "type": "integer", "enum": [9_007_199_254_740_992u64] }),
+                json!(9_007_199_254_740_993u64),
+                false,
+            ),
             (
                 json!({ "type": "string", "enum": ["a"] }),
                 json!("b"),
