@@ -1,6 +1,8 @@
 //! What the host can add to the `send_feedback` tool: report fields of its
 //! own, and a handler that sees each report and may answer the agent.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -8,7 +10,9 @@ use serde_json::{Map, Value};
 use super::contract::arguments::{CONTEXT, CONVERSATION_ID, LLM_MODEL};
 use super::tools::virtual_tools::{FEEDBACK_TYPES, SENTIMENTS};
 
-pub type FeedbackHandler = Arc<dyn Fn(&FeedbackReport) -> Option<String> + Send + Sync>;
+pub type FeedbackHandler = Arc<
+    dyn Fn(FeedbackReport) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync,
+>;
 
 const OTHER_FEEDBACK: &str = "other";
 
@@ -160,6 +164,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::mcp::tools::virtual_tools::VirtualTool;
+
+    #[test]
+    fn every_built_in_report_argument_is_reserved() {
+        let descriptor = VirtualTool::Feedback.descriptor("send_feedback", &Default::default());
+        let properties = descriptor["inputSchema"]["properties"].as_object().unwrap();
+        for name in properties.keys() {
+            assert!(BUILT_IN_FIELDS.contains(&name.as_str()), "{name}");
+        }
+    }
 
     #[test]
     fn values_must_match_the_declared_type_and_enum() {

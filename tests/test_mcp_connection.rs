@@ -608,7 +608,8 @@ fn product_area_options() -> McpOptionsBuilder {
         )
         .feedback_field("note", json!({ "type": "string" }))
         .feedback_field("attempts", json!({ "type": "integer" }))
-        .feedback_field("filters", json!({ "type": "object" }));
+        .feedback_field("filters", json!({ "type": "object" }))
+        .feedback_field("cleared", json!({ "type": "null" }));
     builder
 }
 
@@ -647,14 +648,16 @@ async fn declared_feedback_fields_are_captured_when_well_formed() {
                 "product_area": "flags",
                 "note": "ping ada@example.com",
                 "attempts": 3.0,
-                "filters": { "env": "prod" },
+                "filters": { "env": "prod", "password": { "value": "hunter2" }, "card": 4111111111111111u64 },
+                "cleared": null,
                 "invented": "never captured",
             }),
             json!({
                 "$mcp_feedback_product_area": "flags",
                 "$mcp_feedback_note": "ping [redacted]",
                 "$mcp_feedback_attempts": 3.0,
-                "$mcp_feedback_filters": "{\"env\":\"prod\"}",
+                "$mcp_feedback_filters": "{\"card\":4111111111111111,\"env\":\"prod\",\"password\":\"[redacted]\"}",
+                "$mcp_feedback_cleared": "null",
             }),
             vec!["$mcp_feedback_invented"],
         ),
@@ -691,27 +694,57 @@ async fn declared_feedback_fields_are_captured_when_well_formed() {
 }
 
 #[tokio::test]
+async fn an_object_feedback_field_is_sent_as_bounded_json_text() {
+    let recorder = Recorder::new().await;
+    let options = product_area_options().build().unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+    let filters = json!({ "notes": "word ".repeat(1_000) });
+    let arguments = json!({ "feedback_type": "issue", "summary": "s", "filters": filters });
+
+    call(&client, "send_feedback", arguments).await;
+
+    let event = recorder.only("$mcp_feedback").await;
+    let sent = text_property(&event, "$mcp_feedback_filters");
+    assert_eq!(sent.chars().count(), 2_048);
+    assert!(sent.starts_with("{\"notes\":\"word word"));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Handler {
+    Replies,
+    RepliesBlank,
+    RepliesNothing,
+    Panics,
+}
+
+#[tokio::test]
 async fn the_feedback_handler_gets_the_report_and_may_reply() {
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let replies = [Some("Thanks, filed as DOCS-12"), Some("  "), None];
-    let expected = [
-        "Thanks, filed as DOCS-12",
-        "Your feedback was recorded",
-        "Your feedback was recorded",
+    let cases = [
+        (Handler::Replies, "Thanks, filed as DOCS-12"),
+        (Handler::RepliesBlank, "Your feedback was recorded"),
+        (Handler::RepliesNothing, "Your feedback was recorded"),
+        (Handler::Panics, "Your feedback was recorded"),
     ];
-    for (reply, expected) in IntoIterator::into_iter(replies).zip(expected) {
+    for (handler, expected) in cases {
         let recorder = Recorder::new().await;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
         let reports = seen.clone();
         let options = product_area_options()
-            .on_feedback(move |report: &FeedbackReport| {
-                reports.lock().unwrap().push((
-                    report.feedback_type.clone(),
-                    report.summary.clone(),
-                    report.extras.get("product_area").cloned(),
-                ));
-                match reply {
-                    Some(text) => Some(text.to_string()),
-                    None => panic!("the handler failed"),
+            .on_feedback(move |report: FeedbackReport| {
+                let reports = reports.clone();
+                async move {
+                    tokio::task::yield_now().await;
+                    *reports.lock().unwrap() = Some((
+                        report.feedback_type.clone(),
+                        report.summary.clone(),
+                        report.extras.get("product_area").cloned(),
+                    ));
+                    match handler {
+                        Handler::Replies => Some("Thanks, filed as DOCS-12".to_string()),
+                        Handler::RepliesBlank => Some("  ".to_string()),
+                        Handler::RepliesNothing => None,
+                        Handler::Panics => panic!("the handler failed"),
+                    }
                 }
             })
             .build()
@@ -725,19 +758,19 @@ async fn the_feedback_handler_gets_the_report_and_may_reply() {
 
         let result = call(&client, "send_feedback", arguments).await;
 
-        assert!(texts(&result)[0].starts_with(expected), "{reply:?}");
+        assert!(texts(&result)[0].starts_with(expected), "{handler:?}");
         recorder.only("$mcp_feedback").await;
+        let report = seen.lock().unwrap().clone();
+        assert_eq!(
+            report,
+            Some((
+                "issue".to_string(),
+                "ada@example.com cannot log in".to_string(),
+                Some(json!("flags"))
+            )),
+            "{handler:?}"
+        );
     }
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen.len(), 3);
-    assert_eq!(
-        seen[0],
-        (
-            "issue".to_string(),
-            "ada@example.com cannot log in".to_string(),
-            Some(json!("flags"))
-        )
-    );
 }
 
 #[tokio::test]

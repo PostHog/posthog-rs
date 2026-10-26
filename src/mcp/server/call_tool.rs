@@ -35,7 +35,10 @@ impl<H: ServerHandler> Instrumented<H> {
     ) -> Result<CallToolResponse, McpError> {
         let facts = self.request_facts(&context);
         if let Some(tool) = self.virtual_tool(&request.name) {
-            return Ok(self.answer_virtual_tool(tool, &facts, &request).into());
+            return Ok(self
+                .answer_virtual_tool(tool, &facts, &request)
+                .await
+                .into());
         }
 
         let registered = self.registered_facts(&request.name);
@@ -60,7 +63,7 @@ impl<H: ServerHandler> Instrumented<H> {
         }
     }
 
-    fn answer_virtual_tool(
+    async fn answer_virtual_tool(
         &self,
         tool: VirtualTool,
         facts: &RequestFacts,
@@ -68,7 +71,7 @@ impl<H: ServerHandler> Instrumented<H> {
     ) -> CallToolResult {
         let registered = Some(self.virtual_facts(tool));
         let call = self.prepare(facts, request, registered, ToolExistence::Registered);
-        answer_virtual_call(&self.analytics.core, tool, call)
+        answer_virtual_call(&self.analytics.core, tool, call).await
     }
 
     fn record_outcome(

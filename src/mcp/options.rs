@@ -1,6 +1,7 @@
 //! Configuration. Defaults follow the configuration table of PostHog's MCP
 //! analytics spec.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use derive_builder::Builder;
@@ -102,10 +103,10 @@ pub struct McpOptions {
     pub(crate) feedback_fields: Vec<FeedbackField>,
     /// Sees each feedback report, after its event is sent, and may return the
     /// reply the agent gets instead of the default acknowledgement. A panic
-    /// or a blank reply keeps the default. It runs inside the `tools/call`,
-    /// so hand slow work such as a network call to a task of its own. The
-    /// SDK logs nothing of the report, but a panic message reaches the
-    /// process's panic hook as usual.
+    /// or a blank reply keeps the default. The `tools/call` waits for it, so
+    /// the reply can depend on async work, such as filing a ticket. The SDK
+    /// logs nothing of the report, but a panic message reaches the process's
+    /// panic hook as usual.
     #[builder(setter(custom))]
     pub(crate) on_feedback: Option<FeedbackHandler>,
     /// The exact build the server runs, sent as `$mcp_server_build` on every
@@ -188,11 +189,15 @@ impl McpOptionsBuilder {
         self.add_feedback_field(name.into(), schema, true)
     }
 
-    pub fn on_feedback<F>(&mut self, handle: F) -> &mut Self
+    /// An async handler, such as
+    /// `|report| async move { tickets.file(report).await.ok() }`.
+    pub fn on_feedback<F, Reply>(&mut self, handle: F) -> &mut Self
     where
-        F: Fn(&FeedbackReport) -> Option<String> + Send + Sync + 'static,
+        F: Fn(FeedbackReport) -> Reply + Send + Sync + 'static,
+        Reply: Future<Output = Option<String>> + Send + 'static,
     {
-        self.on_feedback = Some(Some(Arc::new(handle)));
+        let handler: FeedbackHandler = Arc::new(move |report| Box::pin(handle(report)));
+        self.on_feedback = Some(Some(handler));
         self
     }
 

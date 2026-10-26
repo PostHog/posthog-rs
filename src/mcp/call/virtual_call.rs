@@ -2,7 +2,9 @@
 //! PostHog gets the report as a `$mcp_missing_capability` or `$mcp_feedback`
 //! event rather than a tool call.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::AssertUnwindSafe;
+
+use futures_util::FutureExt;
 
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::Value;
@@ -12,7 +14,7 @@ use super::handle_delivery::deliver_handle;
 use super::intent::{Intent, FROM_CONTEXT_ARGUMENT};
 use super::prepare::PreparedCall;
 use crate::mcp::analytics::Core;
-use crate::mcp::bounds::{bounded_non_empty, bounded_text};
+use crate::mcp::bounds::{bounded_non_empty, bounded_payload, bounded_text, truncate};
 use crate::mcp::capture::OutgoingEvent;
 use crate::mcp::contract::arguments::CONTEXT;
 use crate::mcp::contract::events;
@@ -24,7 +26,7 @@ use crate::mcp::tools::virtual_tools::{VirtualTool, FEEDBACK_REPLY, MISSING_CAPA
 
 const FEEDBACK_PROPERTY_PREFIX: &str = "$mcp_feedback_";
 
-pub(crate) fn answer_virtual_call(
+pub(crate) async fn answer_virtual_call(
     core: &Core,
     tool: VirtualTool,
     mut call: PreparedCall,
@@ -43,7 +45,7 @@ pub(crate) fn answer_virtual_call(
             let stated = report.intent();
             call.intent = stated.and_then(|text| Intent::new(&text, FROM_CONTEXT_ARGUMENT));
             core.emit(|| vec![feedback_event(&call, &report)]);
-            feedback_reply(core, &report)
+            feedback_reply(core, report).await
         }
     };
     let mut result = CallToolResult::success(vec![ContentBlock::text(reply)]);
@@ -53,11 +55,14 @@ pub(crate) fn answer_virtual_call(
 
 /// The handler's reply, or the default when there is none, it is blank, or
 /// the handler panicked. The report's text never reaches a log.
-fn feedback_reply(core: &Core, report: &FeedbackReport) -> String {
+async fn feedback_reply(core: &Core, report: FeedbackReport) -> String {
     let Some(handle) = &core.options.on_feedback else {
         return FEEDBACK_REPLY.to_string();
     };
-    match catch_unwind(AssertUnwindSafe(|| handle(report))) {
+    let reply = AssertUnwindSafe(async { handle(report).await })
+        .catch_unwind()
+        .await;
+    match reply {
         Ok(Some(reply)) if !reply.trim().is_empty() => reply,
         Ok(_) => FEEDBACK_REPLY.to_string(),
         Err(_) => {
@@ -118,14 +123,15 @@ fn free_text(text: &str, limit: usize) -> Option<String> {
     bounded_non_empty(text, limit, TextPass::FreeText)
 }
 
-/// A string as free text, a number, boolean or null as is, and anything else
-/// as JSON text within the same limit.
+/// A string as free text, a number or boolean as is, and any other JSON as
+/// text within the same limit, redacted leaf by leaf before it is written.
 fn captured_extra(value: &Value) -> Option<Value> {
     match value {
         Value::String(text) => free_text(text, MAX_TEXT_LENGTH).map(Value::from),
-        Value::Number(_) | Value::Bool(_) | Value::Null => Some(value.clone()),
-        Value::Array(_) | Value::Object(_) => {
-            free_text(&value.to_string(), MAX_TEXT_LENGTH).map(Value::from)
+        Value::Number(_) | Value::Bool(_) => Some(value.clone()),
+        Value::Null | Value::Array(_) | Value::Object(_) => {
+            let redacted = bounded_payload(value, TextPass::FreeText).to_string();
+            Some(Value::from(truncate(&redacted, MAX_TEXT_LENGTH)))
         }
     }
 }
