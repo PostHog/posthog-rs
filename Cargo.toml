@@ -39,6 +39,12 @@ tokio = { version = "1", features = [
 flate2 = "1.0"
 brotli = { version = "9.0", optional = true }
 zstd = { version = "0.14", optional = true }
+rmcp = { version = "3.7", default-features = false, features = [
+    "server",
+], optional = true }
+url = { version = "2.5", optional = true }
+fancy-regex = { version = "0.19", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [dev-dependencies]
 axum = { version = "0.8", default-features = false }
@@ -51,6 +57,17 @@ serde_json = "1.0"
 futures = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eyre = "0.6.12"
+http = "1"
+http-body-util = "0.1"
+base64 = "0.22"
+rmcp = { version = "3.7", features = [
+    "server",
+    "client",
+    "macros",
+    "transport-async-rw",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
 
 [features]
 default = ["async-client", "error-tracking"]
@@ -60,6 +77,14 @@ tower = ["async-client", "dep:http", "dep:tower-layer", "dep:tower-service"]
 capture-v1 = ["brotli", "zstd"]
 test-harness = []
 error-tracking = ["dep:backtrace", "dep:findshlibs"]
+mcp = [
+    "async-client",
+    "dep:rmcp",
+    "dep:http",
+    "dep:url",
+    "dep:fancy-regex",
+    "dep:base64",
+]
 
 [workspace]
 members = [".", "compliance/adapter"]

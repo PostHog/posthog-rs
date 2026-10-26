@@ -56,6 +56,9 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
 
+      - name: Clippy (mcp)
+        run: cargo clippy --features mcp -- -D warnings
+
   public-api:
     name: Public API
     if: github.event_name == 'pull_request'
@@ -87,6 +90,10 @@ jobs:
             toolchain: stable
             cache-key: capture-v1
             command: cargo build --verbose --features capture-v1
+          - name: mcp
+            toolchain: stable
+            cache-key: mcp
+            command: cargo build --verbose --features mcp
           - name: MSRV (capture-v1, async client)
             toolchain: "1.78.0"
             cache-key: msrv-async-client
@@ -95,6 +102,10 @@ jobs:
             toolchain: "1.78.0"
             cache-key: msrv-blocking-client
             command: cargo check --locked --package posthog-rs --lib --no-default-features --features error-tracking,capture-v1
+          - name: MSRV of the mcp feature
+            toolchain: "1.88.0"
+            cache-key: msrv-mcp
+            command: cargo check --locked --package posthog-rs --lib --features mcp
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -173,6 +184,9 @@ jobs:
           - name: Unit test (error-tracking + capture-v1, blocking client)
             cache-key: error-tracking-capture-v1-blocking-client
             command: cargo test --verbose --no-default-features --features error-tracking,capture-v1
+          - name: Unit test (mcp)
+            cache-key: mcp
+            command: cargo test --verbose --features mcp
           - name: E2E test
             cache-key: e2e
             command: cargo test --verbose --features e2e-test --no-default-features
