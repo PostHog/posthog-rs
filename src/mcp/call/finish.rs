@@ -107,7 +107,7 @@ fn failure_events(
     response: Option<&Value>,
 ) -> Vec<OutgoingEvent> {
     let mut events = vec![tool_call_event(call, duration_ms, Some(failure), response)];
-    if core.options.exception_autocapture {
+    if core.options.exception_autocapture && failure.needs_exception() {
         events.push(exception_event(call, failure));
     }
     events

@@ -1,8 +1,9 @@
 //! `$mcp_parameters` and `$mcp_response`: the entry, nesting and key limits and
 //! the key-based redaction apply first, then each string gets its own
 //! redaction and limit. Strings share a budget of what redaction may scan, the
-//! size of a whole event, so once it is spent the rest are cut short before
-//! redaction scans them: an event that large is shrunk afterwards anyway.
+//! size of a whole event. Once it is spent, the strings that come after it in
+//! the payload are cut to a short limit, which bounds their scan too: an event
+//! that large is shrunk afterwards anyway.
 
 use serde_json::{Map, Value};
 

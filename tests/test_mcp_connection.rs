@@ -236,9 +236,12 @@ async fn a_panicking_handler_is_a_failed_call() {
 
     let arguments: JsonObject = serde_json::from_value(json!({})).unwrap();
     let request = CallToolRequestParams::new("explode").with_arguments(arguments);
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(1), client.call_tool(request));
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        client.call_tool(request),
+    );
     assert!(
-        !matches!(reply.await, Ok(Ok(_))),
+        reply.await.is_err(),
         "the panic reaches rmcp, which answers nothing"
     );
 

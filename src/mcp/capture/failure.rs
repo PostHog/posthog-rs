@@ -20,6 +20,7 @@ pub(crate) struct Failure {
     explicit_type: Option<String>,
     synthetic: bool,
     handled: bool,
+    exception_captured: bool,
 }
 
 impl Failure {
@@ -32,16 +33,24 @@ impl Failure {
             explicit_type: None,
             synthetic: false,
             handled: true,
+            exception_captured: false,
         }
     }
 
     /// A panic the framework never turned into a response, so error
-    /// tracking sees it as unhandled.
+    /// tracking sees it as unhandled. The client's panic hook, when
+    /// installed, already sent its `$exception`.
     pub(crate) fn panicked(type_name: &str, message: String) -> Self {
         Self {
             handled: false,
+            exception_captured: panic_hook_installed(),
             ..Self::thrown(type_name, message)
         }
+    }
+
+    /// Whether error tracking still needs an `$exception` for this failure.
+    pub(crate) fn needs_exception(&self) -> bool {
+        !self.exception_captured
     }
 
     /// A result that reported its own failure, with no error behind it.
@@ -52,6 +61,7 @@ impl Failure {
             explicit_type: None,
             synthetic: true,
             handled: true,
+            exception_captured: false,
         }
     }
 
@@ -110,6 +120,16 @@ impl Failure {
         bounded_non_empty(message, MAX_TEXT_LENGTH, TextPass::Captured)
             .unwrap_or_else(|| REDACTED.to_string())
     }
+}
+
+#[cfg(feature = "error-tracking")]
+fn panic_hook_installed() -> bool {
+    crate::error_tracking::panic_hook_installed()
+}
+
+#[cfg(not(feature = "error-tracking"))]
+fn panic_hook_installed() -> bool {
+    false
 }
 
 /// `my_crate::errors::UpstreamTimeout<T>` becomes `UpstreamTimeout`. A trait
