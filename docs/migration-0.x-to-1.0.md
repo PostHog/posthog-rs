@@ -36,6 +36,10 @@ The regular `capture` and `capture_batch` methods remain fire-and-forget. They e
 
 All event-producing SDK paths now use the same capture endpoint, including error tracking, `$feature_flag_called` events, historical migration, `before_send`, and terminal failures reported through `on_error`.
 
+### Reverse proxies
+
+If you send events through your own reverse proxy, update it before you upgrade. Forward `/i/v1/analytics/events` and `/i/v1/ai/events` to PostHog. Pass `Authorization` (the project token, sent as `Bearer <token>`), every `PostHog-*` header, `Content-Type`, `Content-Encoding` and `User-Agent` through unchanged: PostHog answers `401` without `Authorization` and `400` without the others, and the batch fails. Accept request bodies up to 20 MB: AI requests are often larger than 1 MB, the default limit in nginx and ingress-nginx, and a `413` from the proxy fails the batch. PostHog's managed reverse proxy already does this. See the [proxy guides](https://posthog.com/docs/advanced/proxy).
+
 ### Event IDs
 
 The SDK gives every event a UUIDv7 `uuid` and every request a UUIDv7 request ID. If you set your own with `Event::set_uuid`, keep it unique. When two events in one request share a `uuid`, PostHog keeps the first and drops the later copies. The SDK reports each dropped copy through `on_error` and `CaptureSummary` with the reason `duplicate_event_uuid`. An entry's `EventResult::duplicates_dropped` counts the copies dropped with it. If the kept copy comes back `retry` in the background worker, those dropped copies are not reported; PostHog still raises a `duplicate_event_uuid` ingestion warning in your project. Older PostHog versions reject the whole request with HTTP 400 `duplicate_event_uuid` instead.
