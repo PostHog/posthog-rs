@@ -407,3 +407,32 @@ async fn a_feedback_report_joins_the_conversation_of_a_fresh_instance() {
         text_property(&call, "$session_id")
     );
 }
+
+#[cfg(feature = "tower")]
+#[tokio::test]
+async fn the_posthog_layer_identifies_and_describes_mcp_events() {
+    let recorder = Recorder::new().await;
+    let server = stateless(&recorder, TestServer::new());
+    let host = posthog_rs::RequestContext::new()
+        .property("tenant", "acme")
+        .unwrap()
+        .property("authorization", "Bearer secret")
+        .unwrap();
+    let headers = [
+        ("x-posthog-distinct-id", "user_42"),
+        ("x-posthog-session-id", "ses_header"),
+    ];
+
+    let params = call_params("search_docs", json!({ "query": "flags" }));
+    server
+        .request_through_posthog_layer(params, &headers, host)
+        .await;
+
+    let event = recorder.only("$mcp_tool_call").await;
+    assert_eq!(event.distinct_id(), "user_42");
+    assert_eq!(text_property(&event, "tenant"), "acme");
+    assert_eq!(text_property(&event, "authorization"), "[redacted]");
+    assert_eq!(text_property(&event, "$request_path"), "/mcp");
+    assert_ne!(text_property(&event, "$session_id"), "ses_header");
+    assert!(!event.properties().contains_key("$process_person_profile"));
+}

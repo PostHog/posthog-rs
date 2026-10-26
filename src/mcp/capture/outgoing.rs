@@ -2,12 +2,20 @@ use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 use super::context::EventContext;
-use crate::mcp::bounds::fit_event_size;
+use crate::mcp::bounds::{bounded_payload, fit_event_size};
 use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
+use crate::mcp::privacy::TextPass;
 use crate::Event;
 
 const MCP_PREFIX: &str = "$mcp_";
+const PERSON_CONTROLS: [&str; 5] = [
+    key::PROCESS_PERSON_PROFILE,
+    key::SET,
+    "$set_once",
+    "$unset",
+    key::GROUPS,
+];
 
 const ALWAYS_REQUIRED: [&str; 8] = [
     key::INTERFACE,
@@ -78,14 +86,20 @@ impl OutgoingEvent {
 }
 
 /// The host's request context fills in what the event lacks, here rather
-/// than at capture, so the size bound covers it. The MCP session and person
-/// win over the host's, and `$mcp_*` names are MCP analytics' alone.
+/// than at capture, so the size bound and redaction cover it. The MCP
+/// session and person win over the host's: the person controls and the
+/// `$mcp_*` names are MCP analytics' alone.
 fn add_host_properties(properties: &mut Map<String, Value>, host: &Map<String, Value>) {
-    for (name, value) in host {
-        if !name.starts_with(MCP_PREFIX) {
-            properties
-                .entry(name.clone())
-                .or_insert_with(|| value.clone());
+    let kept: Map<String, Value> = host
+        .iter()
+        .filter(|(name, _)| {
+            !name.starts_with(MCP_PREFIX) && !PERSON_CONTROLS.contains(&name.as_str())
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    if let Value::Object(redacted) = bounded_payload(&Value::Object(kept), TextPass::Name) {
+        for (name, value) in redacted {
+            properties.entry(name).or_insert(value);
         }
     }
 }
@@ -140,5 +154,35 @@ mod tests {
             - crate::mcp::contract::limits::HOST_PROPERTIES_HEADROOM;
         assert!(size <= limits, "{size}");
         assert!(event.into_posthog_event().request_context_applied);
+    }
+
+    #[test]
+    fn host_properties_are_redacted_and_leave_identity_to_mcp() {
+        let mut context = context();
+        context.identity = Some(crate::mcp::Identity::new("user-1").with_property("plan", "pro"));
+        context.host_properties = serde_json::json!({
+            "authorization": "Bearer secret",
+            "nested": { "password": "hunter2", "region": "eu" },
+            "$process_person_profile": false,
+            "$set": { "plan": "free" },
+            "$groups": { "company": "other" },
+            "$mcp_intent": "host text",
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+
+        let event = OutgoingEvent::new(TOOLS_LIST, &context);
+
+        let properties = &event.properties;
+        assert_eq!(properties["authorization"], "[redacted]");
+        assert_eq!(
+            properties["nested"],
+            serde_json::json!({ "password": "[redacted]", "region": "eu" })
+        );
+        assert!(!properties.contains_key(key::PROCESS_PERSON_PROFILE));
+        assert_eq!(properties[key::SET], serde_json::json!({ "plan": "pro" }));
+        assert!(!properties.contains_key(key::GROUPS));
+        assert!(!properties.contains_key("$mcp_intent"));
     }
 }
