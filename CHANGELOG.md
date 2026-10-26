@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.28.0 — 2026-10-26
+
+### Minor changes
+
+- [3341880](https://github.com/posthog/posthog-rs/commit/3341880e8a47772ca646f8cd6a0463c251fbb63d) Add isolated request context for captures, exceptions, and feature flags, with optional Tower and Axum middleware. — Thanks @pauldambra for your first contribution 🎉!
+
 ## 0.27.1 — 2026-10-23
 
 ### Patch changes
