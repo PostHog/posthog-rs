@@ -34,6 +34,8 @@ pub(crate) struct EventContext {
     pub(crate) client: ClientIdentity,
     pub(crate) server: ServerIdentity,
     pub(crate) server_build: Option<String>,
+    /// The host's request context, which events carry where MCP sets nothing.
+    pub(crate) host_properties: Map<String, Value>,
 }
 
 impl EventContext {

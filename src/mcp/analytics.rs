@@ -12,7 +12,7 @@ use super::tools::catalog::ToolCatalog;
 use super::tools::injection::ArgumentInjection;
 use super::tools::ownership::ArgumentFlags;
 use super::tools::virtual_tools::VirtualTool;
-use crate::Client;
+use crate::{Client, RequestContext};
 
 /// MCP analytics for one server: its options, what it learned about the
 /// server's tools, and the PostHog client its events go through. Clones share
@@ -106,6 +106,7 @@ impl Core {
             client: scope.client_identity(session.token_client.as_ref()),
             server: scope.server.clone(),
             server_build: self.options.server_build.clone(),
+            host_properties: host_properties(request),
         }
     }
 
@@ -133,4 +134,17 @@ impl Core {
             }
         }
     }
+}
+
+/// The host's request context: the one its HTTP layer attached to the
+/// request, since `rmcp` serves each request on a task of its own, else the
+/// one in scope, for a manual API call made inside the host's handler.
+fn host_properties(request: &RequestInfo<'_>) -> serde_json::Map<String, serde_json::Value> {
+    let attached = request
+        .http
+        .and_then(|parts| parts.extensions.get::<RequestContext>())
+        .cloned();
+    let host = attached.or_else(RequestContext::current);
+    host.map(|host| host.properties.into_iter().collect())
+        .unwrap_or_default()
 }

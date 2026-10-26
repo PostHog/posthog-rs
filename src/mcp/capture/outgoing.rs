@@ -5,7 +5,9 @@ use super::context::EventContext;
 use crate::mcp::bounds::fit_event_size;
 use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
-use crate::{Event, RequestContext};
+use crate::Event;
+
+const MCP_PREFIX: &str = "$mcp_";
 
 const ALWAYS_REQUIRED: [&str; 8] = [
     key::INTERFACE,
@@ -32,7 +34,7 @@ impl OutgoingEvent {
         let mut properties = context.properties();
         properties.insert(key::INTERFACE.to_string(), Value::from(INTERFACE));
         properties.insert(key::LIB.to_string(), Value::from(LIB_NAME));
-        add_host_request_context(&mut properties);
+        add_host_properties(&mut properties, &context.host_properties);
         Self {
             name,
             distinct_id: context.distinct_id().to_string(),
@@ -77,13 +79,14 @@ impl OutgoingEvent {
 
 /// The host's request context fills in what the event lacks, here rather
 /// than at capture, so the size bound covers it. The MCP session and person
-/// win over the host's.
-fn add_host_request_context(properties: &mut Map<String, Value>) {
-    let Some(host) = RequestContext::current() else {
-        return;
-    };
-    for (name, value) in host.properties {
-        properties.entry(name).or_insert(value);
+/// win over the host's, and `$mcp_*` names are MCP analytics' alone.
+fn add_host_properties(properties: &mut Map<String, Value>, host: &Map<String, Value>) {
+    for (name, value) in host {
+        if !name.starts_with(MCP_PREFIX) {
+            properties
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
     }
 }
 
@@ -104,6 +107,7 @@ mod tests {
             client: Default::default(),
             server: Default::default(),
             server_build: None,
+            host_properties: Map::new(),
         }
     }
 
@@ -117,23 +121,24 @@ mod tests {
         assert_eq!(event.properties[key::INTERFACE], INTERFACE);
     }
 
-    #[tokio::test]
-    async fn host_request_context_is_bounded_with_the_event() {
-        let host = crate::RequestContext::new()
-            .session_id("ses_host")
-            .property("tenant", "t".repeat(200_000))
-            .unwrap();
-        let event = host
-            .scope(async { OutgoingEvent::new(TOOLS_LIST, &context()).bounded(&[]) })
-            .await;
+    #[test]
+    fn host_properties_are_bounded_with_the_event() {
+        let mut context = context();
+        context.host_properties = serde_json::json!({
+            "$session_id": "ses_host",
+            "tenant": "t".repeat(200_000),
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let event = OutgoingEvent::new(TOOLS_LIST, &context).bounded(&[]);
 
         assert_eq!(event.properties[key::SESSION_ID], "ses_1");
         assert!(event.properties.contains_key("tenant"));
         let size = serde_json::to_vec(&event.properties).unwrap().len();
-        assert!(
-            size <= crate::mcp::contract::limits::MAX_EVENT_BYTES,
-            "{size}"
-        );
+        let limits = crate::mcp::contract::limits::MAX_EVENT_BYTES
+            - crate::mcp::contract::limits::HOST_PROPERTIES_HEADROOM;
+        assert!(size <= limits, "{size}");
         assert!(event.into_posthog_event().request_context_applied);
     }
 }

@@ -348,3 +348,26 @@ async fn a_synthesized_stateless_handshake_names_no_client() {
     );
     assert!(text_property(&event, "$session_id").starts_with("ses_"));
 }
+
+#[tokio::test]
+async fn the_hosts_request_context_reaches_mcp_events() {
+    let recorder = Recorder::new().await;
+    let server = stateless(&recorder, TestServer::new());
+    let host = posthog_rs::RequestContext::new()
+        .session_id("ses_host")
+        .property("tenant", "acme")
+        .unwrap()
+        .property("$mcp_intent", "host text")
+        .unwrap();
+
+    let params = call_params("search_docs", json!({ "query": "flags" }));
+    let response = server
+        .request_with_context("tools/call", params, &[], Some(host))
+        .await;
+    assert!(!result_texts(&response).is_empty());
+
+    let event = recorder.only("$mcp_tool_call").await;
+    assert_eq!(text_property(&event, "tenant"), "acme");
+    assert_ne!(text_property(&event, "$session_id"), "ses_host");
+    assert!(!event.properties().contains_key("$mcp_intent"));
+}
