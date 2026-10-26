@@ -1,3 +1,7 @@
+use std::any::Any;
+use std::panic::{resume_unwind, AssertUnwindSafe};
+
+use futures_util::FutureExt;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode, InputRequiredResult,
 };
@@ -18,6 +22,7 @@ const PROTOCOL_ERROR_TYPE: &str = "McpError";
 const ROUTER_UNKNOWN_TOOL: &str = "tool not found";
 const VALIDATION_ERROR_TYPE: &str = "validation";
 const INPUT_REQUIRED_ERROR_TYPE: &str = "input_required";
+const PANIC_ERROR_TYPE: &str = "Panic";
 const LEGACY_INPUT_REQUIRED: &str =
     "InputRequiredResult requires negotiated protocol version 2026-07-28 or newer";
 
@@ -41,8 +46,17 @@ impl<H: ServerHandler> Instrumented<H> {
         let mut downstream = request;
         downstream.arguments = call.dispatch_arguments.clone();
 
-        let outcome = self.inner.call_tool(downstream, context).await;
-        self.record_outcome(call, facts.modern_protocol, outcome)
+        let handled = AssertUnwindSafe(self.inner.call_tool(downstream, context))
+            .catch_unwind()
+            .await;
+        match handled {
+            Ok(outcome) => self.record_outcome(call, facts.modern_protocol, outcome),
+            Err(panic) => {
+                let failure = Failure::thrown(PANIC_ERROR_TYPE, panic_message(panic.as_ref()));
+                end_call(&self.analytics.core, call, CallEnd::Failed(failure));
+                resume_unwind(panic)
+            }
+        }
     }
 
     fn answer_virtual_tool(
@@ -137,6 +151,15 @@ fn input_required_end(round: &InputRequiredResult, modern_protocol: bool) -> Cal
         .map(|(_, request)| request_method(request))
         .collect();
     CallEnd::InputRequired { methods }
+}
+
+/// `panic!` carries a `&str` or a `String`; anything else has no message.
+fn panic_message(panic: &(dyn Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|message| message.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
 }
 
 fn request_method(request: &rmcp::model::InputRequest) -> String {

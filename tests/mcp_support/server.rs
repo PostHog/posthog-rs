@@ -81,6 +81,7 @@ fn standard_tools() -> Vec<Tool> {
         simple("export"),
         simple("screenshot"),
         simple("deploy"),
+        simple("explode"),
     ]
 }
 
@@ -172,6 +173,7 @@ impl ServerHandler for TestServer {
             }
             "deploy" if request.input_responses.is_none() => deploy_round().into(),
             "deploy" => text("deployed").into(),
+            "explode" => panic!("index out of bounds"),
             _ => text("Found 3 results").into(),
         };
         Ok(response)

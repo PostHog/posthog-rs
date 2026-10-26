@@ -230,6 +230,27 @@ async fn a_raised_error_is_a_failed_call_and_still_reaches_the_client() {
 }
 
 #[tokio::test]
+async fn a_panicking_handler_is_a_failed_call() {
+    let recorder = Recorder::new().await;
+    let client = connect(&recorder, TestServer::new(), McpOptions::default()).await;
+
+    let arguments: JsonObject = serde_json::from_value(json!({})).unwrap();
+    let request = CallToolRequestParams::new("explode").with_arguments(arguments);
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(1), client.call_tool(request));
+    let _ = reply.await;
+
+    let event = recorder.only("$mcp_tool_call").await;
+    assert_eq!(property(&event, "$mcp_is_error"), &json!(true));
+    assert_eq!(text_property(&event, "$mcp_error_type"), "Panic");
+    assert_eq!(
+        text_property(&event, "$mcp_error_message"),
+        "index out of bounds"
+    );
+    let exception = recorder.only("$exception").await;
+    assert_eq!(property(&exception, "$exception_list")[0]["type"], "Panic");
+}
+
+#[tokio::test]
 async fn a_call_to_a_missing_tool_is_recorded_as_unknown() {
     let recorder = Recorder::new().await;
     let client = connect(&recorder, TestServer::new(), McpOptions::default()).await;

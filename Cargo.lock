@@ -1726,6 +1726,7 @@ dependencies = [
  "findshlibs",
  "flate2",
  "futures",
+ "futures-util",
  "http",
  "http-body-util",
  "httpmock",

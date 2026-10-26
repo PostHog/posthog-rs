@@ -45,6 +45,9 @@ rmcp = { version = "3.7", default-features = false, features = [
 url = { version = "2.5", optional = true }
 fancy-regex = { version = "0.19", optional = true }
 base64 = { version = "0.22", optional = true }
+futures-util = { version = "0.3", default-features = false, features = [
+    "std",
+], optional = true }
 
 [dev-dependencies]
 axum = { version = "0.8", default-features = false }
@@ -84,6 +87,7 @@ mcp = [
     "dep:url",
     "dep:fancy-regex",
     "dep:base64",
+    "dep:futures-util",
 ]
 
 [workspace]
