@@ -46,7 +46,8 @@ pub struct McpOptions {
     #[builder(setter(into, strip_option))]
     pub(crate) model_description: Option<String>,
     /// Supplies the intent of a call whose agent stated none, captured with
-    /// `$mcp_intent_source: "inferred"`. It runs on the response path.
+    /// `$mcp_intent_source: "inferred"`. It runs before the tool does, so
+    /// keep it fast.
     #[builder(setter(custom))]
     pub(crate) intent_fallback: Option<IntentFallback>,
     /// Conversation anchoring: advertise an optional `conversation_id`
