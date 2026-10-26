@@ -145,12 +145,22 @@ impl FeedbackReport {
     }
 }
 
-/// JSON equality, where `3` and `3.0` are the same number. Two integers
-/// compare exactly, since an `f64` cannot tell large ones apart.
+/// JSON Schema equality: numbers by value at any depth, so `[3]` matches
+/// `[3.0]`, and two integers exactly, since an `f64` cannot tell large ones
+/// apart.
 fn same_value(left: &Value, right: &Value) -> bool {
-    let has_float = left.is_f64() || right.is_f64();
-    match (left.as_f64(), right.as_f64()) {
-        (Some(left), Some(right)) if has_float => left == right,
+    match (left, right) {
+        (Value::Number(a), Value::Number(b)) if a.is_f64() || b.is_f64() => {
+            a.as_f64() == b.as_f64()
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_value(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(key, a)| b.get(key).is_some_and(|b| same_value(a, b)))
+        }
         _ => left == right,
     }
 }
@@ -191,6 +201,26 @@ mod tests {
             (
                 json!({ "type": "integer", "enum": [9_007_199_254_740_992u64] }),
                 json!(9_007_199_254_740_993u64),
+                false,
+            ),
+            (
+                json!({ "type": "array", "enum": [[1, 2]] }),
+                json!([1.0, 2]),
+                true,
+            ),
+            (
+                json!({ "type": "array", "enum": [[1, 2]] }),
+                json!([2, 1]),
+                false,
+            ),
+            (
+                json!({ "type": "object", "enum": [{ "a": [1] }] }),
+                json!({ "a": [1.0] }),
+                true,
+            ),
+            (
+                json!({ "type": "object", "enum": [{ "a": 1 }] }),
+                json!({ "a": 1, "b": 2 }),
                 false,
             ),
             (
