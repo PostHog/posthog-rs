@@ -96,12 +96,16 @@ pub struct McpOptions {
     /// Report arguments the host adds to `send_feedback`, each sent as
     /// `$mcp_feedback_<name>` when the agent's value matches its schema.
     /// Declare them with [`McpOptionsBuilder::feedback_field`] and
-    /// [`McpOptionsBuilder::required_feedback_field`].
+    /// [`McpOptionsBuilder::required_feedback_field`]. Like the other
+    /// feedback options, they need `feedback_tool`.
     #[builder(setter(custom))]
     pub(crate) feedback_fields: Vec<FeedbackField>,
     /// Sees each feedback report, after its event is sent, and may return the
     /// reply the agent gets instead of the default acknowledgement. A panic
-    /// or a blank reply keeps the default.
+    /// or a blank reply keeps the default. It runs inside the `tools/call`,
+    /// so hand slow work such as a network call to a task of its own. The
+    /// SDK logs nothing of the report, but a panic message reaches the
+    /// process's panic hook as usual.
     #[builder(setter(custom))]
     pub(crate) on_feedback: Option<FeedbackHandler>,
     /// The exact build the server runs, sent as `$mcp_server_build` on every
@@ -178,7 +182,8 @@ impl McpOptionsBuilder {
         self.add_feedback_field(name.into(), schema, false)
     }
 
-    /// Like [`feedback_field`](Self::feedback_field), advertised as required.
+    /// Like [`feedback_field`](Self::feedback_field), advertised as
+    /// required. Agents are asked for it; a report without it is still sent.
     pub fn required_feedback_field(&mut self, name: impl Into<String>, schema: Value) -> &mut Self {
         self.add_feedback_field(name.into(), schema, true)
     }
@@ -205,6 +210,13 @@ impl McpOptionsBuilder {
 
     fn validate_feedback_fields(&self) -> Result<(), String> {
         let fields = self.feedback_fields.as_deref().unwrap_or_default();
+        let shaped = !fields.is_empty()
+            || matches!(self.feedback_description, Some(Some(_)))
+            || matches!(self.on_feedback, Some(Some(_)));
+        let enabled = matches!(self.feedback_tool, Some(Some(_)));
+        if shaped && !enabled {
+            return Err("feedback options need feedback_tool".to_string());
+        }
         for (index, field) in fields.iter().enumerate() {
             if let Some(problem) = field.problem() {
                 return Err(problem);
@@ -292,6 +304,7 @@ mod tests {
             ("llm_model", string.clone(), false),
             ("product_area", serde_json::json!({ "enum": ["a"] }), false),
             ("product_area", serde_json::json!("string"), false),
+            (" ", string.clone(), false),
         ];
         for (name, schema, accepted) in cases {
             let built = McpOptionsBuilder::default()
@@ -301,10 +314,15 @@ mod tests {
             assert_eq!(built.is_ok(), accepted, "{name} {schema}");
         }
         let twice = McpOptionsBuilder::default()
+            .feedback_tool("")
             .feedback_field("area", string.clone())
-            .feedback_field("area", string)
+            .feedback_field("area", string.clone())
             .build();
         assert!(twice.is_err(), "a field declared twice");
+        let without_tool = McpOptionsBuilder::default()
+            .feedback_field("area", string)
+            .build();
+        assert!(without_tool.is_err(), "a field for a tool that is off");
     }
 
     #[test]

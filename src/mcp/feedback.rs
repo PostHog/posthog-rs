@@ -39,6 +39,9 @@ impl FeedbackField {
     /// Why the host cannot declare this field, if it cannot.
     pub(crate) fn problem(&self) -> Option<String> {
         let name = self.name.as_str();
+        if name.trim().is_empty() {
+            return Some("a feedback field needs a name".to_string());
+        }
         let injected = [CONTEXT, LLM_MODEL, CONVERSATION_ID];
         if BUILT_IN_FIELDS.contains(&name) || injected.contains(&name) {
             return Some(format!(
@@ -46,7 +49,9 @@ impl FeedbackField {
             ));
         }
         let typed = self.schema.get("type").is_some_and(Value::is_string);
-        (!typed).then(|| format!("feedback field {name:?} needs a schema object with a \"type\""))
+        (!typed).then(|| {
+            format!("feedback field {name:?} needs a schema object with a string \"type\"")
+        })
     }
 
     /// Whether `value` has the declared `type` and, when declared, is one of
@@ -64,7 +69,7 @@ impl FeedbackField {
             _ => false,
         };
         let listed = match self.schema.get("enum").and_then(Value::as_array) {
-            Some(allowed) => allowed.contains(value),
+            Some(allowed) => allowed.iter().any(|option| same_value(option, value)),
             None => true,
         };
         typed && listed
@@ -136,8 +141,52 @@ impl FeedbackReport {
     }
 }
 
+/// JSON equality, where `3` and `3.0` are the same number.
+fn same_value(left: &Value, right: &Value) -> bool {
+    match (left.as_f64(), right.as_f64()) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
+}
+
 /// A string argument that is not blank.
 fn text_argument<'a>(arguments: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
     let text = arguments.get(name)?.as_str()?;
     (!text.trim().is_empty()).then_some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn values_must_match_the_declared_type_and_enum() {
+        let cases = [
+            (json!({ "type": "integer" }), json!(3.0), true),
+            (json!({ "type": "integer" }), json!(3.5), false),
+            (
+                json!({ "type": "integer", "enum": [1, 2, 3] }),
+                json!(3.0),
+                true,
+            ),
+            (json!({ "type": "number", "enum": [1.5] }), json!(1.5), true),
+            (
+                json!({ "type": "string", "enum": ["a"] }),
+                json!("b"),
+                false,
+            ),
+            (json!({ "type": "string" }), json!(7), false),
+            (json!({ "type": "object" }), json!({ "k": 1 }), true),
+        ];
+        for (schema, value, admitted) in cases {
+            let field = FeedbackField {
+                name: "f".to_string(),
+                schema: schema.clone(),
+                required: false,
+            };
+            assert_eq!(field.admits(&value), admitted, "{schema} {value}");
+        }
+    }
 }
