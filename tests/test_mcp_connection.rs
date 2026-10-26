@@ -7,7 +7,9 @@ mod mcp_support;
 use mcp_support::recorder::{property, serialized_properties_size, text_property, Recorder};
 use mcp_support::server::{numbered_tools, TestServer, FAILURE_MESSAGE, PAGE_SIZE};
 use posthog_rs::mcp::{Identity, McpAnalytics, McpOptions, McpOptionsBuilder};
-use rmcp::model::{CallToolRequestParams, CallToolResult, JsonObject};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, JsonObject, ListToolsResult, PaginatedRequestParams,
+};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::ServiceExt;
 use serde_json::{json, Value};
@@ -453,6 +455,30 @@ async fn the_virtual_tool_is_not_advertised_by_default() {
     let tools = client.list_all_tools().await.unwrap();
 
     assert!(tools.iter().all(|tool| tool.name != "get_more_tools"));
+}
+
+#[tokio::test]
+async fn the_virtual_tool_is_listed_once_on_the_first_page() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .missing_capability_tool("")
+        .build()
+        .unwrap();
+    let server = TestServer::with_tools(numbered_tools(PAGE_SIZE + 1));
+    let client = connect(&recorder, server, options).await;
+
+    let first = client.list_tools(None).await.unwrap();
+    let cursor = first.next_cursor.clone().unwrap();
+    let request = PaginatedRequestParams::default().with_cursor(Some(cursor));
+    let second = client.list_tools(Some(request)).await.unwrap();
+
+    let virtual_on = |page: &ListToolsResult| {
+        page.tools
+            .iter()
+            .filter(|tool| tool.name == "get_more_tools")
+            .count()
+    };
+    assert_eq!((virtual_on(&first), virtual_on(&second)), (1, 0));
 }
 
 #[tokio::test]

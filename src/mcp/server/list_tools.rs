@@ -17,6 +17,10 @@ impl<H: ServerHandler> Instrumented<H> {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let facts = self.request_facts(&context);
+        let first_page = request
+            .as_ref()
+            .and_then(|params| params.cursor.as_ref())
+            .is_none();
         let mut page = self.inner.list_tools(request, context).await?;
         self.remember(&page.tools);
 
@@ -25,7 +29,7 @@ impl<H: ServerHandler> Instrumented<H> {
             .iter()
             .map(|tool| self.injected_tool(tool))
             .collect();
-        if page.next_cursor.is_none() {
+        if first_page {
             advertised.extend(self.virtual_tool_for_listing(&page.tools));
         }
         page.tools = advertised;

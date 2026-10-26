@@ -15,7 +15,8 @@ impl<H: ServerHandler> Instrumented<H> {
         enabled && !self.server_has_tool(name)
     }
 
-    /// The virtual tool to append to a listing's last page, as advertised.
+    /// The virtual tool to append to a listing's first page, the one every
+    /// client reads, as advertised.
     pub(super) fn virtual_tool_for_listing(&self, page: &[Tool]) -> Option<Tool> {
         let name = self.analytics.core.missing_capability_tool()?;
         let on_page = page.iter().any(|tool| tool.name == name);
