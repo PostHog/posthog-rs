@@ -171,11 +171,11 @@ impl McpOptionsBuilder {
             return Ok(());
         };
         let length = build.chars().count();
-        if (1..=MAX_NAME_LENGTH).contains(&length) {
+        if !build.trim().is_empty() && length <= MAX_NAME_LENGTH {
             Ok(())
         } else {
             Err(format!(
-                "server_build must have 1 to {MAX_NAME_LENGTH} characters, not {length}"
+                "server_build must be 1 to {MAX_NAME_LENGTH} characters and not blank, not {length}"
             ))
         }
     }
@@ -235,6 +235,7 @@ mod tests {
     fn a_server_build_is_kept_whole_or_rejected() {
         let cases = [
             (String::new(), false),
+            ("   ".to_string(), false),
             ("a".repeat(256), true),
             ("a".repeat(257), false),
             ("é".repeat(256), true),
