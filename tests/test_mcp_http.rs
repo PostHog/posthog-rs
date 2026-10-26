@@ -371,3 +371,39 @@ async fn the_hosts_request_context_reaches_mcp_events() {
     assert_ne!(text_property(&event, "$session_id"), "ses_host");
     assert!(!event.properties().contains_key("$mcp_intent"));
 }
+
+#[tokio::test]
+async fn a_feedback_report_joins_the_conversation_of_a_fresh_instance() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .feedback_tool("")
+        .build()
+        .unwrap();
+    let http = HttpServer::stateless(instrumented(&recorder, TestServer::new(), options));
+
+    let first = http
+        .request(
+            "tools/call",
+            call_params("search_docs", json!({ "query": "flags" })),
+            &[],
+        )
+        .await;
+    let handle = returned_handle(&first).expect("a handle");
+    let report = json!({ "feedback_type": "praise", "summary": "fast", "conversation_id": handle });
+    let reply = http
+        .request("tools/call", call_params("send_feedback", report), &[])
+        .await;
+
+    assert_eq!(
+        result_texts(&reply).len(),
+        1,
+        "an echoed handle is not repeated"
+    );
+    let call = recorder.only("$mcp_tool_call").await;
+    let feedback = recorder.only("$mcp_feedback").await;
+    assert_eq!(text_property(&feedback, "$mcp_conversation_id"), handle);
+    assert_eq!(
+        text_property(&feedback, "$session_id"),
+        text_property(&call, "$session_id")
+    );
+}
