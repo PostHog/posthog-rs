@@ -82,6 +82,7 @@ The legacy option properties, the `$`-prefixed properties legacy capture reads a
 | `$process_person_profile` | `process_person_profile` |
 | `$cookieless_mode` | `cookieless_mode` |
 | `$ignore_sent_at` | `disable_skew_correction` |
+| `$product_tour_id` | `product_tour_id` |
 
 When both are set, the option wins. An option set to `null` counts as not set, so the legacy property applies.
 
