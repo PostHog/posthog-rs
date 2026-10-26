@@ -7,7 +7,8 @@ use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
 use crate::Event;
 
-const ALWAYS_REQUIRED: [&str; 6] = [
+const ALWAYS_REQUIRED: [&str; 7] = [
+    key::INTERFACE,
     key::LIB,
     key::SESSION_ID,
     key::PROCESS_PERSON_PROFILE,
@@ -68,5 +69,31 @@ impl OutgoingEvent {
         }
         let _ = event.set_timestamp(self.timestamp);
         event
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::mcp::contract::events::TOOLS_LIST;
+    use crate::mcp::contract::properties::LISTED_TOOL_NAMES;
+
+    #[test]
+    fn an_oversized_event_keeps_its_interface() {
+        let context = EventContext {
+            timestamp: Utc::now(),
+            session_id: "ses_1".to_string(),
+            conversation_id: None,
+            identity: None,
+            client: Default::default(),
+            server: Default::default(),
+        };
+        let names: Vec<String> = (0..3_000).map(|index| format!("{index:058}")).collect();
+        let mut event = OutgoingEvent::new(TOOLS_LIST, &context);
+        event.set(LISTED_TOOL_NAMES, names);
+        let event = event.bounded(&[LISTED_TOOL_NAMES]);
+        assert_eq!(event.properties[key::INTERFACE], INTERFACE);
     }
 }
