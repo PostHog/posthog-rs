@@ -17,9 +17,19 @@ use crate::mcp::contract::events;
 use crate::mcp::contract::limits::MAX_NAME_LENGTH;
 use crate::mcp::contract::properties as key;
 use crate::mcp::privacy::TextPass;
-use crate::mcp::tools::virtual_tools::MISSING_CAPABILITY_REPLY;
+use crate::mcp::tools::virtual_tools::{VirtualTool, MISSING_CAPABILITY_REPLY};
 
-pub(crate) fn answer_virtual_call(core: &Core, mut call: PreparedCall) -> CallToolResult {
+pub(crate) fn answer_virtual_call(
+    core: &Core,
+    tool: VirtualTool,
+    call: PreparedCall,
+) -> CallToolResult {
+    match tool {
+        VirtualTool::MissingCapability => answer_missing_capability(core, call),
+    }
+}
+
+fn answer_missing_capability(core: &Core, mut call: PreparedCall) -> CallToolResult {
     call.transport.call_ended();
     let stated_need = call
         .sent_arguments

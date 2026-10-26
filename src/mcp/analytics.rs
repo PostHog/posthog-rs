@@ -11,7 +11,7 @@ use super::session::{derive_session_id, new_session_id, ResolvedSession};
 use super::tools::catalog::ToolCatalog;
 use super::tools::injection::ArgumentInjection;
 use super::tools::ownership::ArgumentFlags;
-use super::tools::virtual_tools::MISSING_CAPABILITY_TOOL;
+use super::tools::virtual_tools::VirtualTool;
 use crate::Client;
 
 /// MCP analytics for one server: its options, what it learned about the
@@ -109,13 +109,24 @@ impl Core {
         }
     }
 
-    pub(crate) fn missing_capability_tool(&self) -> Option<&str> {
-        let name = self.options.missing_capability_tool.as_deref()?.trim();
+    /// The name a virtual tool is advertised under, when it is enabled; a
+    /// blank configured name means its default.
+    pub(crate) fn virtual_tool_name(&self, tool: VirtualTool) -> Option<&str> {
+        let configured = match tool {
+            VirtualTool::MissingCapability => &self.options.missing_capability_tool,
+        };
+        let name = configured.as_deref()?.trim();
         Some(if name.is_empty() {
-            MISSING_CAPABILITY_TOOL
+            tool.default_name()
         } else {
             name
         })
+    }
+
+    /// The enabled virtual tool advertised under `name`.
+    pub(crate) fn virtual_tool(&self, name: &str) -> Option<VirtualTool> {
+        IntoIterator::into_iter(VirtualTool::ALL)
+            .find(|tool| self.virtual_tool_name(*tool) == Some(name))
     }
 
     fn identify(&self, request: &RequestInfo<'_>) -> Option<Identity> {

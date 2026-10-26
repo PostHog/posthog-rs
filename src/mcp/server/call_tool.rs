@@ -16,6 +16,7 @@ use crate::mcp::call::{
 };
 use crate::mcp::capture::Failure;
 use crate::mcp::tools::catalog::ToolFacts;
+use crate::mcp::tools::virtual_tools::VirtualTool;
 
 const TOOLS_CALL: &str = "tools/call";
 const PROTOCOL_ERROR_TYPE: &str = "McpError";
@@ -33,8 +34,8 @@ impl<H: ServerHandler> Instrumented<H> {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let facts = self.request_facts(&context);
-        if self.is_virtual_tool(&request.name) {
-            return Ok(self.answer_virtual_tool(&facts, &request).into());
+        if let Some(tool) = self.virtual_tool(&request.name) {
+            return Ok(self.answer_virtual_tool(tool, &facts, &request).into());
         }
 
         let registered = self.registered_facts(&request.name);
@@ -61,12 +62,13 @@ impl<H: ServerHandler> Instrumented<H> {
 
     fn answer_virtual_tool(
         &self,
+        tool: VirtualTool,
         facts: &RequestFacts,
         request: &CallToolRequestParams,
     ) -> CallToolResult {
-        let registered = Some(self.virtual_facts());
+        let registered = Some(self.virtual_facts(tool));
         let call = self.prepare(facts, request, registered, ToolExistence::Registered);
-        answer_virtual_call(&self.analytics.core, call)
+        answer_virtual_call(&self.analytics.core, tool, call)
     }
 
     fn record_outcome(
