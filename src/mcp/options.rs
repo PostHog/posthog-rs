@@ -60,7 +60,23 @@ pub struct McpOptions {
     /// calls that echo it into one session (default: `true`). Without it,
     /// every request of a stateless HTTP client is its own session.
     pub(crate) conversation_id: bool,
-    /// Resolves the person each request acts for.
+    /// Resolves the person each request acts for. Nothing else does: a
+    /// distinct id in the host's request context, such as `PostHogLayer`'s
+    /// `x-posthog-distinct-id`, comes from the MCP client, so it identifies a
+    /// call only when this callback trusts it:
+    ///
+    /// ```
+    /// # use posthog_rs::mcp::{Identity, McpOptionsBuilder};
+    /// # use posthog_rs::RequestContext;
+    /// let options = McpOptionsBuilder::default()
+    ///     .identify(|request| {
+    ///         let host = request.http?.extensions.get::<RequestContext>()?;
+    ///         Some(Identity::new(host.get_distinct_id()?))
+    ///     })
+    ///     .build()
+    ///     .unwrap();
+    /// # let _ = options;
+    /// ```
     #[builder(setter(custom))]
     pub(crate) identify: Option<IdentifyCallback>,
     /// Send a `$exception` next to each failed call (default: `true`).

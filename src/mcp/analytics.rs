@@ -121,16 +121,7 @@ impl Core {
             .find(|tool| self.virtual_tool_name(*tool) == Some(name))
     }
 
-    /// The identify callback's person, else the one the host's request
-    /// context names, as `PostHogLayer` resolves it for every other event.
     fn identify(&self, request: &RequestInfo<'_>) -> Option<Identity> {
-        self.identify_with_callback(request).or_else(|| {
-            let host = host_context(request)?;
-            Some(Identity::new(host.get_distinct_id()?))
-        })
-    }
-
-    fn identify_with_callback(&self, request: &RequestInfo<'_>) -> Option<Identity> {
         let identify = self.options.identify.as_ref()?;
         let outcome = catch_unwind(AssertUnwindSafe(|| identify(request)));
         match outcome {
@@ -148,16 +139,12 @@ impl Core {
 /// The host's request context: the one its HTTP layer attached to the
 /// request, since `rmcp` serves each request on a task of its own, else the
 /// one in scope, for a manual API call made inside the host's handler.
-fn host_context(request: &RequestInfo<'_>) -> Option<RequestContext> {
+fn host_properties(request: &RequestInfo<'_>) -> serde_json::Map<String, serde_json::Value> {
     let attached = request
         .http
         .and_then(|parts| parts.extensions.get::<RequestContext>())
         .cloned();
-    attached.or_else(RequestContext::current)
-}
-
-fn host_properties(request: &RequestInfo<'_>) -> serde_json::Map<String, serde_json::Value> {
-    host_context(request)
-        .map(|host| host.properties.into_iter().collect())
+    let host = attached.or_else(RequestContext::current);
+    host.map(|host| host.properties.into_iter().collect())
         .unwrap_or_default()
 }
