@@ -22,6 +22,17 @@ impl VirtualTool {
         }
     }
 
+    /// The name it is advertised under when enabled with `configured`; a
+    /// blank name means its default.
+    pub(crate) fn name(self, configured: Option<&str>) -> Option<&str> {
+        let name = configured?.trim();
+        Some(if name.is_empty() {
+            self.default_name()
+        } else {
+            name
+        })
+    }
+
     pub(crate) fn descriptor(self, name: &str) -> Value {
         match self {
             VirtualTool::MissingCapability => missing_capability_descriptor(name),

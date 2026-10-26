@@ -109,19 +109,9 @@ impl Core {
         }
     }
 
-    /// The name a virtual tool is advertised under, when it is enabled; a
-    /// blank configured name means its default.
+    /// The name a virtual tool is advertised under, when it is enabled.
     pub(crate) fn virtual_tool_name(&self, tool: VirtualTool) -> Option<&str> {
-        let configured = match tool {
-            VirtualTool::MissingCapability => &self.options.missing_capability_tool,
-            VirtualTool::Feedback => &self.options.feedback_tool,
-        };
-        let name = configured.as_deref()?.trim();
-        Some(if name.is_empty() {
-            tool.default_name()
-        } else {
-            name
-        })
+        tool.name(self.options.virtual_tool_name(tool))
     }
 
     /// The enabled virtual tool advertised under `name`.

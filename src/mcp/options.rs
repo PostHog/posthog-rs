@@ -8,6 +8,7 @@ use derive_builder::Builder;
 use super::contract::limits::MAX_NAME_LENGTH;
 use super::identity::Identity;
 use super::request_info::RequestInfo;
+use super::tools::virtual_tools::VirtualTool;
 use crate::client::BeforeSendHook;
 use crate::Event;
 
@@ -133,8 +134,39 @@ impl std::fmt::Debug for McpOptions {
     }
 }
 
+impl McpOptions {
+    pub(crate) fn virtual_tool_name(&self, tool: VirtualTool) -> Option<&str> {
+        match tool {
+            VirtualTool::MissingCapability => self.missing_capability_tool.as_deref(),
+            VirtualTool::Feedback => self.feedback_tool.as_deref(),
+        }
+    }
+}
+
 impl McpOptionsBuilder {
     fn validate(&self) -> Result<(), String> {
+        self.validate_virtual_tool_names()?;
+        self.validate_server_build()
+    }
+
+    /// Two virtual tools under one name would leave one unreachable.
+    fn validate_virtual_tool_names(&self) -> Result<(), String> {
+        let configured = |field: &Option<Option<String>>| field.clone().flatten();
+        let missing_capability = configured(&self.missing_capability_tool);
+        let feedback = configured(&self.feedback_tool);
+        let names = (
+            VirtualTool::MissingCapability.name(missing_capability.as_deref()),
+            VirtualTool::Feedback.name(feedback.as_deref()),
+        );
+        match names {
+            (Some(left), Some(right)) if left == right => Err(format!(
+                "missing_capability_tool and feedback_tool are both named {left:?}"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_server_build(&self) -> Result<(), String> {
         let Some(Some(build)) = &self.server_build else {
             return Ok(());
         };
@@ -176,6 +208,28 @@ impl McpOptionsBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virtual_tools_cannot_share_a_name() {
+        let cases = [
+            ("ask", "ask", false),
+            ("", "get_more_tools", false),
+            ("send_feedback", " ", false),
+            ("", "", true),
+            ("ask", "tell", true),
+        ];
+        for (missing_capability, feedback, accepted) in cases {
+            let built = McpOptionsBuilder::default()
+                .missing_capability_tool(missing_capability)
+                .feedback_tool(feedback)
+                .build();
+            assert_eq!(
+                built.is_ok(),
+                accepted,
+                "{missing_capability:?} {feedback:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_server_build_is_kept_whole_or_rejected() {
