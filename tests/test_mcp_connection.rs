@@ -388,6 +388,28 @@ async fn calls_on_one_connection_share_its_session() {
 }
 
 #[tokio::test]
+async fn every_event_names_the_server_build() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .server_build("3f2c1a9")
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    client.list_tools(None).await.unwrap();
+    call(&client, "fetch_page", json!({})).await;
+
+    for name in ["$mcp_tools_list", "$mcp_tool_call", "$exception"] {
+        let event = recorder.only(name).await;
+        assert_eq!(
+            text_property(&event, "$mcp_server_build"),
+            "3f2c1a9",
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_identified_call_processes_the_person() {
     let recorder = Recorder::new().await;
     let options = McpOptionsBuilder::default()

@@ -33,6 +33,7 @@ pub(crate) struct EventContext {
     pub(crate) identity: Option<Identity>,
     pub(crate) client: ClientIdentity,
     pub(crate) server: ServerIdentity,
+    pub(crate) server_build: Option<String>,
 }
 
 impl EventContext {
@@ -81,6 +82,7 @@ impl EventContext {
         let server = &self.server;
         insert_name(properties, key::SERVER_NAME, server.name.as_deref());
         insert_name(properties, key::SERVER_VERSION, server.version.as_deref());
+        insert_text(properties, key::SERVER_BUILD, self.server_build.as_deref());
     }
 
     /// Anonymous calls create no person profiles.

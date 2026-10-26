@@ -7,8 +7,9 @@ use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
 use crate::{Event, RequestContext};
 
-const ALWAYS_REQUIRED: [&str; 7] = [
+const ALWAYS_REQUIRED: [&str; 8] = [
     key::INTERFACE,
+    key::SERVER_BUILD,
     key::LIB,
     key::SESSION_ID,
     key::PROCESS_PERSON_PROFILE,
@@ -102,6 +103,7 @@ mod tests {
             identity: None,
             client: Default::default(),
             server: Default::default(),
+            server_build: None,
         }
     }
 

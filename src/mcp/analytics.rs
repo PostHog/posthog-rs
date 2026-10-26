@@ -105,6 +105,7 @@ impl Core {
             identity: self.identify(request),
             client: scope.client_identity(session.token_client.as_ref()),
             server: scope.server.clone(),
+            server_build: self.options.server_build.clone(),
         }
     }
 

@@ -103,6 +103,7 @@ pub fn posthog_rs::mcp::McpOptionsBuilder::conversation_id(&mut self, bool) -> &
 pub fn posthog_rs::mcp::McpOptionsBuilder::exception_autocapture(&mut self, bool) -> &mut Self
 pub fn posthog_rs::mcp::McpOptionsBuilder::missing_capability_tool<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::mcp::McpOptionsBuilder::model_description<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
+pub fn posthog_rs::mcp::McpOptionsBuilder::server_build<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 impl core::default::Default for posthog_rs::mcp::McpOptionsBuilder
 pub fn posthog_rs::mcp::McpOptionsBuilder::default() -> Self
 #[non_exhaustive] pub struct posthog_rs::mcp::RequestInfo<'a>

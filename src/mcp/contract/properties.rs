@@ -23,6 +23,7 @@ pub(crate) const PROCESS_PERSON_PROFILE: &str = "$process_person_profile";
 pub(crate) const PROTOCOL_VERSION: &str = "$mcp_protocol_version";
 pub(crate) const RESOURCE_NAME: &str = "$mcp_resource_name";
 pub(crate) const RESPONSE: &str = "$mcp_response";
+pub(crate) const SERVER_BUILD: &str = "$mcp_server_build";
 pub(crate) const SERVER_NAME: &str = "$mcp_server_name";
 pub(crate) const SERVER_VERSION: &str = "$mcp_server_version";
 pub(crate) const SESSION_ID: &str = "$session_id";

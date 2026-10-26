@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 
+use super::contract::limits::MAX_NAME_LENGTH;
 use super::identity::Identity;
 use super::request_info::RequestInfo;
 use crate::client::BeforeSendHook;
@@ -29,7 +30,7 @@ pub type IntentFallback = Arc<dyn Fn(&RequestInfo<'_>) -> Option<String> + Send 
 /// # let _ = options;
 /// ```
 #[derive(Builder, Clone)]
-#[builder(default)]
+#[builder(default, build_fn(validate = "Self::validate"))]
 pub struct McpOptions {
     /// Advertise a required `context` argument on every tool, in which the
     /// agent says why it calls the tool, captured as `$mcp_intent` (default:
@@ -79,6 +80,12 @@ pub struct McpOptions {
     /// one, so give it a name the server's own tools do not use.
     #[builder(setter(into, strip_option))]
     pub(crate) missing_capability_tool: Option<String>,
+    /// The exact build the server runs, sent as `$mcp_server_build` on every
+    /// event: an immutable value such as a commit SHA or an image digest, of
+    /// 1 to 256 characters. [`McpOptionsBuilder::build`] rejects any other
+    /// length rather than cut it.
+    #[builder(setter(into, strip_option))]
+    pub(crate) server_build: Option<String>,
 }
 
 impl Default for McpOptions {
@@ -96,6 +103,7 @@ impl Default for McpOptions {
             capture_responses: true,
             before_send: None,
             missing_capability_tool: None,
+            server_build: None,
         }
     }
 }
@@ -111,11 +119,26 @@ impl std::fmt::Debug for McpOptions {
             .field("capture_parameters", &self.capture_parameters)
             .field("capture_responses", &self.capture_responses)
             .field("missing_capability_tool", &self.missing_capability_tool)
+            .field("server_build", &self.server_build)
             .finish_non_exhaustive()
     }
 }
 
 impl McpOptionsBuilder {
+    fn validate(&self) -> Result<(), String> {
+        let Some(Some(build)) = &self.server_build else {
+            return Ok(());
+        };
+        let length = build.chars().count();
+        if (1..=MAX_NAME_LENGTH).contains(&length) {
+            Ok(())
+        } else {
+            Err(format!(
+                "server_build must have 1 to {MAX_NAME_LENGTH} characters, not {length}"
+            ))
+        }
+    }
+
     pub fn identify<F>(&mut self, resolve: F) -> &mut Self
     where
         F: Fn(&RequestInfo<'_>) -> Option<Identity> + Send + Sync + 'static,
@@ -144,6 +167,30 @@ impl McpOptionsBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_build_is_kept_whole_or_rejected() {
+        let cases = [
+            (String::new(), false),
+            ("a".repeat(256), true),
+            ("a".repeat(257), false),
+            ("é".repeat(256), true),
+        ];
+        for (build, accepted) in cases {
+            let built = McpOptionsBuilder::default()
+                .server_build(build.clone())
+                .build();
+            assert_eq!(
+                built.is_ok(),
+                accepted,
+                "{} characters",
+                build.chars().count()
+            );
+            if let Ok(options) = built {
+                assert_eq!(options.server_build.as_deref(), Some(build.as_str()));
+            }
+        }
+    }
 
     #[test]
     fn defaults_follow_the_spec() {
