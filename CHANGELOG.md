@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.29.0 — 2026-10-26
+
+### Minor changes
+
+- [8408705](https://github.com/posthog/posthog-rs/commit/84087054667e89e6aa8a8232622ed040cd31213d) Add experimental MCP analytics for servers built on `rmcp`, behind the new `mcp` feature (Rust 1.88+). `posthog_rs::mcp::instrument(server, client)` sends each tool call, tool listing and handshake to PostHog as `$mcp_*` events, with `$lib` `posthog-rs-mcp`, following PostHog's cross-SDK MCP analytics spec. A manual API covers servers that cannot be wrapped. Unsupported for now. — Thanks @wthrajat!
+
 ## 0.28.0 — 2026-10-26
 
 ### Minor changes
