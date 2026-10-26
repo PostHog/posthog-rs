@@ -237,7 +237,10 @@ async fn a_panicking_handler_is_a_failed_call() {
     let arguments: JsonObject = serde_json::from_value(json!({})).unwrap();
     let request = CallToolRequestParams::new("explode").with_arguments(arguments);
     let reply = tokio::time::timeout(std::time::Duration::from_secs(1), client.call_tool(request));
-    let _ = reply.await;
+    assert!(
+        !matches!(reply.await, Ok(Ok(_))),
+        "the panic reaches rmcp, which answers nothing"
+    );
 
     let event = recorder.only("$mcp_tool_call").await;
     assert_eq!(property(&event, "$mcp_is_error"), &json!(true));
@@ -248,6 +251,10 @@ async fn a_panicking_handler_is_a_failed_call() {
     );
     let exception = recorder.only("$exception").await;
     assert_eq!(property(&exception, "$exception_list")[0]["type"], "Panic");
+    assert_eq!(
+        &property(&exception, "$exception_list")[0]["mechanism"]["handled"],
+        &json!(false)
+    );
 }
 
 #[tokio::test]

@@ -1,15 +1,15 @@
 //! `$mcp_parameters` and `$mcp_response`: the entry, nesting and key limits and
 //! the key-based redaction apply first, then each string gets its own
-//! redaction and limit. Strings share a budget the size of a whole event, so
-//! once it is spent the rest are cut short before redaction scans them: an
-//! event that large is shrunk afterwards anyway.
+//! redaction and limit. Strings share a budget of what redaction may scan, the
+//! size of a whole event, so once it is spent the rest are cut short before
+//! redaction scans them: an event that large is shrunk afterwards anyway.
 
 use serde_json::{Map, Value};
 
 use super::text::{bounded_text, truncate};
 use crate::mcp::contract::limits::{
     MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, MAX_PAYLOAD_ENTRIES, MAX_PAYLOAD_KEY_LENGTH,
-    MAX_PAYLOAD_STRING_LENGTH,
+    MAX_PAYLOAD_STRING_LENGTH, REDACTION_SCAN_MARGIN,
 };
 use crate::mcp::contract::REDACTED;
 use crate::mcp::privacy::{is_credential_key, TextPass};
@@ -40,9 +40,9 @@ fn bound_string(text: &str, pass: TextPass, budget: &mut usize) -> String {
     let limit = MAX_PAYLOAD_STRING_LENGTH
         .min(*budget)
         .max(EXHAUSTED_STRING_LENGTH);
-    let bounded = bounded_text(text, limit, pass);
-    *budget = budget.saturating_sub(bounded.chars().count());
-    bounded
+    let scanned = text.chars().take(limit + REDACTION_SCAN_MARGIN).count();
+    *budget = budget.saturating_sub(scanned);
+    bounded_text(text, limit, pass)
 }
 
 fn bound_array(
@@ -122,15 +122,16 @@ mod tests {
     #[test]
     fn strings_past_the_event_budget_are_cut_short() {
         let block = Value::from("word ".repeat(8_000));
-        let value = Value::Array(vec![block; MAX_PAYLOAD_ENTRIES]);
+        let value = Value::Array(vec![block; MAX_PAYLOAD_ENTRIES - 1]);
         let bounded = bounded_payload(&value, TextPass::Captured);
-        let kept: usize = bounded
+        let lengths: Vec<usize> = bounded
             .as_array()
             .expect("array")
             .iter()
             .map(|item| item.as_str().expect("string").chars().count())
-            .sum();
-        assert!(kept <= MAX_EVENT_BYTES + MAX_PAYLOAD_ENTRIES * EXHAUSTED_STRING_LENGTH);
+            .collect();
+        assert_eq!(lengths[0], MAX_PAYLOAD_STRING_LENGTH);
+        assert_eq!(lengths[MAX_PAYLOAD_ENTRIES - 2], EXHAUSTED_STRING_LENGTH);
     }
 
     #[test]

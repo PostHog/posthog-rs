@@ -19,6 +19,7 @@ pub(crate) struct Failure {
     message: String,
     explicit_type: Option<String>,
     synthetic: bool,
+    handled: bool,
 }
 
 impl Failure {
@@ -30,6 +31,16 @@ impl Failure {
             message,
             explicit_type: None,
             synthetic: false,
+            handled: true,
+        }
+    }
+
+    /// A panic the framework never turned into a response, so error
+    /// tracking sees it as unhandled.
+    pub(crate) fn panicked(type_name: &str, message: String) -> Self {
+        Self {
+            handled: false,
+            ..Self::thrown(type_name, message)
         }
     }
 
@@ -40,6 +51,7 @@ impl Failure {
             message,
             explicit_type: None,
             synthetic: true,
+            handled: true,
         }
     }
 
@@ -76,7 +88,7 @@ impl Failure {
         let exception = json!({
             "type": truncate(&self.exception_type, MAX_NAME_LENGTH),
             "value": self.bounded_message(),
-            "mechanism": { "type": "generic", "handled": true, "synthetic": self.synthetic },
+            "mechanism": { "type": "generic", "handled": self.handled, "synthetic": self.synthetic },
         });
         let mut properties = Map::new();
         properties.insert(key::EXCEPTION_LIST.to_string(), json!([exception]));

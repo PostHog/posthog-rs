@@ -46,13 +46,13 @@ impl<H: ServerHandler> Instrumented<H> {
         let mut downstream = request;
         downstream.arguments = call.dispatch_arguments.clone();
 
-        let handled = AssertUnwindSafe(self.inner.call_tool(downstream, context))
+        let handled = AssertUnwindSafe(async { self.inner.call_tool(downstream, context).await })
             .catch_unwind()
             .await;
         match handled {
             Ok(outcome) => self.record_outcome(call, facts.modern_protocol, outcome),
             Err(panic) => {
-                let failure = Failure::thrown(PANIC_ERROR_TYPE, panic_message(panic.as_ref()));
+                let failure = Failure::panicked(PANIC_ERROR_TYPE, panic_message(panic.as_ref()));
                 end_call(&self.analytics.core, call, CallEnd::Failed(failure));
                 resume_unwind(panic)
             }
