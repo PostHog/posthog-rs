@@ -1,12 +1,15 @@
 //! `$mcp_parameters` and `$mcp_response`: the entry, nesting and key limits and
 //! the key-based redaction apply first, then each string gets its own
-//! redaction and limit.
+//! redaction and limit. Strings share a budget the size of a whole event, so
+//! once it is spent the rest are cut short before redaction scans them: an
+//! event that large is shrunk afterwards anyway.
 
 use serde_json::{Map, Value};
 
 use super::text::{bounded_text, truncate};
 use crate::mcp::contract::limits::{
-    MAX_PAYLOAD_DEPTH, MAX_PAYLOAD_ENTRIES, MAX_PAYLOAD_KEY_LENGTH, MAX_PAYLOAD_STRING_LENGTH,
+    MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, MAX_PAYLOAD_ENTRIES, MAX_PAYLOAD_KEY_LENGTH,
+    MAX_PAYLOAD_STRING_LENGTH,
 };
 use crate::mcp::contract::REDACTED;
 use crate::mcp::privacy::{is_credential_key, TextPass};
@@ -15,28 +18,44 @@ const OVERFLOW_MARKER: &str = "[MaxProperties ~]";
 const OVERFLOW_KEY: &str = "...";
 const NESTED_ARRAY_MARKER: &str = "[Array]";
 const NESTED_OBJECT_MARKER: &str = "[Object]";
+const EXHAUSTED_STRING_LENGTH: usize = 64;
 
 pub(crate) fn bounded_payload(value: &Value, pass: TextPass) -> Value {
-    bound(value, MAX_PAYLOAD_DEPTH, pass)
+    let mut budget = MAX_EVENT_BYTES;
+    bound(value, MAX_PAYLOAD_DEPTH, pass, &mut budget)
 }
 
-fn bound(value: &Value, remaining_depth: usize, pass: TextPass) -> Value {
+fn bound(value: &Value, remaining_depth: usize, pass: TextPass, budget: &mut usize) -> Value {
     match value {
-        Value::String(text) => Value::String(bounded_text(text, MAX_PAYLOAD_STRING_LENGTH, pass)),
+        Value::String(text) => Value::String(bound_string(text, pass, budget)),
         Value::Array(_) if remaining_depth == 0 => Value::from(NESTED_ARRAY_MARKER),
         Value::Object(_) if remaining_depth == 0 => Value::from(NESTED_OBJECT_MARKER),
-        Value::Array(items) => bound_array(items, remaining_depth - 1, pass),
-        Value::Object(object) => bound_object(object, remaining_depth - 1, pass),
+        Value::Array(items) => bound_array(items, remaining_depth - 1, pass, budget),
+        Value::Object(object) => bound_object(object, remaining_depth - 1, pass, budget),
         other => other.clone(),
     }
 }
 
-fn bound_array(items: &[Value], remaining_depth: usize, pass: TextPass) -> Value {
+fn bound_string(text: &str, pass: TextPass, budget: &mut usize) -> String {
+    let limit = MAX_PAYLOAD_STRING_LENGTH
+        .min(*budget)
+        .max(EXHAUSTED_STRING_LENGTH);
+    let bounded = bounded_text(text, limit, pass);
+    *budget = budget.saturating_sub(bounded.chars().count());
+    bounded
+}
+
+fn bound_array(
+    items: &[Value],
+    remaining_depth: usize,
+    pass: TextPass,
+    budget: &mut usize,
+) -> Value {
     let overflows = items.len() > MAX_PAYLOAD_ENTRIES;
     let kept = kept_entries(items.len());
     let mut bounded: Vec<Value> = items[..kept]
         .iter()
-        .map(|item| bound(item, remaining_depth, pass))
+        .map(|item| bound(item, remaining_depth, pass, budget))
         .collect();
     if overflows {
         bounded.push(Value::from(OVERFLOW_MARKER));
@@ -44,7 +63,12 @@ fn bound_array(items: &[Value], remaining_depth: usize, pass: TextPass) -> Value
     Value::Array(bounded)
 }
 
-fn bound_object(object: &Map<String, Value>, remaining_depth: usize, pass: TextPass) -> Value {
+fn bound_object(
+    object: &Map<String, Value>,
+    remaining_depth: usize,
+    pass: TextPass,
+    budget: &mut usize,
+) -> Value {
     let overflows = object.len() > MAX_PAYLOAD_ENTRIES;
     let mut bounded: Map<String, Value> = object
         .iter()
@@ -52,7 +76,7 @@ fn bound_object(object: &Map<String, Value>, remaining_depth: usize, pass: TextP
         .map(|(key, nested)| {
             let value = match is_credential_key(key) {
                 true => Value::from(REDACTED),
-                false => bound(nested, remaining_depth, pass),
+                false => bound(nested, remaining_depth, pass, budget),
             };
             (truncate(key, MAX_PAYLOAD_KEY_LENGTH), value)
         })
@@ -93,6 +117,20 @@ mod tests {
         let items = bounded.as_array().expect("array");
         assert_eq!(items.len(), MAX_PAYLOAD_ENTRIES);
         assert_eq!(items[MAX_PAYLOAD_ENTRIES - 1], OVERFLOW_MARKER);
+    }
+
+    #[test]
+    fn strings_past_the_event_budget_are_cut_short() {
+        let block = Value::from("word ".repeat(8_000));
+        let value = Value::Array(vec![block; MAX_PAYLOAD_ENTRIES]);
+        let bounded = bounded_payload(&value, TextPass::Captured);
+        let kept: usize = bounded
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|item| item.as_str().expect("string").chars().count())
+            .sum();
+        assert!(kept <= MAX_EVENT_BYTES + MAX_PAYLOAD_ENTRIES * EXHAUSTED_STRING_LENGTH);
     }
 
     #[test]
