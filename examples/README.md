@@ -123,6 +123,19 @@ Custom HTTP clients are separate from TLS crypto-provider selection. The
 `tls-no-provider` feature proposed in #245 is on `v1`, not this `main` branch;
 changing the provider does not change the reqwest client types.
 
+### 6. MCP Analytics (experimental)
+
+An MCP server over stdio, built on `rmcp`, whose tool calls are captured as `$mcp_*` events:
+
+```bash
+export POSTHOG_API_KEY=phc_your_project_key
+cargo run --example mcp_server --features mcp
+```
+
+Point an MCP client at that command. Shows:
+- Instrumenting an `rmcp` server in one call
+- The `get_more_tools` virtual tool
+
 ## Key Concepts
 
 ### Feature Flag Types

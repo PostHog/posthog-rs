@@ -21,6 +21,12 @@ const MAX_ERROR_SOURCES: usize = 50;
 /// Latches the single process-wide panic hook so a second install is rejected.
 static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the panic hook reports every panic as an `$exception`.
+#[cfg(feature = "mcp")]
+pub(crate) fn panic_hook_installed() -> bool {
+    PANIC_HOOK_INSTALLED.load(Ordering::Acquire)
+}
+
 /// An atomic trace/span identifier pair used to correlate an exception with
 /// distributed traces and logs.
 #[derive(Clone, Debug, PartialEq, Eq)]

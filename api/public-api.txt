@@ -4,6 +4,135 @@
 # Test-only harness features are omitted.
 
 pub mod posthog_rs
+pub mod posthog_rs::mcp
+#[non_exhaustive] pub enum posthog_rs::mcp::McpOptionsBuilderError
+pub posthog_rs::mcp::McpOptionsBuilderError::UninitializedField(&'static str)
+pub posthog_rs::mcp::McpOptionsBuilderError::ValidationError(alloc::string::String)
+impl core::convert::From<alloc::string::String> for posthog_rs::mcp::McpOptionsBuilderError
+pub fn posthog_rs::mcp::McpOptionsBuilderError::from(alloc::string::String) -> Self
+impl core::convert::From<derive_builder::error::UninitializedFieldError> for posthog_rs::mcp::McpOptionsBuilderError
+pub fn posthog_rs::mcp::McpOptionsBuilderError::from(derive_builder::error::UninitializedFieldError) -> Self
+impl core::error::Error for posthog_rs::mcp::McpOptionsBuilderError
+impl core::fmt::Display for posthog_rs::mcp::McpOptionsBuilderError
+pub fn posthog_rs::mcp::McpOptionsBuilderError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum posthog_rs::mcp::ToolRegistration
+pub posthog_rs::mcp::ToolRegistration::NoRegistry
+pub posthog_rs::mcp::ToolRegistration::NotRegistered
+pub posthog_rs::mcp::ToolRegistration::Registered(rmcp::model::tool::Tool)
+pub enum posthog_rs::mcp::TransportSession
+pub posthog_rs::mcp::TransportSession::Connection(posthog_rs::mcp::Connection)
+pub posthog_rs::mcp::TransportSession::Id(alloc::string::String)
+pub posthog_rs::mcp::TransportSession::None
+pub struct posthog_rs::mcp::Connection(_)
+impl posthog_rs::mcp::Connection
+pub fn posthog_rs::mcp::Connection::new() -> Self
+impl core::default::Default for posthog_rs::mcp::Connection
+pub fn posthog_rs::mcp::Connection::default() -> Self
+pub struct posthog_rs::mcp::Identity
+pub posthog_rs::mcp::Identity::distinct_id: alloc::string::String
+pub posthog_rs::mcp::Identity::groups: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
+pub posthog_rs::mcp::Identity::properties: serde_json::map::Map<alloc::string::String, serde_json::value::Value>
+impl posthog_rs::mcp::Identity
+pub fn posthog_rs::mcp::Identity::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::mcp::Identity::with_group(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::mcp::Identity::with_property(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<serde_json::value::Value>) -> Self
+pub struct posthog_rs::mcp::Instrumented<H>
+impl<H> posthog_rs::mcp::Instrumented<H>
+pub fn posthog_rs::mcp::Instrumented<H>::analytics(&self) -> &posthog_rs::mcp::McpAnalytics
+pub fn posthog_rs::mcp::Instrumented<H>::inner(&self) -> &H
+impl<H: core::clone::Clone> core::clone::Clone for posthog_rs::mcp::Instrumented<H>
+pub fn posthog_rs::mcp::Instrumented<H>::clone(&self) -> Self
+impl<H: rmcp::handler::server::ServerHandler> rmcp::handler::server::ServerHandler for posthog_rs::mcp::Instrumented<H>
+pub fn posthog_rs::mcp::Instrumented<H>::accepted_subscription_filter(&self, &rmcp::model::SubscriptionFilter) -> core::option::Option<rmcp::model::SubscriptionFilter>
+pub fn posthog_rs::mcp::Instrumented<H>::call_tool(&self, rmcp::model::CallToolRequestParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::mrtr::CallToolResponse, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::cancel_task(&self, rmcp::model::CancelTaskParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<(), rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::complete(&self, rmcp::model::CompleteRequestParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::CompleteResult, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::discover(&self, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::DiscoverResult, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::get_info(&self) -> rmcp::model::ServerConfig
+pub fn posthog_rs::mcp::Instrumented<H>::get_prompt(&self, rmcp::model::GetPromptRequestParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::mrtr::GetPromptResponse, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::get_task(&self, rmcp::model::GetTaskParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::task::GetTaskResult, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::get_tool(&self, &str) -> core::option::Option<rmcp::model::tool::Tool>
+pub fn posthog_rs::mcp::Instrumented<H>::initialize(&self, rmcp::model::InitializeRequestParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::InitializeResult, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::list_prompts(&self, core::option::Option<rmcp::model::PaginatedRequestParams>, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::ListPromptsResult, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::list_resource_templates(&self, core::option::Option<rmcp::model::PaginatedRequestParams>, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::ListResourceTemplatesResult, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::list_resources(&self, core::option::Option<rmcp::model::PaginatedRequestParams>, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::ListResourcesResult, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::list_tools(&self, core::option::Option<rmcp::model::PaginatedRequestParams>, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::ListToolsResult, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::listen(&self, rmcp::service::server::SubscriptionContext) -> impl core::future::future::Future<Output = core::result::Result<(), rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::negotiate_initialize(&self, &rmcp::model::InitializeRequestParams) -> core::result::Result<rmcp::model::InitializeResult, rmcp::model::ErrorData>
+pub fn posthog_rs::mcp::Instrumented<H>::on_cancelled(&self, rmcp::model::CancelledNotificationParam, rmcp::service::NotificationContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = ()> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::on_custom_notification(&self, rmcp::model::CustomNotification, rmcp::service::NotificationContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = ()> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::on_custom_request(&self, rmcp::model::CustomRequest, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::CustomResult, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::on_initialized(&self, rmcp::service::NotificationContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = ()> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::on_progress(&self, rmcp::model::ProgressNotificationParam, rmcp::service::NotificationContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = ()> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::on_roots_list_changed(&self, rmcp::service::NotificationContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = ()> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::ping(&self, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<(), rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::read_resource(&self, rmcp::model::ReadResourceRequestParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<rmcp::model::mrtr::ReadResourceResponse, rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::set_level(&self, rmcp::model::SetLevelRequestParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<(), rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::subscribe(&self, rmcp::model::SubscribeRequestParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<(), rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::supported_protocol_versions(&self) -> alloc::borrow::Cow<'static, [rmcp::model::ProtocolVersion]>
+pub fn posthog_rs::mcp::Instrumented<H>::unsubscribe(&self, rmcp::model::UnsubscribeRequestParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<(), rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub fn posthog_rs::mcp::Instrumented<H>::update_task(&self, rmcp::model::UpdateTaskParams, rmcp::service::RequestContext<rmcp::service::server::RoleServer>) -> impl core::future::future::Future<Output = core::result::Result<(), rmcp::model::ErrorData>> + rmcp::service::MaybeSendFuture + '_
+pub struct posthog_rs::mcp::McpAnalytics
+impl posthog_rs::mcp::McpAnalytics
+pub fn posthog_rs::mcp::McpAnalytics::instrument<H: rmcp::handler::server::ServerHandler>(&self, H) -> posthog_rs::mcp::Instrumented<H>
+impl posthog_rs::mcp::McpAnalytics
+pub fn posthog_rs::mcp::McpAnalytics::list_tools(&self, alloc::vec::Vec<rmcp::model::tool::Tool>) -> alloc::vec::Vec<rmcp::model::tool::Tool>
+pub fn posthog_rs::mcp::McpAnalytics::start_tool_call(&self, posthog_rs::mcp::ToolCallRequest) -> posthog_rs::mcp::StartedToolCall
+impl posthog_rs::mcp::McpAnalytics
+pub fn posthog_rs::mcp::McpAnalytics::new(alloc::sync::Arc<posthog_rs::Client>, posthog_rs::mcp::McpOptions) -> Self
+impl core::fmt::Debug for posthog_rs::mcp::McpAnalytics
+pub fn posthog_rs::mcp::McpAnalytics::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct posthog_rs::mcp::McpOptions
+impl core::default::Default for posthog_rs::mcp::McpOptions
+pub fn posthog_rs::mcp::McpOptions::default() -> Self
+impl core::fmt::Debug for posthog_rs::mcp::McpOptions
+pub fn posthog_rs::mcp::McpOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct posthog_rs::mcp::McpOptionsBuilder
+impl posthog_rs::mcp::McpOptionsBuilder
+pub fn posthog_rs::mcp::McpOptionsBuilder::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog_rs::Event) -> core::option::Option<posthog_rs::Event> + core::marker::Send + 'static
+pub fn posthog_rs::mcp::McpOptionsBuilder::identify<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog_rs::mcp::RequestInfo<'_>) -> core::option::Option<posthog_rs::mcp::Identity> + core::marker::Send + core::marker::Sync + 'static
+pub fn posthog_rs::mcp::McpOptionsBuilder::intent_fallback<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog_rs::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync + 'static
+impl posthog_rs::mcp::McpOptionsBuilder
+pub fn posthog_rs::mcp::McpOptionsBuilder::build(&self) -> core::result::Result<posthog_rs::mcp::McpOptions, posthog_rs::mcp::McpOptionsBuilderError>
+pub fn posthog_rs::mcp::McpOptionsBuilder::capture_model(&mut self, bool) -> &mut Self
+pub fn posthog_rs::mcp::McpOptionsBuilder::capture_parameters(&mut self, bool) -> &mut Self
+pub fn posthog_rs::mcp::McpOptionsBuilder::capture_responses(&mut self, bool) -> &mut Self
+pub fn posthog_rs::mcp::McpOptionsBuilder::context(&mut self, bool) -> &mut Self
+pub fn posthog_rs::mcp::McpOptionsBuilder::context_description<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
+pub fn posthog_rs::mcp::McpOptionsBuilder::conversation_id(&mut self, bool) -> &mut Self
+pub fn posthog_rs::mcp::McpOptionsBuilder::exception_autocapture(&mut self, bool) -> &mut Self
+pub fn posthog_rs::mcp::McpOptionsBuilder::missing_capability_tool<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
+pub fn posthog_rs::mcp::McpOptionsBuilder::model_description<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
+impl core::default::Default for posthog_rs::mcp::McpOptionsBuilder
+pub fn posthog_rs::mcp::McpOptionsBuilder::default() -> Self
+#[non_exhaustive] pub struct posthog_rs::mcp::RequestInfo<'a>
+pub posthog_rs::mcp::RequestInfo::arguments: core::option::Option<&'a serde_json::map::Map<alloc::string::String, serde_json::value::Value>>
+pub posthog_rs::mcp::RequestInfo::http: core::option::Option<&'a http::request::Parts>
+pub posthog_rs::mcp::RequestInfo::meta: core::option::Option<&'a serde_json::map::Map<alloc::string::String, serde_json::value::Value>>
+pub posthog_rs::mcp::RequestInfo::method: &'a str
+pub posthog_rs::mcp::RequestInfo::tool_name: core::option::Option<&'a str>
+pub struct posthog_rs::mcp::StartedToolCall
+impl posthog_rs::mcp::StartedToolCall
+pub fn posthog_rs::mcp::StartedToolCall::arguments(&self) -> core::option::Option<&rmcp::model::JsonObject>
+pub fn posthog_rs::mcp::StartedToolCall::complete(self, rmcp::model::CallToolResult) -> rmcp::model::CallToolResult
+pub fn posthog_rs::mcp::StartedToolCall::fail(self, posthog_rs::mcp::ToolCallError)
+pub fn posthog_rs::mcp::StartedToolCall::input_required(self, &rmcp::model::mrtr::InputRequiredResult)
+pub struct posthog_rs::mcp::ToolCallError
+impl posthog_rs::mcp::ToolCallError
+pub fn posthog_rs::mcp::ToolCallError::error_type(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::mcp::ToolCallError::new<E: core::error::Error + ?core::marker::Sized>(&E) -> Self
+pub struct posthog_rs::mcp::ToolCallRequest
+impl posthog_rs::mcp::ToolCallRequest
+pub fn posthog_rs::mcp::ToolCallRequest::http(self, http::request::Parts) -> Self
+pub fn posthog_rs::mcp::ToolCallRequest::meta(self, rmcp::model::JsonObject) -> Self
+pub fn posthog_rs::mcp::ToolCallRequest::new(impl core::convert::Into<alloc::string::String>, core::option::Option<rmcp::model::JsonObject>) -> Self
+pub fn posthog_rs::mcp::ToolCallRequest::server(self, rmcp::model::Implementation) -> Self
+pub fn posthog_rs::mcp::ToolCallRequest::started_at(self, std::time::Instant) -> Self
+pub fn posthog_rs::mcp::ToolCallRequest::tool(self, posthog_rs::mcp::ToolRegistration) -> Self
+pub fn posthog_rs::mcp::ToolCallRequest::transport_session(self, posthog_rs::mcp::TransportSession) -> Self
+pub fn posthog_rs::mcp::instrument<H: rmcp::handler::server::ServerHandler>(H, alloc::sync::Arc<posthog_rs::Client>) -> posthog_rs::mcp::Instrumented<H>
+pub type posthog_rs::mcp::IdentifyCallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog_rs::mcp::RequestInfo<'_>) -> core::option::Option<posthog_rs::mcp::Identity> + core::marker::Send + core::marker::Sync)>
+pub type posthog_rs::mcp::IntentFallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog_rs::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync)>
 pub mod posthog_rs::tower
 pub struct posthog_rs::tower::PostHogLayer
 impl posthog_rs::tower::PostHogLayer
