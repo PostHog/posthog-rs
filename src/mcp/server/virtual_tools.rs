@@ -41,7 +41,7 @@ impl<H: ServerHandler> Instrumented<H> {
 
     fn virtual_descriptor(&self, tool: VirtualTool) -> serde_json::Value {
         let name = self.analytics.core.virtual_tool_name(tool);
-        tool.descriptor(name.unwrap_or_default())
+        tool.descriptor(name.unwrap_or_default(), &self.analytics.core.options)
     }
 
     fn server_has_tool(&self, name: &str) -> bool {

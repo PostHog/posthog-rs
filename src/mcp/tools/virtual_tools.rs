@@ -4,6 +4,8 @@
 
 use serde_json::{json, Value};
 
+use crate::mcp::options::McpOptions;
+
 /// A tool analytics advertises and answers on the server's behalf.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VirtualTool {
@@ -33,10 +35,10 @@ impl VirtualTool {
         })
     }
 
-    pub(crate) fn descriptor(self, name: &str) -> Value {
+    pub(crate) fn descriptor(self, name: &str, options: &McpOptions) -> Value {
         match self {
             VirtualTool::MissingCapability => missing_capability_descriptor(name),
-            VirtualTool::Feedback => feedback_descriptor(name),
+            VirtualTool::Feedback => feedback_descriptor(name, options),
         }
     }
 }
@@ -48,10 +50,30 @@ pub(crate) const FEEDBACK_REPLY: &str = "Your feedback was recorded for the serv
 
 const FEEDBACK_DESCRIPTION: &str = "Send feedback about this server to its developers. Most important: report a missing capability whenever no available tool fits your task, even if you can work around it (feedback_type \"missing_capability\"). Also welcome: a tool that failed or confused you, an unhelpful error, or something that worked well. This records the feedback; it does not add or change tools. Do not include user PII or sensitive content.";
 
-fn feedback_descriptor(name: &str) -> Value {
+/// The built-in report schema, with the host's description and fields.
+fn feedback_descriptor(name: &str, options: &McpOptions) -> Value {
+    let description = options
+        .feedback_description
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or(FEEDBACK_DESCRIPTION);
+    let mut descriptor = built_in_feedback_descriptor(name, description);
+    let schema = &mut descriptor["inputSchema"];
+    for field in &options.feedback_fields {
+        schema["properties"][&field.name] = field.schema.clone();
+        if field.required {
+            if let Some(required) = schema["required"].as_array_mut() {
+                required.push(Value::from(field.name.as_str()));
+            }
+        }
+    }
+    descriptor
+}
+
+fn built_in_feedback_descriptor(name: &str, description: &str) -> Value {
     json!({
         "name": name,
-        "description": FEEDBACK_DESCRIPTION,
+        "description": description,
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -4,8 +4,10 @@
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use serde_json::Value;
 
 use super::contract::limits::MAX_NAME_LENGTH;
+use super::feedback::{FeedbackField, FeedbackHandler, FeedbackReport};
 use super::identity::Identity;
 use super::request_info::RequestInfo;
 use super::tools::virtual_tools::VirtualTool;
@@ -88,6 +90,20 @@ pub struct McpOptions {
     /// [`McpAnalytics::instrument`](super::McpAnalytics::instrument) only.
     #[builder(setter(into, strip_option))]
     pub(crate) feedback_tool: Option<String>,
+    /// Replaces the `send_feedback` tool's description.
+    #[builder(setter(into, strip_option))]
+    pub(crate) feedback_description: Option<String>,
+    /// Report arguments the host adds to `send_feedback`, each sent as
+    /// `$mcp_feedback_<name>` when the agent's value matches its schema.
+    /// Declare them with [`McpOptionsBuilder::feedback_field`] and
+    /// [`McpOptionsBuilder::required_feedback_field`].
+    #[builder(setter(custom))]
+    pub(crate) feedback_fields: Vec<FeedbackField>,
+    /// Sees each feedback report, after its event is sent, and may return the
+    /// reply the agent gets instead of the default acknowledgement. A panic
+    /// or a blank reply keeps the default.
+    #[builder(setter(custom))]
+    pub(crate) on_feedback: Option<FeedbackHandler>,
     /// The exact build the server runs, sent as `$mcp_server_build` on every
     /// event: an immutable value such as a commit SHA or an image digest, of
     /// 1 to 256 characters. [`McpOptionsBuilder::build`] rejects any other
@@ -112,6 +128,9 @@ impl Default for McpOptions {
             before_send: None,
             missing_capability_tool: None,
             feedback_tool: None,
+            feedback_description: None,
+            feedback_fields: Vec::new(),
+            on_feedback: None,
             server_build: None,
         }
     }
@@ -129,6 +148,8 @@ impl std::fmt::Debug for McpOptions {
             .field("capture_responses", &self.capture_responses)
             .field("missing_capability_tool", &self.missing_capability_tool)
             .field("feedback_tool", &self.feedback_tool)
+            .field("feedback_description", &self.feedback_description)
+            .field("feedback_fields", &self.feedback_fields)
             .field("server_build", &self.server_build)
             .finish_non_exhaustive()
     }
@@ -146,7 +167,56 @@ impl McpOptions {
 impl McpOptionsBuilder {
     fn validate(&self) -> Result<(), String> {
         self.validate_virtual_tool_names()?;
+        self.validate_feedback_fields()?;
         self.validate_server_build()
+    }
+
+    /// Declares a report argument `send_feedback` advertises, as a JSON
+    /// Schema fragment with a `"type"`, such as
+    /// `json!({ "type": "string", "enum": ["flags", "replay"] })`.
+    pub fn feedback_field(&mut self, name: impl Into<String>, schema: Value) -> &mut Self {
+        self.add_feedback_field(name.into(), schema, false)
+    }
+
+    /// Like [`feedback_field`](Self::feedback_field), advertised as required.
+    pub fn required_feedback_field(&mut self, name: impl Into<String>, schema: Value) -> &mut Self {
+        self.add_feedback_field(name.into(), schema, true)
+    }
+
+    pub fn on_feedback<F>(&mut self, handle: F) -> &mut Self
+    where
+        F: Fn(&FeedbackReport) -> Option<String> + Send + Sync + 'static,
+    {
+        self.on_feedback = Some(Some(Arc::new(handle)));
+        self
+    }
+
+    fn add_feedback_field(&mut self, name: String, schema: Value, required: bool) -> &mut Self {
+        let field = FeedbackField {
+            name,
+            schema,
+            required,
+        };
+        self.feedback_fields
+            .get_or_insert_with(Vec::new)
+            .push(field);
+        self
+    }
+
+    fn validate_feedback_fields(&self) -> Result<(), String> {
+        let fields = self.feedback_fields.as_deref().unwrap_or_default();
+        for (index, field) in fields.iter().enumerate() {
+            if let Some(problem) = field.problem() {
+                return Err(problem);
+            }
+            if fields[..index]
+                .iter()
+                .any(|earlier| earlier.name == field.name)
+            {
+                return Err(format!("feedback field {:?} is declared twice", field.name));
+            }
+        }
+        Ok(())
     }
 
     /// Two virtual tools under one name would leave one unreachable.
@@ -208,6 +278,34 @@ impl McpOptionsBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feedback_fields_must_be_new_names_with_a_type() {
+        let string = serde_json::json!({ "type": "string" });
+        let cases = [
+            ("product_area", string.clone(), true),
+            ("summary", string.clone(), false),
+            ("type", string.clone(), false),
+            ("tool", string.clone(), false),
+            ("context", string.clone(), false),
+            ("conversation_id", string.clone(), false),
+            ("llm_model", string.clone(), false),
+            ("product_area", serde_json::json!({ "enum": ["a"] }), false),
+            ("product_area", serde_json::json!("string"), false),
+        ];
+        for (name, schema, accepted) in cases {
+            let built = McpOptionsBuilder::default()
+                .feedback_tool("")
+                .feedback_field(name, schema.clone())
+                .build();
+            assert_eq!(built.is_ok(), accepted, "{name} {schema}");
+        }
+        let twice = McpOptionsBuilder::default()
+            .feedback_field("area", string.clone())
+            .feedback_field("area", string)
+            .build();
+        assert!(twice.is_err(), "a field declared twice");
+    }
 
     #[test]
     fn virtual_tools_cannot_share_a_name() {

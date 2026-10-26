@@ -28,6 +28,17 @@ impl posthog_rs::mcp::Connection
 pub fn posthog_rs::mcp::Connection::new() -> Self
 impl core::default::Default for posthog_rs::mcp::Connection
 pub fn posthog_rs::mcp::Connection::default() -> Self
+#[non_exhaustive] pub struct posthog_rs::mcp::FeedbackReport
+pub posthog_rs::mcp::FeedbackReport::details: core::option::Option<alloc::string::String>
+pub posthog_rs::mcp::FeedbackReport::extras: serde_json::map::Map<alloc::string::String, serde_json::value::Value>
+pub posthog_rs::mcp::FeedbackReport::feedback_type: alloc::string::String
+pub posthog_rs::mcp::FeedbackReport::friction_points: core::option::Option<alloc::string::String>
+pub posthog_rs::mcp::FeedbackReport::raw: serde_json::map::Map<alloc::string::String, serde_json::value::Value>
+pub posthog_rs::mcp::FeedbackReport::sentiment: core::option::Option<alloc::string::String>
+pub posthog_rs::mcp::FeedbackReport::suggested_improvement: core::option::Option<alloc::string::String>
+pub posthog_rs::mcp::FeedbackReport::summary: alloc::string::String
+pub posthog_rs::mcp::FeedbackReport::task_completed: core::option::Option<bool>
+pub posthog_rs::mcp::FeedbackReport::tool_name: core::option::Option<alloc::string::String>
 pub struct posthog_rs::mcp::Identity
 pub posthog_rs::mcp::Identity::distinct_id: alloc::string::String
 pub posthog_rs::mcp::Identity::groups: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
@@ -90,8 +101,11 @@ pub fn posthog_rs::mcp::McpOptions::fmt(&self, &mut core::fmt::Formatter<'_>) ->
 pub struct posthog_rs::mcp::McpOptionsBuilder
 impl posthog_rs::mcp::McpOptionsBuilder
 pub fn posthog_rs::mcp::McpOptionsBuilder::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog_rs::Event) -> core::option::Option<posthog_rs::Event> + core::marker::Send + 'static
+pub fn posthog_rs::mcp::McpOptionsBuilder::feedback_field(&mut self, impl core::convert::Into<alloc::string::String>, serde_json::value::Value) -> &mut Self
 pub fn posthog_rs::mcp::McpOptionsBuilder::identify<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog_rs::mcp::RequestInfo<'_>) -> core::option::Option<posthog_rs::mcp::Identity> + core::marker::Send + core::marker::Sync + 'static
 pub fn posthog_rs::mcp::McpOptionsBuilder::intent_fallback<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog_rs::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync + 'static
+pub fn posthog_rs::mcp::McpOptionsBuilder::on_feedback<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog_rs::mcp::FeedbackReport) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync + 'static
+pub fn posthog_rs::mcp::McpOptionsBuilder::required_feedback_field(&mut self, impl core::convert::Into<alloc::string::String>, serde_json::value::Value) -> &mut Self
 impl posthog_rs::mcp::McpOptionsBuilder
 pub fn posthog_rs::mcp::McpOptionsBuilder::build(&self) -> core::result::Result<posthog_rs::mcp::McpOptions, posthog_rs::mcp::McpOptionsBuilderError>
 pub fn posthog_rs::mcp::McpOptionsBuilder::capture_model(&mut self, bool) -> &mut Self
@@ -101,6 +115,7 @@ pub fn posthog_rs::mcp::McpOptionsBuilder::context(&mut self, bool) -> &mut Self
 pub fn posthog_rs::mcp::McpOptionsBuilder::context_description<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::mcp::McpOptionsBuilder::conversation_id(&mut self, bool) -> &mut Self
 pub fn posthog_rs::mcp::McpOptionsBuilder::exception_autocapture(&mut self, bool) -> &mut Self
+pub fn posthog_rs::mcp::McpOptionsBuilder::feedback_description<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::mcp::McpOptionsBuilder::feedback_tool<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::mcp::McpOptionsBuilder::missing_capability_tool<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::mcp::McpOptionsBuilder::model_description<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
@@ -133,6 +148,7 @@ pub fn posthog_rs::mcp::ToolCallRequest::started_at(self, std::time::Instant) ->
 pub fn posthog_rs::mcp::ToolCallRequest::tool(self, posthog_rs::mcp::ToolRegistration) -> Self
 pub fn posthog_rs::mcp::ToolCallRequest::transport_session(self, posthog_rs::mcp::TransportSession) -> Self
 pub fn posthog_rs::mcp::instrument<H: rmcp::handler::server::ServerHandler>(H, alloc::sync::Arc<posthog_rs::Client>) -> posthog_rs::mcp::Instrumented<H>
+pub type posthog_rs::mcp::FeedbackHandler = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog_rs::mcp::FeedbackReport) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync)>
 pub type posthog_rs::mcp::IdentifyCallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog_rs::mcp::RequestInfo<'_>) -> core::option::Option<posthog_rs::mcp::Identity> + core::marker::Send + core::marker::Sync)>
 pub type posthog_rs::mcp::IntentFallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog_rs::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync)>
 pub mod posthog_rs::tower
