@@ -12,9 +12,9 @@ use crate::Error;
 ///
 /// A fresh allowlist (rather than a denylist) so nothing added upstream — super
 /// properties, context, user-supplied properties, SDK metadata, system context —
-/// can leak past it. Applied as the final capture-pipeline step, after all
-/// enrichment, so the resulting event carries exactly this set intersected with
-/// what the full event would have had. Beyond the evaluation properties it keeps
+/// can leak past it. Applied after every SDK enrichment and before `before_send`,
+/// so the event carries this set intersected with what the full event would have
+/// had, plus whatever a hook adds. Beyond the evaluation properties it keeps
 /// cheap, static, low-cardinality identity useful for platform/runtime
 /// breakdowns (`$lib`, `$lib_version`, `$os`, `$os_version`), processing-control
 /// sentinels this SDK sets (`$geoip_disable`, `$process_person_profile`,
@@ -36,6 +36,11 @@ pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
     "$groups",
     "$process_person_profile",
     "$geoip_disable",
+    // Option sources: capture moves these legacy properties into `options`
+    // after the allowlist runs, so dropping them would drop the option.
+    "$cookieless_mode",
+    "$ignore_sent_at",
+    "$product_tour_id",
     // Linkage / SDK identity
     "$session_id",
     "$window_id",
@@ -49,11 +54,27 @@ pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
 ];
 
 /// Whether `key` survives minimization to [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`].
-/// Applied by the capture pipeline (`capture::build_events_at`) so the
-/// allowlist check has a single implementation independent of the properties
-/// representation it is applied to.
 pub(crate) fn is_minimal_flag_called_property(key: &str) -> bool {
     MINIMAL_FLAG_CALLED_EVENT_PROPERTIES.contains(&key)
+}
+
+/// Merge `groups` into the `$groups` property, key by key, so typed groups win
+/// over a `$groups` value the caller set.
+pub(crate) fn merge_groups_into(
+    properties: &mut HashMap<String, serde_json::Value>,
+    groups: &HashMap<String, String>,
+) {
+    if groups.is_empty() {
+        return;
+    }
+    let mut merged = match properties.remove("$groups") {
+        Some(serde_json::Value::Object(existing)) => existing,
+        _ => serde_json::Map::new(),
+    };
+    for (k, v) in groups {
+        merged.insert(k.clone(), serde_json::Value::String(v.clone()));
+    }
+    properties.insert("$groups".into(), serde_json::Value::Object(merged));
 }
 
 /// An [`Event`] represents an interaction a user has with your app or
@@ -73,8 +94,9 @@ pub struct Event {
     /// [`Event::set_uuid`], so a reused or cloned `Event` never resends a uuid.
     uuid: Option<Uuid>,
     /// When set, the capture pipeline trims this event's properties to
-    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] as its final enrichment step.
-    /// Set only for minimized `$feature_flag_called` events; never serialized.
+    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] after the SDK fills its values
+    /// and before `before_send`. Set only for minimized `$feature_flag_called`
+    /// events; never serialized.
     #[serde(skip)]
     minimal_flag_called: bool,
 }
@@ -433,14 +455,25 @@ impl Event {
 
     /// Mark this event as a minimized `$feature_flag_called` event. The capture
     /// pipeline then trims its properties to
-    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] after all enrichment.
+    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] before `before_send`.
     pub(crate) fn mark_minimal_flag_called(&mut self) {
         self.minimal_flag_called = true;
     }
 
-    /// Whether this event is a minimized `$feature_flag_called` event.
-    pub(crate) fn is_minimal_flag_called(&self) -> bool {
-        self.minimal_flag_called
+    /// Move groups added with [`Event::add_group`] into the `$groups` property,
+    /// so `before_send` sees them and can change or remove them.
+    pub(crate) fn merge_groups_into_properties(&mut self) {
+        merge_groups_into(&mut self.properties, &self.groups);
+        self.groups.clear();
+    }
+
+    /// Trim a minimized `$feature_flag_called` event to
+    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`]; other events are unchanged.
+    pub(crate) fn apply_minimal_flag_called_allowlist(&mut self) {
+        if self.minimal_flag_called {
+            self.properties
+                .retain(|key, _| is_minimal_flag_called_property(key));
+        }
     }
 }
 

@@ -19,7 +19,7 @@ use crate::capture_event::{
 use crate::client::get_default_user_agent;
 use crate::endpoints::Endpoint;
 use crate::error::Error;
-use crate::event::{is_minimal_flag_called_property, Event};
+use crate::event::Event;
 
 // ---------------------------------------------------------------------------
 // Request building
@@ -34,21 +34,10 @@ pub(crate) fn build_events_at(events: &[Event], now: DateTime<Utc>) -> Vec<Captu
         .collect()
 }
 
-/// Build one V1 wire event from a preprocessed event, and apply the
-/// minimized-`$feature_flag_called` allowlist. It adds no SDK values: those
-/// go in before `before_send`, which has the final say over them.
+/// Build one V1 wire event from a preprocessed event. It adds no SDK values:
+/// those go in before `before_send`, which has the final say over them.
 pub(crate) fn build_event_at(event: &Event, now: DateTime<Utc>) -> CaptureEvent {
-    let minimal = event.is_minimal_flag_called();
-    let mut v1 = CaptureEvent::from_event_at(event, now);
-    if let serde_json::Value::Object(ref mut map) = v1.properties {
-        // Minimized `$feature_flag_called` events keep only allowlisted properties;
-        // `$session_id`, `$window_id` and the four legacy option properties already
-        // moved to top-level fields and `options`, so the allowlist cannot drop them.
-        if minimal {
-            map.retain(|key, _| is_minimal_flag_called_property(key));
-        }
-    }
-    v1
+    CaptureEvent::from_event_at(event, now)
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +558,9 @@ mod tests {
             ("$cookieless_mode", serde_json::json!(true)),
             ("$ignore_sent_at", serde_json::json!(true)),
             ("$product_tour_id", serde_json::json!("tour_1")),
+            ("$process_person_profile", serde_json::json!(false)),
+            ("$session_id", serde_json::json!("session-1")),
+            ("$window_id", serde_json::json!("window-1")),
         ] {
             event.insert_prop(k, v).unwrap();
         }
@@ -584,9 +576,12 @@ mod tests {
                 "cookieless_mode": true,
                 "disable_skew_correction": true,
                 "product_tour_id": "tour_1",
+                "process_person_profile": false,
             }),
-            "legacy option properties must become options before the allowlist runs"
+            "the allowlist keeps every legacy option property for the wire builder"
         );
+        assert_eq!(built[0].session_id.as_deref(), Some("session-1"));
+        assert_eq!(built[0].window_id.as_deref(), Some("window-1"));
         let map = built[0].properties.as_object().unwrap();
         let keys: HashSet<&str> = map.keys().map(String::as_str).collect();
         let allow: HashSet<&str> = MINIMAL_FLAG_CALLED_EVENT_PROPERTIES
@@ -653,6 +648,53 @@ mod tests {
         );
         for key in ["$os", "$is_server", "$geoip_disable"] {
             assert!(!map.contains_key(key), "{key} came back after the hook");
+        }
+    }
+
+    #[test]
+    fn before_send_sees_groups_and_the_minimal_trim_and_its_changes_are_sent() {
+        let opts = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .before_send(|mut event| {
+                let groups = event.remove_prop("$groups");
+                event.insert_prop("hook_saw_groups", groups).unwrap();
+                let saw_custom = event.properties().contains_key("custom");
+                event.insert_prop("hook_saw_custom", saw_custom).unwrap();
+                event.add_group("team", "added-by-hook");
+                Some(event)
+            })
+            .build()
+            .unwrap();
+
+        for minimal in [false, true] {
+            let mut event = Event::new("$feature_flag_called", "user-1");
+            if minimal {
+                event.mark_minimal_flag_called();
+            }
+            event.add_group("company", "acme");
+            event.insert_prop("custom", "value").unwrap();
+
+            let event =
+                preprocess_capture_event(event, &opts.capture_defaults(), &opts.before_send)
+                    .unwrap();
+            let wire = build_event_at(&event, Utc::now());
+
+            let map = wire.properties.as_object().unwrap();
+            assert_eq!(
+                map.get("hook_saw_groups"),
+                Some(&serde_json::json!({"company": "acme"})),
+                "minimal={minimal}"
+            );
+            assert_eq!(
+                map.get("hook_saw_custom"),
+                Some(&serde_json::json!(!minimal)),
+                "minimal={minimal}"
+            );
+            assert_eq!(
+                map.get("$groups"),
+                Some(&serde_json::json!({"team": "added-by-hook"})),
+                "the hook's removal holds and its group is sent; minimal={minimal}"
+            );
         }
     }
 

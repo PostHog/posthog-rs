@@ -120,6 +120,8 @@ pub(crate) struct TransportHandle {
     /// Latches the single "queue full" warning so a full queue doesn't spam logs.
     full_warned: AtomicBool,
     max_queue_size: usize,
+    /// The lane's endpoint, named in the queue-full warning.
+    endpoint: Endpoint,
     /// Shares the worker's clock; used to stamp capture (enqueue) time.
     clock: Arc<dyn Clock>,
     /// The worker thread's id, so teardown and the panic hook can avoid waiting
@@ -243,6 +245,7 @@ impl TransportHandle {
         let (tx, rx) = mpsc::channel::<Control>();
         let len = Arc::new(AtomicUsize::new(0));
         let max_queue_size = lane.max_queue_size(&options);
+        let endpoint = lane.endpoint;
         let worker_len = len.clone();
         let worker_clock = Arc::clone(&clock);
         let worker = thread::Builder::new()
@@ -257,9 +260,19 @@ impl TransportHandle {
             worker: Mutex::new(worker),
             full_warned: AtomicBool::new(false),
             max_queue_size,
+            endpoint,
             clock,
             worker_id,
         }
+    }
+
+    fn try_reserve(&self) -> bool {
+        try_reserve(
+            &self.len,
+            self.max_queue_size,
+            &self.full_warned,
+            self.endpoint,
+        )
     }
 
     /// Non-blocking enqueue. Drops (with a single warning) when the queue is full
@@ -268,7 +281,7 @@ impl TransportHandle {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        if try_reserve(&self.len, self.max_queue_size, &self.full_warned) {
+        if self.try_reserve() {
             self.send_reserved(event);
         }
     }
@@ -329,9 +342,7 @@ impl TransportHandle {
             return;
         }
         let mut fitted = 0;
-        while fitted < events.len()
-            && try_reserve(&self.len, self.max_queue_size, &self.full_warned)
-        {
+        while fitted < events.len() && self.try_reserve() {
             events[fitted].ensure_timestamp(self.clock.now_utc());
             events[fitted].ensure_uuid();
             fitted += 1;
@@ -508,7 +519,7 @@ fn reserve_slot(len: &AtomicUsize, max: usize) -> Option<usize> {
 /// Reserve a queue slot, warning once when full. Re-arms that warning once the
 /// queue has fully drained, so a service that repeatedly fills then drains warns
 /// once per episode instead of only on the very first overflow.
-fn try_reserve(len: &AtomicUsize, max: usize, warned: &AtomicBool) -> bool {
+fn try_reserve(len: &AtomicUsize, max: usize, warned: &AtomicBool, endpoint: Endpoint) -> bool {
     match reserve_slot(len, max) {
         Some(current) => {
             if current == 0 {
@@ -518,7 +529,9 @@ fn try_reserve(len: &AtomicUsize, max: usize, warned: &AtomicBool) -> bool {
         }
         None => {
             if !warned.swap(true, Ordering::AcqRel) {
-                warn!("posthog-rs: event queue full (capacity {max}); dropping events");
+                warn!(
+                    "posthog-rs: event queue full for {endpoint} (capacity {max}); dropping events"
+                );
             }
             false
         }
@@ -919,8 +932,9 @@ fn send_buffer(
     while !buffer.is_empty() {
         if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
             warn!(
-                "posthog-rs: shutdown timeout reached; dropping {} buffered event(s)",
-                buffer.len()
+                "posthog-rs: shutdown timeout reached; dropping {} buffered event(s) for {}",
+                buffer.len(),
+                pipeline.lane.endpoint
             );
             dec_len(&pipeline.len, buffer.len());
             buffer.clear();
@@ -959,7 +973,10 @@ fn drain_historical(
     while let Some(chunk) = historical.pop_front() {
         if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
             let dropped = chunk.len() + historical.iter().map(Vec::len).sum::<usize>();
-            warn!("posthog-rs: shutdown timeout reached; dropping {dropped} historical event(s)");
+            warn!(
+                "posthog-rs: shutdown timeout reached; dropping {dropped} historical event(s) for {}",
+                pipeline.lane.endpoint
+            );
             dec_len(&pipeline.len, chunk.len());
             for rest in historical.drain(..) {
                 dec_len(&pipeline.len, rest.len());
@@ -982,6 +999,7 @@ fn build_http(options: &ClientOptions) -> Option<reqwest::blocking::Client> {
     }
     match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(options.request_timeout_seconds))
+        .redirect(super::redirect_policy())
         .build()
     {
         Ok(http) => Some(http),
@@ -1077,7 +1095,10 @@ impl Pipeline {
                 while let Some(chunk) = chunks.next() {
                     if deadline.is_some_and(|d| self.clock.now() >= d) {
                         let dropped = chunk.len() + chunks.map(|c| c.len()).sum::<usize>();
-                        warn!("posthog-rs: shutdown timeout reached; dropping {dropped} event(s)");
+                        warn!(
+                            "posthog-rs: shutdown timeout reached; dropping {dropped} event(s) for {}",
+                            self.lane.endpoint
+                        );
                         dec_len(&self.len, dropped);
                         return;
                     }
@@ -1165,7 +1186,10 @@ impl Pipeline {
             Err(e) => {
                 let count = batch.pending.len();
                 if self.options.on_error.is_empty() {
-                    warn!("posthog-rs: dropping {count} event(s), serialization failed: {e}");
+                    warn!(
+                        "posthog-rs: dropping {count} event(s) for {}, serialization failed: {e}",
+                        self.lane.endpoint
+                    );
                 } else {
                     let err = Error::Serialization(e.to_string());
                     let lost = count + undelivered_results(&batch.final_results);
@@ -1283,8 +1307,9 @@ impl Pipeline {
             Step::Backoff(delay) => {
                 if deadline.is_some() {
                     warn!(
-                        "posthog-rs: dropping {} undelivered event(s) on shutdown",
-                        batch.pending.len()
+                        "posthog-rs: dropping {} undelivered event(s) for {} on shutdown",
+                        batch.pending.len(),
+                        self.lane.endpoint
                     );
                     dec_len(&self.len, batch.pending.len());
                 } else {
@@ -1318,8 +1343,9 @@ impl Pipeline {
         for batch in std::mem::take(&mut self.retries) {
             if deadline.is_some_and(|d| self.clock.now() >= d) {
                 warn!(
-                    "posthog-rs: shutdown timeout reached; dropping {} undelivered event(s)",
-                    batch.pending.len()
+                    "posthog-rs: shutdown timeout reached; dropping {} undelivered event(s) for {}",
+                    batch.pending.len(),
+                    self.lane.endpoint
                 );
                 dec_len(&self.len, batch.pending.len());
             } else {
@@ -1447,27 +1473,37 @@ mod tests {
     fn try_reserve_bounds_at_capacity_and_warns_once() {
         let len = AtomicUsize::new(0);
         let warned = AtomicBool::new(false);
-        assert!(try_reserve(&len, 2, &warned));
-        assert!(try_reserve(&len, 2, &warned));
-        assert!(!try_reserve(&len, 2, &warned)); // third dropped
-        assert_eq!(len.load(Ordering::Acquire), 2);
-        assert!(warned.load(Ordering::Acquire));
-        // A second overflow does not re-warn (single warning when full).
-        assert!(!try_reserve(&len, 2, &warned));
+        let reserve = || try_reserve(&len, 2, &warned, Endpoint::CaptureAi);
+        let ((), logged) = crate::client::tests::with_logs(|| {
+            assert!(reserve());
+            assert!(reserve());
+            assert!(!reserve()); // third dropped
+            assert_eq!(len.load(Ordering::Acquire), 2);
+            assert!(warned.load(Ordering::Acquire));
+            // A second overflow does not re-warn (single warning when full).
+            assert!(!reserve());
+        });
+        assert_eq!(logged.lines().count(), 1, "{logged}");
+        assert!(
+            logged.contains("event queue full for /i/v1/ai/events (capacity 2)"),
+            "{}",
+            logged
+        );
     }
 
     #[test]
     fn try_reserve_rearms_warning_after_full_drain() {
         let len = AtomicUsize::new(0);
         let warned = AtomicBool::new(false);
-        assert!(try_reserve(&len, 1, &warned));
-        assert!(!try_reserve(&len, 1, &warned)); // full -> warns
+        let reserve = || try_reserve(&len, 1, &warned, Endpoint::Capture);
+        assert!(reserve());
+        assert!(!reserve()); // full -> warns
         assert!(warned.load(Ordering::Acquire));
         len.fetch_sub(1, Ordering::AcqRel); // queue fully drains
-        assert!(try_reserve(&len, 1, &warned)); // reserve from empty re-arms the warning
+        assert!(reserve()); // reserve from empty re-arms the warning
         assert!(!warned.load(Ordering::Acquire));
         // A fresh overflow warns again (a new full episode).
-        assert!(!try_reserve(&len, 1, &warned));
+        assert!(!reserve());
         assert!(warned.load(Ordering::Acquire));
     }
 
@@ -2002,6 +2038,77 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_drop_lines_name_the_lane() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(503);
+        });
+        let clock = ManualClock::new();
+        let len = Arc::new(AtomicUsize::new(4));
+        let mut pipeline = Pipeline::new(
+            &options(server.base_url()).build().unwrap(),
+            LaneConfig::ai(),
+            Arc::new(clock.clone()),
+            Arc::clone(&len),
+        )
+        .unwrap();
+        let events = || vec![Event::new("$ai_generation", "user-1")];
+        let past = Some(clock.now());
+        let future = Some(clock.now() + Duration::from_secs(60));
+
+        let ((), logged) = crate::client::tests::with_logs(|| {
+            send_buffer(&mut pipeline, &mut LiveBuffer::Deferred(events()), 10, past);
+            drain_historical(&mut pipeline, &mut VecDeque::from([events()]), past);
+            // A 503 on the final drain attempt drops the batch instead of retrying.
+            pipeline.send_batch(events(), false, future);
+            // A batch waiting to retry when the deadline has passed.
+            pipeline.send_batch(events(), false, None);
+            pipeline.flush_retries(past);
+        });
+
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(lines.len(), 4, "{logged}");
+        for line in lines {
+            assert!(line.contains("for /i/v1/ai/events"), "{}", line);
+        }
+        assert_eq!(
+            len.load(Ordering::SeqCst),
+            0,
+            "every dropped event is released"
+        );
+    }
+
+    #[test]
+    fn redirect_to_another_origin_is_not_followed() {
+        let (server, other) = (MockServer::start(), MockServer::start());
+        let location = other.url("/i/v1/analytics/events");
+        let redirect = server.mock(|when, then| {
+            when.method(POST);
+            then.status(307).header("location", &location);
+        });
+        let other_mock = ok_mock(&other);
+        let len = Arc::new(AtomicUsize::new(1));
+        let mut pipeline = Pipeline::new(
+            &options(server.base_url()).build().unwrap(),
+            LaneConfig::analytics(),
+            Arc::new(ManualClock::new()),
+            Arc::clone(&len),
+        )
+        .unwrap();
+
+        pipeline.send_batch(vec![Event::new("a", "user-1")], false, None);
+
+        redirect.assert_calls(1);
+        other_mock.assert_calls(0);
+        assert_eq!(
+            len.load(Ordering::SeqCst),
+            0,
+            "a refused redirect is terminal"
+        );
+    }
+
+    #[test]
     fn shutdown_deadline_drops_the_remaining_byte_chunks() {
         // A 1-byte target sends each event as its own request. The deadline
         // passes while the first request is in flight, so the other chunks are
@@ -2053,7 +2160,9 @@ mod tests {
         );
         assert_eq!(logged.lines().count(), 1, "{logged}");
         assert!(
-            logged.contains("shutdown timeout reached; dropping 2 event(s)"),
+            logged.contains(
+                "shutdown timeout reached; dropping 2 event(s) for /i/v1/analytics/events"
+            ),
             "{logged}"
         );
     }

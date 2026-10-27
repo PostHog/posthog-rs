@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::constants::{
     LEGACY_OPTION_PROPERTIES, SDK_INFO_PROPERTIES, SESSION_ID_PROP, WINDOW_ID_PROP,
 };
-use crate::event::Event;
+use crate::event::{merge_groups_into, Event};
 
 /// RFC 3339 UTC with 3, 6 or 9 fractional digits: the fewest that keep every
 /// non-zero digit, so finer caller or clock precision is never truncated.
@@ -53,18 +53,9 @@ impl CaptureEvent {
     /// carries none of its own.
     pub(crate) fn from_event_at(event: &Event, now: DateTime<Utc>) -> Self {
         let mut properties = event.properties().clone();
-
-        if !event.groups().is_empty() {
-            // Groups from `add_group` win key by key over a `$groups` property.
-            let mut groups = match properties.remove("$groups") {
-                Some(serde_json::Value::Object(existing)) => existing,
-                _ => serde_json::Map::new(),
-            };
-            for (k, v) in event.groups() {
-                groups.insert(k.clone(), serde_json::Value::String(v.clone()));
-            }
-            properties.insert("$groups".into(), serde_json::Value::Object(groups));
-        }
+        // The pipeline merges groups before `before_send`; this covers groups a
+        // hook adds and events built directly.
+        merge_groups_into(&mut properties, event.groups());
 
         let timestamp = wire_timestamp(event.timestamp().map_or(now, |ts| ts.and_utc()));
 
