@@ -474,8 +474,9 @@ impl ClientOptionsBuilder {
     /// Registering a hook silences the default WARN for terminal capture
     /// reject/exhaustion and serialization failures (the caller now owns that
     /// signal). Shutdown-timeout, queue-full, and `before_send` drops, and
-    /// retryable failures on the final shutdown attempt, keep their WARN logs
-    /// and do **not** fire the hook.
+    /// retryable failures that shutdown stops from being retried, keep their
+    /// WARN logs and do **not** fire the hook. A batch that has used all
+    /// `max_capture_attempts` still fires it.
     /// The existing `/flags` and poller WARN logs are unaffected.
     pub fn on_error<F>(&mut self, hook: F) -> &mut Self
     where
