@@ -146,13 +146,15 @@ impl FeedbackReport {
 }
 
 /// JSON Schema equality: numbers by value at any depth, so `[3]` matches
-/// `[3.0]`, and two integers exactly, since an `f64` cannot tell large ones
+/// `[3.0]`, and integers exactly, since an `f64` cannot tell large ones
 /// apart.
 fn same_value(left: &Value, right: &Value) -> bool {
     match (left, right) {
-        (Value::Number(a), Value::Number(b)) if a.is_f64() || b.is_f64() => {
-            a.as_f64() == b.as_f64()
-        }
+        (Value::Number(a), Value::Number(b)) => match (integer(a), integer(b)) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => a.as_f64() == b.as_f64(),
+            _ => false,
+        },
         (Value::Array(a), Value::Array(b)) => {
             a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_value(a, b))
         }
@@ -163,6 +165,19 @@ fn same_value(left: &Value, right: &Value) -> bool {
         }
         _ => left == right,
     }
+}
+
+/// The number's exact value when it is whole, wider than any JSON integer.
+fn integer(number: &serde_json::Number) -> Option<i128> {
+    if let Some(whole) = number.as_i64() {
+        return Some(whole.into());
+    }
+    if let Some(whole) = number.as_u64() {
+        return Some(whole.into());
+    }
+    let float = number.as_f64()?;
+    let in_range = float.abs() < i128::MAX as f64;
+    (float.fract() == 0.0 && in_range).then_some(float as i128)
 }
 
 /// A string argument that is not blank.
@@ -203,6 +218,17 @@ mod tests {
                 json!(9_007_199_254_740_993u64),
                 false,
             ),
+            (
+                json!({ "type": "integer", "enum": [9_007_199_254_740_992.0f64] }),
+                json!(9_007_199_254_740_993u64),
+                false,
+            ),
+            (
+                json!({ "type": "integer", "enum": [9_007_199_254_740_992.0f64] }),
+                json!(9_007_199_254_740_992u64),
+                true,
+            ),
+            (json!({ "type": "number", "enum": [3] }), json!(3.5), false),
             (
                 json!({ "type": "array", "enum": [[1, 2]] }),
                 json!([1.0, 2]),

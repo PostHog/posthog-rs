@@ -32,7 +32,10 @@ pub(crate) enum TextPass {
 impl TextPass {
     pub(crate) fn apply(self, text: &str) -> String {
         match self {
-            TextPass::Name => urls::redact_urls(&tokens::redact_tokens(text)),
+            TextPass::Name => {
+                let text = json_members::redact_json_members(text);
+                urls::redact_urls(&tokens::redact_tokens(&text))
+            }
             TextPass::Captured => urls::redact_urls(&redact_credentials(text)),
             TextPass::FreeText => urls::redact_urls(&pii::redact_pii(&redact_credentials(text))),
         }

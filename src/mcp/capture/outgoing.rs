@@ -139,6 +139,7 @@ mod tests {
         let host = serde_json::json!({
             "authorization": "Bearer secret",
             "nested": { "password": "hunter2", "region": "eu" },
+            "diagnostic": r#"upstream returned {"password":"hunter2"}"#,
             "$process_person_profile": false,
             "$set": { "plan": "free" },
             "$groups": { "company": "other" },
@@ -160,6 +161,10 @@ mod tests {
         assert_eq!(
             properties["nested"],
             serde_json::json!({ "password": "[redacted]", "region": "eu" })
+        );
+        assert_eq!(
+            properties["diagnostic"],
+            r#"upstream returned {"password":"[redacted]"}"#
         );
         assert!(!properties.contains_key(key::PROCESS_PERSON_PROFILE));
         assert_eq!(properties[key::SET], serde_json::json!({ "plan": "pro" }));
