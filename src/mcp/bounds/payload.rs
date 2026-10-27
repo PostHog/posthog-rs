@@ -26,14 +26,17 @@ pub(crate) fn bounded_payload(value: &Value, pass: TextPass) -> Value {
     bound(value, MAX_PAYLOAD_DEPTH, pass, &mut budget)
 }
 
-/// An object's borrowed entries, bounded as `bounded_payload` bounds the
-/// object, so the caller copies only what the bounds keep.
+/// Borrowed object entries, each bounded as `bounded_payload` bounds an
+/// object's entry, so the caller copies only what the bounds keep. Every entry
+/// is kept: the event size bound limits how many fit.
 pub(crate) fn bounded_entries<'a>(
-    entries: impl ExactSizeIterator<Item = (&'a String, &'a Value)>,
+    entries: impl Iterator<Item = (&'a String, &'a Value)>,
     pass: TextPass,
 ) -> Map<String, Value> {
     let mut budget = MAX_EVENT_BYTES;
-    bound_object(entries, MAX_PAYLOAD_DEPTH - 1, pass, &mut budget)
+    entries
+        .map(|(key, value)| bound_entry(key, value, MAX_PAYLOAD_DEPTH - 1, pass, &mut budget))
+        .collect()
 }
 
 fn bound(value: &Value, remaining_depth: usize, pass: TextPass, budget: &mut usize) -> Value {
@@ -42,12 +45,7 @@ fn bound(value: &Value, remaining_depth: usize, pass: TextPass, budget: &mut usi
         Value::Array(_) if remaining_depth == 0 => Value::from(NESTED_ARRAY_MARKER),
         Value::Object(_) if remaining_depth == 0 => Value::from(NESTED_OBJECT_MARKER),
         Value::Array(items) => bound_array(items, remaining_depth - 1, pass, budget),
-        Value::Object(object) => Value::Object(bound_object(
-            object.iter(),
-            remaining_depth - 1,
-            pass,
-            budget,
-        )),
+        Value::Object(object) => bound_object(object, remaining_depth - 1, pass, budget),
         other => other.clone(),
     }
 }
@@ -79,28 +77,36 @@ fn bound_array(
     Value::Array(bounded)
 }
 
-fn bound_object<'a>(
-    entries: impl ExactSizeIterator<Item = (&'a String, &'a Value)>,
+fn bound_object(
+    object: &Map<String, Value>,
     remaining_depth: usize,
     pass: TextPass,
     budget: &mut usize,
-) -> Map<String, Value> {
-    let length = entries.len();
-    let overflows = length > MAX_PAYLOAD_ENTRIES;
-    let mut bounded: Map<String, Value> = entries
-        .take(kept_entries(length))
-        .map(|(key, nested)| {
-            let value = match is_credential_key(key) {
-                true => Value::from(REDACTED),
-                false => bound(nested, remaining_depth, pass, budget),
-            };
-            (truncate(key, MAX_PAYLOAD_KEY_LENGTH), value)
-        })
+) -> Value {
+    let overflows = object.len() > MAX_PAYLOAD_ENTRIES;
+    let mut bounded: Map<String, Value> = object
+        .iter()
+        .take(kept_entries(object.len()))
+        .map(|(key, nested)| bound_entry(key, nested, remaining_depth, pass, budget))
         .collect();
     if overflows {
         bounded.insert(OVERFLOW_KEY.to_string(), Value::from(OVERFLOW_MARKER));
     }
-    bounded
+    Value::Object(bounded)
+}
+
+fn bound_entry(
+    key: &str,
+    value: &Value,
+    remaining_depth: usize,
+    pass: TextPass,
+    budget: &mut usize,
+) -> (String, Value) {
+    let value = match is_credential_key(key) {
+        true => Value::from(REDACTED),
+        false => bound(value, remaining_depth, pass, budget),
+    };
+    (truncate(key, MAX_PAYLOAD_KEY_LENGTH), value)
 }
 
 fn kept_entries(length: usize) -> usize {

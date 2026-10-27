@@ -90,7 +90,7 @@ mod tests {
     use super::*;
     use crate::mcp::capture::host_properties;
     use crate::mcp::contract::events::TOOLS_LIST;
-    use crate::mcp::contract::limits::{MAX_PAYLOAD_ENTRIES, MAX_PAYLOAD_STRING_LENGTH};
+    use crate::mcp::contract::limits::MAX_PAYLOAD_STRING_LENGTH;
     use crate::mcp::contract::properties::LISTED_TOOL_NAMES;
     use crate::RequestContext;
 
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_keeps_only_the_host_properties_capture_would_send() {
+    fn host_properties_keep_every_name_and_bound_each_value() {
         let host = (0..150).fold(RequestContext::new(), |host, index| {
             host.property(format!("p{index:03}"), "word ".repeat(20_000))
                 .unwrap()
@@ -180,9 +180,9 @@ mod tests {
 
         let kept = host_properties(&host);
 
-        assert_eq!(kept.len(), MAX_PAYLOAD_ENTRIES);
-        assert!(kept.contains_key("p000") && kept.contains_key("p098"));
-        assert!(!kept.contains_key("p099"));
+        assert_eq!(kept.len(), 150);
+        assert!(kept.contains_key("p149"));
+        assert!(!kept.contains_key("..."));
         let longest = kept.values().filter_map(Value::as_str).map(str::len).max();
         assert_eq!(longest, Some(MAX_PAYLOAD_STRING_LENGTH));
     }

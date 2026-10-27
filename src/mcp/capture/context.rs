@@ -21,7 +21,7 @@ const PERSON_CONTROLS: [&str; 5] = [
 ];
 
 /// The host's properties an MCP event may carry: none MCP or identity sets,
-/// redacted and bounded as a payload, in name order.
+/// each value redacted and bounded as a payload's, in name order.
 pub(crate) fn host_properties(host: &RequestContext) -> Map<String, Value> {
     let mut kept: Vec<(&String, &Value)> = host
         .properties
