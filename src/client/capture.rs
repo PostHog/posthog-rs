@@ -1080,6 +1080,48 @@ mod tests {
     }
 
     #[test]
+    fn after_response_proxy_statuses_retry_then_fail() {
+        let opts = test_opts();
+        let rid = Uuid::now_v7();
+        for status in [404, 429] {
+            let mut pending = vec![dummy_event()];
+            let mut final_results = HashMap::new();
+            let step = after_response(
+                &opts,
+                &rid,
+                1,
+                status,
+                Some(Duration::from_secs(2)),
+                "",
+                &mut pending,
+                &mut final_results,
+            );
+            assert!(
+                matches!(step, Step::Backoff(d) if d == Duration::from_secs(2)),
+                "{} must back off for at least Retry-After",
+                status
+            );
+            assert_eq!(pending.len(), 1, "{} must keep the batch", status);
+
+            let step = after_response(
+                &opts,
+                &rid,
+                3,
+                status,
+                None,
+                "",
+                &mut pending,
+                &mut final_results,
+            );
+            match (status, step) {
+                (429, Step::Fail(Error::RateLimit)) => {}
+                (404, Step::Fail(Error::Connection(msg))) if msg.contains("404") => {}
+                (_, other) => panic!("{} at max attempts: unexpected {:?}", status, other),
+            }
+        }
+    }
+
+    #[test]
     fn after_response_non_retryable_status_fails() {
         let opts = test_opts();
         let rid = Uuid::now_v7();

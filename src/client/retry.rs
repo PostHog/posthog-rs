@@ -32,10 +32,10 @@ pub(crate) enum FeatureFlagsTransportStep {
     Fail(Error),
 }
 
-/// Statuses worth retrying. Everything else (including 429) is terminal so the
-/// caller surfaces it without burning the attempt budget.
+/// Statuses worth retrying. Everything else is terminal so the caller surfaces
+/// it without burning the attempt budget.
 pub(crate) fn is_retryable_status(status: u16) -> bool {
-    matches!(status, 408 | 500 | 502 | 503 | 504)
+    matches!(status, 404 | 408 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// Classify transport errors from remote feature-flag requests.
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn retryable_statuses() {
-        for code in [408, 500, 502, 503, 504] {
+        for code in [404, 408, 429, 500, 502, 503, 504] {
             assert!(
                 is_retryable_status(code),
                 "expected {} to be retryable",
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn non_retryable_statuses() {
-        for code in [200, 201, 400, 401, 402, 403, 413, 415, 418, 429, 404] {
+        for code in [200, 201, 400, 401, 402, 403, 413, 415, 418] {
             assert!(
                 !is_retryable_status(code),
                 "expected {} to NOT be retryable",
