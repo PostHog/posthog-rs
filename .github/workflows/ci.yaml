@@ -54,10 +54,10 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --tests -- -D warnings
 
       - name: Clippy (mcp)
-        run: cargo clippy --features mcp,tower -- -D warnings
+        run: cargo clippy --tests --features mcp,tower -- -D warnings
 
   public-api:
     name: Public API

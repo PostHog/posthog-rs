@@ -1,6 +1,8 @@
+type CaptureError = (Option<u16>, String);
+
 #[allow(dead_code)]
 pub fn capture_error_sink() -> (
-    std::sync::mpsc::Receiver<(Option<u16>, String)>,
+    std::sync::mpsc::Receiver<CaptureError>,
     impl Fn(&posthog_rs::PostHogError<'_>) + Send + Sync + 'static,
 ) {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -11,6 +13,7 @@ pub fn capture_error_sink() -> (
     })
 }
 
+#[allow(dead_code)]
 pub fn default_user_agent() -> String {
     format!("posthog-rs/{}", env!("CARGO_PKG_VERSION"))
 }

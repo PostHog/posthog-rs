@@ -94,7 +94,7 @@ mod blocking {
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .expect_err("a 500 with no local results propagates");
         assert!(err.to_string().contains("500"));
-        flags.assert_hits(1);
+        flags.assert_calls(1);
 
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(recorded.len(), 1, "exactly one flags failure expected");
@@ -125,7 +125,7 @@ mod blocking {
             posthog_rs::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
-                .personal_api_key("phx_test".to_string())
+                .secret_key("phx_test".to_string())
                 .enable_local_evaluation(true)
                 .poll_interval_seconds(3600)
                 .on_error(hook)
@@ -137,7 +137,7 @@ mod blocking {
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .expect("degrades to a local-only snapshot");
         assert!(snapshot.keys().contains(&"feature-a".to_string()));
-        flags.assert_hits(1);
+        flags.assert_calls(1);
 
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(recorded.len(), 1, "degrade path still reports once");
@@ -156,7 +156,7 @@ mod blocking {
             posthog_rs::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
-                .personal_api_key("phx_test".to_string())
+                .secret_key("phx_test".to_string())
                 .enable_local_evaluation(true)
                 .poll_interval_seconds(3600)
                 .on_error(hook)
@@ -164,7 +164,7 @@ mod blocking {
                 .unwrap(),
         );
 
-        defs.assert_hits(1);
+        defs.assert_calls(1);
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(recorded.len(), 1, "initial poll failure reported once");
         assert_eq!(recorded[0], Some(401));
@@ -255,7 +255,7 @@ mod blocking {
             posthog_rs::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
-                .personal_api_key("phx_test".to_string())
+                .secret_key("phx_test".to_string())
                 .enable_local_evaluation(true)
                 .poll_interval_seconds(1)
                 .on_error(hook)
@@ -313,7 +313,7 @@ mod async_tests {
             .await
             .expect_err("a 500 with no local results propagates");
         assert!(err.to_string().contains("500"));
-        flags.assert_hits(1);
+        flags.assert_calls(1);
 
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(recorded.len(), 1, "exactly one flags failure expected");
@@ -341,7 +341,7 @@ mod async_tests {
             posthog_rs::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
-                .personal_api_key("phx_test".to_string())
+                .secret_key("phx_test".to_string())
                 .enable_local_evaluation(true)
                 .poll_interval_seconds(3600)
                 .on_error(hook)
@@ -358,7 +358,7 @@ mod async_tests {
             .await
             .expect("degrades to a local-only snapshot");
         assert!(snapshot.keys().contains(&"feature-a".to_string()));
-        flags.assert_hits(1);
+        flags.assert_calls(1);
 
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(recorded.len(), 1, "degrade path still reports once");
@@ -377,7 +377,7 @@ mod async_tests {
             posthog_rs::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
-                .personal_api_key("phx_test".to_string())
+                .secret_key("phx_test".to_string())
                 .enable_local_evaluation(true)
                 .poll_interval_seconds(3600)
                 .on_error(hook)
@@ -386,7 +386,7 @@ mod async_tests {
         )
         .await;
 
-        defs.assert_hits(1);
+        defs.assert_calls(1);
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(recorded.len(), 1, "initial poll failure reported once");
         assert_eq!(recorded[0], Some(401));
@@ -407,7 +407,7 @@ mod async_tests {
             posthog_rs::ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .host(server.base_url())
-                .personal_api_key("phx_test".to_string())
+                .secret_key("phx_test".to_string())
                 .enable_local_evaluation(true)
                 .poll_interval_seconds(1)
                 .on_error(hook)

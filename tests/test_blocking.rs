@@ -139,7 +139,7 @@ fn test_is_feature_enabled() {
     assert!(disabled_result.is_ok());
     assert_eq!(disabled_result.unwrap(), false);
 
-    flags_mock.assert_hits(2);
+    flags_mock.assert_calls(2);
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn test_multivariate_flag() {
     assert!(enabled_result.is_ok());
     assert_eq!(enabled_result.unwrap(), true);
 
-    flags_mock.assert_hits(2);
+    flags_mock.assert_calls(2);
 }
 
 #[test]
@@ -318,9 +318,9 @@ fn assert_disabled_client_is_noop(api_key: Option<&str>) {
     );
 
     client.flush();
-    capture_mock.assert_hits(0);
-    batch_mock.assert_hits(0);
-    flags_mock.assert_hits(0);
+    capture_mock.assert_calls(0);
+    batch_mock.assert_calls(0);
+    flags_mock.assert_calls(0);
 }
 
 #[cfg(not(feature = "capture-v1"))]
@@ -336,7 +336,7 @@ fn test_capture_batch_empty_is_noop() {
     let client = create_test_client(server.base_url());
     client.capture_batch(vec![], false);
     client.flush();
-    batch_mock.assert_hits(0);
+    batch_mock.assert_calls(0);
 }
 
 #[cfg(not(feature = "capture-v1"))]
@@ -410,7 +410,7 @@ fn test_capture_batch_rate_limit() {
     assert_eq!(status, Some(429));
     assert!(error.contains("RateLimit"), "{}", error);
     assert!(errors.try_recv().is_err());
-    batch_mock.assert_hits(1);
+    batch_mock.assert_calls(1);
 }
 
 #[cfg(not(feature = "capture-v1"))]
@@ -445,7 +445,7 @@ fn test_capture_batch_bad_request() {
         error
     );
     assert!(errors.try_recv().is_err());
-    batch_mock.assert_hits(1);
+    batch_mock.assert_calls(1);
 }
 
 #[cfg(not(feature = "capture-v1"))]
