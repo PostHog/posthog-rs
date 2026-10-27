@@ -20,7 +20,7 @@ macro_rules! call {
 fn global_client_lifecycle() {
     let server = MockServer::start();
     let capture = server.mock(|when, then| {
-        when.method(POST).matches(|request| {
+        when.method(POST).is_true(|request| {
             let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
             body["batch"].as_array().is_some_and(|batch| {
                 batch.len() == 1
@@ -76,7 +76,7 @@ fn global_client_lifecycle() {
     #[cfg(feature = "error-tracking")]
     {
         let exceptions = server.mock(|when, then| {
-            when.method(POST).matches(|request| {
+            when.method(POST).is_true(|request| {
                 let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
                 let batch = body["batch"].as_array().unwrap();
                 batch.len() == 2

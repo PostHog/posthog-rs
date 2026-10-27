@@ -44,12 +44,12 @@ fn capture(client: &Client, batch: bool) {
 /// that isn't driven by `flush()`).
 fn wait_for_hits(mock: &httpmock::Mock, want: usize) {
     for _ in 0..400 {
-        if mock.hits() >= want {
+        if mock.calls() >= want {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(mock.hits(), want, "timed out waiting for {want} hits");
+    assert_eq!(mock.calls(), want, "timed out waiting for {want} hits");
 }
 
 #[test]
@@ -68,11 +68,11 @@ fn retryable_status_keeps_retrying_until_attempts_exhausted() {
             client.flush();
             client.flush();
 
-            mock.assert_hits(3);
+            mock.assert_calls(3);
 
             // Budget exhausted: the event is dropped, so a further flush is a no-op.
             client.flush();
-            mock.assert_hits(3);
+            mock.assert_calls(3);
         }
     }
 }
@@ -92,11 +92,11 @@ fn terminal_status_sends_once() {
             let client = create_v0_client(server.base_url(), 3);
             capture(&client, batch);
             client.flush();
-            mock.assert_hits(1);
+            mock.assert_calls(1);
 
             // Terminal: dropped, not retried.
             client.flush();
-            mock.assert_hits(1);
+            mock.assert_calls(1);
         }
     }
 }
@@ -113,7 +113,7 @@ fn success_sends_once() {
         let client = create_v0_client(server.base_url(), 3);
         capture(&client, batch);
         client.flush();
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 }
 
@@ -135,7 +135,7 @@ fn retries_resend_identical_event() {
     client.flush();
     client.flush();
 
-    mock.assert_hits(3);
+    mock.assert_calls(3);
 }
 
 /// Matcher: the request body is valid gzip that decodes to the expected event.
@@ -155,7 +155,7 @@ fn gzip_sets_header_query_param_and_compresses_body() {
         when.method(POST)
             .header("content-encoding", "gzip")
             .query_param("compression", "gzip")
-            .matches(body_gunzips_to_user1);
+            .is_true(body_gunzips_to_user1);
         then.status(200);
     });
 
@@ -188,11 +188,11 @@ fn honors_retry_after_header() {
 
     let start = Instant::now();
     client.flush();
-    mock.assert_hits(1);
+    mock.assert_calls(1);
     wait_for_hits(&mock, 2);
     let elapsed = start.elapsed();
 
-    mock.assert_hits(2);
+    mock.assert_calls(2);
     assert!(
         elapsed >= Duration::from_millis(900),
         "Retry-After header not honored: second attempt after only {:?}",
