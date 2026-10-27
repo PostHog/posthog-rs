@@ -57,6 +57,7 @@ pub(crate) struct FlagCalledEventParams {
     /// Decided by [`FeatureFlagEvaluations::record_access`] from the flag's own
     /// pinned gate and experiment signal, then applied as the final capture step.
     pub minimal: bool,
+    pub context: crate::RequestContext,
 }
 
 /// Dependency-inverted host interface used by [`FeatureFlagEvaluations`] to
@@ -125,6 +126,7 @@ pub struct FeatureFlagEvaluations {
     errors_while_computing: bool,
     quota_limited: bool,
     accessed: Mutex<HashSet<String>>,
+    pub(crate) request_context: crate::RequestContext,
 }
 
 impl FeatureFlagEvaluations {
@@ -151,6 +153,7 @@ impl FeatureFlagEvaluations {
             errors_while_computing,
             quota_limited,
             accessed: Mutex::new(HashSet::new()),
+            request_context: crate::RequestContext::current().unwrap_or_default(),
         }
     }
 
@@ -301,6 +304,7 @@ impl FeatureFlagEvaluations {
             errors_while_computing: self.errors_while_computing,
             quota_limited: self.quota_limited,
             accessed: Mutex::new(self.snapshot_accessed()),
+            request_context: self.request_context.clone(),
         }
     }
 
@@ -336,6 +340,7 @@ impl FeatureFlagEvaluations {
                 disable_geoip: self.disable_geoip,
                 properties,
                 minimal,
+                context: self.request_context.clone(),
             });
     }
 

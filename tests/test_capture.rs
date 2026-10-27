@@ -70,12 +70,12 @@ fn batch_has_two_distinct_uuids(req: &HttpMockRequest) -> bool {
 /// that isn't driven by `flush()`).
 fn wait_for_hits(mock: &httpmock::Mock, want: usize) {
     for _ in 0..400 {
-        if mock.hits() >= want {
+        if mock.calls() >= want {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(mock.hits(), want, "timed out waiting for {want} hits");
+    assert_eq!(mock.calls(), want, "timed out waiting for {want} hits");
 }
 
 #[tokio::test]
@@ -216,9 +216,9 @@ async fn capture_does_not_retry_on_401() {
     // 401 is terminal: one attempt on flush, then dropped (not returned to the
     // caller). A second flush proves there is no retry.
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 }
 
 #[tokio::test]
@@ -242,9 +242,9 @@ async fn capture_does_not_retry_on_402() {
     // billing error is logged, not returned to the caller. A second flush proves
     // there is no retry.
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 }
 
 #[tokio::test]
@@ -288,7 +288,7 @@ async fn capture_partial_batch_retry() {
         when.method(POST)
             .path("/i/v1/analytics/events")
             .header("posthog-attempt", "2")
-            .matches(retry_body_only_contains_retry_event);
+            .is_true(retry_body_only_contains_retry_event);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(retry_resp);
@@ -343,9 +343,9 @@ async fn capture_does_not_retry_terminal_results() {
     // All three per-event results are terminal (ok / drop / warning), so one
     // flush finalizes the batch. A second flush has nothing left to re-send.
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 }
 
 #[tokio::test]
@@ -443,11 +443,11 @@ async fn capture_partial_retry_exhausts_attempts() {
     client.flush().await;
     client.flush().await;
     client.flush().await;
-    mock.assert_hits(3);
+    mock.assert_calls(3);
 
     // Budget exhausted: a further flush is a no-op.
     client.flush().await;
-    mock.assert_hits(3);
+    mock.assert_calls(3);
 }
 
 #[tokio::test]
@@ -472,11 +472,11 @@ async fn capture_exhausts_retries() {
     client.flush().await;
     client.flush().await;
     client.flush().await;
-    mock.assert_hits(3);
+    mock.assert_calls(3);
 
     // Budget exhausted: a further flush is a no-op.
     client.flush().await;
-    mock.assert_hits(3);
+    mock.assert_calls(3);
 }
 
 /// Matcher: the only event carries exactly the merged options, and no legacy
@@ -797,7 +797,7 @@ async fn capture_sends_gzip_content_encoding() {
         when.method(POST)
             .path("/i/v1/analytics/events")
             .header("content-encoding", "gzip")
-            .matches(body_gunzips_to_user1);
+            .is_true(body_gunzips_to_user1);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({ "results": {} }));
@@ -903,7 +903,7 @@ async fn capture_prunes_terminal_events_on_partial_retry() {
         when.method(POST)
             .path("/i/v1/analytics/events")
             .header("posthog-attempt", "2")
-            .matches(retry_body_prunes_terminal_events);
+            .is_true(retry_body_prunes_terminal_events);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(retry_resp);
@@ -945,7 +945,7 @@ async fn capture_request_id_stable_across_retries() {
         when.method(POST)
             .path("/i/v1/analytics/events")
             .header("posthog-attempt", "1")
-            .matches(capture_request_id);
+            .is_true(capture_request_id);
         then.status(503)
             .header("content-type", "application/json")
             .header("retry-after", "0")
@@ -959,7 +959,7 @@ async fn capture_request_id_stable_across_retries() {
         when.method(POST)
             .path("/i/v1/analytics/events")
             .header("posthog-attempt", "2")
-            .matches(capture_request_id);
+            .is_true(capture_request_id);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({ "results": {} }));
@@ -1018,9 +1018,9 @@ async fn capture_accepts_alternate_2xx_status() {
     // batch is finalized after a single attempt.
     client.capture(event);
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
     client.flush().await;
-    mock.assert_hits(1);
+    mock.assert_calls(1);
     assert!(errors.try_recv().is_err());
 }
 
@@ -1063,7 +1063,7 @@ async fn capture_batch_empty_is_noop() {
     client.flush().await;
 
     // An empty batch enqueues nothing, so flushing sends no request.
-    mock.assert_hits(0);
+    mock.assert_calls(0);
 }
 
 #[tokio::test]
@@ -1083,5 +1083,5 @@ async fn capture_disabled_client_noop() {
 
     client.capture(Event::new("test", "user-1"));
     client.flush().await;
-    mock.assert_hits(0);
+    mock.assert_calls(0);
 }

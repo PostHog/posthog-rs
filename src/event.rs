@@ -99,6 +99,8 @@ pub struct Event {
     /// events; never serialized.
     #[serde(skip)]
     minimal_flag_called: bool,
+    #[serde(skip)]
+    pub(crate) request_context_applied: bool,
 }
 
 impl Event {
@@ -127,6 +129,7 @@ impl Event {
             timestamp: None,
             uuid: None,
             minimal_flag_called: false,
+            request_context_applied: false,
         }
     }
 
@@ -160,6 +163,7 @@ impl Event {
             timestamp: None,
             uuid: None,
             minimal_flag_called: false,
+            request_context_applied: false,
         }
     }
 
@@ -295,6 +299,7 @@ impl Event {
             timestamp: None,
             uuid: None,
             minimal_flag_called: false,
+            request_context_applied: false,
         })
     }
 
@@ -355,6 +360,7 @@ impl Event {
             timestamp: None,
             uuid: None,
             minimal_flag_called: false,
+            request_context_applied: false,
         }))
     }
 

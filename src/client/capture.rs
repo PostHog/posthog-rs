@@ -647,7 +647,7 @@ mod tests {
             Some(&serde_json::json!("caller-os-version"))
         );
         for key in ["$os", "$is_server", "$geoip_disable"] {
-            assert!(!map.contains_key(key), "{key} came back after the hook");
+            assert!(!map.contains_key(key), "{} came back after the hook", key);
         }
     }
 
@@ -924,7 +924,10 @@ mod tests {
             ));
             assert!(
                 (base * 3 / 4..=base * 5 / 4).contains(&wait),
-                "attempt {attempt} waited {wait}ms, expected {base}ms +/- 25%"
+                "attempt {} waited {}ms, expected {}ms +/- 25%",
+                attempt,
+                wait,
+                base
             );
         }
         let waits: Vec<u64> = (0..50)

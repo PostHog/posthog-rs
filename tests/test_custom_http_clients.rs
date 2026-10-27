@@ -269,10 +269,10 @@ mod asynchronous {
             .evaluate_flags("user", EvaluateFlagsOptions::default())
             .await
             .unwrap();
-        capture.assert_hits(1);
-        background.assert_hits(1);
+        capture.assert_calls(1);
+        background.assert_calls(1);
         assert!(flags.calls() >= 2);
-        definitions.assert_hits(1);
+        definitions.assert_calls(1);
         client.shutdown().await;
         drop(client);
         assert!(http.get(server.url("/still-alive")).send().await.is_ok());
@@ -329,7 +329,7 @@ mod asynchronous {
         .await;
         client.capture(Event::new("queued", "user"));
         client.flush().await;
-        background.assert_hits(1);
+        background.assert_calls(1);
         client.shutdown().await;
     }
 
@@ -354,7 +354,7 @@ mod asynchronous {
             .evaluate_flags("user", EvaluateFlagsOptions::default())
             .await
             .unwrap();
-        flags.assert_hits(1);
+        flags.assert_calls(1);
         client.shutdown().await;
     }
 
@@ -606,7 +606,7 @@ mod blocking {
             .unwrap();
         assert!(capture.calls() >= 2);
         assert!(flags.calls() >= 2);
-        definitions.assert_hits(1);
+        definitions.assert_calls(1);
         client.shutdown();
         drop(client);
         assert!(http.get(server.url("/still-alive")).send().is_ok());

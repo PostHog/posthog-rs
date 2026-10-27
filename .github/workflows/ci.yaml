@@ -54,7 +54,10 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --tests -- -D warnings
+
+      - name: Clippy (mcp)
+        run: cargo clippy --tests --features mcp -- -D warnings
 
   public-api:
     name: Public API
@@ -93,6 +96,10 @@ jobs:
             command: >-
               cargo build --verbose --no-default-features --features async-client,error-tracking,tls-no-provider
               && ! cargo tree --package posthog-rs --edges normal --invert aws-lc-sys --no-default-features --features async-client,error-tracking,tls-no-provider
+          - name: mcp
+            toolchain: stable
+            cache-key: mcp
+            command: cargo build --verbose --features mcp
           - name: MSRV (async client)
             toolchain: "1.78.0"
             cache-key: msrv-async-client
@@ -101,6 +108,10 @@ jobs:
             toolchain: "1.78.0"
             cache-key: msrv-blocking-client
             command: cargo check --locked --package posthog-rs --lib --no-default-features --features error-tracking,tls
+          - name: MSRV of the mcp feature
+            toolchain: "1.88.0"
+            cache-key: msrv-mcp
+            command: cargo check --locked --package posthog-rs --lib --features mcp
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -179,6 +190,9 @@ jobs:
           - name: TLS without a built-in provider (blocking client)
             cache-key: tls-no-provider-blocking
             command: cargo test --verbose --no-default-features --features tls-no-provider --test test_tls_no_provider
+          - name: Unit test (mcp)
+            cache-key: mcp
+            command: cargo test --verbose --features mcp
           - name: E2E test
             cache-key: e2e
             command: cargo test --verbose --features e2e-test,tls --no-default-features

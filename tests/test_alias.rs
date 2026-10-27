@@ -108,8 +108,8 @@ mod blocking {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path(CAPTURE_PATH)
-                .matches(request_has_well_formed_alias_event)
-                .matches(request_does_not_disable_person_processing);
+                .is_true(request_has_well_formed_alias_event)
+                .is_true(request_does_not_disable_person_processing);
             then.status(200).json_body(ok_response());
         });
 
@@ -126,7 +126,7 @@ mod blocking {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path(CAPTURE_PATH)
-                .matches(request_has_well_formed_alias_event);
+                .is_true(request_has_well_formed_alias_event);
             then.status(200).json_body(ok_response());
         });
 
@@ -144,7 +144,7 @@ mod blocking {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path(CAPTURE_PATH)
-                .matches(request_has_two_distinct_event_uuids);
+                .is_true(request_has_two_distinct_event_uuids);
             then.status(200).json_body(ok_response());
         });
 
@@ -169,7 +169,7 @@ mod blocking {
             client.alias(blank, DISTINCT_ID);
             client.flush();
 
-            capture_mock.assert_hits(0);
+            capture_mock.assert_calls(0);
         }
     }
 
@@ -186,7 +186,7 @@ mod blocking {
             client.alias(PREVIOUS_ID, blank);
             client.flush();
 
-            capture_mock.assert_hits(0);
+            capture_mock.assert_calls(0);
         }
     }
 
@@ -208,7 +208,7 @@ mod blocking {
         client.alias(PREVIOUS_ID, DISTINCT_ID);
         client.flush();
 
-        capture_mock.assert_hits(0);
+        capture_mock.assert_calls(0);
     }
 }
 
@@ -227,8 +227,8 @@ mod async_client {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path(CAPTURE_PATH)
-                .matches(request_has_well_formed_alias_event)
-                .matches(request_does_not_disable_person_processing);
+                .is_true(request_has_well_formed_alias_event)
+                .is_true(request_does_not_disable_person_processing);
             then.status(200).json_body(ok_response());
         });
 
@@ -245,7 +245,7 @@ mod async_client {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path(CAPTURE_PATH)
-                .matches(request_has_well_formed_alias_event);
+                .is_true(request_has_well_formed_alias_event);
             then.status(200).json_body(ok_response());
         });
 
@@ -263,7 +263,7 @@ mod async_client {
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
                 .path(CAPTURE_PATH)
-                .matches(request_has_two_distinct_event_uuids);
+                .is_true(request_has_two_distinct_event_uuids);
             then.status(200).json_body(ok_response());
         });
 
@@ -288,7 +288,7 @@ mod async_client {
             client.alias(blank, DISTINCT_ID);
             client.flush().await;
 
-            capture_mock.assert_hits(0);
+            capture_mock.assert_calls(0);
         }
     }
 
@@ -305,7 +305,7 @@ mod async_client {
             client.alias(PREVIOUS_ID, blank);
             client.flush().await;
 
-            capture_mock.assert_hits(0);
+            capture_mock.assert_calls(0);
         }
     }
 
@@ -327,6 +327,6 @@ mod async_client {
         client.alias(PREVIOUS_ID, DISTINCT_ID);
         client.flush().await;
 
-        capture_mock.assert_hits(0);
+        capture_mock.assert_calls(0);
     }
 }

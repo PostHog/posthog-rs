@@ -612,11 +612,12 @@ mod tests {
             let (options, logged) = build_logging(&builder);
             assert!(
                 options.is_disabled(),
-                "{expected:?} must disable the client"
+                "{:?} must disable the client",
+                expected
             );
             assert_eq!(logged.lines().count(), 1, "{logged}");
-            assert!(logged.contains("ERROR"), "{logged}");
-            assert!(logged.contains(expected), "{logged}");
+            assert!(logged.contains("ERROR"), "{}", logged);
+            assert!(logged.contains(expected), "{}", logged);
             assert!(
                 !logged.contains("secret123"),
                 "the key must never be logged"
@@ -628,11 +629,11 @@ mod tests {
         builder.api_key("phc_project".to_string());
         let (options, logged) = build_logging(&builder);
         assert!(!options.is_disabled());
-        assert!(logged.is_empty(), "{logged}");
+        assert!(logged.is_empty(), "{}", logged);
         builder.api_key(String::new()).disabled(true);
         let (options, logged) = build_logging(&builder);
         assert!(options.is_disabled());
-        assert!(logged.is_empty(), "{logged}");
+        assert!(logged.is_empty(), "{}", logged);
     }
 
     #[test]

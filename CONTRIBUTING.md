@@ -2,6 +2,10 @@
 
 Thanks for your interest in improving the PostHog Rust SDK.
 
+## Commit signing
+
+This repo requires all commits to be signed. To configure commit signing, see the [PostHog handbook](https://posthog.com/handbook/engineering/security#commit-signing). Set `commit.gpgsign` to `true` in your git config so that every commit is signed, not only the ones you sign by hand.
+
 ## Prerequisites
 
 - Rust `1.78.0` or newer for the SDK library (see `Cargo.toml`). Development and test dependencies may require newer Rust.

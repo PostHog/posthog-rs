@@ -305,6 +305,7 @@ impl TransportHandle {
     /// finally sent — then hand it to the worker, releasing the reserved slot if the worker is
     /// gone. The slot must already be reserved by the caller.
     fn send_reserved(&self, mut event: Event) {
+        crate::request_context::apply_current_context(&mut event);
         event.ensure_timestamp(self.clock.now_utc());
         event.ensure_uuid();
         if self
@@ -343,6 +344,7 @@ impl TransportHandle {
         }
         let mut fitted = 0;
         while fitted < events.len() && self.try_reserve() {
+            crate::request_context::apply_current_context(&mut events[fitted]);
             events[fitted].ensure_timestamp(self.clock.now_utc());
             events[fitted].ensure_uuid();
             fitted += 1;
@@ -1673,7 +1675,7 @@ mod tests {
 
         handle.enqueue(Event::new("Delayed", "user-1"));
         handle.tick(); // interval not yet elapsed
-        mock.assert_hits(0);
+        mock.assert_calls(0);
         assert_eq!(
             handle.pending(),
             1,
@@ -1682,7 +1684,7 @@ mod tests {
 
         clock.advance(Duration::from_secs(10));
         handle.tick(); // interval elapsed -> flush, no real sleep
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         assert_eq!(
             handle.pending(),
             0,
@@ -1712,17 +1714,17 @@ mod tests {
 
         handle.enqueue(Event::new("Save", "user-1"));
         handle.flush_blocking(); // attempt 1 -> 503, held for 1s +/- 25% jitter
-        fail.assert_hits(1);
+        fail.assert_calls(1);
 
         clock.advance(Duration::from_millis(749));
         handle.tick(); // below the shortest jittered wait -> no retry
-        fail.assert_hits(1);
+        fail.assert_calls(1);
 
         fail.delete();
         let ok = ok_mock(&server);
         clock.advance(Duration::from_millis(501)); // past the longest jittered wait
         handle.tick(); // due -> retried, delivered
-        ok.assert_hits(1);
+        ok.assert_calls(1);
 
         handle.shutdown_blocking();
     }
@@ -1770,7 +1772,7 @@ mod tests {
 
         handle.flush_blocking(); // 1 kept + 1 filtered by before_send; 503 holds the kept one
 
-        fail.assert_hits(1);
+        fail.assert_calls(1);
         // Only the surviving event remains in flight; the filtered one is terminal.
         assert_eq!(handle.pending(), 1);
 
@@ -1824,7 +1826,7 @@ mod tests {
         // the event `timestamp`, proving the timestamp is stamped at enqueue.
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
-            when.method(POST).matches(|req| {
+            when.method(POST).is_true(|req| {
                 let Ok(json) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
                     return false;
                 };
@@ -1854,7 +1856,7 @@ mod tests {
         clock.advance(Duration::from_secs(10)); // ...delivered 10s later
         handle.flush_blocking();
 
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         handle.shutdown_blocking();
     }
 
@@ -1877,7 +1879,7 @@ mod tests {
         handle.enqueue(Event::new("Dropped", "user-1"));
         handle.shutdown_blocking(); // deadline already past -> drop, do not send
 
-        mock.assert_hits(0);
+        mock.assert_calls(0);
         assert_eq!(
             handle.pending(),
             0,
@@ -1970,7 +1972,7 @@ mod tests {
             .into_iter()
             .map(|names| {
                 server.mock(|when, then| {
-                    when.method(POST).matches(move |request| {
+                    when.method(POST).is_true(move |request| {
                         let body: serde_json::Value =
                             serde_json::from_slice(request.body_ref()).unwrap();
                         let batch = body["batch"].as_array().unwrap();
@@ -2029,7 +2031,7 @@ mod tests {
         handle.enqueue_historical(vec![Event::new("H", "user-1")]);
         handle.shutdown_blocking(); // deadline already past -> drop, do not send
 
-        mock.assert_hits(0);
+        mock.assert_calls(0);
         assert_eq!(
             handle.pending(),
             0,
@@ -2163,7 +2165,8 @@ mod tests {
             logged.contains(
                 "shutdown timeout reached; dropping 2 event(s) for /i/v1/analytics/events"
             ),
-            "{logged}"
+            "{}",
+            logged
         );
     }
 
@@ -2184,7 +2187,7 @@ mod tests {
         handle.enqueue_historical(vec![Event::new("H1", "user-1"), Event::new("H2", "user-1")]);
         handle.tick(); // sync only; the size threshold already drained it on enqueue
 
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         assert_eq!(
             handle.pending(),
             0,
@@ -2457,7 +2460,7 @@ mod tests {
         );
         handle.shutdown_blocking();
 
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(
             *recorded,

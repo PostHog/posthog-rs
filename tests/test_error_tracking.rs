@@ -109,7 +109,7 @@ mod blocking {
                 .body_includes(r#""$exception_level":"error""#)
                 .body_includes(r#""value":"payment failed""#)
                 .body_includes(r#""platform":"native""#)
-                .matches(request_has_capture_exception_user_frame_last);
+                .is_true(request_has_capture_exception_user_frame_last);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(ok_response());
@@ -119,7 +119,7 @@ mod blocking {
         client.capture_exception(&TestError).unwrap();
         client.flush();
 
-        capture_mock.assert_hits(1);
+        capture_mock.assert_calls(1);
     }
 
     #[test]
@@ -134,7 +134,7 @@ mod blocking {
                 .body_includes(r#""$groups":{"company":"company-1"}"#)
                 .body_includes(r#""$exception_fingerprint":"checkout-error""#)
                 .body_includes(r#""$exception_level":"warning""#)
-                .matches(request_has_capture_exception_with_user_frame_last);
+                .is_true(request_has_capture_exception_with_user_frame_last);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(ok_response());
@@ -155,7 +155,7 @@ mod blocking {
             .unwrap();
         client.flush();
 
-        capture_mock.assert_hits(1);
+        capture_mock.assert_calls(1);
     }
 
     #[test]
@@ -187,7 +187,7 @@ mod blocking {
                 .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""value":"payment failed""#)
-                .matches(request_has_no_stacktrace);
+                .is_true(request_has_no_stacktrace);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(ok_response());
@@ -210,7 +210,7 @@ mod blocking {
         client.capture_exception(&TestError).unwrap();
         client.flush();
 
-        capture_mock.assert_hits(1);
+        capture_mock.assert_calls(1);
     }
 }
 
@@ -241,7 +241,7 @@ mod async_client {
                 .body_includes(r#""$exception_level":"error""#)
                 .body_includes(r#""value":"payment failed""#)
                 .body_includes(r#""platform":"native""#)
-                .matches(request_has_capture_exception_user_frame_last);
+                .is_true(request_has_capture_exception_user_frame_last);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(ok_response());
@@ -251,7 +251,7 @@ mod async_client {
         client.capture_exception(&TestError).await.unwrap();
         client.flush().await;
 
-        capture_mock.assert_hits(1);
+        capture_mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -266,7 +266,7 @@ mod async_client {
                 .body_includes(r#""$groups":{"company":"company-1"}"#)
                 .body_includes(r#""$exception_fingerprint":"checkout-error""#)
                 .body_includes(r#""$exception_level":"warning""#)
-                .matches(request_has_capture_exception_with_user_frame_last);
+                .is_true(request_has_capture_exception_with_user_frame_last);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(ok_response());
@@ -288,7 +288,7 @@ mod async_client {
             .unwrap();
         client.flush().await;
 
-        capture_mock.assert_hits(1);
+        capture_mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -321,7 +321,7 @@ mod async_client {
                 .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""value":"payment failed""#)
-                .matches(request_has_no_stacktrace);
+                .is_true(request_has_no_stacktrace);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(ok_response());
@@ -344,7 +344,7 @@ mod async_client {
         client.capture_exception(&TestError).await.unwrap();
         client.flush().await;
 
-        capture_mock.assert_hits(1);
+        capture_mock.assert_calls(1);
     }
 
     #[tokio::test]

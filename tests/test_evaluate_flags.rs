@@ -32,7 +32,7 @@ fn capture_events_mock<'a>(
     server.mock(|when, then| {
         when.method(POST)
             .path(CAPTURE_PATH)
-            .matches(move |request| {
+            .is_true(move |request| {
                 let Ok(body) = serde_json::from_slice::<Value>(request.body_ref()) else {
                     return false;
                 };
@@ -377,9 +377,9 @@ mod blocking {
         let mut keys = snapshot.keys();
         keys.sort();
         assert_eq!(keys, vec!["alpha", "beta", "variant-flag"]);
-        flags_mock.assert_hits(1);
+        flags_mock.assert_calls(1);
         client.flush();
-        capture_mock.assert_hits(0);
+        capture_mock.assert_calls(0);
     }
 
     #[test]
@@ -497,7 +497,7 @@ mod blocking {
                 .expect_err("retryable status should error after retry budget is exhausted");
 
             assert!(err.to_string().contains(&status.to_string()));
-            flags_mock.assert_hits(2);
+            flags_mock.assert_calls(2);
         }
     }
 
@@ -523,7 +523,7 @@ mod blocking {
             .expect_err("500 status should be terminal");
 
         assert!(err.to_string().contains("500"));
-        flags_mock.assert_hits(1);
+        flags_mock.assert_calls(1);
     }
 
     #[test]
@@ -554,9 +554,9 @@ mod blocking {
         let _snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .unwrap();
-        flags_mock.assert_hits(1);
+        flags_mock.assert_calls(1);
         client.flush();
-        capture_mock.assert_hits(0);
+        capture_mock.assert_calls(0);
     }
 
     #[test]
@@ -606,9 +606,9 @@ mod blocking {
         );
         client.flush();
 
-        alpha_mock.assert_hits(1);
-        variant_mock.assert_hits(1);
-        unexpected_capture.assert_hits(0);
+        alpha_mock.assert_calls(1);
+        variant_mock.assert_calls(1);
+        unexpected_capture.assert_calls(0);
     }
 
     #[test]
@@ -626,7 +626,7 @@ mod blocking {
         let payload = snapshot.get_flag_payload("variant-flag");
         assert_eq!(payload, Some(json!({"hello": "world"})));
         client.flush();
-        capture_mock.assert_hits(0);
+        capture_mock.assert_calls(0);
     }
 
     fn assert_group_dedup(
@@ -652,7 +652,7 @@ mod blocking {
         client.flush();
         assert!(snap_2.is_enabled("alpha"));
         client.flush();
-        capture_mock.assert_hits(expected_hits);
+        capture_mock.assert_calls(expected_hits);
     }
 
     fn groups(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
@@ -699,8 +699,8 @@ mod blocking {
         assert!(snap.is_enabled("alpha"));
         assert!(snap.is_enabled("alpha"));
         client.flush();
-        capture_mock.assert_hits(1);
-        unexpected_capture.assert_hits(0);
+        capture_mock.assert_calls(1);
+        unexpected_capture.assert_calls(0);
     }
 
     #[test]
@@ -734,7 +734,7 @@ mod blocking {
         let mut opts = EvaluateFlagsOptions::default();
         opts.flag_keys = Some(vec!["alpha".into(), "beta".into()]);
         let _ = client.evaluate_flags("user-1", opts).unwrap();
-        flags_mock.assert_hits(1);
+        flags_mock.assert_calls(1);
     }
 
     #[test]
@@ -789,8 +789,8 @@ mod blocking {
         assert!(snapshot.keys().is_empty());
         assert!(!snapshot.is_enabled("alpha"));
         client.flush();
-        flags_mock.assert_hits(0);
-        capture_mock.assert_hits(0);
+        flags_mock.assert_calls(0);
+        capture_mock.assert_calls(0);
     }
 
     #[test]
@@ -874,8 +874,8 @@ mod blocking {
         assert!(snapshot.is_enabled("alpha"));
         assert!(snapshot.get_flag("does-not-exist").is_none());
         client.flush();
-        capture_mock.assert_hits(1);
-        unexpected_capture.assert_hits(0);
+        capture_mock.assert_calls(1);
+        unexpected_capture.assert_calls(0);
     }
 
     // Demonstrates that the snapshot can deserialise the legacy shape too;
@@ -967,8 +967,8 @@ mod blocking {
             .unwrap();
         assert!(snapshot.is_enabled("alpha"));
         client.flush();
-        capture_mock.assert_hits(1);
-        legacy_mock.assert_hits(0);
+        capture_mock.assert_calls(1);
+        legacy_mock.assert_calls(0);
     }
 
     /// C5: `$feature_flag_called` uses the normal V1 capture retry path.
@@ -1002,8 +1002,8 @@ mod blocking {
         assert!(snapshot.is_enabled("alpha"));
         client.flush();
         client.flush();
-        first_attempt.assert_hits(1);
-        retry_attempt.assert_hits(1);
+        first_attempt.assert_calls(1);
+        retry_attempt.assert_calls(1);
     }
 
     #[test]
@@ -1024,7 +1024,7 @@ mod blocking {
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .unwrap();
         assert!(snapshot.keys().is_empty());
-        flags_mock.assert_hits(0);
+        flags_mock.assert_calls(0);
     }
 
     /// Ported from the removed V0 suite: `Event::with_flags` attaches the flag
@@ -1057,8 +1057,8 @@ mod blocking {
         client.capture(event);
         client.flush();
         // One /flags request, one capture request — no second flag fetch.
-        flags_mock.assert_hits(1);
-        capture_mock.assert_hits(1);
+        flags_mock.assert_calls(1);
+        capture_mock.assert_calls(1);
     }
 
     /// Ported from the removed V0 suite: `$feature_flag_called` carries
@@ -1087,7 +1087,7 @@ mod blocking {
             .unwrap();
         assert!(snapshot.is_enabled("alpha"));
         client.flush();
-        capture_mock.assert_hits(1);
+        capture_mock.assert_calls(1);
     }
 }
 
@@ -1119,7 +1119,7 @@ mod async_tests {
         let mut keys = snapshot.keys();
         keys.sort();
         assert_eq!(keys, vec!["alpha", "beta", "variant-flag"]);
-        flags_mock.assert_hits(1);
+        flags_mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -1242,7 +1242,7 @@ mod async_tests {
                 .expect_err("retryable status should error after retry budget is exhausted");
 
             assert!(err.to_string().contains(&status.to_string()));
-            flags_mock.assert_hits(2);
+            flags_mock.assert_calls(2);
         }
     }
 
@@ -1269,7 +1269,7 @@ mod async_tests {
             .expect_err("500 status should be terminal");
 
         assert!(err.to_string().contains("500"));
-        flags_mock.assert_hits(1);
+        flags_mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -1332,9 +1332,9 @@ mod async_tests {
             Some(FlagValue::String("test".into()))
         );
         client.flush().await;
-        alpha_mock.assert_hits(1);
-        variant_mock.assert_hits(1);
-        unexpected_capture.assert_hits(0);
+        alpha_mock.assert_calls(1);
+        variant_mock.assert_calls(1);
+        unexpected_capture.assert_calls(0);
     }
 
     #[tokio::test]
@@ -1355,7 +1355,7 @@ mod async_tests {
             Some(json!({"hello": "world"}))
         );
         client.flush().await;
-        capture_mock.assert_hits(0);
+        capture_mock.assert_calls(0);
     }
 
     #[tokio::test]
@@ -1371,7 +1371,7 @@ mod async_tests {
         let mut opts = EvaluateFlagsOptions::default();
         opts.flag_keys = Some(vec!["alpha".into()]);
         let _ = client.evaluate_flags("user-1", opts).await.unwrap();
-        flags_mock.assert_hits(1);
+        flags_mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -1427,8 +1427,8 @@ mod async_tests {
             .unwrap();
         assert!(!snapshot.is_enabled("alpha"));
         client.flush().await;
-        flags_mock.assert_hits(0);
-        capture_mock.assert_hits(0);
+        flags_mock.assert_calls(0);
+        capture_mock.assert_calls(0);
     }
 
     /// C5: `$feature_flag_called` ships via the capture endpoint, never the
@@ -1465,8 +1465,8 @@ mod async_tests {
             .unwrap();
         assert!(snapshot.is_enabled("alpha"));
         client.flush().await;
-        capture_mock.assert_hits(1);
-        legacy_mock.assert_hits(0);
+        capture_mock.assert_calls(1);
+        legacy_mock.assert_calls(0);
     }
 
     /// C5: `$feature_flag_called` uses the normal V1 capture retry path.
@@ -1501,8 +1501,8 @@ mod async_tests {
         assert!(snapshot.is_enabled("alpha"));
         client.flush().await;
         client.flush().await;
-        first_attempt.assert_hits(1);
-        retry_attempt.assert_hits(1);
+        first_attempt.assert_calls(1);
+        retry_attempt.assert_calls(1);
     }
 
     /// Ported from the removed V0 suite: `Event::with_flags` attaches the flag
@@ -1536,9 +1536,9 @@ mod async_tests {
         client.capture(event);
         client.flush().await;
         // One /flags request, one capture request — no second flag fetch.
-        flags_mock.assert_hits(1);
-        capture_mock.assert_hits(1);
-        unexpected_capture.assert_hits(0);
+        flags_mock.assert_calls(1);
+        capture_mock.assert_calls(1);
+        unexpected_capture.assert_calls(0);
     }
 
     /// Ported from the removed V0 suite: `$feature_flag_called` carries
@@ -1568,6 +1568,6 @@ mod async_tests {
             .unwrap();
         assert!(snapshot.is_enabled("alpha"));
         client.flush().await;
-        capture_mock.assert_hits(1);
+        capture_mock.assert_calls(1);
     }
 }

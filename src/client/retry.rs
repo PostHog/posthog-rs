@@ -306,7 +306,7 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 1024];
-            stream.read(&mut request).unwrap();
+            assert!(stream.read(&mut request).unwrap() > 0);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n")
                 .unwrap();
@@ -504,7 +504,8 @@ mod tests {
         for wait in &waits {
             assert!(
                 (Duration::from_millis(75)..=Duration::from_millis(125)).contains(wait),
-                "{wait:?} outside 75-125ms"
+                "{:?} outside 75-125ms",
+                wait
             );
         }
         assert!(

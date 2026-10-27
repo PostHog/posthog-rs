@@ -525,7 +525,7 @@ async fn test_client_adds_distinct_id_for_local_evaluation_only() {
         Some(FlagValue::Boolean(true))
     );
     eval_mock.assert();
-    flags_mock.assert_hits(0);
+    flags_mock.assert_calls(0);
 }
 
 /// Payloads ride along in the definitions manifest, so a snapshot that never
@@ -634,7 +634,7 @@ async fn test_local_evaluation_returns_payloads_without_calling_flags() {
     assert_eq!(snapshot.get_flag_payload("no-payload-flag"), None);
 
     eval_mock.assert();
-    flags_mock.assert_hits(0);
+    flags_mock.assert_calls(0);
 }
 
 #[cfg(feature = "async-client")]
@@ -788,7 +788,7 @@ async fn test_etag_sent_on_second_poll() {
         when.method(GET)
             .path("/flags/definitions/")
             .query_param("send_cohorts", "")
-            .matches(|req| {
+            .is_true(|req| {
                 // Match only if If-None-Match header exists with the correct value
                 req.headers_vec().iter().any(|(name, value)| {
                     name.eq_ignore_ascii_case("if-none-match") && value == "\"abc123\""
@@ -826,9 +826,9 @@ async fn test_etag_sent_on_second_poll() {
 
     // Verify at least one request WITH If-None-Match was made (second+ poll)
     assert!(
-        etag_mock.hits() >= 1,
+        etag_mock.calls() >= 1,
         "Should have at least 1 request with If-None-Match header, got {}",
-        etag_mock.hits()
+        etag_mock.calls()
     );
 
     // Verify cache has the flag (preserved after 304)
@@ -863,7 +863,7 @@ async fn test_304_preserves_cache() {
         when.method(GET)
             .path("/flags/definitions/")
             .query_param("send_cohorts", "")
-            .matches(|req| {
+            .is_true(|req| {
                 // Match only if If-None-Match header exists with the correct value
                 req.headers_vec().iter().any(|(name, value)| {
                     name.eq_ignore_ascii_case("if-none-match") && value == "\"v1\""
@@ -907,9 +907,9 @@ async fn test_304_preserves_cache() {
 
     // Verify 304 mock was hit (proves If-None-Match was sent and 304 was received)
     assert!(
-        etag_mock.hits() >= 1,
+        etag_mock.calls() >= 1,
         "Should have received at least one 304 response, got {} hits",
-        etag_mock.hits()
+        etag_mock.calls()
     );
 
     // Flag should still be present after 304 response (cache preserved)
@@ -970,7 +970,7 @@ async fn test_no_etag_from_server() {
 
     // Should have made multiple requests (initial + polls), all without If-None-Match
     assert!(
-        mock.hits() >= 2,
+        mock.calls() >= 2,
         "Should have made multiple requests without ETag"
     );
 
@@ -1006,7 +1006,7 @@ fn test_sync_etag_sent_on_second_poll() {
         when.method(GET)
             .path("/flags/definitions/")
             .query_param("send_cohorts", "")
-            .matches(|req| {
+            .is_true(|req| {
                 // Match only if If-None-Match header exists with the correct value
                 req.headers_vec().iter().any(|(name, value)| {
                     name.eq_ignore_ascii_case("if-none-match") && value == "\"sync-abc123\""
@@ -1043,9 +1043,9 @@ fn test_sync_etag_sent_on_second_poll() {
 
     // Verify at least one request WITH If-None-Match was made (second+ poll)
     assert!(
-        etag_mock.hits() >= 1,
+        etag_mock.calls() >= 1,
         "Should have at least 1 request with If-None-Match header, got {}",
-        etag_mock.hits()
+        etag_mock.calls()
     );
 
     // Verify cache has the flag (preserved after 304)
@@ -1078,7 +1078,7 @@ fn test_sync_304_preserves_cache() {
         when.method(GET)
             .path("/flags/definitions/")
             .query_param("send_cohorts", "")
-            .matches(|req| {
+            .is_true(|req| {
                 // Match only if If-None-Match header exists with the correct value
                 req.headers_vec().iter().any(|(name, value)| {
                     name.eq_ignore_ascii_case("if-none-match") && value == "\"sync-v1\""
@@ -1121,9 +1121,9 @@ fn test_sync_304_preserves_cache() {
 
     // Verify 304 mock was hit (proves If-None-Match was sent and 304 was received)
     assert!(
-        etag_mock.hits() >= 1,
+        etag_mock.calls() >= 1,
         "Should have received at least one 304 response, got {} hits",
-        etag_mock.hits()
+        etag_mock.calls()
     );
 
     // Flag should still be present after 304 response (cache preserved)
@@ -1183,7 +1183,7 @@ fn test_sync_no_etag_from_server() {
 
     // Should have made multiple requests (initial + polls), all without If-None-Match
     assert!(
-        mock.hits() >= 2,
+        mock.calls() >= 2,
         "Should have made multiple requests without ETag"
     );
 

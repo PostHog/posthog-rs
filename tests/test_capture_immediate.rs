@@ -32,7 +32,7 @@ fn duplicate_copies_retried_once(server: &MockServer, uuid: Uuid) -> (Vec<Event>
         when.method(POST)
             .path("/i/v1/analytics/events")
             .header("posthog-attempt", "2")
-            .matches(|request| {
+            .is_true(|request| {
                 let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
                 let batch = body["batch"].as_array().unwrap();
                 batch.len() == 1 && batch[0]["event"] == "first"
@@ -51,7 +51,7 @@ fn duplicate_copies_retried_once(server: &MockServer, uuid: Uuid) -> (Vec<Event>
 /// Both copies were submitted; the kept one was persisted and the dropped one was not.
 fn assert_duplicate_copy_not_persisted(summary: &CaptureSummary, mocks: &[Mock<'_>], uuid: Uuid) {
     for mock in mocks {
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
     assert_eq!(summary.submitted(), 2);
     assert_eq!(summary.not_persisted(), 1);
@@ -124,7 +124,7 @@ mod async_capture {
         event.set_uuid(uuid);
 
         let summary = client.capture_immediate(event).await.unwrap();
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         assert_eq!(summary.submitted(), 1);
         assert_eq!(summary.not_persisted(), 0);
         assert!(summary.all_persisted());
@@ -154,7 +154,7 @@ mod async_capture {
             .capture_batch_immediate(vec![ok, dropped], false)
             .await
             .unwrap();
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         assert_eq!(summary.submitted(), 2);
         assert_eq!(summary.not_persisted(), 1);
         assert!(!summary.all_persisted());
@@ -184,8 +184,8 @@ mod async_capture {
             .capture_immediate(Event::new("test", "user-1"))
             .await
             .unwrap();
-        fail.assert_hits(1);
-        ok.assert_hits(1);
+        fail.assert_calls(1);
+        ok.assert_calls(1);
         // 200 with an empty results map: nothing was reported unpersisted, but
         // the one submitted event has no ok/warning verdict either, so it counts
         // as not-persisted and the batch is not fully durable.
@@ -212,7 +212,7 @@ mod async_capture {
             when.method(POST)
                 .path("/i/v1/analytics/events")
                 .header("posthog-attempt", "2")
-                .matches(move |request| {
+                .is_true(move |request| {
                     let body: serde_json::Value =
                         serde_json::from_slice(request.body_ref()).unwrap();
                     let batch = body["batch"].as_array().unwrap();
@@ -232,8 +232,8 @@ mod async_capture {
             .capture_batch_immediate(vec![persisted, event], false)
             .await
             .unwrap();
-        retry.assert_hits(1);
-        ok.assert_hits(1);
+        retry.assert_calls(1);
+        ok.assert_calls(1);
         assert_eq!(summary.submitted(), 2);
         assert_eq!(summary.event_results().len(), 2);
         assert_eq!(
@@ -277,7 +277,7 @@ mod async_capture {
                 "status {} should exhaust and error",
                 status
             );
-            mock.assert_hits(3);
+            mock.assert_calls(3);
         }
     }
 
@@ -296,7 +296,7 @@ mod async_capture {
             let client = capture_client(server.base_url()).await;
             let result = client.capture_immediate(Event::new("test", "user-1")).await;
             assert!(result.is_err(), "status {} must be terminal", status);
-            mock.assert_hits(1);
+            mock.assert_calls(1);
         }
     }
 
@@ -327,7 +327,7 @@ mod async_capture {
             .capture_batch_immediate(vec![Event::new("a", "u"), Event::new("b", "u")], true)
             .await
             .unwrap();
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -361,7 +361,7 @@ mod async_capture {
             error,
             posthog_rs::Error::ServerError { status: 500, .. }
         ));
-        _mock.assert_hits(2);
+        _mock.assert_calls(2);
         assert_eq!(
             *count.lock().unwrap(),
             0,
@@ -396,7 +396,7 @@ mod async_capture {
         let client = capture_client(server.base_url()).await;
         let summary = client.capture_batch_immediate(vec![], false).await.unwrap();
         assert_eq!(summary.submitted(), 0);
-        mock.assert_hits(0);
+        mock.assert_calls(0);
     }
 }
 
@@ -441,7 +441,7 @@ mod blocking {
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
         let summary = client.capture_immediate(event).unwrap();
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         assert!(summary.all_persisted());
         assert_eq!(summary.submitted(), 1);
     }
@@ -468,7 +468,7 @@ mod blocking {
         let summary = client
             .capture_batch_immediate(vec![ok, dropped], false)
             .unwrap();
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         assert_eq!(summary.not_persisted(), 1);
         assert!(!summary.all_persisted());
     }
@@ -501,7 +501,7 @@ mod blocking {
                 "status {} should exhaust and error",
                 status
             );
-            mock.assert_hits(3);
+            mock.assert_calls(3);
         }
     }
 
@@ -531,7 +531,7 @@ mod blocking {
             let client = capture_client(server.base_url());
             let result = client.capture_immediate(Event::new("test", "user-1"));
             assert!(result.is_err(), "status {} must be terminal", status);
-            mock.assert_hits(1);
+            mock.assert_calls(1);
         }
     }
 
@@ -564,7 +564,7 @@ mod blocking {
             error,
             posthog_rs::Error::ServerError { status: 500, .. }
         ));
-        _mock.assert_hits(2);
+        _mock.assert_calls(2);
         assert_eq!(*count.lock().unwrap(), 0);
     }
 }

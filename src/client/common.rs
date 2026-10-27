@@ -256,6 +256,7 @@ fn flag_called_event(params: FlagCalledEventParams, defaults: &CaptureDefaults) 
     if defaults.is_server {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
+    params.context.apply_to_event(&mut event);
     Some(event)
 }
 
@@ -633,9 +634,11 @@ mod tests {
     #[test]
     fn evaluation_state_filters_local_results_and_preserves_local_wins_merge_metadata() {
         let evaluator = local_evaluator();
-        let mut options = EvaluateFlagsOptions::default();
-        options.flag_keys = Some(vec!["local".to_string(), "remote".to_string()]);
-        options.groups = Some(groups(&[("organization", "org-a")]));
+        let options = EvaluateFlagsOptions {
+            flag_keys: Some(vec!["local".to_string(), "remote".to_string()]),
+            groups: Some(groups(&[("organization", "org-a")])),
+            ..Default::default()
+        };
 
         let mut state = EvaluationState::new("user-1".to_string(), options, Some(&evaluator));
         assert_eq!(state.records.len(), 1);
@@ -689,13 +692,17 @@ mod tests {
     fn evaluation_state_characterizes_fetch_gates_and_partial_fallback() {
         let evaluator = local_evaluator();
 
-        let mut covered_options = EvaluateFlagsOptions::default();
-        covered_options.flag_keys = Some(vec!["local".to_string()]);
+        let covered_options = EvaluateFlagsOptions {
+            flag_keys: Some(vec!["local".to_string()]),
+            ..Default::default()
+        };
         let covered = EvaluationState::new("user-1".to_string(), covered_options, Some(&evaluator));
         assert!(!covered.should_fetch_remote(false));
 
-        let mut local_only_options = EvaluateFlagsOptions::default();
-        local_only_options.only_evaluate_locally = true;
+        let local_only_options = EvaluateFlagsOptions {
+            only_evaluate_locally: true,
+            ..Default::default()
+        };
         let local_only =
             EvaluationState::new("user-1".to_string(), local_only_options, Some(&evaluator));
         assert!(!local_only.should_fetch_remote(false));
@@ -707,8 +714,10 @@ mod tests {
         );
         assert!(!project_local_only.should_fetch_remote(true));
 
-        let mut partial_options = EvaluateFlagsOptions::default();
-        partial_options.flag_keys = Some(vec!["local".to_string(), "missing".to_string()]);
+        let partial_options = EvaluateFlagsOptions {
+            flag_keys: Some(vec!["local".to_string(), "missing".to_string()]),
+            ..Default::default()
+        };
         let mut partial =
             EvaluationState::new("user-1".to_string(), partial_options, Some(&evaluator));
         partial
@@ -740,6 +749,7 @@ mod tests {
             disable_geoip,
             properties,
             minimal: false,
+            context: crate::RequestContext::default(),
         }
     }
 
