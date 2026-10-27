@@ -4,11 +4,35 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use crate::mcp::bounds::{bounded_payload, bounded_text, truncate};
+use crate::mcp::bounds::{bounded_entries, bounded_payload, bounded_text, truncate};
 use crate::mcp::contract::limits::MAX_NAME_LENGTH;
 use crate::mcp::contract::properties as key;
 use crate::mcp::identity::Identity;
 use crate::mcp::privacy::TextPass;
+use crate::RequestContext;
+
+const MCP_PREFIX: &str = "$mcp_";
+const PERSON_CONTROLS: [&str; 5] = [
+    key::PROCESS_PERSON_PROFILE,
+    key::SET,
+    "$set_once",
+    "$unset",
+    key::GROUPS,
+];
+
+/// The host's properties an MCP event may carry: none MCP or identity sets,
+/// redacted and bounded as a payload, in name order.
+pub(crate) fn host_properties(host: &RequestContext) -> Map<String, Value> {
+    let mut kept: Vec<(&String, &Value)> = host
+        .properties
+        .iter()
+        .filter(|(name, _)| {
+            !name.starts_with(MCP_PREFIX) && !PERSON_CONTROLS.contains(&name.as_str())
+        })
+        .collect();
+    kept.sort_unstable_by_key(|(name, _)| *name);
+    bounded_entries(kept.into_iter(), TextPass::Name)
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClientIdentity {
@@ -35,6 +59,7 @@ pub(crate) struct EventContext {
     pub(crate) server: ServerIdentity,
     pub(crate) server_build: Option<String>,
     /// The host's request context, which events carry where MCP sets nothing.
+    /// Built by `host_properties`, so a call holds only what capture keeps.
     pub(crate) host_properties: Map<String, Value>,
 }
 

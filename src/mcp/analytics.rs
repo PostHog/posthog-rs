@@ -2,7 +2,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use super::call::RequestScope;
-use super::capture::{Delivery, EventContext, OutgoingEvent};
+use super::capture::{self, Delivery, EventContext, OutgoingEvent};
 use super::contract::arguments::{CONTEXT_DESCRIPTION, LLM_MODEL_DESCRIPTION};
 use super::identity::Identity;
 use super::options::McpOptions;
@@ -142,9 +142,9 @@ impl Core {
 fn host_properties(request: &RequestInfo<'_>) -> serde_json::Map<String, serde_json::Value> {
     let attached = request
         .http
-        .and_then(|parts| parts.extensions.get::<RequestContext>())
-        .cloned();
-    let host = attached.or_else(RequestContext::current);
-    host.map(|host| host.properties.into_iter().collect())
-        .unwrap_or_default()
+        .and_then(|parts| parts.extensions.get::<RequestContext>());
+    match attached {
+        Some(host) => capture::host_properties(host),
+        None => RequestContext::with_current(capture::host_properties).unwrap_or_default(),
+    }
 }

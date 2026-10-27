@@ -2,20 +2,10 @@ use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 use super::context::EventContext;
-use crate::mcp::bounds::{bounded_payload, fit_event_size};
+use crate::mcp::bounds::fit_event_size;
 use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
-use crate::mcp::privacy::TextPass;
 use crate::Event;
-
-const MCP_PREFIX: &str = "$mcp_";
-const PERSON_CONTROLS: [&str; 5] = [
-    key::PROCESS_PERSON_PROFILE,
-    key::SET,
-    "$set_once",
-    "$unset",
-    key::GROUPS,
-];
 
 const ALWAYS_REQUIRED: [&str; 8] = [
     key::INTERFACE,
@@ -42,7 +32,11 @@ impl OutgoingEvent {
         let mut properties = context.properties();
         properties.insert(key::INTERFACE.to_string(), Value::from(INTERFACE));
         properties.insert(key::LIB.to_string(), Value::from(LIB_NAME));
-        add_host_properties(&mut properties, &context.host_properties);
+        for (name, value) in &context.host_properties {
+            properties
+                .entry(name.as_str())
+                .or_insert_with(|| value.clone());
+        }
         Self {
             name,
             distinct_id: context.distinct_id().to_string(),
@@ -89,28 +83,16 @@ impl OutgoingEvent {
 /// than at capture, so the size bound and redaction cover it. The MCP
 /// session and person win over the host's: the person controls and the
 /// `$mcp_*` names are MCP analytics' alone.
-fn add_host_properties(properties: &mut Map<String, Value>, host: &Map<String, Value>) {
-    let kept: Map<String, Value> = host
-        .iter()
-        .filter(|(name, _)| {
-            !name.starts_with(MCP_PREFIX) && !PERSON_CONTROLS.contains(&name.as_str())
-        })
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect();
-    if let Value::Object(redacted) = bounded_payload(&Value::Object(kept), TextPass::Name) {
-        for (name, value) in redacted {
-            properties.entry(name).or_insert(value);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
 
     use super::*;
+    use crate::mcp::capture::host_properties;
     use crate::mcp::contract::events::TOOLS_LIST;
+    use crate::mcp::contract::limits::{MAX_PAYLOAD_ENTRIES, MAX_PAYLOAD_STRING_LENGTH};
     use crate::mcp::contract::properties::LISTED_TOOL_NAMES;
+    use crate::RequestContext;
 
     fn context() -> EventContext {
         EventContext {
@@ -138,13 +120,11 @@ mod tests {
     #[test]
     fn host_properties_are_bounded_with_the_event() {
         let mut context = context();
-        context.host_properties = serde_json::json!({
-            "$session_id": "ses_host",
-            "tenant": "t".repeat(200_000),
-        })
-        .as_object()
-        .cloned()
-        .unwrap();
+        let host = RequestContext::new()
+            .session_id("ses_host")
+            .property("tenant", "t".repeat(200_000))
+            .unwrap();
+        context.host_properties = host_properties(&host);
         let event = OutgoingEvent::new(TOOLS_LIST, &context).bounded(&[]);
 
         assert_eq!(event.properties[key::SESSION_ID], "ses_1");
@@ -160,17 +140,22 @@ mod tests {
     fn host_properties_are_redacted_and_leave_identity_to_mcp() {
         let mut context = context();
         context.identity = Some(crate::mcp::Identity::new("user-1").with_property("plan", "pro"));
-        context.host_properties = serde_json::json!({
+        let host = serde_json::json!({
             "authorization": "Bearer secret",
             "nested": { "password": "hunter2", "region": "eu" },
             "$process_person_profile": false,
             "$set": { "plan": "free" },
             "$groups": { "company": "other" },
             "$mcp_intent": "host text",
-        })
-        .as_object()
-        .cloned()
-        .unwrap();
+        });
+        let host = host
+            .as_object()
+            .unwrap()
+            .iter()
+            .fold(RequestContext::new(), |host, (name, value)| {
+                host.property(name.as_str(), value).unwrap()
+            });
+        context.host_properties = host_properties(&host);
 
         let event = OutgoingEvent::new(TOOLS_LIST, &context);
 
@@ -184,5 +169,21 @@ mod tests {
         assert_eq!(properties[key::SET], serde_json::json!({ "plan": "pro" }));
         assert!(!properties.contains_key(key::GROUPS));
         assert!(!properties.contains_key("$mcp_intent"));
+    }
+
+    #[test]
+    fn a_call_keeps_only_the_host_properties_capture_would_send() {
+        let host = (0..150).fold(RequestContext::new(), |host, index| {
+            host.property(format!("p{index:03}"), "word ".repeat(20_000))
+                .unwrap()
+        });
+
+        let kept = host_properties(&host);
+
+        assert_eq!(kept.len(), MAX_PAYLOAD_ENTRIES);
+        assert!(kept.contains_key("p000") && kept.contains_key("p098"));
+        assert!(!kept.contains_key("p099"));
+        let longest = kept.values().filter_map(Value::as_str).map(str::len).max();
+        assert_eq!(longest, Some(MAX_PAYLOAD_STRING_LENGTH));
     }
 }

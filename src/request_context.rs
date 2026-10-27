@@ -59,12 +59,17 @@ impl RequestContext {
 
     /// Returns a snapshot. Spawned tasks must receive and scope an explicit clone.
     pub fn current() -> Option<Self> {
+        Self::with_current(Clone::clone)
+    }
+
+    pub(crate) fn with_current<R>(read: impl FnOnce(&Self) -> R) -> Option<R> {
         #[cfg(feature = "async-client")]
         {
-            CURRENT.try_with(Clone::clone).ok()
+            CURRENT.try_with(read).ok()
         }
         #[cfg(not(feature = "async-client"))]
         {
+            let _ = read;
             None
         }
     }

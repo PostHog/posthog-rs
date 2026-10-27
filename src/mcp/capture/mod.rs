@@ -6,7 +6,7 @@ mod failure;
 mod outgoing;
 mod response;
 
-pub(crate) use context::{ClientIdentity, EventContext, ServerIdentity};
+pub(crate) use context::{host_properties, ClientIdentity, EventContext, ServerIdentity};
 pub(crate) use delivery::Delivery;
 pub(crate) use failure::Failure;
 pub(crate) use outgoing::OutgoingEvent;

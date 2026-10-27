@@ -26,13 +26,28 @@ pub(crate) fn bounded_payload(value: &Value, pass: TextPass) -> Value {
     bound(value, MAX_PAYLOAD_DEPTH, pass, &mut budget)
 }
 
+/// An object's borrowed entries, bounded as `bounded_payload` bounds the
+/// object, so the caller copies only what the bounds keep.
+pub(crate) fn bounded_entries<'a>(
+    entries: impl ExactSizeIterator<Item = (&'a String, &'a Value)>,
+    pass: TextPass,
+) -> Map<String, Value> {
+    let mut budget = MAX_EVENT_BYTES;
+    bound_object(entries, MAX_PAYLOAD_DEPTH - 1, pass, &mut budget)
+}
+
 fn bound(value: &Value, remaining_depth: usize, pass: TextPass, budget: &mut usize) -> Value {
     match value {
         Value::String(text) => Value::String(bound_string(text, pass, budget)),
         Value::Array(_) if remaining_depth == 0 => Value::from(NESTED_ARRAY_MARKER),
         Value::Object(_) if remaining_depth == 0 => Value::from(NESTED_OBJECT_MARKER),
         Value::Array(items) => bound_array(items, remaining_depth - 1, pass, budget),
-        Value::Object(object) => bound_object(object, remaining_depth - 1, pass, budget),
+        Value::Object(object) => Value::Object(bound_object(
+            object.iter(),
+            remaining_depth - 1,
+            pass,
+            budget,
+        )),
         other => other.clone(),
     }
 }
@@ -64,16 +79,16 @@ fn bound_array(
     Value::Array(bounded)
 }
 
-fn bound_object(
-    object: &Map<String, Value>,
+fn bound_object<'a>(
+    entries: impl ExactSizeIterator<Item = (&'a String, &'a Value)>,
     remaining_depth: usize,
     pass: TextPass,
     budget: &mut usize,
-) -> Value {
-    let overflows = object.len() > MAX_PAYLOAD_ENTRIES;
-    let mut bounded: Map<String, Value> = object
-        .iter()
-        .take(kept_entries(object.len()))
+) -> Map<String, Value> {
+    let length = entries.len();
+    let overflows = length > MAX_PAYLOAD_ENTRIES;
+    let mut bounded: Map<String, Value> = entries
+        .take(kept_entries(length))
         .map(|(key, nested)| {
             let value = match is_credential_key(key) {
                 true => Value::from(REDACTED),
@@ -85,7 +100,7 @@ fn bound_object(
     if overflows {
         bounded.insert(OVERFLOW_KEY.to_string(), Value::from(OVERFLOW_MARKER));
     }
-    Value::Object(bounded)
+    bounded
 }
 
 fn kept_entries(length: usize) -> usize {
