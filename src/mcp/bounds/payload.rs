@@ -27,16 +27,30 @@ pub(crate) fn bounded_payload(value: &Value, pass: TextPass) -> Value {
 }
 
 /// Borrowed object entries, each bounded as `bounded_payload` bounds an
-/// object's entry, so the caller copies only what the bounds keep. Every entry
-/// is kept: the event size bound limits how many fit.
+/// object's entry, so the caller copies only what the bounds keep. There is no
+/// entry limit, but the entries stop where they would overflow an event, since
+/// no event could carry more.
 pub(crate) fn bounded_entries<'a>(
     entries: impl Iterator<Item = (&'a String, &'a Value)>,
     pass: TextPass,
 ) -> Map<String, Value> {
     let mut budget = MAX_EVENT_BYTES;
-    entries
-        .map(|(key, value)| bound_entry(key, value, MAX_PAYLOAD_DEPTH - 1, pass, &mut budget))
-        .collect()
+    let mut room = MAX_EVENT_BYTES - 1;
+    let mut bounded = Map::new();
+    for (key, value) in entries {
+        let (key, value) = bound_entry(key, value, MAX_PAYLOAD_DEPTH - 1, pass, &mut budget);
+        let size = json_length(&Value::from(key.as_str())) + 1 + json_length(&value) + 1;
+        if size > room {
+            break;
+        }
+        room -= size;
+        bounded.insert(key, value);
+    }
+    bounded
+}
+
+fn json_length(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
 }
 
 fn bound(value: &Value, remaining_depth: usize, pass: TextPass, budget: &mut usize) -> Value {

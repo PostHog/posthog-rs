@@ -25,6 +25,7 @@ pub(crate) struct OutgoingEvent {
     distinct_id: String,
     timestamp: DateTime<Utc>,
     pub(crate) properties: Map<String, Value>,
+    host_properties: Map<String, Value>,
 }
 
 impl OutgoingEvent {
@@ -32,16 +33,12 @@ impl OutgoingEvent {
         let mut properties = context.properties();
         properties.insert(key::INTERFACE.to_string(), Value::from(INTERFACE));
         properties.insert(key::LIB.to_string(), Value::from(LIB_NAME));
-        for (name, value) in &context.host_properties {
-            properties
-                .entry(name.as_str())
-                .or_insert_with(|| value.clone());
-        }
         Self {
             name,
             distinct_id: context.distinct_id().to_string(),
             timestamp: context.timestamp,
             properties,
+            host_properties: context.host_properties.clone(),
         }
     }
 
@@ -60,11 +57,14 @@ impl OutgoingEvent {
     }
 
     /// Fits the event within the byte bound, keeping `required` and the
-    /// properties every MCP event needs.
+    /// properties every MCP event needs. The host's request context fills in
+    /// what the event lacks, here rather than at capture, so the size bound and
+    /// redaction cover it. It takes only the room MCP's own properties leave,
+    /// and never a name MCP set.
     pub(crate) fn bounded(mut self, required: &[&str]) -> Self {
         let mut kept: Vec<&str> = ALWAYS_REQUIRED.to_vec();
         kept.extend_from_slice(required);
-        fit_event_size(&mut self.properties, &kept);
+        fit_event_size(&mut self.properties, &kept, &self.host_properties);
         self
     }
 
@@ -79,10 +79,6 @@ impl OutgoingEvent {
     }
 }
 
-/// The host's request context fills in what the event lacks, here rather
-/// than at capture, so the size bound and redaction cover it. The MCP
-/// session and person win over the host's: the person controls and the
-/// `$mcp_*` names are MCP analytics' alone.
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -157,7 +153,7 @@ mod tests {
             });
         context.host_properties = host_properties(&host);
 
-        let event = OutgoingEvent::new(TOOLS_LIST, &context);
+        let event = OutgoingEvent::new(TOOLS_LIST, &context).bounded(&[]);
 
         let properties = &event.properties;
         assert_eq!(properties["authorization"], "[redacted]");
@@ -174,16 +170,63 @@ mod tests {
     #[test]
     fn host_properties_keep_every_name_and_bound_each_value() {
         let host = (0..150).fold(RequestContext::new(), |host, index| {
-            host.property(format!("p{index:03}"), "word ".repeat(20_000))
+            host.property(format!("p{index:03}"), "small").unwrap()
+        });
+        let host = host.property("zz_tenant", "word ".repeat(20_000)).unwrap();
+
+        let kept = host_properties(&host);
+
+        assert_eq!(kept.len(), 151);
+        assert!(!kept.contains_key("..."));
+        let tenant = kept["zz_tenant"].as_str().unwrap();
+        assert_eq!(tenant.len(), MAX_PAYLOAD_STRING_LENGTH);
+    }
+
+    #[test]
+    fn host_properties_give_way_to_mcp_payloads() {
+        let mut context = context();
+        let host = (0..4_000).fold(RequestContext::new(), |host, index| {
+            host.property(format!("k{index:04}"), "v".repeat(40))
+                .unwrap()
+        });
+        context.host_properties = host_properties(&host);
+        let mut event = OutgoingEvent::new(TOOLS_LIST, &context);
+        event.set(key::PARAMETERS, serde_json::json!({ "q": "hello" }));
+        event.set(key::RESPONSE, serde_json::json!({ "a": "world" }));
+
+        let event = event.bounded(&[]);
+
+        assert_eq!(
+            event.properties[key::PARAMETERS],
+            serde_json::json!({ "q": "hello" })
+        );
+        assert_eq!(
+            event.properties[key::RESPONSE],
+            serde_json::json!({ "a": "world" })
+        );
+        assert!(event.properties.contains_key("k0000"));
+        let size = serde_json::to_vec(&event.properties).unwrap().len();
+        let limit = crate::mcp::contract::limits::MAX_EVENT_BYTES
+            - crate::mcp::contract::limits::HOST_PROPERTIES_HEADROOM;
+        assert!(size <= limit, "{}", size);
+    }
+
+    #[test]
+    fn a_call_keeps_no_more_host_properties_than_one_event_holds() {
+        let host = (0..20_000).fold(RequestContext::new(), |host, index| {
+            host.property(format!("k{index:05}"), "v".repeat(40))
                 .unwrap()
         });
 
         let kept = host_properties(&host);
 
-        assert_eq!(kept.len(), 150);
-        assert!(kept.contains_key("p149"));
-        assert!(!kept.contains_key("..."));
-        let longest = kept.values().filter_map(Value::as_str).map(str::len).max();
-        assert_eq!(longest, Some(MAX_PAYLOAD_STRING_LENGTH));
+        assert!(kept.contains_key("k00000"));
+        assert!(kept.len() < 20_000, "{}", kept.len());
+        let size = serde_json::to_vec(&kept).unwrap().len();
+        assert!(
+            size <= crate::mcp::contract::limits::MAX_EVENT_BYTES,
+            "{}",
+            size
+        );
     }
 }
