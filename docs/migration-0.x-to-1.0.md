@@ -144,6 +144,8 @@ let response: Option<&posthog_rs::CaptureErrorResponse> = failure.error_response
 
 `$debug_images` lists only images with a debug ID that a sent stack frame points into. In 0.x it could also list an image that only a trimmed frame pointed into.
 
+A `$trace_id` or `$span_id` you set in the exception's properties now wins over the trace context provider, and setting either one stops the SDK adding both provider IDs. `CaptureExceptionOptions::trace_context` still wins over both.
+
 ## Feature flags
 
 The deprecated single-flag methods have been removed:
