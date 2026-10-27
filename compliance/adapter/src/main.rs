@@ -200,9 +200,17 @@ async fn shutdown_client(client: &Client) {
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     // Frozen harness contract keys that select suites and tests via `requires:`.
-    let mut capabilities: Vec<String> = ["capture_v1", "capture_ai_v1", "event_options"]
-        .map(String::from)
-        .to_vec();
+    let mut capabilities: Vec<String> = [
+        "capture_v1",
+        "capture_ai_v1",
+        "event_options",
+        "event_uuid_override",
+        "bounded_retries",
+        "disable_geoip",
+        "historical_migration",
+    ]
+    .map(String::from)
+    .to_vec();
     if let Some(algo) = state.compression {
         capabilities.push(compression_capability(algo).to_string());
     }
