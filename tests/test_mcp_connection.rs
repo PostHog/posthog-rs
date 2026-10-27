@@ -479,7 +479,8 @@ async fn the_virtual_tool_is_not_advertised_by_default() {
     for virtual_tool in ["get_more_tools", "send_feedback"] {
         assert!(
             tools.iter().all(|tool| tool.name != virtual_tool),
-            "{virtual_tool}"
+            "{}",
+            virtual_tool
         );
     }
 }
@@ -591,7 +592,7 @@ async fn a_feedback_report_becomes_one_feedback_event() {
             assert_eq!(property(&event, key), value, "{key}");
         }
         for key in absent.iter().chain(["$mcp_parameters"].iter()) {
-            assert!(!event.properties().contains_key(*key), "{key}");
+            assert!(!event.properties().contains_key(*key), "{}", key);
         }
         assert!(recorder.named("$mcp_tool_call").await.is_empty());
     }
@@ -691,7 +692,7 @@ async fn declared_feedback_fields_are_captured_when_well_formed() {
             assert_eq!(property(&event, key), value, "{key}");
         }
         for key in absent {
-            assert!(!event.properties().contains_key(key), "{key}");
+            assert!(!event.properties().contains_key(key), "{}", key);
         }
     }
 }
@@ -761,7 +762,7 @@ async fn the_feedback_handler_gets_the_report_and_may_reply() {
 
         let result = call(&client, "send_feedback", arguments).await;
 
-        assert!(texts(&result)[0].starts_with(expected), "{handler:?}");
+        assert!(texts(&result)[0].starts_with(expected), "{:?}", handler);
         recorder.only("$mcp_feedback").await;
         let report = seen.lock().unwrap().clone();
         assert_eq!(

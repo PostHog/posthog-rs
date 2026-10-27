@@ -183,7 +183,7 @@ mod tests {
         let descriptor = VirtualTool::Feedback.descriptor("send_feedback", &Default::default());
         let properties = descriptor["inputSchema"]["properties"].as_object().unwrap();
         for name in properties.keys() {
-            assert!(BUILT_IN_FIELDS.contains(&name.as_str()), "{name}");
+            assert!(BUILT_IN_FIELDS.contains(&name.as_str()), "{}", name);
         }
     }
 

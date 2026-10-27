@@ -132,7 +132,7 @@ mod tests {
         let size = serde_json::to_vec(&event.properties).unwrap().len();
         let limits = crate::mcp::contract::limits::MAX_EVENT_BYTES
             - crate::mcp::contract::limits::HOST_PROPERTIES_HEADROOM;
-        assert!(size <= limits, "{size}");
+        assert!(size <= limits, "{}", size);
         assert!(event.into_posthog_event().request_context_applied);
     }
 
