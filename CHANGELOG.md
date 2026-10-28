@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.30.0 — 2026-10-28
+
+### Minor changes
+
+- [6694c32](https://github.com/posthog/posthog-rs/commit/6694c32f756b1f565e7b4687c91f019cf9f5d1c0) Add an opt-in asynchronous application HTTP client that sends current request context to exact allowed hosts and returns redirects without following them. — Thanks @pauldambra!
+
 ## 0.29.0 — 2026-10-26
 
 ### Minor changes
