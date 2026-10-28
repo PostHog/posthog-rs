@@ -77,6 +77,34 @@ pub(crate) fn merge_groups_into(
     properties.insert("$groups".into(), serde_json::Value::Object(merged));
 }
 
+/// Properties whose object values fill one level deep instead of as a whole.
+const NESTED_FILL_PROPERTIES: [&str; 4] = ["$set", "$set_once", "$groups", "$group_set"];
+
+/// Fill `key` with a default only where the caller left it unset. For the
+/// [`NESTED_FILL_PROPERTIES`], when both values are objects, the default adds
+/// only the inner keys the caller's object lacks.
+pub(crate) fn fill_property(
+    properties: &mut HashMap<String, serde_json::Value>,
+    key: String,
+    value: serde_json::Value,
+) {
+    match properties.get_mut(&key) {
+        None => {
+            properties.insert(key, value);
+        }
+        Some(serde_json::Value::Object(existing))
+            if NESTED_FILL_PROPERTIES.contains(&key.as_str()) =>
+        {
+            if let serde_json::Value::Object(defaults) = value {
+                for (inner_key, inner_value) in defaults {
+                    existing.entry(inner_key).or_insert(inner_value);
+                }
+            }
+        }
+        Some(_) => {}
+    }
+}
+
 /// An [`Event`] represents an interaction a user has with your app or
 /// website. Examples include button clicks, pageviews, query completions, and signups.
 /// See the [PostHog documentation](https://posthog.com/docs/data/events)
@@ -467,7 +495,7 @@ impl Event {
         key: K,
         value: serde_json::Value,
     ) {
-        self.properties.entry(key.into()).or_insert(value);
+        fill_property(&mut self.properties, key.into(), value);
     }
 
     /// Insert a default option only if the caller left it unset (missing or `null`).

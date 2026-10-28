@@ -7,6 +7,8 @@ fn explicit_context_builds_events_without_replacing_explicit_values() {
         .session_id("request-session")
         .property("route", "/work")
         .unwrap()
+        .property("$set", serde_json::json!({"plan": "free", "source": "web"}))
+        .unwrap()
         .option("cookieless_mode", true)
         .unwrap()
         .option("disable_skew_correction", true)
@@ -16,6 +18,10 @@ fn explicit_context_builds_events_without_replacing_explicit_values() {
     assert_eq!(value["distinct_id"], "request-user");
     assert_eq!(value["properties"]["$session_id"], "request-session");
     assert_eq!(value["properties"]["route"], "/work");
+    assert_eq!(
+        value["properties"]["$set"],
+        serde_json::json!({"plan": "free", "source": "web"})
+    );
     assert_eq!(value["options"]["cookieless_mode"], true);
     assert_eq!(value["options"]["disable_skew_correction"], true);
 
@@ -24,6 +30,9 @@ fn explicit_context_builds_events_without_replacing_explicit_values() {
         .insert_prop("$session_id", "explicit-session")
         .unwrap();
     event.insert_prop("route", "/explicit").unwrap();
+    event
+        .insert_prop("$set", serde_json::json!({"plan": "pro"}))
+        .unwrap();
     event.insert_option("cookieless_mode", false).unwrap();
     // A null option counts as unset, so the context fills it.
     event
@@ -34,6 +43,11 @@ fn explicit_context_builds_events_without_replacing_explicit_values() {
     assert_eq!(value["distinct_id"], "explicit-user");
     assert_eq!(value["properties"]["$session_id"], "explicit-session");
     assert_eq!(value["properties"]["route"], "/explicit");
+    // The context fills only the `$set` keys the event left out.
+    assert_eq!(
+        value["properties"]["$set"],
+        serde_json::json!({"plan": "pro", "source": "web"})
+    );
     assert_eq!(value["options"]["cookieless_mode"], false);
     assert_eq!(value["options"]["disable_skew_correction"], true);
 }
