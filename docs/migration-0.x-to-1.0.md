@@ -69,7 +69,7 @@ The backend decides which names belong on the AI lane and reports a misrouted or
 
 ### Event options
 
-Capture V1 reads per-event processing controls, such as person profile processing, from an `options` map that is sent next to `properties`. Set them with `Event::insert_option`, or with `CaptureExceptionOptions::option` for exceptions. They work the same on `capture` and `capture_ai`.
+Capture V1 reads per-event processing controls, such as person profile processing, from an `options` map that is sent next to `properties`. Set them with `Event::insert_option`, or with `CaptureExceptionOptions::option` for exceptions. They work the same on `capture` and `capture_ai`. To set an option on every event in a request, use `RequestContext::option`. An option the event sets, other than `null`, wins over it.
 
 ```rust
 let mut event = posthog_rs::Event::new("signed_up", "user-123");
