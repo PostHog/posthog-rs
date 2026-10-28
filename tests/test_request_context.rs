@@ -233,6 +233,8 @@ async fn flag_snapshot_keeps_originating_context_after_request_ends() {
             let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
             body["batch"][0]["event"] == "$feature_flag_called"
                 && body["batch"][0]["session_id"] == "original-session"
+                // The context beats the client's `$is_server` default.
+                && body["batch"][0]["properties"]["$is_server"] == false
                 && body["batch"][0]["properties"]
                     .get("other-request")
                     .is_none()
@@ -242,7 +244,9 @@ async fn flag_snapshot_keeps_originating_context_after_request_ends() {
     let client = posthog_rs::client(("phc_test", server.base_url().as_str())).await;
     let context = RequestContext::new()
         .distinct_id("flag-user")
-        .session_id("original-session");
+        .session_id("original-session")
+        .property("$is_server", false)
+        .unwrap();
     let flags = client
         .evaluate_flags_with_context(&context, Default::default())
         .await
