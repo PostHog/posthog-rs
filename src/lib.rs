@@ -101,6 +101,8 @@ mod feature_flags;
 mod global;
 mod local_evaluation;
 mod request_context;
+#[cfg(feature = "async-client")]
+mod reqwest_client;
 #[cfg(feature = "tower")]
 pub mod tower;
 pub use request_context::RequestContext;
@@ -172,3 +174,6 @@ pub use global::flush;
 pub use global::init_global_client as init_global;
 pub use global::is_disabled as global_is_disabled;
 pub use global::shutdown;
+
+#[cfg(feature = "async-client")]
+pub use reqwest_client::PostHogReqwestClient;

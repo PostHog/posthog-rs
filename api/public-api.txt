@@ -497,6 +497,11 @@ pub posthog_rs::MultivariateFilter::variants: alloc::vec::Vec<posthog_rs::Multiv
 pub struct posthog_rs::MultivariateVariant
 pub posthog_rs::MultivariateVariant::key: alloc::string::String
 pub posthog_rs::MultivariateVariant::rollout_percentage: f64
+pub struct posthog_rs::PostHogReqwestClient
+impl posthog_rs::PostHogReqwestClient
+pub fn posthog_rs::PostHogReqwestClient::client(&self) -> &reqwest::async_impl::client::Client
+pub async fn posthog_rs::PostHogReqwestClient::execute(&self, reqwest::async_impl::request::Request) -> core::result::Result<reqwest::async_impl::response::Response, reqwest::error::Error>
+pub fn posthog_rs::PostHogReqwestClient::new<I, S>(reqwest::async_impl::client::ClientBuilder, I) -> core::result::Result<Self, reqwest::error::Error> where I: core::iter::traits::collect::IntoIterator<Item = S>, S: core::convert::AsRef<str>
 pub struct posthog_rs::Property
 pub posthog_rs::Property::key: alloc::string::String
 pub posthog_rs::Property::operator: alloc::string::String
