@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -88,20 +89,23 @@ pub(crate) fn fill_property(
     key: String,
     value: serde_json::Value,
 ) {
-    match properties.get_mut(&key) {
-        None => {
-            properties.insert(key, value);
+    let nested = NESTED_FILL_PROPERTIES.contains(&key.as_str());
+    match properties.entry(key) {
+        Entry::Vacant(slot) => {
+            slot.insert(value);
         }
-        Some(serde_json::Value::Object(existing))
-            if NESTED_FILL_PROPERTIES.contains(&key.as_str()) =>
-        {
-            if let serde_json::Value::Object(defaults) = value {
+        Entry::Occupied(mut slot) => {
+            if !nested {
+                return;
+            }
+            if let (serde_json::Value::Object(existing), serde_json::Value::Object(defaults)) =
+                (slot.get_mut(), value)
+            {
                 for (inner_key, inner_value) in defaults {
                     existing.entry(inner_key).or_insert(inner_value);
                 }
             }
         }
-        Some(_) => {}
     }
 }
 
