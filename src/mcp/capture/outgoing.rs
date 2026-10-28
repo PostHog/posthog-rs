@@ -140,6 +140,9 @@ mod tests {
             "authorization": "Bearer secret",
             "nested": { "password": "hunter2", "region": "eu" },
             "diagnostic": r#"upstream returned {"password":"hunter2"}"#,
+            "last_error": "github said 401 for ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "$request_path": "/v1/charges/sk_live_abcdefghijklmnop1234",
+            "tenant": "Acme_Corp_Production_Workspace",
             "$process_person_profile": false,
             "$set": { "plan": "free" },
             "$groups": { "company": "other" },
@@ -166,6 +169,9 @@ mod tests {
             properties["diagnostic"],
             r#"upstream returned {"password":"[redacted]"}"#
         );
+        assert_eq!(properties["last_error"], "github said 401 for [redacted]");
+        assert_eq!(properties["$request_path"], "[redacted]");
+        assert_eq!(properties["tenant"], "Acme_Corp_Production_Workspace");
         assert!(!properties.contains_key(key::PROCESS_PERSON_PROFILE));
         assert_eq!(properties[key::SET], serde_json::json!({ "plan": "pro" }));
         assert!(!properties.contains_key(key::GROUPS));

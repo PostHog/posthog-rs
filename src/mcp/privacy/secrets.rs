@@ -82,11 +82,21 @@ impl CharacterClasses {
 /// Redacts each space-separated word that reads as a credential, so the
 /// surrounding prose stays readable.
 pub(super) fn redact_secret_words(text: &str) -> String {
+    redact_words(text, |word| is_known_secret(word) || is_high_entropy(word))
+}
+
+/// Redacts only known key formats, for text whose ids
+/// and names the entropy check would mistake for credentials.
+pub(super) fn redact_known_secrets(text: &str) -> String {
+    redact_words(text, is_known_secret)
+}
+
+fn redact_words(text: &str, is_secret: impl Fn(&str) -> bool) -> String {
     let mut changed = false;
     let words: Vec<&str> = text
         .split(' ')
         .map(|word| {
-            if is_secret_word(word) {
+            if is_secret_word(word, &is_secret) {
                 changed = true;
                 REDACTED
             } else {
@@ -102,25 +112,24 @@ pub(super) fn redact_secret_words(text: &str) -> String {
 }
 
 /// Ignores this module's own markers, which a value sanitized twice carries.
-fn is_secret_word(word: &str) -> bool {
+fn is_secret_word(word: &str, is_secret: impl Fn(&str) -> bool) -> bool {
     let unmarked = word.replace(ENCODED_REDACTED, "").replace(REDACTED, "");
-    !unmarked.is_empty() && looks_like_secret(&unmarked)
+    !unmarked.is_empty() && is_secret(&unmarked)
 }
 
-fn looks_like_secret(word: &str) -> bool {
-    if word.contains(PEM_PRIVATE_KEY_MARKER) {
-        return true;
-    }
+fn is_known_secret(word: &str) -> bool {
     let length = word.chars().count();
-    if length < MIN_LENGTH {
-        return false;
-    }
-    is_high_entropy(word, length)
-        || (length <= KNOWN_FORMAT_MAX_LENGTH && KNOWN_FORMAT.is_match(word))
+    word.contains(PEM_PRIVATE_KEY_MARKER)
+        || ((MIN_LENGTH..=KNOWN_FORMAT_MAX_LENGTH).contains(&length) && KNOWN_FORMAT.is_match(word))
 }
 
-fn is_high_entropy(word: &str, length: usize) -> bool {
-    if word.contains(' ') || looks_like_path_or_url(word) || UUID.is_match(word) {
+fn is_high_entropy(word: &str) -> bool {
+    let length = word.chars().count();
+    if length < MIN_LENGTH
+        || word.contains(' ')
+        || looks_like_path_or_url(word)
+        || UUID.is_match(word)
+    {
         return false;
     }
     let Some(classes) = character_classes(word) else {
@@ -198,6 +207,25 @@ mod tests {
             redact_secret_words(text),
             "key [redacted] and [redacted] here"
         );
+    }
+
+    #[test]
+    fn known_secrets_alone_leave_random_tokens() {
+        let cases = [
+            (
+                "github said 401 for ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                "github said 401 for [redacted]",
+            ),
+            ("/v1/charges/sk_live_abcdefghijklmnop1234", "[redacted]"),
+            ("key AKIAABCDEFGHIJKLMNOP", "key [redacted]"),
+            (
+                "tenant Zx9-Qw7_Lm3.Rt8+Yp2!Kd5",
+                "tenant Zx9-Qw7_Lm3.Rt8+Yp2!Kd5",
+            ),
+        ];
+        for (text, redacted) in cases {
+            assert_eq!(redact_known_secrets(text), redacted, "{text}");
+        }
     }
 
     #[test]
