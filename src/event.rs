@@ -455,6 +455,21 @@ impl Event {
         self.properties.entry(key.into()).or_insert(value);
     }
 
+    /// Insert a default option only if the caller left it unset (missing or `null`).
+    pub(crate) fn insert_option_default<K: Into<String>>(
+        &mut self,
+        key: K,
+        value: serde_json::Value,
+    ) {
+        let slot = self
+            .options
+            .entry(key.into())
+            .or_insert(serde_json::Value::Null);
+        if slot.is_null() {
+            *slot = value;
+        }
+    }
+
     pub(crate) fn groups(&self) -> &HashMap<String, String> {
         &self.groups
     }

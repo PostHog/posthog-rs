@@ -6,23 +6,36 @@ fn explicit_context_builds_events_without_replacing_explicit_values() {
         .distinct_id("request-user")
         .session_id("request-session")
         .property("route", "/work")
+        .unwrap()
+        .option("cookieless_mode", true)
+        .unwrap()
+        .option("disable_skew_correction", true)
         .unwrap();
     let event = context.event("work");
     let value = serde_json::to_value(event).unwrap();
     assert_eq!(value["distinct_id"], "request-user");
     assert_eq!(value["properties"]["$session_id"], "request-session");
     assert_eq!(value["properties"]["route"], "/work");
+    assert_eq!(value["options"]["cookieless_mode"], true);
+    assert_eq!(value["options"]["disable_skew_correction"], true);
 
     let mut event = Event::new("work", "explicit-user");
     event
         .insert_prop("$session_id", "explicit-session")
         .unwrap();
     event.insert_prop("route", "/explicit").unwrap();
+    event.insert_option("cookieless_mode", false).unwrap();
+    // A null option counts as unset, so the context fills it.
+    event
+        .insert_option("disable_skew_correction", serde_json::Value::Null)
+        .unwrap();
     context.apply_to_event(&mut event);
     let value = serde_json::to_value(event).unwrap();
     assert_eq!(value["distinct_id"], "explicit-user");
     assert_eq!(value["properties"]["$session_id"], "explicit-session");
     assert_eq!(value["properties"]["route"], "/explicit");
+    assert_eq!(value["options"]["cookieless_mode"], false);
+    assert_eq!(value["options"]["disable_skew_correction"], true);
 }
 
 #[test]
@@ -126,7 +139,9 @@ async fn queued_batch_and_exception_context_survives_scope_end() {
                         Some("$exception") => "context-user",
                         _ => return false,
                     };
-                    event["session_id"] == "original-session" && event["distinct_id"] == identity
+                    event["session_id"] == "original-session"
+                        && event["distinct_id"] == identity
+                        && event["options"]["cookieless_mode"] == true
                 })
         });
         then.status(200).json_body(json!({"results": {}}));
@@ -143,6 +158,8 @@ async fn queued_batch_and_exception_context_survives_scope_end() {
     RequestContext::new()
         .distinct_id("context-user")
         .session_id("original-session")
+        .option("cookieless_mode", true)
+        .unwrap()
         .scope(async {
             client.capture(Event::new("work", "explicit-user"));
             client.capture_batch(vec![Event::new("batch", "batch-user")], true);
