@@ -5,7 +5,7 @@ use crate::endpoints::{EndpointManager, DEFAULT_HOST};
 use crate::error_tracking::ErrorTrackingOptions;
 use crate::event::Event;
 use derive_builder::Builder;
-use tracing::warn;
+use tracing::error;
 
 mod common;
 #[cfg(test)]
@@ -24,8 +24,8 @@ pub use summary::CaptureSummary;
 ///
 /// When set on [`ClientOptions`], capture requests are compressed and the
 /// matching `Content-Encoding` header is sent. The variant string matches the
-/// HTTP `Content-Encoding` token the server expects. The V0 pipeline supports
-/// `Gzip` only; V1 supports all variants.
+/// HTTP `Content-Encoding` token the server expects. All four variants are
+/// accepted by the capture endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureCompression {
     Gzip,
@@ -48,12 +48,9 @@ impl CaptureCompression {
 
 #[cfg(not(feature = "async-client"))]
 mod blocking;
+mod capture;
 mod retry;
 mod transport;
-#[cfg(not(feature = "capture-v1"))]
-mod v0_capture;
-#[cfg(feature = "capture-v1")]
-mod v1_capture;
 #[cfg(not(feature = "async-client"))]
 pub use blocking::client;
 #[cfg(not(feature = "async-client"))]
@@ -101,8 +98,37 @@ impl BeforeSendHook {
 pub(crate) const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SDK_USERAGENT_NAME: &str = "posthog-rs";
 
+/// Prefix of a personal API key, which capture always rejects as a project key.
+const PERSONAL_API_KEY_PREFIX: &str = "phx_";
+
 pub(crate) fn get_default_user_agent() -> String {
     format!("{}/{}", SDK_USERAGENT_NAME, CRATE_VERSION)
+}
+
+/// Most redirects an SDK-built HTTP client follows for one request.
+const MAX_REDIRECTS: usize = 5;
+
+/// Redirect policy for the capture and `/flags` HTTP clients the SDK builds.
+/// Follows only 307 and 308, which keep the method and body, to the origin of
+/// the first request, at most [`MAX_REDIRECTS`] times. Any other redirect comes
+/// back as the response, which fails the request, so a request body never
+/// leaves the configured host.
+pub(crate) fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let keeps_body = matches!(
+            attempt.status(),
+            reqwest::StatusCode::TEMPORARY_REDIRECT | reqwest::StatusCode::PERMANENT_REDIRECT
+        );
+        let same_origin = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| first.origin() == attempt.url().origin());
+        if keeps_body && same_origin && attempt.previous().len() <= MAX_REDIRECTS {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
 }
 
 /// Configuration options for the PostHog client.
@@ -146,7 +172,9 @@ pub struct ClientOptions {
     ///
     /// Only supply clients whose default headers and cookies are safe to send to
     /// PostHog. Do not share clients carrying credentials for unrelated services;
-    /// the SDK cannot inspect or filter those defaults.
+    /// the SDK cannot inspect or filter those defaults. The SDK keeps the
+    /// supplied client's redirect policy; the capture and `/flags` clients it
+    /// builds follow only 307 and 308 redirects to the same scheme, host and port.
     #[cfg(feature = "async-client")]
     #[builder(default, setter(strip_option))]
     http_client: Option<reqwest::Client>,
@@ -167,7 +195,9 @@ pub struct ClientOptions {
     ///
     /// Only supply clients whose default headers and cookies are safe to send to
     /// PostHog. Do not share clients carrying credentials for unrelated services;
-    /// the SDK cannot inspect or filter those defaults.
+    /// the SDK cannot inspect or filter those defaults. The SDK keeps the
+    /// supplied client's redirect policy; the capture and `/flags` clients it
+    /// builds follow only 307 and 308 redirects to the same scheme, host and port.
     ///
     /// Create and finally drop application-owned blocking clients, including handles
     /// held in options and builders, outside async runtimes. SDK shutdown does not
@@ -239,20 +269,18 @@ pub struct ClientOptions {
     #[builder(default = "false")]
     local_evaluation_only: bool,
 
-    /// Maximum number of attempts for V1 capture requests (default: 3).
-    /// Includes the initial attempt, so `3` means 1 initial + 2 retries.
-    #[builder(default = "3")]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    /// Maximum number of attempts for capture requests (default: 4).
+    /// Includes the initial attempt, so `4` means 1 initial + 3 retries.
+    #[builder(default = "4")]
     pub(crate) max_capture_attempts: u32,
 
-    /// Initial retry backoff duration in milliseconds (default: 200)
-    #[builder(default = "200")]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    /// Initial capture retry backoff duration in milliseconds (default: 100).
+    /// Remote `/flags` retries use their own fixed backoff.
+    #[builder(default = "100")]
     pub(crate) retry_initial_backoff_ms: u64,
 
-    /// Maximum retry backoff duration in milliseconds (default: 30000)
+    /// Maximum capture retry backoff duration in milliseconds (default: 30000)
     #[builder(default = "30000")]
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) retry_max_backoff_ms: u64,
 
     /// Number of buffered events that triggers an automatic flush (default: 100).
@@ -277,21 +305,32 @@ pub struct ClientOptions {
     /// Maximum time `shutdown()` and `Drop` spend draining buffered and
     /// retrying events before abandoning the rest, in milliseconds (default:
     /// 30000). This bounds the drain itself, including any delivery the drain
-    /// starts. It does not bound work already underway: the single background
-    /// worker performs one blocking send at a time, so an automatic flush or
-    /// drain in progress when shutdown is requested runs to completion first —
-    /// up to `request_timeout_seconds` per in-flight batch, including with a custom
-    /// blocking client, so a large auto-drain can delay teardown by several
-    /// request timeouts. `flush()` is
+    /// starts. It does not bound work already underway: each background
+    /// worker (analytics, and the AI lane once used) performs one blocking send
+    /// at a time, so an automatic flush or drain in progress when shutdown is
+    /// requested runs to completion first — up to `request_timeout_seconds`
+    /// per in-flight batch, including with a custom blocking client, so a large
+    /// auto-drain can delay teardown by several request timeouts. The lanes
+    /// drain concurrently, so the budget is shared, not doubled. `flush()` is
     /// unaffected.
     #[builder(default = "30000")]
     pub(crate) shutdown_timeout_ms: u64,
 
     /// Optional request-body compression. When `None` (default), bodies are
-    /// sent uncompressed. The V0 pipeline supports `Gzip` only; V1 supports all
-    /// variants.
+    /// sent uncompressed. The capture endpoint supports all variants.
     #[builder(default, setter(strip_option))]
     pub(crate) capture_compression: Option<CaptureCompression>,
+
+    /// Compression for `capture_ai*` bodies; unset (default) sends them
+    /// uncompressed. Prefer `Zstd`: AI events are large JSON.
+    #[builder(default, setter(strip_option))]
+    pub(crate) capture_ai_compression: Option<CaptureCompression>,
+
+    /// Maximum `capture_ai*` events buffered before new ones are dropped
+    /// (default: 1000). Lower than `max_queue_size` because AI events can be
+    /// multi-MB; a single warning is logged while the queue is full.
+    #[builder(default = "1000")]
+    pub(crate) capture_ai_max_queue_size: usize,
 
     /// Hooks to modify, filter, or sample events before they are sent.
     #[builder(default, setter(custom))]
@@ -320,10 +359,9 @@ pub struct ClientOptions {
 
 /// Resolved client-level default properties for capture requests.
 ///
-/// Built once from [`ClientOptions`] and threaded through all event-producing
-/// paths (V0 capture, V0 flag-called host, V1 capture) so each default is
-/// applied in exactly one place with caller-wins (`entry().or_insert`)
-/// semantics.
+/// Built once from [`ClientOptions`] and threaded through every event-producing
+/// path so each default is applied in exactly one place with caller-wins
+/// (`entry().or_insert`) semantics.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CaptureDefaults {
     pub(crate) disable_geoip: bool,
@@ -352,17 +390,26 @@ impl ClientOptions {
 
     /// Check whether the client is disabled.
     ///
-    /// A client is disabled when configured with `disabled(true)` or when the
-    /// project API key is missing or blank after trimming.
+    /// A client is disabled when configured with `disabled(true)`, when the
+    /// project API key is missing or blank after trimming, or when it is a
+    /// personal API key (`phx_...`), which PostHog never accepts for capture.
     pub fn is_disabled(&self) -> bool {
         self.disabled
     }
 
     fn sanitize(mut self) -> Self {
         self.api_key = self.api_key.trim().to_string();
-        if self.api_key.is_empty() {
-            warn!("api_key is empty after trimming whitespace; disabling PostHog client");
-            self.disabled = true;
+        // An explicitly disabled client needs no key, so it logs nothing.
+        if !self.disabled {
+            if self.api_key.is_empty() {
+                error!("api_key is empty after trimming whitespace; disabling PostHog client");
+                self.disabled = true;
+            } else if self.api_key.starts_with(PERSONAL_API_KEY_PREFIX) {
+                error!(
+                    "api_key is a personal API key ({PERSONAL_API_KEY_PREFIX}...), not a project API key; disabling PostHog client"
+                );
+                self.disabled = true;
+            }
         }
         self.host = Some(match self.host {
             Some(host) => {
@@ -426,8 +473,10 @@ impl ClientOptionsBuilder {
     ///
     /// Registering a hook silences the default WARN for terminal capture
     /// reject/exhaustion and serialization failures (the caller now owns that
-    /// signal). Shutdown-timeout, queue-full, and `before_send` drops keep their
-    /// WARN logs and do **not** fire the hook — they are not delivery failures.
+    /// signal). Shutdown-timeout, queue-full, and `before_send` drops, and
+    /// retryable failures that shutdown stops from being retried, keep their
+    /// WARN logs and do **not** fire the hook. A batch that has used all
+    /// `max_capture_attempts` still fires it.
     /// The existing `/flags` and poller WARN logs are unaffected.
     pub fn on_error<F>(&mut self, hook: F) -> &mut Self
     where
@@ -441,9 +490,9 @@ impl ClientOptionsBuilder {
 
     /// Build sanitized [`ClientOptions`].
     ///
-    /// Missing or whitespace-only API keys are allowed and disable the client so
-    /// SDK initialization remains infallible while avoiding requests with an
-    /// empty API key.
+    /// Missing, whitespace-only and personal (`phx_...`) API keys are allowed and
+    /// disable the client with one error log, so SDK initialization remains
+    /// infallible and never sends a key PostHog would reject.
     ///
     /// # Errors
     ///
@@ -451,18 +500,6 @@ impl ClientOptionsBuilder {
     /// invalid according to the generated builder.
     pub fn build(&self) -> Result<ClientOptions, ClientOptionsBuilderError> {
         Ok(self.build_unchecked()?.sanitize())
-    }
-
-    /// Deprecated alias for [`secret_key`](Self::secret_key).
-    ///
-    /// Kept for backwards compatibility; forwards to `secret_key`. The last
-    /// builder call wins if both are set.
-    #[deprecated(
-        note = "use `secret_key` instead; it accepts a Personal API Key or a Project Secret API Key"
-    )]
-    pub fn personal_api_key<VALUE: Into<String>>(&mut self, value: VALUE) -> &mut Self {
-        self.secret_key = Some(Some(value.into()));
-        self
     }
 }
 
@@ -489,7 +526,12 @@ impl From<(&str, &str)> for ClientOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::ClientOptionsBuilder;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use httpmock::prelude::*;
+
+    use super::{redirect_policy, ClientOptions, ClientOptionsBuilder, MAX_REDIRECTS};
     use crate::endpoints::{EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT};
 
     #[test]
@@ -505,39 +547,6 @@ mod tests {
         assert_eq!(options.host.as_deref(), Some("https://eu.posthog.com/"));
         assert_eq!(options.secret_key, None);
         assert_eq!(options.endpoints().api_host(), EU_INGESTION_ENDPOINT);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn personal_api_key_forwards_to_secret_key_last_call_wins() {
-        let resolve = |calls: &[(&str, &str)]| {
-            let mut builder = ClientOptionsBuilder::default();
-            builder.api_key("test-api-key".to_string());
-            for (which, val) in calls {
-                match *which {
-                    "secret" => builder.secret_key(*val),
-                    _ => builder.personal_api_key(*val),
-                };
-            }
-            builder.build().unwrap().secret_key
-        };
-
-        assert_eq!(
-            resolve(&[("secret", "phs_secret")]).as_deref(),
-            Some("phs_secret")
-        );
-        assert_eq!(
-            resolve(&[("personal", "phx_personal")]).as_deref(),
-            Some("phx_personal")
-        );
-        assert_eq!(
-            resolve(&[("personal", "phx_personal"), ("secret", "phs_secret")]).as_deref(),
-            Some("phs_secret")
-        );
-        assert_eq!(
-            resolve(&[("secret", "phs_secret"), ("personal", "phx_personal")]).as_deref(),
-            Some("phx_personal")
-        );
     }
 
     #[test]
@@ -560,6 +569,73 @@ mod tests {
         assert!(options.is_disabled());
     }
 
+    /// Run `f` and return its result with every log line it emitted on this thread.
+    pub(super) fn with_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(writer.clone()))
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        (result, logged)
+    }
+
+    /// Build options and return them with every log line emitted while building.
+    fn build_logging(builder: &ClientOptionsBuilder) -> (ClientOptions, String) {
+        with_logs(|| builder.build().unwrap())
+    }
+
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn unusable_api_keys_disable_the_client_with_one_error() {
+        for (api_key, expected) in [
+            ("", "api_key is empty"),
+            (" \n\t ", "api_key is empty"),
+            (" phx_secret123 ", "personal API key"),
+        ] {
+            let mut builder = ClientOptionsBuilder::default();
+            builder.api_key(api_key.to_string());
+            let (options, logged) = build_logging(&builder);
+            assert!(
+                options.is_disabled(),
+                "{:?} must disable the client",
+                expected
+            );
+            assert_eq!(logged.lines().count(), 1, "{logged}");
+            assert!(logged.contains("ERROR"), "{}", logged);
+            assert!(logged.contains(expected), "{}", logged);
+            assert!(
+                !logged.contains("secret123"),
+                "the key must never be logged"
+            );
+        }
+
+        // A project key enables the client; an explicit disable needs no key and logs nothing.
+        let mut builder = ClientOptionsBuilder::default();
+        builder.api_key("phc_project".to_string());
+        let (options, logged) = build_logging(&builder);
+        assert!(!options.is_disabled());
+        assert!(logged.is_empty(), "{}", logged);
+        builder.api_key(String::new()).disabled(true);
+        let (options, logged) = build_logging(&builder);
+        assert!(options.is_disabled());
+        assert!(logged.is_empty(), "{}", logged);
+    }
+
     #[test]
     fn builder_disables_client_for_trim_empty_api_key() {
         let options = ClientOptionsBuilder::default()
@@ -569,5 +645,77 @@ mod tests {
 
         assert_eq!(options.api_key, "");
         assert!(options.is_disabled());
+    }
+
+    fn post_with_redirect_policy(url: String) -> reqwest::blocking::Response {
+        reqwest::blocking::Client::builder()
+            .redirect(redirect_policy())
+            .build()
+            .unwrap()
+            .post(url)
+            .body("payload")
+            .send()
+            .unwrap()
+    }
+
+    #[test]
+    fn redirect_policy_follows_only_same_origin_307_and_308_with_the_body() {
+        for (status, same_origin, followed) in [
+            (307, true, true),
+            (308, true, true),
+            (307, false, false),
+            (308, false, false),
+            (301, true, false),
+            (302, true, false),
+            (303, true, false),
+        ] {
+            let (server, other) = (MockServer::start(), MockServer::start());
+            let target = if same_origin { &server } else { &other };
+            let next = target.mock(|when, then| {
+                when.method(POST).path("/next").body("payload");
+                then.status(200);
+            });
+            let location = target.url("/next");
+            server.mock(|when, then| {
+                when.path("/start");
+                then.status(status).header("location", &location);
+            });
+
+            let response = post_with_redirect_policy(server.url("/start"));
+
+            let case = format!("{status} same_origin={same_origin}");
+            assert_eq!(next.calls(), usize::from(followed), "{case}");
+            let want = if followed { 200 } else { status };
+            assert_eq!(response.status().as_u16(), want, "{case}");
+        }
+    }
+
+    #[test]
+    fn redirect_policy_does_not_follow_a_scheme_change_on_the_same_host() {
+        let server = MockServer::start();
+        let location = format!("https://{}/next", server.address());
+        server.mock(|when, then| {
+            when.path("/start");
+            then.status(307).header("location", &location);
+        });
+
+        let response = post_with_redirect_policy(server.url("/start"));
+
+        assert_eq!(response.status().as_u16(), 307);
+    }
+
+    #[test]
+    fn redirect_policy_stops_after_the_redirect_limit() {
+        let server = MockServer::start();
+        let location = server.url("/loop");
+        let looping = server.mock(|when, then| {
+            when.method(POST).path("/loop");
+            then.status(307).header("location", &location);
+        });
+
+        let response = post_with_redirect_policy(server.url("/loop"));
+
+        assert_eq!(response.status().as_u16(), 307);
+        assert_eq!(looping.calls(), MAX_REDIRECTS + 1);
     }
 }

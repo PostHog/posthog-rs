@@ -21,6 +21,9 @@ const MAX_ERROR_SOURCES: usize = 50;
 /// Latches the single process-wide panic hook so a second install is rejected.
 static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+const TRACE_ID_PROPERTY: &str = "$trace_id";
+const SPAN_ID_PROPERTY: &str = "$span_id";
+
 /// Whether the panic hook reports every panic as an `$exception`.
 #[cfg(feature = "mcp")]
 pub(crate) fn panic_hook_installed() -> bool {
@@ -244,6 +247,9 @@ impl ErrorTrackingOptionsBuilder {
     /// The callback runs synchronously during `capture_exception`. It must be
     /// fast, non-blocking, and must not call back into the PostHog SDK. Panics
     /// are caught and cause trace context to be omitted from that exception.
+    /// The callback is skipped for an exception that sets a `$trace_id` or
+    /// `$span_id` property or an explicit
+    /// [`CaptureExceptionOptions::trace_context`].
     pub fn trace_context_provider<F>(&mut self, provider: F) -> &mut Self
     where
         F: Fn() -> Option<TraceContext> + Send + Sync + 'static,
@@ -379,12 +385,15 @@ fn build_panic_event(
 }
 
 /// Optional context for `capture_exception_with`: person identity, custom
-/// properties, groups, trace context, and exception fingerprint/level.
+/// properties, capture options, groups, trace context, and exception
+/// fingerprint/level.
 ///
 /// All fields are optional. An empty options set (`new()` / `Default`)
 /// captures the exception personlessly with no extra context. With the
 /// trace-context provider configured on [`ErrorTrackingOptions`], its trace
 /// and span IDs are attached automatically; values set here take precedence.
+/// A `$trace_id` or `$span_id` set with [`CaptureExceptionOptions::property`]
+/// also wins: the provider's IDs are then not added at all.
 ///
 /// # Examples
 ///
@@ -407,6 +416,7 @@ fn build_panic_event(
 pub struct CaptureExceptionOptions {
     pub(crate) distinct_id: Option<String>,
     pub(crate) properties: Vec<(String, Value)>,
+    options: Vec<(String, Value)>,
     groups: Vec<(String, String)>,
     trace_context: Option<TraceContext>,
     fingerprint: Option<String>,
@@ -436,7 +446,23 @@ impl CaptureExceptionOptions {
         Ok(self)
     }
 
+    /// Set a capture option on the exception event; see [`Event::insert_option`].
+    pub fn option<K: Into<String>, V: Serialize>(
+        mut self,
+        key: K,
+        value: V,
+    ) -> Result<Self, Error> {
+        let value = serde_json::to_value(value).map_err(|e| Error::Serialization(e.to_string()))?;
+        self.options.push((key.into(), value));
+        Ok(self)
+    }
+
     /// Capture the exception as a group event.
+    ///
+    /// Adding a group does not change person processing. An exception without
+    /// a distinct ID is personless, and PostHog attaches groups for group
+    /// analytics only to events that process person profiles. Set
+    /// `option("process_person_profile", true)` to count it for its groups.
     pub fn group<N: Into<String>, I: Into<String>>(mut self, group_name: N, group_id: I) -> Self {
         self.groups.push((group_name.into(), group_id.into()));
         self
@@ -446,7 +472,8 @@ impl CaptureExceptionOptions {
     ///
     /// The IDs are accepted together so an exception can never combine a trace
     /// ID and span ID from different contexts. This pair overrides any context
-    /// returned by the client's trace-context provider.
+    /// returned by the client's trace-context provider, and any `$trace_id` or
+    /// `$span_id` set with [`CaptureExceptionOptions::property`].
     pub fn trace_context<T: Into<String>, S: Into<String>>(
         mut self,
         trace_id: T,
@@ -491,13 +518,25 @@ where
     let CaptureExceptionOptions {
         distinct_id,
         properties,
+        options,
         groups,
         trace_context,
         fingerprint,
         level,
     } = options;
 
-    let trace_context = trace_context.or_else(|| et_options.trace_context());
+    // A `$trace_id` or `$span_id` property blocks the provider so the event
+    // never mixes the caller's ID with one from another trace context.
+    let properties_set_trace_ids = properties
+        .iter()
+        .any(|(key, _)| key == TRACE_ID_PROPERTY || key == SPAN_ID_PROPERTY);
+    let trace_context = trace_context.or_else(|| {
+        if properties_set_trace_ids {
+            None
+        } else {
+            et_options.trace_context()
+        }
+    });
 
     let mut exception = Exception::from_error(error, et_options.capture_stacktrace());
     if let Some(fingerprint) = fingerprint {
@@ -514,15 +553,18 @@ where
     for (key, value) in properties {
         event.insert_prop(key, value)?;
     }
+    for (key, value) in options {
+        event.insert_option(key, value)?;
+    }
     for (group_name, group_id) in groups {
         event.add_group(&group_name, &group_id);
     }
 
-    // Reserved properties are written after user-set properties so they can't
-    // be overridden.
+    // Written after user-set properties so the typed trace context and the
+    // reserved `$exception_*` properties can't be overridden.
     if let Some(trace_context) = trace_context {
-        event.insert_prop("$trace_id", trace_context.trace_id)?;
-        event.insert_prop("$span_id", trace_context.span_id)?;
+        event.insert_prop(TRACE_ID_PROPERTY, trace_context.trace_id)?;
+        event.insert_prop(SPAN_ID_PROPERTY, trace_context.span_id)?;
     }
     exception.write_into(&mut event, et_options)?;
     Ok(event)
@@ -698,14 +740,7 @@ impl Exception {
             }
             trim_to_max_frames(&mut frames, MAX_FRAMES);
             // Only report modules still referenced after trimming.
-            debug_images = captured_images
-                .into_iter()
-                .filter(|image| {
-                    frames
-                        .iter()
-                        .any(|f| f.image_addr.as_deref() == Some(image.image_addr.as_str()))
-                })
-                .collect();
+            debug_images = referenced_images(captured_images, &frames);
             items[0].stacktrace = Some(ExceptionStacktrace::raw(frames));
         }
 
@@ -842,6 +877,12 @@ pub(crate) struct DebugImage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code_file: Option<String>,
     pub arch: String,
+}
+
+impl DebugImage {
+    fn has_usable_debug_id(&self) -> bool {
+        !self.debug_id.is_empty()
+    }
 }
 
 /// A module mapped into the process, used to attach load addresses to frames
@@ -1026,7 +1067,7 @@ fn capture_frames_current_first(skip: usize, modules: &[LoadedModule]) -> Vec<St
         // Only send addresses the server can actually resolve: without a
         // module carrying a debug id there is no `$debug_images` entry to
         // match, and the frame should pass through as purely client-resolved.
-        let resolvable = module.is_some_and(|m| !m.image.debug_id.is_empty());
+        let resolvable = module.is_some_and(|m| m.image.has_usable_debug_id());
 
         // One physical frame resolves to multiple symbols when the compiler
         // inlined functions into it; `resolve_frame` yields those layers
@@ -1236,18 +1277,19 @@ fn capture_raw_frames(
     // expects.
     frames.reverse();
 
-    let images = referenced_images(modules, &frames);
+    let images = referenced_images(modules.into_iter().map(|module| module.image), &frames);
     (frames, images)
 }
 
-/// Only report modules that frames actually point into, and only those with a
-/// usable debug id; the final filtering against the trimmed frame list happens
-/// in `write_into`.
-fn referenced_images(modules: Vec<LoadedModule>, frames: &[StackFrame]) -> Vec<DebugImage> {
-    modules
+/// Only report images with a usable debug id that are referenced by a frame
+/// surviving all capture-time stripping and client-policy trimming.
+fn referenced_images(
+    images: impl IntoIterator<Item = DebugImage>,
+    frames: &[StackFrame],
+) -> Vec<DebugImage> {
+    images
         .into_iter()
-        .filter(|m| !m.image.debug_id.is_empty())
-        .map(|m| m.image)
+        .filter(DebugImage::has_usable_debug_id)
         .filter(|image| {
             frames
                 .iter()
@@ -1331,7 +1373,7 @@ fn capture_raw_panic_frames() -> (Vec<StackFrame>, Vec<DebugImage>) {
     // Flip innermost-first into canonical wire order: outermost frame first,
     // panic site last (see `capture_raw_frames` for why one reverse suffices).
     frames.reverse();
-    let images = referenced_images(modules, &frames);
+    let images = referenced_images(modules.into_iter().map(|module| module.image), &frames);
     (frames, images)
 }
 
@@ -1663,8 +1705,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+    use crate::capture_event::CaptureEvent;
     use crate::client::ClientOptionsBuilder;
-    use crate::event::InnerEvent;
 
     #[derive(Debug)]
     struct OuterError {
@@ -1705,9 +1747,10 @@ mod tests {
 
     impl StdError for BorrowedError<'_> {}
 
-    fn built_event_json(mut event: Event) -> Value {
-        event.prepare_for_v0();
-        serde_json::to_value(InnerEvent::new(event, "api-key".to_string())).unwrap()
+    /// Serialize through the capture wire builder so these tests assert the
+    /// shape actually put on the wire.
+    fn built_event_json(event: Event) -> Value {
+        serde_json::to_value(CaptureEvent::from_event(&event)).unwrap()
     }
 
     fn event_json_with(exception: Exception, options: &ErrorTrackingOptions) -> Value {
@@ -1783,7 +1826,7 @@ mod tests {
     }
 
     /// Match the panic `$exception` event inside the transport's batch envelope
-    /// (`batch[0]`) — the same event shape for the V0 and V1 wire formats.
+    /// (`batch[0]`).
     fn request_has_panic_payload(req: &HttpMockRequest) -> bool {
         let Ok(body) = serde_json::from_slice::<Value>(req.body_ref()) else {
             return false;
@@ -1813,8 +1856,8 @@ mod tests {
         });
 
         event["event"] == "$exception"
-            // V0 injects `$process_person_profile` into properties; V1 keeps it
-            // in the typed `options` object.
+            // The SDK moves `$process_person_profile` into `options`, and a hand-built
+            // payload may still carry the properties spelling.
             && (event["properties"]["$process_person_profile"] == false
                 || event["options"]["process_person_profile"] == false)
             && event["properties"]["$exception_level"] == "fatal"
@@ -2383,6 +2426,72 @@ mod tests {
         assert!(find_module(&modules, 0x5000).is_none()); // past the last module
     }
 
+    fn test_stack_frame(function: String, image_addr: Option<&str>) -> StackFrame {
+        StackFrame {
+            filename: None,
+            line_no: None,
+            function,
+            lang: "rust".to_string(),
+            in_app: true,
+            synthetic: false,
+            platform: "native".to_string(),
+            instruction_addr: image_addr.map(|_| "0x1234".to_string()),
+            symbol_addr: None,
+            image_addr: image_addr.map(str::to_string),
+            client_resolved: true,
+            inline: false,
+        }
+    }
+
+    fn test_debug_image(debug_id: &str, image_addr: &str) -> DebugImage {
+        DebugImage {
+            image_type: "elf".to_string(),
+            debug_id: debug_id.to_string(),
+            code_id: None,
+            image_addr: image_addr.to_string(),
+            image_size: None,
+            image_vmaddr: None,
+            code_file: None,
+            arch: "x86_64".to_string(),
+        }
+    }
+
+    #[test]
+    fn debug_image_referenced_only_by_trimmed_frame_is_omitted() {
+        let mut exception = Exception::from_message("TrimmedImage", "trim image frame", false);
+        exception.captured_frames = Some(
+            (0..=MAX_FRAMES)
+                .map(|index| {
+                    test_stack_frame(format!("frame_{index}"), (index == 0).then_some("0x1000"))
+                })
+                .collect(),
+        );
+        exception.captured_images = vec![test_debug_image("debug-id", "0x1000")];
+
+        let json = event_json(exception);
+        let frames = json["properties"]["$exception_list"][0]["stacktrace"]["frames"]
+            .as_array()
+            .unwrap();
+
+        assert_eq!(frames.len(), MAX_FRAMES);
+        assert_eq!(frames[0]["function"], "frame_1");
+        assert!(json["properties"]["$debug_images"].is_null());
+    }
+
+    #[test]
+    fn debug_images_with_empty_debug_ids_are_omitted() {
+        let mut exception = Exception::from_message("EmptyDebugId", "empty debug id", false);
+        exception.captured_frames = Some(vec![test_stack_frame(
+            "referencing_frame".to_string(),
+            Some("0x1000"),
+        )]);
+        exception.captured_images = vec![test_debug_image("", "0x1000")];
+
+        let json = event_json(exception);
+
+        assert!(json["properties"]["$debug_images"].is_null());
+    }
+
     #[test]
     fn captured_stacks_reference_loaded_debug_images() {
         let json = event_json(Exception::from_message(
@@ -2466,7 +2575,9 @@ mod tests {
         let json = event_json(Exception::from_message("Error", "no user context", true));
 
         assert_eq!(json["event"], "$exception");
-        assert_eq!(json["properties"]["$process_person_profile"], false);
+        // Lifted out of `properties` into the typed wire options object.
+        assert_eq!(json["options"]["process_person_profile"], false);
+        assert!(json["properties"]["$process_person_profile"].is_null());
     }
 
     #[test]
@@ -2875,7 +2986,9 @@ mod tests {
         let json = built_event_json(event);
 
         assert_eq!(json["event"], "$exception");
-        assert_eq!(json["properties"]["$process_person_profile"], false);
+        // Lifted out of `properties` into the typed wire options object.
+        assert_eq!(json["options"]["process_person_profile"], false);
+        assert!(json["properties"]["$process_person_profile"].is_null());
         assert_eq!(json["properties"]["$exception_level"], "error");
     }
 
@@ -2885,6 +2998,8 @@ mod tests {
         let options = CaptureExceptionOptions::new()
             .distinct_id("user-1")
             .property("route", "/checkout")
+            .unwrap()
+            .option("cookieless_mode", true)
             .unwrap()
             .group("company", "acme")
             .trace_context("00000000000000000000000000000123", "0000000000000456")
@@ -2896,6 +3011,8 @@ mod tests {
 
         assert_eq!(json["distinct_id"], "user-1");
         assert_eq!(json["properties"]["route"], "/checkout");
+        assert_eq!(json["options"]["cookieless_mode"], true);
+        assert!(json["properties"].get("cookieless_mode").is_none());
         assert_eq!(json["properties"]["$groups"]["company"], "acme");
         assert_eq!(
             json["properties"]["$trace_id"],
@@ -2918,12 +3035,67 @@ mod tests {
             .build()
             .unwrap();
         let error = OuterError { source: InnerError };
-        let event =
-            build_exception_event(&error, CaptureExceptionOptions::new(), &options).unwrap();
+        let event = build_exception_event(
+            &error,
+            CaptureExceptionOptions::new()
+                .property("route", "/checkout")
+                .unwrap(),
+            &options,
+        )
+        .unwrap();
         let json = built_event_json(event);
 
         assert_eq!(json["properties"]["$trace_id"], "provider-trace-id");
         assert_eq!(json["properties"]["$span_id"], "provider-span-id");
+    }
+
+    #[test]
+    fn trace_id_property_blocks_both_provider_ids() {
+        for (key, other_key) in [("$trace_id", "$span_id"), ("$span_id", "$trace_id")] {
+            let provider_called = Arc::new(AtomicBool::new(false));
+            let provider_called_in_callback = Arc::clone(&provider_called);
+            let options = ErrorTrackingOptionsBuilder::default()
+                .trace_context_provider(move || {
+                    provider_called_in_callback.store(true, Ordering::SeqCst);
+                    Some(TraceContext::new("provider-trace-id", "provider-span-id"))
+                })
+                .build()
+                .unwrap();
+            let error = OuterError { source: InnerError };
+            let event = build_exception_event(
+                &error,
+                CaptureExceptionOptions::new()
+                    .property(key, "caller-id")
+                    .unwrap(),
+                &options,
+            )
+            .unwrap();
+            let json = built_event_json(event);
+
+            assert_eq!(json["properties"][key], "caller-id", "{}", key);
+            assert!(json["properties"].get(other_key).is_none(), "{}", key);
+            assert!(!provider_called.load(Ordering::SeqCst), "{}", key);
+        }
+    }
+
+    #[test]
+    fn explicit_trace_context_takes_precedence_over_trace_id_properties() {
+        let error = OuterError { source: InnerError };
+        let event = build_exception_event(
+            &error,
+            CaptureExceptionOptions::new()
+                .property("$trace_id", "property-trace-id")
+                .unwrap()
+                .property("$span_id", "property-span-id")
+                .unwrap()
+                .trace_context("explicit-trace-id", "explicit-span-id"),
+            &ErrorTrackingOptions::default(),
+        )
+        .unwrap();
+        let json = built_event_json(event);
+
+        assert_eq!(json["properties"]["$trace_id"], "explicit-trace-id");
+        assert_eq!(json["properties"]["$span_id"], "explicit-span-id");
     }
 
     #[test]

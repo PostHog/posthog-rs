@@ -7,21 +7,83 @@
 //! wire, with no `flush()` in the loop. Tiny backoffs keep the inline retry
 //! paths fast.
 //!
-//! Exactly one of the four modules below compiles per feature combo
-//! (async XOR blocking) × (capture-v1 XOR v0).
+//! Exactly one of the two modules below compiles per feature combo:
+//! async XOR blocking.
+
+use httpmock::prelude::*;
+use httpmock::Mock;
+use posthog_rs::{CaptureSummary, Event, EventStatus};
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+/// Two events sharing `uuid`. Capture answers the first request with a `retry`
+/// for the kept first copy and one dropped duplicate, and the second request
+/// only when it resends the first copy alone.
+fn duplicate_copies_retried_once(server: &MockServer, uuid: Uuid) -> (Vec<Event>, [Mock<'_>; 2]) {
+    let first_attempt = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-attempt", "1");
+        then.status(200).json_body(json!({ "results": {
+            uuid.to_string(): { "result": "retry", "details": "not_persisted", "duplicates_dropped": 1 }
+        } }));
+    });
+    let resend = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .header("posthog-attempt", "2")
+            .is_true(|request| {
+                let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
+                let batch = body["batch"].as_array().unwrap();
+                batch.len() == 1 && batch[0]["event"] == "first"
+            });
+        then.status(200)
+            .json_body(json!({ "results": { uuid.to_string(): { "result": "ok" } } }));
+    });
+    let events = ["first", "copy"].map(|name| {
+        let mut event = Event::new(name, "user-1");
+        event.set_uuid(uuid);
+        event
+    });
+    (Vec::from(events), [first_attempt, resend])
+}
+
+/// Both copies were submitted; the kept one was persisted and the dropped one was not.
+fn assert_duplicate_copy_not_persisted(summary: &CaptureSummary, mocks: &[Mock<'_>], uuid: Uuid) {
+    for mock in mocks {
+        mock.assert_calls(1);
+    }
+    assert_eq!(summary.submitted(), 2);
+    assert_eq!(summary.not_persisted(), 1);
+    assert_eq!(summary.event_results()[&uuid].result, EventStatus::Ok);
+}
+
+/// Capture on `server` redirects with a 307 to `other`, which would accept the
+/// batch. Returns the mock on `other`, which must never be called.
+fn redirect_to_another_origin<'a>(server: &MockServer, other: &'a MockServer) -> Mock<'a> {
+    let location = other.url("/i/v1/analytics/events");
+    server.mock(|when, then| {
+        when.method(POST).path("/i/v1/analytics/events");
+        then.status(307).header("location", &location);
+    });
+    other.mock(|when, then| {
+        when.method(POST);
+        then.status(200).json_body(json!({ "results": {} }));
+    })
+}
 
 // ---------------------------------------------------------------------------
-// Async, V1 capture
+// Async capture
 // ---------------------------------------------------------------------------
-#[cfg(all(feature = "async-client", feature = "capture-v1"))]
-mod async_v1 {
+#[cfg(feature = "async-client")]
+mod async_capture {
     use std::sync::{Arc, Mutex};
 
     use httpmock::prelude::*;
     use posthog_rs::{Client, ClientOptionsBuilder, Event, PostHogError};
     use serde_json::json;
 
-    async fn v1_client(base_url: String) -> Client {
+    async fn capture_client(base_url: String) -> Client {
         posthog_rs::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
@@ -57,7 +119,7 @@ mod async_v1 {
                 .json_body(json!({ "results": { uuid.to_string(): { "result": "ok" } } }));
         });
 
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
 
@@ -87,7 +149,7 @@ mod async_v1 {
             } }));
         });
 
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         let summary = client
             .capture_batch_immediate(vec![ok, dropped], false)
             .await
@@ -117,7 +179,7 @@ mod async_v1 {
             then.status(200).json_body(json!({ "results": {} }));
         });
 
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         let summary = client
             .capture_immediate(Event::new("test", "user-1"))
             .await
@@ -160,7 +222,7 @@ mod async_v1 {
                 .json_body(json!({ "results": { uuid.to_string(): { "result": "ok" } } }));
         });
 
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
 
@@ -187,6 +249,17 @@ mod async_v1 {
     }
 
     #[tokio::test]
+    async fn dropped_duplicate_copy_is_not_resent_or_persisted() {
+        let server = MockServer::start();
+        let uuid = uuid::Uuid::now_v7();
+        let (events, mocks) = super::duplicate_copies_retried_once(&server, uuid);
+
+        let client = capture_client(server.base_url()).await;
+        let summary = client.capture_batch_immediate(events, false).await.unwrap();
+        super::assert_duplicate_copy_not_persisted(&summary, &mocks, uuid);
+    }
+
+    #[tokio::test]
     async fn exhausting_retryable_status_returns_err() {
         // Every shared-retryable status burns the full attempt budget (3) then
         // surfaces an error. max_capture_attempts = 3 → 3 inline attempts.
@@ -197,7 +270,7 @@ mod async_v1 {
                 then.status(status).json_body(json!({ "error": "boom" }));
             });
 
-            let client = v1_client(server.base_url()).await;
+            let client = capture_client(server.base_url()).await;
             let result = client.capture_immediate(Event::new("test", "user-1")).await;
             assert!(
                 result.is_err(),
@@ -220,11 +293,23 @@ mod async_v1 {
                     .json_body(json!({ "error": "terminal" }));
             });
 
-            let client = v1_client(server.base_url()).await;
+            let client = capture_client(server.base_url()).await;
             let result = client.capture_immediate(Event::new("test", "user-1")).await;
             assert!(result.is_err(), "status {} must be terminal", status);
             mock.assert_calls(1);
         }
+    }
+
+    #[tokio::test]
+    async fn redirect_to_another_origin_is_not_followed() {
+        let (server, other) = (MockServer::start(), MockServer::start());
+        let other_mock = super::redirect_to_another_origin(&server, &other);
+
+        let client = capture_client(server.base_url()).await;
+        let result = client.capture_immediate(Event::new("test", "user-1")).await;
+
+        assert!(result.is_err());
+        other_mock.assert_calls(0);
     }
 
     #[tokio::test]
@@ -237,7 +322,7 @@ mod async_v1 {
             then.status(200).json_body(json!({ "results": {} }));
         });
 
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         client
             .capture_batch_immediate(vec![Event::new("a", "u"), Event::new("b", "u")], true)
             .await
@@ -308,7 +393,7 @@ mod async_v1 {
             when.method(POST).path("/i/v1/analytics/events");
             then.status(200).json_body(json!({ "results": {} }));
         });
-        let client = v1_client(server.base_url()).await;
+        let client = capture_client(server.base_url()).await;
         let summary = client.capture_batch_immediate(vec![], false).await.unwrap();
         assert_eq!(summary.submitted(), 0);
         mock.assert_calls(0);
@@ -318,217 +403,18 @@ mod async_v1 {
 // ---------------------------------------------------------------------------
 // Async, V0 capture
 // ---------------------------------------------------------------------------
-#[cfg(all(feature = "async-client", not(feature = "capture-v1")))]
-mod async_v0 {
-    use std::io::Read;
-    use std::sync::{Arc, Mutex};
-
-    use httpmock::prelude::*;
-    use posthog_rs::{CaptureCompression, Client, ClientOptionsBuilder, Event, PostHogError};
-
-    async fn v0_client(base_url: String) -> Client {
-        posthog_rs::client(
-            ClientOptionsBuilder::default()
-                .api_key("phc_test_token".to_string())
-                .host(base_url)
-                .max_capture_attempts(3u32)
-                .retry_initial_backoff_ms(1u64)
-                .retry_max_backoff_ms(5u64)
-                .build()
-                .unwrap(),
-        )
-        .await
-    }
-
-    fn error_sink() -> (
-        Arc<Mutex<usize>>,
-        impl Fn(&PostHogError<'_>) + Send + Sync + 'static,
-    ) {
-        let count = Arc::new(Mutex::new(0usize));
-        let sink = count.clone();
-        let hook = move |_: &PostHogError<'_>| *sink.lock().unwrap() += 1;
-        (count, hook)
-    }
-
-    #[tokio::test]
-    async fn success_reports_whole_batch_persisted() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST).path("/batch/");
-            then.status(200);
-        });
-
-        let client = v0_client(server.base_url()).await;
-        let summary = client
-            .capture_batch_immediate(vec![Event::new("a", "u"), Event::new("b", "u")], false)
-            .await
-            .unwrap();
-        mock.assert_calls(1);
-        // v0 has no per-event verdicts: a 2xx persists the whole batch.
-        assert_eq!(summary.submitted(), 2);
-        assert_eq!(summary.not_persisted(), 0);
-        assert!(summary.all_persisted());
-    }
-
-    #[tokio::test]
-    async fn exhausting_retryable_status_returns_err() {
-        // The shared retryable set burns the full attempt budget (3) then errs.
-        for status in [408, 500, 502, 503, 504] {
-            let server = MockServer::start();
-            let mock = server.mock(|when, then| {
-                when.method(POST).path("/batch/");
-                then.status(status);
-            });
-
-            let client = v0_client(server.base_url()).await;
-            let result = client.capture_immediate(Event::new("test", "user-1")).await;
-            assert!(
-                result.is_err(),
-                "status {} should exhaust and error",
-                status
-            );
-            mock.assert_calls(3);
-        }
-    }
-
-    #[tokio::test]
-    async fn terminal_status_returns_err_without_retry() {
-        // Non-retryable statuses, including a bare 429 (no Retry-After), fail on
-        // the first attempt without retrying.
-        for status in [400, 401, 402, 403, 429] {
-            let server = MockServer::start();
-            let mock = server.mock(|when, then| {
-                when.method(POST).path("/batch/");
-                then.status(status);
-            });
-
-            let client = v0_client(server.base_url()).await;
-            let result = client.capture_immediate(Event::new("test", "user-1")).await;
-            assert!(result.is_err(), "status {} must be terminal", status);
-            mock.assert_calls(1);
-        }
-    }
-
-    #[tokio::test]
-    async fn historical_migration_flag_is_sent() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/batch/")
-                .body_includes("\"historical_migration\":true");
-            then.status(200);
-        });
-
-        let client = v0_client(server.base_url()).await;
-        client
-            .capture_batch_immediate(vec![Event::new("a", "u")], true)
-            .await
-            .unwrap();
-        mock.assert_calls(1);
-    }
-
-    fn body_gunzips_to_user1(req: &HttpMockRequest) -> bool {
-        let mut decoder = flate2::read::GzDecoder::new(req.body_ref());
-        let mut decoded = String::new();
-        match decoder.read_to_string(&mut decoded) {
-            Ok(_) => decoded.contains(r#""distinct_id":"user1""#),
-            Err(_) => false,
-        }
-    }
-
-    #[tokio::test]
-    async fn gzip_sets_header_and_query_param() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/batch/")
-                .header("content-encoding", "gzip")
-                .query_param("compression", "gzip")
-                .is_true(body_gunzips_to_user1);
-            then.status(200);
-        });
-
-        let client = posthog_rs::client(
-            ClientOptionsBuilder::default()
-                .api_key("phc_test_token".to_string())
-                .host(server.base_url())
-                .capture_compression(CaptureCompression::Gzip)
-                .build()
-                .unwrap(),
-        )
-        .await;
-        client
-            .capture_immediate(Event::new("test_event", "user1"))
-            .await
-            .unwrap();
-        mock.assert_calls(1);
-    }
-
-    #[tokio::test]
-    async fn does_not_fire_on_error_on_terminal_failure() {
-        let server = MockServer::start();
-        let _mock = server.mock(|when, then| {
-            when.method(POST).path("/batch/");
-            then.status(500);
-        });
-
-        let (count, hook) = error_sink();
-        let client = posthog_rs::client(
-            ClientOptionsBuilder::default()
-                .api_key("phc_test_token".to_string())
-                .host(server.base_url())
-                .max_capture_attempts(2u32)
-                .retry_initial_backoff_ms(1u64)
-                .retry_max_backoff_ms(5u64)
-                .on_error(hook)
-                .build()
-                .unwrap(),
-        )
-        .await;
-
-        let error = client
-            .capture_immediate(Event::new("test", "user-1"))
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            posthog_rs::Error::ServerError { status: 500, .. }
-        ));
-        _mock.assert_calls(2);
-        assert_eq!(*count.lock().unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn disabled_client_is_noop() {
-        let disabled = posthog_rs::client(
-            ClientOptionsBuilder::default()
-                .api_key("phc_test".to_string())
-                .disabled(true)
-                .build()
-                .unwrap(),
-        )
-        .await;
-        let summary = disabled
-            .capture_immediate(Event::new("test", "user-1"))
-            .await
-            .unwrap();
-        assert_eq!(summary.submitted(), 0);
-        assert!(summary.all_persisted());
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Blocking, V1 capture
+// Blocking capture
 // ---------------------------------------------------------------------------
-#[cfg(all(not(feature = "async-client"), feature = "capture-v1"))]
-mod blocking_v1 {
+#[cfg(not(feature = "async-client"))]
+mod blocking {
     use std::sync::{Arc, Mutex};
 
     use httpmock::prelude::*;
     use posthog_rs::{Client, ClientOptionsBuilder, Event, PostHogError};
     use serde_json::json;
 
-    fn v1_client(base_url: String) -> Client {
+    fn capture_client(base_url: String) -> Client {
         posthog_rs::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
@@ -551,7 +437,7 @@ mod blocking_v1 {
                 .json_body(json!({ "results": { uuid.to_string(): { "result": "ok" } } }));
         });
 
-        let client = v1_client(server.base_url());
+        let client = capture_client(server.base_url());
         let mut event = Event::new("test", "user-1");
         event.set_uuid(uuid);
         let summary = client.capture_immediate(event).unwrap();
@@ -578,13 +464,24 @@ mod blocking_v1 {
             } }));
         });
 
-        let client = v1_client(server.base_url());
+        let client = capture_client(server.base_url());
         let summary = client
             .capture_batch_immediate(vec![ok, dropped], false)
             .unwrap();
         mock.assert_calls(1);
         assert_eq!(summary.not_persisted(), 1);
         assert!(!summary.all_persisted());
+    }
+
+    #[test]
+    fn dropped_duplicate_copy_is_not_resent_or_persisted() {
+        let server = MockServer::start();
+        let uuid = uuid::Uuid::now_v7();
+        let (events, mocks) = super::duplicate_copies_retried_once(&server, uuid);
+
+        let client = capture_client(server.base_url());
+        let summary = client.capture_batch_immediate(events, false).unwrap();
+        super::assert_duplicate_copy_not_persisted(&summary, &mocks, uuid);
     }
 
     #[test]
@@ -597,7 +494,7 @@ mod blocking_v1 {
                 then.status(status).json_body(json!({ "error": "boom" }));
             });
 
-            let client = v1_client(server.base_url());
+            let client = capture_client(server.base_url());
             let result = client.capture_immediate(Event::new("test", "user-1"));
             assert!(
                 result.is_err(),
@@ -606,6 +503,18 @@ mod blocking_v1 {
             );
             mock.assert_calls(3);
         }
+    }
+
+    #[test]
+    fn redirect_to_another_origin_is_not_followed() {
+        let (server, other) = (MockServer::start(), MockServer::start());
+        let other_mock = super::redirect_to_another_origin(&server, &other);
+
+        let client = capture_client(server.base_url());
+        let result = client.capture_immediate(Event::new("test", "user-1"));
+
+        assert!(result.is_err());
+        other_mock.assert_calls(0);
     }
 
     #[test]
@@ -619,7 +528,7 @@ mod blocking_v1 {
                     .json_body(json!({ "error": "terminal" }));
             });
 
-            let client = v1_client(server.base_url());
+            let client = capture_client(server.base_url());
             let result = client.capture_immediate(Event::new("test", "user-1"));
             assert!(result.is_err(), "status {} must be terminal", status);
             mock.assert_calls(1);
@@ -663,111 +572,3 @@ mod blocking_v1 {
 // ---------------------------------------------------------------------------
 // Blocking, V0 capture
 // ---------------------------------------------------------------------------
-#[cfg(all(not(feature = "async-client"), not(feature = "capture-v1")))]
-mod blocking_v0 {
-    use std::sync::{Arc, Mutex};
-
-    use httpmock::prelude::*;
-    use posthog_rs::{Client, ClientOptionsBuilder, Event, PostHogError};
-
-    fn v0_client(base_url: String) -> Client {
-        posthog_rs::client(
-            ClientOptionsBuilder::default()
-                .api_key("phc_test_token".to_string())
-                .host(base_url)
-                .max_capture_attempts(3u32)
-                .retry_initial_backoff_ms(1u64)
-                .retry_max_backoff_ms(5u64)
-                .build()
-                .unwrap(),
-        )
-    }
-
-    #[test]
-    fn success_reports_whole_batch_persisted() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST).path("/batch/");
-            then.status(200);
-        });
-
-        let client = v0_client(server.base_url());
-        let summary = client
-            .capture_batch_immediate(vec![Event::new("a", "u"), Event::new("b", "u")], false)
-            .unwrap();
-        mock.assert_calls(1);
-        assert_eq!(summary.submitted(), 2);
-        assert!(summary.all_persisted());
-    }
-
-    #[test]
-    fn exhausting_retryable_status_returns_err() {
-        // The shared retryable set burns the full attempt budget (3) then errs.
-        for status in [408, 500, 502, 503, 504] {
-            let server = MockServer::start();
-            let mock = server.mock(|when, then| {
-                when.method(POST).path("/batch/");
-                then.status(status);
-            });
-
-            let client = v0_client(server.base_url());
-            let result = client.capture_immediate(Event::new("test", "user-1"));
-            assert!(
-                result.is_err(),
-                "status {} should exhaust and error",
-                status
-            );
-            mock.assert_calls(3);
-        }
-    }
-
-    #[test]
-    fn terminal_status_returns_err_without_retry() {
-        // Non-retryable statuses, including a bare 429 (no Retry-After), fail on
-        // the first attempt without retrying.
-        for status in [400, 401, 402, 403, 429] {
-            let server = MockServer::start();
-            let mock = server.mock(|when, then| {
-                when.method(POST).path("/batch/");
-                then.status(status);
-            });
-
-            let client = v0_client(server.base_url());
-            let result = client.capture_immediate(Event::new("test", "user-1"));
-            assert!(result.is_err(), "status {} must be terminal", status);
-            mock.assert_calls(1);
-        }
-    }
-
-    #[test]
-    fn does_not_fire_on_error_on_terminal_failure() {
-        let server = MockServer::start();
-        let _mock = server.mock(|when, then| {
-            when.method(POST).path("/batch/");
-            then.status(500);
-        });
-
-        let count = Arc::new(Mutex::new(0usize));
-        let sink = count.clone();
-        let client = posthog_rs::client(
-            ClientOptionsBuilder::default()
-                .api_key("phc_test_token".to_string())
-                .host(server.base_url())
-                .max_capture_attempts(2u32)
-                .retry_initial_backoff_ms(1u64)
-                .retry_max_backoff_ms(5u64)
-                .on_error(move |_: &PostHogError<'_>| *sink.lock().unwrap() += 1)
-                .build()
-                .unwrap(),
-        );
-        let error = client
-            .capture_immediate(Event::new("test", "user-1"))
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            posthog_rs::Error::ServerError { status: 500, .. }
-        ));
-        _mock.assert_calls(2);
-        assert_eq!(*count.lock().unwrap(), 0);
-    }
-}

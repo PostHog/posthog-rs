@@ -30,7 +30,7 @@ fn missing_context_identity_keeps_personless_capture() {
     let value =
         serde_json::to_value(RequestContext::new().session_id("session").event("work")).unwrap();
     assert!(!value["distinct_id"].as_str().unwrap().is_empty());
-    assert_eq!(value["properties"]["$process_person_profile"], false);
+    assert_eq!(value["options"]["process_person_profile"], false);
     assert_eq!(value["properties"]["$session_id"], "session");
     let value = serde_json::to_value(RequestContext::new().event("work")).unwrap();
     assert!(value["properties"].get("$session_id").is_none());
@@ -126,12 +126,7 @@ async fn queued_batch_and_exception_context_survives_scope_end() {
                         Some("$exception") => "context-user",
                         _ => return false,
                     };
-                    (if cfg!(feature = "capture-v1") {
-                        &event["session_id"]
-                    } else {
-                        &event["properties"]["$session_id"]
-                    }) == "original-session"
-                        && event["distinct_id"] == identity
+                    event["session_id"] == "original-session" && event["distinct_id"] == identity
                 })
         });
         then.status(200).json_body(json!({"results": {}}));
@@ -185,11 +180,7 @@ async fn flag_snapshot_keeps_originating_context_after_request_ends() {
         when.method(POST).is_true(|request| {
             let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
             body["batch"][0]["event"] == "$feature_flag_called"
-                && (if cfg!(feature = "capture-v1") {
-                    &body["batch"][0]["session_id"]
-                } else {
-                    &body["batch"][0]["properties"]["$session_id"]
-                }) == "original-session"
+                && body["batch"][0]["session_id"] == "original-session"
                 && body["batch"][0]["properties"]
                     .get("other-request")
                     .is_none()

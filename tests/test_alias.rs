@@ -10,10 +10,7 @@
 use httpmock::prelude::*;
 use serde_json::{json, Value};
 
-#[cfg(feature = "capture-v1")]
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
-#[cfg(not(feature = "capture-v1"))]
-const CAPTURE_PATH: &str = "/batch/";
 
 const PREVIOUS_ID: &str = "anon-abc123";
 const DISTINCT_ID: &str = "user-42";
@@ -62,16 +59,14 @@ fn request_does_not_disable_person_processing(req: &HttpMockRequest) -> bool {
         return false;
     };
 
-    let path = if cfg!(feature = "capture-v1") {
-        "/options/process_person_profile"
-    } else {
-        "/properties/$process_person_profile"
-    };
-    event.pointer(path).and_then(Value::as_bool) != Some(false)
+    event
+        .pointer("/options/process_person_profile")
+        .and_then(Value::as_bool)
+        != Some(false)
 }
 
 /// PostHog deduplicates on event UUID, so a constructor that reused one would
-/// have every alias after the first silently dropped server-side.
+/// have every alias after the first dropped server-side.
 fn request_has_two_distinct_event_uuids(req: &HttpMockRequest) -> bool {
     let Ok(body) = serde_json::from_slice::<Value>(req.body_ref()) else {
         return false;

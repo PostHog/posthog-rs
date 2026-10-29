@@ -189,7 +189,7 @@ fn property_matching_version_reaches_groups_recursive_cohorts_and_dependencies()
 
 fn poller_config(server: &httpmock::MockServer) -> posthog_rs::LocalEvaluationConfig {
     posthog_rs::LocalEvaluationConfig {
-        personal_api_key: "personal-key".into(),
+        secret_key: "personal-key".into(),
         project_api_key: "project-key".into(),
         api_host: server.base_url(),
         poll_interval: std::time::Duration::from_millis(20),

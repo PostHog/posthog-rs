@@ -69,6 +69,17 @@
 //! }
 //! ```
 //!
+//! # Event options
+//!
+//! Per-event processing controls go in an `options` map next to the
+//! properties. Set them with [`Event::insert_option`]; PostHog validates them.
+//!
+//! ```
+//! let mut event = posthog_rs::Event::new("signed_up", "user-123");
+//! event.insert_option("process_person_profile", false)?;
+//! # Ok::<(), posthog_rs::Error>(())
+//! ```
+//!
 //! # Capture is fire-and-forget
 //!
 //! [`Client::capture`] and [`Client::capture_batch`] are the primary API: they
@@ -86,6 +97,35 @@
 //! signal. Reach for them only when the caller must know a batch persisted
 //! before advancing its own durable state (for example, a server-side importer
 //! committing an upstream offset); prefer fire-and-forget everywhere else.
+//!
+//! # AI events
+//!
+//! Send LLM analytics events such as `$ai_generation` with
+//! [`Client::capture_ai`], not [`Client::capture`]. They go to the AI endpoint
+//! on their own background lane, and `capture` never reroutes them.
+//!
+//! ```no_run
+//! # fn send(posthog: &posthog_rs::Client) -> Result<(), posthog_rs::Error> {
+//! let mut event = posthog_rs::Event::new("$ai_generation", "user-123");
+//! event.insert_prop("$ai_model", "gpt-4o")?;
+//! posthog.capture_ai(event);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Cargo features
+//!
+//! - `async-client` (default): the async [`Client`]. Without it, [`client`]
+//!   returns the blocking client.
+//! - `error-tracking` (default): exception capture.
+//! - `tls` (default): HTTPS with reqwest's default Rustls crypto provider.
+//! - `tls-no-provider`: HTTPS with a Rustls `CryptoProvider` that the
+//!   application installs before it creates a client. Creating a client
+//!   first panics.
+//!
+//! With `default-features = false`, enable `tls` or `tls-no-provider` to send to
+//! an HTTPS host.
+mod capture_event;
 mod client;
 mod compression;
 mod constants;
@@ -94,8 +134,6 @@ mod error;
 #[cfg(feature = "error-tracking")]
 mod error_tracking;
 mod event;
-#[cfg(feature = "capture-v1")]
-mod event_v1;
 mod feature_flag_evaluations;
 mod feature_flags;
 mod global;
@@ -140,9 +178,8 @@ pub use error_tracking::{
 // Event
 pub use event::Event;
 
-// V1 Capture types
-#[cfg(feature = "capture-v1")]
-pub use event_v1::{CaptureResponse, EventResult, EventStatus, V1ErrorResponse};
+// Capture wire types
+pub use capture_event::{CaptureErrorResponse, CaptureResponse, EventResult, EventStatus};
 
 // Feature Flags
 pub use feature_flag_evaluations::{EvaluateFlagsOptions, FeatureFlagEvaluations};
@@ -165,6 +202,7 @@ pub use local_evaluation::AsyncFlagPoller;
 // global client. flush/shutdown matter because the global singleton lives in a
 // `static`, whose `Drop` never runs — they must be called to drain on exit.
 pub use global::capture;
+pub use global::capture_ai;
 #[cfg(feature = "error-tracking")]
 pub use global::capture_exception;
 #[cfg(feature = "error-tracking")]
