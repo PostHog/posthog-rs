@@ -118,11 +118,13 @@ impl RequestContext {
         properties.extend(options.properties);
         options.properties = properties.into_iter().collect();
         for (key, value) in &self.options {
-            // An option counts as unset when it is missing or null, as on events.
+            // The last entry for a key wins; a missing or null last value counts as unset, as on events.
             let unset = options
                 .options
                 .iter()
-                .all(|(set_key, set_value)| set_key != key || set_value.is_null());
+                .rev()
+                .find(|(set_key, _)| set_key == key)
+                .map_or(true, |(_, set_value)| set_value.is_null());
             if unset {
                 options.options.retain(|(set_key, _)| set_key != key);
                 options.options.push((key.clone(), value.clone()));
@@ -159,6 +161,10 @@ mod test {
             .option("cookieless_mode", false)
             .unwrap()
             .option("disable_skew_correction", Value::Null)
+            .unwrap()
+            .option("product_tour_id", "caller-tour")
+            .unwrap()
+            .option("product_tour_id", Value::Null)
             .unwrap();
         let mut merged = context.exception_options(options).options;
         merged.sort_by(|a, b| a.0.cmp(&b.0));
