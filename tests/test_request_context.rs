@@ -47,6 +47,20 @@ fn missing_context_identity_keeps_personless_capture() {
     assert_eq!(value["properties"]["$session_id"], "session");
     let value = serde_json::to_value(RequestContext::new().event("work")).unwrap();
     assert!(value["properties"].get("$session_id").is_none());
+
+    // The personless default is the lowest layer, so a context option replaces it.
+    let context = RequestContext::new()
+        .option("process_person_profile", true)
+        .unwrap();
+    let value = serde_json::to_value(context.event("work")).unwrap();
+    assert_eq!(value["options"]["process_person_profile"], true);
+    let mut event = Event::new_anon("work");
+    event
+        .insert_option("process_person_profile", false)
+        .unwrap();
+    context.apply_to_event(&mut event);
+    let value = serde_json::to_value(event).unwrap();
+    assert_eq!(value["options"]["process_person_profile"], false);
 }
 
 #[cfg(feature = "async-client")]
