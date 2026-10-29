@@ -175,6 +175,10 @@ fn integer(number: &serde_json::Number) -> Option<i128> {
     if let Some(whole) = number.as_u64() {
         return Some(whole.into());
     }
+    // With serde_json's `arbitrary_precision`, a larger integer keeps its digits.
+    if let Ok(whole) = number.to_string().parse::<i128>() {
+        return Some(whole);
+    }
     let float = number.as_f64()?;
     let in_range = float.abs() < i128::MAX as f64;
     (float.fract() == 0.0 && in_range).then_some(float as i128)
@@ -200,6 +204,24 @@ mod tests {
         for name in properties.keys() {
             assert!(BUILT_IN_FIELDS.contains(&name.as_str()), "{}", name);
         }
+    }
+
+    /// Runs only when a crate in the build turns on serde_json's
+    /// `arbitrary_precision`, the one way an integer past `u64` keeps its digits.
+    #[test]
+    fn integers_past_u64_match_exactly_when_their_digits_survive() {
+        let parse = |text: &str| serde_json::from_str::<Value>(text).unwrap();
+        let beyond = parse("18446744073709551617");
+        if serde_json::to_string(&beyond).unwrap() != "18446744073709551617" {
+            return;
+        }
+        let field = FeedbackField {
+            name: "f".to_string(),
+            schema: json!({ "type": "integer", "enum": [parse("18446744073709551616")] }),
+            required: false,
+        };
+        assert!(!field.admits(&beyond));
+        assert!(field.admits(&parse("18446744073709551616")));
     }
 
     #[test]
