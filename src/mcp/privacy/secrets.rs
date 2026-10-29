@@ -58,7 +58,10 @@ static KNOWN_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
         r"NR(?:AK|JS|II|MA|RA)-[A-Za-z0-9]{27}",
         r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}",
     ];
-    Regex::new(&formats.join("|")).expect("known secret pattern")
+    // A format starts a word or follows a non-alphanumeric character, so the
+    // `sk-` in `task-create-recurring-reminder` is not a key.
+    let pattern = format!("(?:^|[^A-Za-z0-9])(?:{})", formats.join("|"));
+    Regex::new(&pattern).expect("known secret pattern")
 });
 
 #[derive(Default)]
