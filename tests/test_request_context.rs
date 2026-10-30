@@ -7,6 +7,8 @@ fn explicit_context_builds_events_without_replacing_explicit_values() {
         .session_id("request-session")
         .property("route", "/work")
         .unwrap()
+        .property("$set", serde_json::json!({"plan": "free", "source": "web"}))
+        .unwrap()
         .option("cookieless_mode", true)
         .unwrap()
         .option("disable_skew_correction", true)
@@ -16,6 +18,10 @@ fn explicit_context_builds_events_without_replacing_explicit_values() {
     assert_eq!(value["distinct_id"], "request-user");
     assert_eq!(value["properties"]["$session_id"], "request-session");
     assert_eq!(value["properties"]["route"], "/work");
+    assert_eq!(
+        value["properties"]["$set"],
+        serde_json::json!({"plan": "free", "source": "web"})
+    );
     assert_eq!(value["options"]["cookieless_mode"], true);
     assert_eq!(value["options"]["disable_skew_correction"], true);
 
@@ -24,6 +30,9 @@ fn explicit_context_builds_events_without_replacing_explicit_values() {
         .insert_prop("$session_id", "explicit-session")
         .unwrap();
     event.insert_prop("route", "/explicit").unwrap();
+    event
+        .insert_prop("$set", serde_json::json!({"plan": "pro"}))
+        .unwrap();
     event.insert_option("cookieless_mode", false).unwrap();
     // A null option counts as unset, so the context fills it.
     event
@@ -34,6 +43,11 @@ fn explicit_context_builds_events_without_replacing_explicit_values() {
     assert_eq!(value["distinct_id"], "explicit-user");
     assert_eq!(value["properties"]["$session_id"], "explicit-session");
     assert_eq!(value["properties"]["route"], "/explicit");
+    // The context fills only the `$set` keys the event left out.
+    assert_eq!(
+        value["properties"]["$set"],
+        serde_json::json!({"plan": "pro", "source": "web"})
+    );
     assert_eq!(value["options"]["cookieless_mode"], false);
     assert_eq!(value["options"]["disable_skew_correction"], true);
 }
@@ -219,6 +233,8 @@ async fn flag_snapshot_keeps_originating_context_after_request_ends() {
             let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
             body["batch"][0]["event"] == "$feature_flag_called"
                 && body["batch"][0]["session_id"] == "original-session"
+                // The context beats the client's `$is_server` default.
+                && body["batch"][0]["properties"]["$is_server"] == false
                 && body["batch"][0]["properties"]
                     .get("other-request")
                     .is_none()
@@ -228,7 +244,9 @@ async fn flag_snapshot_keeps_originating_context_after_request_ends() {
     let client = posthog_rs::client(("phc_test", server.base_url().as_str())).await;
     let context = RequestContext::new()
         .distinct_id("flag-user")
-        .session_id("original-session");
+        .session_id("original-session")
+        .property("$is_server", false)
+        .unwrap();
     let flags = client
         .evaluate_flags_with_context(&context, Default::default())
         .await

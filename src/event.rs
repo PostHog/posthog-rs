@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -75,6 +76,37 @@ pub(crate) fn merge_groups_into(
         merged.insert(k.clone(), serde_json::Value::String(v.clone()));
     }
     properties.insert("$groups".into(), serde_json::Value::Object(merged));
+}
+
+/// Properties whose object values fill one level deep instead of as a whole.
+const NESTED_FILL_PROPERTIES: [&str; 4] = ["$set", "$set_once", "$groups", "$group_set"];
+
+/// Fill `key` with a default only where the caller left it unset. For the
+/// [`NESTED_FILL_PROPERTIES`], when both values are objects, the default adds
+/// only the inner keys the caller's object lacks.
+pub(crate) fn fill_property(
+    properties: &mut HashMap<String, serde_json::Value>,
+    key: String,
+    value: serde_json::Value,
+) {
+    let nested = NESTED_FILL_PROPERTIES.contains(&key.as_str());
+    match properties.entry(key) {
+        Entry::Vacant(slot) => {
+            slot.insert(value);
+        }
+        Entry::Occupied(mut slot) => {
+            if !nested {
+                return;
+            }
+            if let (serde_json::Value::Object(existing), serde_json::Value::Object(defaults)) =
+                (slot.get_mut(), value)
+            {
+                for (inner_key, inner_value) in defaults {
+                    existing.entry(inner_key).or_insert(inner_value);
+                }
+            }
+        }
+    }
 }
 
 /// An [`Event`] represents an interaction a user has with your app or
@@ -467,7 +499,7 @@ impl Event {
         key: K,
         value: serde_json::Value,
     ) {
-        self.properties.entry(key.into()).or_insert(value);
+        fill_property(&mut self.properties, key.into(), value);
     }
 
     /// Insert a default option only if the caller left it unset (missing or `null`).

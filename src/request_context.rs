@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{Error, Event};
+use crate::{event::fill_property, Error, Event};
 
 #[cfg(feature = "async-client")]
 tokio::task_local! {
@@ -115,8 +115,10 @@ impl RequestContext {
         if options.distinct_id.is_none() {
             options.distinct_id = self.get_distinct_id().map(str::to_string);
         }
-        let mut properties: HashMap<_, _> = self.properties.clone();
-        properties.extend(options.properties);
+        let mut properties: HashMap<_, _> = options.properties.into_iter().collect();
+        for (key, value) in &self.properties {
+            fill_property(&mut properties, key.clone(), value.clone());
+        }
         options.properties = properties.into_iter().collect();
         for (key, value) in self.options.iter().filter(|(_, value)| !value.is_null()) {
             // The last entry for a key wins; a missing or null last value counts as unset, as on events.
@@ -148,6 +150,29 @@ mod test {
 
     use super::RequestContext;
     use crate::CaptureExceptionOptions;
+
+    #[test]
+    fn exception_options_fill_only_unset_set_keys() {
+        let context = RequestContext::new()
+            .property("$set", json!({"plan": "free", "source": "web"}))
+            .unwrap()
+            .property("route", "/work")
+            .unwrap();
+        let options = CaptureExceptionOptions::new()
+            .property("$set", json!({"plan": "pro"}))
+            .unwrap()
+            .property("route", "/explicit")
+            .unwrap();
+        let mut merged = context.exception_options(options).properties;
+        merged.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            merged,
+            vec![
+                ("$set".to_string(), json!({"plan": "pro", "source": "web"})),
+                ("route".to_string(), json!("/explicit")),
+            ]
+        );
+    }
 
     #[test]
     fn exception_options_fill_only_unset_options() {

@@ -250,13 +250,18 @@ fn flag_called_event(params: FlagCalledEventParams, defaults: &CaptureDefaults) 
     for (group_name, group_id) in &params.groups {
         event.add_group(group_name, group_id);
     }
-    if params.disable_geoip.unwrap_or(defaults.disable_geoip) {
+    // A per-call value is the event's own, so it fills before the context; client
+    // defaults are SDK values, so the context beats them.
+    if params.disable_geoip == Some(true) {
+        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
+    }
+    params.context.apply_to_event(&mut event);
+    if params.disable_geoip.is_none() && defaults.disable_geoip {
         event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
     }
     if defaults.is_server {
         event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
     }
-    params.context.apply_to_event(&mut event);
     Some(event)
 }
 
