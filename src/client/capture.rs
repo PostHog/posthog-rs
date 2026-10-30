@@ -605,6 +605,57 @@ mod tests {
     }
 
     #[test]
+    fn personless_option_fills_while_unset_and_a_hook_removal_holds() {
+        let wire_option = |event: Event, opts: &ClientOptions| {
+            let event =
+                preprocess_capture_event(event, &opts.capture_defaults(), &opts.before_send)
+                    .unwrap();
+            serde_json::to_value(build_event_at(&event, Utc::now())).unwrap()["options"]
+                ["process_person_profile"]
+                .clone()
+        };
+        let opts = test_opts();
+
+        let mut null_option = Event::new_anon("e");
+        null_option
+            .insert_option("process_person_profile", serde_json::Value::Null)
+            .unwrap();
+        assert_eq!(wire_option(null_option, &opts), serde_json::json!(false));
+
+        let mut removed = Event::new_anon("e");
+        removed.remove_option("process_person_profile");
+        assert_eq!(wire_option(removed, &opts), serde_json::json!(false));
+
+        // A legacy property never overrides the personless option (SD-20, SD-21).
+        let mut legacy_true = Event::new_anon("e");
+        legacy_true.remove_option("process_person_profile");
+        legacy_true
+            .insert_prop("$process_person_profile", true)
+            .unwrap();
+        assert_eq!(wire_option(legacy_true, &opts), serde_json::json!(false));
+
+        let mut opted_in = Event::new_anon("e");
+        opted_in
+            .insert_option("process_person_profile", true)
+            .unwrap();
+        assert_eq!(wire_option(opted_in, &opts), serde_json::json!(true));
+
+        // No SDK value is added after the hooks (SD-25c).
+        let hook_removes = ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .before_send(|mut event| {
+                event.remove_option("process_person_profile");
+                Some(event)
+            })
+            .build()
+            .unwrap();
+        assert_eq!(
+            wire_option(Event::new_anon("e"), &hook_removes),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn before_send_sees_sdk_values_and_its_removals_hold_on_the_wire() {
         let opts = ClientOptionsBuilder::default()
             .api_key("phc_test".to_string())
