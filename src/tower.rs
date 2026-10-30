@@ -90,6 +90,7 @@ fn request_context<B>(request: &Request<B>) -> RequestContext {
             context.distinct_id = Some(identity.to_string());
         }
         context.properties.extend(application.properties.clone());
+        context.options.extend(application.options.clone());
     }
     context
 }

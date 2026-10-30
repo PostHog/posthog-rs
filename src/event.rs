@@ -101,6 +101,10 @@ pub struct Event {
     minimal_flag_called: bool,
     #[serde(skip)]
     pub(crate) request_context_applied: bool,
+    /// True while `process_person_profile` holds the personless default from
+    /// [`Event::new_anon`], so a request context option can still replace it.
+    #[serde(skip)]
+    personless_default: bool,
 }
 
 impl Event {
@@ -130,6 +134,7 @@ impl Event {
             uuid: None,
             minimal_flag_called: false,
             request_context_applied: false,
+            personless_default: false,
         }
     }
 
@@ -164,6 +169,7 @@ impl Event {
             uuid: None,
             minimal_flag_called: false,
             request_context_applied: false,
+            personless_default: true,
         }
     }
 
@@ -217,12 +223,19 @@ impl Event {
     ) -> Result<(), Error> {
         let as_json =
             serde_json::to_value(value).map_err(|e| Error::Serialization(e.to_string()))?;
-        let _ = self.options.insert(key.into(), as_json);
+        let key = key.into();
+        if key == crate::constants::PROCESS_PERSON_PROFILE_OPT {
+            self.personless_default = false;
+        }
+        let _ = self.options.insert(key, as_json);
         Ok(())
     }
 
     /// Remove a capture option from the event and return its previous value, if any.
     pub fn remove_option(&mut self, key: &str) -> Option<serde_json::Value> {
+        if key == crate::constants::PROCESS_PERSON_PROFILE_OPT {
+            self.personless_default = false;
+        }
         self.options.remove(key)
     }
 
@@ -300,6 +313,7 @@ impl Event {
             uuid: None,
             minimal_flag_called: false,
             request_context_applied: false,
+            personless_default: false,
         })
     }
 
@@ -361,6 +375,7 @@ impl Event {
             uuid: None,
             minimal_flag_called: false,
             request_context_applied: false,
+            personless_default: false,
         }))
     }
 
@@ -453,6 +468,28 @@ impl Event {
         value: serde_json::Value,
     ) {
         self.properties.entry(key.into()).or_insert(value);
+    }
+
+    /// Insert a default option only if the caller left it unset (missing or `null`).
+    /// The personless default from [`Event::new_anon`] counts as unset.
+    pub(crate) fn insert_option_default<K: Into<String>>(
+        &mut self,
+        key: K,
+        value: serde_json::Value,
+    ) {
+        if value.is_null() {
+            return;
+        }
+        let key = key.into();
+        if key == crate::constants::PROCESS_PERSON_PROFILE_OPT && self.personless_default {
+            self.personless_default = false;
+            self.options.insert(key, value);
+            return;
+        }
+        let slot = self.options.entry(key).or_insert(serde_json::Value::Null);
+        if slot.is_null() {
+            *slot = value;
+        }
     }
 
     pub(crate) fn groups(&self) -> &HashMap<String, String> {

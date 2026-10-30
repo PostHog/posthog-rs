@@ -416,7 +416,7 @@ fn build_panic_event(
 pub struct CaptureExceptionOptions {
     pub(crate) distinct_id: Option<String>,
     pub(crate) properties: Vec<(String, Value)>,
-    options: Vec<(String, Value)>,
+    pub(crate) options: Vec<(String, Value)>,
     groups: Vec<(String, String)>,
     trace_context: Option<TraceContext>,
     fingerprint: Option<String>,

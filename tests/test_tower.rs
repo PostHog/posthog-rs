@@ -47,6 +47,7 @@ async fn axum_accepts_sanitized_headers_and_existing_application_context() {
         let event = serde_json::to_value(context.event("work")).unwrap();
         assert_eq!(event["properties"]["$request_path"], "/work");
         assert!(event["properties"].get("$current_url").is_none());
+        assert_eq!(event["options"]["cookieless_mode"], true);
         Ok::<_, Infallible>(Response::new(()))
     }));
     let mut request = Request::builder()
@@ -55,9 +56,12 @@ async fn axum_accepts_sanitized_headers_and_existing_application_context() {
         .header("x-posthog-session-id", "header-session")
         .body(())
         .unwrap();
-    request
-        .extensions_mut()
-        .insert(RequestContext::new().distinct_id("authenticated-user"));
+    request.extensions_mut().insert(
+        RequestContext::new()
+            .distinct_id("authenticated-user")
+            .option("cookieless_mode", true)
+            .unwrap(),
+    );
     app.oneshot(request).await.unwrap();
 }
 

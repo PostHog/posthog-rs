@@ -526,6 +526,7 @@ pub fn posthog_rs::RequestContext::exception_options(&self, posthog_rs::CaptureE
 pub fn posthog_rs::RequestContext::get_distinct_id(&self) -> core::option::Option<&str>
 pub fn posthog_rs::RequestContext::get_session_id(&self) -> core::option::Option<&str>
 pub fn posthog_rs::RequestContext::new() -> Self
+pub fn posthog_rs::RequestContext::option(self, impl core::convert::Into<alloc::string::String>, impl serde_core::ser::Serialize) -> core::result::Result<Self, posthog_rs::Error>
 pub fn posthog_rs::RequestContext::property(self, impl core::convert::Into<alloc::string::String>, impl serde_core::ser::Serialize) -> core::result::Result<Self, posthog_rs::Error>
 pub async fn posthog_rs::RequestContext::scope<F: core::future::future::Future>(self, F) -> <F as core::future::future::Future>::Output
 pub fn posthog_rs::RequestContext::session_id(self, impl core::convert::Into<alloc::string::String>) -> Self

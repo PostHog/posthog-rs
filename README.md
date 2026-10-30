@@ -42,6 +42,8 @@ In an application handler, pass `context.event("work_completed")` to
 capture behavior when no identity exists. Existing events keep their explicit
 identity and properties. The context adds defaults, including `$session_id`,
 `$request_method`, and `$request_path`. Query strings are not captured.
+`RequestContext::option` adds a capture option to every event in the context,
+unless the event sets that option itself.
 
 Tracing headers are client-controlled analytics context. Never use them for
 authentication, authorization, or account lookup. Place an application-owned
