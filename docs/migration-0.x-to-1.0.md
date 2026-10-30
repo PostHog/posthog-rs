@@ -79,6 +79,8 @@ client.capture(event);
 
 Keys are strings and values are any JSON value. The SDK sends options as given, so a new option that PostHog adds needs no SDK upgrade. PostHog validates them: it ignores keys it does not know, converts common forms of a known key's value (for a boolean, `"yes"`, `"off"` or `0`), and drops the event if a known key has a value it cannot read. That drop reaches `on_error` as a per-event `drop` with the detail `invalid_options`. `before_send` hooks can read and change options with `Event::options`, `insert_option`, and `remove_option`.
 
+Review your `before_send` hooks for the new event shape. To change an option, use `insert_option`: a legacy property that the hook adds with `insert_prop` does not replace an option that is already set. A hook that returns a new `Event` must copy the options of the event it received, or the event is sent without them. That includes the `process_person_profile` option that `Event::new_anon` sets to `false`, so PostHog would create a person for the generated ID.
+
 The legacy option properties, the `$`-prefixed properties legacy capture reads as settings, still work. The SDK moves each one into its option and removes it from `properties`:
 
 | Legacy option property | Option |
