@@ -715,6 +715,10 @@ impl Client {
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureSummary, Error> {
+        let mut events = events;
+        for event in &mut events {
+            crate::request_context::apply_current_context(event);
+        }
         if self.options.is_disabled() || events.is_empty() {
             return Ok(CaptureSummary::default());
         }
