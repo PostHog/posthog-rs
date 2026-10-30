@@ -477,6 +477,9 @@ impl Event {
         key: K,
         value: serde_json::Value,
     ) {
+        if value.is_null() {
+            return;
+        }
         let key = key.into();
         if key == crate::constants::PROCESS_PERSON_PROFILE_OPT && self.personless_default {
             self.personless_default = false;

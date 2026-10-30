@@ -61,6 +61,13 @@ fn missing_context_identity_keeps_personless_capture() {
     context.apply_to_event(&mut event);
     let value = serde_json::to_value(event).unwrap();
     assert_eq!(value["options"]["process_person_profile"], false);
+
+    // A null context option sets nothing, so the personless default stays.
+    let context = RequestContext::new()
+        .option("process_person_profile", serde_json::Value::Null)
+        .unwrap();
+    let value = serde_json::to_value(context.event("work")).unwrap();
+    assert_eq!(value["options"]["process_person_profile"], false);
 }
 
 #[cfg(feature = "async-client")]

@@ -45,7 +45,8 @@ impl RequestContext {
         Ok(self)
     }
 
-    /// Sets a capture option on every event in this context. An option the event sets wins.
+    /// Sets a capture option on every event in this context. An option the event sets wins,
+    /// and a `null` value sets nothing.
     pub fn option(mut self, key: impl Into<String>, value: impl Serialize) -> Result<Self, Error> {
         let value =
             serde_json::to_value(value).map_err(|error| Error::Serialization(error.to_string()))?;
@@ -117,7 +118,7 @@ impl RequestContext {
         let mut properties: HashMap<_, _> = self.properties.clone();
         properties.extend(options.properties);
         options.properties = properties.into_iter().collect();
-        for (key, value) in &self.options {
+        for (key, value) in self.options.iter().filter(|(_, value)| !value.is_null()) {
             // The last entry for a key wins; a missing or null last value counts as unset, as on events.
             let unset = options
                 .options
@@ -156,6 +157,8 @@ mod test {
             .option("disable_skew_correction", true)
             .unwrap()
             .option("product_tour_id", "tour")
+            .unwrap()
+            .option("process_person_profile", Value::Null)
             .unwrap();
         let options = CaptureExceptionOptions::new()
             .option("cookieless_mode", false)
