@@ -44,7 +44,7 @@ rmcp = { version = "3.7", default-features = false, features = [
 ], optional = true }
 url = { version = "2.5", optional = true }
 fancy-regex = { version = "0.19", optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 futures-util = { version = "0.3", default-features = false, features = [
     "std",
 ], optional = true }
@@ -55,14 +55,14 @@ tower = { version = "0.5", features = ["util"] }
 dotenv = "0.15.0"
 ctor = "1.0.12"
 tokio = { version = "1", features = ["full"] }
-httpmock = "0.8"
+httpmock = "0.9"
 serde_json = "1.0"
 futures = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eyre = "0.6.12"
 http = "1"
 http-body-util = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 rmcp = { version = "3.7", features = [
     "server",
     "client",
