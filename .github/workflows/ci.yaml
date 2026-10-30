@@ -57,7 +57,7 @@ jobs:
         run: cargo clippy --tests -- -D warnings
 
       - name: Clippy (mcp)
-        run: cargo clippy --tests --features mcp -- -D warnings
+        run: cargo clippy --tests --features mcp,tower -- -D warnings
 
   public-api:
     name: Public API
@@ -186,7 +186,7 @@ jobs:
             command: cargo test --verbose --no-default-features --features error-tracking,capture-v1
           - name: Unit test (mcp)
             cache-key: mcp
-            command: cargo test --verbose --features mcp
+            command: cargo test --verbose --features mcp,tower
           - name: E2E test
             cache-key: e2e
             command: cargo test --verbose --features e2e-test --no-default-features

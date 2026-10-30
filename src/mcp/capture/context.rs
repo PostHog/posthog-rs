@@ -4,11 +4,35 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use crate::mcp::bounds::{bounded_payload, bounded_text, truncate};
+use crate::mcp::bounds::{bounded_entries, bounded_payload, bounded_text, truncate};
 use crate::mcp::contract::limits::MAX_NAME_LENGTH;
 use crate::mcp::contract::properties as key;
 use crate::mcp::identity::Identity;
 use crate::mcp::privacy::TextPass;
+use crate::RequestContext;
+
+const MCP_PREFIX: &str = "$mcp_";
+const PERSON_CONTROLS: [&str; 5] = [
+    key::PROCESS_PERSON_PROFILE,
+    key::SET,
+    "$set_once",
+    "$unset",
+    key::GROUPS,
+];
+
+/// The host's properties an MCP event may carry: none MCP or identity sets,
+/// each value redacted and bounded as a payload's, in name order.
+pub(crate) fn host_properties(host: &RequestContext) -> Map<String, Value> {
+    let mut kept: Vec<(&String, &Value)> = host
+        .properties
+        .iter()
+        .filter(|(name, _)| {
+            !name.starts_with(MCP_PREFIX) && !PERSON_CONTROLS.contains(&name.as_str())
+        })
+        .collect();
+    kept.sort_unstable_by_key(|(name, _)| *name);
+    bounded_entries(kept.into_iter(), TextPass::Name)
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClientIdentity {
@@ -33,6 +57,10 @@ pub(crate) struct EventContext {
     pub(crate) identity: Option<Identity>,
     pub(crate) client: ClientIdentity,
     pub(crate) server: ServerIdentity,
+    pub(crate) server_build: Option<String>,
+    /// The host's request context, which events carry where MCP sets nothing.
+    /// Built by `host_properties`, so a call holds only what capture keeps.
+    pub(crate) host_properties: Map<String, Value>,
 }
 
 impl EventContext {
@@ -81,6 +109,7 @@ impl EventContext {
         let server = &self.server;
         insert_name(properties, key::SERVER_NAME, server.name.as_deref());
         insert_name(properties, key::SERVER_VERSION, server.version.as_deref());
+        insert_text(properties, key::SERVER_BUILD, self.server_build.as_deref());
     }
 
     /// Anonymous calls create no person profiles.

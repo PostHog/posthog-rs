@@ -5,9 +5,11 @@
 //! the payload are cut to a short limit, which bounds their scan too: an event
 //! that large is shrunk afterwards anyway.
 
+use std::collections::HashMap;
+
 use serde_json::{Map, Value};
 
-use super::text::{bounded_text, truncate};
+use super::text::bounded_text;
 use crate::mcp::contract::limits::{
     MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, MAX_PAYLOAD_ENTRIES, MAX_PAYLOAD_KEY_LENGTH,
     MAX_PAYLOAD_STRING_LENGTH, REDACTION_SCAN_MARGIN,
@@ -24,6 +26,53 @@ const EXHAUSTED_STRING_LENGTH: usize = 64;
 pub(crate) fn bounded_payload(value: &Value, pass: TextPass) -> Value {
     let mut budget = MAX_EVENT_BYTES;
     bound(value, MAX_PAYLOAD_DEPTH, pass, &mut budget)
+}
+
+/// Borrowed object entries, each bounded as `bounded_payload` bounds an
+/// object's entry, so the caller copies only what the bounds keep. There is no
+/// entry limit, but the entries stop where they would overflow an event, since
+/// no event could carry more.
+pub(crate) fn bounded_entries<'a>(
+    entries: impl Iterator<Item = (&'a String, &'a Value)>,
+    pass: TextPass,
+) -> Map<String, Value> {
+    let mut budget = MAX_EVENT_BYTES;
+    let mut room = MAX_EVENT_BYTES - 1;
+    let mut bounded = KeptEntries::default();
+    for (received, value) in entries {
+        let (key, value) = bound_entry(received, value, MAX_PAYLOAD_DEPTH - 1, pass, &mut budget);
+        let size = json_length(&Value::from(key.as_str())) + 1 + json_length(&value) + 1;
+        if size > room {
+            break;
+        }
+        room -= size;
+        bounded.insert(received, key, value);
+    }
+    bounded.entries
+}
+
+/// Entries whose bounded keys may collide: of the entries whose keys redaction
+/// or cutting made equal, the one whose key as received sorts first is kept.
+#[derive(Default)]
+struct KeptEntries<'a> {
+    entries: Map<String, Value>,
+    received: HashMap<String, &'a str>,
+}
+
+impl<'a> KeptEntries<'a> {
+    fn insert(&mut self, received: &'a str, key: String, value: Value) {
+        match self.received.get(&key) {
+            Some(kept) if *kept <= received => {}
+            _ => {
+                self.received.insert(key.clone(), received);
+                self.entries.insert(key, value);
+            }
+        }
+    }
+}
+
+fn json_length(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
 }
 
 fn bound(value: &Value, remaining_depth: usize, pass: TextPass, budget: &mut usize) -> Value {
@@ -71,21 +120,36 @@ fn bound_object(
     budget: &mut usize,
 ) -> Value {
     let overflows = object.len() > MAX_PAYLOAD_ENTRIES;
-    let mut bounded: Map<String, Value> = object
-        .iter()
-        .take(kept_entries(object.len()))
-        .map(|(key, nested)| {
-            let value = match is_credential_key(key) {
-                true => Value::from(REDACTED),
-                false => bound(nested, remaining_depth, pass, budget),
-            };
-            (truncate(key, MAX_PAYLOAD_KEY_LENGTH), value)
-        })
-        .collect();
+    let mut bounded = KeptEntries::default();
+    for (received, nested) in object.iter().take(kept_entries(object.len())) {
+        let (key, value) = bound_entry(received, nested, remaining_depth, pass, budget);
+        bounded.insert(received, key, value);
+    }
+    let mut bounded = bounded.entries;
     if overflows {
         bounded.insert(OVERFLOW_KEY.to_string(), Value::from(OVERFLOW_MARKER));
     }
     Value::Object(bounded)
+}
+
+fn bound_entry(
+    key: &str,
+    value: &Value,
+    remaining_depth: usize,
+    pass: TextPass,
+    budget: &mut usize,
+) -> (String, Value) {
+    let value = match is_credential_key(key) {
+        true => Value::from(REDACTED),
+        false => bound(value, remaining_depth, pass, budget),
+    };
+    (bounded_key(key), value)
+}
+
+/// A key is a captured string too, since data such as a signed URL can be the
+/// key, but it gets only the name passes: entropy would redact field names.
+fn bounded_key(key: &str) -> String {
+    bounded_text(key, MAX_PAYLOAD_KEY_LENGTH, TextPass::Name)
 }
 
 fn kept_entries(length: usize) -> usize {
@@ -109,6 +173,31 @@ mod tests {
             bounded_payload(&value, TextPass::Captured),
             json!({ "api_key": "[redacted]", "Authorization": "[redacted]", "q": "eu" })
         );
+    }
+
+    #[test]
+    fn keys_get_the_name_passes() {
+        let cases = [
+            (
+                json!({ "https://bucket.test/a.png?X-Amz-Signature=abc123": "logo" }),
+                json!({ "https://bucket.test/a.png?X-Amz-Signature=%5Bredacted%5D": "logo" }),
+            ),
+            (
+                json!({ "Get_Organization_Memberships": 1 }),
+                json!({ "Get_Organization_Memberships": 1 }),
+            ),
+            (
+                json!({ "https://a.test/?token=one": "first", "https://a.test/?token=two": "second" }),
+                json!({ "https://a.test/?token=%5Bredacted%5D": "first" }),
+            ),
+        ];
+        for (value, bounded) in cases {
+            assert_eq!(
+                bounded_payload(&value, TextPass::Captured),
+                bounded,
+                "{value}"
+            );
+        }
     }
 
     #[test]

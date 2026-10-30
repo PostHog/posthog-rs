@@ -1,4 +1,5 @@
 pub(crate) const EXCEPTION: &str = "$exception";
+pub(crate) const FEEDBACK: &str = "$mcp_feedback";
 pub(crate) const INITIALIZE: &str = "$mcp_initialize";
 pub(crate) const INPUT_REQUIRED: &str = "$mcp_input_required";
 pub(crate) const MISSING_CAPABILITY: &str = "$mcp_missing_capability";

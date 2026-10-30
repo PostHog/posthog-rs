@@ -19,8 +19,10 @@ pub(crate) use keys::is_credential_key;
 /// Which redactions a captured string gets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TextPass {
-    /// Tool and resource names, and transport headers: the entropy detector
-    /// would read names like `Get_Organization_Memberships` as credentials.
+    /// Tool and resource names, transport headers, and the host's request
+    /// context: the entropy detector would read names like
+    /// `Get_Organization_Memberships` as credentials, so only known key
+    /// formats are redacted.
     Name,
     /// Payloads, error messages, and other text a tool or server produced.
     Captured,
@@ -32,7 +34,11 @@ pub(crate) enum TextPass {
 impl TextPass {
     pub(crate) fn apply(self, text: &str) -> String {
         match self {
-            TextPass::Name => urls::redact_urls(&tokens::redact_tokens(text)),
+            TextPass::Name => {
+                let text = json_members::redact_json_members(text);
+                let text = secrets::redact_known_secrets(&tokens::redact_tokens(&text));
+                urls::redact_urls(&text)
+            }
             TextPass::Captured => urls::redact_urls(&redact_credentials(text)),
             TextPass::FreeText => urls::redact_urls(&pii::redact_pii(&redact_credentials(text))),
         }

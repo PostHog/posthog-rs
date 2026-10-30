@@ -348,3 +348,124 @@ async fn a_synthesized_stateless_handshake_names_no_client() {
     );
     assert!(text_property(&event, "$session_id").starts_with("ses_"));
 }
+
+#[tokio::test]
+async fn the_hosts_request_context_reaches_mcp_events() {
+    let recorder = Recorder::new().await;
+    let server = stateless(&recorder, TestServer::new());
+    let host = posthog_rs::RequestContext::new()
+        .session_id("ses_host")
+        .property("tenant", "acme")
+        .unwrap()
+        .property("$mcp_intent", "host text")
+        .unwrap();
+
+    let params = call_params("search_docs", json!({ "query": "flags" }));
+    let response = server
+        .request_with_context("tools/call", params, &[], Some(host))
+        .await;
+    assert!(!result_texts(&response).is_empty());
+
+    let event = recorder.only("$mcp_tool_call").await;
+    assert_eq!(text_property(&event, "tenant"), "acme");
+    assert_ne!(text_property(&event, "$session_id"), "ses_host");
+    assert!(!event.properties().contains_key("$mcp_intent"));
+}
+
+#[tokio::test]
+async fn a_feedback_report_joins_the_conversation_of_a_fresh_instance() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .feedback_tool("")
+        .build()
+        .unwrap();
+    let http = HttpServer::stateless(instrumented(&recorder, TestServer::new(), options));
+
+    let first = http
+        .request(
+            "tools/call",
+            call_params("search_docs", json!({ "query": "flags" })),
+            &[],
+        )
+        .await;
+    let handle = returned_handle(&first).expect("a handle");
+    let report = json!({ "feedback_type": "praise", "summary": "fast", "conversation_id": handle });
+    let reply = http
+        .request("tools/call", call_params("send_feedback", report), &[])
+        .await;
+
+    assert_eq!(
+        result_texts(&reply).len(),
+        1,
+        "an echoed handle is not repeated"
+    );
+    let call = recorder.only("$mcp_tool_call").await;
+    let feedback = recorder.only("$mcp_feedback").await;
+    assert_eq!(text_property(&feedback, "$mcp_conversation_id"), handle);
+    assert_eq!(
+        text_property(&feedback, "$session_id"),
+        text_property(&call, "$session_id")
+    );
+}
+
+#[cfg(feature = "tower")]
+#[tokio::test]
+async fn the_posthog_layer_describes_mcp_events_and_identifies_only_when_trusted() {
+    let trusts_the_context = || {
+        McpOptionsBuilder::default()
+            .identify(|request| {
+                let host = request
+                    .http?
+                    .extensions
+                    .get::<posthog_rs::RequestContext>()?;
+                Some(posthog_rs::mcp::Identity::new(host.get_distinct_id()?))
+            })
+            .build()
+            .unwrap()
+    };
+    let decides_anonymous = || {
+        McpOptionsBuilder::default()
+            .identify(|_| None)
+            .build()
+            .unwrap()
+    };
+    let cases: [(McpOptions, Option<&str>); 3] = [
+        (McpOptions::default(), None),
+        (decides_anonymous(), None),
+        (trusts_the_context(), Some("user_42")),
+    ];
+    for (options, identified) in cases {
+        let recorder = Recorder::new().await;
+        let server = HttpServer::stateless(instrumented(&recorder, TestServer::new(), options));
+        let host = posthog_rs::RequestContext::new()
+            .property("tenant", "acme")
+            .unwrap()
+            .property("authorization", "Bearer secret")
+            .unwrap();
+        let headers = [
+            ("x-posthog-distinct-id", "user_42"),
+            ("x-posthog-session-id", "ses_header"),
+        ];
+
+        let params = call_params("search_docs", json!({ "query": "flags" }));
+        server
+            .request_through_posthog_layer(params, &headers, host)
+            .await;
+
+        let event = recorder.only("$mcp_tool_call").await;
+        assert_eq!(text_property(&event, "tenant"), "acme");
+        assert_eq!(text_property(&event, "authorization"), "[redacted]");
+        assert_eq!(text_property(&event, "$request_path"), "/mcp");
+        assert_ne!(text_property(&event, "$session_id"), "ses_header");
+        match identified {
+            Some(person) => {
+                assert_eq!(event.distinct_id(), person);
+                assert!(!event.properties().contains_key("$process_person_profile"));
+            }
+            None => {
+                assert_eq!(event.distinct_id(), text_property(&event, "$session_id"));
+                assert_eq!(property(&event, "$process_person_profile"), &json!(false));
+            }
+        }
+    }
+}
