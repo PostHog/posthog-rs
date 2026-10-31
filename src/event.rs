@@ -137,6 +137,10 @@ pub struct Event {
     /// [`Event::new_anon`], so a request context option can still replace it.
     #[serde(skip)]
     personless_default: bool,
+    /// True for an event built by [`Event::new_anon`]: its distinct ID is generated, so the
+    /// SDK fills `process_person_profile: false` before `before_send` while the option is unset.
+    #[serde(skip)]
+    personless: bool,
 }
 
 impl Event {
@@ -167,6 +171,7 @@ impl Event {
             minimal_flag_called: false,
             request_context_applied: false,
             personless_default: false,
+            personless: false,
         }
     }
 
@@ -182,9 +187,10 @@ impl Event {
     ///
     /// Generates a random distinct ID and sets the `process_person_profile`
     /// option to `false` so PostHog does not create a person profile for the
-    /// event. To process one anyway, set the option with
+    /// event. To process one anyway, set the option to `true` with
     /// [`Event::insert_option`]; a legacy `$process_person_profile` property
-    /// does not override an option.
+    /// does not override an option. A `null` or removed option counts as unset,
+    /// so the SDK sets `false` again before `before_send`.
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
         let mut options = HashMap::new();
         options.insert(
@@ -202,6 +208,7 @@ impl Event {
             minimal_flag_called: false,
             request_context_applied: false,
             personless_default: true,
+            personless: true,
         }
     }
 
@@ -346,6 +353,7 @@ impl Event {
             minimal_flag_called: false,
             request_context_applied: false,
             personless_default: false,
+            personless: false,
         })
     }
 
@@ -408,6 +416,7 @@ impl Event {
             minimal_flag_called: false,
             request_context_applied: false,
             personless_default: false,
+            personless: false,
         }))
     }
 
@@ -521,6 +530,23 @@ impl Event {
         let slot = self.options.entry(key).or_insert(serde_json::Value::Null);
         if slot.is_null() {
             *slot = value;
+        }
+    }
+
+    /// Fill the personless `process_person_profile: false` while the option is unset (missing
+    /// or `null`), on an event built by [`Event::new_anon`]. Runs with the other SDK values,
+    /// before `before_send`.
+    pub(crate) fn fill_personless_default(&mut self) {
+        if !self.personless {
+            return;
+        }
+        let slot = self
+            .options
+            .entry(crate::constants::PROCESS_PERSON_PROFILE_OPT.to_string())
+            .or_insert(serde_json::Value::Null);
+        if slot.is_null() {
+            *slot = serde_json::Value::Bool(false);
+            self.personless_default = true;
         }
     }
 

@@ -97,6 +97,7 @@ impl FeatureFlagEvaluationsHost for FlagEventHost {
 }
 
 fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaults) {
+    event.fill_personless_default();
     if defaults.disable_geoip {
         event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
     }

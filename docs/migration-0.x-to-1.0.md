@@ -96,7 +96,7 @@ One behavior differs from the 0.x `capture-v1` feature:
 
 Two behaviors differ from every 0.x build:
 
-- `Event::new_anon` sets the `process_person_profile` option to `false` instead of the legacy property. Because an option wins over its legacy property, `insert_prop("$process_person_profile", true)` no longer turns processing back on for an anonymous event. Use `insert_option("process_person_profile", true)`.
+- `Event::new_anon` sets the `process_person_profile` option to `false` instead of the legacy property. Because an option wins over its legacy property, `insert_prop("$process_person_profile", true)` no longer turns processing back on for an anonymous event. Use `insert_option("process_person_profile", true)`. A `null` or removed option counts as unset, so the SDK sets `false` again before `before_send`.
 - Adding a group no longer turns on person processing. In 0.x, `Event::add_group` and `CaptureExceptionOptions::group` set `$process_person_profile` to `true`. In 1.0 they leave it unchanged. An event from `Event::new` still processes person profiles by default. An anonymous event with groups (from `Event::new_anon`, or an exception without a distinct ID) now stays personless. PostHog attaches groups for group analytics only to events that process person profiles, so set `insert_option("process_person_profile", true)` on those events if you need them in group analytics.
 
 Values the SDK adds, and the values you set:
