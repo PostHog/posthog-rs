@@ -13,7 +13,9 @@ use crate::event::{merge_groups_into, Event};
 
 /// RFC 3339 UTC with 3, 6 or 9 fractional digits: the fewest that keep every
 /// non-zero digit, so finer caller or clock precision is never truncated.
-fn wire_timestamp(ts: DateTime<Utc>) -> String {
+/// Every wire timestamp uses it: event `timestamp`, batch `created_at` and the
+/// `posthog-request-timestamp` header.
+pub(crate) fn wire_timestamp(ts: DateTime<Utc>) -> String {
     let nanos = ts.timestamp_subsec_nanos();
     let precision = if nanos % 1_000_000 == 0 {
         SecondsFormat::Millis
@@ -235,6 +237,8 @@ mod tests {
         for (input, expected) in [
             ("2023-01-01T10:00:00.123+03:00", "2023-01-01T07:00:00.123Z"),
             ("2023-01-01T07:00:00Z", "2023-01-01T07:00:00.000Z"),
+            ("2023-01-01T07:00:00.000Z", "2023-01-01T07:00:00.000Z"),
+            ("2023-01-01T07:00:00.120Z", "2023-01-01T07:00:00.120Z"),
             ("2023-01-01T07:00:00.123456Z", "2023-01-01T07:00:00.123456Z"),
             (
                 "2023-01-01T07:00:00.123456789Z",

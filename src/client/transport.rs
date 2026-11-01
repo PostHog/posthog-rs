@@ -34,7 +34,7 @@ use tracing::warn;
 use super::capture::{build_event_at, chunk_by_bytes, measure_event, measure_total};
 use super::common::{apply_on_error_hooks, preprocess_capture_event};
 use super::{CaptureCompression, CaptureFailure, ClientOptions, PostHogError};
-use crate::capture_event::{duplicates_dropped, CaptureEvent};
+use crate::capture_event::{duplicates_dropped, wire_timestamp, CaptureEvent};
 use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::Event;
@@ -1127,7 +1127,7 @@ impl Pipeline {
         let batch = RetryBatch {
             pending,
             request_id: Uuid::now_v7(),
-            created_at: self.clock.now_utc().to_rfc3339(),
+            created_at: wire_timestamp(self.clock.now_utc()),
             final_results: HashMap::new(),
             historical_migration,
             attempt: 1,
@@ -1430,8 +1430,11 @@ mod tests {
 
     impl ManualClock {
         fn new() -> Self {
+            Self::at(Utc::now())
+        }
+        fn at(wall: DateTime<Utc>) -> Self {
             Self {
-                inner: Arc::new(Mutex::new((Instant::now(), Utc::now()))),
+                inner: Arc::new(Mutex::new((Instant::now(), wall))),
             }
         }
         fn advance(&self, by: Duration) {
@@ -1811,6 +1814,33 @@ mod tests {
         );
         _stall.assert_calls(1);
         assert_eq!(handle.pending(), 0);
+    }
+
+    #[test]
+    fn whole_second_clock_sends_millisecond_created_at_and_header() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .header("posthog-request-timestamp", "2026-05-28T15:00:00.000Z")
+                .body_includes(r#""created_at":"2026-05-28T15:00:00.000Z""#)
+                .body_includes(r#""timestamp":"2026-05-28T15:00:00.000Z""#);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({ "results": {} }));
+        });
+
+        let wall = DateTime::parse_from_rfc3339("2026-05-28T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url()).build().unwrap(),
+            Arc::new(ManualClock::at(wall)),
+        );
+        handle.enqueue(Event::new("Captured", "user-1"));
+        handle.flush_blocking();
+
+        mock.assert_calls(1);
+        handle.shutdown_blocking();
     }
 
     /// Parse an RFC3339 wire timestamp and normalize it to UTC.

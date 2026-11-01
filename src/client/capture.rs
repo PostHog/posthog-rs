@@ -14,7 +14,8 @@ use super::retry::{capture_backoff_duration, is_retryable_status};
 pub(crate) use super::retry::{parse_retry_after, Step};
 use super::{common::preprocess_capture_event, CaptureCompression, ClientOptions};
 use crate::capture_event::{
-    BatchRequestRef, CaptureErrorResponse, CaptureEvent, CaptureResponse, EventResult, EventStatus,
+    wire_timestamp, BatchRequestRef, CaptureErrorResponse, CaptureEvent, CaptureResponse,
+    EventResult, EventStatus,
 };
 use crate::client::get_default_user_agent;
 use crate::endpoints::Endpoint;
@@ -159,7 +160,7 @@ pub(crate) fn build_headers_at(
     );
     headers.insert(
         "posthog-request-timestamp",
-        HeaderValue::from_str(&now.to_rfc3339())
+        HeaderValue::from_str(&wire_timestamp(now))
             .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
     );
     #[cfg(feature = "test-harness")]
@@ -299,6 +300,18 @@ pub(crate) fn prepare_immediate(
     events: Vec<Event>,
     historical_migration: bool,
 ) -> ImmediatePlan {
+    prepare_immediate_at(opts, lane, events, historical_migration, Utc::now())
+}
+
+/// Like [`prepare_immediate`] but with an injected `now` for the event
+/// fallback timestamps and each request's `created_at`.
+pub(crate) fn prepare_immediate_at(
+    opts: &ClientOptions,
+    lane: ImmediateLane,
+    events: Vec<Event>,
+    historical_migration: bool,
+    now: DateTime<Utc>,
+) -> ImmediatePlan {
     let defaults = opts.capture_defaults();
     let events: Vec<Event> = events
         .into_iter()
@@ -311,7 +324,7 @@ pub(crate) fn prepare_immediate(
 
     let historical_migration = historical_migration.then_some(true);
     let url = opts.endpoints().build_url(lane.endpoint);
-    let built = build_events_at(&events, Utc::now());
+    let built = build_events_at(&events, now);
     let chunks = match lane.batch_bytes_target {
         Some(target) => chunk_by_bytes(
             measure_within_limit(built, lane.max_event_bytes, &mut local_results),
@@ -331,7 +344,7 @@ pub(crate) fn prepare_immediate(
         .map(|pending| Prepared {
             url: url.clone(),
             request_id: Uuid::now_v7(),
-            created_at: Utc::now().to_rfc3339(),
+            created_at: wire_timestamp(now),
             historical_migration,
             submitted: pending.len(),
             pending,
@@ -1313,6 +1326,47 @@ mod tests {
         // user-agent mirrors the same identity string.
         let ua = headers.get("user-agent").unwrap().to_str().unwrap();
         assert_eq!(ua, expected);
+    }
+
+    // -- wire timestamps -------------------------------------------------------
+
+    /// A whole-second clock still sends `.000`; finer clock digits are kept.
+    #[test]
+    fn immediate_timestamps_keep_at_least_millisecond_digits() {
+        let opts = test_opts();
+        for (clock, expected) in [
+            ("2026-05-28T15:00:00Z", "2026-05-28T15:00:00.000Z"),
+            ("2026-05-28T15:00:00.000Z", "2026-05-28T15:00:00.000Z"),
+            ("2026-05-28T15:00:00.120Z", "2026-05-28T15:00:00.120Z"),
+            (
+                "2026-05-28T15:00:00.123456789Z",
+                "2026-05-28T15:00:00.123456789Z",
+            ),
+        ] {
+            let now = DateTime::parse_from_rfc3339(clock)
+                .unwrap()
+                .with_timezone(&Utc);
+            for lane in [ImmediateLane::analytics(), ImmediateLane::ai()] {
+                let plan =
+                    prepare_immediate_at(&opts, lane, vec![Event::new("e", "user-1")], false, now);
+                let request = &plan.requests[0];
+                assert_eq!(request.created_at, expected, "created_at, clock {clock}");
+                assert_eq!(
+                    request.pending[0].timestamp, expected,
+                    "event, clock {clock}"
+                );
+            }
+            let headers = build_headers_at(&opts, &Uuid::now_v7(), 1, now);
+            assert_eq!(
+                headers
+                    .get("posthog-request-timestamp")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                expected,
+                "header, clock {clock}"
+            );
+        }
     }
 
     // -- byte accounting (AI lane) -------------------------------------------
