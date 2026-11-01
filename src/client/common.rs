@@ -129,11 +129,14 @@ fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Eve
 
     for hook in hooks {
         let event = current.take().expect("event is present between hooks");
+        // The hook takes the event, so keep its name for the panic log line.
+        let name = event.event_name().to_string();
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.apply(event))) {
             Ok(Some(next)) => current = Some(next),
             Ok(None) => return None,
             Err(_) => {
-                error!("panic in PostHog before_send hook; dropping event");
+                // Never log the panic payload: it can hold the values the hook was redacting.
+                error!("panic in PostHog before_send hook for event {name:?}; dropping event");
                 return None;
             }
         }
@@ -900,16 +903,25 @@ mod tests {
     }
 
     #[test]
-    fn before_send_hook_panic_drops_event() {
+    fn before_send_hook_panic_drops_event_and_logs_only_its_name() {
         let options = crate::ClientOptionsBuilder::default()
             .api_key("test-key".to_string())
-            .before_send(|_event| panic!("boom"))
+            .before_send(|_event| panic!("secret-payload"))
             .build()
             .unwrap();
 
+        let (kept, logs) = crate::client::tests::with_logs(|| {
+            apply_before_send_hooks(&options.before_send, Event::new("signed_up", "user-1"))
+        });
+        assert!(kept.is_none());
         assert!(
-            apply_before_send_hooks(&options.before_send, Event::new("test", "user-1")).is_none()
+            logs.contains(
+                r#"panic in PostHog before_send hook for event "signed_up"; dropping event"#
+            ),
+            "{}",
+            logs
         );
+        assert!(!logs.contains("secret-payload"), "{}", logs);
     }
 
     #[test]
