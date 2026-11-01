@@ -63,6 +63,7 @@ The backend decides which names belong on the AI lane and reports a misrouted ev
 ### Event uuid, timestamp and distinct ID
 
 - The SDK assigns an event's uuid when you hand the event to `capture` or `capture_immediate`, not in `Event::new`. Capturing a cloned or reused `Event` twice now sends two uuids. In 0.x both copies shared one uuid, and capture V1 rejects a request that contains a uuid twice. A uuid set with `Event::set_uuid` is still sent as given on every capture.
+- Every timestamp the SDK sends is UTC with a `Z` and 3, 6 or 9 fractional-second digits: the event `timestamp`, the batch `created_at` and the `PostHog-Request-Timestamp` header. A whole second is sent as `.000Z`, and finer digits from your timestamp or the clock are kept.
 - `Event::set_timestamp` accepts timestamps in the future. In 0.x it returned `Error::InvalidTimestamp` for a timestamp more than 1 s ahead. PostHog clamps far-future timestamps, as it does for every other SDK. The method keeps its `Result` return type.
 - `Event::new` with an empty or whitespace-only distinct ID creates an anonymous event, as `Event::new_anon` does. In 0.x it sent the empty ID, and PostHog dropped the event.
 - The SDK sends an event with an empty name, and PostHog drops it with the per-event result `missing_event_name`, which reaches `on_error` (or the `CaptureSummary` of an immediate method). PostHog's other server SDKs drop it before sending.
@@ -129,7 +130,7 @@ An event's properties and options come from three layers. For the same key, a la
 `before_send` runs after all three and can change any value. The SDK has no client-wide layer for properties or options.
 
 - A context `process_person_profile` option replaces the `false` that `Event::new_anon` sets. A context `$process_person_profile` property does not, because the option wins over its legacy property.
-- `$feature_flag_called` events now take a request context value over the client's `$is_server` and `$geoip_disable` defaults, as other events do. A per-call `disable_geoip` still wins.
+- `$feature_flag_called` events now take a request context value over the client's `$is_server` and `$geoip_disable` defaults, as other events do. A per-call `disable_geoip` wins over both, and `Some(false)` sends `$geoip_disable: false`. In 0.x, `Some(false)` sent nothing, so a request context `$geoip_disable` applied.
 - `disable_geoip` defaults to `false`, as in 0.x and unlike PostHog's other server SDKs, so PostHog adds GeoIP properties based on the IP address of your server. To turn this off, call `.disable_geoip(true)` on `ClientOptionsBuilder`.
 
 The request context works only with the async client. Code inside `RequestContext::scope` sends the context with `capture`, `capture_batch`, `capture_immediate`, `capture_batch_immediate`, the `capture_ai` methods, `capture_exception`, `alias` and `group_identify`. A flag snapshot from `evaluate_flags` inside the scope keeps the context for its `$feature_flag_called` events, even after the scope ends. An event you build with `Event::new` or `Event::new_anon` keeps its own distinct ID. An exception without a distinct ID takes the context distinct ID.
