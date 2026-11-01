@@ -256,8 +256,8 @@ fn flag_called_event(params: FlagCalledEventParams, defaults: &CaptureDefaults) 
     }
     // A per-call value is the event's own, so it fills before the context; client
     // defaults are SDK values, so the context beats them.
-    if params.disable_geoip == Some(true) {
-        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
+    if let Some(disable_geoip) = params.disable_geoip {
+        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(disable_geoip));
     }
     params.context.apply_to_event(&mut event);
     if params.disable_geoip.is_none() && defaults.disable_geoip {
@@ -822,6 +822,38 @@ mod tests {
 
         assert_eq!(event.properties().get("$is_server"), Some(&json!(true)));
         assert_eq!(event.properties().get("$geoip_disable"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn flag_called_event_sends_a_per_call_geoip_value_over_context_and_client() {
+        let context = crate::RequestContext::new()
+            .property("$geoip_disable", true)
+            .unwrap();
+        for (per_call, client_default, expected) in [
+            (Some(true), false, Some(json!(true))),
+            (Some(false), true, Some(json!(false))),
+            (None, true, Some(json!(true))),
+            (None, false, None),
+        ] {
+            let mut params = flag_params(HashMap::new(), HashMap::new(), per_call);
+            let event = flag_called_event(params.clone(), &defaults(client_default, true))
+                .expect("valid flag-called event");
+            assert_eq!(
+                event.properties().get("$geoip_disable"),
+                expected.as_ref(),
+                "per call {per_call:?}, client {client_default}"
+            );
+
+            // The per-call value beats a context value; without one the context wins.
+            params.context = context.clone();
+            let event = flag_called_event(params, &defaults(client_default, true))
+                .expect("valid flag-called event");
+            assert_eq!(
+                event.properties().get("$geoip_disable"),
+                Some(&json!(per_call.unwrap_or(true))),
+                "with context: per call {per_call:?}, client {client_default}"
+            );
+        }
     }
 
     #[test]
