@@ -56,6 +56,7 @@ pub(crate) enum Control {
     /// *before* older held retries. Used by the panic hook so a retry backlog
     /// behind a slow endpoint can't starve the just-enqueued `$exception` within
     /// the hook's short bounded wait.
+    #[cfg_attr(not(feature = "error-tracking"), allow(dead_code))]
     FlushCaptures(Completion),
     Shutdown(Completion),
     /// Test-only: re-evaluate the (virtual) clock and flush/retry whatever is now
