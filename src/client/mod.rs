@@ -525,7 +525,7 @@ impl From<(&str, &str)> for ClientOptions {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -570,7 +570,7 @@ mod tests {
     }
 
     /// Run `f` and return its result with every log line it emitted on this thread.
-    pub(super) fn with_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
+    pub(crate) fn with_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
         let logs = Arc::new(Mutex::new(Vec::new()));
         let writer = logs.clone();
         let subscriber = tracing_subscriber::fmt()
