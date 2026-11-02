@@ -25,6 +25,9 @@ const STATUS_PATH: &str = "/api/projects/@current/messaging/emails/";
 const US_APP_HOST: &str = "https://us.posthog.com";
 const EU_APP_HOST: &str = "https://eu.posthog.com";
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+/// The most of a reply body the client reads, after decompression. PostHog's
+/// email replies are a few hundred bytes, so a larger body is unreadable.
+pub(crate) const MAX_REPLY_BYTES: usize = 1 << 20;
 const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
 const MAX_TEMPLATE_KEY_LEN: usize = 400;
 
@@ -323,6 +326,19 @@ pub(crate) fn request_error(error: reqwest::Error) -> EmailError {
         .with_source(error);
     }
     EmailError::new("network_error", "The request to PostHog failed.").with_source(error)
+}
+
+/// A reply body that could not be read. Like any network error it is
+/// retried, because an accepted send may already be queued.
+pub(crate) fn read_error(error: impl std::error::Error + Send + Sync + 'static) -> EmailError {
+    EmailError::new("network_error", "The reply from PostHog could not be read.").with_source(error)
+}
+
+pub(crate) fn reply_too_large() -> EmailError {
+    EmailError::new(
+        "network_error",
+        format!("PostHog's reply is larger than {MAX_REPLY_BYTES} bytes, so the client did not read it."),
+    )
 }
 
 fn text(fields: &Map<String, Value>, name: &str) -> Option<String> {

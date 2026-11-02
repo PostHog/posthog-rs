@@ -223,3 +223,27 @@ fn the_email_timeout_replaces_a_custom_clients_timeout() {
         elapsed
     );
 }
+
+#[test]
+fn a_reply_over_one_mebibyte_is_not_read() {
+    let padding = "x".repeat(1 << 20);
+    let server = ScriptedServer::start(vec![
+        Answer::json(202, json!({"message_id": MESSAGE_ID, "padding": padding})),
+        Answer::json(503, json!({"code": "big", "padding": padding})),
+    ]);
+    let client = client_for(&server);
+    let send = || {
+        client
+            .emails()
+            .send(TemplateEmail::new("user@example.com", TEMPLATE_ID).max_retries(0))
+    };
+
+    let error = send().unwrap_err();
+    assert_eq!(error.code(), "network_error");
+    assert_eq!(error.status(), None);
+
+    let error = send().unwrap_err();
+    assert_eq!(error.code(), "api_error");
+    assert_eq!(error.status(), Some(503));
+    assert_eq!(error.kind(), EmailErrorKind::ServiceUnavailable);
+}

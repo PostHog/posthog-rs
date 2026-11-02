@@ -537,3 +537,26 @@ async fn the_email_timeout_replaces_a_custom_clients_timeout() {
         elapsed
     );
 }
+
+#[tokio::test]
+async fn a_reply_over_one_mebibyte_is_not_read() {
+    let padding = "x".repeat(1 << 20);
+    let server = ScriptedServer::start_async(vec![
+        Answer::json(202, json!({"message_id": MESSAGE_ID, "padding": padding})),
+        Answer::json(503, json!({"code": "big", "padding": padding})),
+    ])
+    .await;
+    let client = client_for(&server).await;
+    let email = || TemplateEmail::new("user@example.com", TEMPLATE_ID).max_retries(0);
+
+    // An accepted send may be queued, so an unread acceptance is a network error.
+    let error = client.emails().send(email()).await.unwrap_err();
+    assert_eq!(error.code(), "network_error");
+    assert_eq!(error.status(), None);
+
+    // A refusal still counts by its status, without its unread code.
+    let error = client.emails().send(email()).await.unwrap_err();
+    assert_eq!(error.code(), "api_error");
+    assert_eq!(error.status(), Some(503));
+    assert_eq!(error.kind(), EmailErrorKind::ServiceUnavailable);
+}

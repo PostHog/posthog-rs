@@ -1,3 +1,5 @@
+use std::io::Read;
+
 use reqwest::blocking::Client as HttpClient;
 use reqwest::header::HeaderMap;
 use reqwest::Method;
@@ -181,15 +183,15 @@ impl<'a> Emails<'a> {
         let response = request.send().map_err(shared::request_error)?;
         let status = response.status().as_u16();
         let retry_after = parse_retry_after(response.headers());
-        match response.bytes() {
+        match read_capped(response) {
             Ok(bytes) => Ok(Reply {
                 status,
                 payload: serde_json::from_slice(&bytes).ok(),
                 retry_after,
             }),
-            // An accepted send may already be queued, so a failed read stays a
-            // retryable network error.
-            Err(error) if (200..300).contains(&status) => Err(shared::request_error(error)),
+            // An accepted send may already be queued, so a failed or oversized
+            // read stays a retryable network error.
+            Err(error) if (200..300).contains(&status) => Err(error),
             // The status and Retry-After still decide the retry when an error
             // body can't be read.
             Err(_) => Ok(Reply {
@@ -199,4 +201,17 @@ impl<'a> Emails<'a> {
             }),
         }
     }
+}
+
+/// Reads the body, decompressed, up to [`shared::MAX_REPLY_BYTES`].
+fn read_capped(response: reqwest::blocking::Response) -> Result<Vec<u8>, EmailError> {
+    let mut body = Vec::new();
+    response
+        .take(shared::MAX_REPLY_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(shared::read_error)?;
+    if body.len() > shared::MAX_REPLY_BYTES {
+        return Err(shared::reply_too_large());
+    }
+    Ok(body)
 }
