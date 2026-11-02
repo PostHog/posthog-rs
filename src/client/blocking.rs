@@ -164,8 +164,8 @@ impl Client {
     /// with a single warning).
     ///
     /// Use [`Client::capture_ai`] for LLM analytics events (`$ai_generation`,
-    /// `$ai_span`, …): `capture` never reroutes by event name, and the
-    /// analytics endpoint does not accept AI events.
+    /// `$ai_span`, …): `capture` never reroutes by event name. The analytics
+    /// endpoint still accepts AI events for now, but large ones need `capture_ai`.
     #[instrument(skip(self, event), level = "debug")]
     pub fn capture(&self, event: Event) {
         if let Some(transport) = &self.transport {

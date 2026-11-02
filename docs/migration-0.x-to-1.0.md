@@ -38,7 +38,7 @@ All event-producing SDK paths now use the same capture endpoint, including error
 
 ### Reverse proxies
 
-If you send events through your own reverse proxy, update it before you upgrade. Forward `/i/v1/analytics/events` and `/i/v1/ai/events` to PostHog. Pass `Authorization` (the project token, sent as `Bearer <token>`), every `PostHog-*` header, `Content-Type`, `Content-Encoding` and `User-Agent` through unchanged: PostHog answers `401` without `Authorization` and `400` without the others, and the batch fails. Accept request bodies up to 20 MB: AI requests are often larger than 1 MB, the default limit in nginx and ingress-nginx, and a `413` from the proxy fails the batch. PostHog's managed reverse proxy already does this. See the [proxy guides](https://posthog.com/docs/advanced/proxy).
+If you send events through your own reverse proxy, update it before you upgrade. Forward `/i/v1/analytics/events` and `/i/v1/ai/events` to PostHog. Pass `Authorization` (the project token, sent as `Bearer <token>`), every `PostHog-*` header, `Content-Type`, `Content-Encoding` and `User-Agent` through unchanged: PostHog answers `401` without `Authorization` and `400` without the others, and the batch fails. If the proxy strips other credentials, keep `Authorization` values that start with `Bearer phc_`, `Bearer phs_` or `Bearer phx_`, and the exact `Bearer <token>` of an older project token without a prefix. Accept request bodies up to 20 MB: AI requests are often larger than 1 MB, the default limit in nginx and ingress-nginx, and a `413` from the proxy fails the batch. PostHog's managed reverse proxy already does this. See the [proxy guides](https://posthog.com/docs/advanced/proxy).
 
 ### Event IDs
 
@@ -48,28 +48,33 @@ The SDK gives every event a UUIDv7 `uuid` and every request a UUIDv7 request ID.
 
 PostHog sets `$lib` and `$lib_version` on every event from the `posthog-sdk-info` request header, which is always `posthog-rs/<version>`. The SDK no longer adds them to properties. If you set them with `insert_prop` or in `before_send`, the SDK removes them before it sends the event, so stored events always report `posthog-rs`. `before_send` still sees the value you set. In 0.x without `capture-v1`, PostHog stored a `$lib` or `$lib_version` you set. The 0.x `capture-v1` path already sent the header, so PostHog replaced your value.
 
+This includes the `mcp` feature, which sets `$lib` to `posthog-rs-mcp` on its events. PostHog now stores `posthog-rs` for them. In 0.x without `capture-v1`, it stored `posthog-rs-mcp`. To find MCP events, filter on `$mcp_interface`, which is `mcp` on every MCP event.
+
 The SDK no longer sends `$lib_version__major`, `$lib_version__minor` or `$lib_version__patch`. Only the 0.x V0 path sent them. Filter on `$lib_version` instead.
 
 ### AI events
 
-Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog_rs::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size. The SDK drops an event over the backend's 8 MiB per-event limit locally, on the background lane and in the immediate variants. The immediate variants return that drop in the `CaptureSummary` with the detail `ai_event_too_big`. An event too large for the AI endpoint's request size limit gets HTTP 413 instead: `capture_ai_batch_immediate` returns `Error::BadRequest` and does not send the rest of the batch. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
+Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog_rs::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size. The SDK drops an event over the backend's 8 MiB per-event limit locally, on the background lane and in the immediate variants. On the background lane, that drop logs a warning with the event name and size, and it does not reach `on_error`. The immediate variants return that drop in the `CaptureSummary` with the detail `ai_event_too_big`. An event too large for the AI endpoint's request size limit gets HTTP 413 instead: `capture_ai_batch_immediate` returns `Error::BadRequest` and does not send the rest of the batch. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
 
 `capture` never reroutes by event name. Send AI events with `capture_ai`. PostHog owns the `$ai_` prefix, so don't use it for your own events. For now the V1 analytics endpoint still accepts `$ai_` events sent through `capture`, but this is temporary, and large AI events always need `capture_ai`.
 
-The backend decides which names belong on the AI lane and reports a misrouted or oversize event as a per-event `drop` inside a `200`. That verdict reaches an `on_error` hook (`CaptureFailure::endpoint()` says which lane) or the returned `CaptureSummary` for the immediate variants; without a hook the SDK logs one aggregate warning per batch with drop and retry totals. To log every drop and retry reason, call `CaptureFailure::verdict_summary()` in an `on_error` hook; it returns one line such as `drop/invalid_options=2, retry/not_persisted=1`.
+The backend decides which names belong on the AI lane and reports a misrouted event as a per-event `drop` inside a `200`. That verdict reaches an `on_error` hook (`CaptureFailure::endpoint()` says which lane) or the returned `CaptureSummary` for the immediate variants; without a hook the SDK logs one aggregate warning per batch with drop and retry totals. To log every drop and retry reason, call `CaptureFailure::verdict_summary()` in an `on_error` hook; it returns one line such as `drop/invalid_options=2, retry/not_persisted=1`.
 
 ### Event uuid, timestamp and distinct ID
 
 - The SDK assigns an event's uuid when you hand the event to `capture` or `capture_immediate`, not in `Event::new`. Capturing a cloned or reused `Event` twice now sends two uuids. In 0.x both copies shared one uuid, and capture V1 rejects a request that contains a uuid twice. A uuid set with `Event::set_uuid` is still sent as given on every capture.
+- Every timestamp the SDK sends is UTC with a `Z` and 3, 6 or 9 fractional-second digits: the event `timestamp`, the batch `created_at` and the `PostHog-Request-Timestamp` header. A whole second is sent as `.000Z`, and finer digits from your timestamp or the clock are kept.
 - `Event::set_timestamp` accepts timestamps in the future. In 0.x it returned `Error::InvalidTimestamp` for a timestamp more than 1 s ahead. PostHog clamps far-future timestamps, as it does for every other SDK. The method keeps its `Result` return type.
 - `Event::new` with an empty or whitespace-only distinct ID creates an anonymous event, as `Event::new_anon` does. In 0.x it sent the empty ID, and PostHog dropped the event.
+- The SDK sends an event with an empty name, and PostHog drops it with the per-event result `missing_event_name`, which reaches `on_error` (or the `CaptureSummary` of an immediate method). PostHog's other server SDKs drop it before sending.
+- A `NaN` or infinite number in a property is sent as `null`, as in 0.x, and the event is kept. A `null` in `$set` clears that person property.
 - PostHog drops an event whose distinct ID is over 200 UTF-8 bytes, with the per-event result `distinct_id_too_large`, which reaches `on_error` (or the `CaptureSummary` of an immediate method). 0.x sent events to legacy capture, which shortened the ID to 200 characters and kept the event.
 - PostHog drops an event whose name is over 200 UTF-8 bytes, with the per-event result `event_name_too_long`, reported the same way. This is new: legacy capture had no limit on event name length.
 - `group_identify` sends the request context's distinct ID when the context has one, and `$<group_type>_<group_key>` otherwise. It never adds the context session ID. In 0.x it always sent `$<group_type>_<group_key>`, with the context session ID. If `$<group_type>_<group_key>` is over 200 bytes, PostHog drops the event. To set a group with a longer key, capture a `$groupidentify` event yourself with `Event::new("$groupidentify", <your distinct ID>)` and the `$group_type`, `$group_key` and `$group_set` properties.
 
 ### Event options
 
-Capture V1 reads per-event processing controls, such as person profile processing, from an `options` map that is sent next to `properties`. Set them with `Event::insert_option`, or with `CaptureExceptionOptions::option` for exceptions. They work the same on `capture` and `capture_ai`. To set an option on every event in a request, use `RequestContext::option`. An option the event sets, other than `null`, wins over it.
+Capture V1 reads per-event processing controls, such as person profile processing, from an `options` map that is sent next to `properties`. Set them with `Event::insert_option`, or with `CaptureExceptionOptions::option` for exceptions. They work the same on `capture` and `capture_ai`. To set an option on every event in a request, use `RequestContext::option` (see [Layers and which calls they reach](#layers-and-which-calls-they-reach)). An option the event sets, other than `null`, wins over it.
 
 ```rust
 let mut event = posthog_rs::Event::new("signed_up", "user-123");
@@ -114,6 +119,26 @@ One behavior differs from 0.x without `capture-v1`, which used the V0 endpoint:
 
 - PostHog now reads common forms of an option value, so `"$process_person_profile": "false"` turns person processing off. The V0 endpoint ignored that string. A value PostHog cannot read now drops the event, where the V0 endpoint kept the event and ignored the value.
 
+### Layers and which calls they reach
+
+An event's properties and options come from three layers. For the same key, a layer earlier in this list wins:
+
+1. Event values: what you set on the event with `insert_prop` and `insert_option`, or on `CaptureExceptionOptions`. For `$feature_flag_called` events, a per-call `disable_geoip` in `EvaluateFlagsOptions` counts as an event value.
+2. Request context: properties and options from `RequestContext`. They fill only the keys the event leaves unset.
+3. SDK values: `$os`, `$os_version`, and `$is_server` and `$geoip_disable` from the client settings, plus the `process_person_profile` option that `Event::new_anon` sets to `false`.
+
+`before_send` runs after all three and can change any value. The SDK has no client-wide layer for properties or options.
+
+- A context `process_person_profile` option replaces the `false` that `Event::new_anon` sets. A context `$process_person_profile` property does not, because the option wins over its legacy property.
+- `$feature_flag_called` events now take a request context value over the client's `$is_server` and `$geoip_disable` defaults, as other events do. A per-call `disable_geoip` wins over both, and `Some(false)` sends `$geoip_disable: false`. In 0.x, `Some(false)` sent nothing, so a request context `$geoip_disable` applied.
+- `disable_geoip` defaults to `false`, as in 0.x and unlike PostHog's other server SDKs, so PostHog adds GeoIP properties based on the IP address of your server. To turn this off, call `.disable_geoip(true)` on `ClientOptionsBuilder`.
+
+The request context works only with the async client. Code inside `RequestContext::scope` sends the context with `capture`, `capture_batch`, `capture_immediate`, `capture_batch_immediate`, the `capture_ai` methods, `capture_exception`, `alias` and `group_identify`. A flag snapshot from `evaluate_flags` inside the scope keeps the context for its `$feature_flag_called` events, even after the scope ends. An event you build with `Event::new` or `Event::new_anon` keeps its own distinct ID. An exception without a distinct ID takes the context distinct ID.
+
+The blocking client has no scoped context, and `RequestContext::current()` returns `None`. Apply a context to each event yourself with `RequestContext::event` or `RequestContext::apply_to_event`, and use `evaluate_flags_with_context` for flags.
+
+A context `process_person_profile` of `false`, set as an option or as the legacy `$process_person_profile` property, also reaches `alias` and `group_identify`. PostHog drops `$create_alias` and `$groupidentify` events that have person processing off, and records an `invalid_event_when_process_person_profile_is_false` ingestion warning in your project. Capture accepts these events before the drop, so `on_error` does not see it. In 0.x, a context `$process_person_profile` property already reached these calls.
+
 ### Session and window IDs
 
 The SDK sends `$session_id` and `$window_id` as top-level fields of the event, because capture reads them there and requires strings. A string value, including an empty string, is sent unchanged. Any other value is dropped, and the SDK logs a warning for each drop that names the key and the value's type, never the value. A `null` value counts as unset and drops without a warning. In 0.x without `capture-v1`, the SDK sent any value as a property.
@@ -126,7 +151,7 @@ Brotli and Zstandard support is always compiled in. `zstd-sys` builds C code wit
 
 ### Retry and persistence results
 
-The V1 endpoint returns a result for each event. The SDK retries transient request failures and only the events with retryable results from a partial response. Each capture retry wait varies at random by up to 25% either way, so clients that fail together do not retry together; a `Retry-After` header is still the minimum wait.
+The V1 endpoint returns a result for each event. The SDK retries transient request failures and only the events with retryable results from a partial response. Each capture retry wait varies at random by up to 25% either way, so clients that fail together do not retry together; a `Retry-After` header is still the minimum wait, capped at `retry_max_backoff_ms` (30 s by default) as in 0.x.
 
 Capture now makes 4 attempts by default (`max_capture_attempts`, was 3). The first retry waits 100 ms (`retry_initial_backoff_ms`, was 200 ms), and each later wait doubles up to `retry_max_backoff_ms`. These options apply to `capture` and `capture_ai`. Remote `/flags` retries no longer use them. They wait 300 ms before the first retry (was 200 ms by default) and double up to 30 s. `feature_flags_request_max_retries` still sets how many `/flags` retries the SDK makes.
 
@@ -134,7 +159,7 @@ Capture now makes 4 attempts by default (`max_capture_attempts`, was 3). The fir
 
 The SDK retries network errors and HTTP 404, 408, 429, 500, 502, 503 and 504. Every other status is terminal. The 0.x V0 path retried a 429 only when it had a `Retry-After` header, and never retried a 404. Capture itself does not return 429, but a proxy in front of it can. A 404 that lasts through every attempt can mean the PostHog deployment has no capture V1 route, for example an older self-hosted install. HTTP 402 means the whole request is over the billing limit. A product quota drops single events inside a `200`, as a per-event `drop` such as `llm_events_over_quota`. `Retry-After` is still honored for retryable statuses and `retry` results.
 
-Without an `on_error` hook, a request that fails for good logs `posthog-rs: dropping <n> event(s) for <endpoint>: <error>`, as in 0.x. The error text can include PostHog's response body. Register an `on_error` hook to choose what to log. The hook must not call back into the SDK (`capture`, `flush` or `shutdown`), because an event sent while handling a failure can fail again and loop. The immediate methods never call `on_error`.
+Without an `on_error` hook, a request that fails for good logs `posthog-rs: dropping <n> event(s) for <endpoint>: <error>`. 0.x logged the same line without `for <endpoint>`. The queue-full and shutdown warnings now name the endpoint too, for example `posthog-rs: event queue full for <endpoint> (capacity <n>); dropping events`. Update any log filter that matches the 0.x text. The error text can include PostHog's response body. Register an `on_error` hook to choose what to log. The hook must not call back into the SDK (`capture`, `flush` or `shutdown`), because an event sent while handling a failure can fail again and loop. The immediate methods never call `on_error`.
 
 During shutdown, the SDK makes one final attempt per batch. If that attempt gets a retryable failure (a network error, a retryable HTTP status, or a per-event `retry` result) while the batch still has attempts left, the SDK drops those events instead of retrying them. It also drops any events left when `shutdown_timeout_ms` runs out. These drops are logged with a warning that names the endpoint, and they do not reach `on_error`, as in 0.x. A batch that has used all its `max_capture_attempts` fails as usual and reaches `on_error`. Queue-full and `before_send` drops do not reach `on_error` either.
 

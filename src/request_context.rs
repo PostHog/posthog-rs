@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{event::fill_property, Error, Event};
+#[cfg(feature = "error-tracking")]
+use crate::event::fill_property;
+use crate::{Error, Event};
 
 #[cfg(feature = "async-client")]
 tokio::task_local! {
