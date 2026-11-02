@@ -324,6 +324,9 @@ impl Client {
     /// Fire-and-forget, like [`Client::capture`], for a blank `group_type` or
     /// `group_key`: the event is dropped with a warning rather than sent.
     ///
+    /// The event's distinct id is the request context's distinct id when one is
+    /// set, else `$<group_type>_<group_key>`. The context session id is never added.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Serialization`] if `properties` fails to serialize to
@@ -715,6 +718,10 @@ impl Client {
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureSummary, Error> {
+        let mut events = events;
+        for event in &mut events {
+            crate::request_context::apply_current_context(event);
+        }
         if self.options.is_disabled() || events.is_empty() {
             return Ok(CaptureSummary::default());
         }
