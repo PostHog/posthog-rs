@@ -194,8 +194,8 @@ impl Client {
     /// with a single warning).
     ///
     /// Use [`Client::capture_ai`] for LLM analytics events (`$ai_generation`,
-    /// `$ai_span`, …): `capture` never reroutes by event name, and the
-    /// analytics endpoint does not accept AI events.
+    /// `$ai_span`, …): `capture` never reroutes by event name. The analytics
+    /// endpoint still accepts AI events for now, but large ones need `capture_ai`.
     #[instrument(skip(self, event), level = "debug")]
     pub fn capture(&self, event: Event) {
         if let Some(transport) = &self.transport {
@@ -323,6 +323,9 @@ impl Client {
     ///
     /// Fire-and-forget, like [`Client::capture`], for a blank `group_type` or
     /// `group_key`: the event is dropped with a warning rather than sent.
+    ///
+    /// The event's distinct id is the request context's distinct id when one is
+    /// set, else `$<group_type>_<group_key>`. The context session id is never added.
     ///
     /// # Errors
     ///
@@ -715,6 +718,10 @@ impl Client {
         events: Vec<Event>,
         historical_migration: bool,
     ) -> Result<CaptureSummary, Error> {
+        let mut events = events;
+        for event in &mut events {
+            crate::request_context::apply_current_context(event);
+        }
         if self.options.is_disabled() || events.is_empty() {
             return Ok(CaptureSummary::default());
         }

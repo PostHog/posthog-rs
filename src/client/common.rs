@@ -129,11 +129,14 @@ fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Eve
 
     for hook in hooks {
         let event = current.take().expect("event is present between hooks");
+        // The hook takes the event, so keep its name for the panic log line.
+        let name = event.event_name().to_string();
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.apply(event))) {
             Ok(Some(next)) => current = Some(next),
             Ok(None) => return None,
             Err(_) => {
-                error!("panic in PostHog before_send hook; dropping event");
+                // Never log the panic payload: it can hold the values the hook was redacting.
+                error!("panic in PostHog before_send hook for event {name:?}; dropping event");
                 return None;
             }
         }
@@ -253,8 +256,8 @@ fn flag_called_event(params: FlagCalledEventParams, defaults: &CaptureDefaults) 
     }
     // A per-call value is the event's own, so it fills before the context; client
     // defaults are SDK values, so the context beats them.
-    if params.disable_geoip == Some(true) {
-        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
+    if let Some(disable_geoip) = params.disable_geoip {
+        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(disable_geoip));
     }
     params.context.apply_to_event(&mut event);
     if params.disable_geoip.is_none() && defaults.disable_geoip {
@@ -822,6 +825,38 @@ mod tests {
     }
 
     #[test]
+    fn flag_called_event_sends_a_per_call_geoip_value_over_context_and_client() {
+        let context = crate::RequestContext::new()
+            .property("$geoip_disable", true)
+            .unwrap();
+        for (per_call, client_default, expected) in [
+            (Some(true), false, Some(json!(true))),
+            (Some(false), true, Some(json!(false))),
+            (None, true, Some(json!(true))),
+            (None, false, None),
+        ] {
+            let mut params = flag_params(HashMap::new(), HashMap::new(), per_call);
+            let event = flag_called_event(params.clone(), &defaults(client_default, true))
+                .expect("valid flag-called event");
+            assert_eq!(
+                event.properties().get("$geoip_disable"),
+                expected.as_ref(),
+                "per call {per_call:?}, client {client_default}"
+            );
+
+            // The per-call value beats a context value; without one the context wins.
+            params.context = context.clone();
+            let event = flag_called_event(params, &defaults(client_default, true))
+                .expect("valid flag-called event");
+            assert_eq!(
+                event.properties().get("$geoip_disable"),
+                Some(&json!(per_call.unwrap_or(true))),
+                "with context: per call {per_call:?}, client {client_default}"
+            );
+        }
+    }
+
+    #[test]
     fn flag_event_hosts_keep_dedup_state_separate() {
         let first = FlagEventHost::new(defaults(false, true), None);
         let second = FlagEventHost::new(defaults(false, true), None);
@@ -900,16 +935,25 @@ mod tests {
     }
 
     #[test]
-    fn before_send_hook_panic_drops_event() {
+    fn before_send_hook_panic_drops_event_and_logs_only_its_name() {
         let options = crate::ClientOptionsBuilder::default()
             .api_key("test-key".to_string())
-            .before_send(|_event| panic!("boom"))
+            .before_send(|_event| panic!("secret-payload"))
             .build()
             .unwrap();
 
+        let (kept, logs) = crate::client::tests::with_logs(|| {
+            apply_before_send_hooks(&options.before_send, Event::new("signed_up", "user-1"))
+        });
+        assert!(kept.is_none());
         assert!(
-            apply_before_send_hooks(&options.before_send, Event::new("test", "user-1")).is_none()
+            logs.contains(
+                r#"panic in PostHog before_send hook for event "signed_up"; dropping event"#
+            ),
+            "{}",
+            logs
         );
+        assert!(!logs.contains("secret-payload"), "{}", logs);
     }
 
     #[test]

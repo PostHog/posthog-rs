@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{event::fill_property, Error, Event};
+#[cfg(feature = "error-tracking")]
+use crate::event::fill_property;
+use crate::{Error, Event};
 
 #[cfg(feature = "async-client")]
 tokio::task_local! {
@@ -110,7 +112,12 @@ impl RequestContext {
 
     /// Pins these defaults before delivery. Explicit event identity, properties and options win.
     pub fn apply_to_event(&self, event: &mut Event) {
+        let skip_session = event.event_name() == "$groupidentify";
         for (key, value) in &self.properties {
+            // A session on `$groupidentify` would reassign the session to the group's distinct id.
+            if skip_session && key == "$session_id" {
+                continue;
+            }
             event.insert_prop_default(key.clone(), value.clone());
         }
         for (key, value) in &self.options {
@@ -146,6 +153,26 @@ impl RequestContext {
             }
         }
         options
+    }
+}
+
+/// The current context's distinct id, if it has one that is not blank.
+pub(crate) fn current_distinct_id() -> Option<String> {
+    #[cfg(feature = "async-client")]
+    {
+        CURRENT
+            .try_with(|context| {
+                context
+                    .get_distinct_id()
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_string)
+            })
+            .ok()
+            .flatten()
+    }
+    #[cfg(not(feature = "async-client"))]
+    {
+        None
     }
 }
 

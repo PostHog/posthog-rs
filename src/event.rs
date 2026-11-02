@@ -7,6 +7,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::feature_flag_evaluations::FeatureFlagEvaluations;
+use crate::request_context::current_distinct_id;
 use crate::Error;
 
 /// The only properties retained on a minimized `$feature_flag_called` event.
@@ -360,7 +361,8 @@ impl Event {
     /// Build the `$groupidentify` event backing [`crate::Client::group_identify`].
     ///
     /// Sets `$group_type`, `$group_key`, and `$group_set` in `properties`.
-    /// The event is attributed to `format!("${group_type}_{group_key}")`.
+    /// The event takes the request context's distinct id when one is set, else
+    /// `format!("${group_type}_{group_key}")`.
     ///
     /// Returns `Ok(None)` when either `group_type` or `group_key` is blank (a
     /// warning is logged and the event is dropped).
@@ -393,7 +395,8 @@ impl Event {
             )));
         }
 
-        let distinct_id = format!("${group_type}_{group_key}");
+        let distinct_id =
+            current_distinct_id().unwrap_or_else(|| format!("${group_type}_{group_key}"));
         let mut props = HashMap::new();
         props.insert(
             "$group_type".to_string(),
