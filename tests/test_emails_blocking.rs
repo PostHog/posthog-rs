@@ -247,3 +247,24 @@ fn a_reply_over_one_mebibyte_is_not_read() {
     assert_eq!(error.status(), Some(503));
     assert_eq!(error.kind(), EmailErrorKind::ServiceUnavailable);
 }
+
+#[test]
+fn reading_stops_at_the_cap_on_an_endless_reply() {
+    let client = posthog_rs::client(
+        options(&email_support::endless_body_server())
+            .email_request_timeout_seconds(10)
+            .email_request_max_retries(0)
+            .build()
+            .unwrap(),
+    );
+
+    let started = std::time::Instant::now();
+    let error = client
+        .emails()
+        .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
+        .unwrap_err();
+
+    assert_eq!(error.code(), "network_error");
+    assert!(error.message().contains("larger than"), "{}", error);
+    assert!(started.elapsed() < Duration::from_secs(5));
+}

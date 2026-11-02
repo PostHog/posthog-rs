@@ -140,6 +140,31 @@ fn script(answers: Vec<Answer>) -> (Arc<Mutex<Vec<Recorded>>>, Responder) {
     (requests, Box::new(respond))
 }
 
+/// A server that answers `202` with a 10 MB `content-length`, sends 1.1 MiB
+/// of it, then holds the connection open. Only a client that stops reading at
+/// its cap gets an answer before its request timeout. httpmock always sends
+/// the whole body, so this one is a raw socket.
+pub fn endless_body_server() -> String {
+    use std::io::{Read, Write};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            std::thread::spawn(move || {
+                let mut request = [0; 64 * 1024];
+                let _ = stream.read(&mut request);
+                let head = "HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\ncontent-length: 10000000\r\n\r\n";
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&vec![b' '; (1 << 20) + (1 << 17)]);
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_secs(20));
+            });
+        }
+    });
+    url
+}
+
 /// A URL where nothing listens.
 pub fn closed_url() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
