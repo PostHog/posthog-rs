@@ -1,5 +1,6 @@
 use std::error::Error as StdError;
 use std::fmt;
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::time::Duration;
 
 /// A coarse category of an [`EmailError`], for code that branches on the kind
@@ -104,7 +105,23 @@ struct Details {
     docs_url: Option<String>,
     field: Option<String>,
     retry_after: Option<Duration>,
-    source: Option<Box<dyn StdError + Send + Sync>>,
+    source: Option<Source>,
+}
+
+/// The error that caused an [`EmailError`], such as a `reqwest::Error`.
+///
+/// Nothing changes it after the error is built, so it keeps `EmailError`, and
+/// the crate's `Error` that wraps it, unwind safe, as that `Error` was before
+/// it had an email variant.
+struct Source(Box<dyn StdError + Send + Sync>);
+
+impl UnwindSafe for Source {}
+impl RefUnwindSafe for Source {}
+
+impl fmt::Debug for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
 }
 
 impl EmailError {
@@ -168,7 +185,7 @@ impl EmailError {
     }
 
     pub(crate) fn with_source(mut self, source: impl StdError + Send + Sync + 'static) -> Self {
-        self.0.source = Some(Box::new(source));
+        self.0.source = Some(Source(Box::new(source)));
         self
     }
 
@@ -240,13 +257,20 @@ impl StdError for EmailError {
         self.0
             .source
             .as_ref()
-            .map(|source| source.as_ref() as &(dyn StdError + 'static))
+            .map(|source| source.0.as_ref() as &(dyn StdError + 'static))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::EmailErrorKind as Kind;
+
+    #[test]
+    fn errors_keep_their_auto_traits() {
+        fn check<T: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        check::<super::EmailError>();
+        check::<crate::Error>();
+    }
 
     #[test]
     fn kinds_follow_the_status_and_code() {
