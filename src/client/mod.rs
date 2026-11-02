@@ -49,6 +49,7 @@ impl CaptureCompression {
 #[cfg(not(feature = "async-client"))]
 mod blocking;
 mod retry;
+pub(crate) use retry::parse_retry_after;
 mod transport;
 #[cfg(not(feature = "capture-v1"))]
 mod v0_capture;
@@ -129,7 +130,7 @@ pub struct ClientOptions {
     /// App hosts such as `https://eu.posthog.com` are normalized to ingestion
     /// hosts before requests are sent.
     #[builder(setter(into, strip_option), default)]
-    host: Option<String>,
+    pub(crate) host: Option<String>,
 
     /// PostHog project API key (project token). If missing or blank, the client
     /// is disabled.
@@ -187,8 +188,37 @@ pub struct ClientOptions {
     ///
     /// Accepts either a Personal API Key (`phx_...`) or a Project Secret API
     /// Key (`phs_...`). Required when `enable_local_evaluation` is `true`.
+    ///
+    /// [`Client::emails`] needs a Project Secret API Key with the
+    /// `hog_flow:write` scope to send email, or `hog_flow:read` to read an
+    /// email's status.
     #[builder(setter(into, strip_option), default)]
-    secret_key: Option<String>,
+    pub(crate) secret_key: Option<String>,
+
+    /// Your PostHog app host, such as `https://posthog.example.com`, for
+    /// [`Client::emails`]. Needed only when `host` is not PostHog Cloud, such
+    /// as a reverse proxy: email requests carry the secret key, so they never
+    /// go to a custom `host`. Without it, a PostHog Cloud `host` such as
+    /// `https://eu.i.posthog.com` sends email to its region's app host.
+    #[builder(setter(into, strip_option), default)]
+    pub(crate) app_host: Option<String>,
+
+    /// Per-request timeout in seconds for [`Client::emails`]. Defaults to `15`.
+    /// Also applies to custom HTTP clients, replacing their request timeout.
+    #[builder(default = "15")]
+    pub(crate) email_request_timeout_seconds: u64,
+
+    /// Maximum number of retries of an email request after a network error,
+    /// a rate limit, a send with the same idempotency key in flight, or an
+    /// unavailable service. Defaults to `2`. Set to `0` when a job runner
+    /// already retries the send. A send can override it.
+    #[builder(default = "2")]
+    pub(crate) email_request_max_retries: u32,
+
+    /// The email provider your sends moved from, such as `"resend"`, sent with
+    /// each email request so PostHog knows where your sends came from.
+    #[builder(setter(into, strip_option), default)]
+    pub(crate) migrated_from: Option<String>,
 
     /// Enable local evaluation of feature flags using a background definitions
     /// poller.
@@ -375,14 +405,9 @@ impl ClientOptions {
             }
             None => DEFAULT_HOST.to_string(),
         });
-        self.secret_key = self.secret_key.and_then(|secret_key| {
-            let normalized = secret_key.trim().to_string();
-            if normalized.is_empty() {
-                None
-            } else {
-                Some(normalized)
-            }
-        });
+        self.secret_key = trimmed(self.secret_key);
+        self.app_host = trimmed(self.app_host);
+        self.migrated_from = trimmed(self.migrated_from);
         self.endpoint_manager = EndpointManager::new(
             self.host
                 .clone()
@@ -390,6 +415,18 @@ impl ClientOptions {
         );
         self
     }
+}
+
+/// The trimmed value, or `None` when it is blank.
+fn trimmed(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let normalized = value.trim().to_string();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    })
 }
 
 impl ClientOptionsBuilder {

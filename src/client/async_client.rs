@@ -10,6 +10,7 @@ use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
 
 use super::get_default_user_agent;
+use crate::emails::{EmailTracker, Emails};
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
@@ -63,6 +64,8 @@ pub struct Client {
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
     /// Background event transport. `None` for disabled clients.
     transport: Option<Arc<TransportHandle>>,
+    /// Email requests in flight, which `shutdown` waits for.
+    email_tracker: EmailTracker,
 }
 
 /// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
@@ -206,6 +209,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         _flag_poller: flag_poller,
         flag_event_host: OnceLock::new(),
         transport,
+        email_tracker: EmailTracker::default(),
     }
 }
 
@@ -346,6 +350,15 @@ impl Client {
         }
     }
 
+    /// Transactional email: send email from templates made in PostHog or from
+    /// content your code rendered, and read the status of each email sent.
+    ///
+    /// Needs `secret_key` set to a Project Secret API Key with the
+    /// `hog_flow:write` scope. See [`Emails`] for setup.
+    pub fn emails(&self) -> Emails<'_> {
+        Emails::new(&self.options, self.client.as_ref(), &self.email_tracker)
+    }
+
     /// Whether the client is disabled (no transport; capture is a no-op). Used
     /// by the panic hook to skip building an event it could never send.
     #[cfg(feature = "error-tracking")]
@@ -401,10 +414,21 @@ impl Client {
     }
 
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
-    /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
-    /// disabled clients. When called from a transport callback, queues shutdown
-    /// without waiting for or joining the current worker thread.
+    /// calls are no-ops. After shutdown, `capture` drops events and
+    /// [`emails`](Self::emails) refuses requests with `client_closed`. Email
+    /// requests already in flight, retries included, get until
+    /// `shutdown_timeout_ms` from the start of shutdown to finish. When called
+    /// from a transport callback, queues shutdown without waiting for or
+    /// joining the current worker thread.
     pub async fn shutdown(&self) {
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(self.options.shutdown_timeout_ms);
+        self.email_tracker.close();
+        self.shutdown_transport().await;
+        self.email_tracker.wait_idle(deadline).await;
+    }
+
+    async fn shutdown_transport(&self) {
         let Some(transport) = &self.transport else {
             return;
         };
@@ -1560,6 +1584,7 @@ mod minimal_gate_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            email_tracker: EmailTracker::default(),
         };
         client
             .flag_event_host
@@ -1660,6 +1685,7 @@ mod local_payload_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            email_tracker: EmailTracker::default(),
         };
         client
             .flag_event_host
