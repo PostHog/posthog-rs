@@ -362,12 +362,27 @@ fn is_success(status: u16) -> bool {
     (200..300).contains(&status)
 }
 
-pub(crate) fn parse_send_reply(reply: Reply) -> Result<SendEmailResult, EmailError> {
+/// A `2xx` reply's status and JSON fields.
+pub(crate) struct Accepted {
+    status: u16,
+    fields: Map<String, Value>,
+}
+
+/// The reply's fields when PostHog answered `2xx`, else PostHog's error. Only
+/// this error can be retried: a malformed `2xx` is reported as it is.
+pub(crate) fn accept(reply: Reply) -> Result<Accepted, EmailError> {
     let fields = reply_fields(reply.payload);
     if !is_success(reply.status) {
         return Err(reply_error(&fields, reply.status, reply.retry_after));
     }
-    let status = reply.status;
+    Ok(Accepted {
+        status: reply.status,
+        fields,
+    })
+}
+
+pub(crate) fn parse_send_reply(reply: Accepted) -> Result<SendEmailResult, EmailError> {
+    let Accepted { status, fields } = reply;
     let id = text(&fields, "message_id").ok_or_else(|| {
         EmailError::from_response(
             status,
@@ -403,26 +418,23 @@ fn timestamp(fields: &Map<String, Value>, name: &str) -> Option<DateTime<Utc>> {
         .map(|time| time.with_timezone(&Utc))
 }
 
-pub(crate) fn parse_status_reply(reply: Reply) -> Result<EmailStatus, EmailError> {
-    let fields = reply_fields(reply.payload);
-    if !is_success(reply.status) {
-        return Err(reply_error(&fields, reply.status, reply.retry_after));
-    }
+pub(crate) fn parse_status_reply(reply: Accepted) -> Result<EmailStatus, EmailError> {
+    let Accepted { status, fields } = reply;
     match (
         text(&fields, "id"),
         text(&fields, "status"),
         timestamp(&fields, "created_at"),
         timestamp(&fields, "status_at"),
     ) {
-        (Some(id), Some(status), Some(created_at), Some(status_at)) => Ok(EmailStatus {
+        (Some(id), Some(delivery), Some(created_at), Some(status_at)) => Ok(EmailStatus {
             id,
-            status: EmailDeliveryStatus::parse(&status),
+            status: EmailDeliveryStatus::parse(&delivery),
             created_at,
             status_at,
             reason: text(&fields, "reason"),
         }),
         _ => Err(EmailError::from_response(
-            reply.status,
+            status,
             None,
             Some("PostHog answered without an email status.".into()),
             None,
@@ -552,9 +564,9 @@ impl EmailTracker {
             return;
         }
         loop {
+            // notify_waiters reaches every Notified made before the call, so
+            // making it before the check misses no wake-up.
             let idle = self.idle.notified();
-            tokio::pin!(idle);
-            idle.as_mut().enable();
             if self.lock().in_flight == 0 {
                 return;
             }
@@ -591,6 +603,14 @@ mod tests {
 
     fn body(prepared: &PreparedSend) -> Value {
         serde_json::from_slice(&prepared.body).unwrap()
+    }
+
+    fn send_reply(reply: Reply) -> Result<SendEmailResult, EmailError> {
+        accept(reply).and_then(parse_send_reply)
+    }
+
+    fn status_reply(reply: Reply) -> Result<EmailStatus, EmailError> {
+        accept(reply).and_then(parse_status_reply)
     }
 
     fn reply(status: u16, payload: Value) -> Reply {
@@ -768,7 +788,7 @@ mod tests {
 
     #[test]
     fn send_reply_reads_the_id_warnings_and_replay() {
-        let result = parse_send_reply(reply(
+        let result = send_reply(reply(
             202,
             json!({
                 "message_id": "msg_1",
@@ -807,12 +827,12 @@ mod tests {
             json!({"message_id": ""}),
             json!({"message_id": 7}),
         ] {
-            let error = parse_send_reply(reply(202, payload)).unwrap_err();
+            let error = send_reply(reply(202, payload)).unwrap_err();
             assert_eq!(error.code(), "api_error");
             assert_eq!(error.status(), Some(202));
             assert_eq!(retry_delay(&error, 0, 2), None);
         }
-        let error = parse_send_reply(Reply {
+        let error = send_reply(Reply {
             status: 200,
             payload: None,
             retry_after: None,
@@ -823,7 +843,7 @@ mod tests {
 
     #[test]
     fn error_reply_keeps_every_field() {
-        let error = parse_send_reply(Reply {
+        let error = send_reply(Reply {
             status: 422,
             payload: Some(json!({
                 "code": "recipient_suppressed",
@@ -846,14 +866,14 @@ mod tests {
         assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
         assert_eq!(error.to_string(), "recipient_suppressed (HTTP 422): Nope.");
 
-        let error = parse_send_reply(reply(500, json!("oops"))).unwrap_err();
+        let error = send_reply(reply(500, json!("oops"))).unwrap_err();
         assert_eq!(error.code(), "api_error");
         assert_eq!(error.message(), "PostHog answered HTTP 500.");
     }
 
     #[test]
     fn status_reply_parses_times_and_passes_unknown_statuses() {
-        let status = parse_status_reply(reply(
+        let status = status_reply(reply(
             200,
             json!({
                 "id": "01a18356-c56c-0001-e494-7666bc915188",
@@ -871,7 +891,7 @@ mod tests {
             "2026-10-28T16:27:44.364+00:00"
         );
 
-        let status = parse_status_reply(reply(
+        let status = status_reply(reply(
             200,
             json!({
                 "id": "x",
@@ -886,7 +906,7 @@ mod tests {
         assert_eq!(status.status.as_str(), "archived");
         assert_eq!(status.reason, None);
 
-        let error = parse_status_reply(reply(
+        let error = status_reply(reply(
             200,
             json!({"id": "x", "status": "sent", "created_at": "yesterday", "status_at": "2026-10-28T16:27:44Z"}),
         ))

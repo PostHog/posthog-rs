@@ -185,3 +185,41 @@ fn shutdown_keeps_to_its_timeout() {
     assert_eq!(server.requests().len(), 1);
     assert!(send.join().unwrap());
 }
+
+#[test]
+fn the_email_timeout_replaces_a_custom_clients_timeout() {
+    let server = httpmock::MockServer::start();
+    server.mock(|when, then| {
+        when.path(SEND_PATH);
+        then.status(202)
+            .delay(Duration::from_secs(5))
+            .json_body(json!({"message_id": MESSAGE_ID}));
+    });
+    let patient = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(
+        options(&server.base_url())
+            .blocking_http_client(patient)
+            .email_request_timeout_seconds(1)
+            .email_request_max_retries(0)
+            .build()
+            .unwrap(),
+    );
+
+    let started = std::time::Instant::now();
+    let error = client
+        .emails()
+        .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
+        .unwrap_err();
+
+    let elapsed = started.elapsed();
+    assert_eq!(error.code(), "network_error");
+    assert_eq!(error.kind(), EmailErrorKind::ServiceUnavailable);
+    assert!(
+        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(4),
+        "the send took {:?}",
+        elapsed
+    );
+}

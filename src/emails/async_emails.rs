@@ -2,7 +2,7 @@ use reqwest::header::HeaderMap;
 use reqwest::{Client as HttpClient, Method};
 
 use super::error::EmailError;
-use super::shared::{self, EmailTracker, Reply};
+use super::shared::{self, Accepted, EmailTracker, Reply};
 use super::types::{EmailStatus, SendEmail, SendEmailResult};
 use crate::client::{parse_retry_after, ClientOptions};
 
@@ -88,28 +88,17 @@ impl<'a> Emails<'a> {
         let headers = connection.headers(Some(&prepared.idempotency_key))?;
         let url = format!("{}{}", connection.app_host, shared::SEND_PATH);
         let max_retries = prepared.max_retries.unwrap_or(connection.max_retries);
-        let mut attempt = 0;
-        let result = loop {
-            let error = match self
-                .request(
-                    Method::POST,
-                    &url,
-                    &headers,
-                    Some(&prepared.body),
-                    &connection,
-                )
-                .await
-                .and_then(shared::parse_send_reply)
-            {
-                Ok(result) => break result,
-                Err(error) => error,
-            };
-            let Some(delay) = shared::retry_delay(&error, attempt, max_retries) else {
-                return Err(error);
-            };
-            tokio::time::sleep(delay).await;
-            attempt += 1;
-        };
+        let reply = self
+            .request(
+                Method::POST,
+                &url,
+                &headers,
+                Some(&prepared.body),
+                &connection,
+                max_retries,
+            )
+            .await?;
+        let result = shared::parse_send_reply(reply)?;
         shared::log_warnings(&result);
         Ok(result)
     }
@@ -131,17 +120,42 @@ impl<'a> Emails<'a> {
         let connection = shared::connect(self.options, shared::GET_KEY_NEEDED)?;
         let headers = connection.headers(None)?;
         let url = format!("{}{}", connection.app_host, path);
+        let reply = self
+            .request(
+                Method::GET,
+                &url,
+                &headers,
+                None,
+                &connection,
+                connection.max_retries,
+            )
+            .await?;
+        shared::parse_status_reply(reply)
+    }
+
+    /// Sends the request until PostHog answers `2xx`, retrying what
+    /// [`shared::retry_delay`] allows. Every attempt sends the same headers, so
+    /// a send keeps its idempotency key.
+    async fn request(
+        &self,
+        method: Method,
+        url: &str,
+        headers: &HeaderMap,
+        body: Option<&[u8]>,
+        connection: &shared::Connection,
+        max_retries: u32,
+    ) -> Result<Accepted, EmailError> {
         let mut attempt = 0;
         loop {
             let error = match self
-                .request(Method::GET, &url, &headers, None, &connection)
+                .attempt(method.clone(), url, headers, body, connection)
                 .await
-                .and_then(shared::parse_status_reply)
+                .and_then(shared::accept)
             {
-                Ok(status) => return Ok(status),
+                Ok(reply) => return Ok(reply),
                 Err(error) => error,
             };
-            let Some(delay) = shared::retry_delay(&error, attempt, connection.max_retries) else {
+            let Some(delay) = shared::retry_delay(&error, attempt, max_retries) else {
                 return Err(error);
             };
             tokio::time::sleep(delay).await;
@@ -149,7 +163,7 @@ impl<'a> Emails<'a> {
         }
     }
 
-    async fn request(
+    async fn attempt(
         &self,
         method: Method,
         url: &str,

@@ -1,13 +1,15 @@
-//! A tiny HTTP/1.1 server for email tests: it answers a scripted sequence of
-//! responses, the last one repeating, and records every request it read.
+//! An httpmock server for email tests: it answers a scripted sequence of
+//! responses, the last one repeating, and records every request it answered.
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use httpmock::{HttpMockRequest, HttpMockResponse, MockServer};
 
 pub const TEMPLATE_ID: &str = "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b";
 pub const MESSAGE_ID: &str = "01a18356-c56c-0001-e494-7666bc915188";
@@ -57,23 +59,40 @@ impl Recorded {
 pub struct ScriptedServer {
     pub url: String,
     requests: Arc<Mutex<Vec<Recorded>>>,
+    _server: MockServer,
 }
 
+type Responder = Box<dyn Fn(&HttpMockRequest) -> HttpMockResponse + Send + Sync>;
+
 impl ScriptedServer {
+    /// For blocking tests.
     pub fn start(answers: Vec<Answer>) -> Self {
-        assert!(!answers.is_empty());
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&requests);
-        std::thread::spawn(move || {
-            for (index, stream) in listener.incoming().enumerate() {
-                let Ok(stream) = stream else { return };
-                let answer = answers[index.min(answers.len() - 1)].clone();
-                serve(stream, &answer, &recorded);
-            }
+        let server = MockServer::start();
+        let (requests, respond) = script(answers);
+        server.mock(|_, then| {
+            then.respond_with(respond);
         });
-        Self { url, requests }
+        Self::new(server, requests)
+    }
+
+    /// For async tests, where httpmock's blocking calls would block the runtime.
+    pub async fn start_async(answers: Vec<Answer>) -> Self {
+        let server = MockServer::start_async().await;
+        let (requests, respond) = script(answers);
+        server
+            .mock_async(|_, then| {
+                then.respond_with(respond);
+            })
+            .await;
+        Self::new(server, requests)
+    }
+
+    fn new(server: MockServer, requests: Arc<Mutex<Vec<Recorded>>>) -> Self {
+        Self {
+            url: server.base_url(),
+            requests,
+            _server: server,
+        }
     }
 
     pub fn requests(&self) -> Vec<Recorded> {
@@ -90,51 +109,35 @@ impl ScriptedServer {
     }
 }
 
-fn serve(stream: TcpStream, answer: &Answer, recorded: &Mutex<Vec<Recorded>>) -> Option<()> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    let mut parts = line.split_whitespace();
-    let method = parts.next()?.to_string();
-    let path = parts.next()?.to_string();
-    let mut headers = HashMap::new();
-    loop {
-        let mut header = String::new();
-        reader.read_line(&mut header).ok()?;
-        let header = header.trim_end();
-        if header.is_empty() {
-            break;
+/// Records each request before it answers, so a test that sees the answer
+/// sees the request.
+fn script(answers: Vec<Answer>) -> (Arc<Mutex<Vec<Recorded>>>, Responder) {
+    assert!(!answers.is_empty());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let next = AtomicUsize::new(0);
+    let respond = move |request: &HttpMockRequest| {
+        recorded.lock().unwrap().push(Recorded {
+            method: request.method_str().to_string(),
+            path: request.uri().path().to_string(),
+            headers: request
+                .headers_vec()
+                .iter()
+                .map(|(name, value)| (name.to_lowercase(), value.clone()))
+                .collect(),
+            body: request.body_vec(),
+        });
+        let index = next.fetch_add(1, Ordering::SeqCst);
+        let answer = &answers[index.min(answers.len() - 1)];
+        let mut response = HttpMockResponse::builder()
+            .status(answer.status)
+            .header("content-type", "application/json");
+        for (name, value) in &answer.headers {
+            response = response.header(name.as_str(), value.as_str());
         }
-        let (name, value) = header.split_once(':')?;
-        headers.insert(name.trim().to_lowercase(), value.trim().to_string());
-    }
-    let length = headers
-        .get("content-length")
-        .and_then(|length| length.parse().ok())
-        .unwrap_or(0);
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body).ok()?;
-    // Record before answering, so a test that sees the answer sees the request.
-    recorded.lock().unwrap().push(Recorded {
-        method,
-        path,
-        headers,
-        body,
-    });
-    let mut response = format!(
-        "HTTP/1.1 {} Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n",
-        answer.status,
-        answer.body.len()
-    );
-    for (name, value) in &answer.headers {
-        response.push_str(&format!("{name}: {value}\r\n"));
-    }
-    response.push_str("\r\n");
-    response.push_str(&answer.body);
-    let mut stream = stream;
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
-    Some(())
+        response.body(answer.body.clone()).build()
+    };
+    (requests, Box::new(respond))
 }
 
 /// A URL where nothing listens.
