@@ -409,6 +409,20 @@ async fn get_of_an_unknown_id_is_not_found_once() {
     assert_eq!(server.requests().len(), 1);
 }
 
+/// Waits until the server has a request. Fails when the send ends without
+/// one, or when none comes within 10 seconds.
+async fn wait_for_first_request<T>(server: &ScriptedServer, send: &tokio::task::JoinHandle<T>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.requests().is_empty() {
+        assert!(
+            !send.is_finished(),
+            "the send ended before it reached the server"
+        );
+        assert!(Instant::now() < deadline, "the server got no request");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn shutdown_waits_for_a_send_in_its_retry_backoff() {
     let server = ScriptedServer::start_async(vec![unavailable(), accepted()]).await;
@@ -420,9 +434,7 @@ async fn shutdown_waits_for_a_send_in_its_retry_backoff() {
             .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
             .await
     });
-    while server.requests().is_empty() {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_for_first_request(&server, &send).await;
 
     client.shutdown().await;
 
@@ -456,9 +468,7 @@ async fn shutdown_keeps_to_its_timeout_during_a_retry_backoff() {
             .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
             .await
     });
-    while server.requests().is_empty() {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_for_first_request(&server, &send).await;
 
     let started = Instant::now();
     client.shutdown().await;
