@@ -213,6 +213,9 @@ def main() -> None:
     write(f"posthog-rust-{major}.md", [front_matter(title, body), *body])
     if declared >= major:
         write("posthog-rust-reference.md", [front_matter("PostHog Rust SDK", body), *body])
+    if guides := sorted((ROOT / "docs").glob("migration-*.md"), reverse=True):
+        head = "---\ntitle: PostHog Rust SDK migration guides\nsidebar: Docs\nshowTitle: true\n---"
+        write("posthog-rust-migration.md", [head, *(g.read_text().strip() for g in guides)])
 
 
 if __name__ == "__main__":
