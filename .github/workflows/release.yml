@@ -114,6 +114,12 @@ jobs:
           new_version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
+      - name: Generate SDK reference
+        run: |
+          rustup toolchain install nightly-2026-06-12 --profile minimal
+          git clone --depth 1 https://github.com/PostHog/sdk-specs "$RUNNER_TEMP/sdk-specs"
+          python3 scripts/generate_markdown.py --sdk-specs "$RUNNER_TEMP/sdk-specs"
+
       - name: Check for changes
         id: check-changes
         run: |

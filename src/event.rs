@@ -90,6 +90,8 @@ impl Event {
     /// - `event`: Event name, such as `"user_signed_up"`.
     /// - `distinct_id`: Stable user or account identifier. For backend events,
     ///   use the same distinct ID your frontend passes to `posthog.identify()`.
+    ///
+    /// posthog-capability: capture
     pub fn new<S: Into<String>>(event: S, distinct_id: S) -> Self {
         Self {
             event: event.into(),
@@ -115,6 +117,8 @@ impl Event {
     ///
     /// Generates a random distinct ID and sets `$process_person_profile` to
     /// `false` so PostHog does not create a person profile for the event.
+    ///
+    /// posthog-capability: capture
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
         let mut properties = HashMap::new();
         properties.insert(
