@@ -11,7 +11,7 @@ use email_support::{
     accepted, closed_url, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH,
     TEMPLATE_ID,
 };
-use posthog_rs::{CodeEmail, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
+use posthog_rs::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
 use serde_json::json;
 
 async fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
@@ -116,6 +116,95 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
         request.header("idempotency-key"),
         Some("password-reset:user_123")
     );
+}
+
+#[tokio::test]
+async fn code_send_carries_copies_and_attachments() {
+    let server = ScriptedServer::start_async(vec![accepted()]).await;
+    let client = client_for(&server).await;
+    let bytes_that_are_not_utf8 = [0x25, 0x50, 0x44, 0x46, 0x00, 0x9f, 0xff];
+
+    client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "invoice", "Your invoice")
+                .html(r#"<img src="cid:logo">"#)
+                .cc("finance@example.com")
+                .cc("boss@example.com")
+                .bcc("audit@example.com")
+                .attachment(
+                    EmailAttachment::new("invoice.pdf", bytes_that_are_not_utf8)
+                        .content_type("application/pdf"),
+                )
+                .attachment(
+                    EmailAttachment::from_base64("logo.png", "iVBORw0KGgo=").content_id("logo"),
+                ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        server.requests()[0].json(),
+        json!({
+            "template_key": "invoice",
+            "subject": "Your invoice",
+            "html": "<img src=\"cid:logo\">",
+            "cc": ["finance@example.com", "boss@example.com"],
+            "bcc": ["audit@example.com"],
+            "attachments": [
+                {"filename": "invoice.pdf", "content": "JVBERgCf/w==", "content_type": "application/pdf"},
+                {"filename": "logo.png", "content": "iVBORw0KGgo=", "content_id": "logo"},
+            ],
+            "capture_engagement": true,
+            "to": "user@example.com",
+        })
+    );
+}
+
+#[test]
+fn a_printed_send_never_shows_the_file() {
+    let email = CodeEmail::new("user@example.com", "invoice", "Your invoice")
+        .text("Attached.")
+        .attachment(EmailAttachment::from_base64(
+            "invoice.pdf",
+            "U0VDUkVUIFJFUE9SVA==",
+        ));
+
+    let printed = format!("{email:?}");
+
+    assert!(printed.contains("invoice.pdf"), "{printed}");
+    assert!(!printed.contains("U0VDUkVUIFJFUE9SVA=="), "{printed}");
+}
+
+#[tokio::test]
+async fn a_server_without_a_field_refuses_the_send_and_names_it() {
+    let server = ScriptedServer::start_async(vec![Answer::json(
+        400,
+        json!({
+            "type": "invalid_request",
+            "code": "invalid_request",
+            "detail": "PostHog doesn't take this field yet, so it didn't send the email.",
+            "attr": "attachments",
+            "fix": "Send the email without this field, or send it again once PostHog takes the field.",
+        }),
+    )])
+    .await;
+    let client = client_for(&server).await;
+
+    let error = client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "invoice", "Your invoice")
+                .text("Attached.")
+                .attachment(EmailAttachment::new("invoice.pdf", b"%PDF")),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "invalid_request");
+    assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+    assert_eq!(error.field(), Some("attachments"));
+    assert_eq!(server.requests().len(), 1);
 }
 
 #[tokio::test]

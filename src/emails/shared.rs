@@ -9,14 +9,14 @@ use chrono::{DateTime, Utc};
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT,
 };
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use tracing::warn;
 use uuid::Uuid;
 
 use super::error::EmailError;
 use super::types::{
-    CodeEmail, EmailDeliveryStatus, EmailStatus, EmailWarning, SendEmail, SendEmailResult,
-    SendOptions, TemplateEmail,
+    CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailStatus, EmailWarning, SendEmail,
+    SendEmailResult, SendOptions, TemplateEmail,
 };
 use crate::client::{get_default_user_agent, ClientOptions};
 
@@ -206,11 +206,18 @@ fn code_body(email: &CodeEmail) -> Result<Map<String, Value>, EmailError> {
     if let Some(from) = &email.from {
         body.insert("from".into(), Value::String(from.clone()));
     }
-    if !email.reply_to.is_empty() {
-        body.insert(
-            "reply_to".into(),
-            Value::Array(email.reply_to.iter().cloned().map(Value::String).collect()),
-        );
+    for (field, addresses) in [
+        ("reply_to", &email.reply_to),
+        ("cc", &email.cc),
+        ("bcc", &email.bcc),
+    ] {
+        if !addresses.is_empty() {
+            body.insert(field.into(), json!(addresses));
+        }
+    }
+    if !email.attachments.is_empty() {
+        let attachments = email.attachments.iter().map(EmailAttachment::to_json);
+        body.insert("attachments".into(), Value::Array(attachments.collect()));
     }
     body.insert(
         "capture_engagement".into(),
@@ -615,7 +622,6 @@ impl EmailTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn body(prepared: &PreparedSend) -> Value {
         serde_json::from_slice(&prepared.body).unwrap()
