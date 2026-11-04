@@ -24,7 +24,8 @@ with [`Emails::get`].
 A [`CodeEmail`](crate::CodeEmail) takes `cc`, `bcc` and files: add each
 with [`cc`](crate::CodeEmail::cc), [`bcc`](crate::CodeEmail::bcc) and
 [`attachment`](crate::CodeEmail::attachment). PostHog takes at most 10
-addresses in each of `cc` and `bcc`, and at most 10 files, 512 KB in total.
+addresses in each of `cc` and `bcc`, and at most 10 files with 512 KB of
+file content in total, counted before Base64 encoding.
 A template made in PostHog sets its own recipients and content, so a
 [`TemplateEmail`](crate::TemplateEmail) takes none of them. A PostHog
 version that doesn't take one of these fields yet refuses the send with a
