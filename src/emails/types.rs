@@ -308,6 +308,7 @@ impl fmt::Debug for EmailAttachment {
 /// An email for [`Emails::send`](crate::Emails::send): a template made in
 /// PostHog, or content your code rendered.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum SendEmail {
     /// A template made transactional in PostHog.
     Template(TemplateEmail),

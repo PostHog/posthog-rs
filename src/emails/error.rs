@@ -65,8 +65,6 @@ impl EmailErrorKind {
             Some(404) => EmailErrorKind::NotFound,
             Some(409) if code == "template_outdated" => EmailErrorKind::ValidationError,
             Some(409) => EmailErrorKind::ConcurrentIdempotentRequests,
-            // The template send route also answers 422 for send checks such as
-            // recipient_suppressed.
             Some(422) if code == "idempotency_key_reused" => {
                 EmailErrorKind::InvalidIdempotentRequest
             }

@@ -437,11 +437,17 @@ async fn a_network_error_is_retried_then_reported() {
             .unwrap(),
     )
     .await;
+    let started = Instant::now();
     let error = client
         .emails()
         .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
         .await
         .unwrap_err();
+    assert!(
+        started.elapsed() >= Duration::from_millis(800),
+        "one retry waits at least 0.8 s, took {:?}",
+        started.elapsed()
+    );
     assert_eq!(error.code(), "network_error");
     assert_eq!(error.kind(), EmailErrorKind::ServiceUnavailable);
     assert_eq!(error.status(), None);
@@ -536,6 +542,29 @@ async fn shutdown_waits_for_a_send_in_its_retry_backoff() {
         .unwrap_err();
     assert_eq!(error.code(), "client_closed");
     assert_eq!(server.requests().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_off_the_runtime_waits_for_a_send_in_its_retry_backoff() {
+    let server = ScriptedServer::start_async(vec![unavailable(), accepted()]).await;
+    let client = Arc::new(client_for(&server).await);
+    let sender = Arc::clone(&client);
+    let send = tokio::spawn(async move {
+        sender
+            .emails()
+            .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
+            .await
+    });
+    wait_for_first_request(&server, &send).await;
+
+    let closer = Arc::clone(&client);
+    let thread = std::thread::spawn(move || futures::executor::block_on(closer.shutdown()));
+    tokio::task::spawn_blocking(move || thread.join().unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(server.requests().len(), 2);
+    assert!(send.await.unwrap().is_ok());
 }
 
 #[tokio::test]

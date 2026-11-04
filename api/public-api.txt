@@ -256,7 +256,7 @@ pub fn posthog_rs::FlagValue::default() -> Self
 pub posthog_rs::PostHogError::Capture(posthog_rs::CaptureFailure<'a>)
 pub posthog_rs::PostHogError::FeatureFlags(posthog_rs::FlagsFailure<'a>)
 pub posthog_rs::PostHogError::LocalEvaluation(posthog_rs::LocalEvaluationFailure<'a>)
-pub enum posthog_rs::SendEmail
+#[non_exhaustive] pub enum posthog_rs::SendEmail
 pub posthog_rs::SendEmail::Code(posthog_rs::CodeEmail)
 pub posthog_rs::SendEmail::Template(posthog_rs::TemplateEmail)
 impl core::convert::From<posthog_rs::CodeEmail> for posthog_rs::SendEmail
