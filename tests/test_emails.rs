@@ -172,8 +172,8 @@ fn a_printed_send_never_shows_the_file() {
 
     let printed = format!("{email:?}");
 
-    assert!(printed.contains("invoice.pdf"), "{printed}");
-    assert!(!printed.contains("U0VDUkVUIFJFUE9SVA=="), "{printed}");
+    assert!(printed.contains("invoice.pdf"), "{}", printed);
+    assert!(!printed.contains("U0VDUkVUIFJFUE9SVA=="), "{}", printed);
 }
 
 #[tokio::test]
