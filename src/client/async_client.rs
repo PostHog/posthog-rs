@@ -1535,6 +1535,47 @@ mod teardown_tests {
     }
 
     #[tokio::test]
+    async fn shutdown_from_worker_callback_waits_for_no_email_request() {
+        let client_slot = Arc::new(Mutex::new(None::<Arc<Client>>));
+        let callback_slot = Arc::clone(&client_slot);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let options = crate::ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host("http://localhost:0".to_string())
+            .flush_at(1usize)
+            .shutdown_timeout_ms(10_000u64)
+            .before_send(move |_| {
+                let client = Arc::clone(
+                    callback_slot
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .as_ref()
+                        .expect("client installed before capture"),
+                );
+                futures::executor::block_on(client.shutdown());
+                shutdown_tx.send(()).unwrap();
+                None
+            })
+            .build()
+            .unwrap();
+        let client = Arc::new(client(options).await);
+        *client_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&client));
+        let email_in_flight = client
+            .email_tracker
+            .admit(false, "nothing was sent")
+            .unwrap();
+
+        client.capture(Event::new("shutdown-in-callback", "user-1"));
+        shutdown_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("shutdown from the transport worker waited for an email request");
+
+        drop(email_in_flight);
+        client_slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn drop_from_worker_callback_closes_without_blocking() {
         let client_slot = Arc::new(Mutex::new(None::<Client>));
         let callback_slot = Arc::clone(&client_slot);
