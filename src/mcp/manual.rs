@@ -4,7 +4,7 @@
 //!
 //! ```no_run
 //! # use std::sync::Arc;
-//! # use posthog_rs::mcp::{McpAnalytics, McpOptions, ToolCallError, ToolCallRequest, ToolRegistration};
+//! # use posthog::mcp::{McpAnalytics, McpOptions, ToolCallError, ToolCallRequest, ToolRegistration};
 //! # use rmcp::model::{CallToolResult, ContentBlock, Tool};
 //! # fn run(analytics: McpAnalytics, tool: Tool, arguments: Option<rmcp::model::JsonObject>) {
 //! let call = analytics.start_tool_call(

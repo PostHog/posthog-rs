@@ -1,6 +1,6 @@
 //! One test owns the process-wide singleton; other global scenarios use separate binaries.
 use httpmock::prelude::*;
-use posthog_rs::{ClientOptionsBuilder, Error, Event};
+use posthog::{ClientOptionsBuilder, Error, Event};
 use serde_json::{json, Value};
 
 #[cfg(feature = "async-client")]
@@ -37,40 +37,40 @@ fn global_client_lifecycle() {
         .build()
         .unwrap();
 
-    assert!(!posthog_rs::global_is_disabled());
-    posthog_rs::capture(Event::new("before-init", "user-1"));
-    call!(posthog_rs::flush());
-    call!(posthog_rs::shutdown());
+    assert!(!posthog::global_is_disabled());
+    posthog::capture(Event::new("before-init", "user-1"));
+    call!(posthog::flush());
+    call!(posthog::shutdown());
     #[cfg(feature = "error-tracking")]
     {
         let error = std::io::Error::other("global error");
         assert!(matches!(
-            call!(posthog_rs::capture_exception(&error)),
+            call!(posthog::capture_exception(&error)),
             Err(Error::NotInitialized)
         ));
         assert!(matches!(
-            call!(posthog_rs::capture_exception_with(
+            call!(posthog::capture_exception_with(
                 &error,
-                posthog_rs::CaptureExceptionOptions::new()
+                posthog::CaptureExceptionOptions::new()
             )),
             Err(Error::NotInitialized)
         ));
     }
     capture.assert_calls(0);
 
-    call!(posthog_rs::init_global(options.clone())).unwrap();
+    call!(posthog::init_global(options.clone())).unwrap();
     assert!(matches!(
-        call!(posthog_rs::init_global(options)),
+        call!(posthog::init_global(options)),
         Err(Error::AlreadyInitialized)
     ));
-    posthog_rs::capture(Event::new("global-event", "user-1"));
-    call!(posthog_rs::flush());
+    posthog::capture(Event::new("global-event", "user-1"));
+    call!(posthog::flush());
     capture.assert_calls(1);
 
-    posthog_rs::disable_global();
-    assert!(posthog_rs::global_is_disabled());
-    posthog_rs::capture(Event::new("global-event", "user-1"));
-    call!(posthog_rs::flush());
+    posthog::disable_global();
+    assert!(posthog::global_is_disabled());
+    posthog::capture(Event::new("global-event", "user-1"));
+    call!(posthog::flush());
     capture.assert_calls(2);
 
     #[cfg(feature = "error-tracking")]
@@ -87,24 +87,24 @@ fn global_client_lifecycle() {
             then.status(200).json_body(json!({"results": {}}));
         });
         let error = std::io::Error::other("global error");
-        call!(posthog_rs::capture_exception(&error)).unwrap();
-        call!(posthog_rs::capture_exception_with(
+        call!(posthog::capture_exception(&error)).unwrap();
+        call!(posthog::capture_exception_with(
             &error,
-            posthog_rs::CaptureExceptionOptions::new()
+            posthog::CaptureExceptionOptions::new()
                 .distinct_id("identified-user")
                 .property("context", "global")
                 .unwrap()
         ))
         .unwrap();
-        call!(posthog_rs::flush());
+        call!(posthog::flush());
         exceptions.assert_calls(1);
     }
 
-    posthog_rs::capture(Event::new("global-event", "user-1"));
-    call!(posthog_rs::shutdown());
+    posthog::capture(Event::new("global-event", "user-1"));
+    call!(posthog::shutdown());
     capture.assert_calls(3);
-    posthog_rs::capture(Event::new("global-event", "user-1"));
-    call!(posthog_rs::flush());
-    call!(posthog_rs::shutdown());
+    posthog::capture(Event::new("global-event", "user-1"));
+    call!(posthog::flush());
+    call!(posthog::shutdown());
     capture.assert_calls(3);
 }

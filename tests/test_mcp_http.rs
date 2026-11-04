@@ -12,7 +12,7 @@ use mcp_support::http::{
 };
 use mcp_support::recorder::{property, text_property, Recorder};
 use mcp_support::server::TestServer;
-use posthog_rs::mcp::{McpAnalytics, McpOptions, McpOptionsBuilder};
+use posthog::mcp::{McpAnalytics, McpOptions, McpOptionsBuilder};
 use serde_json::{json, Value};
 
 const HANDLE: &str = "0190f0e8-7a6b-7c3d-9e4f-5a6b7c8d9e0f";
@@ -22,7 +22,7 @@ fn instrumented(
     recorder: &Recorder,
     server: TestServer,
     options: McpOptions,
-) -> posthog_rs::mcp::Instrumented<TestServer> {
+) -> posthog::mcp::Instrumented<TestServer> {
     McpAnalytics::new(recorder.client.clone(), options).instrument(server)
 }
 

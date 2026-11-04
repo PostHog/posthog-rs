@@ -1,7 +1,7 @@
 #![cfg(feature = "async-client")]
 
 use httpmock::prelude::*;
-use posthog_rs::{PostHogReqwestClient, RequestContext};
+use posthog::{PostHogReqwestClient, RequestContext};
 use reqwest::{header::HeaderMap, Method};
 
 #[tokio::test]

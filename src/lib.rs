@@ -9,15 +9,15 @@
 //!
 //! # Getting started
 //!
-//! Add `posthog-rs` to your `Cargo.toml`, then initialize a client with your
+//! Add `posthog` to your `Cargo.toml`, then initialize a client with your
 //! project API key.
 //!
 //! ```no_run
-//! use posthog_rs::{client, EvaluateFlagsOptions, Event};
+//! use posthog::{client, EvaluateFlagsOptions, Event};
 //!
 //! #[cfg(feature = "async-client")]
 //! #[tokio::main]
-//! async fn main() -> Result<(), posthog_rs::Error> {
+//! async fn main() -> Result<(), posthog::Error> {
 //!     let api_key = std::env::var("POSTHOG_API_KEY")
 //!         .expect("set POSTHOG_API_KEY to your PostHog project API key");
 //!
@@ -44,7 +44,7 @@
 //! }
 //!
 //! #[cfg(not(feature = "async-client"))]
-//! fn main() -> Result<(), posthog_rs::Error> {
+//! fn main() -> Result<(), posthog::Error> {
 //!     let api_key = std::env::var("POSTHOG_API_KEY")
 //!         .expect("set POSTHOG_API_KEY to your PostHog project API key");
 //!
@@ -75,9 +75,9 @@
 //! properties. Set them with [`Event::insert_option`]; PostHog validates them.
 //!
 //! ```
-//! let mut event = posthog_rs::Event::new("signed_up", "user-123");
+//! let mut event = posthog::Event::new("signed_up", "user-123");
 //! event.insert_option("process_person_profile", false)?;
-//! # Ok::<(), posthog_rs::Error>(())
+//! # Ok::<(), posthog::Error>(())
 //! ```
 //!
 //! # Capture is fire-and-forget
@@ -105,8 +105,8 @@
 //! on their own background lane, and `capture` never reroutes them.
 //!
 //! ```no_run
-//! # fn send(posthog: &posthog_rs::Client) -> Result<(), posthog_rs::Error> {
-//! let mut event = posthog_rs::Event::new("$ai_generation", "user-123");
+//! # fn send(posthog: &posthog::Client) -> Result<(), posthog::Error> {
+//! let mut event = posthog::Event::new("$ai_generation", "user-123");
 //! event.insert_prop("$ai_model", "gpt-4o")?;
 //! posthog.capture_ai(event);
 //! # Ok(())

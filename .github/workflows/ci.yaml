@@ -95,7 +95,7 @@ jobs:
             cache-key: tls-no-provider
             command: >-
               cargo build --verbose --no-default-features --features async-client,error-tracking,tls-no-provider
-              && ! cargo tree --package posthog-rs --edges normal --invert aws-lc-sys --no-default-features --features async-client,error-tracking,tls-no-provider
+              && ! cargo tree --package posthog --edges normal --invert aws-lc-sys --no-default-features --features async-client,error-tracking,tls-no-provider
           - name: mcp
             toolchain: stable
             cache-key: mcp
@@ -103,15 +103,15 @@ jobs:
           - name: MSRV (async client)
             toolchain: "1.78.0"
             cache-key: msrv-async-client
-            command: cargo check --locked --package posthog-rs --lib
+            command: cargo check --locked --package posthog --lib
           - name: MSRV (error-tracking, blocking client)
             toolchain: "1.78.0"
             cache-key: msrv-blocking-client
-            command: cargo check --locked --package posthog-rs --lib --no-default-features --features error-tracking,tls
+            command: cargo check --locked --package posthog --lib --no-default-features --features error-tracking,tls
           - name: MSRV of the mcp feature
             toolchain: "1.88.0"
             cache-key: msrv-mcp
-            command: cargo check --locked --package posthog-rs --lib --features mcp
+            command: cargo check --locked --package posthog --lib --features mcp
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -163,7 +163,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Publish dry run
-        run: cargo publish --dry-run --locked
+        run: cargo publish --workspace --dry-run --locked --package posthog --package posthog-rs
 
   test:
     name: ${{ matrix.name }}
@@ -178,6 +178,13 @@ jobs:
           - name: Unit test (workspace)
             cache-key: workspace
             command: cargo test --workspace --verbose
+          - name: Compatibility crate
+            cache-key: compatibility-crate
+            command: >-
+              scripts/check-compatibility-crate.sh
+              && cargo test --locked --manifest-path crates/posthog-rs/Cargo.toml
+              && cargo test --locked --manifest-path crates/posthog-rs/Cargo.toml --all-features
+              && cargo test --locked --manifest-path crates/posthog-rs/Cargo.toml --no-default-features
           - name: Unit test (blocking client)
             cache-key: blocking-client
             command: cargo test --verbose --no-default-features

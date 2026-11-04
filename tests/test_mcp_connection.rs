@@ -6,7 +6,7 @@ mod mcp_support;
 
 use mcp_support::recorder::{property, serialized_properties_size, text_property, Recorder};
 use mcp_support::server::{numbered_tools, TestServer, FAILURE_MESSAGE, PAGE_SIZE};
-use posthog_rs::mcp::{Identity, McpAnalytics, McpOptions, McpOptionsBuilder};
+use posthog::mcp::{Identity, McpAnalytics, McpOptions, McpOptionsBuilder};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, JsonObject, ListToolsResult, PaginatedRequestParams,
 };

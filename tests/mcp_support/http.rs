@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use http_body_util::BodyExt;
-use posthog_rs::mcp::Instrumented;
+use posthog::mcp::Instrumented;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use serde_json::{json, Value};

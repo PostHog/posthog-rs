@@ -1,4 +1,4 @@
-use posthog_rs::{FlagCache, FlagValue, LocalEvaluationResponse, LocalEvaluator};
+use posthog::{FlagCache, FlagValue, LocalEvaluationResponse, LocalEvaluator};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -187,8 +187,8 @@ fn property_matching_version_reaches_groups_recursive_cohorts_and_dependencies()
     }
 }
 
-fn poller_config(server: &httpmock::MockServer) -> posthog_rs::LocalEvaluationConfig {
-    posthog_rs::LocalEvaluationConfig {
+fn poller_config(server: &httpmock::MockServer) -> posthog::LocalEvaluationConfig {
+    posthog::LocalEvaluationConfig {
         secret_key: "personal-key".into(),
         project_api_key: "project-key".into(),
         api_host: server.base_url(),
@@ -222,7 +222,7 @@ fn property_matching_version_blocking_poller_reload_failure_and_304() {
     let server = httpmock::MockServer::start();
     let cache = FlagCache::new();
     let evaluator = LocalEvaluator::new(cache.clone());
-    let mut poller = posthog_rs::FlagPoller::new(poller_config(&server), cache);
+    let mut poller = posthog::FlagPoller::new(poller_config(&server), cache);
     for version in [Some(1), Some(2), Some(1), Some(2), None, Some(2)] {
         let mut response = mock_definitions(&server, version);
         poller.load_flags().unwrap();
@@ -263,7 +263,7 @@ async fn property_matching_version_async_poller_reload_failure_and_304() {
     let server = httpmock::MockServer::start();
     let cache = FlagCache::new();
     let evaluator = LocalEvaluator::new(cache.clone());
-    let mut poller = posthog_rs::AsyncFlagPoller::new(poller_config(&server), cache);
+    let mut poller = posthog::AsyncFlagPoller::new(poller_config(&server), cache);
     for version in [Some(1), Some(2), Some(1), Some(2), None, Some(2)] {
         let mut response = mock_definitions(&server, version);
         poller.load_flags().await.unwrap();
@@ -305,7 +305,7 @@ fn property_matching_version_public_helper_defaults_to_legacy() {
     let response = definitions(Some(2), json!(false), "exact");
     // Context-free callers have no definitions metadata; retain released behavior.
     assert_eq!(
-        posthog_rs::match_feature_flag(
+        posthog::match_feature_flag(
             &response.flags[0],
             "user",
             &HashMap::from([("value".into(), json!("banana"))]),

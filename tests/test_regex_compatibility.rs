@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use posthog_rs::{FlagCache, FlagValue, LocalEvaluationResponse, LocalEvaluator};
+use posthog::{FlagCache, FlagValue, LocalEvaluationResponse, LocalEvaluator};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -32,7 +32,7 @@ fn evaluate(
     pattern: &str,
     operator: &str,
     input: Value,
-) -> Result<Option<FlagValue>, posthog_rs::InconclusiveMatchError> {
+) -> Result<Option<FlagValue>, posthog::InconclusiveMatchError> {
     let cache = FlagCache::new();
     cache.update(definitions(pattern, operator));
     LocalEvaluator::new(cache).evaluate_flag(
@@ -263,11 +263,11 @@ fn regex_compatibility_cohort_negation_preserves_inconclusive() {
 #[tokio::test]
 async fn regex_compatibility_public_client_fallback_and_local_only() {
     use httpmock::prelude::*;
-    use posthog_rs::{ClientOptionsBuilder, EvaluateFlagsOptions};
+    use posthog::{ClientOptionsBuilder, EvaluateFlagsOptions};
     use std::time::Duration;
 
     async fn get_flag(
-        client: &posthog_rs::Client,
+        client: &posthog::Client,
         key: &str,
         properties: Option<HashMap<String, Value>>,
     ) -> Option<FlagValue> {
@@ -318,7 +318,7 @@ async fn regex_compatibility_public_client_fallback_and_local_only() {
                 .poll_interval_seconds(60)
                 .build()
                 .unwrap();
-            let client = posthog_rs::client(options).await;
+            let client = posthog::client(options).await;
             let expected_calls = if local_only { 2 } else { 1 };
             tokio::time::timeout(Duration::from_secs(5), async {
                 while definitions_mock.calls_async().await < expected_calls {

@@ -1,22 +1,22 @@
 use httpmock::prelude::*;
-use posthog_rs::{ClientOptionsBuilder, EvaluateFlagsOptions, Event};
+use posthog::{ClientOptionsBuilder, EvaluateFlagsOptions, Event};
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::time::Duration;
 
-fn is_transport_failure(failure: &posthog_rs::PostHogError<'_>, surface: &str) -> bool {
+fn is_transport_failure(failure: &posthog::PostHogError<'_>, surface: &str) -> bool {
     match failure {
-        posthog_rs::PostHogError::Capture(f) if surface == "capture" => {
-            f.status().is_none() && matches!(f.error(), Some(posthog_rs::Error::Connection(_)))
+        posthog::PostHogError::Capture(f) if surface == "capture" => {
+            f.status().is_none() && matches!(f.error(), Some(posthog::Error::Connection(_)))
         }
-        posthog_rs::PostHogError::LocalEvaluation(f) if surface == "polling" => {
-            f.status().is_none() && matches!(f.error(), posthog_rs::Error::Connection(_))
+        posthog::PostHogError::LocalEvaluation(f) if surface == "polling" => {
+            f.status().is_none() && matches!(f.error(), posthog::Error::Connection(_))
         }
         _ => false,
     }
 }
 
-fn assert_transport_error(error: posthog_rs::Error) {
-    let posthog_rs::Error::Connection(message) = error else {
+fn assert_transport_error(error: posthog::Error) {
+    let posthog::Error::Connection(message) = error else {
         panic!("expected request timeout, got {:?}", error);
     };
     assert!(
@@ -127,7 +127,7 @@ mod asynchronous {
                 .blocking_http_client(reqwest::blocking::Client::new())
                 .build()
                 .unwrap();
-            let client = futures::executor::block_on(posthog_rs::client(options));
+            let client = futures::executor::block_on(posthog::client(options));
             drop(client);
         }
     }
@@ -141,7 +141,7 @@ mod asynchronous {
                 .delay(Duration::from_millis(1500))
                 .json_body(serde_json::json!({"featureFlags": {"flag": true}}));
         });
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .http_client(reqwest::Client::new())
                 .feature_flags_request_timeout_seconds(1)
@@ -169,7 +169,7 @@ mod asynchronous {
         let server = MockServer::start();
         let mut event = Event::new("test", "user");
         let _capture = capture_mock(&server, "async", &mut event);
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .http_client(http())
                 .max_capture_attempts(1)
@@ -187,7 +187,7 @@ mod asynchronous {
         let mut event = Event::new("test", "user");
         let _capture = capture_mock(&server, "blocking", &mut event);
         let (tx, rx) = std::sync::mpsc::channel();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .blocking_http_client(blocking_http().await)
                 .max_capture_attempts(1)
@@ -211,7 +211,7 @@ mod asynchronous {
         let server = MockServer::start();
         let _definitions = definitions_mock(&server, "async");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .http_client(http())
                 .enable_local_evaluation(true)
@@ -243,7 +243,7 @@ mod asynchronous {
         let definitions = definitions_mock(&server, "async");
         let http = http();
         let blocking = blocking_http().await;
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .request_timeout_seconds(5)
                 .http_client(http.clone())
@@ -297,7 +297,7 @@ mod asynchronous {
             .blocking_http_client(blocking_http().await);
         let options = builder.build().unwrap();
         drop(builder);
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
         assert!(client
             .capture_ai_immediate(immediate)
             .await
@@ -319,7 +319,7 @@ mod asynchronous {
             then.status(200)
                 .json_body(serde_json::json!({"results": {}}));
         });
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .request_timeout_seconds(5)
                 .http_client(http())
@@ -341,7 +341,7 @@ mod asynchronous {
             then.status(200)
                 .json_body(serde_json::json!({"featureFlags": {"flag": true}}));
         });
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .request_timeout_seconds(5)
                 .feature_flags_request_timeout_seconds(5)
@@ -368,7 +368,7 @@ mod asynchronous {
                 .blocking_http_client(blocking_http().await);
             let options = builder.build().unwrap();
             drop(builder);
-            let client = posthog_rs::client(options).await;
+            let client = posthog::client(options).await;
             drop(client);
         }
     }
@@ -380,7 +380,7 @@ mod asynchronous {
             when.method(POST);
             then.status(200).delay(Duration::from_secs(2));
         });
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .blocking_http_client(blocking_http().await)
                 .request_timeout_seconds(5)
@@ -414,7 +414,7 @@ mod asynchronous {
         let options = builder.build().unwrap();
         drop(builder);
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), posthog_rs::client(options))
+            tokio::time::timeout(Duration::from_millis(100), posthog::client(options))
                 .await
                 .is_err()
         );
@@ -429,7 +429,7 @@ mod asynchronous {
             .timeout(Duration::from_millis(5))
             .build()
             .unwrap();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .http_client(http)
                 .feature_flags_request_timeout_seconds(5)
@@ -459,7 +459,7 @@ mod blocking {
                 .delay(Duration::from_millis(1500))
                 .json_body(serde_json::json!({"featureFlags": {"flag": true}}));
         });
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .blocking_http_client(reqwest::blocking::Client::new())
                 .feature_flags_request_timeout_seconds(1)
@@ -488,7 +488,7 @@ mod blocking {
             .timeout(Duration::from_millis(5))
             .build()
             .unwrap();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .blocking_http_client(http)
                 .feature_flags_request_timeout_seconds(5)
@@ -514,7 +514,7 @@ mod blocking {
         let server = MockServer::start();
         let mut event = Event::new("test", "user");
         let _capture = capture_mock(&server, "blocking", &mut event);
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .blocking_http_client(http())
                 .max_capture_attempts(1)
@@ -531,7 +531,7 @@ mod blocking {
         let mut event = Event::new("test", "user");
         let _capture = capture_mock(&server, "blocking", &mut event);
         let (tx, rx) = std::sync::mpsc::channel();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .blocking_http_client(http())
                 .max_capture_attempts(1)
@@ -554,7 +554,7 @@ mod blocking {
         let server = MockServer::start();
         let _definitions = definitions_mock(&server, "blocking");
         let (tx, rx) = std::sync::mpsc::channel();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .blocking_http_client(http())
                 .enable_local_evaluation(true)
@@ -583,7 +583,7 @@ mod blocking {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             options(&server)
                 .request_timeout_seconds(5)
                 .blocking_http_client(http.clone())

@@ -12,7 +12,7 @@
 
 use httpmock::prelude::*;
 use httpmock::Mock;
-use posthog_rs::{CaptureSummary, Event, EventStatus};
+use posthog::{CaptureSummary, Event, EventStatus};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -80,11 +80,11 @@ mod async_capture {
     use std::sync::{Arc, Mutex};
 
     use httpmock::prelude::*;
-    use posthog_rs::{Client, ClientOptionsBuilder, Event, PostHogError};
+    use posthog::{Client, ClientOptionsBuilder, Event, PostHogError};
     use serde_json::json;
 
     async fn capture_client(base_url: String) -> Client {
-        posthog_rs::client(
+        posthog::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
                 .host(base_url)
@@ -238,11 +238,11 @@ mod async_capture {
         assert_eq!(summary.event_results().len(), 2);
         assert_eq!(
             summary.event_results()[&uuid].result,
-            posthog_rs::EventStatus::Ok
+            posthog::EventStatus::Ok
         );
         assert_eq!(
             summary.event_results()[&persisted_uuid].result,
-            posthog_rs::EventStatus::Ok
+            posthog::EventStatus::Ok
         );
         assert!(summary.all_persisted());
         assert_eq!(summary.not_persisted(), 0);
@@ -340,7 +340,7 @@ mod async_capture {
         });
 
         let (count, hook) = error_sink();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
                 .host(server.base_url())
@@ -359,7 +359,7 @@ mod async_capture {
             .unwrap_err();
         assert!(matches!(
             error,
-            posthog_rs::Error::ServerError { status: 500, .. }
+            posthog::Error::ServerError { status: 500, .. }
         ));
         _mock.assert_calls(2);
         assert_eq!(
@@ -372,7 +372,7 @@ mod async_capture {
     #[tokio::test]
     async fn disabled_and_empty_are_noops() {
         // Disabled client: no request, default summary.
-        let disabled = posthog_rs::client(
+        let disabled = posthog::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
                 .disabled(true)
@@ -411,11 +411,11 @@ mod blocking {
     use std::sync::{Arc, Mutex};
 
     use httpmock::prelude::*;
-    use posthog_rs::{Client, ClientOptionsBuilder, Event, PostHogError};
+    use posthog::{Client, ClientOptionsBuilder, Event, PostHogError};
     use serde_json::json;
 
     fn capture_client(base_url: String) -> Client {
-        posthog_rs::client(
+        posthog::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
                 .host(base_url)
@@ -546,7 +546,7 @@ mod blocking {
 
         let count = Arc::new(Mutex::new(0usize));
         let sink = count.clone();
-        let client = posthog_rs::client(
+        let client = posthog::client(
             ClientOptionsBuilder::default()
                 .api_key("phc_test_token".to_string())
                 .host(server.base_url())
@@ -562,7 +562,7 @@ mod blocking {
             .unwrap_err();
         assert!(matches!(
             error,
-            posthog_rs::Error::ServerError { status: 500, .. }
+            posthog::Error::ServerError { status: 500, .. }
         ));
         _mock.assert_calls(2);
         assert_eq!(*count.lock().unwrap(), 0);

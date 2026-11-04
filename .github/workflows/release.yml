@@ -99,11 +99,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/sampo
-          key: sampo-${{ runner.os }}-${{ runner.arch }}
+          key: sampo-0.17.4-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install Sampo CLI
         if: steps.cache-sampo.outputs.cache-hit != 'true'
-        run: cargo install sampo
+        run: cargo install sampo --version 0.17.4 --locked
 
       - name: Prepare release with Sampo
         id: sampo-release
@@ -145,7 +145,7 @@ jobs:
 
       - name: Publish dry-run
         if: steps.check-changes.outputs.committed == 'true'
-        run: cargo publish --workspace --dry-run
+        run: scripts/check-compatibility-crate.sh && cargo publish --workspace --dry-run --locked --package posthog --package posthog-rs
 
       - name: Authenticate with crates.io
         if: steps.check-changes.outputs.committed == 'true'
@@ -238,5 +238,5 @@ jobs:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
           thread_ts: ${{ needs.notify-approval-needed.outputs.slack_ts }}
-          message: "🚀 posthog-rs released successfully!"
+          message: "🚀 posthog and posthog-rs released successfully!"
           emoji_reaction: "rocket"

@@ -2,7 +2,7 @@
 
 use axum::{body::Body, routing::get, Router};
 use http::{Request, Response};
-use posthog_rs::{tower::PostHogLayer, RequestContext};
+use posthog::{tower::PostHogLayer, RequestContext};
 use std::convert::Infallible;
 use tower::{service_fn, Layer, ServiceExt};
 

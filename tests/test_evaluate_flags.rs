@@ -352,12 +352,12 @@ fn start_status_then_success_flags_server(
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, Event, FlagValue};
+    use posthog::{EvaluateFlagsOptions, Event, FlagValue};
     use reqwest::header::USER_AGENT;
 
-    fn create_test_client(base_url: String) -> posthog_rs::Client {
-        let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
-        posthog_rs::client(options)
+    fn create_test_client(base_url: String) -> posthog::Client {
+        let options: posthog::ClientOptions = ("test_api_key", base_url.as_str()).into();
+        posthog::client(options)
     }
 
     #[test]
@@ -389,14 +389,14 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
             .enable_local_evaluation(true)
             .local_evaluation_only(true)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
 
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -409,7 +409,7 @@ mod blocking {
     #[test]
     fn evaluate_flags_retries_transport_error_then_succeeds() {
         let server = start_flaky_flags_server(flags_response_fixture().to_string());
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url.clone())
             .feature_flags_request_max_retries(1u32)
@@ -417,7 +417,7 @@ mod blocking {
             .retry_max_backoff_ms(1u64)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
 
         let flags = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -430,7 +430,7 @@ mod blocking {
     #[test]
     fn evaluate_flags_returns_error_after_transport_retry_budget() {
         let server = start_resetting_flags_server(2);
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url.clone())
             .feature_flags_request_max_retries(1u32)
@@ -438,13 +438,13 @@ mod blocking {
             .retry_max_backoff_ms(1u64)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
 
         let err = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .expect_err("transport errors should stop after retry budget is exhausted");
 
-        assert!(matches!(err, posthog_rs::Error::Connection(_)));
+        assert!(matches!(err, posthog::Error::Connection(_)));
         server.assert_attempts(2);
     }
 
@@ -455,7 +455,7 @@ mod blocking {
                 status,
                 flags_response_fixture().to_string(),
             );
-            let options = posthog_rs::ClientOptionsBuilder::default()
+            let options = posthog::ClientOptionsBuilder::default()
                 .api_key("test_api_key".to_string())
                 .host(server.base_url.clone())
                 .feature_flags_request_max_retries(1u32)
@@ -463,7 +463,7 @@ mod blocking {
                 .retry_max_backoff_ms(1u64)
                 .build()
                 .unwrap();
-            let client = posthog_rs::client(options);
+            let client = posthog::client(options);
 
             let snapshot = client
                 .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -482,7 +482,7 @@ mod blocking {
                 when.method(POST).path("/flags/");
                 then.status(status).body("transient flags error");
             });
-            let options = posthog_rs::ClientOptionsBuilder::default()
+            let options = posthog::ClientOptionsBuilder::default()
                 .api_key("test_api_key".to_string())
                 .host(server.base_url())
                 .feature_flags_request_max_retries(1u32)
@@ -490,7 +490,7 @@ mod blocking {
                 .retry_max_backoff_ms(1u64)
                 .build()
                 .unwrap();
-            let client = posthog_rs::client(options);
+            let client = posthog::client(options);
 
             let err = client
                 .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -508,7 +508,7 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(500).body("boom");
         });
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
             .max_capture_attempts(3u32)
@@ -516,7 +516,7 @@ mod blocking {
             .retry_max_backoff_ms(1u64)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
 
         let err = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -749,7 +749,7 @@ mod blocking {
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
             .secret_key("test_personal_key".to_string())
@@ -757,7 +757,7 @@ mod blocking {
             .poll_interval_seconds(3600)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
         definitions_mock.assert_calls(1);
 
         let mut evaluate_options = EvaluateFlagsOptions::default();
@@ -1013,13 +1013,13 @@ mod blocking {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
             .disabled(true)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .unwrap();
@@ -1096,12 +1096,12 @@ mod blocking {
 #[cfg(feature = "async-client")]
 mod async_tests {
     use super::*;
-    use posthog_rs::{EvaluateFlagsOptions, Event, FlagValue};
+    use posthog::{EvaluateFlagsOptions, Event, FlagValue};
     use reqwest::header::USER_AGENT;
 
-    async fn create_test_client(base_url: String) -> posthog_rs::Client {
-        let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
-        posthog_rs::client(options).await
+    async fn create_test_client(base_url: String) -> posthog::Client {
+        let options: posthog::ClientOptions = ("test_api_key", base_url.as_str()).into();
+        posthog::client(options).await
     }
 
     #[tokio::test]
@@ -1129,14 +1129,14 @@ mod async_tests {
             when.method(POST).path("/flags/");
             then.status(200).json_body(flags_response_fixture());
         });
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
             .enable_local_evaluation(true)
             .local_evaluation_only(true)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
 
         let snapshot = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -1150,7 +1150,7 @@ mod async_tests {
     #[tokio::test]
     async fn evaluate_flags_retries_transport_error_then_succeeds() {
         let server = start_flaky_flags_server(flags_response_fixture().to_string());
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url.clone())
             .feature_flags_request_max_retries(1u32)
@@ -1158,7 +1158,7 @@ mod async_tests {
             .retry_max_backoff_ms(1u64)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
 
         let flags = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -1172,7 +1172,7 @@ mod async_tests {
     #[tokio::test]
     async fn evaluate_flags_returns_error_after_transport_retry_budget() {
         let server = start_resetting_flags_server(2);
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url.clone())
             .feature_flags_request_max_retries(1u32)
@@ -1180,14 +1180,14 @@ mod async_tests {
             .retry_max_backoff_ms(1u64)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
 
         let err = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
             .await
             .expect_err("transport errors should stop after retry budget is exhausted");
 
-        assert!(matches!(err, posthog_rs::Error::Connection(_)));
+        assert!(matches!(err, posthog::Error::Connection(_)));
         server.assert_attempts(2);
     }
 
@@ -1198,7 +1198,7 @@ mod async_tests {
                 status,
                 flags_response_fixture().to_string(),
             );
-            let options = posthog_rs::ClientOptionsBuilder::default()
+            let options = posthog::ClientOptionsBuilder::default()
                 .api_key("test_api_key".to_string())
                 .host(server.base_url.clone())
                 .feature_flags_request_max_retries(1u32)
@@ -1206,7 +1206,7 @@ mod async_tests {
                 .retry_max_backoff_ms(1u64)
                 .build()
                 .unwrap();
-            let client = posthog_rs::client(options).await;
+            let client = posthog::client(options).await;
 
             let snapshot = client
                 .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -1226,7 +1226,7 @@ mod async_tests {
                 when.method(POST).path("/flags/");
                 then.status(status).body("transient flags error");
             });
-            let options = posthog_rs::ClientOptionsBuilder::default()
+            let options = posthog::ClientOptionsBuilder::default()
                 .api_key("test_api_key".to_string())
                 .host(server.base_url())
                 .feature_flags_request_max_retries(1u32)
@@ -1234,7 +1234,7 @@ mod async_tests {
                 .retry_max_backoff_ms(1u64)
                 .build()
                 .unwrap();
-            let client = posthog_rs::client(options).await;
+            let client = posthog::client(options).await;
 
             let err = client
                 .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -1253,7 +1253,7 @@ mod async_tests {
             when.method(POST).path("/flags/");
             then.status(500).body("boom");
         });
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
             .max_capture_attempts(3u32)
@@ -1261,7 +1261,7 @@ mod async_tests {
             .retry_max_backoff_ms(1u64)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
 
         let err = client
             .evaluate_flags("user-1", EvaluateFlagsOptions::default())
@@ -1386,7 +1386,7 @@ mod async_tests {
             then.status(200).json_body(flags_response_fixture());
         });
         let capture_mock = capture_path_mock(&server);
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
             .secret_key("test_personal_key".to_string())
@@ -1394,7 +1394,7 @@ mod async_tests {
             .poll_interval_seconds(3600)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
         definitions_mock.assert_calls(1);
 
         let mut evaluate_options = EvaluateFlagsOptions::default();

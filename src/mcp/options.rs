@@ -16,7 +16,7 @@ pub type IntentFallback = Arc<dyn Fn(&RequestInfo<'_>) -> Option<String> + Send 
 /// Configures MCP analytics. Build it with [`McpOptionsBuilder`].
 ///
 /// ```
-/// use posthog_rs::mcp::{Identity, McpOptionsBuilder};
+/// use posthog::mcp::{Identity, McpOptionsBuilder};
 ///
 /// let options = McpOptionsBuilder::default()
 ///     .identify(|request| {

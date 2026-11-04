@@ -7,7 +7,7 @@ mod mcp_support;
 use mcp_support::http::{call_params, HttpServer};
 use mcp_support::recorder::{property, text_property, Recorder};
 use mcp_support::server::TestServer;
-use posthog_rs::mcp::{
+use posthog::mcp::{
     Connection, McpAnalytics, McpOptions, ToolCallError, ToolCallRequest, ToolRegistration,
     TransportSession,
 };

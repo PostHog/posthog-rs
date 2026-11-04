@@ -9,8 +9,8 @@
 //! ```no_run
 //! # use rmcp::{ServerHandler, ServiceExt};
 //! # async fn example<H: ServerHandler>(server: H) -> Result<(), Box<dyn std::error::Error>> {
-//! let posthog = std::sync::Arc::new(posthog_rs::client("phc_project_api_key").await);
-//! let server = posthog_rs::mcp::instrument(server, posthog.clone());
+//! let posthog = std::sync::Arc::new(posthog::client("phc_project_api_key").await);
+//! let server = posthog::mcp::instrument(server, posthog.clone());
 //! server.serve(rmcp::transport::stdio()).await?.waiting().await?;
 //! posthog.shutdown().await;
 //! # Ok(())

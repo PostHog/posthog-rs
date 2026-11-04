@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use httpmock::prelude::*;
-use posthog_rs::{
+use posthog::{
     CaptureCompression, CaptureSummary, ClientOptionsBuilder, Endpoint, Event, EventStatus,
     PostHogError,
 };
@@ -185,8 +185,8 @@ fn all_ok(uuids: &[Uuid]) -> serde_json::Value {
 mod async_client {
     use super::*;
 
-    async fn client(builder: &mut ClientOptionsBuilder) -> posthog_rs::Client {
-        posthog_rs::client(builder.build().unwrap()).await
+    async fn client(builder: &mut ClientOptionsBuilder) -> posthog::Client {
+        posthog::client(builder.build().unwrap()).await
     }
 
     #[tokio::test]
@@ -422,8 +422,8 @@ mod async_client {
 mod blocking {
     use super::*;
 
-    fn client(builder: &mut ClientOptionsBuilder) -> posthog_rs::Client {
-        posthog_rs::client(builder.build().unwrap())
+    fn client(builder: &mut ClientOptionsBuilder) -> posthog::Client {
+        posthog::client(builder.build().unwrap())
     }
 
     #[test]
