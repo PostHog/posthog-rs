@@ -181,11 +181,10 @@ async fn a_server_without_a_field_refuses_the_send_and_names_it() {
     let server = ScriptedServer::start_async(vec![Answer::json(
         400,
         json!({
-            "type": "invalid_request",
-            "code": "invalid_request",
-            "detail": "PostHog doesn't take this field yet, so it didn't send the email.",
+            "type": "validation_error",
+            "code": "invalid_input",
+            "detail": "PostHog doesn't take this field, so it doesn't send the email without it.",
             "attr": "attachments",
-            "fix": "Send the email without this field, or send it again once PostHog takes the field.",
         }),
     )])
     .await;
@@ -201,7 +200,7 @@ async fn a_server_without_a_field_refuses_the_send_and_names_it() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.code(), "invalid_request");
+    assert_eq!(error.code(), "invalid_input");
     assert_eq!(error.kind(), EmailErrorKind::ValidationError);
     assert_eq!(error.field(), Some("attachments"));
     assert_eq!(server.requests().len(), 1);
