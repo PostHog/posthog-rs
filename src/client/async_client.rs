@@ -418,14 +418,20 @@ impl Client {
     /// [`emails`](Self::emails) refuses requests with `client_closed`. Email
     /// requests already in flight, retries included, get until
     /// `shutdown_timeout_ms` from the start of shutdown to finish. When called
-    /// from a transport callback, queues shutdown without waiting for or
-    /// joining the current worker thread.
+    /// from a transport callback, queues shutdown without waiting for email
+    /// requests or joining the current worker thread.
     pub async fn shutdown(&self) {
         let deadline =
             std::time::Instant::now() + Duration::from_millis(self.options.shutdown_timeout_ms);
+        let called_from_transport_worker = self
+            .transport
+            .as_ref()
+            .is_some_and(|transport| transport.on_worker_thread());
         self.email_tracker.close();
         self.shutdown_transport().await;
-        self.email_tracker.wait_idle(deadline).await;
+        if !called_from_transport_worker {
+            self.email_tracker.wait_idle(deadline).await;
+        }
     }
 
     async fn shutdown_transport(&self) {

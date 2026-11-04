@@ -183,23 +183,7 @@ impl<'a> Emails<'a> {
         let response = request.send().map_err(shared::request_error)?;
         let status = response.status().as_u16();
         let retry_after = parse_retry_after(response.headers());
-        match read_capped(response) {
-            Ok(bytes) => Ok(Reply {
-                status,
-                payload: serde_json::from_slice(&bytes).ok(),
-                retry_after,
-            }),
-            // An accepted send may already be queued, so a failed or oversized
-            // read stays a retryable network error.
-            Err(error) if (200..300).contains(&status) => Err(error),
-            // The status and Retry-After still decide the retry when an error
-            // body can't be read.
-            Err(_) => Ok(Reply {
-                status,
-                payload: None,
-                retry_after,
-            }),
-        }
+        shared::reply_from_body(status, retry_after, read_capped(response))
     }
 }
 

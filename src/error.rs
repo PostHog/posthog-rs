@@ -5,7 +5,7 @@ use crate::emails::EmailError;
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Email(error) => Some(error),
+            Error::Email(error) => error.source(),
             _ => None,
         }
     }

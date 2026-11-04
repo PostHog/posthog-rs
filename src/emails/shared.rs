@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 use tracing::warn;
 use uuid::Uuid;
 
-use super::error::EmailError;
+use super::error::{EmailError, EmailErrorKind};
 use super::types::{
     CodeEmail, EmailDeliveryStatus, EmailStatus, EmailWarning, SendEmail, SendEmailResult,
     SendOptions, TemplateEmail,
@@ -60,7 +60,6 @@ impl Connection {
         let mut headers = self.headers.clone();
         if let Some(key) = idempotency_key {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            // The key passed the visible-ASCII check, so it is a valid header value.
             let value = HeaderValue::from_str(key).map_err(|_| invalid_idempotency_key())?;
             headers.insert(HeaderName::from_static("idempotency-key"), value);
         }
@@ -74,6 +73,29 @@ pub(crate) struct Reply {
     pub(crate) status: u16,
     pub(crate) payload: Option<Value>,
     pub(crate) retry_after: Option<Duration>,
+}
+
+/// The reply for a read body. An accepted send may already be queued, so an
+/// unreadable 2xx body stays a retryable network error. An unreadable refusal
+/// keeps its status and `Retry-After`, which still decide the retry.
+pub(crate) fn reply_from_body(
+    status: u16,
+    retry_after: Option<Duration>,
+    body: Result<Vec<u8>, EmailError>,
+) -> Result<Reply, EmailError> {
+    match body {
+        Ok(bytes) => Ok(Reply {
+            status,
+            payload: serde_json::from_slice(&bytes).ok(),
+            retry_after,
+        }),
+        Err(unreadable_acceptance) if (200..300).contains(&status) => Err(unreadable_acceptance),
+        Err(_unreadable_refusal) => Ok(Reply {
+            status,
+            payload: None,
+            retry_after,
+        }),
+    }
 }
 
 pub(crate) fn prepare_send(email: SendEmail) -> Result<PreparedSend, EmailError> {
@@ -317,8 +339,6 @@ pub(crate) fn connect(options: &ClientOptions, key_needed: &str) -> Result<Conne
 /// A failed request with no answer from PostHog.
 pub(crate) fn request_error(error: reqwest::Error) -> EmailError {
     if error.is_builder() {
-        // The request could not be built, so nothing reached PostHog and a
-        // retry would fail the same way.
         return EmailError::new(
             "unexpected_error",
             "The request to PostHog could not be built.",
@@ -467,26 +487,26 @@ pub(crate) fn log_warnings(result: &SendEmailResult) {
     }
 }
 
+/// A send carries an idempotency key, so a retry can't queue a second email.
+/// A status read changes nothing.
 fn is_retryable(error: &EmailError) -> bool {
-    // A send carries an idempotency key, so a retry can't queue a second
-    // email. A status read changes nothing.
     match error.status() {
         None => error.is_network_error(),
         Some(409) => error.code() == "idempotency_key_in_flight",
-        // Waiting doesn't fix a monthly quota.
-        Some(429) => error.code() != "quota_limited",
+        Some(429) => error.kind() != EmailErrorKind::MonthlyQuotaExceeded,
         Some(status) => status == 503,
     }
 }
 
 /// How long to wait before retry `attempt` (counting from 0), or `None` to
-/// report the error now.
+/// report the error now. A `Retry-After` longer than the longest backoff
+/// reports the error now, because retrying sooner would break the server's
+/// rate limit.
 pub(crate) fn retry_delay(error: &EmailError, attempt: u32, max_retries: u32) -> Option<Duration> {
     if attempt >= max_retries || !is_retryable(error) {
         return None;
     }
     let retry_after = error.retry_after().unwrap_or_default();
-    // Retrying before a longer Retry-After would break the server's rate limit.
     if retry_after > MAX_RETRY_DELAY {
         return None;
     }
@@ -513,10 +533,9 @@ struct TrackerState {
 #[derive(Debug, Default)]
 pub(crate) struct EmailTracker {
     state: Mutex<TrackerState>,
-    #[cfg(feature = "async-client")]
-    idle: tokio::sync::Notify,
-    #[cfg(not(feature = "async-client"))]
     idle: std::sync::Condvar,
+    #[cfg(feature = "async-client")]
+    idle_on_runtime: tokio::sync::Notify,
 }
 
 /// One email request in flight. Dropping it, also when the caller drops the
@@ -528,10 +547,9 @@ impl Drop for InFlight<'_> {
         let mut state = self.0.lock();
         state.in_flight -= 1;
         if state.in_flight == 0 {
-            #[cfg(feature = "async-client")]
-            self.0.idle.notify_waiters();
-            #[cfg(not(feature = "async-client"))]
             self.0.idle.notify_all();
+            #[cfg(feature = "async-client")]
+            self.0.idle_on_runtime.notify_waiters();
         }
     }
 }
@@ -572,17 +590,19 @@ impl EmailTracker {
         self.lock().closed = true;
     }
 
-    /// Waits until no email request is in flight, or until `deadline`.
+    /// Waits until no email request is in flight, or until `deadline`. Off a
+    /// Tokio runtime, such as under `futures::executor::block_on`, it blocks
+    /// the calling thread instead.
+    ///
+    /// `notify_waiters` wakes every `Notified` made before it, so each pass
+    /// makes one before it reads the count.
     #[cfg(feature = "async-client")]
     pub(crate) async fn wait_idle(&self, deadline: std::time::Instant) {
         if tokio::runtime::Handle::try_current().is_err() {
-            // Without a runtime there is no timer to bound the wait.
-            return;
+            return self.block_until_idle(deadline);
         }
         loop {
-            // notify_waiters reaches every Notified made before the call, so
-            // making it before the check misses no wake-up.
-            let idle = self.idle.notified();
+            let idle = self.idle_on_runtime.notified();
             if self.lock().in_flight == 0 {
                 return;
             }
@@ -598,6 +618,10 @@ impl EmailTracker {
     /// Waits until no email request is in flight, or until `deadline`.
     #[cfg(not(feature = "async-client"))]
     pub(crate) fn wait_idle(&self, deadline: std::time::Instant) {
+        self.block_until_idle(deadline);
+    }
+
+    fn block_until_idle(&self, deadline: std::time::Instant) {
         let mut state = self.lock();
         while state.in_flight > 0 {
             let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
