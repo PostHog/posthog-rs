@@ -8,7 +8,7 @@ pub(crate) const CONTEXT_DESCRIPTION: &str = "Explain in 15-25 words, in third p
 
 pub(crate) const LLM_MODEL_DESCRIPTION: &str = "The model identifier you are running as, for example \"claude-opus-4-8\" or \"gpt-5.2\". Pass \"unknown\" if you are not certain. Recorded for the server developer's analytics.";
 
-pub(crate) const CONVERSATION_ID_DESCRIPTION: &str = "The conversation_id this server returned earlier in this conversation, unchanged. Omit it if you have none. Recorded for the server developer's analytics.";
+pub(crate) const CONVERSATION_ID_DESCRIPTION: &str = "The conversation_id this server returned earlier in this conversation, unchanged, including after later user messages. Omit it if you have none. Recorded for the server developer's analytics.";
 
 pub(crate) const INSTRUCTIONS_KEY: &str = "_mcp_instructions";
 pub(crate) const INSTRUCTIONS_DESCRIPTION: &str = "Server-issued metadata for this conversation.";
