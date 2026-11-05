@@ -119,11 +119,13 @@ jobs:
           rustup toolchain install nightly-2026-06-12 --profile minimal
           git clone --depth 1 https://github.com/PostHog/sdk-specs "$RUNNER_TEMP/sdk-specs"
           python3 scripts/generate_markdown.py --sdk-specs "$RUNNER_TEMP/sdk-specs"
+          # Stage the pages, so a new page shows in git status as a file, not as an untracked folder.
+          git add references
 
       - name: Check for changes
         id: check-changes
         run: |
-          if git diff --quiet; then
+          if git diff --quiet HEAD; then
             echo "No changes to commit"
             echo "committed=false" >> "$GITHUB_OUTPUT"
           else
@@ -142,12 +144,12 @@ jobs:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
 
       # ghcommit-action commits via the GitHub API, so the local working
-      # tree still has dirty files. Discard them (already committed remotely)
+      # tree still has dirty and staged files. Discard them (already committed remotely)
       # and pull, otherwise cargo publish fails with "files contain changes
       # not yet committed".
       - name: Sync local repository
         if: steps.check-changes.outputs.committed == 'true'
-        run: git checkout -- . && git pull origin main
+        run: git reset --hard && git pull origin main
 
       - name: Publish dry-run
         if: steps.check-changes.outputs.committed == 'true'
