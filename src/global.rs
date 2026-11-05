@@ -36,8 +36,6 @@ pub(crate) fn global_client() -> Option<&'static Client> {
 /// # Errors
 ///
 /// Returns [`Error::AlreadyInitialized`] if called more than once.
-///
-/// posthog-capability: setup
 #[cfg(feature = "async-client")]
 pub async fn init_global_client<C: Into<ClientOptions>>(options: C) -> Result<(), Error> {
     if is_disabled() {
@@ -71,8 +69,6 @@ pub async fn init_global_client<C: Into<ClientOptions>>(options: C) -> Result<()
 /// # Errors
 ///
 /// Returns [`Error::AlreadyInitialized`] if called more than once.
-///
-/// posthog-capability: setup
 #[cfg(not(feature = "async-client"))]
 pub fn init_global_client<C: Into<ClientOptions>>(options: C) -> Result<(), Error> {
     if is_disabled() {
@@ -113,8 +109,6 @@ pub fn is_disabled() -> bool {
 ///
 /// Fire-and-forget, like [`Client::capture`]. No-op if `init_global` has not
 /// run.
-///
-/// posthog-capability: capture
 pub fn capture(event: Event) {
     if let Some(client) = GLOBAL_CLIENT.get() {
         client.capture(event);
@@ -127,8 +121,6 @@ pub fn capture(event: Event) {
 /// `capture` only enqueues, and the global client lives in a `static` whose
 /// `Drop` never runs at process exit, so call this (or [`shutdown`]) before
 /// exiting to avoid losing buffered events.
-///
-/// posthog-capability: flush
 #[cfg(feature = "async-client")]
 pub async fn flush() {
     if let Some(client) = GLOBAL_CLIENT.get() {
@@ -138,8 +130,6 @@ pub async fn flush() {
 
 /// Flush and stop the global client's background worker. Idempotent; no-op if
 /// `init_global` has not run.
-///
-/// posthog-capability: shutdown
 #[cfg(feature = "async-client")]
 pub async fn shutdown() {
     if let Some(client) = GLOBAL_CLIENT.get() {
@@ -148,8 +138,6 @@ pub async fn shutdown() {
 }
 
 /// Capture a Rust error personlessly using the global client.
-///
-/// posthog-capability: capture-exception
 #[cfg(all(feature = "async-client", feature = "error-tracking"))]
 pub async fn capture_exception<E>(error: &E) -> Result<(), Error>
 where
@@ -160,8 +148,6 @@ where
 }
 
 /// Capture a Rust error with optional context using the global client.
-///
-/// posthog-capability: capture-exception
 #[cfg(all(feature = "async-client", feature = "error-tracking"))]
 pub async fn capture_exception_with<E>(
     error: &E,
@@ -180,8 +166,6 @@ where
 /// `capture` only enqueues, and the global client lives in a `static` whose
 /// `Drop` never runs at process exit, so call this (or [`shutdown`]) before
 /// exiting to avoid losing buffered events.
-///
-/// posthog-capability: flush
 #[cfg(not(feature = "async-client"))]
 pub fn flush() {
     if let Some(client) = GLOBAL_CLIENT.get() {
@@ -191,8 +175,6 @@ pub fn flush() {
 
 /// Flush and stop the global client's background worker. Idempotent; no-op if
 /// `init_global` has not run.
-///
-/// posthog-capability: shutdown
 #[cfg(not(feature = "async-client"))]
 pub fn shutdown() {
     if let Some(client) = GLOBAL_CLIENT.get() {
@@ -201,8 +183,6 @@ pub fn shutdown() {
 }
 
 /// Capture a Rust error personlessly using the global client.
-///
-/// posthog-capability: capture-exception
 #[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
 pub fn capture_exception<E>(error: &E) -> Result<(), Error>
 where
@@ -213,8 +193,6 @@ where
 }
 
 /// Capture a Rust error with optional context using the global client.
-///
-/// posthog-capability: capture-exception
 #[cfg(all(not(feature = "async-client"), feature = "error-tracking"))]
 pub fn capture_exception_with<E>(error: &E, options: CaptureExceptionOptions) -> Result<(), Error>
 where

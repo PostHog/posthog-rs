@@ -132,8 +132,6 @@ impl FeatureFlagEvaluationsHost for BlockingFlagEventHost {
 /// `async-client` feature to use the async client instead.
 /// If the HTTP client cannot be built, logs a warning and creates a disabled
 /// client instead.
-///
-/// posthog-capability: setup
 pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
     let mut options = options.into().sanitize();
     let client = http_client_or_disable(
@@ -227,8 +225,6 @@ impl Client {
     /// once it is delivered, and delivery failures are not surfaced to the
     /// caller. Disabled clients and a full queue drop the event (the latter
     /// with a single warning).
-    ///
-    /// posthog-capability: capture
     #[instrument(skip(self, event), level = "debug")]
     pub fn capture(&self, event: Event) {
         if let Some(transport) = &self.transport {
@@ -260,8 +256,6 @@ impl Client {
     /// // The visitor browsed anonymously, then logged in.
     /// client.alias("anon-abc123", "user-42");
     /// ```
-    ///
-    /// posthog-capability: alias
     pub fn alias<P: Into<String>, D: Into<String>>(&self, previous_id: P, distinct_id: D) {
         if let Some(event) = Event::alias(previous_id.into(), distinct_id.into()) {
             self.capture(event);
@@ -307,8 +301,6 @@ impl Client {
     /// )?;
     /// # Ok::<(), posthog_rs::Error>(())
     /// ```
-    ///
-    /// posthog-capability: group-identify
     pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(
         &self,
         group_type: T,
@@ -325,8 +317,6 @@ impl Client {
     /// Flush queued events, blocking until the worker has attempted delivery of
     /// everything queued before this call. Transient failures are kept for retry
     /// (the call still returns). A no-op for disabled clients.
-    ///
-    /// posthog-capability: flush
     pub fn flush(&self) {
         let Some(transport) = &self.transport else {
             return;
@@ -397,8 +387,6 @@ impl Client {
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
     /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
     /// disabled clients.
-    ///
-    /// posthog-capability: shutdown
     pub fn shutdown(&self) {
         if let Some(transport) = &self.transport {
             transport.close_blocking();
@@ -430,8 +418,6 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    ///
-    /// posthog-capability: capture-exception
     #[cfg(feature = "error-tracking")]
     pub fn capture_exception<E>(&self, error: &E) -> Result<(), Error>
     where
@@ -464,8 +450,6 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    ///
-    /// posthog-capability: capture-exception
     #[cfg(feature = "error-tracking")]
     pub fn capture_exception_with<E>(
         &self,
@@ -503,8 +487,6 @@ impl Client {
     /// Fire-and-forget, like [`Client::capture`]. The batch is enqueued per event
     /// rather than atomically, so if the bounded queue fills partway through, the
     /// remaining events are dropped (with the usual single full-queue warning).
-    ///
-    /// posthog-capability: capture
     #[instrument(skip(self, events), fields(event_count = events.len()), level = "debug")]
     pub fn capture_batch(&self, events: Vec<Event>, historical_migration: bool) {
         if let Some(transport) = &self.transport {
@@ -532,8 +514,6 @@ impl Client {
     /// The immediate-delivery counterpart to [`Client::capture`]. This is a
     /// convenience wrapper over [`Client::capture_batch_immediate`] with a
     /// one-event batch; see it for full semantics.
-    ///
-    /// posthog-capability: capture
     #[must_use = "the delivery outcome should be inspected"]
     pub fn capture_immediate(&self, event: Event) -> Result<CaptureSummary, Error> {
         self.capture_batch_immediate(vec![event], false)
@@ -565,8 +545,6 @@ impl Client {
     ///
     /// Returns [`Error`] when the request is rejected with a terminal status or
     /// the retry budget is exhausted without a successful response.
-    ///
-    /// posthog-capability: capture
     #[must_use = "the delivery outcome should be inspected"]
     #[instrument(
         skip(self, events),
@@ -753,8 +731,6 @@ impl Client {
     /// Returns [`Error::Connection`] for request failures or non-success HTTP
     /// statuses, and [`Error::Serialization`] when the response cannot be
     /// parsed.
-    ///
-    /// posthog-capability: get-feature-flags
     #[must_use = "feature flags result should be used"]
     pub fn get_feature_flags<S: Into<String>>(
         &self,
@@ -859,8 +835,6 @@ impl Client {
     /// # Errors
     ///
     /// Returns errors from remote `/flags` requests or response parsing.
-    ///
-    /// posthog-capability: get-feature-flag
     #[must_use = "feature flag result should be used"]
     #[instrument(skip_all, level = "debug")]
     #[deprecated(
@@ -945,8 +919,6 @@ impl Client {
     /// # Errors
     ///
     /// Returns errors from [`Client::get_feature_flag`].
-    ///
-    /// posthog-capability: is-feature-enabled
     #[must_use = "feature flag enabled check result should be used"]
     #[deprecated(
         since = "0.6.0",
@@ -993,8 +965,6 @@ impl Client {
     ///
     /// Returns [`Error::Connection`] for request failures and
     /// [`Error::Serialization`] when the response cannot be parsed.
-    ///
-    /// posthog-capability: get-feature-flag-payload
     #[must_use = "feature flag payload result should be used"]
     #[deprecated(
         since = "0.6.0",
@@ -1094,8 +1064,6 @@ impl Client {
     ///
     /// Returns [`Error::InconclusiveMatch`] when the flag cannot be evaluated
     /// locally with the supplied context.
-    ///
-    /// posthog-capability: local-feature-flag-evaluator
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate_feature_flag_locally(
         &self,
@@ -1122,8 +1090,6 @@ impl Client {
     }
 
     /// Uses this context's identity and pins defaults for later flag access events.
-    ///
-    /// posthog-capability: evaluate-flags
     pub fn evaluate_flags_with_context(
         &self,
         context: &crate::RequestContext,
@@ -1156,8 +1122,6 @@ impl Client {
     /// results are available.
     ///
     /// [`Event::with_flags`]: crate::Event::with_flags
-    ///
-    /// posthog-capability: evaluate-flags
     pub fn evaluate_flags<S: Into<String>>(
         &self,
         distinct_id: S,

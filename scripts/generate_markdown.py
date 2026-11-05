@@ -1,8 +1,9 @@
 """Generate the SDK reference Markdown from rustdoc JSON.
 
 rustdoc lists every public item with its doc comment, which is already Markdown. This script
-only groups items by the `posthog-capability: <slug>` line in their docs, in the PostHog/sdk-specs
-README's order, and writes front matter. Untagged items go to SDK utils.
+only groups items by the sdk-specs capability `docs/capabilities.json` maps their label to, in the
+PostHog/sdk-specs README's order, and writes front matter. Top-level items are keyed without the
+crate name, so one map serves `posthog_rs` and `posthog`. Items in its `utils` go to SDK utils.
 
 Needs the nightly that CI pins for the public API check. It only builds the docs and is never a
 dependency of the crate: `rustup toolchain install nightly-2026-06-12 --profile minimal`.
@@ -20,10 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLCHAIN = os.environ.get("DOCS_TOOLCHAIN", "nightly-2026-06-12")
 # Cargo features that are for tests or swap a dependency, rather than add public API.
 NOT_API = {"default", "e2e-test", "test-harness", "tls-no-provider"}
-# Other public client classes: their untagged methods get an H2 of their own.
+# Other public client classes: their unmapped methods get an H2 of their own.
 CLASSES = ["FeatureFlagEvaluations", "LocalEvaluator", "FlagPoller", "EndpointManager"]
 FIRST = ["setup", "capture", "identify"]
-TAG = "posthog-capability:"
 ITEMS: dict = {}  # rustdoc items by id, for variants whose fields are separate items
 
 
@@ -35,7 +35,7 @@ class Docs:
         self.root = self.index[str(data["root"])]["inner"]["module"]["items"]
 
     def markdown(self, item: dict, level: int) -> str:
-        """The item's docs without the tag line, with rustdoc-only syntax made plain Markdown."""
+        """The item's docs, with rustdoc-only syntax made plain Markdown."""
         out, fence = [], False
         for line in (item["docs"] or "").split("\n"):
             bare = line.strip()
@@ -45,8 +45,8 @@ class Docs:
                 fence = not fence
             elif fence and (bare == "#" or bare.startswith("# ")):
                 continue  # rustdoc hides these example lines
-            elif not fence and (bare.startswith(TAG) or (bare.startswith("[") and "]: " in bare)):
-                continue  # the tag, and intra-doc link targets that only rustdoc resolves
+            elif not fence and bare.startswith("[") and "]: " in bare:
+                continue  # intra-doc link targets that only rustdoc resolves
             elif not fence and line.startswith("#"):
                 line = "#" * level + line.lstrip("#")
             out.append(line)
@@ -153,13 +153,6 @@ def where(g: dict) -> str:
     return "\nwhere\n" + "\n".join(lines) if lines else ""
 
 
-def tag(item: dict) -> str | None:
-    for line in (item["docs"] or "").split("\n"):
-        if line.strip().startswith(TAG):
-            return line.strip()[len(TAG) :].strip()
-    return None
-
-
 def entry(docs: Docs, item: dict, label: str, level: int, name: str = "") -> str:
     parts = [f"{'#' * level} `{label}`", f"```rust\n{signature(item, name)}\n```"]
     return "\n\n".join(p for p in [*parts, fields(docs, item), docs.markdown(item, level + 1)] if p)
@@ -209,7 +202,20 @@ def capabilities(checkout: str) -> dict[str, str]:
     return {s: titles[s][0].upper() + titles[s][1:] for s in order if s in titles}
 
 
-def reference(docs: Docs, caps: dict[str, str], crate: str) -> list[str]:
+def reference(docs: Docs, caps: dict[str, str], crate: str, current: bool) -> list[str]:
+    tags = json.loads((ROOT / "docs/capabilities.json").read_text())
+    allowed, nexts, found = set(tags.pop("utils")), tags.pop("next", {}), set()
+    for label, slug in [*tags.items(), *nexts.items()]:
+        if slug not in caps:
+            raise SystemExit(f"docs/capabilities.json: {label} maps to {slug}, which isn't an sdk-specs capability")
+
+    def capability(label: str, util: bool) -> str | None:
+        found.add(label)
+        slug = tags.get(label) or nexts.get(label)
+        if util and not slug and label not in allowed:
+            raise SystemExit(f"docs/capabilities.json: map {label} to a capability or add it to utils")
+        return slug
+
     tagged: dict[str, list[str]] = {slug: [] for slug in caps}
     utils, classes, types = [], {}, []
     for use in (docs.index[str(i)]["inner"].get("use") for i in docs.root):
@@ -218,17 +224,19 @@ def reference(docs: Docs, caps: dict[str, str], crate: str) -> list[str]:
         item, name = docs.index[str(use["id"])], use["name"]
         kind = next(iter(item["inner"]))
         if kind in ("function", "constant"):
-            text = entry(docs, item, f"{crate}::{name}", 3, name)
-            (tagged[tag(item)] if tag(item) else utils).append(text)
+            text, slug = entry(docs, item, f"{crate}::{name}", 3, name), capability(name, True)
+            (tagged[slug] if slug else utils).append(text)
             continue
         if kind not in ("struct", "enum", "trait"):
             continue
         rest = []
         for m in members(docs, item):
-            inside = not tag(m) and name not in CLASSES and name != "Client"
-            text = entry(docs, m, f"{name}::{m['name']}", 4 if inside else 3)
-            if tag(m):
-                tagged[tag(m)].append(text)
+            label = f"{name}::{m['name']}"
+            slug = capability(label, name == "Client")
+            inside = not slug and name not in CLASSES and name != "Client"
+            text = entry(docs, m, label, 4 if inside else 3)
+            if slug:
+                tagged[slug].append(text)
             elif name == "Client":
                 utils.append(text)
             elif name in CLASSES:
@@ -239,6 +247,9 @@ def reference(docs: Docs, caps: dict[str, str], crate: str) -> list[str]:
             classes[name] = [entry(docs, item, name, 3), *classes.get(name, [])]
         elif name != "Client":
             types.append("\n\n".join([entry(docs, item, name, 3), *rest]))
+    # A next major can drop labels the current one maps, so only the current major checks for stale keys.
+    if current and (stale := sorted(set(tags) - found)):
+        raise SystemExit(f"docs/capabilities.json: {', '.join(stale)} names no public item")
     out = []
     for slug, title in caps.items():
         if tagged[slug]:
@@ -303,7 +314,7 @@ def main() -> None:
     declared = int(version.split('"')[1].split(".")[0])
     major = opts.major or declared
     body = ["## Getting started", nest((ROOT / "docs/getting-started.md").read_text())]
-    body += reference(docs, capabilities(opts.sdk_specs), crate)
+    body += reference(docs, capabilities(opts.sdk_specs), crate, declared >= major)
     (ROOT / "references").mkdir(exist_ok=True)
     title = f"PostHog Rust SDK {major}.x" + ("" if declared >= major else " (experimental)")
     write(f"posthog-rust-{major}.md", [front_matter(title, body), *body])

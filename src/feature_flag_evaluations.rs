@@ -177,8 +177,6 @@ impl FeatureFlagEvaluations {
     ///
     /// `true` for enabled boolean flags or matched multivariate variants, and
     /// `false` for disabled or missing flags.
-    ///
-    /// posthog-capability: is-feature-enabled
     #[must_use]
     pub fn is_enabled(&self, key: &str) -> bool {
         self.record_access(key);
@@ -195,8 +193,6 @@ impl FeatureFlagEvaluations {
     /// - `Some(FlagValue::Boolean(true))` when enabled with no variant.
     ///
     /// Records the access and fires (deduplicated) `$feature_flag_called`.
-    ///
-    /// posthog-capability: get-feature-flag-result
     #[must_use]
     pub fn get_flag(&self, key: &str) -> Option<FlagValue> {
         self.record_access(key);
@@ -210,8 +206,6 @@ impl FeatureFlagEvaluations {
     ///
     /// This call does **not** count as an access and does **not** fire any
     /// event, matching the behavior documented for server-side SDKs.
-    ///
-    /// posthog-capability: get-feature-flag-payload
     #[must_use]
     pub fn get_flag_payload(&self, key: &str) -> Option<Value> {
         self.flags.get(key).and_then(|f| f.payload.clone())
