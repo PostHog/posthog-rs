@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.31.1 — 2026-11-05
+
+### Patch changes
+
+- [7d78b25](https://github.com/posthog/posthog-rs/commit/7d78b2554219bb146557e7bc2ad22fc1cb40feaf) Reworded the descriptions of the injected `conversation_id` and `llm_model` arguments and the `get_more_tools` virtual tool so they describe the field instead of instructing the model. This changes your published tool definitions; if your server is listed in the ChatGPT or Claude directories, those platforms may re-review the updated tools. — Thanks @lucasheriques!
+
 ## 0.31.0 — 2026-11-05
 
 ### Minor changes
