@@ -6,9 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use httpmock::prelude::*;
-use posthog_rs::{
-    ClientOptionsBuilder, Error, Event, FlagCache, FlagPoller, LocalEvaluationConfig,
-};
+use posthog::{ClientOptionsBuilder, Error, Event, FlagCache, FlagPoller, LocalEvaluationConfig};
 
 /// Isolate the empty trust store in a subprocess so parallel tests keep their
 /// normal certificates. The mock server stays in the parent for the same reason.
@@ -92,7 +90,7 @@ fn client_without_ca_certificates_is_noop() {
                 .build()
                 .expect("valid client options");
             assert!(!options.is_disabled());
-            let client = complete(posthog_rs::client(options));
+            let client = complete(posthog::client(options));
             let event = Event::new("test_event", "test_user");
             client.capture(event.clone());
             client.capture_batch(vec![event.clone()], false);
@@ -142,8 +140,7 @@ fn async_poller_without_ca_certificates_stays_stopped() {
     without_ca_certificates(
         "async_poller_without_ca_certificates_stays_stopped",
         |host| {
-            let mut poller =
-                posthog_rs::AsyncFlagPoller::new(poller_config(host), FlagCache::new());
+            let mut poller = posthog::AsyncFlagPoller::new(poller_config(host), FlagCache::new());
             assert!(matches!(
                 complete(poller.load_flags()),
                 Err(Error::Connection(_))

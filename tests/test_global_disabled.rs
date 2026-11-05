@@ -8,7 +8,7 @@ fn disabling_global_prevents_initialization_and_delivery() {
         when.any_request();
         then.status(200);
     });
-    let options = posthog_rs::ClientOptionsBuilder::default()
+    let options = posthog::ClientOptionsBuilder::default()
         .api_key("phc_test".to_string())
         .host(server.base_url())
         .enable_local_evaluation(true)
@@ -16,17 +16,17 @@ fn disabling_global_prevents_initialization_and_delivery() {
         .build()
         .unwrap();
 
-    posthog_rs::disable_global();
-    posthog_rs::disable_global();
-    assert!(posthog_rs::global_is_disabled());
+    posthog::disable_global();
+    posthog::disable_global();
+    assert!(posthog::global_is_disabled());
     #[cfg(feature = "async-client")]
-    futures::executor::block_on(posthog_rs::init_global(options)).unwrap();
+    futures::executor::block_on(posthog::init_global(options)).unwrap();
     #[cfg(not(feature = "async-client"))]
-    posthog_rs::init_global(options).unwrap();
-    posthog_rs::capture(posthog_rs::Event::new("not-sent", "user-1"));
+    posthog::init_global(options).unwrap();
+    posthog::capture(posthog::Event::new("not-sent", "user-1"));
     #[cfg(feature = "async-client")]
-    futures::executor::block_on(posthog_rs::shutdown());
+    futures::executor::block_on(posthog::shutdown());
     #[cfg(not(feature = "async-client"))]
-    posthog_rs::shutdown();
+    posthog::shutdown();
     requests.assert_calls(0);
 }

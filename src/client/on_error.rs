@@ -175,7 +175,7 @@ impl<'a> CaptureFailure<'a> {
     /// separators, cuts each reason to 64 characters, and shows a missing one as `unspecified`.
     ///
     /// ```no_run
-    /// use posthog_rs::{ClientOptionsBuilder, PostHogError};
+    /// use posthog::{ClientOptionsBuilder, PostHogError};
     ///
     /// let options = ClientOptionsBuilder::default()
     ///     .api_key("phc_example".to_string())

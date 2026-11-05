@@ -1,4 +1,4 @@
-use posthog_rs::{Event, RequestContext};
+use posthog::{Event, RequestContext};
 
 #[test]
 fn explicit_context_builds_events_without_replacing_explicit_values() {
@@ -181,8 +181,8 @@ async fn queued_batch_and_exception_context_survives_scope_end() {
         });
         then.status(200).json_body(json!({"results": {}}));
     });
-    let client = posthog_rs::client(
-        posthog_rs::ClientOptionsBuilder::default()
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
             .api_key("phc_test".into())
             .host(server.base_url())
             .flush_at(100usize)
@@ -241,7 +241,7 @@ async fn flag_snapshot_keeps_originating_context_after_request_ends() {
         });
         then.status(200).json_body(json!({"results": {}}));
     });
-    let client = posthog_rs::client(("phc_test", server.base_url().as_str())).await;
+    let client = posthog::client(("phc_test", server.base_url().as_str())).await;
     let context = RequestContext::new()
         .distinct_id("flag-user")
         .session_id("original-session")
@@ -300,8 +300,8 @@ async fn immediate_analytics_and_ai_capture_take_the_context() {
     };
     let analytics = lane_mock("/i/v1/analytics/events", "work");
     let ai = lane_mock("/i/v1/ai/events", "$ai_generation");
-    let client = posthog_rs::client(
-        posthog_rs::ClientOptionsBuilder::default()
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
             .api_key("phc_test".into())
             .host(server.base_url())
             .max_capture_attempts(1u32)
@@ -367,8 +367,8 @@ async fn group_identify_takes_the_context_id_but_never_its_session() {
     let with_id = group_identify_mock("with-id", "context-user");
     let without_id = group_identify_mock("without-id", "$company_without-id");
     let blank_id = group_identify_mock("blank-id", "$company_blank-id");
-    let client = posthog_rs::client(
-        posthog_rs::ClientOptionsBuilder::default()
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
             .api_key("phc_test".into())
             .host(server.base_url())
             .flush_at(1usize)

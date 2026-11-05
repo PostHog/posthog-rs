@@ -5,7 +5,7 @@
 //! TLS connector at client construction time and rustls panics if no provider
 //! is available, so successfully constructing a client is the regression check.
 
-use posthog_rs::{ClientOptions, ClientOptionsBuilder};
+use posthog::{ClientOptions, ClientOptionsBuilder};
 
 fn install_ring_provider() {
     // Ignore the result: `install_default` fails if a process-level provider
@@ -25,12 +25,12 @@ fn options() -> ClientOptions {
 #[test]
 fn blocking_client_builds_with_installed_provider() {
     install_ring_provider();
-    let _client = posthog_rs::client(options());
+    let _client = posthog::client(options());
 }
 
 #[cfg(feature = "async-client")]
 #[tokio::test]
 async fn async_client_builds_with_installed_provider() {
     install_ring_provider();
-    let _client = posthog_rs::client(options()).await;
+    let _client = posthog::client(options()).await;
 }

@@ -3,7 +3,7 @@ version = 1
 
 [git]
 default_branch = "main"
-short_tags = "posthog-rs"    # Tag with v1.2.3 rather than posthog-rs-v1.2.3
+short_tags = "posthog"    # Use v1.2.3 for the implementation crate
 
 [github]
 repository = "posthog/posthog-rs"
@@ -14,4 +14,5 @@ repository = "posthog/posthog-rs"
 # show_acknowledgments = true (default)
 
 [packages]
+fixed = [["cargo/posthog", "cargo/posthog-rs"]]
 ignore = ["compliance/*"]

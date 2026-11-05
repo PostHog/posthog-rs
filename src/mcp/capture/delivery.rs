@@ -67,7 +67,7 @@ mod tests {
         assert!(kept.is_none());
         assert!(
             logs.contains(
-                r#"ERROR posthog_rs::mcp::capture::delivery: panic in PostHog before_send hook for event "$mcp_tool_call"; dropping event"#
+                r#"ERROR posthog::mcp::capture::delivery: panic in PostHog before_send hook for event "$mcp_tool_call"; dropping event"#
             ),
             "{}",
             logs

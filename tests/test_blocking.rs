@@ -31,21 +31,21 @@ fn assert_disabled_client_is_noop(api_key: Option<&str>) {
         }));
     });
 
-    let mut options_builder = posthog_rs::ClientOptionsBuilder::default();
+    let mut options_builder = posthog::ClientOptionsBuilder::default();
     if let Some(api_key) = api_key {
         options_builder.api_key(api_key.to_string());
     }
     let options = options_builder.host(server.base_url()).build().unwrap();
     assert!(options.is_disabled());
 
-    let client = posthog_rs::client(options);
-    let event = posthog_rs::Event::new("test_event", "user1");
+    let client = posthog::client(options);
+    let event = posthog::Event::new("test_event", "user1");
 
     client.capture(event.clone());
     client.capture_batch(vec![event], false);
 
     let flags = client
-        .evaluate_flags("test-user", posthog_rs::EvaluateFlagsOptions::default())
+        .evaluate_flags("test-user", posthog::EvaluateFlagsOptions::default())
         .unwrap();
     assert!(flags.keys().is_empty());
 

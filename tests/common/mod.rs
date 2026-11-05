@@ -3,11 +3,11 @@ type CaptureError = (Option<u16>, String);
 #[allow(dead_code)]
 pub fn capture_error_sink() -> (
     std::sync::mpsc::Receiver<CaptureError>,
-    impl Fn(&posthog_rs::PostHogError<'_>) + Send + Sync + 'static,
+    impl Fn(&posthog::PostHogError<'_>) + Send + Sync + 'static,
 ) {
     let (tx, rx) = std::sync::mpsc::channel();
     (rx, move |failure| {
-        if let posthog_rs::PostHogError::Capture(failure) = failure {
+        if let posthog::PostHogError::Capture(failure) = failure {
             let _ = tx.send((failure.status(), format!("{:?}", failure.error())));
         }
     })

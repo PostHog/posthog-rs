@@ -1,5 +1,5 @@
 ---
-cargo/posthog-rs: major
+cargo/posthog: major
 ---
 
 Set per-event capture options with `Event::insert_option`, or `CaptureExceptionOptions::option` for exceptions. The SDK sends them in an `options` map next to `properties`, unchanged, and PostHog validates them.

@@ -1,4 +1,4 @@
-use posthog_rs::{ClientOptionsBuilder, Event};
+use posthog::{ClientOptionsBuilder, Event};
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let client = posthog_rs::client(options).await;
+                let client = posthog::client(options).await;
                 client.capture(Event::new("custom_http_example", "example-user"));
                 client.shutdown().await;
             });
@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(not(feature = "async-client"))]
     {
-        let client = posthog_rs::client(options.build()?);
+        let client = posthog::client(options.build()?);
         client.capture(Event::new("custom_http_example", "example-user"));
         client.shutdown();
     }

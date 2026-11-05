@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use httpmock::prelude::*;
-use posthog_rs::{Client, ClientOptionsBuilder, Event};
+use posthog::{Client, ClientOptionsBuilder, Event};
 use serde_json::Value;
 
 pub struct Recorder {
@@ -38,7 +38,7 @@ impl Recorder {
             .build()
             .unwrap();
         Self {
-            client: Arc::new(posthog_rs::client(options).await),
+            client: Arc::new(posthog::client(options).await),
             events,
             _endpoint: endpoint,
         }
