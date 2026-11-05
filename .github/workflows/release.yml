@@ -115,6 +115,8 @@ jobs:
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
       - name: Generate SDK reference
+        # Best-effort: a failure never blocks the release. Run generate-references.yml to retry.
+        continue-on-error: true
         run: |
           rustup toolchain install nightly-2026-06-12 --profile minimal
           git clone --depth 1 https://github.com/PostHog/sdk-specs "$RUNNER_TEMP/sdk-specs"
