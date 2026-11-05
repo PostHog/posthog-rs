@@ -207,7 +207,7 @@ def capabilities(checkout: str) -> dict[str, str]:
     return {s: titles[s][0].upper() + titles[s][1:] for s in order if s in titles}
 
 
-def reference(docs: Docs, caps: dict[str, str]) -> list[str]:
+def reference(docs: Docs, caps: dict[str, str], crate: str) -> list[str]:
     tagged: dict[str, list[str]] = {slug: [] for slug in caps}
     utils, classes, types = [], {}, []
     for use in (docs.index[str(i)]["inner"].get("use") for i in docs.root):
@@ -216,7 +216,7 @@ def reference(docs: Docs, caps: dict[str, str]) -> list[str]:
         item, name = docs.index[str(use["id"])], use["name"]
         kind = next(iter(item["inner"]))
         if kind in ("function", "constant"):
-            text = entry(docs, item, f"posthog_rs::{name}", 3, name)
+            text = entry(docs, item, f"{crate}::{name}", 3, name)
             (tagged[tag(item)] if tag(item) else utils).append(text)
             continue
         if kind not in ("struct", "enum", "trait"):
@@ -290,12 +290,14 @@ def main() -> None:
         cwd=ROOT,
         check=True,
     )
-    docs = Docs(ROOT / "target/doc/posthog_rs.json")
-    version = next(l for l in (ROOT / "Cargo.toml").read_text().split("\n") if l.startswith("version = "))
+    manifest = (ROOT / "Cargo.toml").read_text().split("\n")
+    crate = next(l for l in manifest if l.startswith("name = ")).split('"')[1].replace("-", "_")
+    docs = Docs(ROOT / f"target/doc/{crate}.json")
+    version = next(l for l in manifest if l.startswith("version = "))
     declared = int(version.split('"')[1].split(".")[0])
     major = opts.major or declared
     body = ["## Getting started", nest((ROOT / "docs/getting-started.md").read_text())]
-    body += reference(docs, capabilities(opts.sdk_specs))
+    body += reference(docs, capabilities(opts.sdk_specs), crate)
     (ROOT / "references").mkdir(exist_ok=True)
     title = f"PostHog Rust SDK {major}.x" + ("" if declared >= major else " (experimental)")
     write(f"posthog-rust-{major}.md", [front_matter(title, body), *body])
