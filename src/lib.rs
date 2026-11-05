@@ -89,6 +89,7 @@
 mod client;
 mod compression;
 mod constants;
+mod emails;
 mod endpoints;
 mod error;
 #[cfg(feature = "error-tracking")]
@@ -125,6 +126,12 @@ pub use client::{CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogEr
 // Endpoints
 pub use endpoints::{
     Endpoint, EndpointManager, DEFAULT_HOST, EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT,
+};
+
+// Emails
+pub use emails::{
+    CodeEmail, EmailDeliveryStatus, EmailError, EmailErrorKind, EmailStatus, EmailWarning, Emails,
+    SendEmail, SendEmailResult, TemplateEmail,
 };
 
 // Error
