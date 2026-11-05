@@ -4,9 +4,13 @@ sidebar: Docs
 showTitle: true
 ---
 
-# Migrating from posthog-rs 0.x to 1.0
+# Migrating from posthog-rs 0.x to posthog 1.0
 
-Version 1.0 makes the V1 analytics endpoint the SDK's only capture path and removes APIs that were already deprecated in 0.x. This guide lists the code changes 1.0 needs and the behavior that differs from 0.x.
+Version 1.0 publishes the SDK as `posthog`, makes the V1 analytics endpoint the SDK's only capture path and removes APIs that were already deprecated in 0.x. This guide lists the code changes 1.0 needs and the behavior that differs from 0.x.
+
+New applications should depend on `posthog = "1"` and import `posthog`. Existing applications can use `posthog-rs = "1"` and keep their `posthog_rs` imports: that package forwards every feature and re-exports the same implementation, types and global state. The examples below use `posthog` for 1.0.
+
+The implementation's tracing target is now `posthog`, including when you use the compatibility crate. Update filters such as `RUST_LOG=posthog_rs=debug` to `RUST_LOG=posthog=debug`.
 
 For the changes every capture v1 SDK shares, such as event options, limits and per-event results, see [Upgrading to capture v1 SDKs](https://posthog.com/docs/libraries/capture-v1).
 
@@ -19,17 +23,17 @@ Remove `capture-v1` from your dependency features. Capture no longer needs a fea
 posthog-rs = { version = "0.27", features = ["capture-v1"] }
 
 # 1.0
-posthog-rs = "1"
+posthog = "1"
 ```
 
 The default features are the async client, error tracking, and TLS. Use `default-features = false` for the blocking client and explicitly enable a TLS feature when sending to an HTTPS endpoint.
 
 ```toml
 # Async client with error tracking and TLS
-posthog-rs = "1"
+posthog = "1"
 
 # Blocking client with TLS
-posthog-rs = { version = "1", default-features = false, features = ["tls"] }
+posthog = { version = "1", default-features = false, features = ["tls"] }
 ```
 
 TLS was previously enabled even with `default-features = false`. In 1.0, choose `tls` to use reqwest's default Rustls provider, or choose `tls-no-provider` when the application installs a process-level Rustls `CryptoProvider`. The latter avoids pulling in `aws-lc-rs` from this SDK, but constructing a client before installing a provider will panic. Cargo features are additive, so `tls-no-provider` only avoids the built-in provider when no dependency enables `tls`.
@@ -60,7 +64,7 @@ The SDK no longer sends `$lib_version__major`, `$lib_version__minor` or `$lib_ve
 
 ### AI events
 
-Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog_rs::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size. The SDK drops an event over the backend's 8 MiB per-event limit locally, on the background lane and in the immediate variants. On the background lane, that drop logs a warning with the event name and size, and it does not reach `on_error`. The immediate variants return that drop in the `CaptureSummary` with the detail `ai_event_too_big`. An event too large for the AI endpoint's request size limit gets HTTP 413 instead: `capture_ai_batch_immediate` returns `Error::BadRequest` and does not send the rest of the batch. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
+Use the new `capture_ai` family for LLM analytics events (`$ai_generation`, `$ai_span`, `$ai_trace`, `$ai_embedding`, and the other `$ai_*` names PostHog's LLM analytics product defines). `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog::capture_ai` mirror their analytics counterparts but post to `/i/v1/ai/events` on their own background lane, batched by size. The SDK drops an event over the backend's 8 MiB per-event limit locally, on the background lane and in the immediate variants. On the background lane, that drop logs a warning with the event name and size, and it does not reach `on_error`. The immediate variants return that drop in the `CaptureSummary` with the detail `ai_event_too_big`. An event too large for the AI endpoint's request size limit gets HTTP 413 instead: `capture_ai_batch_immediate` returns `Error::BadRequest` and does not send the rest of the batch. The lane has its own options: `capture_ai_compression` (unset sends AI bodies uncompressed; set `CaptureCompression::Zstd`, the best fit for large JSON) and `capture_ai_max_queue_size` (default 1000).
 
 `capture` never reroutes by event name. Send AI events with `capture_ai`. PostHog owns the `$ai_` prefix, so don't use it for your own events. For now the V1 analytics endpoint still accepts `$ai_` events sent through `capture`, but this is temporary, and large AI events always need `capture_ai`.
 
@@ -83,7 +87,7 @@ The backend decides which names belong on the AI lane and reports a misrouted ev
 Capture V1 reads per-event processing controls, such as person profile processing, from an `options` map that is sent next to `properties`. Set them with `Event::insert_option`, or with `CaptureExceptionOptions::option` for exceptions. They work the same on `capture` and `capture_ai`. To set an option on every event in a request, use `RequestContext::option` (see [Layers and which calls they reach](#layers-and-which-calls-they-reach)). An option the event sets, other than `null`, wins over it.
 
 ```rust
-let mut event = posthog_rs::Event::new("signed_up", "user-123");
+let mut event = posthog::Event::new("signed_up", "user-123");
 event.insert_option("process_person_profile", false)?;
 client.capture(event);
 ```
@@ -180,7 +184,7 @@ Rename `V1ErrorResponse` to `CaptureErrorResponse`:
 let response: Option<&posthog_rs::V1ErrorResponse> = failure.error_response();
 
 // 1.0
-let response: Option<&posthog_rs::CaptureErrorResponse> = failure.error_response();
+let response: Option<&posthog::CaptureErrorResponse> = failure.error_response();
 ```
 
 `CaptureResponse` and `EventResult` are now non-exhaustive, so you cannot build them with a struct literal.
@@ -203,7 +207,7 @@ The deprecated single-flag methods have been removed:
 Call `evaluate_flags` once and read from the returned snapshot instead:
 
 ```rust
-use posthog_rs::EvaluateFlagsOptions;
+use posthog::EvaluateFlagsOptions;
 
 let flags = client
     .evaluate_flags("user-123", EvaluateFlagsOptions::default())
@@ -234,7 +238,7 @@ These feature flag types are non-exhaustive too: `FeatureFlagsResponse`, `FlagDe
 Use `secret_key` terminology throughout configuration. The builder's deprecated `personal_api_key` alias has been removed, and `LocalEvaluationConfig::personal_api_key` is now `secret_key`.
 
 ```rust
-let options = posthog_rs::ClientOptionsBuilder::default()
+let options = posthog::ClientOptionsBuilder::default()
     .api_key("phc_project_token".to_string())
     .secret_key("phs_project_secret")
     .enable_local_evaluation(true)
