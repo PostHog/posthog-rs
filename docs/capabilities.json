@@ -27,16 +27,18 @@
   "client": "setup",
   "flush": "flush",
   "init_global": "setup",
+  "next": {
+    "Client::capture_ai": "capture-ai",
+    "Client::capture_ai_batch": "capture-ai",
+    "Client::capture_ai_batch_immediate": "capture-ai",
+    "Client::capture_ai_immediate": "capture-ai",
+    "capture_ai": "capture-ai"
+  },
   "shutdown": "shutdown",
   "utils": [
-    "Client::capture_ai",
-    "Client::capture_ai_batch",
-    "Client::capture_ai_batch_immediate",
-    "Client::capture_ai_immediate",
     "DEFAULT_HOST",
     "EU_INGESTION_ENDPOINT",
     "US_INGESTION_ENDPOINT",
-    "capture_ai",
     "disable_global",
     "global_is_disabled",
     "match_feature_flag",
