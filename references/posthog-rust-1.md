@@ -17,6 +17,9 @@ tableOfContents:
   - value: "Alias"
     url: alias
     depth: 0
+  - value: "Capture AI"
+    url: capture-ai
+    depth: 0
   - value: "Capture exception"
     url: capture-exception
     depth: 0
@@ -353,6 +356,143 @@ client.alias("anon-abc123", "user-42");
 
 [`Client::capture`]: #clientcapture
 
+## Capture AI
+
+### `Client::capture_ai`
+
+```rust
+pub fn capture_ai(&self, event: Event)
+```
+
+Capture an AI (LLM analytics) event, sending it to PostHog's AI
+ingestion endpoint.
+
+#### Parameters
+
+- `event`: The AI event (`$ai_generation`, `$ai_span`, `$ai_trace`,
+  `$ai_embedding`, …) with its `$ai_*` properties.
+
+#### Remarks
+
+Fire-and-forget, like [`Client::capture`], on a separate lane: its own
+background worker, queue (`capture_ai_max_queue_size`), retry state, and
+endpoint, so a multi-MB AI event can never delay or displace analytics
+events. The lane batches by size (about 5 MiB per request), compresses
+bodies per `capture_ai_compression` (unset sends them raw; zstd is
+recommended), and drops an event locally — with a warning naming only
+the event and its byte size — when its serialized properties exceed
+8 MiB, the backend's per-event ceiling. The worker starts on the first
+call.
+
+The SDK does not inspect the event name. The backend accepts only its
+AI event names on this endpoint and reports anything else as a per-event
+`drop`, which reaches an `on_error` hook (see
+[`CaptureFailure::endpoint`](crate::CaptureFailure::endpoint)) or, with no
+hook, one aggregate warning per batch.
+
+[`Client::capture`]: #clientcapture
+[crate::CaptureFailure::endpoint]: #cratecapturefailureendpoint
+
+### `Client::capture_ai_batch`
+
+```rust
+pub fn capture_ai_batch(&self, events: Vec<Event>, historical_migration: bool)
+```
+
+Capture a batch of AI events on the AI lane.
+
+#### Parameters
+
+- `events`: AI events to send.
+- `historical_migration`: Kept for parity with [`Client::capture_batch`]
+  and passed through to the backend, which currently ignores it for AI
+  events.
+
+#### Remarks
+
+Fire-and-forget, like [`Client::capture_ai`]. Events are enqueued per
+event, so if the bounded queue fills partway through, the remaining
+events are dropped (with the usual single full-queue warning). The lane
+splits the batch into requests of about 5 MiB each.
+
+[`Client::capture_ai`]: #clientcapture_ai
+[`Client::capture_batch`]: #clientcapture_batch
+
+### `Client::capture_ai_immediate`
+
+```rust
+pub async fn capture_ai_immediate(&self, event: Event) -> Result<CaptureSummary, Error>
+```
+
+Capture a single AI event and await confirmation that the request
+completed.
+
+The immediate-delivery counterpart to [`Client::capture_ai`]. This is a
+convenience wrapper over [`Client::capture_ai_batch_immediate`] with a
+one-event batch; see it for full semantics.
+
+[`Client::capture_ai`]: #clientcapture_ai
+[`Client::capture_ai_batch_immediate`]: #clientcapture_ai_batch_immediate
+
+### `Client::capture_ai_batch_immediate`
+
+```rust
+pub async fn capture_ai_batch_immediate(&self, events: Vec<Event>, historical_migration: bool) -> Result<CaptureSummary, Error>
+```
+
+Capture a batch of AI events and await confirmation that every request
+completed, returning a [`CaptureSummary`] describing the outcome.
+
+The immediate-delivery counterpart to [`Client::capture_ai_batch`].
+
+#### Parameters
+
+- `events`: AI events to send.
+- `historical_migration`: Kept for parity with
+  [`Client::capture_batch_immediate`] and passed through to the backend,
+  which currently ignores it for AI events.
+
+#### Behavior
+
+Like [`Client::capture_batch_immediate`], but on the AI endpoint with
+`capture_ai_compression`, and the batch is split into requests of about 5 MiB
+each, sent in order. Each request retries transient failures and
+per-event `retry` verdicts per the client's retry configuration; the
+summary merges every request's verdicts. An event whose serialized
+`properties` are over 8 MiB is not sent, as the backend would refuse it.
+It gets a local `drop` verdict with `details` `ai_event_too_big` in the
+summary, and counts in [`CaptureSummary::submitted`] and
+[`CaptureSummary::not_persisted`].
+
+#### Errors
+
+Returns [`Error`] as soon as one request is rejected with a terminal
+status or exhausts its retry budget; requests sent before it may already
+have persisted. An `Err` therefore means "not confirmed", not "nothing
+was stored".
+
+[`Client::capture_batch_immediate`]: #clientcapture_batch_immediate
+[`CaptureSummary::submitted`]: #capturesummarysubmitted
+[`CaptureSummary`]: #capturesummary
+[`Error`]: #error
+[`CaptureSummary::not_persisted`]: #capturesummarynot_persisted
+[`Client::capture_ai_batch`]: #clientcapture_ai_batch
+
+### `posthog::capture_ai`
+
+```rust
+pub fn capture_ai(event: Event)
+```
+
+Capture the provided AI event using the global client.
+
+#### Remarks
+
+Fire-and-forget, like [`Client::capture_ai`]. No-op if `init_global` has
+not run.
+
+[`Client::capture_ai`]: #clientcapture_ai
+
 ## Capture exception
 
 ### `Client::capture_exception`
@@ -671,126 +811,6 @@ locally with the supplied context.
 
 ## SDK utils
 
-### `Client::capture_ai`
-
-```rust
-pub fn capture_ai(&self, event: Event)
-```
-
-Capture an AI (LLM analytics) event, sending it to PostHog's AI
-ingestion endpoint.
-
-#### Parameters
-
-- `event`: The AI event (`$ai_generation`, `$ai_span`, `$ai_trace`,
-  `$ai_embedding`, …) with its `$ai_*` properties.
-
-#### Remarks
-
-Fire-and-forget, like [`Client::capture`], on a separate lane: its own
-background worker, queue (`capture_ai_max_queue_size`), retry state, and
-endpoint, so a multi-MB AI event can never delay or displace analytics
-events. The lane batches by size (about 5 MiB per request), compresses
-bodies per `capture_ai_compression` (unset sends them raw; zstd is
-recommended), and drops an event locally — with a warning naming only
-the event and its byte size — when its serialized properties exceed
-8 MiB, the backend's per-event ceiling. The worker starts on the first
-call.
-
-The SDK does not inspect the event name. The backend accepts only its
-AI event names on this endpoint and reports anything else as a per-event
-`drop`, which reaches an `on_error` hook (see
-[`CaptureFailure::endpoint`](crate::CaptureFailure::endpoint)) or, with no
-hook, one aggregate warning per batch.
-
-[`Client::capture`]: #clientcapture
-[crate::CaptureFailure::endpoint]: #cratecapturefailureendpoint
-
-### `Client::capture_ai_batch`
-
-```rust
-pub fn capture_ai_batch(&self, events: Vec<Event>, historical_migration: bool)
-```
-
-Capture a batch of AI events on the AI lane.
-
-#### Parameters
-
-- `events`: AI events to send.
-- `historical_migration`: Kept for parity with [`Client::capture_batch`]
-  and passed through to the backend, which currently ignores it for AI
-  events.
-
-#### Remarks
-
-Fire-and-forget, like [`Client::capture_ai`]. Events are enqueued per
-event, so if the bounded queue fills partway through, the remaining
-events are dropped (with the usual single full-queue warning). The lane
-splits the batch into requests of about 5 MiB each.
-
-[`Client::capture_ai`]: #clientcapture_ai
-[`Client::capture_batch`]: #clientcapture_batch
-
-### `Client::capture_ai_immediate`
-
-```rust
-pub async fn capture_ai_immediate(&self, event: Event) -> Result<CaptureSummary, Error>
-```
-
-Capture a single AI event and await confirmation that the request
-completed.
-
-The immediate-delivery counterpart to [`Client::capture_ai`]. This is a
-convenience wrapper over [`Client::capture_ai_batch_immediate`] with a
-one-event batch; see it for full semantics.
-
-[`Client::capture_ai`]: #clientcapture_ai
-[`Client::capture_ai_batch_immediate`]: #clientcapture_ai_batch_immediate
-
-### `Client::capture_ai_batch_immediate`
-
-```rust
-pub async fn capture_ai_batch_immediate(&self, events: Vec<Event>, historical_migration: bool) -> Result<CaptureSummary, Error>
-```
-
-Capture a batch of AI events and await confirmation that every request
-completed, returning a [`CaptureSummary`] describing the outcome.
-
-The immediate-delivery counterpart to [`Client::capture_ai_batch`].
-
-#### Parameters
-
-- `events`: AI events to send.
-- `historical_migration`: Kept for parity with
-  [`Client::capture_batch_immediate`] and passed through to the backend,
-  which currently ignores it for AI events.
-
-#### Behavior
-
-Like [`Client::capture_batch_immediate`], but on the AI endpoint with
-`capture_ai_compression`, and the batch is split into requests of about 5 MiB
-each, sent in order. Each request retries transient failures and
-per-event `retry` verdicts per the client's retry configuration; the
-summary merges every request's verdicts. An event whose serialized
-`properties` are over 8 MiB is not sent, as the backend would refuse it.
-It gets a local `drop` verdict with `details` `ai_event_too_big` in the
-summary, and counts in [`CaptureSummary::submitted`] and
-[`CaptureSummary::not_persisted`].
-
-#### Errors
-
-Returns [`Error`] as soon as one request is rejected with a terminal
-status or exhausts its retry budget; requests sent before it may already
-have persisted. An `Err` therefore means "not confirmed", not "nothing
-was stored".
-
-[`Client::capture_batch_immediate`]: #clientcapture_batch_immediate
-[`CaptureSummary::submitted`]: #capturesummarysubmitted
-[`CaptureSummary`]: #capturesummary
-[`Error`]: #error
-[`CaptureSummary::not_persisted`]: #capturesummarynot_persisted
-[`Client::capture_ai_batch`]: #clientcapture_ai_batch
-
 ### `posthog::DEFAULT_HOST`
 
 ```rust
@@ -885,21 +905,6 @@ Returns [`InconclusiveMatchError`] when the property, cohort, or dependent
 flag cannot be evaluated from the supplied context.
 
 [`InconclusiveMatchError`]: #inconclusivematcherror
-
-### `posthog::capture_ai`
-
-```rust
-pub fn capture_ai(event: Event)
-```
-
-Capture the provided AI event using the global client.
-
-#### Remarks
-
-Fire-and-forget, like [`Client::capture_ai`]. No-op if `init_global` has
-not run.
-
-[`Client::capture_ai`]: #clientcapture_ai
 
 ### `posthog::disable_global`
 
