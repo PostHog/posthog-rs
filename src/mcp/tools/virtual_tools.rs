@@ -23,10 +23,9 @@ pub(crate) fn missing_capability_descriptor(name: &str) -> Value {
             "required": ["context"],
         },
         "annotations": {
-            "title": "Get More Tools",
-            "readOnlyHint": true,
-            "openWorldHint": true,
-            "idempotentHint": true,
+            "readOnlyHint": false,
+            "openWorldHint": false,
+            "idempotentHint": false,
             "destructiveHint": false,
         },
     })
