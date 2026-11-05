@@ -18,6 +18,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLCHAIN = os.environ.get("DOCS_TOOLCHAIN", "nightly-2026-06-12")
+# Cargo features that are for tests or swap a dependency, rather than add public API.
+NOT_API = {"default", "e2e-test", "test-harness", "tls-no-provider"}
 # Other public client classes: their untagged methods get an H2 of their own.
 CLASSES = ["FeatureFlagEvaluations", "LocalEvaluator", "FlagPoller", "EndpointManager"]
 FIRST = ["setup", "capture", "identify"]
@@ -285,12 +287,16 @@ def main() -> None:
     args.add_argument("--sdk-specs", required=True, help="PostHog/sdk-specs checkout")
     args.add_argument("--major", type=int, help="target major, defaults to the declared one")
     opts = args.parse_args()
+    manifest = (ROOT / "Cargo.toml").read_text().split("\n")
+    # Document every public feature, so feature-gated API such as `mcp` is on the page.
+    table = manifest[manifest.index("[features]") + 1 :]
+    table = table[: next(i for i, l in enumerate(table) if l.startswith("["))]
+    features = [l.split(" = ")[0] for l in table if " = " in l and l.split(" = ")[0] not in NOT_API]
     subprocess.run(
-        ["cargo", f"+{TOOLCHAIN}", "rustdoc", "--lib", "--", "-Z", "unstable-options", "--output-format", "json"],
+        ["cargo", f"+{TOOLCHAIN}", "rustdoc", "--lib", "--features", ",".join(features), "--", "-Z", "unstable-options", "--output-format", "json"],
         cwd=ROOT,
         check=True,
     )
-    manifest = (ROOT / "Cargo.toml").read_text().split("\n")
     crate = next(l for l in manifest if l.startswith("name = ")).split('"')[1].replace("-", "_")
     docs = Docs(ROOT / f"target/doc/{crate}.json")
     version = next(l for l in manifest if l.startswith("version = "))
