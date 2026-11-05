@@ -127,7 +127,6 @@ must be awaited. Passing a blank API key creates a disabled client.
 If the HTTP client cannot be built, logs a warning and creates a disabled
 client instead.
 
-
 [`ClientOptions`]: #clientoptions
 [`Client`]: #client
 
@@ -155,7 +154,6 @@ this also installs a process-wide panic hook that captures panics as
 #### Errors
 
 Returns [`Error::AlreadyInitialized`] if called more than once.
-
 
 [`ClientOptions`]: #clientoptions
 [`Error::AlreadyInitialized`]: #erroralreadyinitialized
@@ -205,7 +203,6 @@ Fire-and-forget, like [`Client::capture`]. The batch is enqueued per event
 rather than atomically, so if the bounded queue fills partway through, the
 remaining events are dropped (with the usual single full-queue warning).
 
-
 [`Client::capture`]: #clientcapture
 
 ### `Client::capture_immediate`
@@ -219,7 +216,6 @@ Capture a single event and await confirmation that the request completed.
 The immediate-delivery counterpart to [`Client::capture`]. This is a
 convenience wrapper over [`Client::capture_batch_immediate`] with a
 one-event batch; see it for full semantics.
-
 
 [`Client::capture_batch_immediate`]: #clientcapture_batch_immediate
 [`Client::capture`]: #clientcapture
@@ -257,7 +253,6 @@ returned `Result` is the delivery signal. Disabled clients and an empty
 Returns [`Error`] when the request is rejected with a terminal status or
 the retry budget is exhausted without a successful response.
 
-
 [`Client::capture`]: #clientcapture
 [`CaptureSummary`]: #capturesummary
 [`Client::capture_batch`]: #clientcapture_batch
@@ -279,7 +274,6 @@ instead.
 - `event`: Event name, such as `"user_signed_up"`.
 - `distinct_id`: Stable user or account identifier. For backend events,
   use the same distinct ID your frontend passes to `posthog.identify()`.
-
 
 [`Event::new_anon`]: #eventnew_anon
 [`Event`]: #event
@@ -316,7 +310,6 @@ Capture the provided event using the global client.
 Fire-and-forget, like [`Client::capture`]. No-op if `init_global` has not
 run.
 
-
 [`Client::capture`]: #clientcapture
 
 ## Alias
@@ -351,7 +344,6 @@ let client = posthog_rs::client("phc_project_api_key").await;
 // The visitor browsed anonymously, then logged in.
 client.alias("anon-abc123", "user-42");
 ```
-
 
 [`Client::capture`]: #clientcapture
 
@@ -388,7 +380,6 @@ let error = std::io::Error::other("checkout failed");
 client.capture_exception(&error).await?;
 ```
 
-
 [`std::error::Error`]: #stderrorerror
 [`Client::capture_exception_with`]: #clientcapture_exception_with
 
@@ -423,7 +414,6 @@ client
     )
     .await?;
 ```
-
 
 [`CaptureExceptionOptions::distinct_id`]: #captureexceptionoptionsdistinct_id
 
@@ -471,7 +461,6 @@ attempt. No-op if `init_global` has not run.
 `capture` only enqueues, and the global client lives in a `static` whose
 `Drop` never runs at process exit, so call this (or [`shutdown`]) before
 exiting to avoid losing buffered events.
-
 
 [`shutdown`]: #shutdown
 
@@ -528,7 +517,6 @@ emit `$feature_flag_called` events.
 
 Returns [`Error::Connection`] for request failures and
 [`Error::Serialization`] when the response cannot be parsed.
-
 
 [`Error::Serialization`]: #errorserialization
 [`Error::Connection`]: #errorconnection
@@ -599,7 +587,6 @@ Returns [`Error::Connection`] for request failures or non-success HTTP
 statuses, and [`Error::Serialization`] when the response cannot be
 parsed.
 
-
 [crate::Event::with_flags]: #crateeventwith_flags
 [`Error::Serialization`]: #errorserialization
 [`Error::Connection`]: #errorconnection
@@ -641,7 +628,6 @@ without an extra `/flags` request.
 Returns [`Error::Connection`] or [`Error::Serialization`] when remote
 evaluation is required and the `/flags` request fails before any local
 results are available.
-
 
 
 [crate::Event::with_flags]: #crateeventwith_flags
@@ -697,7 +683,6 @@ client.group_identify(
 )?;
 ```
 
-
 [`Client::capture`]: #clientcapture
 [`Error::Serialization`]: #errorserialization
 
@@ -719,7 +704,6 @@ Check if a feature flag is enabled for a user.
 #### Errors
 
 Returns errors from [`Client::get_feature_flag`].
-
 
 [`Client::get_feature_flag`]: #clientget_feature_flag
 
@@ -786,7 +770,6 @@ of its conditions) targets a group; pass empty maps for person flags.
 
 Returns [`Error::InconclusiveMatch`] when the flag cannot be evaluated
 locally with the supplied context.
-
 
 [`Error::InconclusiveMatch`]: #errorinconclusivematch
 

@@ -121,7 +121,6 @@ must be awaited. Passing a blank API key creates a disabled client.
 If the HTTP client cannot be built, logs a warning and creates a disabled
 client instead.
 
-
 [`ClientOptions`]: #clientoptions
 [`Client`]: #client
 
@@ -149,7 +148,6 @@ this also installs a process-wide panic hook that captures panics as
 #### Errors
 
 Returns [`Error::AlreadyInitialized`] if called more than once.
-
 
 [`ClientOptions`]: #clientoptions
 [`Error::AlreadyInitialized`]: #erroralreadyinitialized
@@ -181,7 +179,6 @@ Use [`Client::capture_ai`] for LLM analytics events (`$ai_generation`,
 `$ai_span`, …): `capture` never reroutes by event name. The analytics
 endpoint still accepts AI events for now, but large ones need `capture_ai`.
 
-
 [`Client::capture_ai`]: #clientcapture_ai
 
 ### `Client::capture_batch`
@@ -204,7 +201,6 @@ Fire-and-forget, like [`Client::capture`]. The batch is enqueued per event
 rather than atomically, so if the bounded queue fills partway through, the
 remaining events are dropped (with the usual single full-queue warning).
 
-
 [`Client::capture`]: #clientcapture
 
 ### `Client::capture_immediate`
@@ -218,7 +214,6 @@ Capture a single event and await confirmation that the request completed.
 The immediate-delivery counterpart to [`Client::capture`]. This is a
 convenience wrapper over [`Client::capture_batch_immediate`] with a
 one-event batch; see it for full semantics.
-
 
 [`Client::capture_batch_immediate`]: #clientcapture_batch_immediate
 [`Client::capture`]: #clientcapture
@@ -256,7 +251,6 @@ returned `Result` is the delivery signal. Disabled clients and an empty
 Returns [`Error`] when the request is rejected with a terminal status or
 the retry budget is exhausted without a successful response.
 
-
 [`Client::capture`]: #clientcapture
 [`CaptureSummary`]: #capturesummary
 [`Client::capture_batch`]: #clientcapture_batch
@@ -280,7 +274,6 @@ instead.
   use the same distinct ID your frontend passes to `posthog.identify()`.
   An empty or whitespace-only ID counts as missing: the event becomes
   anonymous, as from [`Event::new_anon`].
-
 
 [`Event::new_anon`]: #eventnew_anon
 [`Event`]: #event
@@ -308,7 +301,6 @@ event. To process one anyway, set the option to `true` with
 does not override an option. A `null` or removed option counts as unset,
 so the SDK sets `false` again before `before_send`.
 
-
 [`Event::insert_option`]: #eventinsert_option
 
 ### `posthog::capture`
@@ -323,7 +315,6 @@ Capture the provided event using the global client.
 
 Fire-and-forget, like [`Client::capture`]. No-op if `init_global` has not
 run.
-
 
 [`Client::capture`]: #clientcapture
 
@@ -360,7 +351,6 @@ let client = posthog::client("phc_project_api_key").await;
 client.alias("anon-abc123", "user-42");
 ```
 
-
 [`Client::capture`]: #clientcapture
 
 ## Capture exception
@@ -396,7 +386,6 @@ let error = std::io::Error::other("checkout failed");
 client.capture_exception(&error).await?;
 ```
 
-
 [`std::error::Error`]: #stderrorerror
 [`Client::capture_exception_with`]: #clientcapture_exception_with
 
@@ -431,7 +420,6 @@ client
     )
     .await?;
 ```
-
 
 [`CaptureExceptionOptions::distinct_id`]: #captureexceptionoptionsdistinct_id
 
@@ -479,7 +467,6 @@ attempt. No-op if `init_global` has not run.
 `capture` only enqueues, and the global client lives in a `static` whose
 `Drop` never runs at process exit, so call this (or [`shutdown`]) before
 exiting to avoid losing buffered events.
-
 
 [`shutdown`]: #shutdown
 
@@ -555,7 +542,6 @@ evaluation is required and the `/flags` request fails before any local
 results are available.
 
 
-
 [crate::Event::with_flags]: #crateeventwith_flags
 [`Client::capture`]: #clientcapture
 [`Error::Connection`]: #errorconnection
@@ -611,7 +597,6 @@ client.group_identify(
     }),
 )?;
 ```
-
 
 [`Client::capture`]: #clientcapture
 [`Error::Serialization`]: #errorserialization
@@ -681,7 +666,6 @@ of its conditions) targets a group; pass empty maps for person flags.
 
 Returns [`Error::InconclusiveMatch`] when the flag cannot be evaluated
 locally with the supplied context.
-
 
 [`Error::InconclusiveMatch`]: #errorinconclusivematch
 
