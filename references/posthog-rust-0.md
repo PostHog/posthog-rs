@@ -1428,6 +1428,20 @@ delivery (e.g. committing an upstream offset) must therefore also check
 `submitted()` against the number of events they intended to send — do not
 gate durability on `all_persisted()` alone.
 
+#### `CaptureSummary::event_results`
+
+```rust
+pub fn event_results(&self) -> &HashMap<Uuid, EventResult>
+```
+
+Per-event server verdicts (`capture-v1` only). Includes persisted
+(`ok`/`warning`) and unpersisted (`drop`/`retry`) verdicts; filter by
+[`EventStatus`](crate::EventStatus) to isolate failures. May omit events
+the backend did not report on — see [`not_persisted`](Self::not_persisted).
+
+[crate::EventStatus]: #crateeventstatus
+[Self::not_persisted]: #selfnot_persisted
+
 ### `ClientOptions`
 
 ```rust
@@ -1845,7 +1859,10 @@ pub fn error(&self) -> Option<&Error>
 
 The batch-level cause: a permanent reject, exhausted transport/HTTP
 retries, or a serialization failure.
-Always present: every capture failure surfaced to the hook carries a cause.
+`None` only when the request itself succeeded (`2xx`) but some events were not
+persisted after the retry budget — inspect [`event_results`](Self::event_results).
+
+[Self::event_results]: #selfevent_results
 
 #### `CaptureFailure::status`
 
@@ -1871,6 +1888,12 @@ pub fn event_count(&self) -> usize
 ```
 
 Number of events this failure dropped (lost).
+Counts only undelivered events (`retry`/`drop`), including any finalized on
+earlier attempts. This can be smaller than [`event_results`](Self::event_results)`.len()`,
+which also reports persisted `ok`/`warning` verdicts — filter by status before
+treating an entry as lost.
+
+[Self::event_results]: #selfevent_results
 
 #### `CaptureFailure::historical_migration`
 
@@ -1879,6 +1902,52 @@ pub fn historical_migration(&self) -> bool
 ```
 
 Whether the batch was a historical-migration batch.
+
+#### `CaptureFailure::request_id`
+
+```rust
+pub fn request_id(&self) -> Option<&Uuid>
+```
+
+The V1 capture `posthog-request-id` of the final attempt, when one was
+sent. `None` for a serialization failure (no request reached the wire)
+and on the v0 pipeline (which has no request id).
+
+#### `CaptureFailure::event_results`
+
+```rust
+pub fn event_results(&self) -> &HashMap<Uuid, EventResult>
+```
+
+Per-event server verdicts for the batch (V1 capture pipeline only).
+
+Maps event UUID to its [`EventResult`]. Includes **all** verdicts the
+batch collected — persisted (`ok`/`warning`) as well as lost
+(`retry`/`drop`) — so this map can be larger than
+[`event_count`](Self::event_count); filter by
+[`EventStatus`](crate::EventStatus) to isolate the failures. Complete
+when [`error`](Self::error) is `None` (a `2xx` where events weren't
+persisted after retries); possibly partial on a batch-level failure
+(only verdicts collected from earlier attempts).
+
+[Self::event_count]: #selfevent_count
+[crate::EventStatus]: #crateeventstatus
+[Self::error]: #selferror
+[`EventResult`]: #eventresult
+
+#### `CaptureFailure::error_response`
+
+```rust
+pub fn error_response(&self) -> Option<&V1ErrorResponse>
+```
+
+The structured error body returned by the V1 capture backend on a
+non-`2xx` response (`error`, `error_description`, `error_uri`), when the
+body parsed as one. `None` for a transport error, a `2xx`, or an
+unrecognizable body — the raw body remains available via
+[`error`](Self::error).
+
+[Self::error]: #selferror
 
 ### `FlagsFailure`
 
@@ -2409,6 +2478,57 @@ pub fn properties(&self) -> &HashMap<String, serde_json::Value>
 ```
 
 Return the event properties.
+
+### `CaptureResponse`
+
+```rust
+pub struct CaptureResponse
+```
+
+**Fields**
+
+- `results: std::collections::HashMap<uuid::Uuid, EventResult>`
+
+### `EventResult`
+
+```rust
+pub struct EventResult
+```
+
+**Fields**
+
+- `result: EventStatus`
+- `details: Option<String>`
+
+### `EventStatus`
+
+```rust
+pub enum EventStatus
+```
+
+**Variants**
+
+- `Ok`
+- `Drop`
+- `Warning`
+- `Retry`
+- `Unknown`
+
+Only `Retry` is resent; all other variants are terminal.
+`Unknown` (`#[serde(other)]`) is a forward-compat catch-all that deserializes
+unrecognised statuses as terminal rather than failing the parse.
+
+### `V1ErrorResponse`
+
+```rust
+pub struct V1ErrorResponse
+```
+
+**Fields**
+
+- `error: String`
+- `error_description: Option<String>`
+- `error_uri: Option<String>`
 
 ### `EvaluateFlagsOptions`
 
