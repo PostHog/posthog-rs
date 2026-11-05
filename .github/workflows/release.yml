@@ -115,6 +115,7 @@ jobs:
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
       - name: Generate SDK reference
+        id: reference
         # Best-effort: a failure never blocks the release. Run generate-references.yml to retry.
         continue-on-error: true
         run: |
@@ -123,6 +124,10 @@ jobs:
           python3 scripts/generate_markdown.py --sdk-specs "$RUNNER_TEMP/sdk-specs"
           # Stage the pages, so a new page shows in git status as a file, not as an untracked folder.
           git add references
+
+      - name: Warn if the SDK reference didn't regenerate
+        if: steps.reference.outcome == 'failure'
+        run: echo "::warning::The SDK reference didn't regenerate. Run generate-references.yml to retry."
 
       - name: Check for changes
         id: check-changes
