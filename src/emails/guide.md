@@ -5,10 +5,12 @@ status of each email it sent. Get it with
 
 # Setup
 
-1. Create a project secret API key (`phs_...`) with Workflow write access
-   (`hog_flow:write`) in your project settings, and set it as the client's
-   `secret_key`. The project API key (`phc_...`) captures events but can't
-   send email.
+1. Create a project secret API key (`phs_...`) with the "Send transactional
+   email" preset (`transactional_email:write`) in your project settings, and
+   set it as the client's `secret_key`. Add `transactional_email:read` too if
+   you read email statuses with a key that can't send. Keys made with
+   `hog_flow:write` still work. The project API key (`phc_...`) captures
+   events but can't send email.
 2. On PostHog Cloud, set `host` to your region, such as
    `https://eu.i.posthog.com`, and the client sends email to that region's
    app host. For any other `host`, such as a reverse proxy, set `app_host`

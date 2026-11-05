@@ -103,7 +103,8 @@ impl<'a> Emails<'a> {
     }
 
     /// Reads the status of an email that [`send`](Self::send) queued, for 30
-    /// days after the send. A key with only `hog_flow:read` can read statuses.
+    /// days after the send. A key with only `transactional_email:read` can read
+    /// statuses but not send.
     ///
     /// # Errors
     ///
