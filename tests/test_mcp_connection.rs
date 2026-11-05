@@ -6,7 +6,7 @@ mod mcp_support;
 
 use mcp_support::recorder::{property, serialized_properties_size, text_property, Recorder};
 use mcp_support::server::{numbered_tools, TestServer, FAILURE_MESSAGE, PAGE_SIZE};
-use posthog_rs::mcp::{Identity, McpAnalytics, McpOptions, McpOptionsBuilder};
+use posthog_rs::mcp::{FeedbackReport, Identity, McpAnalytics, McpOptions, McpOptionsBuilder};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, JsonObject, ListToolsResult, PaginatedRequestParams,
 };
@@ -388,6 +388,28 @@ async fn calls_on_one_connection_share_its_session() {
 }
 
 #[tokio::test]
+async fn every_event_names_the_server_build() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .server_build("3f2c1a9")
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    client.list_tools(None).await.unwrap();
+    call(&client, "fetch_page", json!({})).await;
+
+    for name in ["$mcp_tools_list", "$mcp_tool_call", "$exception"] {
+        let event = recorder.only(name).await;
+        assert_eq!(
+            text_property(&event, "$mcp_server_build"),
+            "3f2c1a9",
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_identified_call_processes_the_person() {
     let recorder = Recorder::new().await;
     let options = McpOptionsBuilder::default()
@@ -454,14 +476,21 @@ async fn the_virtual_tool_is_not_advertised_by_default() {
 
     let tools = client.list_all_tools().await.unwrap();
 
-    assert!(tools.iter().all(|tool| tool.name != "get_more_tools"));
+    for virtual_tool in ["get_more_tools", "send_feedback"] {
+        assert!(
+            tools.iter().all(|tool| tool.name != virtual_tool),
+            "{}",
+            virtual_tool
+        );
+    }
 }
 
 #[tokio::test]
-async fn the_virtual_tool_is_listed_once_on_the_first_page() {
+async fn the_virtual_tools_are_listed_once_on_the_first_page() {
     let recorder = Recorder::new().await;
     let options = McpOptionsBuilder::default()
         .missing_capability_tool("")
+        .feedback_tool("")
         .build()
         .unwrap();
     let server = TestServer::with_tools(numbered_tools(PAGE_SIZE + 1));
@@ -472,13 +501,308 @@ async fn the_virtual_tool_is_listed_once_on_the_first_page() {
     let request = PaginatedRequestParams::default().with_cursor(Some(cursor));
     let second = client.list_tools(Some(request)).await.unwrap();
 
-    let virtual_on = |page: &ListToolsResult| {
-        page.tools
+    for name in ["get_more_tools", "send_feedback"] {
+        let count =
+            |page: &ListToolsResult| page.tools.iter().filter(|tool| tool.name == name).count();
+        assert_eq!((count(&first), count(&second)), (1, 0), "{name}");
+    }
+}
+
+fn feedback_options() -> McpOptions {
+    McpOptionsBuilder::default()
+        .feedback_tool("")
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_feedback_tool_asks_for_a_type_and_a_summary() {
+    let recorder = Recorder::new().await;
+    let client = connect(&recorder, TestServer::new(), feedback_options()).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+
+    let feedback = tools
+        .iter()
+        .find(|tool| tool.name == "send_feedback")
+        .expect("advertised");
+    let schema = serde_json::to_value(&feedback.input_schema).unwrap();
+    assert_eq!(
+        schema["required"],
+        json!(["feedback_type", "summary", "llm_model"])
+    );
+    assert!(schema["properties"].get("context").is_none());
+}
+
+#[tokio::test]
+async fn a_feedback_report_becomes_one_feedback_event() {
+    let full = json!({
+        "feedback_type": "issue",
+        "summary": "query rejects dates for ada@example.com",
+        "details": "tried 7d",
+        "friction_points": "the error names no field",
+        "suggested_improvement": "accept relative dates",
+        "tool_name": "query",
+        "sentiment": "negative",
+        "task_completed": false,
+    });
+    let expected_full = json!({
+        "$mcp_feedback_type": "issue",
+        "$mcp_feedback_summary": "query rejects dates for [redacted]",
+        "$mcp_feedback_details": "tried 7d",
+        "$mcp_feedback_friction_points": "the error names no field",
+        "$mcp_feedback_suggested_improvement": "accept relative dates",
+        "$mcp_feedback_tool": "query",
+        "$mcp_feedback_sentiment": "negative",
+        "$mcp_feedback_task_completed": false,
+        "$mcp_intent": "query rejects dates for [redacted]\n\ntried 7d",
+        "$mcp_intent_source": "context_parameter",
+        "$mcp_resource_name": "send_feedback",
+    });
+    let malformed = json!({
+        "feedback_type": "bogus",
+        "summary": "works",
+        "sentiment": "furious",
+        "task_completed": "yes",
+    });
+    let expected_malformed = json!({
+        "$mcp_feedback_type": "other",
+        "$mcp_feedback_summary": "works",
+        "$mcp_intent": "works",
+    });
+    let absent_from_malformed = [
+        "$mcp_feedback_sentiment",
+        "$mcp_feedback_task_completed",
+        "$mcp_feedback_details",
+    ];
+    let cases = [
+        (full, expected_full, &[][..]),
+        (malformed, expected_malformed, &absent_from_malformed[..]),
+    ];
+
+    for (arguments, expected, absent) in cases {
+        let recorder = Recorder::new().await;
+        let client = connect(&recorder, TestServer::new(), feedback_options()).await;
+
+        let result = call(&client, "send_feedback", arguments).await;
+
+        assert!(texts(&result)[0].starts_with("Your feedback was recorded"));
+        let event = recorder.only("$mcp_feedback").await;
+        for (key, value) in expected.as_object().unwrap() {
+            assert_eq!(property(&event, key), value, "{key}");
+        }
+        for key in absent.iter().chain(["$mcp_parameters"].iter()) {
+            assert!(!event.properties().contains_key(*key), "{}", key);
+        }
+        assert!(recorder.named("$mcp_tool_call").await.is_empty());
+    }
+}
+
+fn product_area_options() -> McpOptionsBuilder {
+    let mut builder = McpOptionsBuilder::default();
+    builder
+        .feedback_tool("")
+        .feedback_description("Tell the docs team what you think.")
+        .required_feedback_field(
+            "product_area",
+            json!({ "type": "string", "enum": ["flags", "replay"], "description": "The product." }),
+        )
+        .feedback_field("note", json!({ "type": "string" }))
+        .feedback_field("attempts", json!({ "type": "integer" }))
+        .feedback_field("filters", json!({ "type": "object" }))
+        .feedback_field("cleared", json!({ "type": "null" }))
+        .feedback_field("api_token", json!({ "type": "string" }));
+    builder
+}
+
+#[tokio::test]
+async fn the_host_shapes_the_feedback_tool() {
+    let recorder = Recorder::new().await;
+    let options = product_area_options().build().unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+
+    let feedback = tools
+        .iter()
+        .find(|tool| tool.name == "send_feedback")
+        .expect("advertised");
+    assert_eq!(
+        feedback.description.as_deref(),
+        Some("Tell the docs team what you think.")
+    );
+    let schema = serde_json::to_value(&feedback.input_schema).unwrap();
+    assert_eq!(
+        schema["required"],
+        json!(["feedback_type", "summary", "product_area", "llm_model"])
+    );
+    assert_eq!(
+        schema["properties"]["product_area"],
+        json!({ "type": "string", "enum": ["flags", "replay"], "description": "The product." })
+    );
+}
+
+#[tokio::test]
+async fn declared_feedback_fields_are_captured_when_well_formed() {
+    let cases = [
+        (
+            json!({
+                "product_area": "flags",
+                "note": "ping ada@example.com",
+                "attempts": 3.0,
+                "filters": { "env": "prod", "password": { "value": "hunter2" }, "card": 4111111111111111u64 },
+                "cleared": null,
+                "api_token": "hunter2",
+                "invented": "never captured",
+            }),
+            json!({
+                "$mcp_feedback_product_area": "flags",
+                "$mcp_feedback_note": "ping [redacted]",
+                "$mcp_feedback_attempts": 3.0,
+                "$mcp_feedback_filters": "{\"card\":4111111111111111,\"env\":\"prod\",\"password\":\"[redacted]\"}",
+                "$mcp_feedback_cleared": "null",
+                "$mcp_feedback_api_token": "[redacted]",
+            }),
+            vec!["$mcp_feedback_invented"],
+        ),
+        (
+            json!({ "product_area": "billing", "note": 7, "attempts": 3.5 }),
+            json!({}),
+            vec![
+                "$mcp_feedback_product_area",
+                "$mcp_feedback_note",
+                "$mcp_feedback_attempts",
+            ],
+        ),
+    ];
+
+    for (fields, expected, absent) in cases {
+        let recorder = Recorder::new().await;
+        let options = product_area_options().build().unwrap();
+        let client = connect(&recorder, TestServer::new(), options).await;
+        let mut arguments = json!({ "feedback_type": "issue", "summary": "slow" });
+        for (name, value) in fields.as_object().unwrap() {
+            arguments[name] = value.clone();
+        }
+
+        call(&client, "send_feedback", arguments).await;
+
+        let event = recorder.only("$mcp_feedback").await;
+        for (key, value) in expected.as_object().unwrap() {
+            assert_eq!(property(&event, key), value, "{key}");
+        }
+        for key in absent {
+            assert!(!event.properties().contains_key(key), "{}", key);
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_object_feedback_field_is_sent_as_bounded_json_text() {
+    let recorder = Recorder::new().await;
+    let options = product_area_options().build().unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+    let filters = json!({ "notes": "word ".repeat(1_000) });
+    let arguments = json!({ "feedback_type": "issue", "summary": "s", "filters": filters });
+
+    call(&client, "send_feedback", arguments).await;
+
+    let event = recorder.only("$mcp_feedback").await;
+    let sent = text_property(&event, "$mcp_feedback_filters");
+    assert_eq!(sent.chars().count(), 2_048);
+    assert!(sent.starts_with("{\"notes\":\"word word"));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Handler {
+    Replies,
+    RepliesBlank,
+    RepliesNothing,
+    Panics,
+}
+
+#[tokio::test]
+async fn the_feedback_handler_gets_the_report_and_may_reply() {
+    let cases = [
+        (Handler::Replies, "Thanks, filed as DOCS-12"),
+        (Handler::RepliesBlank, "Your feedback was recorded"),
+        (Handler::RepliesNothing, "Your feedback was recorded"),
+        (Handler::Panics, "Your feedback was recorded"),
+    ];
+    for (handler, expected) in cases {
+        let recorder = Recorder::new().await;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let reports = seen.clone();
+        let options = product_area_options()
+            .on_feedback(move |report: FeedbackReport| {
+                let reports = reports.clone();
+                async move {
+                    tokio::task::yield_now().await;
+                    *reports.lock().unwrap() = Some((
+                        report.feedback_type.clone(),
+                        report.summary.clone(),
+                        report.extras.get("product_area").cloned(),
+                    ));
+                    match handler {
+                        Handler::Replies => Some("Thanks, filed as DOCS-12".to_string()),
+                        Handler::RepliesBlank => Some("  ".to_string()),
+                        Handler::RepliesNothing => None,
+                        Handler::Panics => panic!("the handler failed"),
+                    }
+                }
+            })
+            .build()
+            .unwrap();
+        let client = connect(&recorder, TestServer::new(), options).await;
+        let arguments = json!({
+            "feedback_type": "issue",
+            "summary": "ada@example.com cannot log in",
+            "product_area": "flags",
+        });
+
+        let result = call(&client, "send_feedback", arguments).await;
+
+        assert!(texts(&result)[0].starts_with(expected), "{:?}", handler);
+        recorder.only("$mcp_feedback").await;
+        let report = seen.lock().unwrap().clone();
+        assert_eq!(
+            report,
+            Some((
+                "issue".to_string(),
+                "ada@example.com cannot log in".to_string(),
+                Some(json!("flags"))
+            )),
+            "{handler:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_server_tool_takes_the_feedback_tools_name() {
+    let recorder = Recorder::new().await;
+    let own = mcp_support::server::tool(json!({
+        "name": "send_feedback",
+        "inputSchema": { "type": "object", "properties": {} },
+    }));
+    let client = connect(
+        &recorder,
+        TestServer::with_tools(vec![own]),
+        feedback_options(),
+    )
+    .await;
+
+    let tools = client.list_all_tools().await.unwrap();
+    call(&client, "send_feedback", json!({})).await;
+
+    assert_eq!(
+        tools
             .iter()
-            .filter(|tool| tool.name == "get_more_tools")
-            .count()
-    };
-    assert_eq!((virtual_on(&first), virtual_on(&second)), (1, 0));
+            .filter(|tool| tool.name == "send_feedback")
+            .count(),
+        1
+    );
+    assert!(recorder.named("$mcp_feedback").await.is_empty());
+    recorder.only("$mcp_tool_call").await;
 }
 
 #[tokio::test]

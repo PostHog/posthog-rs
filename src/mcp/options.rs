@@ -1,12 +1,17 @@
 //! Configuration. Defaults follow the configuration table of PostHog's MCP
 //! analytics spec.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use serde_json::Value;
 
+use super::contract::limits::MAX_NAME_LENGTH;
+use super::feedback::{FeedbackField, FeedbackHandler, FeedbackReport};
 use super::identity::Identity;
 use super::request_info::RequestInfo;
+use super::tools::virtual_tools::VirtualTool;
 use crate::client::BeforeSendHook;
 use crate::Event;
 
@@ -29,7 +34,7 @@ pub type IntentFallback = Arc<dyn Fn(&RequestInfo<'_>) -> Option<String> + Send 
 /// # let _ = options;
 /// ```
 #[derive(Builder, Clone)]
-#[builder(default)]
+#[builder(default, build_fn(validate = "Self::validate"))]
 pub struct McpOptions {
     /// Advertise a required `context` argument on every tool, in which the
     /// agent says why it calls the tool, captured as `$mcp_intent` (default:
@@ -46,7 +51,8 @@ pub struct McpOptions {
     #[builder(setter(into, strip_option))]
     pub(crate) model_description: Option<String>,
     /// Supplies the intent of a call whose agent stated none, captured with
-    /// `$mcp_intent_source: "inferred"`. It runs on the response path.
+    /// `$mcp_intent_source: "inferred"`. It runs before the tool does, so
+    /// keep it fast.
     #[builder(setter(custom))]
     pub(crate) intent_fallback: Option<IntentFallback>,
     /// Conversation anchoring: advertise an optional `conversation_id`
@@ -54,7 +60,23 @@ pub struct McpOptions {
     /// calls that echo it into one session (default: `true`). Without it,
     /// every request of a stateless HTTP client is its own session.
     pub(crate) conversation_id: bool,
-    /// Resolves the person each request acts for.
+    /// Resolves the person each request acts for. Nothing else does: a
+    /// distinct id in the host's request context, such as `PostHogLayer`'s
+    /// `x-posthog-distinct-id`, comes from the MCP client, so it identifies a
+    /// call only when this callback trusts it:
+    ///
+    /// ```
+    /// # use posthog_rs::mcp::{Identity, McpOptionsBuilder};
+    /// # use posthog_rs::RequestContext;
+    /// let options = McpOptionsBuilder::default()
+    ///     .identify(|request| {
+    ///         let host = request.http?.extensions.get::<RequestContext>()?;
+    ///         Some(Identity::new(host.get_distinct_id()?))
+    ///     })
+    ///     .build()
+    ///     .unwrap();
+    /// # let _ = options;
+    /// ```
     #[builder(setter(custom))]
     pub(crate) identify: Option<IdentifyCallback>,
     /// Send a `$exception` next to each failed call (default: `true`).
@@ -78,6 +100,37 @@ pub struct McpOptions {
     /// one, so give it a name the server's own tools do not use.
     #[builder(setter(into, strip_option))]
     pub(crate) missing_capability_tool: Option<String>,
+    /// Advertise a virtual tool of this name (`send_feedback` when blank)
+    /// that agents call to report a missing capability, a tool that failed or
+    /// confused them, or one that worked well, sent as `$mcp_feedback`. Like
+    /// `missing_capability_tool`, it is answered by
+    /// [`McpAnalytics::instrument`](super::McpAnalytics::instrument) only.
+    #[builder(setter(into, strip_option))]
+    pub(crate) feedback_tool: Option<String>,
+    /// Replaces the `send_feedback` tool's description.
+    #[builder(setter(into, strip_option))]
+    pub(crate) feedback_description: Option<String>,
+    /// Report arguments the host adds to `send_feedback`, each sent as
+    /// `$mcp_feedback_<name>` when the agent's value matches its schema.
+    /// Declare them with [`McpOptionsBuilder::feedback_field`] and
+    /// [`McpOptionsBuilder::required_feedback_field`]. Like the other
+    /// feedback options, they need `feedback_tool`.
+    #[builder(setter(custom))]
+    pub(crate) feedback_fields: Vec<FeedbackField>,
+    /// Sees each feedback report, after its event is sent, and may return the
+    /// reply the agent gets instead of the default acknowledgement. A panic
+    /// or a blank reply keeps the default. The `tools/call` waits for it, so
+    /// the reply can depend on async work, such as filing a ticket. The SDK
+    /// logs nothing of the report, but a panic message reaches the process's
+    /// panic hook as usual.
+    #[builder(setter(custom))]
+    pub(crate) on_feedback: Option<FeedbackHandler>,
+    /// The exact build the server runs, sent as `$mcp_server_build` on every
+    /// event: an immutable value such as a commit SHA or an image digest, of
+    /// 1 to 256 characters. [`McpOptionsBuilder::build`] rejects any other
+    /// length rather than cut it.
+    #[builder(setter(into, strip_option))]
+    pub(crate) server_build: Option<String>,
 }
 
 impl Default for McpOptions {
@@ -95,6 +148,11 @@ impl Default for McpOptions {
             capture_responses: true,
             before_send: None,
             missing_capability_tool: None,
+            feedback_tool: None,
+            feedback_description: None,
+            feedback_fields: Vec::new(),
+            on_feedback: None,
+            server_build: None,
         }
     }
 }
@@ -110,11 +168,121 @@ impl std::fmt::Debug for McpOptions {
             .field("capture_parameters", &self.capture_parameters)
             .field("capture_responses", &self.capture_responses)
             .field("missing_capability_tool", &self.missing_capability_tool)
+            .field("feedback_tool", &self.feedback_tool)
+            .field("feedback_description", &self.feedback_description)
+            .field("feedback_fields", &self.feedback_fields)
+            .field("server_build", &self.server_build)
             .finish_non_exhaustive()
     }
 }
 
+impl McpOptions {
+    pub(crate) fn virtual_tool_name(&self, tool: VirtualTool) -> Option<&str> {
+        match tool {
+            VirtualTool::MissingCapability => self.missing_capability_tool.as_deref(),
+            VirtualTool::Feedback => self.feedback_tool.as_deref(),
+        }
+    }
+}
+
 impl McpOptionsBuilder {
+    fn validate(&self) -> Result<(), String> {
+        self.validate_virtual_tool_names()?;
+        self.validate_feedback_fields()?;
+        self.validate_server_build()
+    }
+
+    /// Declares a report argument `send_feedback` advertises, as a JSON
+    /// Schema fragment with a `"type"`, such as
+    /// `json!({ "type": "string", "enum": ["flags", "replay"] })`.
+    pub fn feedback_field(&mut self, name: impl Into<String>, schema: Value) -> &mut Self {
+        self.add_feedback_field(name.into(), schema, false)
+    }
+
+    /// Like [`feedback_field`](Self::feedback_field), advertised as
+    /// required. Agents are asked for it; a report without it is still sent.
+    pub fn required_feedback_field(&mut self, name: impl Into<String>, schema: Value) -> &mut Self {
+        self.add_feedback_field(name.into(), schema, true)
+    }
+
+    /// An async handler, such as
+    /// `|report| async move { tickets.file(report).await.ok() }`.
+    pub fn on_feedback<F, Reply>(&mut self, handle: F) -> &mut Self
+    where
+        F: Fn(FeedbackReport) -> Reply + Send + Sync + 'static,
+        Reply: Future<Output = Option<String>> + Send + 'static,
+    {
+        let handler: FeedbackHandler = Arc::new(move |report| Box::pin(handle(report)));
+        self.on_feedback = Some(Some(handler));
+        self
+    }
+
+    fn add_feedback_field(&mut self, name: String, schema: Value, required: bool) -> &mut Self {
+        let field = FeedbackField {
+            name,
+            schema,
+            required,
+        };
+        self.feedback_fields
+            .get_or_insert_with(Vec::new)
+            .push(field);
+        self
+    }
+
+    fn validate_feedback_fields(&self) -> Result<(), String> {
+        let fields = self.feedback_fields.as_deref().unwrap_or_default();
+        let shaped = !fields.is_empty()
+            || matches!(self.feedback_description, Some(Some(_)))
+            || matches!(self.on_feedback, Some(Some(_)));
+        let enabled = matches!(self.feedback_tool, Some(Some(_)));
+        if shaped && !enabled {
+            return Err("feedback options need feedback_tool".to_string());
+        }
+        for (index, field) in fields.iter().enumerate() {
+            if let Some(problem) = field.problem() {
+                return Err(problem);
+            }
+            if fields[..index]
+                .iter()
+                .any(|earlier| earlier.name == field.name)
+            {
+                return Err(format!("feedback field {:?} is declared twice", field.name));
+            }
+        }
+        Ok(())
+    }
+
+    /// Two virtual tools under one name would leave one unreachable.
+    fn validate_virtual_tool_names(&self) -> Result<(), String> {
+        let configured = |field: &Option<Option<String>>| field.clone().flatten();
+        let missing_capability = configured(&self.missing_capability_tool);
+        let feedback = configured(&self.feedback_tool);
+        let names = (
+            VirtualTool::MissingCapability.name(missing_capability.as_deref()),
+            VirtualTool::Feedback.name(feedback.as_deref()),
+        );
+        match names {
+            (Some(left), Some(right)) if left == right => Err(format!(
+                "missing_capability_tool and feedback_tool are both named {left:?}"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_server_build(&self) -> Result<(), String> {
+        let Some(Some(build)) = &self.server_build else {
+            return Ok(());
+        };
+        let length = build.chars().count();
+        if !build.trim().is_empty() && length <= MAX_NAME_LENGTH {
+            Ok(())
+        } else {
+            Err(format!(
+                "server_build must be 1 to {MAX_NAME_LENGTH} characters and not blank, not {length}"
+            ))
+        }
+    }
+
     pub fn identify<F>(&mut self, resolve: F) -> &mut Self
     where
         F: Fn(&RequestInfo<'_>) -> Option<Identity> + Send + Sync + 'static,
@@ -143,6 +311,87 @@ impl McpOptionsBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feedback_fields_must_be_new_names_with_a_type() {
+        let string = serde_json::json!({ "type": "string" });
+        let cases = [
+            ("product_area", string.clone(), true),
+            ("summary", string.clone(), false),
+            ("type", string.clone(), false),
+            ("tool", string.clone(), false),
+            ("context", string.clone(), false),
+            ("conversation_id", string.clone(), false),
+            ("llm_model", string.clone(), false),
+            ("product_area", serde_json::json!({ "enum": ["a"] }), false),
+            ("product_area", serde_json::json!("string"), false),
+            (" ", string.clone(), false),
+        ];
+        for (name, schema, accepted) in cases {
+            let built = McpOptionsBuilder::default()
+                .feedback_tool("")
+                .feedback_field(name, schema.clone())
+                .build();
+            assert_eq!(built.is_ok(), accepted, "{name} {schema}");
+        }
+        let twice = McpOptionsBuilder::default()
+            .feedback_tool("")
+            .feedback_field("area", string.clone())
+            .feedback_field("area", string.clone())
+            .build();
+        assert!(twice.is_err(), "a field declared twice");
+        let without_tool = McpOptionsBuilder::default()
+            .feedback_field("area", string)
+            .build();
+        assert!(without_tool.is_err(), "a field for a tool that is off");
+    }
+
+    #[test]
+    fn virtual_tools_cannot_share_a_name() {
+        let cases = [
+            ("ask", "ask", false),
+            ("", "get_more_tools", false),
+            ("send_feedback", " ", false),
+            ("", "", true),
+            ("ask", "tell", true),
+        ];
+        for (missing_capability, feedback, accepted) in cases {
+            let built = McpOptionsBuilder::default()
+                .missing_capability_tool(missing_capability)
+                .feedback_tool(feedback)
+                .build();
+            assert_eq!(
+                built.is_ok(),
+                accepted,
+                "{missing_capability:?} {feedback:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_build_is_kept_whole_or_rejected() {
+        let cases = [
+            (String::new(), false),
+            ("   ".to_string(), false),
+            ("a".repeat(256), true),
+            ("a".repeat(257), false),
+            ("é".repeat(256), true),
+        ];
+        for (build, accepted) in cases {
+            let built = McpOptionsBuilder::default()
+                .server_build(build.clone())
+                .build();
+            assert_eq!(
+                built.is_ok(),
+                accepted,
+                "{} characters",
+                build.chars().count()
+            );
+            if let Ok(options) = built {
+                assert_eq!(options.server_build.as_deref(), Some(build.as_str()));
+            }
+        }
+    }
 
     #[test]
     fn defaults_follow_the_spec() {
