@@ -110,6 +110,12 @@ pub(crate) fn fill_property(
     }
 }
 
+/// Whether a `$lib` or `$lib_version` value counts as set: only a non-empty
+/// string does. A missing key, `null`, `""` and non-strings are all unset.
+pub(crate) fn names_a_library(value: Option<&serde_json::Value>) -> bool {
+    matches!(value, Some(serde_json::Value::String(text)) if !text.is_empty())
+}
+
 /// An [`Event`] represents an interaction a user has with your app or
 /// website. Examples include button clicks, pageviews, query completions, and signups.
 /// See the [PostHog documentation](https://posthog.com/docs/data/events)
@@ -512,6 +518,11 @@ impl Event {
         value: serde_json::Value,
     ) {
         fill_property(&mut self.properties, key.into(), value);
+    }
+
+    /// Set a property, replacing any value it had.
+    pub(crate) fn set_prop<K: Into<String>>(&mut self, key: K, value: serde_json::Value) {
+        self.properties.insert(key.into(), value);
     }
 
     /// Insert a default option only if the caller left it unset (missing or `null`).

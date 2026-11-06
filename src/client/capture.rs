@@ -716,6 +716,99 @@ mod tests {
     }
 
     #[test]
+    fn before_send_sees_sdk_identity_and_its_changes_hold_on_the_wire() {
+        #[derive(Clone, Copy, Debug)]
+        enum Change {
+            Keep,
+            Relabel,
+            SetNull,
+            Remove,
+        }
+        let version = serde_json::json!(env!("CARGO_PKG_VERSION"));
+        for (change, expected_lib, expected_version) in [
+            (
+                Change::Keep,
+                Some(serde_json::json!("posthog-rs")),
+                Some(version.clone()),
+            ),
+            (
+                Change::Relabel,
+                Some(serde_json::json!("hook-lib")),
+                Some(version.clone()),
+            ),
+            (
+                Change::SetNull,
+                Some(serde_json::Value::Null),
+                Some(version.clone()),
+            ),
+            (Change::Remove, None, None),
+        ] {
+            let opts = ClientOptionsBuilder::default()
+                .api_key("phc_test".to_string())
+                .before_send(move |mut event| {
+                    let saw = event.properties().get("$lib").cloned();
+                    event.insert_prop("hook_saw_lib", saw).unwrap();
+                    match change {
+                        Change::Keep => {}
+                        Change::Relabel => event.insert_prop("$lib", "hook-lib").unwrap(),
+                        Change::SetNull => {
+                            event.insert_prop("$lib", serde_json::Value::Null).unwrap()
+                        }
+                        Change::Remove => {
+                            event.remove_prop("$lib");
+                            event.remove_prop("$lib_version");
+                        }
+                    }
+                    Some(event)
+                })
+                .build()
+                .unwrap();
+
+            let event = preprocess_capture_event(
+                Event::new("test", "user-1"),
+                &opts.capture_defaults(),
+                &opts.before_send,
+            )
+            .unwrap();
+            let wire = build_event_at(&event, Utc::now());
+
+            let map = wire.properties.as_object().unwrap();
+            assert_eq!(
+                map.get("hook_saw_lib"),
+                Some(&serde_json::json!("posthog-rs"))
+            );
+            assert_eq!(map.get("$lib"), expected_lib.as_ref(), "{change:?}");
+            assert_eq!(
+                map.get("$lib_version"),
+                expected_version.as_ref(),
+                "{change:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn minimal_flag_called_event_keeps_lib_but_not_the_version_parts() {
+        let mut event = Event::new("$feature_flag_called", "user-1");
+        event.mark_minimal_flag_called();
+        let defaults = CaptureDefaults {
+            disable_geoip: false,
+            is_server: false,
+        };
+
+        let wire = build_preprocessed(event, &defaults);
+
+        let map = wire.properties.as_object().unwrap();
+        assert_eq!(map.get("$lib"), Some(&serde_json::json!("posthog-rs")));
+        assert_eq!(
+            map.get("$lib_version"),
+            Some(&serde_json::json!(env!("CARGO_PKG_VERSION")))
+        );
+        assert!(!map.contains_key("$lib_version__major"));
+        assert!(!map.contains_key("$lib_version__minor"));
+        assert!(!map.contains_key("$lib_version__patch"));
+    }
+
+    #[test]
     fn before_send_sees_groups_and_the_minimal_trim_and_its_changes_are_sent() {
         let opts = ClientOptionsBuilder::default()
             .api_key("phc_test".to_string())
@@ -1305,8 +1398,8 @@ mod tests {
 
     // -- build_headers SDK identity -------------------------------------------
 
-    /// Capture derives `$lib`/`$lib_version` from this header, so the name must
-    /// stay `posthog-rs`.
+    /// The header and the `$lib`/`$lib_version` the SDK adds name the same
+    /// identity, so the name must stay `posthog-rs`.
     #[test]
     fn build_headers_sdk_info_is_canonical_lib_slash_version() {
         let opts = test_opts();

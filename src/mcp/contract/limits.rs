@@ -14,7 +14,7 @@ pub(crate) const MAX_PAYLOAD_DEPTH: usize = 10;
 
 pub(crate) const MAX_EVENT_BYTES: usize = 102_400;
 /// Room left for the properties the host client adds after MCP analytics
-/// bounds an event, such as `$lib_version` and `$os`.
+/// bounds an event, such as `$os` and `$os_version`.
 pub(crate) const HOST_PROPERTIES_HEADROOM: usize = 1_024;
 
 pub(crate) const MAX_INPUT_REQUEST_METHODS: usize = 100;

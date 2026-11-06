@@ -61,6 +61,10 @@ async fn a_successful_call_produces_one_event_with_the_required_properties() {
         "posthog_mcp_analytics"
     );
     assert_eq!(text_property(&event, "$lib"), "posthog-rs-mcp");
+    assert_eq!(
+        text_property(&event, "$lib_version"),
+        env!("CARGO_PKG_VERSION")
+    );
     assert_eq!(text_property(&event, "$mcp_server_name"), "docs-server");
     let session_id = text_property(&event, "$session_id");
     assert!(session_id.starts_with("ses_"));
@@ -316,6 +320,41 @@ async fn a_very_large_response_still_produces_a_bounded_event() {
     let event = recorder.only("$mcp_tool_call").await;
     assert!(serialized_properties_size(&event) <= 102_400);
     assert_eq!(text_property(&event, "$mcp_tool_name"), "export");
+}
+
+#[tokio::test]
+async fn mcp_events_are_sent_as_mcp_analytics_with_its_version() {
+    let recorder = Recorder::new().await;
+    let client = connect(&recorder, TestServer::new(), McpOptions::default()).await;
+
+    call(&client, "search_docs", json!({ "query": "flags" })).await;
+
+    let sent = recorder.sent_properties("$mcp_tool_call").await;
+    assert_eq!(sent["$lib"], "posthog-rs-mcp");
+    assert_eq!(sent["$lib_version"], env!("CARGO_PKG_VERSION"));
+    // The SDK's version parts describe `posthog-rs`, so another `$lib` never gets them.
+    assert!(sent.get("$lib_version__major").is_none(), "{}", sent);
+}
+
+#[tokio::test]
+async fn an_mcp_hook_can_rename_the_lib_and_the_sdk_adds_no_version() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .before_send(|mut event| {
+            event.insert_prop("$lib", "custom-mcp").unwrap();
+            event.remove_prop("$lib_version");
+            Some(event)
+        })
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    call(&client, "search_docs", json!({ "query": "flags" })).await;
+
+    let sent = recorder.sent_properties("$mcp_tool_call").await;
+    assert_eq!(sent["$lib"], "custom-mcp");
+    assert!(sent.get("$lib_version").is_none(), "{}", sent);
+    assert!(sent.get("$lib_version__major").is_none(), "{}", sent);
 }
 
 #[tokio::test]

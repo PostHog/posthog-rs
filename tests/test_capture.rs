@@ -1024,8 +1024,156 @@ async fn capture_accepts_alternate_2xx_status() {
     assert!(errors.try_recv().is_err());
 }
 
-/// C4: pins the wire identity `posthog-rs/<semver>` that capture parses
-/// into `$lib`/`$lib_version`.
+#[derive(Clone, Copy, Debug)]
+enum SendPath {
+    Capture,
+    Batch,
+    Historical,
+    Immediate,
+    BatchImmediate,
+    Ai,
+    AiBatch,
+    AiImmediate,
+    AiBatchImmediate,
+    Alias,
+    GroupIdentify,
+    #[cfg(feature = "error-tracking")]
+    Exception,
+}
+
+impl SendPath {
+    const ALL: &'static [SendPath] = &[
+        SendPath::Capture,
+        SendPath::Batch,
+        SendPath::Historical,
+        SendPath::Immediate,
+        SendPath::BatchImmediate,
+        SendPath::Ai,
+        SendPath::AiBatch,
+        SendPath::AiImmediate,
+        SendPath::AiBatchImmediate,
+        SendPath::Alias,
+        SendPath::GroupIdentify,
+        #[cfg(feature = "error-tracking")]
+        SendPath::Exception,
+    ];
+
+    fn endpoint(self) -> &'static str {
+        match self {
+            SendPath::Ai
+            | SendPath::AiBatch
+            | SendPath::AiImmediate
+            | SendPath::AiBatchImmediate => "/i/v1/ai/events",
+            _ => "/i/v1/analytics/events",
+        }
+    }
+
+    /// `false` for the paths that send an event the SDK builds.
+    fn takes_events(self) -> bool {
+        match self {
+            SendPath::Alias | SendPath::GroupIdentify => false,
+            #[cfg(feature = "error-tracking")]
+            SendPath::Exception => false,
+            _ => true,
+        }
+    }
+
+    async fn send(self, client: &posthog::Client, events: Vec<Event>) {
+        match self {
+            SendPath::Capture => events.into_iter().for_each(|event| client.capture(event)),
+            SendPath::Batch => client.capture_batch(events, false),
+            SendPath::Historical => client.capture_batch(events, true),
+            SendPath::Immediate => {
+                for event in events {
+                    client.capture_immediate(event).await.unwrap();
+                }
+            }
+            SendPath::BatchImmediate => {
+                client.capture_batch_immediate(events, false).await.unwrap();
+            }
+            SendPath::Ai => events
+                .into_iter()
+                .for_each(|event| client.capture_ai(event)),
+            SendPath::AiBatch => client.capture_ai_batch(events, false),
+            SendPath::AiImmediate => {
+                for event in events {
+                    client.capture_ai_immediate(event).await.unwrap();
+                }
+            }
+            SendPath::AiBatchImmediate => {
+                client
+                    .capture_ai_batch_immediate(events, false)
+                    .await
+                    .unwrap();
+            }
+            SendPath::Alias => client.alias("old-id", "user-1"),
+            SendPath::GroupIdentify => client
+                .group_identify("company", "acme", json!({ "name": "Acme" }))
+                .unwrap(),
+            #[cfg(feature = "error-tracking")]
+            SendPath::Exception => {
+                let error = std::io::Error::other("boom");
+                client.capture_exception(&error).await.unwrap();
+            }
+        }
+        client.flush().await;
+    }
+}
+
+#[tokio::test]
+async fn every_send_path_applies_the_lib_pair_rule() {
+    for &path in SendPath::ALL {
+        let server = MockServer::start();
+        let wire = common::record_wire_events(&server, path.endpoint());
+        let client = create_capture_client(server.base_url()).await;
+        let context = format!("{path:?}");
+
+        if path.takes_events() {
+            let cases = common::lib_cases();
+            let events = cases
+                .iter()
+                .map(|case| case.event("$ai_generation"))
+                .collect();
+            path.send(&client, events).await;
+            for case in &cases {
+                case.assert_wire(&common::wire_properties(&wire, Some(case.name)), &context);
+            }
+        } else {
+            path.send(&client, Vec::new()).await;
+            let unset = &common::lib_cases()[0];
+            unset.assert_wire(&common::wire_properties(&wire, None), &context);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_request_context_lib_reaches_the_wire_without_the_sdk_version() {
+    let server = MockServer::start();
+    let wire = common::record_wire_events(&server, "/i/v1/analytics/events");
+    let client = create_capture_client(server.base_url()).await;
+
+    let context = posthog::RequestContext::new()
+        .property("$lib", "custom-middleware")
+        .unwrap();
+    context
+        .scope(async {
+            client.capture(Event::new("test", "user-1"));
+        })
+        .await;
+    client.flush().await;
+
+    let properties = common::wire_properties(&wire, None);
+    assert_eq!(properties["$lib"], "custom-middleware");
+    assert!(properties.get("$lib_version").is_none(), "{}", properties);
+    assert!(
+        properties.get("$lib_version__major").is_none(),
+        "{}",
+        properties
+    );
+}
+
+/// C4: pins the wire identity `posthog-rs/<semver>`, the same value the SDK
+/// sends as `$lib`/`$lib_version`.
 #[tokio::test]
 async fn capture_sends_canonical_sdk_info_header() {
     let server = MockServer::start();
