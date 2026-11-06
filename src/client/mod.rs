@@ -190,8 +190,8 @@ pub struct ClientOptions {
     /// Key (`phs_...`). Required when `enable_local_evaluation` is `true`.
     ///
     /// [`Client::emails`] needs a Project Secret API Key with the
-    /// `hog_flow:write` scope to send email, or `hog_flow:read` to read an
-    /// email's status.
+    /// `transactional_email:write` scope to send email, or
+    /// `transactional_email:read` to read an email's status.
     #[builder(setter(into, strip_option), default)]
     pub(crate) secret_key: Option<String>,
 

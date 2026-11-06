@@ -34,8 +34,8 @@ const MAX_TEMPLATE_KEY_LEN: usize = 400;
 pub(crate) const SEND_NOT_DONE: &str = "no email was sent";
 pub(crate) const GET_NOT_DONE: &str = "no email status was read";
 pub(crate) const SEND_KEY_NEEDED: &str =
-    "Sending email needs secret_key, a project secret API key with the hog_flow:write scope.";
-pub(crate) const GET_KEY_NEEDED: &str = "Reading an email status needs secret_key, a project secret API key with the hog_flow:read or hog_flow:write scope.";
+    "Sending email needs secret_key, a project secret API key with the transactional_email:write scope.";
+pub(crate) const GET_KEY_NEEDED: &str = "Reading an email status needs secret_key, a project secret API key with the transactional_email:read or transactional_email:write scope.";
 
 /// A send whose arguments passed every check.
 #[derive(Debug)]

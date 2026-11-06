@@ -142,7 +142,7 @@ Sends one email, then reads its status:
 
 ```bash
 export POSTHOG_API_KEY=phc_your_project_key
-export POSTHOG_SECRET_KEY=phs_your_project_secret_key  # with hog_flow:write
+export POSTHOG_SECRET_KEY=phs_your_project_secret_key  # with transactional_email:write
 export EMAIL_TO=you@example.com
 # Optional: a template made transactional in PostHog. Without it, the
 # example sends HTML it rendered itself.

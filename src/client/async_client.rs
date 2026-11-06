@@ -354,7 +354,7 @@ impl Client {
     /// content your code rendered, and read the status of each email sent.
     ///
     /// Needs `secret_key` set to a Project Secret API Key with the
-    /// `hog_flow:write` scope. See [`Emails`] for setup.
+    /// `transactional_email:write` scope. See [`Emails`] for setup.
     pub fn emails(&self) -> Emails<'_> {
         Emails::new(&self.options, self.client.as_ref(), &self.email_tracker)
     }

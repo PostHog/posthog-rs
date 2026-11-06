@@ -458,6 +458,31 @@ async fn the_virtual_tool_is_not_advertised_by_default() {
 }
 
 #[tokio::test]
+async fn no_advertised_description_instructs_the_model_beyond_the_call() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .missing_capability_tool("")
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+
+    assert!(tools.iter().any(|tool| tool.name == "get_more_tools"));
+    let advertised = serde_json::to_string(&tools).unwrap().to_lowercase();
+    for phrase in [
+        "parallel tool calls",
+        "system prompt",
+        "even if existing tools",
+        "most important",
+        "even if you can work around it",
+        "send it even if",
+    ] {
+        assert!(!advertised.contains(phrase), "{}: {}", phrase, advertised);
+    }
+}
+
+#[tokio::test]
 async fn the_virtual_tool_is_listed_once_on_the_first_page() {
     let recorder = Recorder::new().await;
     let options = McpOptionsBuilder::default()

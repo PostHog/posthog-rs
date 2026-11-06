@@ -76,7 +76,9 @@ to application-owned tracing or OpenTelemetry spans or install a trace provider.
 `client.emails()` sends one email per call from your backend, from an email
 template made transactional in PostHog or from content your code rendered. It
 needs `secret_key` set to a project secret API key (`phs_...`) with the
-`hog_flow:write` scope. Requests go to your region's app host, derived from a
+`transactional_email:write` scope, which the "Send transactional email" preset
+in your project settings gives. Keys made with `hog_flow:write` still work.
+Requests go to your region's app host, derived from a
 PostHog Cloud `host`. Set `app_host` when `host` is a reverse proxy: the proxy
 must not receive the secret key.
 
