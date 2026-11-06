@@ -10,7 +10,7 @@ use common::default_user_agent;
 use email_support::{
     accepted, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
-use posthog_rs::{CodeEmail, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
+use posthog_rs::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
 use serde_json::json;
 
 fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
@@ -74,6 +74,40 @@ fn code_send_posts_the_rendered_content() {
             "subject": "Reset your password",
             "html": "<p>Reset</p>",
             "from": "Acme <security@example.com>",
+            "capture_engagement": true,
+            "to": "user@example.com",
+        })
+    );
+}
+
+#[test]
+fn code_send_carries_copies_and_attachments() {
+    let server = ScriptedServer::start(vec![accepted()]);
+    let client = client_for(&server);
+
+    client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "invoice", "Your invoice")
+                .text("Attached.")
+                .cc("finance@example.com")
+                .bcc("audit@example.com")
+                .attachment(EmailAttachment::new(
+                    "invoice.pdf",
+                    [0x25, 0x50, 0x44, 0x46, 0x00, 0x9f, 0xff],
+                )),
+        )
+        .unwrap();
+
+    assert_eq!(
+        server.requests()[0].json(),
+        json!({
+            "template_key": "invoice",
+            "subject": "Your invoice",
+            "text": "Attached.",
+            "cc": ["finance@example.com"],
+            "bcc": ["audit@example.com"],
+            "attachments": [{"filename": "invoice.pdf", "content": "JVBERgCf/w=="}],
             "capture_engagement": true,
             "to": "user@example.com",
         })

@@ -1,5 +1,8 @@
+use std::fmt;
+
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// What every send takes, whatever its form.
 #[derive(Debug, Clone, Default)]
@@ -96,6 +99,9 @@ pub struct CodeEmail {
     pub(crate) text: Option<String>,
     pub(crate) from: Option<String>,
     pub(crate) reply_to: Vec<String>,
+    pub(crate) cc: Vec<String>,
+    pub(crate) bcc: Vec<String>,
+    pub(crate) attachments: Vec<EmailAttachment>,
     pub(crate) capture_engagement: bool,
     pub(crate) options: SendOptions,
 }
@@ -119,6 +125,9 @@ impl CodeEmail {
             text: None,
             from: None,
             reply_to: Vec::new(),
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            attachments: Vec::new(),
             capture_engagement: true,
             options: SendOptions::default(),
         }
@@ -146,6 +155,30 @@ impl CodeEmail {
     /// Adds a reply-to address. Call it again to add more.
     pub fn reply_to(mut self, address: impl Into<String>) -> Self {
         self.reply_to.push(address.into());
+        self
+    }
+
+    /// Adds an address that gets a visible copy. Call it again to add more,
+    /// at most 10. Each is a bare address, such as `"finance@example.com"`,
+    /// with no name.
+    pub fn cc(mut self, address: impl Into<String>) -> Self {
+        self.cc.push(address.into());
+        self
+    }
+
+    /// Adds an address that gets a copy the other recipients never see. Call
+    /// it again to add more, at most 10. Each is a bare address, with no name.
+    pub fn bcc(mut self, address: impl Into<String>) -> Self {
+        self.bcc.push(address.into());
+        self
+    }
+
+    /// Adds a file to the email. Call it again to add more, at most 10
+    /// files and 512 KB of file content in total, counted before Base64
+    /// encoding. PostHog refuses a file type that mailbox providers block,
+    /// such as `.exe`.
+    pub fn attachment(mut self, attachment: EmailAttachment) -> Self {
+        self.attachments.push(attachment);
         self
     }
 
@@ -184,6 +217,92 @@ impl CodeEmail {
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.options.max_retries = Some(max_retries);
         self
+    }
+}
+
+/// A file sent with a [`CodeEmail`].
+///
+/// PostHog can't fetch a file from a path or URL: read the file and pass its
+/// bytes. Its `Debug` output never shows the content.
+///
+/// ```
+/// use posthog_rs::{CodeEmail, EmailAttachment};
+///
+/// # let invoice_pdf: Vec<u8> = Vec::new();
+/// # let logo_png: Vec<u8> = Vec::new();
+/// let email = CodeEmail::new("jane@example.com", "invoice", "Your invoice")
+///     .html(r#"<img src="cid:logo"><p>Your invoice is attached.</p>"#)
+///     .attachment(EmailAttachment::new("invoice.pdf", invoice_pdf))
+///     .attachment(EmailAttachment::new("logo.png", logo_png).content_id("logo"));
+/// ```
+#[derive(Clone)]
+pub struct EmailAttachment {
+    filename: String,
+    content_base64: String,
+    content_type: Option<String>,
+    content_id: Option<String>,
+}
+
+impl EmailAttachment {
+    /// A file from its bytes, with the name the recipient sees, such as
+    /// `"invoice.pdf"`. The client encodes the bytes as Base64 here, once.
+    pub fn new(filename: impl Into<String>, content: impl AsRef<[u8]>) -> Self {
+        let content_base64 = base64::engine::general_purpose::STANDARD.encode(content);
+        Self::from_base64(filename, content_base64)
+    }
+
+    /// A file whose content is already standard Base64, without line breaks.
+    /// The client sends it as is.
+    pub fn from_base64(filename: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            filename: filename.into(),
+            content_base64: content.into(),
+            content_type: None,
+            content_id: None,
+        }
+    }
+
+    /// The MIME type, such as `"application/pdf"`. Without it, the type
+    /// follows from the file name.
+    pub fn content_type(mut self, content_type: impl Into<String>) -> Self {
+        self.content_type = Some(content_type.into());
+        self
+    }
+
+    /// Shows the file inline: the HTML references it as `cid:<content_id>`,
+    /// such as `<img src="cid:logo">` for `"logo"`.
+    pub fn content_id(mut self, content_id: impl Into<String>) -> Self {
+        self.content_id = Some(content_id.into());
+        self
+    }
+
+    /// The attachment as the send request carries it.
+    pub(crate) fn to_json(&self) -> Value {
+        let mut attachment = json!({
+            "filename": self.filename,
+            "content": self.content_base64,
+        });
+        if let Some(content_type) = &self.content_type {
+            attachment["content_type"] = json!(content_type);
+        }
+        if let Some(content_id) = &self.content_id {
+            attachment["content_id"] = json!(content_id);
+        }
+        attachment
+    }
+}
+
+impl fmt::Debug for EmailAttachment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmailAttachment")
+            .field("filename", &self.filename)
+            .field(
+                "content",
+                &format_args!("<{} Base64 characters>", self.content_base64.len()),
+            )
+            .field("content_type", &self.content_type)
+            .field("content_id", &self.content_id)
+            .finish()
     }
 }
 
