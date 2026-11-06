@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.31.2 — 2026-11-06
+
+### Patch changes
+
+- [98d2bf1](https://github.com/posthog/posthog-rs/commit/98d2bf1b6186e9461efa70977f1a28f5dca34899) Aligned the `mcp` module with the sdk-specs MCP spec. The `get_more_tools` tool now advertises `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint` as `false`, because a call records an event. The injected `context` argument has a shorter description, and the injected `llm_model` argument is no longer required. This changes your published tool definitions; if your server is listed in the ChatGPT or Claude directories, those platforms may re-review the updated tools. — Thanks @lucasheriques!
+
 ## 0.31.1 — 2026-11-05
 
 ### Patch changes
