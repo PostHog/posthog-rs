@@ -227,6 +227,12 @@ pub fn posthog::FlagValue::default() -> Self
 pub posthog::PostHogError::Capture(posthog::CaptureFailure<'a>)
 pub posthog::PostHogError::FeatureFlags(posthog::FlagsFailure<'a>)
 pub posthog::PostHogError::LocalEvaluation(posthog::LocalEvaluationFailure<'a>)
+pub posthog::PostHogError::Storage(posthog::StorageFailure<'a>)
+#[non_exhaustive] pub enum posthog::StorageOperation
+pub posthog::StorageOperation::Open
+pub posthog::StorageOperation::Read
+pub posthog::StorageOperation::Remove
+pub posthog::StorageOperation::Write
 pub struct posthog::AsyncFlagPoller
 impl posthog::AsyncFlagPoller
 pub async fn posthog::AsyncFlagPoller::is_running(&self) -> bool
@@ -535,6 +541,10 @@ pub fn posthog::RequestContext::option(self, impl core::convert::Into<alloc::str
 pub fn posthog::RequestContext::property(self, impl core::convert::Into<alloc::string::String>, impl serde_core::ser::Serialize) -> core::result::Result<Self, posthog::Error>
 pub async fn posthog::RequestContext::scope<F: core::future::future::Future>(self, F) -> <F as core::future::future::Future>::Output
 pub fn posthog::RequestContext::session_id(self, impl core::convert::Into<alloc::string::String>) -> Self
+#[non_exhaustive] pub struct posthog::StorageFailure<'a>
+impl posthog::StorageFailure<'_>
+pub fn posthog::StorageFailure<'_>::error(&self) -> &std::io::error::Error
+pub fn posthog::StorageFailure<'_>::operation(&self) -> posthog::StorageOperation
 pub struct posthog::TraceContext
 impl posthog::TraceContext
 pub fn posthog::TraceContext::new<T: core::convert::Into<alloc::string::String>, S: core::convert::Into<alloc::string::String>>(T, S) -> Self

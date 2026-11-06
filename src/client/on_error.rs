@@ -1,9 +1,8 @@
 //! The `on_error` observability hook and the failure types it surfaces.
 //!
 //! Registering a hook via [`ClientOptionsBuilder::on_error`] lets a caller
-//! observe terminal failures across the SDK's network surfaces — capture batch
-//! delivery, remote `/flags` requests, and the local-evaluation definitions
-//! poller — without reverting to a blocking API. The hook receives a
+//! observe capture delivery, remote `/flags`, local-evaluation polling, and
+//! storage failures without reverting to a blocking API. The hook receives a
 //! [`PostHogError`], a `#[non_exhaustive]` enum with one variant per surface so
 //! more can be added without breaking callers.
 //!
@@ -60,8 +59,9 @@ impl OnErrorHook {
     }
 }
 
-/// A terminal failure on one of the SDK's network surfaces, passed by reference
-/// to each registered `on_error` hook.
+/// A delivery, network, or storage failure, passed by reference to each
+/// registered `on_error` hook. A storage failure does not necessarily prevent
+/// delivery: events may still be sent from memory.
 ///
 /// `#[non_exhaustive]`: new variants may be added as more surfaces gain hook
 /// coverage, so a `match` must include a wildcard arm.
@@ -79,6 +79,48 @@ pub enum PostHogError<'a> {
     /// error, non-success status, or an unparseable response body). The SDK
     /// keeps serving the previously cached definitions.
     LocalEvaluation(LocalEvaluationFailure<'a>),
+    /// A persistence operation failed. Live in-memory state remains usable;
+    /// data that could not be persisted may be lost when the process exits.
+    Storage(StorageFailure<'a>),
+}
+
+/// The persistence operation that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StorageOperation {
+    /// Opening or acquiring exclusive ownership of a store.
+    Open,
+    /// Reading or decoding persisted data.
+    Read,
+    /// Writing or replacing persisted data.
+    Write,
+    /// Removing a persisted record.
+    Remove,
+}
+
+/// Details of a storage failure. The callback runs on the thread performing
+/// storage I/O, not on an ordinary capture caller.
+///
+/// Failure to write does not roll back in-memory state. Failure to remove an
+/// acknowledged event may cause duplicate delivery after restart.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct StorageFailure<'a> {
+    pub(crate) operation: StorageOperation,
+    pub(crate) error: &'a std::io::Error,
+}
+
+impl StorageFailure<'_> {
+    /// The operation that failed.
+    pub fn operation(&self) -> StorageOperation {
+        self.operation
+    }
+
+    /// The underlying I/O or decoding error. Custom backends may include file
+    /// paths or other application context in the error; handle it accordingly.
+    pub fn error(&self) -> &std::io::Error {
+        self.error
+    }
 }
 
 /// Details of a terminal capture batch failure.
@@ -348,6 +390,38 @@ pub(crate) fn duplicate_verdict(result: EventStatus, dropped: u32) -> (Uuid, Eve
 mod tests {
     use super::*;
     use EventStatus::{Drop, Ok, Retry, Warning};
+
+    #[test]
+    fn storage_failure_uses_the_shared_error_hook() {
+        use std::sync::{Arc, Mutex};
+
+        let observed = Arc::new(Mutex::new(None));
+        let output = Arc::clone(&observed);
+        let opts = crate::ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .on_error(move |failure| {
+                if let PostHogError::Storage(failure) = failure {
+                    *output.lock().unwrap() = Some((failure.operation(), failure.error().kind()));
+                }
+            })
+            .build()
+            .unwrap();
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "write failed");
+        super::super::common::apply_on_error_hooks(
+            &opts.on_error,
+            &PostHogError::Storage(StorageFailure {
+                operation: StorageOperation::Write,
+                error: &error,
+            }),
+        );
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some((
+                StorageOperation::Write,
+                std::io::ErrorKind::PermissionDenied
+            ))
+        );
+    }
 
     #[test]
     fn verdict_summary_lists_every_lost_reason_in_order() {

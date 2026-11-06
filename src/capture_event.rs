@@ -42,6 +42,12 @@ pub struct CaptureEvent {
     pub properties: serde_json::Value,
 }
 
+impl AsRef<CaptureEvent> for CaptureEvent {
+    fn as_ref(&self) -> &CaptureEvent {
+        self
+    }
+}
+
 impl CaptureEvent {
     // Only the tests build a CaptureEvent without an injected clock; the worker uses
     // `from_event_at` so its timestamps are deterministic.
@@ -137,11 +143,11 @@ pub struct BatchRequest {
 
 /// Serialize-only borrowed twin of [`BatchRequest`]; avoids per-attempt clones.
 #[derive(Debug, Serialize)]
-pub(crate) struct BatchRequestRef<'a> {
+pub(crate) struct BatchRequestRef<'a, T = CaptureEvent> {
     pub created_at: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub historical_migration: Option<bool>,
-    pub batch: &'a [CaptureEvent],
+    pub batch: &'a [T],
 }
 
 /// Only `Retry` is resent; all other variants are terminal.
