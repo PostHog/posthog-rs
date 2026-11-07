@@ -20,12 +20,15 @@ pub fn default_user_agent() -> String {
 
 /// What a caller sets on `$lib` and `$lib_version` (`None` leaves the key
 /// out) and what must reach the wire. `parts` is whether the SDK's
-/// `$lib_version__major/minor/patch` are sent.
+/// `$lib_version__major/minor/patch` are sent. `major` is a
+/// `$lib_version__major` the caller sets, which is sent unless the SDK's parts
+/// replace it.
 #[allow(dead_code)]
 pub struct LibCase {
     pub name: &'static str,
     pub lib: Option<serde_json::Value>,
     pub version: Option<serde_json::Value>,
+    pub major: Option<serde_json::Value>,
     pub wire_lib: Option<serde_json::Value>,
     pub wire_version: Option<serde_json::Value>,
     pub parts: bool,
@@ -33,6 +36,11 @@ pub struct LibCase {
 
 #[allow(dead_code)]
 impl LibCase {
+    fn with_major(mut self, major: serde_json::Value) -> Self {
+        self.major = Some(major);
+        self
+    }
+
     /// An event named `name` carrying this case's values and a `case` marker.
     pub fn event(&self, name: &str) -> posthog::Event {
         let mut event = posthog::Event::new(name, "user-1");
@@ -42,6 +50,9 @@ impl LibCase {
         }
         if let Some(version) = &self.version {
             event.insert_prop("$lib_version", version).unwrap();
+        }
+        if let Some(major) = &self.major {
+            event.insert_prop("$lib_version__major", major).unwrap();
         }
         event
     }
@@ -64,9 +75,15 @@ impl LibCase {
             ("$lib_version__patch", env!("CARGO_PKG_VERSION_PATCH")),
         ];
         for (key, part) in parts {
-            let expected = self
-                .parts
-                .then(|| serde_json::json!(part.parse::<u64>().unwrap()));
+            let caller = match key {
+                "$lib_version__major" => self.major.clone(),
+                _ => None,
+            };
+            let expected = if self.parts {
+                Some(serde_json::json!(part.parse::<u64>().unwrap()))
+            } else {
+                caller
+            };
             assert_eq!(
                 properties.get(key),
                 expected.as_ref(),
@@ -86,6 +103,7 @@ pub fn lib_cases() -> Vec<LibCase> {
         name,
         lib,
         version,
+        major: None,
         wire_lib: sdk_lib(),
         wire_version: sdk_version(),
         parts: true,
@@ -96,6 +114,7 @@ pub fn lib_cases() -> Vec<LibCase> {
         wire_version: version.clone(),
         lib,
         version,
+        major: None,
         parts: false,
     };
     vec![
@@ -126,6 +145,28 @@ pub fn lib_cases() -> Vec<LibCase> {
             Some(json!("custom-lib")),
             Some(json!("9.9.9")),
         ),
+        kept(
+            "custom_lib_empty_version",
+            Some(json!("custom-lib")),
+            Some(json!("")),
+        ),
+        // Whitespace is a non-empty string, so it names a library.
+        kept("whitespace_lib", Some(json!(" ")), None),
+        // The SDK's parts replace the caller's only when it writes its version.
+        case("unset_with_parts", None, None).with_major(json!(99)),
+        case("sdk_lib_alone_with_parts", sdk_lib(), None).with_major(json!(99)),
+        kept(
+            "sdk_lib_with_version_and_parts",
+            sdk_lib(),
+            Some(json!("0.1.0")),
+        )
+        .with_major(json!(99)),
+        kept(
+            "custom_lib_with_parts",
+            Some(json!("custom-lib")),
+            Some(json!("9.9.9")),
+        )
+        .with_major(json!(99)),
     ]
 }
 

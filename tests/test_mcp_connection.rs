@@ -358,6 +358,28 @@ async fn an_mcp_hook_can_rename_the_lib_and_the_sdk_adds_no_version() {
 }
 
 #[tokio::test]
+async fn an_mcp_hook_that_removes_the_lib_gets_the_sdk_label() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .before_send(|mut event| {
+            event.remove_prop("$lib");
+            Some(event)
+        })
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    call(&client, "search_docs", json!({ "query": "flags" })).await;
+
+    // The `McpOptions` hook runs before the client fills `$lib`.
+    let sent = recorder.sent_properties("$mcp_tool_call").await;
+    assert_eq!(sent["$lib"], "posthog-rs");
+    assert_eq!(sent["$lib_version"], env!("CARGO_PKG_VERSION"));
+    let major: u64 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap();
+    assert_eq!(sent["$lib_version__major"], major);
+}
+
+#[tokio::test]
 async fn a_failing_before_send_hook_drops_the_event_but_not_the_result() {
     let recorder = Recorder::new().await;
     let options = McpOptionsBuilder::default()

@@ -1147,29 +1147,99 @@ async fn every_send_path_applies_the_lib_pair_rule() {
 }
 
 #[tokio::test]
-async fn a_request_context_lib_reaches_the_wire_without_the_sdk_version() {
-    let server = MockServer::start();
-    let wire = common::record_wire_events(&server, "/i/v1/analytics/events");
-    let client = create_capture_client(server.base_url()).await;
+async fn every_send_path_applies_the_lib_pair_rule_to_the_request_context() {
+    let sdk_version = json!(env!("CARGO_PKG_VERSION"));
+    // (context `$lib`, context `$lib_version`, expected wire values). The event
+    // is `case.lib`/`case.version`, which only the event paths can set.
+    let case =
+        |name, lib: Option<&str>, version: Option<&str>, wire: (_, _, bool)| common::LibCase {
+            name,
+            lib: lib.map(|lib| json!(lib)),
+            version: version.map(|version| json!(version)),
+            major: None,
+            wire_lib: wire.0,
+            wire_version: wire.1,
+            parts: wire.2,
+        };
+    let scenarios = [
+        (
+            Some("mw"),
+            Some("2.0.0"),
+            case(
+                "context_pair",
+                None,
+                None,
+                (Some(json!("mw")), Some(json!("2.0.0")), false),
+            ),
+        ),
+        (
+            Some("mw"),
+            None,
+            case(
+                "context_lib_alone",
+                None,
+                None,
+                (Some(json!("mw")), None, false),
+            ),
+        ),
+        (
+            None,
+            Some("2.0.0"),
+            case(
+                "context_lone_version",
+                None,
+                None,
+                (Some(json!("posthog-rs")), Some(sdk_version.clone()), true),
+            ),
+        ),
+        (
+            None,
+            Some("2.0.0"),
+            case(
+                "event_sdk_lib_context_version",
+                Some("posthog-rs"),
+                None,
+                (Some(json!("posthog-rs")), Some(json!("2.0.0")), false),
+            ),
+        ),
+        (
+            Some("mw"),
+            Some("2.0.0"),
+            case(
+                "event_lib_context_version",
+                Some("custom-lib"),
+                None,
+                (Some(json!("custom-lib")), Some(json!("2.0.0")), false),
+            ),
+        ),
+    ];
 
-    let context = posthog::RequestContext::new()
-        .property("$lib", "custom-middleware")
-        .unwrap();
-    context
-        .scope(async {
-            client.capture(Event::new("test", "user-1"));
-        })
-        .await;
-    client.flush().await;
+    for &path in SendPath::ALL {
+        for (context_lib, context_version, case) in &scenarios {
+            if !path.takes_events() && case.lib.is_some() {
+                continue;
+            }
+            let server = MockServer::start();
+            let wire = common::record_wire_events(&server, path.endpoint());
+            let client = create_capture_client(server.base_url()).await;
+            let mut context = posthog::RequestContext::new();
+            if let Some(lib) = context_lib {
+                context = context.property("$lib", lib).unwrap();
+            }
+            if let Some(version) = context_version {
+                context = context.property("$lib_version", version).unwrap();
+            }
+            let events = if path.takes_events() {
+                vec![case.event("$ai_generation")]
+            } else {
+                Vec::new()
+            };
 
-    let properties = common::wire_properties(&wire, None);
-    assert_eq!(properties["$lib"], "custom-middleware");
-    assert!(properties.get("$lib_version").is_none(), "{}", properties);
-    assert!(
-        properties.get("$lib_version__major").is_none(),
-        "{}",
-        properties
-    );
+            context.scope(path.send(&client, events)).await;
+
+            case.assert_wire(&common::wire_properties(&wire, None), &format!("{path:?}"));
+        }
+    }
 }
 
 /// C4: pins the wire identity `posthog-rs/<semver>`, the same value the SDK

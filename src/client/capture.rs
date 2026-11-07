@@ -723,6 +723,8 @@ mod tests {
             Relabel,
             SetNull,
             Remove,
+            RemoveLib,
+            RemoveVersion,
         }
         let version = serde_json::json!(env!("CARGO_PKG_VERSION"));
         for (change, expected_lib, expected_version) in [
@@ -742,6 +744,12 @@ mod tests {
                 Some(version.clone()),
             ),
             (Change::Remove, None, None),
+            (Change::RemoveLib, None, Some(version.clone())),
+            (
+                Change::RemoveVersion,
+                Some(serde_json::json!("posthog-rs")),
+                None,
+            ),
         ] {
             let opts = ClientOptionsBuilder::default()
                 .api_key("phc_test".to_string())
@@ -756,6 +764,12 @@ mod tests {
                         }
                         Change::Remove => {
                             event.remove_prop("$lib");
+                            event.remove_prop("$lib_version");
+                        }
+                        Change::RemoveLib => {
+                            event.remove_prop("$lib");
+                        }
+                        Change::RemoveVersion => {
                             event.remove_prop("$lib_version");
                         }
                     }
