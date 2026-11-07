@@ -1024,8 +1024,226 @@ async fn capture_accepts_alternate_2xx_status() {
     assert!(errors.try_recv().is_err());
 }
 
-/// C4: pins the wire identity `posthog-rs/<semver>` that capture parses
-/// into `$lib`/`$lib_version`.
+#[derive(Clone, Copy, Debug)]
+enum SendPath {
+    Capture,
+    Batch,
+    Historical,
+    Immediate,
+    BatchImmediate,
+    Ai,
+    AiBatch,
+    AiImmediate,
+    AiBatchImmediate,
+    Alias,
+    GroupIdentify,
+    #[cfg(feature = "error-tracking")]
+    Exception,
+}
+
+impl SendPath {
+    const ALL: &'static [SendPath] = &[
+        SendPath::Capture,
+        SendPath::Batch,
+        SendPath::Historical,
+        SendPath::Immediate,
+        SendPath::BatchImmediate,
+        SendPath::Ai,
+        SendPath::AiBatch,
+        SendPath::AiImmediate,
+        SendPath::AiBatchImmediate,
+        SendPath::Alias,
+        SendPath::GroupIdentify,
+        #[cfg(feature = "error-tracking")]
+        SendPath::Exception,
+    ];
+
+    fn endpoint(self) -> &'static str {
+        match self {
+            SendPath::Ai
+            | SendPath::AiBatch
+            | SendPath::AiImmediate
+            | SendPath::AiBatchImmediate => "/i/v1/ai/events",
+            _ => "/i/v1/analytics/events",
+        }
+    }
+
+    /// `false` for the paths that send an event the SDK builds.
+    fn takes_events(self) -> bool {
+        match self {
+            SendPath::Alias | SendPath::GroupIdentify => false,
+            #[cfg(feature = "error-tracking")]
+            SendPath::Exception => false,
+            _ => true,
+        }
+    }
+
+    async fn send(self, client: &posthog::Client, events: Vec<Event>) {
+        match self {
+            SendPath::Capture => events.into_iter().for_each(|event| client.capture(event)),
+            SendPath::Batch => client.capture_batch(events, false),
+            SendPath::Historical => client.capture_batch(events, true),
+            SendPath::Immediate => {
+                for event in events {
+                    client.capture_immediate(event).await.unwrap();
+                }
+            }
+            SendPath::BatchImmediate => {
+                client.capture_batch_immediate(events, false).await.unwrap();
+            }
+            SendPath::Ai => events
+                .into_iter()
+                .for_each(|event| client.capture_ai(event)),
+            SendPath::AiBatch => client.capture_ai_batch(events, false),
+            SendPath::AiImmediate => {
+                for event in events {
+                    client.capture_ai_immediate(event).await.unwrap();
+                }
+            }
+            SendPath::AiBatchImmediate => {
+                client
+                    .capture_ai_batch_immediate(events, false)
+                    .await
+                    .unwrap();
+            }
+            SendPath::Alias => client.alias("old-id", "user-1"),
+            SendPath::GroupIdentify => client
+                .group_identify("company", "acme", json!({ "name": "Acme" }))
+                .unwrap(),
+            #[cfg(feature = "error-tracking")]
+            SendPath::Exception => {
+                let error = std::io::Error::other("boom");
+                client.capture_exception(&error).await.unwrap();
+            }
+        }
+        client.flush().await;
+    }
+}
+
+#[tokio::test]
+async fn every_send_path_applies_the_lib_pair_rule() {
+    for &path in SendPath::ALL {
+        let server = MockServer::start();
+        let wire = common::record_wire_events(&server, path.endpoint());
+        let client = create_capture_client(server.base_url()).await;
+        let context = format!("{path:?}");
+
+        if path.takes_events() {
+            let cases = common::lib_cases();
+            let events = cases
+                .iter()
+                .map(|case| case.event("$ai_generation"))
+                .collect();
+            path.send(&client, events).await;
+            for case in &cases {
+                case.assert_wire(&common::wire_properties(&wire, Some(case.name)), &context);
+            }
+        } else {
+            path.send(&client, Vec::new()).await;
+            let unset = &common::lib_cases()[0];
+            unset.assert_wire(&common::wire_properties(&wire, None), &context);
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_send_path_applies_the_lib_pair_rule_to_the_request_context() {
+    let sdk_version = json!(env!("CARGO_PKG_VERSION"));
+    // (context `$lib`, context `$lib_version`, expected wire values). The event
+    // is `case.lib`/`case.version`, which only the event paths can set.
+    let case =
+        |name, lib: Option<&str>, version: Option<&str>, wire: (_, _, bool)| common::LibCase {
+            name,
+            lib: lib.map(|lib| json!(lib)),
+            version: version.map(|version| json!(version)),
+            major: None,
+            wire_lib: wire.0,
+            wire_version: wire.1,
+            parts: wire.2,
+        };
+    let scenarios = [
+        (
+            Some("mw"),
+            Some("2.0.0"),
+            case(
+                "context_pair",
+                None,
+                None,
+                (Some(json!("mw")), Some(json!("2.0.0")), false),
+            ),
+        ),
+        (
+            Some("mw"),
+            None,
+            case(
+                "context_lib_alone",
+                None,
+                None,
+                (Some(json!("mw")), None, false),
+            ),
+        ),
+        (
+            None,
+            Some("2.0.0"),
+            case(
+                "context_lone_version",
+                None,
+                None,
+                (Some(json!("posthog-rs")), Some(sdk_version.clone()), true),
+            ),
+        ),
+        (
+            None,
+            Some("2.0.0"),
+            case(
+                "event_sdk_lib_context_version",
+                Some("posthog-rs"),
+                None,
+                (Some(json!("posthog-rs")), Some(json!("2.0.0")), false),
+            ),
+        ),
+        (
+            Some("mw"),
+            Some("2.0.0"),
+            case(
+                "event_lib_context_version",
+                Some("custom-lib"),
+                None,
+                (Some(json!("custom-lib")), Some(json!("2.0.0")), false),
+            ),
+        ),
+    ];
+
+    for &path in SendPath::ALL {
+        for (context_lib, context_version, case) in &scenarios {
+            if !path.takes_events() && case.lib.is_some() {
+                continue;
+            }
+            let server = MockServer::start();
+            let wire = common::record_wire_events(&server, path.endpoint());
+            let client = create_capture_client(server.base_url()).await;
+            let mut context = posthog::RequestContext::new();
+            if let Some(lib) = context_lib {
+                context = context.property("$lib", lib).unwrap();
+            }
+            if let Some(version) = context_version {
+                context = context.property("$lib_version", version).unwrap();
+            }
+            let events = if path.takes_events() {
+                vec![case.event("$ai_generation")]
+            } else {
+                Vec::new()
+            };
+
+            context.scope(path.send(&client, events)).await;
+
+            case.assert_wire(&common::wire_properties(&wire, None), &format!("{path:?}"));
+        }
+    }
+}
+
+/// C4: pins the wire identity `posthog-rs/<semver>`, the same value the SDK
+/// sends as `$lib`/`$lib_version`.
 #[tokio::test]
 async fn capture_sends_canonical_sdk_info_header() {
     let server = MockServer::start();

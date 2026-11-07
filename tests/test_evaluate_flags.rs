@@ -1062,11 +1062,9 @@ mod blocking {
     }
 
     /// Ported from the removed V0 suite: `$feature_flag_called` carries
-    /// `$is_server`. The `$lib`/`$lib_version` half of the original assertion
-    /// now travels in the `posthog-sdk-info` header instead of the body, and is
-    /// covered by `flag_called_event_routes_to_capture_endpoint` above.
+    /// `$lib`, `$lib_version` and `$is_server`.
     #[test]
-    fn flag_called_event_contains_is_server() {
+    fn flag_called_event_contains_lib_and_is_server() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/flags/");
@@ -1076,6 +1074,11 @@ mod blocking {
             when.method(POST)
                 .path(CAPTURE_PATH)
                 .body_includes("$feature_flag_called")
+                .body_includes("\"$lib\":\"posthog-rs\"")
+                .body_includes(format!(
+                    "\"$lib_version\":\"{}\"",
+                    env!("CARGO_PKG_VERSION")
+                ))
                 .body_includes("\"$is_server\":true");
             then.status(200)
                 .header("content-type", "application/json")
@@ -1542,11 +1545,9 @@ mod async_tests {
     }
 
     /// Ported from the removed V0 suite: `$feature_flag_called` carries
-    /// `$is_server`. The `$lib`/`$lib_version` half of the original assertion
-    /// now travels in the `posthog-sdk-info` header instead of the body, and is
-    /// covered by `flag_called_event_routes_to_capture_endpoint` above.
+    /// `$lib`, `$lib_version` and `$is_server`.
     #[tokio::test]
-    async fn flag_called_event_contains_is_server() {
+    async fn flag_called_event_contains_lib_and_is_server() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/flags/");
@@ -1556,6 +1557,11 @@ mod async_tests {
             when.method(POST)
                 .path(CAPTURE_PATH)
                 .body_includes("$feature_flag_called")
+                .body_includes("\"$lib\":\"posthog-rs\"")
+                .body_includes(format!(
+                    "\"$lib_version\":\"{}\"",
+                    env!("CARGO_PKG_VERSION")
+                ))
                 .body_includes("\"$is_server\":true");
             then.status(200)
                 .header("content-type", "application/json")

@@ -50,11 +50,24 @@ The SDK gives every event a UUIDv7 `uuid` and every request a UUIDv7 request ID.
 
 ### SDK identity
 
-PostHog sets `$lib` and `$lib_version` on every event from the `posthog-sdk-info` request header, which is always `posthog-rs/<version>`. The SDK no longer adds them to properties. If you set them with `insert_prop` or in `before_send`, the SDK removes them before it sends the event, so stored events always report `posthog-rs`. `before_send` still sees the value you set. In 0.x without `capture-v1`, PostHog stored a `$lib` or `$lib_version` you set. The 0.x `capture-v1` path already sent the header, so PostHog replaced your value.
+Each event's `$lib` and `$lib_version` properties name the library that produced it. The SDK sends them in `properties` as they are when the event is sent, and PostHog stores them. The SDK also sends `posthog-rs/<version>` in the `posthog-sdk-info` request header. PostHog uses the header only to fill in what an event leaves unset: both properties when `$lib` isn't set, and the version when `$lib` is `posthog-rs` and `$lib_version` isn't set.
 
-This includes the `mcp` feature, which sets `$lib` to `posthog-rs-mcp` on its events. PostHog now stores `posthog-rs` for them. In 0.x without `capture-v1`, it stored `posthog-rs-mcp`. To find MCP events, filter on `$mcp_interface`, which is `mcp` on every MCP event.
+You can set them on the event or in the request context. Like any other property, each one comes from the most specific place that sets it, so set both in the same place. The SDK fills these properties after the event and request context values, and before `before_send` runs. A `$lib` counts as set only when it's a non-empty string, so a missing, `null`, empty or non-string `$lib` is not set. The same goes for `$lib_version`.
 
-The SDK no longer sends `$lib_version__major`, `$lib_version__minor` or `$lib_version__patch`. Only the 0.x V0 path sent them. Filter on `$lib_version` instead.
+- If `$lib` isn't set, the SDK sets `$lib` to `posthog-rs` and `$lib_version` to the crate version. A `$lib_version` set without `$lib` is replaced.
+- If `$lib` is `posthog-rs` and `$lib_version` isn't set, the SDK adds the crate version.
+- If `$lib` names another library, the SDK leaves both properties as they are, even if `$lib_version` is missing. Set both when you name another library.
+
+`before_send` sees the result and can change either property. The SDK doesn't fill them again after the hook, but PostHog still uses the header as described above, so an event the hook sends without `$lib` is stored as `posthog-rs`. To label an event as another library, set both `$lib` and `$lib_version` in the hook.
+
+When the SDK adds its own `$lib_version`, it also adds `$lib_version__major`, `$lib_version__minor` and `$lib_version__patch` as numbers. It never adds them to another library's `$lib`. A minimized `$feature_flag_called` event keeps `$lib` and `$lib_version` but not the three version parts.
+
+How this compares with 0.x:
+
+- The default 0.x path (V0) also added these properties before `before_send`, but one key at a time, so a `$lib` you set on its own got the SDK's `$lib_version` and version parts. In 1.0 it doesn't.
+- The 0.x `capture-v1` path didn't add these properties, so PostHog set them from the header.
+
+The `mcp` feature sets `$lib` to `posthog-rs-mcp` and `$lib_version` to the crate version on its events, and PostHog stores both. 0.x without `capture-v1` also stored `posthog-rs-mcp`, and added the three version parts, which 1.0 doesn't send on MCP events. To label MCP events as another library, set `$lib` and `$lib_version` in the `McpOptions` hook or the client's `before_send`. Removing `$lib` in either hook makes the event report `posthog-rs`. `$mcp_interface` is `mcp` on every MCP event.
 
 ### AI events
 
@@ -113,6 +126,7 @@ Two behaviors differ from every 0.x build:
 Values the SDK adds, and the values you set:
 
 - The SDK adds `$os`, `$os_version`, `$is_server` and `$geoip_disable` only when the event does not already have the key, and it adds them before `before_send` runs. The hook sees them and can change or remove them, and the SDK does not add them again after the hook. The default 0.x path (V0) also added them before the hook. The 0.x `capture-v1` path added them while building the request, after the hook, so a hook could not see `$os` or remove any of them.
+- The SDK adds `$lib` and `$lib_version` before `before_send` runs, as a pair, as described in [SDK identity](#sdk-identity). The 0.x `capture-v1` path never added them.
 - `Event::with_flags` keeps a `$feature/<key>` or `$active_feature_flags` property that the event already has. In 0.x, the flag values replaced it.
 - Groups from `Event::add_group` merge into a `$groups` property key by key, and the added group wins for the same group type. In 0.x, they replaced the whole `$groups` property.
 - A `$set`, `$set_once`, `$groups` or `$group_set` from the request context fills in only the keys the event's own value lacks. For example, a context `$set` of `{"plan": "free", "source": "web"}` and an event `$set` of `{"plan": "pro"}` send `{"plan": "pro", "source": "web"}`. In 0.x, the context value was used only when the event had none of that property.
@@ -125,11 +139,11 @@ One behavior differs from 0.x without `capture-v1`, which used the V0 endpoint:
 
 ### Layers and which calls they reach
 
-An event's properties and options come from three layers. For the same key, a layer earlier in this list wins:
+An event's properties and options come from three layers. For the same key, a layer earlier in this list wins, except for `$lib`, `$lib_version` and its version parts, which follow the rule in [SDK identity](#sdk-identity):
 
 1. Event values: what you set on the event with `insert_prop` and `insert_option`, or on `CaptureExceptionOptions`. For `$feature_flag_called` events, a per-call `disable_geoip` in `EvaluateFlagsOptions` counts as an event value.
 2. Request context: properties and options from `RequestContext`. They fill only the keys the event leaves unset.
-3. SDK values: `$os`, `$os_version`, and `$is_server` and `$geoip_disable` from the client settings, plus the `process_person_profile` option that `Event::new_anon` sets to `false`.
+3. SDK values: `$lib`, `$lib_version` and its three version parts, `$os`, `$os_version`, and `$is_server` and `$geoip_disable` from the client settings, plus the `process_person_profile` option that `Event::new_anon` sets to `false`.
 
 `before_send` runs after all three and can change any value. The SDK has no client-wide layer for properties or options.
 

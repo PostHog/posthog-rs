@@ -2,14 +2,16 @@ use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 use super::context::EventContext;
+use crate::client::CRATE_VERSION;
 use crate::mcp::bounds::fit_event_size;
 use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
 use crate::Event;
 
-const ALWAYS_REQUIRED: [&str; 7] = [
+const ALWAYS_REQUIRED: [&str; 8] = [
     key::INTERFACE,
     key::LIB,
+    key::LIB_VERSION,
     key::SESSION_ID,
     key::PROCESS_PERSON_PROFILE,
     key::EXCEPTION_LIST,
@@ -30,7 +32,7 @@ impl OutgoingEvent {
     pub(crate) fn new(name: &'static str, context: &EventContext) -> Self {
         let mut properties = context.properties();
         properties.insert(key::INTERFACE.to_string(), Value::from(INTERFACE));
-        properties.insert(key::LIB.to_string(), Value::from(LIB_NAME));
+        label_library(&mut properties);
         Self {
             name,
             distinct_id: context.distinct_id().to_string(),
@@ -72,6 +74,13 @@ impl OutgoingEvent {
     }
 }
 
+/// Names MCP analytics as the library, as a pair so the event never carries
+/// `posthog-rs-mcp` without a version.
+fn label_library(properties: &mut Map<String, Value>) {
+    properties.insert(key::LIB.to_string(), Value::from(LIB_NAME));
+    properties.insert(key::LIB_VERSION.to_string(), Value::from(CRATE_VERSION));
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -95,5 +104,7 @@ mod tests {
         event.set(LISTED_TOOL_NAMES, names);
         let event = event.bounded(&[LISTED_TOOL_NAMES]);
         assert_eq!(event.properties[key::INTERFACE], INTERFACE);
+        assert_eq!(event.properties[key::LIB], LIB_NAME);
+        assert_eq!(event.properties[key::LIB_VERSION], CRATE_VERSION);
     }
 }

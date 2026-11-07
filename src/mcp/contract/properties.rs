@@ -15,6 +15,7 @@ pub(crate) const INTENT_SOURCE: &str = "$mcp_intent_source";
 pub(crate) const INTERFACE: &str = "$mcp_interface";
 pub(crate) const IS_ERROR: &str = "$mcp_is_error";
 pub(crate) const LIB: &str = "$lib";
+pub(crate) const LIB_VERSION: &str = "$lib_version";
 pub(crate) const LISTED_TOOL_NAMES: &str = "$mcp_listed_tool_names";
 pub(crate) const LLM_MODEL: &str = "$mcp_llm_model";
 pub(crate) const LLM_MODEL_SOURCE: &str = "$mcp_llm_model_source";
