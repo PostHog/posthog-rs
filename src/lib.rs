@@ -152,6 +152,8 @@ pub mod mcp;
 // Public interface - any change to this is breaking!
 // Client
 pub use client::client;
+#[cfg(feature = "stateful")]
+pub use client::stateful;
 pub use client::BeforeSendHook;
 pub use client::CaptureCompression;
 pub use client::CaptureSummary;

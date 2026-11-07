@@ -2,6 +2,22 @@
 
 This directory contains example applications demonstrating how to use the PostHog Rust SDK, including feature flags, local evaluation, configuration, and manual error tracking.
 
+## Stateful application client
+
+Set `POSTHOG_PROJECT_TOKEN` and optionally `POSTHOG_HOST` and
+`POSTHOG_DATA_DIR` (a persistence root override), then run:
+
+```bash
+cargo run --features stateful --example stateful
+# Without the async client feature:
+cargo run --no-default-features --features stateful,tls --example stateful
+```
+
+This blocking example uses automatic local persistence, anonymous identity,
+explicit capture/screen, a native privacy hook, and separate drain reports.
+See [stateful client behavior](../docs/stateful-client.md) for configuration,
+admission limits, storage failure handling, async initialization and drains.
+
 ## Running the Examples
 
 ### 1. Feature Flags Example

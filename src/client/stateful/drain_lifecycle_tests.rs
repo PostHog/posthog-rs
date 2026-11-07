@@ -1,0 +1,114 @@
+use super::*;
+use std::future::Future;
+use std::task::{Context, Poll};
+
+#[test]
+fn async_flush_captures_revision_and_cancellation_keeps_client_open() {
+    let directory = Directory::new();
+    let (state, gate) = gated_writer(&directory);
+    gate.entered.recv_timeout(WAIT).unwrap();
+    let client = client_with_writer(&config(), state);
+    let mut context = Context::from_waker(futures::task::noop_waker_ref());
+    let mut cancelled = Box::pin(client.flush());
+    assert!(matches!(
+        cancelled.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(cancelled);
+    assert!(!client.closed.load(Ordering::Acquire));
+    let mut flush = Box::pin(client.flush());
+    assert!(matches!(flush.as_mut().poll(&mut context), Poll::Pending));
+    let state = client.state.as_ref().unwrap();
+    state
+        .update(|snapshot| snapshot.distinct_id = "newer".into())
+        .unwrap();
+    state.checkpoint();
+    gate.release.send(()).unwrap();
+    // The next revision is now blocked. This flush only requested revision 1.
+    gate.entered.recv_timeout(WAIT).unwrap();
+    let report = futures::executor::block_on(flush);
+    gate.release.send(()).unwrap();
+    assert_eq!(report.state, PersistenceOutcome::Persisted);
+    assert_eq!(report.delivery, DeliveryOutcome::Attempted);
+    client.shutdown_blocking(None);
+    gate.dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn async_drains_from_state_writer_callback_defer_without_cross_worker_waits() {
+    struct FailingStore;
+    impl StateStore for FailingStore {
+        fn save(&mut self, _: &Snapshot) -> io::Result<()> {
+            Err(io::Error::other("test state write failure"))
+        }
+    }
+    let slot = Arc::new(Mutex::new(std::sync::Weak::<Client>::new()));
+    let callback_slot = slot.clone();
+    let (tx, rx) = mpsc::channel();
+    let mut config = config();
+    config.on_error(move |_| {
+        let client = callback_slot.lock().unwrap().upgrade().unwrap();
+        let flush = futures::executor::block_on(client.flush());
+        let shutdown = futures::executor::block_on(client.shutdown(None));
+        tx.send((flush, shutdown)).unwrap();
+    });
+    let state = StateWriter::new(
+        Snapshot::anonymous("anonymous".into()),
+        Backend::Persistent {
+            store: Box::new(FailingStore),
+            restored: true,
+        },
+        WriterOptions::default(),
+        config.on_error.clone(),
+        Arc::new(SystemClock),
+    )
+    .unwrap();
+    let client = Arc::new(client_with_writer(&config, state));
+    *slot.lock().unwrap() = Arc::downgrade(&client);
+    client
+        .state
+        .as_ref()
+        .unwrap()
+        .update(|s| s.distinct_id = "newer".into())
+        .unwrap();
+    client.state.as_ref().unwrap().checkpoint();
+    let (flush, shutdown) = rx.recv_timeout(WAIT).unwrap();
+    assert_eq!(flush.state, PersistenceOutcome::Deferred);
+    assert_eq!(shutdown.delivery, DeliveryOutcome::Deferred);
+    let report = futures::executor::block_on(client.shutdown(None));
+    assert_eq!(report.state, PersistenceOutcome::WriteFailed);
+    assert_eq!(report.delivery, DeliveryOutcome::Stopped);
+}
+
+#[test]
+fn cancelled_shutdown_wait_keeps_both_workers_closing_and_allows_another_waiter() {
+    let directory = Directory::new();
+    let (state, gate) = gated_writer(&directory);
+    gate.entered.recv_timeout(WAIT).unwrap();
+    let client = Arc::new(client_with_writer(&config(), state));
+    let mut context = Context::from_waker(futures::task::noop_waker_ref());
+    let mut cancelled = Box::pin(client.shutdown(Some(Duration::from_secs(30))));
+    assert!(matches!(
+        cancelled.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(cancelled);
+    assert!(client.transport.as_ref().unwrap().is_closed());
+    assert!(client.state.as_ref().unwrap().is_closed());
+    assert_eq!(
+        client.capture("closed"),
+        crate::stateful::CaptureOutcome::Closed
+    );
+    let mut second = Box::pin(client.shutdown(None));
+    assert!(matches!(second.as_mut().poll(&mut context), Poll::Pending));
+    let blocking_client = client.clone();
+    let blocking = thread::spawn(move || blocking_client.shutdown_blocking(None));
+    gate.release.send(()).unwrap();
+    let async_report = futures::executor::block_on(second);
+    let blocking_report = blocking.join().unwrap();
+    assert_eq!(async_report, blocking_report);
+    assert_eq!(async_report.state, PersistenceOutcome::Persisted);
+    assert_eq!(async_report.delivery, DeliveryOutcome::Stopped);
+    gate.dropped.recv_timeout(WAIT).unwrap();
+    drop(StorageDirectory::open(&directory.0).unwrap());
+}

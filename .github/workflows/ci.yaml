@@ -192,14 +192,22 @@ jobs:
           - name: Unit test (stateful, blocking client)
             cache-key: stateful-blocking
             command: cargo test --locked --no-default-features --features stateful,error-tracking,tls
-          - name: Stateful storage and transport (macOS)
+          - name: Stateful client, storage and transport (macOS)
             os: macos-latest
             cache-key: stateful-macos
-            command: 'cargo test --locked --lib --features stateful client::'
-          - name: Stateful storage and transport (Windows)
+            command: >-
+              cargo test --locked --lib --features stateful client::
+              && cargo test --locked --features stateful --test test_stateful_init --test test_stateful_capture --test test_stateful_drains
+              && cargo test --locked --no-default-features --features stateful,tls --lib client::stateful
+              && cargo test --locked --no-default-features --features stateful,tls --test test_stateful_init --test test_stateful_capture --test test_stateful_drains
+          - name: Stateful client, storage and transport (Windows)
             os: windows-latest
             cache-key: stateful-windows
-            command: 'cargo test --locked --lib --features stateful client::'
+            command: >-
+              cargo test --locked --lib --features stateful client::
+              && cargo test --locked --features stateful --test test_stateful_init --test test_stateful_capture --test test_stateful_drains
+              && cargo test --locked --no-default-features --features stateful,tls --lib client::stateful
+              && cargo test --locked --no-default-features --features stateful,tls --test test_stateful_init --test test_stateful_capture --test test_stateful_drains
           - name: Unit test (workspace)
             cache-key: workspace
             command: cargo test --workspace --verbose
@@ -218,10 +226,10 @@ jobs:
             command: cargo test --verbose --no-default-features --features error-tracking
           - name: TLS without a built-in provider (async client)
             cache-key: tls-no-provider-async
-            command: cargo test --verbose --no-default-features --features async-client,tls-no-provider --test test_tls_no_provider
+            command: cargo test --verbose --no-default-features --features stateful,async-client,tls-no-provider --test test_tls_no_provider
           - name: TLS without a built-in provider (blocking client)
             cache-key: tls-no-provider-blocking
-            command: cargo test --verbose --no-default-features --features tls-no-provider --test test_tls_no_provider
+            command: cargo test --verbose --no-default-features --features stateful,tls-no-provider --test test_tls_no_provider
           - name: Unit test (mcp)
             cache-key: mcp
             command: cargo test --verbose --features mcp
