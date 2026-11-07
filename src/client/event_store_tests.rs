@@ -45,6 +45,35 @@ fn event(name: &str) -> CaptureEvent {
 }
 
 #[test]
+fn stateful_sdk_attribution_is_in_the_record_and_survives_recovery() {
+    let directory = TestDirectory::new();
+    let mut input = Event::new("captured", "anonymous-id");
+    input.set_uuid(Uuid::now_v7());
+    input.insert_prop("$lib", "embedded-sdk").unwrap();
+    input.insert_prop("$lib_version", "1.2.3").unwrap();
+    let now = "2025-01-01T00:00:00.123456789Z".parse().unwrap();
+    let original = CaptureEvent::from_stateful_event_at(&input, now);
+    let expected = serde_json::to_value(&original).unwrap();
+    {
+        let mut store = directory.open(limits());
+        let key = store.put(&original).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path(key)).unwrap()).unwrap();
+        assert_eq!(record["event"], expected);
+        assert_eq!(record["event"]["properties"]["$lib"], "embedded-sdk");
+        assert_eq!(record["event"]["properties"]["$lib_version"], "1.2.3");
+    }
+    let mut store = directory.open(limits());
+    let recovered = store.recover(10, 64 * 1024).unwrap();
+    assert!(recovered.errors.is_empty());
+    assert_eq!(recovered.events.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&recovered.events[0].event).unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn restart_preserves_the_complete_event_and_removes_by_entry_identity() {
     let directory = TestDirectory::new();
     let original = event("first");

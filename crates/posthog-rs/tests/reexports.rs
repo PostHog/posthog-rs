@@ -34,6 +34,26 @@ fn exposes_blocking_client() {
     let _: fn(posthog_rs::ClientOptions) -> posthog_rs::Client = posthog_rs::client;
 }
 
+#[cfg(feature = "stateful")]
+#[test]
+fn reexports_stateful_client_and_its_public_entry_points() {
+    use posthog_rs::stateful::{CaptureOutcome, Client, Config, DeliveryOutcome, Persistence};
+    assert_same_type::<Client, posthog::stateful::Client>();
+    assert_same_type::<Config, posthog::stateful::Config>();
+    assert_same_type::<posthog_rs::stateful::Capture, posthog::stateful::Capture>();
+    assert_same_type::<posthog_rs::stateful::DrainReport, posthog::stateful::DrainReport>();
+    let mut config = Config::new("phc_test");
+    config.persistence = Persistence::Memory;
+    config.disabled = true;
+    let client = Client::init_blocking(config);
+    assert_eq!(client.capture("disabled"), CaptureOutcome::Disabled);
+    assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Disabled);
+    assert_eq!(
+        client.shutdown_blocking(None).delivery,
+        DeliveryOutcome::Disabled
+    );
+}
+
 #[test]
 fn shares_global_state() {
     assert!(!posthog::global_is_disabled());
