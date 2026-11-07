@@ -3,7 +3,6 @@ use serde_json::{Map, Value};
 
 use super::context::EventContext;
 use crate::client::CRATE_VERSION;
-use crate::event::names_a_library;
 use crate::mcp::bounds::fit_event_size;
 use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
@@ -76,12 +75,8 @@ impl OutgoingEvent {
 }
 
 /// Names MCP analytics as the library, as a pair so the event never carries
-/// `posthog-rs-mcp` without a version. A `$lib` already on the event wins,
-/// with whatever `$lib_version` it has.
+/// `posthog-rs-mcp` without a version.
 fn label_library(properties: &mut Map<String, Value>) {
-    if names_a_library(properties.get(key::LIB)) {
-        return;
-    }
     properties.insert(key::LIB.to_string(), Value::from(LIB_NAME));
     properties.insert(key::LIB_VERSION.to_string(), Value::from(CRATE_VERSION));
 }
@@ -111,36 +106,5 @@ mod tests {
         assert_eq!(event.properties[key::INTERFACE], INTERFACE);
         assert_eq!(event.properties[key::LIB], LIB_NAME);
         assert_eq!(event.properties[key::LIB_VERSION], CRATE_VERSION);
-    }
-
-    #[test]
-    fn the_label_is_a_pair_and_a_lib_already_set_wins() {
-        let label = |lib: Option<Value>, version: Option<Value>| {
-            let mut properties = Map::new();
-            if let Some(lib) = lib {
-                properties.insert(key::LIB.to_string(), lib);
-            }
-            if let Some(version) = version {
-                properties.insert(key::LIB_VERSION.to_string(), version);
-            }
-            label_library(&mut properties);
-            (
-                properties.get(key::LIB).cloned(),
-                properties.get(key::LIB_VERSION).cloned(),
-            )
-        };
-        let labeled = (
-            Some(Value::from(LIB_NAME)),
-            Some(Value::from(CRATE_VERSION)),
-        );
-
-        assert_eq!(label(None, None), labeled);
-        assert_eq!(label(Some(Value::Null), None), labeled);
-        assert_eq!(label(Some(Value::from("")), None), labeled);
-        assert_eq!(label(None, Some(Value::from("9.9.9"))), labeled);
-        assert_eq!(
-            label(Some(Value::from("custom-mcp")), None),
-            (Some(Value::from("custom-mcp")), None)
-        );
     }
 }
