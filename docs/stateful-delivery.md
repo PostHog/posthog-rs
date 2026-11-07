@@ -1,8 +1,8 @@
 # Prepared-event delivery and persistence
 
-The `stateful` Cargo feature enables internal delivery facilities for the stateful
-client. It does not yet expose a public stateful client or storage configuration.
-Existing server constructors remain memory-backed and retain their defaults,
+The optional `stateful` Cargo feature exposes a public [stateful client](stateful-client.md)
+with local anonymous identity, configurable persistence, and bounded prepared-event
+delivery. Existing server constructors remain memory-backed and retain their defaults,
 hook timing, response handling, and finite retry budgets.
 
 ## Shared delivery engine
@@ -78,10 +78,23 @@ The event can be lost if the process exits before delivery. Ordinary capture doe
 not wait for a write or roll back because persistence failed.
 
 Storage failures expose an operation and an I/O error through `StorageFailure`.
-Read, write, and removal failures are reported by the transport worker. Opening
-and ownership acquisition return errors to the initialization caller. Without an
-error hook, worker diagnostics report the operation and error kind, not backend
-error text. Error hooks are observability-only and must not call back into the SDK.
+Event read, write, and removal failures are reported by the transport worker.
+Private storage-open and ownership-acquisition operations return errors internally.
+Public stateful initialization returns `Client` directly: storage failures report
+through `on_error` and retain enabled, bounded memory-backed operation. State and
+event persistence can degrade independently. Unreadable or unsupported state is
+preserved rather than overwritten; failure to acquire the namespace lease falls
+back to memory without taking ownership of another client's storage. Invalid
+configuration or local delivery setup failure instead disables the client, as
+explained in [initialization and storage](stateful-client.md#initialization-and-storage).
+Without an error hook, storage diagnostics report the operation and error kind,
+not backend error text.
+
+Error hooks are observability-only: do not emit events from them or synchronously
+wait for SDK work. Stateful flush/shutdown calls from worker callbacks or capture
+hooks request progress/closure and return `Deferred` instead of waiting. See
+[admission and drains](stateful-client.md#admission-and-drains). Server error hooks
+retain their prohibition on calling back into the SDK.
 
 The shared response classifier selects successes, terminal failures, and
 retryable outcomes. Successes and terminal failures remove the corresponding
@@ -114,7 +127,9 @@ blocked filesystem call or callback.
 The foundation tests cover real-file restart fidelity, namespace ownership,
 record/schema failures, bounded recovery, duplicate UUID acknowledgements,
 blocked storage, memory-only fallback, retry exhaustion, and shutdown deadlines.
-Existing public server integration tests cover the shared transport's compatibility.
+Public stateful integration tests cover initialization, capture/screen, hooks,
+bounded admission, and blocking/async drains. Existing public server integration
+tests cover the shared transport's compatibility.
 
 ```sh
 cargo test --locked --features stateful
@@ -123,5 +138,7 @@ cargo clippy --locked --all-targets --features stateful -- -D warnings
 scripts/check-public-api.sh
 ```
 
-CI also exercises the file and transport unit tests on macOS and Windows. Public
-stateful initialization and capture-entry tests belong with the stateful client.
+CI is configured to run stateful unit and integration tests in default and blocking
+configurations on Linux. The macOS and Windows jobs include client/storage/transport
+unit tests in the default configuration and stateful-client unit tests in the blocking
+configuration, plus public initialization, capture, and drain tests in both.

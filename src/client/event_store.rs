@@ -48,7 +48,7 @@ fn create_directory(path: &Path) -> io::Result<()> {
     builder.create(path)
 }
 
-fn open_private(path: &Path, exclusive: bool) -> io::Result<File> {
+pub(super) fn open_private(path: &Path, exclusive: bool) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true);
     if exclusive {
@@ -108,9 +108,9 @@ pub(crate) fn record_size(event: &CaptureEvent) -> usize {
 }
 
 /// Bound serialization before allocating an oversized record buffer.
-struct RecordBuffer {
-    bytes: Vec<u8>,
-    limit: u64,
+pub(super) struct RecordBuffer {
+    pub(super) bytes: Vec<u8>,
+    pub(super) limit: u64,
 }
 
 impl Write for RecordBuffer {

@@ -60,6 +60,18 @@ impl CaptureEvent {
     /// worker can stamp a deterministic timestamp from its clock when the event
     /// carries none of its own.
     pub(crate) fn from_event_at(event: &Event, now: DateTime<Utc>) -> Self {
+        Self::convert_event_at(event, now, false)
+    }
+
+    /// Convert a producer-prepared stateful event after enrichment and hooks.
+    /// Capture-time SDK properties stay with the event through storage/retry;
+    /// missing or hook-removed attribution is not filled again here.
+    #[cfg(feature = "stateful")]
+    pub(crate) fn from_stateful_event_at(event: &Event, now: DateTime<Utc>) -> Self {
+        Self::convert_event_at(event, now, true)
+    }
+
+    fn convert_event_at(event: &Event, now: DateTime<Utc>, retain_sdk_properties: bool) -> Self {
         let mut properties = event.properties().clone();
         // The pipeline merges groups before `before_send`; this covers groups a
         // hook adds and events built directly.
@@ -68,8 +80,10 @@ impl CaptureEvent {
         let timestamp = wire_timestamp(event.timestamp().map_or(now, |ts| ts.and_utc()));
 
         let options = merge_options(event, &mut properties);
-        for key in SDK_INFO_PROPERTIES {
-            properties.remove(*key);
+        if !retain_sdk_properties {
+            for key in SDK_INFO_PROPERTIES {
+                properties.remove(*key);
+            }
         }
 
         let session_id = lift_string_property(&mut properties, SESSION_ID_PROP);
@@ -208,11 +222,14 @@ pub struct CaptureErrorResponse {
     pub error_uri: Option<String>,
 }
 
+#[cfg(all(test, feature = "stateful"))]
+#[path = "capture_event_stateful_tests.rs"]
+mod stateful_tests;
+
 /// Wire-shape tests for the capture event builder.
 ///
-/// Note on `$lib`/`$lib_version`: they are never carried in `properties`. The
-/// SDK sends its identity in the `posthog-sdk-info` header and capture
-/// materializes the properties server-side; the header is covered by
+/// The server conversion removes `$lib`/`$lib_version` from `properties`.
+/// That path sends SDK identity in the `posthog-sdk-info` header; the header is covered by
 /// `client::capture::tests::build_headers_sdk_info_is_canonical_lib_slash_version`.
 #[cfg(test)]
 mod tests {

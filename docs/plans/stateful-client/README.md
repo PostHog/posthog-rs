@@ -1,6 +1,6 @@
 # Stateful Rust client: implementation stack
 
-Status: the shared-delivery foundation is implemented and locally validated, with independent review pending. The remaining analytics phases and separate replay follow-up are planned. This directory tracks the eight implementation PRs and their contracts.
+Status: the shared-delivery foundation is signed draft [PR 334](https://github.com/PostHog/posthog-rs/pull/334), with independent reviews and CI complete. The public stateful client/storage/event foundation is implemented and locally validated; its full-domain review and publication are pending. Later analytics phases and replay remain planned. This directory tracks the eight implementation PRs and their contracts.
 
 ## Goal and scope
 
@@ -135,4 +135,4 @@ PR 1 uses branch `feat/stateful-delivery`, based on `v1` at `b244fc38384e44473f4
 - Commands and result artifact locations.
 - Unresolved findings, validation gaps, and next ready action.
 
-Next action: independently review the delivery foundation before its draft PR. Resolve the stateful client's public initialization, storage, and default contracts before implementing PR 2.
+Next action: implement the stateful client/storage foundation on `feat/stateful-client` above PR 1. Its agreed runtime, automatic persistence, degraded-initialization, and capture-time attribution contracts are recorded in the client foundation plan.

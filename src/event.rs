@@ -145,6 +145,31 @@ pub struct Event {
 }
 
 impl Event {
+    #[cfg(feature = "stateful")]
+    pub(crate) fn from_parts(
+        event: String,
+        distinct_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        options: HashMap<String, serde_json::Value>,
+        groups: HashMap<String, String>,
+        timestamp: Option<NaiveDateTime>,
+        uuid: Option<Uuid>,
+    ) -> Self {
+        Self {
+            event,
+            distinct_id,
+            properties,
+            options,
+            groups,
+            timestamp,
+            uuid,
+            minimal_flag_called: false,
+            request_context_applied: false,
+            personless_default: false,
+            personless: false,
+        }
+    }
+
     /// Create a new identified [`Event`]. Unless you have a distinct ID you can
     /// associate with a user, you probably want to use [`Event::new_anon`]
     /// instead.
