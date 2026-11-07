@@ -195,8 +195,7 @@ impl Event {
     /// Generates a random distinct ID and sets the `process_person_profile`
     /// option to `false` so PostHog does not create a person profile for the
     /// event. To process one anyway, set the option to `true` with
-    /// [`Event::insert_option`]; a legacy `$process_person_profile` property
-    /// does not override an option. A `null` or removed option counts as unset,
+    /// [`Event::insert_option`]. A `null` or removed option counts as unset,
     /// so the SDK sets `false` again before `before_send`.
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
         let mut options = HashMap::new();
@@ -260,8 +259,8 @@ impl Event {
     /// # Remarks
     ///
     /// Sent unchecked: PostHog ignores unknown keys and drops the event if a
-    /// known key has an unusable value. A non-`null` option wins over its legacy
-    /// `$` property, such as `$process_person_profile`.
+    /// known key has an unusable value. Legacy option properties still work,
+    /// but an option overrides its legacy property. Use options.
     pub fn insert_option<K: Into<String>, V: Serialize>(
         &mut self,
         key: K,

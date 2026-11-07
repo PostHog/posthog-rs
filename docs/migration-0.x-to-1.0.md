@@ -115,27 +115,27 @@ client.capture(event);
 
 Keys are strings and values are any JSON value. The SDK sends options as given, so a new option that PostHog adds needs no SDK upgrade. PostHog validates them: it ignores keys it does not know, converts common forms of a known key's value (for a boolean, `"yes"`, `"off"` or `0`), and drops the event if a known key has a value it cannot read. That drop reaches `on_error` as a per-event `drop` with the detail `invalid_options`. `before_send` hooks can read and change options with `Event::options`, `insert_option`, and `remove_option`.
 
-Review your `before_send` hooks for the new event shape. To change an option, use `insert_option`: a legacy property that the hook adds with `insert_prop` does not replace an option that is already set. A hook that returns a new `Event` must copy the options of the event it received, or the event is sent without them. That includes the `process_person_profile` option that `Event::new_anon` sets to `false`, so PostHog would create a person for the generated ID.
+Review your `before_send` hooks for the new event shape. To change an option, use `insert_option`. A hook that returns a new `Event` must copy the options of the event it received, or the event is sent without them. That includes the `process_person_profile` option that `Event::new_anon` sets to `false`, so PostHog would create a person for the generated ID.
 
-The legacy option properties, the `$`-prefixed properties legacy capture reads as settings, still work. The SDK moves each one into its option and removes it from `properties`:
+Each option replaces a legacy option property. Move these properties to options:
 
-| Legacy option property | Option |
+| Option | Replaces |
 | --- | --- |
-| `$process_person_profile` | `process_person_profile` |
-| `$cookieless_mode` | `cookieless_mode` |
-| `$ignore_sent_at` | `disable_skew_correction` |
-| `$product_tour_id` | `product_tour_id` |
+| `process_person_profile` | `$process_person_profile` |
+| `cookieless_mode` | `$cookieless_mode` |
+| `disable_skew_correction` | `$ignore_sent_at` |
+| `product_tour_id` | `$product_tour_id` |
 
-When both are set, the option wins. An option set to `null` counts as not set, so the legacy property applies.
+Legacy option properties still work, but an option overrides its legacy property. Use options.
 
 One behavior differs from the 0.x `capture-v1` feature:
 
-- The SDK no longer converts legacy property values to the type PostHog expects. A value PostHog cannot read, such as `"$process_person_profile": "maybe"`, used to be removed so the event was sent without it. Now PostHog drops the event as `invalid_options`. Values PostHog accepts, such as `"false"` or `0`, behave as before.
+- The SDK sends option values unchanged. PostHog reads common forms of a value, such as `"false"` or `0`, and drops the event as `invalid_options` when it cannot read one. The 0.x `capture-v1` feature removed a value it could not read and sent the event without it.
 
 Two behaviors differ from every 0.x build:
 
-- `Event::new_anon` sets the `process_person_profile` option to `false` instead of the legacy property. Because an option wins over its legacy property, `insert_prop("$process_person_profile", true)` no longer turns processing back on for an anonymous event. Use `insert_option("process_person_profile", true)`. A `null` or removed option counts as unset, so the SDK sets `false` again before `before_send`.
-- Adding a group no longer turns on person processing. In 0.x, `Event::add_group` and `CaptureExceptionOptions::group` set `$process_person_profile` to `true`. In 1.0 they leave it unchanged. An event from `Event::new` still processes person profiles by default. An anonymous event with groups (from `Event::new_anon`, or an exception without a distinct ID) now stays personless. PostHog attaches groups for group analytics only to events that process person profiles, so set `insert_option("process_person_profile", true)` on those events if you need them in group analytics.
+- `Event::new_anon` sets the `process_person_profile` option to `false`. To process person profiles for an anonymous event, set the option with `insert_option("process_person_profile", true)`. A `null` or removed option counts as unset, so the SDK sets `false` again before `before_send`.
+- Adding a group no longer turns on person processing. In 0.x, `Event::add_group` and `CaptureExceptionOptions::group` turned person processing on. In 1.0 they leave it unchanged. An event from `Event::new` still processes person profiles by default. An anonymous event with groups (from `Event::new_anon`, or an exception without a distinct ID) now stays personless. PostHog attaches groups for group analytics only to events that process person profiles, so set `insert_option("process_person_profile", true)` on those events if you need them in group analytics.
 
 Values the SDK adds, and the values you set:
 
@@ -149,7 +149,7 @@ Values the SDK adds, and the values you set:
 
 One behavior differs from 0.x without `capture-v1`, which used the V0 endpoint:
 
-- PostHog now reads common forms of an option value, so `"$process_person_profile": "false"` turns person processing off. The V0 endpoint ignored that string. A value PostHog cannot read now drops the event, where the V0 endpoint kept the event and ignored the value.
+- PostHog now reads common forms of an option value, so a `process_person_profile` option of `"false"` turns person processing off. The V0 endpoint ignored that string. A value PostHog cannot read now drops the event, where the V0 endpoint kept the event and ignored the value.
 
 ### Layers and which calls they reach
 
@@ -161,7 +161,7 @@ An event's properties and options come from three layers. For the same key, a la
 
 `before_send` runs after all three and can change any value. The SDK has no client-wide layer for properties or options.
 
-- A context `process_person_profile` option replaces the `false` that `Event::new_anon` sets. A context `$process_person_profile` property does not, because the option wins over its legacy property.
+- A context `process_person_profile` option replaces the `false` that `Event::new_anon` sets.
 - `$feature_flag_called` events now take a request context value over the client's `$is_server` and `$geoip_disable` defaults, as other events do. A per-call `disable_geoip` wins over both, and `Some(false)` sends `$geoip_disable: false`. In 0.x, `Some(false)` sent nothing, so a request context `$geoip_disable` applied.
 - `disable_geoip` defaults to `false`, as in 0.x and unlike PostHog's other server SDKs, so PostHog adds GeoIP properties based on the IP address of your server. To turn this off, call `.disable_geoip(true)` on `ClientOptionsBuilder`.
 
@@ -169,7 +169,7 @@ The request context works only with the async client. Code inside `RequestContex
 
 The blocking client has no scoped context, and `RequestContext::current()` returns `None`. Apply a context to each event yourself with `RequestContext::event` or `RequestContext::apply_to_event`, and use `evaluate_flags_with_context` for flags.
 
-A context `process_person_profile` of `false`, set as an option or as the legacy `$process_person_profile` property, also reaches `alias` and `group_identify`. PostHog drops `$create_alias` and `$groupidentify` events that have person processing off, and records an `invalid_event_when_process_person_profile_is_false` ingestion warning in your project. Capture accepts these events before the drop, so `on_error` does not see it. In 0.x, a context `$process_person_profile` property already reached these calls.
+A context `process_person_profile` option of `false` also reaches `alias` and `group_identify`. PostHog drops `$create_alias` and `$groupidentify` events that have person processing off, and records an `invalid_event_when_process_person_profile_is_false` ingestion warning in your project. Capture accepts these events before the drop, so `on_error` does not see it. In 0.x, a context that turned person processing off already reached these calls.
 
 ### Session and window IDs
 
