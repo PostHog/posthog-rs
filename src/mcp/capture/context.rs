@@ -83,10 +83,8 @@ impl EventContext {
         insert_name(properties, key::SERVER_VERSION, server.version.as_deref());
     }
 
-    /// Anonymous calls create no person profiles.
     fn insert_person(&self, properties: &mut Map<String, Value>) {
         let Some(identity) = &self.identity else {
-            properties.insert(key::PROCESS_PERSON_PROFILE.to_string(), Value::Bool(false));
             return;
         };
         if !identity.properties.is_empty() {

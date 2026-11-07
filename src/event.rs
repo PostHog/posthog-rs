@@ -19,8 +19,8 @@ use crate::Error;
 /// had, plus whatever a hook adds. Beyond the evaluation properties it keeps
 /// cheap, static, low-cardinality identity useful for platform/runtime
 /// breakdowns (`$lib`, `$lib_version`, `$os`, `$os_version`), processing-control
-/// sentinels this SDK sets (`$geoip_disable`, `$process_person_profile`,
-/// `$is_server`), correctness-required `$groups`, and linkage identifiers.
+/// sentinels (`$geoip_disable`, `$process_person_profile`, `$is_server`),
+/// correctness-required `$groups`, and linkage identifiers.
 pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
     // Identity
     "$feature_flag",

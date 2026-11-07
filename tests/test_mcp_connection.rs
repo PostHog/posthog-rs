@@ -69,7 +69,11 @@ async fn a_successful_call_produces_one_event_with_the_required_properties() {
     let session_id = text_property(&event, "$session_id");
     assert!(session_id.starts_with("ses_"));
     assert_eq!(event.distinct_id(), session_id);
-    assert_eq!(property(&event, "$process_person_profile"), &json!(false));
+    assert_eq!(
+        event.options().get("process_person_profile"),
+        Some(&json!(false))
+    );
+    assert!(!event.properties().contains_key("$process_person_profile"));
 }
 
 #[tokio::test]
@@ -468,10 +472,8 @@ async fn an_identified_call_processes_the_person() {
     let event = recorder.only("$mcp_tool_call").await;
     assert_eq!(event.distinct_id(), "user-123");
     assert_eq!(property(&event, "$set"), &json!({ "plan": "pro" }));
-    assert_ne!(
-        event.properties().get("$process_person_profile"),
-        Some(&json!(false))
-    );
+    assert_eq!(event.options().get("process_person_profile"), None);
+    assert!(!event.properties().contains_key("$process_person_profile"));
     assert_eq!(property(&event, "$groups"), &json!({ "company": "acme" }));
 }
 

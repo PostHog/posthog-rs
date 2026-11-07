@@ -3,17 +3,17 @@ use serde_json::{Map, Value};
 
 use super::context::EventContext;
 use crate::client::CRATE_VERSION;
+use crate::constants::PROCESS_PERSON_PROFILE_OPT;
 use crate::mcp::bounds::fit_event_size;
 use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
 use crate::Event;
 
-const ALWAYS_REQUIRED: [&str; 8] = [
+const ALWAYS_REQUIRED: [&str; 7] = [
     key::INTERFACE,
     key::LIB,
     key::LIB_VERSION,
     key::SESSION_ID,
-    key::PROCESS_PERSON_PROFILE,
     key::EXCEPTION_LIST,
     key::EXCEPTION_LEVEL,
     key::EXCEPTION_SOURCE,
@@ -25,6 +25,9 @@ pub(crate) struct OutgoingEvent {
     pub(crate) name: &'static str,
     distinct_id: String,
     timestamp: DateTime<Utc>,
+    /// Set for anonymous calls; sent as an event option so a request context option cannot
+    /// turn person processing back on.
+    personless: bool,
     pub(crate) properties: Map<String, Value>,
 }
 
@@ -37,6 +40,7 @@ impl OutgoingEvent {
             name,
             distinct_id: context.distinct_id().to_string(),
             timestamp: context.timestamp,
+            personless: context.identity.is_none(),
             properties,
         }
     }
@@ -69,6 +73,9 @@ impl OutgoingEvent {
         for (name, value) in self.properties {
             let _ = event.insert_prop(name, value);
         }
+        if self.personless {
+            let _ = event.insert_option(PROCESS_PERSON_PROFILE_OPT, false);
+        }
         let _ = event.set_timestamp(self.timestamp);
         event
     }
@@ -85,20 +92,59 @@ fn label_library(properties: &mut Map<String, Value>) {
 mod tests {
     use chrono::Utc;
 
-    use super::*;
-    use crate::mcp::contract::events::TOOLS_LIST;
-    use crate::mcp::contract::properties::LISTED_TOOL_NAMES;
+    use serde_json::json;
 
-    #[test]
-    fn an_oversized_event_keeps_its_interface() {
-        let context = EventContext {
+    use super::*;
+    use crate::constants::PROCESS_PERSON_PROFILE_OPT;
+    use crate::mcp::contract::events::{TOOLS_LIST, TOOL_CALL};
+    use crate::mcp::contract::properties::LISTED_TOOL_NAMES;
+    use crate::mcp::Identity;
+    use crate::RequestContext;
+
+    fn context(identity: Option<Identity>) -> EventContext {
+        EventContext {
             timestamp: Utc::now(),
             session_id: "ses_1".to_string(),
             conversation_id: None,
-            identity: None,
+            identity,
             client: Default::default(),
             server: Default::default(),
-        };
+        }
+    }
+
+    fn person_processing(event: &Event) -> Option<&Value> {
+        event.options().get(PROCESS_PERSON_PROFILE_OPT)
+    }
+
+    #[test]
+    fn an_anonymous_event_stays_personless_under_a_request_context() {
+        let mut event = OutgoingEvent::new(TOOL_CALL, &context(None)).into_posthog_event();
+        assert_eq!(person_processing(&event), Some(&json!(false)));
+        assert!(!event.properties().contains_key("$process_person_profile"));
+
+        let request = RequestContext::new()
+            .option(PROCESS_PERSON_PROFILE_OPT, true)
+            .unwrap();
+        request.apply_to_event(&mut event);
+        assert_eq!(person_processing(&event), Some(&json!(false)));
+    }
+
+    #[test]
+    fn an_identified_event_leaves_person_processing_to_the_request_context() {
+        let identified = context(Some(Identity::new("user-1")));
+        let mut event = OutgoingEvent::new(TOOL_CALL, &identified).into_posthog_event();
+        assert_eq!(person_processing(&event), None);
+
+        let request = RequestContext::new()
+            .option(PROCESS_PERSON_PROFILE_OPT, false)
+            .unwrap();
+        request.apply_to_event(&mut event);
+        assert_eq!(person_processing(&event), Some(&json!(false)));
+    }
+
+    #[test]
+    fn an_oversized_event_keeps_its_interface() {
+        let context = context(None);
         let names: Vec<String> = (0..3_000).map(|index| format!("{index:058}")).collect();
         let mut event = OutgoingEvent::new(TOOLS_LIST, &context);
         event.set(LISTED_TOOL_NAMES, names);
