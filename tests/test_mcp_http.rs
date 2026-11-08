@@ -488,6 +488,103 @@ async fn an_mcp_hook_sees_the_requests_context_and_its_changes_are_sent() {
     assert_eq!(sent["options"]["product_tour_id"], "tour-1");
 }
 
+/// The callback names each request's method in `product_tour_id`, so every
+/// event shows which request's options it carries.
+fn options_by_method(recorder: &Recorder) -> HttpServer {
+    let options = McpOptionsBuilder::default()
+        .missing_capability_tool("")
+        .event_options(|request| {
+            let options =
+                json!({ "product_tour_id": request.method, "cookieless_mode": Value::Null });
+            serde_json::from_value(options).ok()
+        })
+        .build()
+        .unwrap();
+    HttpServer::stateless(instrumented(recorder, TestServer::new(), options))
+}
+
+#[tokio::test]
+async fn callback_options_reach_every_event_and_win_over_the_requests_context() {
+    let recorder = Recorder::new().await;
+    let http = options_by_method(&recorder);
+    let initialize = json!({
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": { "name": "agent", "version": "1.0" },
+    });
+
+    let requests = [
+        ("initialize", initialize),
+        ("tools/list", json!({})),
+        ("tools/call", failing_call()),
+        ("tools/call", call_params("no_such_tool", json!({}))),
+        (
+            "tools/call",
+            call_params("get_more_tools", json!({ "context": "export a PDF" })),
+        ),
+    ];
+    for (method, params) in requests {
+        http.request_in_context(method, params, &[], request_context())
+            .await;
+    }
+
+    let mut seen = Vec::new();
+    for event in recorder.sent_events().await {
+        let name = event["event"].as_str().unwrap().to_string();
+        let method = match name.as_str() {
+            "$mcp_initialize" => "initialize",
+            "$mcp_tools_list" => "tools/list",
+            _ => "tools/call",
+        };
+        assert_eq!(
+            event["options"],
+            json!({
+                "cookieless_mode": true,
+                "disable_skew_correction": true,
+                "product_tour_id": method,
+                "process_person_profile": false,
+            }),
+            "{}",
+            name
+        );
+        seen.push(name);
+    }
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        [
+            "$exception",
+            "$mcp_initialize",
+            "$mcp_missing_capability",
+            "$mcp_tool_call",
+            "$mcp_tools_list",
+            "$mcp_unknown_tool",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_panicking_options_callback_sets_no_options() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .event_options(|_| panic!("options failure"))
+        .build()
+        .unwrap();
+    let http = HttpServer::stateless(instrumented(&recorder, TestServer::new(), options));
+
+    let response = http
+        .request(
+            "tools/call",
+            call_params("search_docs", json!({ "query": "flags" })),
+            &[],
+        )
+        .await;
+
+    assert_eq!(result_texts(&response)[0], "Found 3 results");
+    let sent = recorder.sent("$mcp_tool_call").await;
+    assert_eq!(sent["options"], json!({ "process_person_profile": false }));
+}
+
 /// The same request context, set by `PostHogLayer` from the request.
 #[cfg(feature = "tower")]
 mod posthog_layer {

@@ -27,6 +27,30 @@
 //! keeps its MCP session ID and the `process_person_profile: false` option.
 //! Context properties and options fill only the keys the event leaves unset,
 //! before [`McpOptionsBuilder::before_send`] runs.
+//!
+//! # Event options
+//!
+//! [`McpOptionsBuilder::event_options`] sets capture options on each request's
+//! events, and [`ToolCallRequest::event_option`] on one call's. The call's
+//! option wins over the callback's, and both win over the request context. An
+//! anonymous event keeps `process_person_profile: false` over all of them.
+//!
+//! ```
+//! use posthog::mcp::{McpOptionsBuilder, ToolCallRequest};
+//!
+//! let options = McpOptionsBuilder::default()
+//!     .event_options(|_request| {
+//!         let mut options = serde_json::Map::new();
+//!         options.insert("disable_skew_correction".into(), true.into());
+//!         Some(options)
+//!     })
+//!     .build()
+//!     .unwrap();
+//! let call = ToolCallRequest::new("search_docs", None)
+//!     .event_option("product_tour_id", "onboarding")?;
+//! # let _ = (options, call);
+//! # Ok::<(), posthog::Error>(())
+//! ```
 
 mod analytics;
 mod bounds;
@@ -46,7 +70,8 @@ pub use analytics::McpAnalytics;
 pub use identity::Identity;
 pub use manual::{StartedToolCall, ToolCallError, ToolCallRequest, ToolRegistration};
 pub use options::{
-    IdentifyCallback, IntentFallback, McpOptions, McpOptionsBuilder, McpOptionsBuilderError,
+    EventOptionsCallback, IdentifyCallback, IntentFallback, McpOptions, McpOptionsBuilder,
+    McpOptionsBuilderError,
 };
 pub use request_info::RequestInfo;
 pub use server::{instrument, Instrumented};
