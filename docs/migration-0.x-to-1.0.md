@@ -132,7 +132,7 @@ Keys are strings and values are any JSON value. The SDK sends options as given, 
 
 Review your `before_send` hooks for the new event shape. To change an option, use `insert_option`. A hook that returns a new `Event` must copy the options of the event it received, or the event is sent without them. That includes the `process_person_profile` option that `Event::new_anon` sets to `false`, so PostHog would create a person for the generated ID.
 
-Each option replaces a legacy option property. Move these properties to options:
+Each option replaces a legacy option property:
 
 | Option | Replaces |
 | --- | --- |
