@@ -12,7 +12,8 @@ use mcp_support::http::{
 };
 use mcp_support::recorder::{property, text_property, Recorder};
 use mcp_support::server::TestServer;
-use posthog::mcp::{McpAnalytics, McpOptions, McpOptionsBuilder};
+use posthog::mcp::{Identity, McpAnalytics, McpOptions, McpOptionsBuilder};
+use posthog::RequestContext;
 use serde_json::{json, Value};
 
 const HANDLE: &str = "0190f0e8-7a6b-7c3d-9e4f-5a6b7c8d9e0f";
@@ -347,4 +348,197 @@ async fn a_synthesized_stateless_handshake_names_no_client() {
         event.properties()
     );
     assert!(text_property(&event, "$session_id").starts_with("ses_"));
+}
+
+/// Analytics defaults an application attaches to the HTTP request, setting
+/// every capture option.
+fn request_context() -> RequestContext {
+    RequestContext::new()
+        .distinct_id("context-user")
+        .session_id("context-session")
+        .property("deployment", "canary")
+        .unwrap()
+        .option("cookieless_mode", true)
+        .unwrap()
+        .option("disable_skew_correction", true)
+        .unwrap()
+        .option("product_tour_id", "tour-1")
+        .unwrap()
+        .option("process_person_profile", true)
+        .unwrap()
+}
+
+fn identified(recorder: &Recorder) -> HttpServer {
+    let options = McpOptionsBuilder::default()
+        .identify(|_| Some(Identity::new("user-123")))
+        .build()
+        .unwrap();
+    HttpServer::stateless(instrumented(recorder, TestServer::new(), options))
+}
+
+fn failing_call() -> Value {
+    call_params("fetch_page", json!({ "url": "https://example.com" }))
+}
+
+/// The context's property and options reach `name` on the wire. The MCP
+/// session and distinct id win, and `process_person_profile` is `person`.
+async fn assert_sent_with_context(
+    recorder: &Recorder,
+    name: &str,
+    distinct_id: &str,
+    person: bool,
+) {
+    let sent = recorder.sent(name).await;
+    let session_id = sent["session_id"].as_str().unwrap();
+    assert!(session_id.starts_with("ses_"), "{}: {}", name, session_id);
+    let expected_distinct_id = if distinct_id.is_empty() {
+        session_id
+    } else {
+        distinct_id
+    };
+    assert_eq!(sent["distinct_id"], expected_distinct_id, "{name}");
+    assert_eq!(sent["properties"]["deployment"], "canary", "{name}");
+    assert_eq!(
+        sent["options"],
+        json!({
+            "cookieless_mode": true,
+            "disable_skew_correction": true,
+            "product_tour_id": "tour-1",
+            "process_person_profile": person,
+        }),
+        "{name}"
+    );
+}
+
+#[tokio::test]
+async fn the_requests_context_fills_every_event_and_the_mcp_identity_wins() {
+    let recorder = Recorder::new().await;
+    let http = identified(&recorder);
+
+    http.request_in_context("tools/call", failing_call(), &[], request_context())
+        .await;
+
+    for name in ["$mcp_tool_call", "$exception"] {
+        assert_sent_with_context(&recorder, name, "user-123", true).await;
+    }
+}
+
+#[tokio::test]
+async fn an_anonymous_call_stays_personless_under_a_context_that_processes_persons() {
+    let recorder = Recorder::new().await;
+    let http = stateless(&recorder, TestServer::new());
+
+    http.request_in_context("tools/call", failing_call(), &[], request_context())
+        .await;
+
+    for name in ["$mcp_tool_call", "$exception"] {
+        assert_sent_with_context(&recorder, name, "", false).await;
+    }
+}
+
+#[tokio::test]
+async fn the_requests_context_fills_listing_and_handshake_events() {
+    let recorder = Recorder::new().await;
+    let http = stateless(&recorder, TestServer::new());
+
+    let initialize = json!({
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": { "name": "agent", "version": "1.0" },
+    });
+    http.request_in_context("initialize", initialize, &[], request_context())
+        .await;
+    http.request_in_context("tools/list", json!({}), &[], request_context())
+        .await;
+
+    for name in ["$mcp_initialize", "$mcp_tools_list"] {
+        assert_sent_with_context(&recorder, name, "", false).await;
+    }
+}
+
+#[tokio::test]
+async fn an_mcp_hook_sees_the_requests_context_and_its_changes_are_sent() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .before_send(|mut event| {
+            assert_eq!(event.properties()["deployment"], "canary");
+            event.remove_prop("deployment");
+            event.remove_option("disable_skew_correction");
+            Some(event)
+        })
+        .build()
+        .unwrap();
+    let http = HttpServer::stateless(instrumented(&recorder, TestServer::new(), options));
+
+    http.request_in_context(
+        "tools/call",
+        call_params("search_docs", json!({ "query": "flags" })),
+        &[],
+        request_context(),
+    )
+    .await;
+
+    let sent = recorder.sent("$mcp_tool_call").await;
+    assert!(sent["properties"].get("deployment").is_none(), "{:#}", sent);
+    assert!(
+        sent["options"].get("disable_skew_correction").is_none(),
+        "{:#}",
+        sent
+    );
+    assert_eq!(sent["options"]["product_tour_id"], "tour-1");
+}
+
+/// The same request context, set by `PostHogLayer` from the request.
+#[cfg(feature = "tower")]
+mod posthog_layer {
+    use super::*;
+
+    const HEADERS: [(&str, &str); 2] = [
+        ("x-posthog-distinct-id", "header-user"),
+        ("x-posthog-session-id", "header-session"),
+    ];
+
+    async fn assert_request_described(recorder: &Recorder) {
+        let sent = recorder.sent_properties("$mcp_tool_call").await;
+        assert_eq!(sent["$request_method"], "POST");
+        assert_eq!(sent["$request_path"], "/mcp");
+    }
+
+    #[tokio::test]
+    async fn the_layers_context_fills_every_event_and_the_mcp_identity_wins() {
+        let recorder = Recorder::new().await;
+        let http = identified(&recorder);
+
+        http.request_through_posthog_layer(
+            "tools/call",
+            failing_call(),
+            &HEADERS,
+            Some(request_context()),
+        )
+        .await;
+
+        for name in ["$mcp_tool_call", "$exception"] {
+            assert_sent_with_context(&recorder, name, "user-123", true).await;
+        }
+        assert_request_described(&recorder).await;
+    }
+
+    #[tokio::test]
+    async fn an_anonymous_call_stays_personless_behind_the_layer() {
+        let recorder = Recorder::new().await;
+        let http = stateless(&recorder, TestServer::new());
+
+        http.request_through_posthog_layer(
+            "tools/call",
+            failing_call(),
+            &HEADERS,
+            Some(request_context()),
+        )
+        .await;
+
+        for name in ["$mcp_tool_call", "$exception"] {
+            assert_sent_with_context(&recorder, name, "", false).await;
+        }
+        assert_request_described(&recorder).await;
+    }
 }

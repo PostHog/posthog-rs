@@ -69,11 +69,14 @@ async fn a_successful_call_produces_one_event_with_the_required_properties() {
     let session_id = text_property(&event, "$session_id");
     assert!(session_id.starts_with("ses_"));
     assert_eq!(event.distinct_id(), session_id);
+    let options = serde_json::to_value(event.options()).unwrap();
     assert_eq!(
-        event.options().get("process_person_profile"),
-        Some(&json!(false))
+        options,
+        json!({ "process_person_profile": false }),
+        "a connection carries no request context"
     );
     assert!(!event.properties().contains_key("$process_person_profile"));
+    assert!(!event.properties().contains_key("$request_path"));
 }
 
 #[tokio::test]

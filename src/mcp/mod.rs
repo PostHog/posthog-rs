@@ -16,6 +16,17 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Request context
+//!
+//! Over HTTP, every event takes the [`RequestContext`](crate::RequestContext)
+//! that `PostHogLayer` or the host's middleware placed in the request
+//! extensions, as other events take the context of their scope. A context
+//! scoped around the code that sends the event wins over it. The identity from
+//! [`McpOptionsBuilder::identify`] stays the distinct ID; an anonymous event
+//! keeps its MCP session ID and the `process_person_profile: false` option.
+//! Context properties and options fill only the keys the event leaves unset,
+//! before [`McpOptionsBuilder::before_send`] runs.
 
 mod analytics;
 mod bounds;

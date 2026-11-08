@@ -61,6 +61,11 @@ impl Recorder {
 
     /// The properties of the only `name` event as it was sent.
     pub async fn sent_properties(&self, name: &str) -> Value {
+        self.sent(name).await["properties"].clone()
+    }
+
+    /// The only `name` event as it was sent.
+    pub async fn sent(&self, name: &str) -> Value {
         self.client.flush().await;
         let wire = self.wire.lock().unwrap();
         let mut sent: Vec<&Value> = wire
@@ -72,7 +77,7 @@ impl Recorder {
             1,
             "expected exactly one {name} sent, got {sent:#?}"
         );
-        sent.remove(0)["properties"].clone()
+        sent.remove(0).clone()
     }
 
     pub async fn events(&self) -> Vec<Event> {

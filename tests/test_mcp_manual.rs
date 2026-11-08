@@ -11,6 +11,7 @@ use posthog::mcp::{
     Connection, McpAnalytics, McpOptions, ToolCallError, ToolCallRequest, ToolRegistration,
     TransportSession,
 };
+use posthog::RequestContext;
 use rmcp::model::{CallToolResult, ContentBlock, JsonObject, Tool};
 use rmcp::ServerHandler;
 use serde_json::json;
@@ -155,4 +156,49 @@ async fn listing_advertises_the_analytics_arguments() {
             .len(),
         1
     );
+}
+
+fn route_context(route: &str) -> RequestContext {
+    RequestContext::new()
+        .property("route", route)
+        .unwrap()
+        .option("product_tour_id", route)
+        .unwrap()
+}
+
+fn http_parts(context: RequestContext) -> http::request::Parts {
+    let mut request = http::Request::new(());
+    request.extensions_mut().insert(context);
+    request.into_parts().0
+}
+
+#[tokio::test]
+async fn a_manual_call_takes_its_scopes_context_over_its_http_requests() {
+    let recorder = Recorder::new().await;
+    let analytics = McpAnalytics::new(recorder.client.clone(), McpOptions::default());
+    let request =
+        |tool: &str| ToolCallRequest::new(tool, None).http(http_parts(route_context("/from-http")));
+
+    analytics
+        .start_tool_call(request("search_docs"))
+        .complete(CallToolResult::success(vec![]));
+    route_context("/from-scope")
+        .scope(async {
+            analytics
+                .start_tool_call(request("query"))
+                .complete(CallToolResult::success(vec![]));
+        })
+        .await;
+
+    for (tool, route) in [("search_docs", "/from-http"), ("query", "/from-scope")] {
+        let event = recorder
+            .named("$mcp_tool_call")
+            .await
+            .into_iter()
+            .find(|event| text_property(event, "$mcp_tool_name") == tool)
+            .unwrap();
+        assert_eq!(text_property(&event, "route"), route);
+        assert_eq!(event.options()["product_tour_id"], route);
+        assert_eq!(event.options()["process_person_profile"], false);
+    }
 }

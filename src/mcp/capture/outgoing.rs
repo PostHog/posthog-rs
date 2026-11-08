@@ -7,7 +7,7 @@ use crate::constants::PROCESS_PERSON_PROFILE_OPT;
 use crate::mcp::bounds::fit_event_size;
 use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
-use crate::Event;
+use crate::{Event, RequestContext};
 
 const ALWAYS_REQUIRED: [&str; 7] = [
     key::INTERFACE,
@@ -29,6 +29,7 @@ pub(crate) struct OutgoingEvent {
     /// turn person processing back on.
     personless: bool,
     pub(crate) properties: Map<String, Value>,
+    request_context: Option<RequestContext>,
 }
 
 impl OutgoingEvent {
@@ -42,6 +43,7 @@ impl OutgoingEvent {
             timestamp: context.timestamp,
             personless: context.identity.is_none(),
             properties,
+            request_context: context.request_context.clone(),
         }
     }
 
@@ -77,6 +79,10 @@ impl OutgoingEvent {
             let _ = event.insert_option(PROCESS_PERSON_PROFILE_OPT, false);
         }
         let _ = event.set_timestamp(self.timestamp);
+        // Applied before the MCP `before_send` rather than at enqueue, so what the hook returns is sent.
+        if let Some(context) = RequestContext::current().or(self.request_context) {
+            context.apply_to_event(&mut event);
+        }
         event
     }
 }
@@ -109,6 +115,7 @@ mod tests {
             identity,
             client: Default::default(),
             server: Default::default(),
+            request_context: None,
         }
     }
 
@@ -116,29 +123,45 @@ mod tests {
         event.options().get(PROCESS_PERSON_PROFILE_OPT)
     }
 
-    #[test]
-    fn an_anonymous_event_stays_personless_under_a_request_context() {
-        let mut event = OutgoingEvent::new(TOOL_CALL, &context(None)).into_posthog_event();
-        assert_eq!(person_processing(&event), Some(&json!(false)));
-        assert!(!event.properties().contains_key("$process_person_profile"));
+    fn request(option: bool) -> RequestContext {
+        RequestContext::new()
+            .distinct_id("context-user")
+            .property("route", "/mcp")
+            .unwrap()
+            .option(PROCESS_PERSON_PROFILE_OPT, option)
+            .unwrap()
+    }
 
-        let request = RequestContext::new()
-            .option(PROCESS_PERSON_PROFILE_OPT, true)
-            .unwrap();
-        request.apply_to_event(&mut event);
-        assert_eq!(person_processing(&event), Some(&json!(false)));
+    fn converted(identity: Option<Identity>, request: Option<RequestContext>) -> Event {
+        let mut context = context(identity);
+        context.request_context = request;
+        OutgoingEvent::new(TOOL_CALL, &context).into_posthog_event()
     }
 
     #[test]
-    fn an_identified_event_leaves_person_processing_to_the_request_context() {
-        let identified = context(Some(Identity::new("user-1")));
-        let mut event = OutgoingEvent::new(TOOL_CALL, &identified).into_posthog_event();
-        assert_eq!(person_processing(&event), None);
+    fn an_anonymous_event_stays_personless_under_a_request_context() {
+        let event = converted(None, Some(request(true)));
+        assert_eq!(person_processing(&event), Some(&json!(false)));
+        assert_eq!(event.distinct_id(), "ses_1");
+        assert_eq!(event.properties()["route"], "/mcp");
+        assert!(!event.properties().contains_key("$process_person_profile"));
+    }
 
-        let request = RequestContext::new()
-            .option(PROCESS_PERSON_PROFILE_OPT, false)
-            .unwrap();
-        request.apply_to_event(&mut event);
+    #[test]
+    fn an_identified_event_keeps_its_identity_and_takes_the_context_options() {
+        let event = converted(Some(Identity::new("user-1")), Some(request(false)));
+        assert_eq!(event.distinct_id(), "user-1");
+        assert_eq!(person_processing(&event), Some(&json!(false)));
+        assert_eq!(event.properties()["route"], "/mcp");
+    }
+
+    #[tokio::test]
+    async fn a_scoped_context_wins_over_the_http_requests() {
+        let scoped = RequestContext::new().property("route", "/scoped").unwrap();
+        let event = scoped
+            .scope(async { converted(None, Some(request(true))) })
+            .await;
+        assert_eq!(event.properties()["route"], "/scoped");
         assert_eq!(person_processing(&event), Some(&json!(false)));
     }
 
