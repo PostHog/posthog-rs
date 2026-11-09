@@ -142,13 +142,14 @@ State and queued events share the namespace lease. Storage errors report through
 unsupported state is preserved rather than overwritten. State and event persistence
 can degrade independently.
 
-State records use version 3 for identity, profile flags and an optional explicit
-consent choice. Valid version-1 identity records restore as anonymous; version-2
-records retain identity/profile flags. Both use the configured consent default and
-migrate on the next state write. A migrated
+State records use version 4 for identity, profile flags, explicit consent, registered
+properties and remembered groups. Valid version-1 identity records restore as
+anonymous; version-2 records retain identity/profile flags. Both use the configured
+consent default; version-3 records retain explicit consent. All three restore with
+empty registered properties and groups and migrate on the next state write. A migrated
 record must fit the configured state bound; otherwise restore reports a storage error
 and falls back to fresh memory state without overwriting the file. Older SDKs preserve
-unsupported version-3 files rather than rewriting them. Event records and namespace
+unsupported version-4 files rather than rewriting them. Event records and namespace
 paths are unchanged. A flush drains the captured state revision, not a transaction
 between state and event files.
 
@@ -156,16 +157,50 @@ Initialization does not wait for network connectivity or backlog delivery. Recov
 may temporarily reserve queue capacity after readiness. A ready client can therefore
 report `CaptureOutcome::Full`; readiness is not a promise of free queue capacity.
 
+## Registered properties and groups
+
+`register(HashMap<String, Value>)` owns persistent context for future events. New
+values replace existing top-level values; null is a value, not removal. Use
+`unregister(key)` to remove one entry. Both are local operations available while
+opted out and emit no event. A candidate exceeding the state byte or JSON nesting
+limits is rejected as a whole, preserving previous context and state durability.
+Validation uses the persistence codec in memory, without filesystem access.
+
+`group(type, key, optional_properties)` remembers one membership and attempts
+`$groupidentify` on every valid call, including the same key without properties.
+`group_identify(type, key, properties)` sends metadata without changing membership.
+Both use the current distinct ID, put profile fields under `$group_set`, and enable
+person processing without identifying the user. They no-op for opted-out,
+`PersonProfiles::Never`, disabled or closed clients. Types and keys must be nonblank
+strings. A rejected event does not roll back local membership/processing or schedule
+replay. Merely attaching `Capture.groups` does not enable person processing.
+
+`remove_group(type)` removes one membership locally without an event or disabling
+processing. It remains available while opted out or configured with Never.
+Disabled/closed clients ignore all context mutations. Reset clears registered
+properties and remembered groups together with identity and consent state.
+Already captured events retain their original context, including through retries
+and restart. Hooks can change local context without changing their outer snapshot.
+
+All mutations update memory before returning and use the same asynchronous state
+writer. A successful state drain confirms the captured revision; a crash before
+persistence may restore older context. Group analytics and state persistence are
+independent outcomes. Flag targeting and reloads are not part of these APIs yet.
+
 ## Capture and hooks
 
-Capture and screen are synchronous. The SDK snapshots identity and consent, applies cached
-platform context and SDK defaults, runs hooks, converts the event, then attempts
+Capture and screen are synchronous. The SDK snapshots identity, consent and context,
+applies registered properties, remembered groups, cached platform context and SDK
+defaults, runs hooks, converts the event, then attempts
 bounded admission. It performs no filesystem or network work on this path. OS
 context is discovered during initialization; embedding applications can provide
 `platform_context`, `sdk_name` and `sdk_version` in configuration.
 
 Caller properties win over context/default properties. `$set`, `$set_once`, `$groups`
 and `$group_set` objects fill missing inner keys using the existing Rust rules.
+Registered properties fill before remembered group defaults, then platform context.
+A per-event or registered non-object `$groups` value blocks lower-priority defaults;
+explicit typed `Capture.groups` still replace it using the canonical Rust merge.
 Typed groups win per group type. Explicit options take precedence over legacy
 property options. The SDK supplies `process_person_profile` from the selected profile
 mode and identity/profile state (false for fresh anonymous IdentifiedOnly captures).

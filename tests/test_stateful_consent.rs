@@ -189,7 +189,7 @@ fn persisted_explicit_choice_wins_over_opposite_startup_default() {
             PersistenceOutcome::Persisted
         );
         drop(client);
-        assert_eq!(directory.state()["version"], 3);
+        assert_eq!(directory.state()["version"], 4);
         assert_eq!(directory.state()["state"]["opt_out"], choice);
         let mut conf = directory.config();
         conf.opt_out = !choice;
@@ -344,7 +344,7 @@ fn legacy_records_use_startup_default_without_eager_rewrite() {
             PersistenceOutcome::Persisted
         );
         drop(client);
-        assert_eq!(directory.state()["version"], 3);
+        assert_eq!(directory.state()["version"], 4);
         assert_eq!(directory.state()["state"]["opt_out"], false);
     }
 }
@@ -363,7 +363,7 @@ fn unreadable_or_expanded_legacy_state_preserves_bytes_and_uses_safe_configured_
             }}))
             .unwrap()
         } else {
-            // A current-version record missing consent must not silently opt in.
+            // A version-3 record missing consent must not silently opt in.
             br#"{"version":3,"state":{"anonymous_id":"old","distinct_id":"old","identified":false,"person_processing":false}}"#.to_vec()
         };
         std::fs::write(directory.state_path(), &bytes).unwrap();

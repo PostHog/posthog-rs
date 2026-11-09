@@ -131,7 +131,7 @@ struct StateRecord<T> {
 
 pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     crate::client::capture::json_len(&StateRecord {
-        version: 3,
+        version: 4,
         state: snapshot,
     })
 }
@@ -140,6 +140,41 @@ pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
 /// can opt in/out or clear the override without exceeding its configured bound.
 pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
     snapshot_size(snapshot).saturating_add(usize::from(snapshot.opt_out != Some(false)))
+}
+
+/// Encode and validate the same bounded representation for both memory admission
+/// and persistence. This function performs no filesystem operations.
+pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
+    if snapshot_capacity(snapshot) as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "State snapshot exceeds store limit",
+        ));
+    }
+    let mut buffer = RecordBuffer {
+        bytes: Vec::new(),
+        limit: max_bytes,
+    };
+    serde_json::to_writer(
+        &mut buffer,
+        &StateRecord {
+            version: 4,
+            state: snapshot,
+        },
+    )
+    .map_err(|error| {
+        if error.is_io() {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "State snapshot exceeds store limit",
+            )
+        } else {
+            invalid_state()
+        }
+    })?;
+    // Check the same bounded decoder used at startup before touching files.
+    FileStateStore::decode(&buffer.bytes)?;
+    Ok(buffer.bytes)
 }
 
 /// Blocking backend calls belong exclusively to the state-persistence worker.
@@ -242,7 +277,27 @@ impl FileStateStore {
                 snapshot.person_processing = old.person_processing;
                 snapshot
             }
-            3 => serde_json::from_value(record.state).map_err(|_| invalid_state())?,
+            3 => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct ConsentState {
+                    anonymous_id: String,
+                    distinct_id: String,
+                    identified: bool,
+                    person_processing: bool,
+                    #[serde(deserialize_with = "Option::<bool>::deserialize")]
+                    opt_out: Option<bool>,
+                }
+                let old: ConsentState =
+                    serde_json::from_value(record.state).map_err(|_| invalid_state())?;
+                let mut snapshot = Snapshot::anonymous(old.anonymous_id);
+                snapshot.distinct_id = old.distinct_id;
+                snapshot.identified = old.identified;
+                snapshot.person_processing = old.person_processing;
+                snapshot.opt_out = old.opt_out;
+                snapshot
+            }
+            4 => serde_json::from_value(record.state).map_err(|_| invalid_state())?,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -259,42 +314,14 @@ impl FileStateStore {
     /// Only the state writer calls this. A completed replacement is not a
     /// multi-file transaction with event storage or a universal power-loss guarantee.
     pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
-        if snapshot_capacity(snapshot) as u64 > self.max_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "State snapshot exceeds store limit",
-            ));
-        }
-        let mut buffer = RecordBuffer {
-            bytes: Vec::new(),
-            limit: self.max_bytes,
-        };
-        serde_json::to_writer(
-            &mut buffer,
-            &StateRecord {
-                version: 3,
-                state: snapshot,
-            },
-        )
-        .map_err(|error| {
-            if error.is_io() {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "State snapshot exceeds store limit",
-                )
-            } else {
-                invalid_state()
-            }
-        })?;
-        // Check the same bounded decoder used at startup before touching files.
-        Self::decode(&buffer.bytes)?;
+        let encoded = encode_snapshot(snapshot, self.max_bytes)?;
         let temporary = self.directory.path().join("state.json.tmp");
         // The lease and single writer exclude live concurrent writes. A stale
         // temporary is an uncommitted write from a previous process/attempt.
         remove_temporary(&temporary)?;
         let result = (|| -> io::Result<()> {
             let mut file = open_private(&temporary, true)?;
-            file.write_all(&buffer.bytes)?;
+            file.write_all(&encoded)?;
             file.sync_all()?;
             drop(file);
             fs::rename(&temporary, self.path())?;

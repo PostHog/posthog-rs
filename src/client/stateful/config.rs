@@ -31,7 +31,7 @@ pub struct Config {
     /// Identified setup seed. Mutually exclusive with bootstrap_anonymous_id.
     /// Reconciles restored anonymous state; never replaces a different identified user.
     pub bootstrap_identified_id: Option<String>,
-    /// Default person processing and identity-operation policy. Default: IdentifiedOnly.
+    /// Default person processing and identity/group-operation policy. Default: IdentifiedOnly.
     /// Explicit capture options and hooks retain their normal precedence.
     pub person_profiles: PersonProfiles,
     /// Events that trigger an automatic flush. Default: 20.
@@ -65,7 +65,7 @@ pub struct Config {
     pub capture_compression: Option<CaptureCompression>,
     /// Disable server-side GeoIP enrichment. Default: false.
     pub disable_geoip: bool,
-    /// Platform properties cached at initialization. Per-event properties win.
+    /// Platform properties cached at initialization. Per-event and registered properties win.
     /// Missing $os/$os_version are discovered once during initialization.
     pub platform_context: HashMap<String, serde_json::Value>,
     /// Capture-time SDK name. Defaults to posthog-rs; embedding clients may override it.
