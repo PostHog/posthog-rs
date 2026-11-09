@@ -510,7 +510,10 @@ fn state_write_failure_preserves_live_identity_and_retries_the_latest_snapshot()
     let path = directory.state_path();
     let temporary = path.with_file_name("state.json.tmp");
     std::fs::create_dir(&temporary).unwrap();
-    let client = Client::init_blocking(directory.config());
+    let mut conf = directory.config();
+    // Keep state persistence recovery independent of HTTP delivery.
+    conf.before_send(|_| None);
+    let client = Client::init_blocking(conf);
     client.identify("A");
     assert_eq!(
         client.flush_blocking().state,
