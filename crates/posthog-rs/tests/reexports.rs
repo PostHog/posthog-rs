@@ -42,10 +42,18 @@ fn reexports_stateful_client_and_its_public_entry_points() {
     assert_same_type::<Config, posthog::stateful::Config>();
     assert_same_type::<posthog_rs::stateful::Capture, posthog::stateful::Capture>();
     assert_same_type::<posthog_rs::stateful::DrainReport, posthog::stateful::DrainReport>();
+    assert_same_type::<posthog_rs::stateful::Identify, posthog::stateful::Identify>();
+    assert_same_type::<posthog_rs::stateful::PersonProfiles, posthog::stateful::PersonProfiles>();
     let mut config = Config::new("phc_test");
     config.persistence = Persistence::Memory;
     config.disabled = true;
     let client = Client::init_blocking(config);
+    client.identify(posthog_rs::stateful::Identify::new("user"));
+    client.alias("alias");
+    client.set_person_properties(Default::default(), Default::default());
+    client.create_person_profile();
+    client.reset();
+    assert!(!client.is_identified());
     assert_eq!(client.capture("disabled"), CaptureOutcome::Disabled);
     assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Disabled);
     assert_eq!(

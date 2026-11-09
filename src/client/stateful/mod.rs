@@ -2,6 +2,7 @@
 //! the state-persistence worker, never ordinary capture or state access.
 
 mod config;
+mod identity;
 #[cfg(feature = "async-client")]
 mod initialization;
 mod producer;
@@ -11,6 +12,7 @@ mod writer;
 
 pub use crate::client::on_error::InitializationFailure;
 pub use config::Config;
+pub use identity::{Identify, PersonProfiles};
 pub use producer::{Capture, CaptureOutcome};
 pub use runtime::{Client, DeliveryOutcome, DrainReport, PersistenceOutcome};
 pub use storage::Persistence;
@@ -23,6 +25,13 @@ struct Snapshot {
     device_id: String,
     anonymous_id: String,
     distinct_id: String,
+    identified: bool,
+    person_processing: bool,
+    // Process-local bookkeeping shares the same lock as identity, but is not persisted.
+    #[serde(skip)]
+    generation: u64,
+    #[serde(skip)]
+    person_properties: Option<[u8; 20]>,
 }
 
 impl Snapshot {
@@ -31,7 +40,19 @@ impl Snapshot {
             device_id: id.clone(),
             anonymous_id: id.clone(),
             distinct_id: id,
+            identified: false,
+            person_processing: false,
+            generation: 0,
+            person_properties: None,
         }
+    }
+
+    fn same_persisted_state(&self, other: &Self) -> bool {
+        self.anonymous_id == other.anonymous_id
+            && self.device_id == other.device_id
+            && self.distinct_id == other.distinct_id
+            && self.identified == other.identified
+            && self.person_processing == other.person_processing
     }
 
     fn is_valid(&self) -> bool {
