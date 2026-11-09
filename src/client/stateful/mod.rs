@@ -2,6 +2,7 @@
 //! the state-persistence worker, never ordinary capture or state access.
 
 mod config;
+mod consent;
 mod identity;
 #[cfg(feature = "async-client")]
 mod initialization;
@@ -27,6 +28,9 @@ struct Snapshot {
     distinct_id: String,
     identified: bool,
     person_processing: bool,
+    // None follows the configured default, including after reset.
+    #[serde(deserialize_with = "Option::<bool>::deserialize")]
+    opt_out: Option<bool>,
     // Process-local bookkeeping shares the same lock as identity, but is not persisted.
     #[serde(skip)]
     generation: u64,
@@ -41,6 +45,7 @@ impl Snapshot {
             distinct_id: id,
             identified: false,
             person_processing: false,
+            opt_out: None,
             generation: 0,
             person_properties: None,
         }
@@ -51,6 +56,7 @@ impl Snapshot {
             && self.distinct_id == other.distinct_id
             && self.identified == other.identified
             && self.person_processing == other.person_processing
+            && self.opt_out == other.opt_out
     }
 
     fn is_valid(&self) -> bool {

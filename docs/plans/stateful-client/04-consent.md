@@ -1,6 +1,6 @@
 # PR 4 — Consent
 
-Status: planned. Predecessor: [PR 3](03-identity-and-person-profiles.md). Uses delivery from PR 1 and storage from PR 2.
+Status: implemented and routine-reviewed; full local release validation passed. Full-domain review and publication gates pending. Predecessor: [PR 3](03-identity-and-person-profiles.md). Uses delivery from PR 1 and storage from PR 2.
 
 ## Outcome and scope
 
@@ -18,13 +18,14 @@ This is the agreed calling contract, not a durable-acknowledgement API. Follow [
 
 ## Required contract
 
-- Consent defaults and restored state are resolved before ready/admission; no startup capture escapes persisted opt-out.
+- `Config::opt_out` is the startup default, false by default. An explicit persisted choice overrides it; absent or legacy consent uses this default. Resolve consent before ready/admission so no startup capture escapes persisted opt-out.
+- Expose synchronous `opt_in()` / `opt_out()` returning `()`, a memory-only `is_opt_out()` getter, and `CaptureOutcome::OptedOut`. Disabled/closed clients are effectively opted out; opting in cannot enable them.
 - Opt-out updates memory and closes collection in the same ordered transition; schedule persistence afterward without disk waits.
 - Opt-in changes memory and allows fresh collection without waiting for persistence.
 - Repeated calls are safe and linearizable with capture.
 - Analytics capture from identify/person/group and eventual automatic events/exposures uses the same gate. Do not gate the entire identify operation: local identity and targeting state still update while opted out, and successful-capture deduplication remains unchanged for blocked events.
 - Check consent atomically with the capture snapshot before invoking hooks. A capture permitted at that point may finish hooks, queue admission, persistence, and delivery after opt-out. A separate capture initiated from a hook checks consent independently.
-- Reset's treatment of consent follows the selected canonical contract; never silently preserve or clear it based on an unrelated implementation convenience.
+- Reset clears the explicit consent choice and returns to the configured startup default, atomically with the fresh identity. With the ordinary enabled default, `opt_out(); reset();` permits new collection; with `Config::opt_out = true`, `opt_in(); reset();` blocks collection. Reset does not reapply identity bootstrap.
 - Failed persistence leaves the current in-memory choice intact and reports the error. An immediate process crash can restore an older persisted choice.
 - Queued events and requests started under consent may complete and retry normally after opt-out. A response must not change the current consent state; any new analytics capture triggered by completion checks current consent.
 
@@ -38,12 +39,12 @@ Feature-flag loading remains allowed while opted out, including reloads caused b
 
 ## Implementation tasks
 
-- [ ] Record defaults, the prospective consent boundary, request-initiation policy, and reset interaction.
-- [ ] Add consent to the shared in-memory state and asynchronous persistence schema.
-- [ ] Implement opt-in/out/getter and the synchronized capture-time consent check.
-- [ ] Integrate existing identity/person APIs and hooks with the gate.
-- [ ] Expose safe diagnostics for persistence failures without logging user state.
-- [ ] Document the distinction between immediate collection changes and crash durability.
+- [x] Record defaults, the prospective consent boundary, request-initiation policy, and reset interaction.
+- [x] Add consent to the shared in-memory state and asynchronous persistence schema.
+- [x] Implement opt-in/out/getter and the synchronized capture-time consent check.
+- [x] Integrate existing identity/person APIs and hooks with the gate.
+- [x] Expose safe diagnostics for persistence failures without logging user state.
+- [x] Document the distinction between immediate collection changes and crash durability.
 
 ## Required tests
 
@@ -59,9 +60,34 @@ Feature-flag loading remains allowed while opted out, including reloads caused b
 - Crash-point/restart tests distinguish durable state from pending memory updates.
 - Reset, shutdown, and delayed persistence interact without deadlocks or false durability claims.
 
+## Implementation and validation
+
+The existing snapshot carries an optional explicit consent choice; immutable producer configuration
+supplies the default. Version 3 stores the explicit choice, including null after reset. Versions 1
+and 2 migrate without an explicit choice, retaining their identity/profile semantics. Capacity
+validation reserves the longest consent representation so toggling never needs more state space.
+Unsupported or oversized migration preserves the old file and uses configured-default memory fallback.
+
+Public tests cover defaults/restored overrides, reset/restart, identity and bootstrap while out,
+helper guards, delayed/nested hooks, concurrency, write failure, bounded migration, and delivery of
+persisted pre-opt-out events. A gated-file test separately proves synchronous consent/capture while
+I/O is blocked and that old write completion cannot revert memory. Compatibility-shim tests cover
+the consent API, and macOS/Windows CI selects the public consent suite in both feature modes.
+The local feature/MSRV/API/package/documentation matrix and maintained-mock smoke pass. The
+smoke exercises public async and blocking entry points, durable pre-opt-out retry/restart,
+persisted choices overriding defaults, identity updates without linking replay, and both reset
+defaults. Local execution is macOS; remote platform execution and full-domain reviews remain
+separate gates.
+
+PR 8 must add actual request-completion/targeting tests when the stateful flag loader exists;
+there is no stateful flag request subsystem in this domain. Existing delivery keeps its normal
+retry/recovery policy and never reads current consent. Later event producers must use the same
+snapshot gate rather than adding a second delivery gate.
+
 ## Done gate and handoff
 
-- [ ] Immediate memory gating and asynchronous storage are proven independently.
-- [ ] Previously consented work can complete while new collection is blocked.
-- [ ] Consent is the single policy source for later domains.
-- [ ] Tests and documentation state crash/in-flight limitations precisely.
+- [x] Immediate memory gating and asynchronous storage are proven independently.
+- [x] Previously consented work can complete while new collection is blocked.
+- [x] Consent is the single policy source for later domains.
+- [x] Tests and documentation state crash/in-flight limitations precisely.
+- [ ] Full-domain review, signed draft publication and remote CI complete.

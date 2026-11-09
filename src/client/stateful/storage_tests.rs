@@ -46,10 +46,48 @@ fn limits() -> StoreLimits {
 
 fn record(snapshot: &Snapshot) -> Vec<u8> {
     serde_json::to_vec(&StateRecord {
-        version: 2,
+        version: 3,
         state: snapshot,
     })
     .unwrap()
+}
+
+#[test]
+fn consent_encoding_reserves_space_for_every_choice_and_requires_a_valid_field() {
+    let mut snapshot = Snapshot::anonymous("anonymous".into());
+    let capacity = snapshot_capacity(&snapshot);
+    for choice in [None, Some(true), Some(false)] {
+        snapshot.opt_out = choice;
+        assert_eq!(snapshot_capacity(&snapshot), capacity);
+        let directory = TestDirectory::new();
+        let (mut store, _) = FileStateStore::open(directory.lease(), capacity as u64).unwrap();
+        store.save(&snapshot).unwrap();
+        assert_eq!(store.load().unwrap(), Some(snapshot.clone()));
+    }
+    for consent in [
+        None,
+        Some(serde_json::json!("true")),
+        Some(serde_json::json!(0)),
+    ] {
+        let mut value = serde_json::to_value(StateRecord {
+            version: 3,
+            state: &snapshot,
+        })
+        .unwrap();
+        match consent {
+            Some(consent) => value["state"]["opt_out"] = consent,
+            None => {
+                value["state"].as_object_mut().unwrap().remove("opt_out");
+            }
+        }
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let directory = TestDirectory::new();
+        let lease = directory.lease();
+        let path = directory.path().join("state.json");
+        fs::write(&path, &bytes).unwrap();
+        assert!(FileStateStore::open(lease, 4096).is_err());
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
 }
 
 #[test]
@@ -169,7 +207,8 @@ fn fresh_state_roundtrips_and_atomic_replacement_keeps_latest_snapshot() {
 #[test]
 fn serialization_limit_is_exact_and_failed_write_preserves_previous_state() {
     let directory = TestDirectory::new();
-    let first = Snapshot::anonymous("用户".into());
+    let mut first = Snapshot::anonymous("用户".into());
+    first.opt_out = Some(false);
     let exact_bytes = record(&first).len() as u64;
     {
         let (mut store, _) = FileStateStore::open(directory.lease(), exact_bytes - 1).unwrap();

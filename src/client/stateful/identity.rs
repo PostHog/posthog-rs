@@ -149,10 +149,13 @@ impl Client {
             return;
         }
         let result = self.state.as_ref().unwrap().mutate(|state| {
+            if self.snapshot_opted_out(state) {
+                return None;
+            }
             state.person_processing = true;
-            state.clone()
+            Some(state.clone())
         });
-        if let Ok((_, snapshot)) = result {
+        if let Ok((_, Some(snapshot))) = result {
             let mut event = Capture::new("$create_alias");
             event.properties.insert("alias".into(), alias.into());
             event
@@ -200,7 +203,7 @@ impl Client {
         };
         let mode = self.producer.as_ref().unwrap().person_profiles;
         let result = self.state.as_ref().unwrap().mutate(|state| {
-            if mode.processes(state) {
+            if self.snapshot_opted_out(state) || mode.processes(state) {
                 return None;
             }
             state.person_processing = true;
@@ -216,7 +219,9 @@ impl Client {
     }
 
     /// Start a fresh anonymous identity, including a fresh device ID. Emits no event
-    /// and preserves queued events. Setup bootstrap is not reapplied. A hook may reset:
+    /// and preserves queued events. Clears explicit consent and restores Config::opt_out;
+    /// with the normal default, reset re-enables collection. Setup bootstrap is not
+    /// reapplied. A hook may reset:
     /// its already-snapshotted outer event retains the old identity.
     pub fn reset(&self) {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {

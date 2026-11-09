@@ -47,12 +47,18 @@ fn reexports_stateful_client_and_its_public_entry_points() {
     let mut config = Config::new("phc_test");
     config.persistence = Persistence::Memory;
     config.disabled = true;
+    config.opt_out = true;
     let client = Client::init_blocking(config);
     client.identify(posthog_rs::stateful::Identify::new("user"));
     client.alias("alias");
     client.set_person_properties(Default::default(), Default::default());
     client.create_person_profile();
     client.reset();
+    client.opt_out();
+    assert!(client.is_opt_out());
+    client.opt_in();
+    assert!(client.is_opt_out());
+    let _: CaptureOutcome = CaptureOutcome::OptedOut;
     assert!(!client.is_identified());
     assert_eq!(client.capture("disabled"), CaptureOutcome::Disabled);
     assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Disabled);

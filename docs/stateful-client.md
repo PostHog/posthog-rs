@@ -1,7 +1,7 @@
 # Stateful client
 
 Enable the optional `stateful` feature for applications that keep local user identity,
-person-profile state and a persistent delivery queue. Existing root-level server APIs and defaults
+person-profile state, consent and a persistent delivery queue. Existing root-level server APIs and defaults
 are unchanged.
 
 ```rust
@@ -65,7 +65,7 @@ again with the same ID and properties follows the `$set` path, not `$identify` r
 An already-enabled create-profile call also does not replay a dropped creation event.
 
 `reset()` creates fresh anonymous/distinct/device IDs, clears identified/profile state,
-and emits no event. It does not purge or rewrite queued events and does not reapply
+and clears the explicit consent choice (see below). It emits no event and does not purge or rewrite queued events and does not reapply
 setup bootstrap. Profile mode is configuration: Always still applies after reset.
 Hooks run outside the state lock. A hook may reset, but its outer event keeps the old
 snapshot; a delayed capture cannot restore old-generation dedup state after reset.
@@ -85,6 +85,40 @@ seed still initializes identity in Never mode, but capture processing defaults t
 An already-identified user is retained; a different identified seed produces a warning
 rather than silently replacing that user. Anonymous bootstrap remains a fresh-scope seed
 and does not replace restored identity.
+
+## Consent
+
+`opt_out()` immediately blocks new collection; `opt_in()` immediately permits it.
+Both return `()`, and `is_opt_out()` reads the current choice from memory.
+A blocked capture returns `CaptureOutcome::OptedOut` without running hooks.
+Disabled or closed clients report opted out and cannot be enabled by opting in.
+
+`Config::opt_out` is the startup default (false). An explicit stored opt-in/out
+choice overrides it. Missing or legacy consent uses the configured default.
+`reset()` clears the explicit choice and restores that default: with ordinary
+configuration, `opt_out(); reset();` enables collection again. With
+`Config::opt_out = true`, `opt_in(); reset();` blocks collection again.
+Reset before opting in when switching users.
+
+Consent and identity are snapshotted together before hooks. A capture permitted at
+that boundary may finish its hooks, queue admission, persistence and delivery after
+opt-out. Already queued/in-flight/retrying events and recovered disk records remain
+eligible for delivery; opt-out is not a purge or cancellation operation.
+A new capture attempted by a hook checks current consent independently.
+
+Identify and identified-bootstrap reconciliation still update local identity while
+opted out; their analytics events are blocked. Opt-in retains that identity and
+does not replay a dropped linking event. Blocked property events do not populate
+the accepted-event deduplication cache. Alias and create-profile calls while opted
+out are no-ops; person-property updates retain local processing enablement but their
+analytics uses the same consent gate.
+
+Consent persistence uses the existing asynchronous state writer. No consent mutation
+waits for disk or network I/O. A successful state drain confirms its captured revision;
+before that, a crash can restore an older choice. Write failure reports through
+`on_error` without reverting live consent. If stored state cannot be read, the
+enabled memory fallback uses the configured startup default and preserves the
+unreadable file. Set that default to true if collection must wait for an explicit opt-in.
 
 ## Initialization and storage
 
@@ -108,11 +142,13 @@ State and queued events share the namespace lease. Storage errors report through
 unsupported state is preserved rather than overwritten. State and event persistence
 can degrade independently.
 
-State records use version 2 for identity and profile flags. Valid version-1 identity
-records restore as anonymous and are migrated on the next state write. A migrated
+State records use version 3 for identity, profile flags and an optional explicit
+consent choice. Valid version-1 identity records restore as anonymous; version-2
+records retain identity/profile flags. Both use the configured consent default and
+migrate on the next state write. A migrated
 record must fit the configured state bound; otherwise restore reports a storage error
 and falls back to fresh memory state without overwriting the file. Older SDKs preserve
-unsupported version-2 files rather than rewriting them. Event records and namespace
+unsupported version-3 files rather than rewriting them. Event records and namespace
 paths are unchanged. A flush drains the captured state revision, not a transaction
 between state and event files.
 
@@ -122,7 +158,7 @@ report `CaptureOutcome::Full`; readiness is not a promise of free queue capacity
 
 ## Capture and hooks
 
-Capture and screen are synchronous. The SDK snapshots identity, applies cached
+Capture and screen are synchronous. The SDK snapshots identity and consent, applies cached
 platform context and SDK defaults, runs hooks, converts the event, then attempts
 bounded admission. It performs no filesystem or network work on this path. OS
 context is discovered during initialization; embedding applications can provide
@@ -151,7 +187,7 @@ run in registration order on the capture caller, outside client-state locks. The
 may modify the event or return `None` to drop it. A panic stops the chain and drops
 the event. Each mutable hook is serialized across concurrent captures: do not wait
 for another capture of this client from inside a hook. Recursive same-thread capture
-returns `Reentrant` rather than bypassing privacy hooks. Closing from a hook returns
+returns `Reentrant` when collection is allowed, rather than bypassing privacy hooks. Closing from a hook returns
 a deferred drain and prevents the outer capture from being admitted.
 
 After hooks, custom null-valued object members are omitted recursively, including
@@ -171,8 +207,8 @@ Screen capture does not install platform navigation observers.
 
 `CaptureOutcome::Accepted { uuid }` reports local admission, not persistence or server
 ingestion. A full count/serialized-byte budget rejects new work without evicting
-already admitted events. Invalid inputs, hook drops, reentrancy, closure and disabled
-configuration have distinct outcomes. The byte limit bounds serialized queued data,
+already admitted events. Opt-out, invalid inputs, hook drops, reentrancy, closure and
+disabled configuration have distinct outcomes. The byte limit bounds serialized queued data,
 not all caller allocations or HTTP/compression buffers.
 
 `flush_blocking()` and `flush().await` return separate state-persistence and delivery
