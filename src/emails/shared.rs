@@ -350,7 +350,7 @@ pub(crate) struct Upload {
 
 impl Upload {
     /// The file store's answer, or the error that stops the send. A refusal
-    /// keeps the store's status, so a `503` is retried like PostHog's.
+    /// keeps the store's status, so a `500`, `502`, `503` or `504` is retried.
     pub(crate) fn check_reply(
         &self,
         status: u16,
@@ -736,11 +736,15 @@ fn is_retryable(error: &EmailError) -> bool {
         None => error.is_network_error(),
         Some(409) => error.code() == "idempotency_key_in_flight",
         Some(429) => error.kind() != EmailErrorKind::MonthlyQuotaExceeded,
-        // A file store's 500, 502 and 504 are transient too, and a PUT of the
-        // same bytes is safe to repeat.
-        Some(500 | 502 | 504) => error.code() == UPLOAD_FAILED,
+        Some(500 | 502 | 504) => is_upload_refusal(error),
         Some(status) => status == 503,
     }
+}
+
+/// A PUT of the same bytes is safe to repeat, so the file store's transient
+/// server errors are retried too.
+fn is_upload_refusal(error: &EmailError) -> bool {
+    error.code() == UPLOAD_FAILED
 }
 
 /// How long to wait before retry `attempt` (counting from 0), or `None` to
@@ -1215,6 +1219,20 @@ mod tests {
             None,
             retry_after.map(Duration::from_secs),
         )
+    }
+
+    #[test]
+    fn each_body_counts_like_a_file_in_base64() {
+        let estimate = |html: String, text: Option<String>| {
+            let mut email = CodeEmail::new("user@example.com", "key", "Subject").html(html);
+            if let Some(text) = text {
+                email = email.text(text);
+            }
+            estimated_message_bytes(&email) - HEADERS_AND_MIME_BOUNDARIES_BYTES
+        };
+        assert_eq!(estimate("a".repeat(57), None), 78);
+        assert_eq!(estimate("é".repeat(57), None), 156);
+        assert_eq!(estimate("a".repeat(57), Some("é".repeat(57))), 78 + 156);
     }
 
     #[test]
