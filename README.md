@@ -59,6 +59,18 @@ options)` uses the context identity. An absent identity returns an empty flag
 result without a network request. Flag access events retain the context from
 evaluation, including when the result is read after the request ends.
 
+MCP analytics (the `mcp` feature) applies the context to every MCP event over
+HTTP, although `rmcp` runs each request handler in a task of its own. It reads
+the `RequestContext` that `PostHogLayer` or your middleware placed in the
+request extensions. A context scoped around the code that sends the event takes
+priority. The MCP identity from the `identify` callback stays the distinct ID
+and wins over the context identity. An anonymous request keeps its MCP session
+ID as the distinct ID and the `process_person_profile: false` option. Context
+properties and options fill only keys the event leaves unset, before the MCP
+`before_send` hook runs. Options from `McpOptionsBuilder::event_options` and
+`ToolCallRequest::event_option` win over context options, and the call's own
+option wins over the callback's.
+
 Spawned tasks and streaming response bodies do not inherit context. Pass a
 context clone and use `.scope(...)` explicitly for work that must retain it.
 Request completion, errors, panics, and cancellation remove the scoped context.
