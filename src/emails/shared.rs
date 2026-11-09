@@ -320,8 +320,8 @@ pub(crate) struct UploadsRequest {
 }
 
 /// PostHog's refusal of the upload request. A `404` means this PostHog has no
-/// upload route or sending email from code is off for the project, and the
-/// client can't tell which. It reports PostHog's own answer, `not_found` when
+/// upload route, sending email from code is off for the project, or
+/// `app_host` isn't PostHog's, and the client can't tell which. It reports PostHog's own answer, `not_found` when
 /// the reply named no code, on `attachments`.
 pub(crate) fn upload_route_error(error: EmailError) -> EmailError {
     if error.status() != Some(404) {

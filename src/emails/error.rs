@@ -17,7 +17,8 @@ pub enum EmailErrorKind {
     MissingApiKey,
     /// PostHog answered `403`: the secret key lacks the scope.
     InvalidPermission,
-    /// PostHog answered `404`: no such template or email in this project.
+    /// PostHog answered `404`: no such template or email in this project, or,
+    /// for a send with files, no upload route.
     NotFound,
     /// PostHog answered `409`: a send with the same idempotency key is still
     /// in flight.
