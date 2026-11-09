@@ -251,8 +251,10 @@ impl Client {
             let generation = state.generation.wrapping_add(1);
             let context_revision = state.context_revision.wrapping_add(1);
             let device_id = state.device_id.clone();
+            let sessions = state.sessions.cleared();
             *state = Snapshot::anonymous(id);
             state.device_id = device_id;
+            state.sessions = sessions;
             state.generation = generation;
             state.context_revision = context_revision;
         });

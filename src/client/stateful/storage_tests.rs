@@ -215,7 +215,7 @@ fn serialization_limit_is_exact_and_failed_write_preserves_previous_state() {
             fs::metadata(store.path()).unwrap().len(),
             record(&first).len() as u64
         );
-        assert_eq!(snapshot_size(&first) as u64, exact_bytes);
+        assert_eq!(snapshot_capacity(&first) as u64, exact_bytes);
         assert!(store.save(&Snapshot::anonymous("x".repeat(4096))).is_err());
         assert_eq!(store.load().unwrap(), Some(first.clone()));
     }
