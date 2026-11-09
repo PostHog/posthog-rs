@@ -252,10 +252,7 @@ impl EmailAttachment {
     /// `"invoice.pdf"`. The client hashes the bytes here, once.
     pub fn new(filename: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
         let content = Bytes::from(content.into());
-        let sha256 = Sha256::digest(&content)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let sha256 = format!("{:x}", Sha256::digest(&content));
         Self {
             filename: filename.into(),
             content,
