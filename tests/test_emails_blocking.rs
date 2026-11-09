@@ -10,7 +10,9 @@ use common::default_user_agent;
 use email_support::{
     accepted, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
-use posthog_rs::{CodeEmail, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
+use posthog_rs::{
+    CodeEmail, EmailDeliveryStatus, EmailErrorKind, TemplateEmail, TRANSACTIONAL_CATEGORY,
+};
 use serde_json::json;
 
 fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
@@ -63,7 +65,8 @@ fn code_send_posts_the_rendered_content() {
         .send(
             CodeEmail::new("user@example.com", "password-reset", "Reset your password")
                 .html("<p>Reset</p>")
-                .from("Acme <security@example.com>"),
+                .from("Acme <security@example.com>")
+                .category(TRANSACTIONAL_CATEGORY),
         )
         .unwrap();
 
@@ -75,6 +78,7 @@ fn code_send_posts_the_rendered_content() {
             "html": "<p>Reset</p>",
             "from": "Acme <security@example.com>",
             "capture_engagement": true,
+            "category": "transactional",
             "to": "user@example.com",
         })
     );

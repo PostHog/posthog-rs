@@ -238,6 +238,9 @@ fn code_body(email: &CodeEmail) -> Result<Map<String, Value>, EmailError> {
         "capture_engagement".into(),
         Value::Bool(email.capture_engagement),
     );
+    if let Some(category) = &email.category {
+        body.insert("category".into(), Value::String(category.clone()));
+    }
     Ok(body)
 }
 

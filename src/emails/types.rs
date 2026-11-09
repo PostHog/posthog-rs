@@ -1,6 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+/// The built-in category of [`CodeEmail::category`]: transactional email, as
+/// a send without a category is.
+pub const TRANSACTIONAL_CATEGORY: &str = "transactional";
+
 /// What every send takes, whatever its form.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SendOptions {
@@ -97,6 +101,7 @@ pub struct CodeEmail {
     pub(crate) from: Option<String>,
     pub(crate) reply_to: Vec<String>,
     pub(crate) capture_engagement: bool,
+    pub(crate) category: Option<String>,
     pub(crate) options: SendOptions,
 }
 
@@ -120,6 +125,7 @@ impl CodeEmail {
             from: None,
             reply_to: Vec::new(),
             capture_engagement: true,
+            category: None,
             options: SendOptions::default(),
         }
     }
@@ -155,6 +161,18 @@ impl CodeEmail {
     /// captures nothing, whatever the send asks.
     pub fn capture_engagement(mut self, capture: bool) -> Self {
         self.capture_engagement = capture;
+        self
+    }
+
+    /// The email's message category. Without it, or with
+    /// [`TRANSACTIONAL_CATEGORY`], PostHog sends transactional email.
+    ///
+    /// Any other value is the key of one of the project's marketing message
+    /// categories, such as `"product-updates"`. A marketing send honors the
+    /// recipient's opt-outs, and its `html` (or `text`, without `html`) needs
+    /// the `{{ unsubscribe_url }}` placeholder.
+    pub fn category(mut self, category: impl Into<String>) -> Self {
+        self.category = Some(category.into());
         self
     }
 
@@ -298,8 +316,8 @@ pub struct EmailStatus {
     pub created_at: DateTime<Utc>,
     /// When the email reached its current status.
     pub status_at: DateTime<Utc>,
-    /// Why a failed email was not sent, such as `provider_error` or
-    /// `recipient_suppressed`, or the bounce type of a bounced email: `hard`,
-    /// `soft` or `unknown`. `None` otherwise.
+    /// Why a failed email was not sent, such as `provider_error`,
+    /// `recipient_suppressed` or `recipient_opted_out`, or the bounce type of
+    /// a bounced email: `hard`, `soft` or `unknown`. `None` otherwise.
     pub reason: Option<String>,
 }

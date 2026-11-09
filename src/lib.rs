@@ -131,7 +131,7 @@ pub use endpoints::{
 // Emails
 pub use emails::{
     CodeEmail, EmailDeliveryStatus, EmailError, EmailErrorKind, EmailStatus, EmailWarning, Emails,
-    SendEmail, SendEmailResult, TemplateEmail,
+    SendEmail, SendEmailResult, TemplateEmail, TRANSACTIONAL_CATEGORY,
 };
 
 // Error

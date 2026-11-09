@@ -90,6 +90,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
                 .from("Acme <security@example.com>")
                 .reply_to("help@example.com")
                 .capture_engagement(false)
+                .category("product-updates")
                 .distinct_id("user_123")
                 .idempotency_key("password-reset:user_123"),
         )
@@ -108,6 +109,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
             "from": "Acme <security@example.com>",
             "reply_to": ["help@example.com"],
             "capture_engagement": false,
+            "category": "product-updates",
             "distinct_id": "user_123",
             "to": "user@example.com",
         })
@@ -236,6 +238,14 @@ async fn refusals_keep_posthogs_code_and_are_not_retried() {
             EmailErrorKind::InvalidIdempotentRequest,
         ),
         (422, "recipient_suppressed", EmailErrorKind::ValidationError),
+        (400, "unknown_category", EmailErrorKind::ValidationError),
+        (400, "category_mismatch", EmailErrorKind::ValidationError),
+        (
+            400,
+            "unsubscribe_link_required",
+            EmailErrorKind::ValidationError,
+        ),
+        (422, "recipient_opted_out", EmailErrorKind::ValidationError),
     ];
     for (status, code, kind) in cases {
         let server = ScriptedServer::start_async(vec![Answer::json(
