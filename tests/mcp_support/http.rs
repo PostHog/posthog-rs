@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use http_body_util::BodyExt;
 use posthog::mcp::Instrumented;
+use posthog::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use serde_json::{json, Value};
@@ -56,6 +57,55 @@ impl HttpServer {
         params: Value,
         headers: &[(&str, &str)],
     ) -> HttpResponse {
+        self.send(self.http_request(method, params, headers)).await
+    }
+
+    /// A request carrying `context` as an extension, as application middleware
+    /// attaches it.
+    pub async fn request_in_context(
+        &self,
+        method: &str,
+        params: Value,
+        headers: &[(&str, &str)],
+        context: RequestContext,
+    ) -> HttpResponse {
+        let mut request = self.http_request(method, params, headers);
+        request.extensions_mut().insert(context);
+        self.send(request).await
+    }
+
+    /// A request served behind `PostHogLayer`, with an application `context`
+    /// extension when one is given.
+    #[cfg(feature = "tower")]
+    pub async fn request_through_posthog_layer(
+        &self,
+        method: &str,
+        params: Value,
+        headers: &[(&str, &str)],
+        context: Option<RequestContext>,
+    ) -> HttpResponse {
+        use tower::{Layer, ServiceExt};
+
+        let mut request = self.http_request(method, params, headers);
+        if let Some(context) = context {
+            request.extensions_mut().insert(context);
+        }
+        let layered = posthog::tower::PostHogLayer::new().layer(self.service.clone());
+        let response = layered.oneshot(request).await.unwrap();
+        read_response(response).await
+    }
+
+    pub async fn notify(&self, method: &str, headers: &[(&str, &str)]) {
+        let message = json!({ "jsonrpc": "2.0", "method": method });
+        self.send(post(message, headers)).await;
+    }
+
+    fn http_request(
+        &self,
+        method: &str,
+        params: Value,
+        headers: &[(&str, &str)],
+    ) -> http::Request<String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let name = params["name"].as_str().unwrap_or_default().to_string();
         let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
@@ -66,36 +116,41 @@ impl HttpServer {
                 all_headers.push(("mcp-name", name.as_str()));
             }
         }
-        self.post(message, &all_headers).await
+        post(message, &all_headers)
     }
 
-    pub async fn notify(&self, method: &str, headers: &[(&str, &str)]) {
-        let message = json!({ "jsonrpc": "2.0", "method": method });
-        self.post(message, headers).await;
+    async fn send(&self, request: http::Request<String>) -> HttpResponse {
+        read_response(self.service.handle(request).await).await
     }
+}
 
-    async fn post(&self, message: Value, headers: &[(&str, &str)]) -> HttpResponse {
-        let mut request = http::Request::builder()
-            .method("POST")
-            .uri("http://localhost/mcp")
-            .header("host", "localhost")
-            .header("accept", "application/json, text/event-stream")
-            .header("content-type", "application/json");
-        for (name, value) in headers {
-            request = request.header(*name, *value);
-        }
-        let request = request.body(message.to_string()).unwrap();
-        let response = self.service.handle(request).await;
-        let session_id = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        HttpResponse {
-            session_id,
-            body: parse_body(&String::from_utf8_lossy(&bytes)),
-        }
+fn post(message: Value, headers: &[(&str, &str)]) -> http::Request<String> {
+    let mut request = http::Request::builder()
+        .method("POST")
+        .uri("http://localhost/mcp")
+        .header("host", "localhost")
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request.body(message.to_string()).unwrap()
+}
+
+async fn read_response<B>(response: http::Response<B>) -> HttpResponse
+where
+    B: BodyExt,
+    B::Error: std::fmt::Debug,
+{
+    let session_id = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    HttpResponse {
+        session_id,
+        body: parse_body(&String::from_utf8_lossy(&bytes)),
     }
 }
 

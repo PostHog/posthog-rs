@@ -90,6 +90,7 @@ pub fn posthog::mcp::McpOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> co
 pub struct posthog::mcp::McpOptionsBuilder
 impl posthog::mcp::McpOptionsBuilder
 pub fn posthog::mcp::McpOptionsBuilder::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog::Event) -> core::option::Option<posthog::Event> + core::marker::Send + 'static
+pub fn posthog::mcp::McpOptionsBuilder::event_options<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<serde_json::map::Map<alloc::string::String, serde_json::value::Value>> + core::marker::Send + core::marker::Sync + 'static
 pub fn posthog::mcp::McpOptionsBuilder::identify<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<posthog::mcp::Identity> + core::marker::Send + core::marker::Sync + 'static
 pub fn posthog::mcp::McpOptionsBuilder::intent_fallback<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync + 'static
 impl posthog::mcp::McpOptionsBuilder
@@ -123,6 +124,7 @@ pub fn posthog::mcp::ToolCallError::error_type(self, impl core::convert::Into<al
 pub fn posthog::mcp::ToolCallError::new<E: core::error::Error + ?core::marker::Sized>(&E) -> Self
 pub struct posthog::mcp::ToolCallRequest
 impl posthog::mcp::ToolCallRequest
+pub fn posthog::mcp::ToolCallRequest::event_option(self, impl core::convert::Into<alloc::string::String>, impl serde_core::ser::Serialize) -> core::result::Result<Self, posthog::Error>
 pub fn posthog::mcp::ToolCallRequest::http(self, http::request::Parts) -> Self
 pub fn posthog::mcp::ToolCallRequest::meta(self, rmcp::model::JsonObject) -> Self
 pub fn posthog::mcp::ToolCallRequest::new(impl core::convert::Into<alloc::string::String>, core::option::Option<rmcp::model::JsonObject>) -> Self
@@ -131,6 +133,7 @@ pub fn posthog::mcp::ToolCallRequest::started_at(self, std::time::Instant) -> Se
 pub fn posthog::mcp::ToolCallRequest::tool(self, posthog::mcp::ToolRegistration) -> Self
 pub fn posthog::mcp::ToolCallRequest::transport_session(self, posthog::mcp::TransportSession) -> Self
 pub fn posthog::mcp::instrument<H: rmcp::handler::server::ServerHandler>(H, alloc::sync::Arc<posthog::Client>) -> posthog::mcp::Instrumented<H>
+pub type posthog::mcp::EventOptionsCallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<serde_json::map::Map<alloc::string::String, serde_json::value::Value>> + core::marker::Send + core::marker::Sync)>
 pub type posthog::mcp::IdentifyCallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<posthog::mcp::Identity> + core::marker::Send + core::marker::Sync)>
 pub type posthog::mcp::IntentFallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync)>
 pub mod posthog::tower

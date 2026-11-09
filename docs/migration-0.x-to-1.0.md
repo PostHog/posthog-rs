@@ -113,11 +113,26 @@ event.insert_option("process_person_profile", false)?;
 client.capture(event);
 ```
 
+MCP events from the `mcp` feature take options from the `McpOptions` `event_options` callback, which runs for each request, and from `ToolCallRequest::event_option` in the manual API. The call's own option wins over the callback's, both win over the request context, and an anonymous MCP event keeps `process_person_profile: false`. The `McpOptions` hook and then the client's `before_send` see the result and can change it.
+
+```rust
+use posthog::mcp::{McpOptionsBuilder, ToolCallRequest};
+
+let options = McpOptionsBuilder::default()
+    .event_options(|_request| {
+        let mut options = serde_json::Map::new();
+        options.insert("disable_skew_correction".into(), true.into());
+        Some(options)
+    })
+    .build()?;
+let call = ToolCallRequest::new("search_docs", None).event_option("product_tour_id", "onboarding")?;
+```
+
 Keys are strings and values are any JSON value. The SDK sends options as given, so a new option that PostHog adds needs no SDK upgrade. PostHog validates them: it ignores keys it does not know, converts common forms of a known key's value (for a boolean, `"yes"`, `"off"` or `0`), and drops the event if a known key has a value it cannot read. That drop reaches `on_error` as a per-event `drop` with the detail `invalid_options`. `before_send` hooks can read and change options with `Event::options`, `insert_option`, and `remove_option`.
 
 Review your `before_send` hooks for the new event shape. To change an option, use `insert_option`. A hook that returns a new `Event` must copy the options of the event it received, or the event is sent without them. That includes the `process_person_profile` option that `Event::new_anon` sets to `false`, so PostHog would create a person for the generated ID.
 
-Each option replaces a legacy option property. Move these properties to options:
+Each option replaces a legacy option property:
 
 | Option | Replaces |
 | --- | --- |
@@ -166,6 +181,8 @@ An event's properties and options come from three layers. For the same key, a la
 - `disable_geoip` defaults to `false`, as in 0.x and unlike PostHog's other server SDKs, so PostHog adds GeoIP properties based on the IP address of your server. To turn this off, call `.disable_geoip(true)` on `ClientOptionsBuilder`.
 
 The request context works only with the async client. Code inside `RequestContext::scope` sends the context with `capture`, `capture_batch`, `capture_immediate`, `capture_batch_immediate`, the `capture_ai` methods, `capture_exception`, `alias` and `group_identify`. A flag snapshot from `evaluate_flags` inside the scope keeps the context for its `$feature_flag_called` events, even after the scope ends. An event you build with `Event::new` or `Event::new_anon` keeps its own distinct ID. An exception without a distinct ID takes the context distinct ID.
+
+MCP events from the `mcp` feature take the request context too. `rmcp` runs each request handler in a task of its own, so over HTTP the SDK reads the `RequestContext` that `PostHogLayer` or your middleware placed in the request extensions. A context scoped around the code that sends the event wins over it. The identity from the `McpOptions` `identify` callback stays the distinct ID. An anonymous MCP event keeps its MCP session ID as the distinct ID and keeps `process_person_profile: false` over a context option. The `McpOptions` hook sees the context values.
 
 The blocking client has no scoped context, and `RequestContext::current()` returns `None`. Apply a context to each event yourself with `RequestContext::event` or `RequestContext::apply_to_event`, and use `evaluate_flags_with_context` for flags.
 

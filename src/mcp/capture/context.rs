@@ -9,6 +9,7 @@ use crate::mcp::contract::limits::MAX_NAME_LENGTH;
 use crate::mcp::contract::properties as key;
 use crate::mcp::identity::Identity;
 use crate::mcp::privacy::TextPass;
+use crate::RequestContext;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClientIdentity {
@@ -33,6 +34,11 @@ pub(crate) struct EventContext {
     pub(crate) identity: Option<Identity>,
     pub(crate) client: ClientIdentity,
     pub(crate) server: ServerIdentity,
+    /// Capture options the host set for the request's events.
+    pub(crate) options: Map<String, Value>,
+    /// The HTTP request's [`RequestContext`] extension, since `rmcp` runs each handler in a
+    /// task the scoped context does not reach.
+    pub(crate) request_context: Option<RequestContext>,
 }
 
 impl EventContext {
