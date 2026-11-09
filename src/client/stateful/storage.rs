@@ -154,6 +154,8 @@ pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
     snapshot_size(snapshot).saturating_add(usize::from(snapshot.opt_out != Some(false)))
 }
 
+/// Encode and validate the same bounded representation for both memory admission
+/// and persistence. This function performs no filesystem operations.
 pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
     if snapshot_capacity(snapshot) as u64 > max_bytes {
         return Err(io::Error::new(
@@ -182,7 +184,7 @@ pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result
             invalid_state()
         }
     })?;
-    // Writes use the same bounded representation as startup.
+    // Check the same bounded decoder used at startup before touching files.
     FileStateStore::decode(&buffer.bytes)?;
     Ok(buffer.bytes)
 }

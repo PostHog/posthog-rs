@@ -1,6 +1,6 @@
 //! Run with `cargo run --features stateful --example stateful`.
 //! Set POSTHOG_PROJECT_TOKEN; POSTHOG_HOST, POSTHOG_DATA_DIR and
-//! POSTHOG_DISTINCT_ID are optional.
+//! POSTHOG_DISTINCT_ID and POSTHOG_GROUP_KEY are optional.
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -27,6 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut identity = Identify::new(id);
         identity.set.insert("example".into(), json!("rust"));
         client.identify(identity);
+    }
+    client.register(HashMap::from([("example_context".into(), json!("rust"))]));
+    if let Ok(group) = std::env::var("POSTHOG_GROUP_KEY") {
+        client.group("organization", group, None);
     }
     let mut event = Capture::new("example opened");
     event

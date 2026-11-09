@@ -209,6 +209,133 @@ fn replacement_hooks_keep_their_identity_and_metadata_removals() {
 }
 
 #[test]
+fn registered_context_matches_stateless_fill_and_wire_precedence() {
+    let registered = json!({
+        "scalar": "registered", "object": {"registered": 1}, "array": [1],
+        "null": 7, "registered_null": null,
+        "$set": {"same": "registered", "registered": null},
+        "$set_once": {"same": "registered", "registered": 1},
+        "$group_set": {"same": "registered", "registered": 1},
+        "$groups": {"company": "registered", "registered": "r"},
+        "$session_id": "registered-session", "$process_person_profile": true
+    });
+    let mut state = snapshot();
+    state.registered = serde_json::from_value(registered.clone()).unwrap();
+    state.groups = HashMap::from([
+        ("company".into(), "remembered".into()),
+        ("remembered".into(), "m".into()),
+    ]);
+    let mut config = Config::new("phc_test");
+    config.platform_context = serde_json::from_value(json!({
+        "scalar": "platform", "registered_null": 3,
+        "$set": {"same": "platform", "platform": 1},
+        "$groups": {"company": "platform", "platform": "p"}
+    }))
+    .unwrap();
+    let producer = Producer::new(&config);
+    let mut input = Capture::new("collision");
+    input.properties = serde_json::from_value(json!({
+        "scalar": false, "object": {"event": 1}, "array": [null, {"null": null}],
+        "null": null, "$set": {"same": null}, "$set_once": {"same": []},
+        "$group_set": {"same": {"deep": 1}}, "$groups": {"company": "event", "raw": "raw"},
+        "$session_id": "event-session"
+    }))
+    .unwrap();
+    input.groups.insert("company".into(), "typed".into());
+    input
+        .options
+        .insert("process_person_profile".into(), false.into());
+    let wire = producer.prepare(input.clone(), &state, now()).unwrap();
+    // Use the existing public stateless context API as the like-for-like control.
+    let mut server = Event::from_parts(
+        input.event,
+        state.distinct_id.clone(),
+        input.properties,
+        input.options,
+        input.groups,
+        None,
+        None,
+    );
+    for defaults in [
+        registered,
+        serde_json::to_value(&state.groups)
+            .map(|v| json!({"$groups":v}))
+            .unwrap(),
+        serde_json::to_value(&config.platform_context).unwrap(),
+    ] {
+        let mut context = crate::RequestContext::new();
+        for (key, value) in defaults.as_object().unwrap() {
+            context = context.property(key, value).unwrap();
+        }
+        context.apply_to_event(&mut server);
+    }
+    let mut baseline = CaptureEvent::from_event_at(&server, now());
+    // Stateful-only null cleanup is the already established difference.
+    normalize_custom_properties(&mut baseline.properties);
+    for key in [
+        "scalar",
+        "object",
+        "array",
+        "null",
+        "registered_null",
+        "$set",
+        "$set_once",
+        "$group_set",
+        "$groups",
+    ] {
+        assert_eq!(
+            wire.properties.get(key),
+            baseline.properties.get(key),
+            "{}",
+            key
+        );
+    }
+    assert_eq!(wire.properties["object"], json!({"event":1}));
+    assert_eq!(wire.properties["array"], json!([null, {}]));
+    assert!(wire.properties.get("null").is_none());
+    assert!(wire.properties.get("registered_null").is_none());
+    assert_eq!(
+        wire.properties["$set"],
+        json!({"same":null,"registered":null,"platform":1})
+    );
+    assert_eq!(
+        wire.properties["$groups"],
+        json!({"company":"typed","raw":"raw","registered":"r","remembered":"m","platform":"p"})
+    );
+    assert_eq!(wire.session_id, baseline.session_id);
+    assert_eq!(wire.options, baseline.options);
+}
+
+#[test]
+fn raw_group_scalars_and_nulls_keep_canonical_fill_until_typed_groups_override() {
+    let producer = Producer::new(&Config::new("phc_test"));
+    let mut state = snapshot();
+    state.groups.insert("company".into(), "remembered".into());
+    state
+        .registered
+        .insert("$groups".into(), json!({"registered":"r"}));
+    for value in [Value::Null, json!(7), json!(["a"])] {
+        for typed in [false, true] {
+            let mut input = Capture::new("groups");
+            input.properties.insert("$groups".into(), value.clone());
+            if typed {
+                input.groups.insert("company".into(), "typed".into());
+            }
+            let wire = producer.prepare(input, &state, now()).unwrap();
+            assert_eq!(
+                wire.properties["$groups"],
+                if typed {
+                    json!({"company":"typed"})
+                } else {
+                    value.clone()
+                }
+            );
+            assert_eq!(wire.options["process_person_profile"], false);
+        }
+    }
+}
+
+#[test]
 fn unspecified_uuid_is_fresh_per_capture_and_explicit_time_is_kept() {
     let producer = Producer::new(&Config::new("phc_test"));
     let mut input = Capture::new("repeat");
