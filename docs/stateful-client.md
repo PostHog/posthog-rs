@@ -1,7 +1,7 @@
 # Stateful client
 
-Enable the optional `stateful` feature for applications that keep a local anonymous
-identity and a persistent delivery queue. Existing root-level server APIs and defaults
+Enable the optional `stateful` feature for applications that keep local user identity,
+person-profile state and a persistent delivery queue. Existing root-level server APIs and defaults
 are unchanged.
 
 ```rust
@@ -27,6 +27,65 @@ Its identity comes from the client. `get_anonymous_id()` and `get_distinct_id()`
 memory synchronously. New anonymous IDs use UUIDv7; an anonymous bootstrap seeds a
 fresh storage scope but cannot replace restored identity.
 
+## Identity and person profiles
+
+`identify("user-id")` synchronously changes anonymous state to identified and attempts
+`$identify` with the previous anonymous distinct ID. The anonymous/device ID is retained.
+Identifying the same ID while still anonymous marks it identified and attempts one
+`$set` instead. Once identified, another ID is ignored: call `reset()` before switching
+users. Repeating the current ID without properties emits nothing. Blank IDs are ignored.
+
+Use `Identify::new(id)` with `set` and `set_once` maps for person properties, or call
+`set_person_properties(set, set_once)` for the current identity without identifying.
+Empty ordinary property updates do nothing. These APIs share a bounded, process-local
+fingerprint of the last accepted update. Object key order does not matter; array order
+and explicit nulls do. Dropped or full-queue attempts are not marked as duplicates.
+Reset clears this cache; restarting does not preserve it.
+
+`alias(alias)` attempts `$create_alias` without changing the local IDs or identified
+status. `create_person_profile()` enables person processing without identifying and
+attempts one empty `$set`; it does nothing when processing is already enabled.
+
+`Config::person_profiles` selects:
+
+| Mode | Default capture processing | Identity/profile helper operations |
+| --- | --- | --- |
+| `IdentifiedOnly` (default) | Enabled after identify, alias, person updates or create-profile | Allowed |
+| `Always` | Enabled, including while anonymous | Allowed |
+| `Never` | Disabled | Ignored |
+
+Explicit per-event options and hooks retain their normal precedence in every mode;
+they change that event, not the client's stored processing state. `is_identified()`
+reads the local flag, independently of whether person processing is enabled.
+
+Identity/profile methods return `()`. Their local changes are not atomic with event
+admission, persistence or ingestion. A hook drop, full queue or delivery failure does
+not roll back identity and does not schedule another linking event. Calling identify
+again with the same ID and properties follows the `$set` path, not `$identify` replay.
+An already-enabled create-profile call also does not replay a dropped creation event.
+
+`reset()` creates fresh anonymous/distinct/device IDs, clears identified/profile state,
+and emits no event. It does not purge or rewrite queued events and does not reapply
+setup bootstrap. Profile mode is configuration: Always still applies after reset.
+Hooks run outside the state lock. A hook may reset, but its outer event keeps the old
+snapshot; a delayed capture cannot restore old-generation dedup state after reset.
+Recursive emitting identity calls are ignored before changing state. Concurrent calls
+share coherent identity snapshots, not a global delivery-order guarantee.
+
+### Identified bootstrap
+
+`Config::bootstrap_identified_id` seeds an identified user with a separate generated
+anonymous/device ID in a fresh scope. It is mutually exclusive with
+`bootstrap_anonymous_id`; supplying both disables initialization with a diagnostic.
+
+For restored anonymous state, a different identified seed reconciles through identify
+before readiness, without waiting for delivery. A matching ID is marked identified
+without an identity event. Neither reconciliation runs in Never mode. A fresh identified
+seed still initializes identity in Never mode, but capture processing defaults to false.
+An already-identified user is retained; a different identified seed produces a warning
+rather than silently replacing that user. Anonymous bootstrap remains a fresh-scope seed
+and does not replace restored identity.
+
 ## Initialization and storage
 
 Both `init_blocking(config)` and, with `async-client`, `Client::init(config).await`
@@ -49,6 +108,14 @@ State and queued events share the namespace lease. Storage errors report through
 unsupported state is preserved rather than overwritten. State and event persistence
 can degrade independently.
 
+State records use version 2 for identity and profile flags. Valid version-1 identity
+records restore as anonymous and are migrated on the next state write. A migrated
+record must fit the configured state bound; otherwise restore reports a storage error
+and falls back to fresh memory state without overwriting the file. Older SDKs preserve
+unsupported version-2 files rather than rewriting them. Event records and namespace
+paths are unchanged. A flush drains the captured state revision, not a transaction
+between state and event files.
+
 Initialization does not wait for network connectivity or backlog delivery. Recovery
 may temporarily reserve queue capacity after readiness. A ready client can therefore
 report `CaptureOutcome::Full`; readiness is not a promise of free queue capacity.
@@ -64,8 +131,9 @@ context is discovered during initialization; embedding applications can provide
 Caller properties win over context/default properties. `$set`, `$set_once`, `$groups`
 and `$group_set` objects fill missing inner keys using the existing Rust rules.
 Typed groups win per group type. Explicit options take precedence over legacy
-property options. The SDK also supplies `process_person_profile: false` for anonymous
-captures; this option takes precedence even over a caller-supplied legacy
+property options. The SDK supplies `process_person_profile` from the selected profile
+mode and identity/profile state (false for fresh anonymous IdentifiedOnly captures).
+This option takes precedence even over a caller-supplied legacy
 `$process_person_profile` property. To override it for an event, set `Capture.options`
 explicitly:
 

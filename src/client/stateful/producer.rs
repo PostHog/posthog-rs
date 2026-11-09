@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{Client, Config, Snapshot};
+use super::{Client, Config, PersonProfiles, Snapshot};
 use crate::capture_event::CaptureEvent;
 use crate::client::common::apply_before_send_hooks;
 use crate::client::transport::Admission;
@@ -84,6 +84,7 @@ pub(super) struct Producer {
     sdk_version: String,
     disable_geoip: bool,
     hooks: Vec<BeforeSendHook>,
+    pub(super) person_profiles: PersonProfiles,
 }
 
 impl Producer {
@@ -103,6 +104,7 @@ impl Producer {
             sdk_version: config.sdk_version.clone(),
             disable_geoip: config.disable_geoip,
             hooks: config.before_send.clone(),
+            person_profiles: config.person_profiles,
         }
     }
 
@@ -132,8 +134,11 @@ impl Producer {
         event.insert_prop_default("$lib", self.sdk_name.clone().into());
         event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
         event.insert_prop_default("$device_id", snapshot.anonymous_id.clone().into());
-        event.insert_prop_default("$is_identified", false.into());
-        event.insert_option_default(PROCESS_PERSON_PROFILE_OPT, false.into());
+        event.insert_prop_default("$is_identified", snapshot.identified.into());
+        event.insert_option_default(
+            PROCESS_PERSON_PROFILE_OPT,
+            self.person_profiles.processes(snapshot).into(),
+        );
         if self.disable_geoip {
             event.insert_prop_default("$geoip_disable", true.into());
         }
@@ -176,10 +181,10 @@ thread_local! {
     static CAPTURING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-struct CaptureGuard(usize);
+pub(super) struct CaptureGuard(usize);
 
 impl CaptureGuard {
-    fn enter(client: &Client) -> Result<Self, CaptureOutcome> {
+    pub(super) fn enter(client: &Client) -> Result<Self, CaptureOutcome> {
         let key = client as *const Client as usize;
         CAPTURING
             .try_with(|active| {
@@ -225,16 +230,23 @@ impl Client {
             Err(outcome) => return outcome,
         };
         let snapshot = self.state.as_ref().unwrap().snapshot();
-        let wire =
-            match self
-                .producer
-                .as_ref()
-                .unwrap()
-                .prepare(input.into(), &snapshot, Utc::now())
-            {
-                Ok(wire) => wire,
-                Err(outcome) => return outcome,
-            };
+        self.capture_snapshot(input.into(), &snapshot)
+    }
+
+    /// The caller owns the recursion guard and the operation's identity snapshot.
+    pub(super) fn capture_snapshot(&self, input: Capture, snapshot: &Snapshot) -> CaptureOutcome {
+        if self.closed.load(Ordering::Acquire) {
+            return CaptureOutcome::Closed;
+        }
+        let wire = match self
+            .producer
+            .as_ref()
+            .unwrap()
+            .prepare(input, snapshot, Utc::now())
+        {
+            Ok(wire) => wire,
+            Err(outcome) => return outcome,
+        };
         // A hook can close the client. Its outer capture must not be admitted.
         if self.closed.load(Ordering::Acquire) {
             return CaptureOutcome::Closed;

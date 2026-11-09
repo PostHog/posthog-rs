@@ -46,7 +46,7 @@ fn limits() -> StoreLimits {
 
 fn record(snapshot: &Snapshot) -> Vec<u8> {
     serde_json::to_vec(&StateRecord {
-        version: 1,
+        version: 2,
         state: snapshot,
     })
     .unwrap()
@@ -204,6 +204,7 @@ fn invalid_identity_cannot_replace_persisted_state() {
         Snapshot {
             anonymous_id: "valid".into(),
             distinct_id: String::new(),
+            ..Snapshot::anonymous("valid".into())
         },
     ] {
         assert_eq!(
@@ -256,7 +257,7 @@ fn corrupt_oversized_and_future_records_are_preserved_and_never_writable() {
     for bytes in [
         b"truncated {".to_vec(),
         vec![b' '; 4097],
-        br#"{"version":2,"state":{"anonymous_id":"private","distinct_id":"private"}}"#.to_vec(),
+        br#"{"version":99,"state":{"anonymous_id":"private","distinct_id":"private"}}"#.to_vec(),
         br#"{"version":1,"state":{"anonymous_id":"private","distinct_id":"private","future":true}}"#.to_vec(),
         br#"{"version":1,"state":{"anonymous_id":"private","distinct_id":17}}"#.to_vec(),
         br#"{"version":1,"state":{"anonymous_id":"","distinct_id":"private"}}"#.to_vec(),

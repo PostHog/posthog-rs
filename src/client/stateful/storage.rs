@@ -131,7 +131,7 @@ struct StateRecord<T> {
 
 pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     crate::client::capture::json_len(&StateRecord {
-        version: 1,
+        version: 2,
         state: snapshot,
     })
 }
@@ -194,22 +194,43 @@ impl FileStateStore {
         if encoded.len() as u64 > self.max_bytes {
             return Err(invalid_state());
         }
-        Self::decode(&encoded).map(Some)
+        let snapshot = Self::decode(&encoded)?;
+        // A migrated record must also fit the current in-memory/write bound.
+        if snapshot_size(&snapshot) as u64 > self.max_bytes {
+            return Err(invalid_state());
+        }
+        Ok(Some(snapshot))
     }
 
     fn decode(encoded: &[u8]) -> io::Result<Snapshot> {
-        let record: StateRecord<Snapshot> =
+        let record: StateRecord<serde_json::Value> =
             serde_json::from_slice(encoded).map_err(|_| invalid_state())?;
-        if record.version != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unsupported state store version",
-            ));
-        }
-        if !record.state.is_valid() {
+        let snapshot: Snapshot = match record.version {
+            1 => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct AnonymousState {
+                    anonymous_id: String,
+                    distinct_id: String,
+                }
+                let old: AnonymousState =
+                    serde_json::from_value(record.state).map_err(|_| invalid_state())?;
+                let mut snapshot = Snapshot::anonymous(old.anonymous_id);
+                snapshot.distinct_id = old.distinct_id;
+                snapshot
+            }
+            2 => serde_json::from_value(record.state).map_err(|_| invalid_state())?,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Unsupported state store version",
+                ))
+            }
+        };
+        if !snapshot.is_valid() {
             return Err(invalid_state());
         }
-        Ok(record.state)
+        Ok(snapshot)
     }
 
     /// Only the state writer calls this. A completed replacement is not a
@@ -222,7 +243,7 @@ impl FileStateStore {
         serde_json::to_writer(
             &mut buffer,
             &StateRecord {
-                version: 1,
+                version: 2,
                 state: snapshot,
             },
         )
