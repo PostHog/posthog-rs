@@ -66,10 +66,10 @@ impl Recorder {
 
     /// The only `name` event as it was sent.
     pub async fn sent(&self, name: &str) -> Value {
-        self.client.flush().await;
-        let wire = self.wire.lock().unwrap();
-        let mut sent: Vec<&Value> = wire
-            .values()
+        let mut sent: Vec<Value> = self
+            .sent_events()
+            .await
+            .into_iter()
             .filter(|event| event["event"] == name)
             .collect();
         assert_eq!(
@@ -77,7 +77,13 @@ impl Recorder {
             1,
             "expected exactly one {name} sent, got {sent:#?}"
         );
-        sent.remove(0).clone()
+        sent.remove(0)
+    }
+
+    /// Every event as it was sent.
+    pub async fn sent_events(&self) -> Vec<Value> {
+        self.client.flush().await;
+        self.wire.lock().unwrap().values().cloned().collect()
     }
 
     pub async fn events(&self) -> Vec<Event> {

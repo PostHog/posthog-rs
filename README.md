@@ -67,7 +67,9 @@ priority. The MCP identity from the `identify` callback stays the distinct ID
 and wins over the context identity. An anonymous request keeps its MCP session
 ID as the distinct ID and the `process_person_profile: false` option. Context
 properties and options fill only keys the event leaves unset, before the MCP
-`before_send` hook runs.
+`before_send` hook runs. Options from `McpOptionsBuilder::event_options` and
+`ToolCallRequest::event_option` win over context options, and the call's own
+option wins over the callback's.
 
 Spawned tasks and streaming response bodies do not inherit context. Pass a
 context clone and use `.scope(...)` explicitly for work that must retain it.

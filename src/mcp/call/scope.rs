@@ -30,6 +30,8 @@ pub(crate) struct RequestScope<'a> {
     pub(crate) timestamp: DateTime<Utc>,
     /// When the request arrived, which a call's duration runs from.
     pub(crate) started: Instant,
+    /// Capture options the manual API set on this call.
+    pub(crate) event_options: Option<&'a Map<String, Value>>,
 }
 
 impl<'a> RequestScope<'a> {

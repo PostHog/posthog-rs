@@ -113,11 +113,26 @@ event.insert_option("process_person_profile", false)?;
 client.capture(event);
 ```
 
+MCP events from the `mcp` feature take options from the `McpOptions` `event_options` callback, which runs for each request, and from `ToolCallRequest::event_option` in the manual API. The call's own option wins over the callback's, both win over the request context, and an anonymous MCP event keeps `process_person_profile: false`. The `McpOptions` hook and then the client's `before_send` see the result and can change it.
+
+```rust
+use posthog::mcp::{McpOptionsBuilder, ToolCallRequest};
+
+let options = McpOptionsBuilder::default()
+    .event_options(|_request| {
+        let mut options = serde_json::Map::new();
+        options.insert("disable_skew_correction".into(), true.into());
+        Some(options)
+    })
+    .build()?;
+let call = ToolCallRequest::new("search_docs", None).event_option("product_tour_id", "onboarding")?;
+```
+
 Keys are strings and values are any JSON value. The SDK sends options as given, so a new option that PostHog adds needs no SDK upgrade. PostHog validates them: it ignores keys it does not know, converts common forms of a known key's value (for a boolean, `"yes"`, `"off"` or `0`), and drops the event if a known key has a value it cannot read. That drop reaches `on_error` as a per-event `drop` with the detail `invalid_options`. `before_send` hooks can read and change options with `Event::options`, `insert_option`, and `remove_option`.
 
 Review your `before_send` hooks for the new event shape. To change an option, use `insert_option`. A hook that returns a new `Event` must copy the options of the event it received, or the event is sent without them. That includes the `process_person_profile` option that `Event::new_anon` sets to `false`, so PostHog would create a person for the generated ID.
 
-Each option replaces a legacy option property. Move these properties to options:
+Each option replaces a legacy option property:
 
 | Option | Replaces |
 | --- | --- |

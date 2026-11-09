@@ -29,6 +29,7 @@ pub(crate) struct OutgoingEvent {
     /// turn person processing back on.
     personless: bool,
     pub(crate) properties: Map<String, Value>,
+    options: Map<String, Value>,
     request_context: Option<RequestContext>,
 }
 
@@ -43,6 +44,7 @@ impl OutgoingEvent {
             timestamp: context.timestamp,
             personless: context.identity.is_none(),
             properties,
+            options: context.options.clone(),
             request_context: context.request_context.clone(),
         }
     }
@@ -74,6 +76,9 @@ impl OutgoingEvent {
         let mut event = Event::new(self.name.to_string(), self.distinct_id);
         for (name, value) in self.properties {
             let _ = event.insert_prop(name, value);
+        }
+        for (name, value) in self.options {
+            let _ = event.insert_option(name, value);
         }
         if self.personless {
             let _ = event.insert_option(PROCESS_PERSON_PROFILE_OPT, false);
@@ -115,6 +120,7 @@ mod tests {
             identity,
             client: Default::default(),
             server: Default::default(),
+            options: Map::new(),
             request_context: None,
         }
     }
