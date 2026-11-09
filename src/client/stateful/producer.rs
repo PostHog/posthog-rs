@@ -89,6 +89,7 @@ pub(super) struct Producer {
     hooks: Vec<BeforeSendHook>,
     pub(super) person_profiles: PersonProfiles,
     pub(super) default_opt_out: bool,
+    pub(super) session_clock: std::sync::Arc<dyn super::sessions::SessionClock>,
 }
 
 impl Producer {
@@ -110,6 +111,7 @@ impl Producer {
             hooks: config.before_send.clone(),
             person_profiles: config.person_profiles,
             default_opt_out: config.opt_out,
+            session_clock: std::sync::Arc::new(super::sessions::SystemSessionClock),
         }
     }
 
@@ -118,6 +120,7 @@ impl Producer {
         input: Capture,
         snapshot: &Snapshot,
         now: DateTime<Utc>,
+        session_id: Option<Uuid>,
     ) -> Result<CaptureEvent, CaptureOutcome> {
         if input.event.trim().is_empty() {
             return Err(CaptureOutcome::Invalid);
@@ -150,6 +153,9 @@ impl Producer {
         }
         for (key, value) in &self.context {
             event.insert_prop_default(key.clone(), value.clone());
+        }
+        if let Some(id) = session_id {
+            event.insert_prop_default("$session_id", id.to_string().into());
         }
         event.insert_prop_default("$lib", self.sdk_name.clone().into());
         event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
@@ -245,34 +251,72 @@ impl Client {
         if self.closed.load(Ordering::Acquire) {
             return CaptureOutcome::Closed;
         }
-        let snapshot = self.state.as_ref().unwrap().snapshot();
-        if self.snapshot_opted_out(&snapshot) {
+        if self.snapshot_opted_out(&self.state.as_ref().unwrap().snapshot()) {
             return CaptureOutcome::OptedOut;
         }
         let _guard = match CaptureGuard::enter(self) {
             Ok(guard) => guard,
             Err(outcome) => return outcome,
         };
-        self.capture_snapshot(input.into(), &snapshot)
+        let input = input.into();
+        if input.event.trim().is_empty() {
+            return CaptureOutcome::Invalid;
+        }
+        let snapshot = self.state.as_ref().unwrap().mutate(|snapshot| {
+            let opted_out = self.snapshot_opted_out(snapshot);
+            let now = self.producer.as_ref().unwrap().session_clock.now();
+            snapshot.session_operation(super::sessions::Operation::Activity, now, opted_out);
+            let session_id = snapshot.sessions.active_id(now.monotonic);
+            (snapshot.clone(), session_id)
+        });
+        let Ok((_, (snapshot, session_id))) = snapshot else {
+            return if self.closed.load(Ordering::Acquire) {
+                CaptureOutcome::Closed
+            } else {
+                CaptureOutcome::Full
+            };
+        };
+        self.capture_with_session(input, &snapshot, session_id)
     }
 
+    /// Passive SDK events inspect attribution without maintaining the session.
     /// The caller owns the recursion guard and the operation's identity snapshot.
     pub(super) fn capture_snapshot(&self, input: Capture, snapshot: &Snapshot) -> CaptureOutcome {
+        let session_id = snapshot.sessions.active_id(
+            self.producer
+                .as_ref()
+                .unwrap()
+                .session_clock
+                .now()
+                .monotonic,
+        );
+        self.capture_with_session(input, snapshot, session_id)
+    }
+
+    /// Attribution was selected with the operation's snapshot. Do not recheck
+    /// expiration here: crossing a boundary cannot erase the selected session.
+    fn capture_with_session(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+        session_id: Option<Uuid>,
+    ) -> CaptureOutcome {
         if self.closed.load(Ordering::Acquire) {
             return CaptureOutcome::Closed;
         }
         if self.snapshot_opted_out(snapshot) {
             return CaptureOutcome::OptedOut;
         }
-        let wire = match self
-            .producer
-            .as_ref()
-            .unwrap()
-            .prepare(input, snapshot, Utc::now())
-        {
-            Ok(wire) => wire,
-            Err(outcome) => return outcome,
-        };
+        let wire =
+            match self
+                .producer
+                .as_ref()
+                .unwrap()
+                .prepare(input, snapshot, Utc::now(), session_id)
+            {
+                Ok(wire) => wire,
+                Err(outcome) => return outcome,
+            };
         // A hook can close the client. Its outer capture must not be admitted.
         if self.closed.load(Ordering::Acquire) {
             return CaptureOutcome::Closed;

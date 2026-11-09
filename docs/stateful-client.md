@@ -142,14 +142,16 @@ State and queued events share the namespace lease. Storage errors report through
 unsupported state is preserved rather than overwritten. State and event persistence
 can degrade independently.
 
-State records use version 4 for identity, profile flags, explicit consent, registered
-properties and remembered groups. Valid version-1 identity records restore as
-anonymous; version-2 records retain identity/profile flags. Both use the configured
-consent default; version-3 records retain explicit consent. All three restore with
-empty registered properties and groups and migrate on the next state write. A migrated
-record must fit the configured state bound; otherwise restore reports a storage error
-and falls back to fresh memory state without overwriting the file. Older SDKs preserve
-unsupported version-4 files rather than rewriting them. Event records and namespace
+State records use version 5 for identity, profile flags, explicit consent, registered
+properties, remembered groups and optional persistent session timing. Valid version-1
+identity records restore as anonymous; version-2 records retain identity/profile flags.
+Both use the configured consent default; version-3 records retain explicit consent.
+Versions 1–3 restore empty registered properties and groups; version 4 retains them.
+All legacy versions restore without a session and migrate on the next state write.
+The bounded state reserves room for consent changes and session bookkeeping. A migrated
+record must fit that bound; otherwise restore reports a storage error and falls back
+to fresh memory state without overwriting the file. Older SDKs preserve unsupported
+version-5 files rather than rewriting them. Event records and namespace
 paths are unchanged. A flush drains the captured state revision, not a transaction
 between state and event files.
 
@@ -186,6 +188,58 @@ All mutations update memory before returning and use the same asynchronous state
 writer. A successful state drain confirms the captured revision; a crash before
 persistence may restore older context. Group analytics and state persistence are
 independent outcomes. Flag targeting and reloads are not part of these APIs yet.
+
+## Sessions
+
+Sessions are per client, with UUIDv7 IDs. `Config::session_mode` defaults to
+`SessionMode::Automatic`: foreground capture/screen attempts and explicit
+`session_activity()` create or maintain a session. A session expires at 30 minutes
+of inactivity or 24 hours of total age, even with continuous activity. Valid capture
+attempts count before hooks and admission; hook drops or full queues do not undo
+activity. SDK-generated identity/group events are passive and only attach a valid
+existing session. Caller event timestamps do not change session timing.
+
+`session_id()` maintains a session but does not extend an already-valid session's
+activity. `peek_session_id()` is a pure read of the stored ID, which may be expired.
+Both return `Option<Uuid>`; disabled/closed clients return None. `start_session()`
+creates only when absent, `end_session()` clears, and `reset_session()` forces a new
+ID. These operations emit no event. In `SessionMode::Manual`, only explicit boundaries
+create/clear/rotate sessions; automatic expiry is disabled.
+
+Hosts call `set_app_in_background(bool)`; initial state is foreground. Entering
+background touches a still-valid automatic session. Background captures/getters do
+not extend it or create a replacement after expiry. Returning to foreground applies
+activity policy; duplicate signals do nothing. Identity reset clears the session
+atomically while preserving this environmental state. Identification alone does not
+rotate it.
+
+While opted out, no session is created, rotated or touched. Maintaining getters return
+only valid stored attribution without mutation. Pure peek, explicit end and host
+foreground/background bookkeeping remain available. Opt-in alone is not activity.
+Already-snapshotted events retain their original identity/session through hooks,
+delivery, retries and restart.
+
+### Restart continuity
+
+`Config::session_persistence` defaults to `SessionPersistence::Memory`: a new client
+starts sessionless, independently of restored identity. Games can use this default.
+Select `SessionPersistence::Persistent` for successive CLI invocations that should
+share an unexpired session. Rust saves/restores the ID and timing through the same
+state writer, not consumer-managed storage. It respects `Config::persistence`;
+an explicitly memory-only backend or storage failure cannot provide durability.
+
+Call flush or shutdown and inspect the state outcome before exiting when continuity
+matters. Persistence is asynchronous: a crash can lose recent activity or restore an
+older boundary. Selecting Memory ignores previously saved sessions and removes that
+session from subsequent state snapshots; it does not rewrite queued event attribution.
+
+Live expiry uses monotonic elapsed time, unaffected by wall-clock changes. OS suspend
+accounting follows the platform's monotonic clock. Persistent restart checks use wall
+time; expired automatic sessions and future/inconsistent stored timing are not
+continued. Manual sessions have no idle/max expiry but still require valid timing.
+Restored automatic age includes time before restart, so restarting does not restart
+the 24-hour maximum. Per-event/registered/platform `$session_id` properties and hooks
+retain normal Rust precedence over the managed default without replacing manager state.
 
 ## Capture and hooks
 

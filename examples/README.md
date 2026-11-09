@@ -15,7 +15,8 @@ cargo run --no-default-features --features stateful,tls --example stateful
 
 This blocking example uses automatic local persistence, anonymous identity,
 registered context, explicit capture/screen, a native privacy hook, and separate drain
-reports. Optionally set `POSTHOG_DISTINCT_ID` to identify a user and
+reports. It opts into persistent sessions so repeated invocations in the same scope
+can share an unexpired session; the SDK default keeps sessions in memory. Optionally set `POSTHOG_DISTINCT_ID` to identify a user and
 `POSTHOG_GROUP_KEY` to associate an organization (enabling person processing).
 See [stateful client behavior](../docs/stateful-client.md) for configuration,
 admission limits, storage failure handling, async initialization and drains.

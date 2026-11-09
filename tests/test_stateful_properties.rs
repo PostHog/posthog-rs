@@ -369,7 +369,7 @@ fn legacy_context_migrates_on_mutation_and_invalid_current_records_are_preserved
             client.shutdown_blocking(None).state,
             PersistenceOutcome::Persisted
         );
-        assert_eq!(directory.state()["version"], 4);
+        assert_eq!(directory.state()["version"], 5);
         assert_eq!(
             directory.state()["state"]["registered"],
             json!({"migrated":true})
@@ -630,7 +630,7 @@ fn expanded_legacy_context_migration_preserves_file_and_uses_memory_fallback() {
     seed.shutdown_blocking(None);
     drop(seed);
     let bytes = serde_json::to_vec(&json!({"version":3,"state":{
-        "anonymous_id":"a".repeat(100),"distinct_id":"b".repeat(100),
+        "anonymous_id":"a".repeat(200),"distinct_id":"b".repeat(200),
         "identified":true,"person_processing":true,"opt_out":false
     }}))
     .unwrap();

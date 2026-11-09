@@ -315,7 +315,7 @@ fn slow_hook_does_not_block_reset_or_poison_new_generation_dedup() {
 #[test]
 fn invalid_state_size_disabled_and_closed_mutations_do_nothing() {
     let mut conf = config();
-    conf.max_state_bytes = 256;
+    conf.max_state_bytes = 512;
     let (client, events) = observed(conf);
     client.identify("x".repeat(1000));
     assert_eq!(client.get_distinct_id(), "anonymous");
@@ -487,7 +487,7 @@ fn version_one_state_migrates_on_mutation_and_future_state_is_preserved() {
     client.shutdown_blocking(None);
     drop(client);
     let state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(state["version"], 4);
+    assert_eq!(state["version"], 5);
     assert_eq!(state["state"]["identified"], true);
     assert_eq!(state["state"]["anonymous_id"], "legacy");
     assert!(state["state"].get("person_properties").is_none());

@@ -4,11 +4,13 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use posthog::stateful::{Capture, Client, Config, Identify, Persistence};
+use posthog::stateful::{Capture, Client, Config, Identify, Persistence, SessionPersistence};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::new(std::env::var("POSTHOG_PROJECT_TOKEN")?);
+    // Repeated CLI invocations can continue an unexpired session in this scope.
+    config.session_persistence = SessionPersistence::Persistent;
     if let Ok(host) = std::env::var("POSTHOG_HOST") {
         config.host = host;
     }
@@ -37,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .properties
         .insert("source".into(), json!("rust-example"));
     println!("capture: {:?}", client.capture(event));
+    println!("session: {:?}", client.peek_session_id());
     println!("screen: {:?}", client.screen("Example", HashMap::new()));
     println!("flush: {:?}", client.flush_blocking());
     println!(

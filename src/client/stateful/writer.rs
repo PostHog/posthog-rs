@@ -276,13 +276,15 @@ impl StateWriter {
             }
             let mut candidate = (*state.snapshot).clone();
             let result = change(&mut candidate);
-            validate(&candidate, self.options.max_bytes)?;
+            // Process-local session activity does not change the already-validated
+            // persistence representation. Only changed persisted fields need encoding.
             if candidate.same_persisted_state(&state.snapshot) {
                 if candidate != *state.snapshot {
                     state.snapshot = Arc::new(candidate);
                 }
                 return Ok((state.revision, result));
             }
+            validate(&candidate, self.options.max_bytes)?;
             let revision = state.revision.checked_add(1).ok_or(UpdateError::Full)?;
             state.snapshot = Arc::new(candidate);
             state.revision = revision;

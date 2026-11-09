@@ -44,7 +44,14 @@ fn reexports_stateful_client_and_its_public_entry_points() {
     assert_same_type::<posthog_rs::stateful::DrainReport, posthog::stateful::DrainReport>();
     assert_same_type::<posthog_rs::stateful::Identify, posthog::stateful::Identify>();
     assert_same_type::<posthog_rs::stateful::PersonProfiles, posthog::stateful::PersonProfiles>();
+    assert_same_type::<posthog_rs::stateful::SessionMode, posthog::stateful::SessionMode>();
+    assert_same_type::<
+        posthog_rs::stateful::SessionPersistence,
+        posthog::stateful::SessionPersistence,
+    >();
     let mut config = Config::new("phc_test");
+    config.session_mode = posthog_rs::stateful::SessionMode::Manual;
+    config.session_persistence = posthog_rs::stateful::SessionPersistence::Persistent;
     config.persistence = Persistence::Memory;
     config.disabled = true;
     config.opt_out = true;
@@ -58,6 +65,13 @@ fn reexports_stateful_client_and_its_public_entry_points() {
     client.group("company", "example", None);
     client.group_identify("company", "example", Default::default());
     client.remove_group("company");
+    client.start_session();
+    client.session_activity();
+    client.set_app_in_background(true);
+    client.reset_session();
+    client.end_session();
+    assert_eq!(client.session_id(), None);
+    assert_eq!(client.peek_session_id(), None);
     client.reset();
     client.opt_out();
     assert!(client.is_opt_out());

@@ -46,7 +46,7 @@ fn limits() -> StoreLimits {
 
 fn record(snapshot: &Snapshot) -> Vec<u8> {
     serde_json::to_vec(&StateRecord {
-        version: 4,
+        version: 5,
         state: snapshot,
     })
     .unwrap()
@@ -70,7 +70,7 @@ fn consent_encoding_reserves_space_for_every_choice_and_requires_a_valid_field()
         Some(serde_json::json!(0)),
     ] {
         let mut value = serde_json::to_value(StateRecord {
-            version: 4,
+            version: 5,
             state: &snapshot,
         })
         .unwrap();
@@ -209,7 +209,7 @@ fn serialization_limit_is_exact_and_failed_write_preserves_previous_state() {
     let directory = TestDirectory::new();
     let mut first = Snapshot::anonymous("用户".into());
     first.opt_out = Some(false);
-    let exact_bytes = record(&first).len() as u64;
+    let exact_bytes = snapshot_capacity(&first) as u64;
     {
         let (mut store, _) = FileStateStore::open(directory.lease(), exact_bytes - 1).unwrap();
         assert_eq!(
@@ -221,7 +221,11 @@ fn serialization_limit_is_exact_and_failed_write_preserves_previous_state() {
     {
         let (mut store, _) = FileStateStore::open(directory.lease(), exact_bytes).unwrap();
         store.save(&first).unwrap();
-        assert_eq!(fs::metadata(store.path()).unwrap().len(), exact_bytes);
+        assert_eq!(
+            fs::metadata(store.path()).unwrap().len(),
+            record(&first).len() as u64
+        );
+        assert_eq!(snapshot_capacity(&first) as u64, exact_bytes);
         assert!(store.save(&Snapshot::anonymous("x".repeat(4096))).is_err());
         assert_eq!(store.load().unwrap(), Some(first.clone()));
     }

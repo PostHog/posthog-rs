@@ -189,7 +189,7 @@ fn persisted_explicit_choice_wins_over_opposite_startup_default() {
             PersistenceOutcome::Persisted
         );
         drop(client);
-        assert_eq!(directory.state()["version"], 4);
+        assert_eq!(directory.state()["version"], 5);
         assert_eq!(directory.state()["state"]["opt_out"], choice);
         let mut conf = directory.config();
         conf.opt_out = !choice;
@@ -344,7 +344,7 @@ fn legacy_records_use_startup_default_without_eager_rewrite() {
             PersistenceOutcome::Persisted
         );
         drop(client);
-        assert_eq!(directory.state()["version"], 4);
+        assert_eq!(directory.state()["version"], 5);
         assert_eq!(directory.state()["state"]["opt_out"], false);
     }
 }
@@ -358,7 +358,7 @@ fn unreadable_or_expanded_legacy_state_preserves_bytes_and_uses_safe_configured_
         drop(client);
         let bytes = if legacy {
             serde_json::to_vec(&json!({"version":2, "state":{
-                "anonymous_id":"a".repeat(100), "distinct_id":"b".repeat(100),
+                "anonymous_id":"a".repeat(200), "distinct_id":"b".repeat(200),
                 "identified":true, "person_processing":true
             }}))
             .unwrap()
