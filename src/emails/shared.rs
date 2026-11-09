@@ -2,13 +2,16 @@
 //! clients: argument checks, request bodies and headers, reply parsing, the
 //! retry policy, and the in-flight count that `shutdown` waits on.
 
+use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT,
 };
+use reqwest::Method;
 use serde_json::{json, Map, Value};
 use tracing::warn;
 use uuid::Uuid;
@@ -21,6 +24,7 @@ use super::types::{
 use crate::client::{get_default_user_agent, ClientOptions};
 
 pub(crate) const SEND_PATH: &str = "/api/projects/@current/messaging/send/email/";
+const UPLOADS_PATH: &str = "/api/projects/@current/messaging/attachments/uploads/";
 const STATUS_PATH: &str = "/api/projects/@current/messaging/emails/";
 const US_APP_HOST: &str = "https://us.posthog.com";
 const EU_APP_HOST: &str = "https://eu.posthog.com";
@@ -30,6 +34,13 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 pub(crate) const MAX_REPLY_BYTES: usize = 1 << 20;
 const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
 const MAX_TEMPLATE_KEY_LEN: usize = 400;
+const MAX_ATTACHMENTS: usize = 10;
+const MAX_MESSAGE_BYTES: u64 = 40_000_000;
+const HEADERS_AND_MIME_BOUNDARIES_BYTES: u64 = 64 * 1024;
+/// The slowest upload the client waits for: 1 Mbit/s on top of the email
+/// timeout, so the largest file gets about four minutes.
+const MIN_UPLOAD_BYTES_PER_SECOND: u64 = 128 * 1024;
+const UPLOAD_FAILED: &str = "attachment_upload_failed";
 
 pub(crate) const SEND_NOT_DONE: &str = "no email was sent";
 pub(crate) const GET_NOT_DONE: &str = "no email status was read";
@@ -41,6 +52,7 @@ pub(crate) const GET_KEY_NEEDED: &str = "Reading an email status needs secret_ke
 #[derive(Debug)]
 pub(crate) struct PreparedSend {
     pub(crate) body: Vec<u8>,
+    pub(crate) attachments: Vec<EmailAttachment>,
     pub(crate) idempotency_key: String,
     pub(crate) max_retries: Option<u32>,
 }
@@ -99,16 +111,17 @@ pub(crate) fn reply_from_body(
 }
 
 pub(crate) fn prepare_send(email: SendEmail) -> Result<PreparedSend, EmailError> {
-    let (to, mut body, options) = match email {
+    let (to, mut body, options, attachments) = match email {
         SendEmail::Template(email) => {
             check_recipient(&email.to, &email.options)?;
             let body = template_body(&email)?;
-            (email.to, body, email.options)
+            (email.to, body, email.options, Vec::new())
         }
         SendEmail::Code(email) => {
             check_recipient(&email.to, &email.options)?;
+            check_attachments(&email)?;
             let body = code_body(&email)?;
-            (email.to, body, email.options)
+            (email.to, body, email.options, email.attachments)
         }
     };
     if let Some(distinct_id) = options.distinct_id {
@@ -128,6 +141,7 @@ pub(crate) fn prepare_send(email: SendEmail) -> Result<PreparedSend, EmailError>
     })?;
     Ok(PreparedSend {
         body,
+        attachments,
         idempotency_key,
         max_retries: options.max_retries,
     })
@@ -165,6 +179,53 @@ fn invalid_idempotency_key() -> EmailError {
         "idempotency_key must be 1 to 255 visible ASCII characters without spaces.",
         "idempotency_key",
     )
+}
+
+fn check_attachments(email: &CodeEmail) -> Result<(), EmailError> {
+    let count = email.attachments.len();
+    if count > MAX_ATTACHMENTS {
+        return Err(EmailError::invalid(
+            "too_many_attachments",
+            format!("An email carries at most {MAX_ATTACHMENTS} files, and this one has {count}, so no email was sent."),
+            "attachments",
+        )
+        .with_details(
+            None,
+            Some(format!("Attach at most {MAX_ATTACHMENTS} files, and link to any others from the email body.")),
+            None,
+        ));
+    }
+    let message_bytes = estimated_message_bytes(email);
+    if count > 0 && message_bytes > MAX_MESSAGE_BYTES {
+        return Err(EmailError::invalid(
+            "message_too_large",
+            format!("The email would be about {message_bytes} bytes after Base64 encoding, over the limit of 40 MB, so no email was sent."),
+            "attachments",
+        )
+        .with_details(
+            None,
+            Some("Attach fewer or smaller files, about 29 MB in total at most, or link to large files from the email body.".into()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// The size of the email as the email provider counts it, the way PostHog
+/// estimates it: each file and body in Base64 with line breaks, plus room for
+/// the headers and MIME boundaries.
+fn estimated_message_bytes(email: &CodeEmail) -> u64 {
+    let files = email.attachments.iter().map(|file| file.content.len());
+    let bodies = email.html.iter().chain(&email.text).map(String::len);
+    files
+        .chain(bodies)
+        .map(|size| base64_transfer_bytes(size as u64))
+        .sum::<u64>()
+        + HEADERS_AND_MIME_BOUNDARIES_BYTES
+}
+
+fn base64_transfer_bytes(size: u64) -> u64 {
+    (size.div_ceil(3) * 4 * 78).div_ceil(76)
 }
 
 fn template_body(email: &TemplateEmail) -> Result<Map<String, Value>, EmailError> {
@@ -238,14 +299,181 @@ fn code_body(email: &CodeEmail) -> Result<Map<String, Value>, EmailError> {
         }
     }
     if !email.attachments.is_empty() {
-        let attachments = email.attachments.iter().map(EmailAttachment::to_json);
-        body.insert("attachments".into(), Value::Array(attachments.collect()));
+        let references = email
+            .attachments
+            .iter()
+            .map(EmailAttachment::to_reference_json);
+        body.insert("attachments".into(), Value::Array(references.collect()));
     }
     body.insert(
         "capture_engagement".into(),
         Value::Bool(email.capture_engagement),
     );
     Ok(body)
+}
+
+/// The request that asks PostHog which files to upload, and where.
+pub(crate) struct UploadsRequest {
+    pub(crate) url: String,
+    pub(crate) headers: HeaderMap,
+    pub(crate) body: Vec<u8>,
+}
+
+pub(crate) fn uploads_request(
+    connection: &Connection,
+    attachments: &[EmailAttachment],
+) -> Result<UploadsRequest, EmailError> {
+    let mut headers = connection.headers(None)?;
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let files: Vec<Value> = attachments
+        .iter()
+        .map(EmailAttachment::to_upload_json)
+        .collect();
+    Ok(UploadsRequest {
+        url: format!("{}{UPLOADS_PATH}", connection.app_host),
+        headers,
+        body: json!({ "files": files }).to_string().into_bytes(),
+    })
+}
+
+/// One file to PUT to the file store, as PostHog signed it.
+#[derive(Debug)]
+pub(crate) struct Upload {
+    index: usize,
+    filename: String,
+    pub(crate) method: Method,
+    pub(crate) url: String,
+    pub(crate) headers: HeaderMap,
+    pub(crate) content: Bytes,
+    pub(crate) timeout: Duration,
+}
+
+impl Upload {
+    /// The file store's answer, or the error that stops the send. A refusal
+    /// keeps the store's status, so a `503` is retried like PostHog's.
+    pub(crate) fn check_reply(
+        &self,
+        status: u16,
+        retry_after: Option<Duration>,
+        body: Option<Vec<u8>>,
+    ) -> Result<(), EmailError> {
+        if is_success(status) {
+            return Ok(());
+        }
+        let body = body.map(|body| String::from_utf8_lossy(&body).into_owned());
+        let answer = match body
+            .as_deref()
+            .map(|body| (xml_text(body, "Code"), xml_text(body, "Message")))
+        {
+            Some((Some(code), Some(message))) => format!("{code}: {message}"),
+            Some((Some(code), None)) => code.to_string(),
+            _ => format!("HTTP {status}"),
+        };
+        Err(EmailError::from_response(
+            status,
+            Some(UPLOAD_FAILED.into()),
+            Some(format!(
+                "The file store refused the upload of {}, so no email was sent.",
+                self.filename
+            )),
+            retry_after,
+        )
+        .with_field(Some(self.field()))
+        .with_details(
+            Some(format!("The file store answered {answer}")),
+            Some("Send the email again. Each send asks PostHog for new upload URLs.".into()),
+            None,
+        ))
+    }
+
+    /// A PUT that got no answer from the file store.
+    pub(crate) fn request_error(&self, error: reqwest::Error) -> EmailError {
+        EmailError::new(
+            "network_error",
+            format!(
+                "The upload of {} to the file store failed, so no email was sent.",
+                self.filename
+            ),
+        )
+        .with_field(Some(self.field()))
+        .with_source(error)
+    }
+
+    fn field(&self) -> String {
+        format!("attachments__{}", self.index)
+    }
+}
+
+fn xml_text<'a>(body: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let start = body.find(&open)? + open.len();
+    let end = start + body[start..].find(&format!("</{tag}>"))?;
+    Some(body[start..end].trim()).filter(|text| !text.is_empty())
+}
+
+/// The files PostHog answered `upload` for, each once, in the send's order.
+pub(crate) fn uploads_to_make(
+    reply: Accepted,
+    attachments: &[EmailAttachment],
+    timeout: Duration,
+) -> Result<Vec<Upload>, EmailError> {
+    let Accepted { status, fields } = reply;
+    let malformed = || {
+        EmailError::from_response(
+            status,
+            None,
+            Some("PostHog answered the upload request without an answer for each file, so no email was sent.".into()),
+            None,
+        )
+    };
+    let slots = match fields.get("files") {
+        Some(Value::Array(slots)) if slots.len() == attachments.len() => slots,
+        _ => return Err(malformed()),
+    };
+    let mut uploading = HashSet::new();
+    let mut uploads = Vec::new();
+    for (index, (slot, attachment)) in slots.iter().zip(attachments).enumerate() {
+        let slot = slot.as_object().ok_or_else(malformed)?;
+        if text(slot, "sha256").as_deref() != Some(attachment.sha256.as_str()) {
+            return Err(malformed());
+        }
+        match text(slot, "status").as_deref() {
+            Some("present") => {}
+            Some("upload") if !uploading.insert(&attachment.sha256) => {}
+            Some("upload") => {
+                let upload = upload(index, attachment, slot, timeout).ok_or_else(malformed)?;
+                uploads.push(upload);
+            }
+            _ => return Err(malformed()),
+        }
+    }
+    Ok(uploads)
+}
+
+fn upload(
+    index: usize,
+    attachment: &EmailAttachment,
+    slot: &Map<String, Value>,
+    timeout: Duration,
+) -> Option<Upload> {
+    let method = Method::from_bytes(text(slot, "method")?.as_bytes()).ok()?;
+    let mut headers = HeaderMap::new();
+    for (name, value) in slot.get("headers")?.as_object()? {
+        headers.insert(
+            HeaderName::from_bytes(name.as_bytes()).ok()?,
+            HeaderValue::from_str(value.as_str()?).ok()?,
+        );
+    }
+    let size = attachment.content.len() as u64;
+    Some(Upload {
+        index,
+        filename: attachment.filename.clone(),
+        method,
+        url: text(slot, "url")?,
+        headers,
+        content: attachment.content.clone(),
+        timeout: timeout + Duration::from_secs(size / MIN_UPLOAD_BYTES_PER_SECOND),
+    })
 }
 
 /// The status read's path for a message ID, or an argument error.

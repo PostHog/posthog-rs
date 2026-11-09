@@ -25,6 +25,8 @@ backtrace = { version = "0.3.74", optional = true }
 findshlibs = { version = "0.10", optional = true }
 os_info = "3.14"
 sha1 = ">=0.10.7, <0.12"
+sha2 = "0.10"
+bytes = "1"
 regex = "1.10"
 tracing = "0.1"
 http = { version = "1", optional = true }
@@ -44,7 +46,7 @@ rmcp = { version = "3.7", default-features = false, features = [
 ], optional = true }
 url = { version = "2.5", optional = true }
 fancy-regex = { version = "0.19", optional = true }
-base64 = "0.22"
+base64 = { version = "0.22", optional = true }
 futures-util = { version = "0.3", default-features = false, features = [
     "std",
 ], optional = true }
@@ -86,6 +88,7 @@ mcp = [
     "dep:http",
     "dep:url",
     "dep:fancy-regex",
+    "dep:base64",
     "dep:futures-util",
 ]
 

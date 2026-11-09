@@ -14,10 +14,12 @@ use httpmock::{HttpMockRequest, HttpMockResponse, MockServer};
 pub const TEMPLATE_ID: &str = "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b";
 pub const MESSAGE_ID: &str = "01a18356-c56c-0001-e494-7666bc915188";
 pub const SEND_PATH: &str = "/api/projects/@current/messaging/send/email/";
+pub const UPLOADS_PATH: &str = "/api/projects/@current/messaging/attachments/uploads/";
 
 #[derive(Debug, Clone)]
 pub struct Answer {
     status: u16,
+    content_type: &'static str,
     body: String,
     headers: Vec<(String, String)>,
 }
@@ -26,6 +28,17 @@ impl Answer {
     pub fn json(status: u16, body: serde_json::Value) -> Self {
         Self {
             status,
+            content_type: "application/json",
+            body: body.to_string(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// An answer as an S3-compatible bucket gives it.
+    pub fn xml(status: u16, body: &str) -> Self {
+        Self {
+            status,
+            content_type: "application/xml",
             body: body.to_string(),
             headers: Vec::new(),
         }
@@ -131,7 +144,7 @@ fn script(answers: Vec<Answer>) -> (Arc<Mutex<Vec<Recorded>>>, Responder) {
         let answer = &answers[index.min(answers.len() - 1)];
         let mut response = HttpMockResponse::builder()
             .status(answer.status)
-            .header("content-type", "application/json");
+            .header("content-type", answer.content_type);
         for (name, value) in &answer.headers {
             response = response.header(name.as_str(), value.as_str());
         }

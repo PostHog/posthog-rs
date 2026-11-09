@@ -9,6 +9,7 @@ use std::time::Duration;
 use common::default_user_agent;
 use email_support::{
     accepted, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    UPLOADS_PATH,
 };
 use posthog_rs::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
 use serde_json::json;
@@ -80,38 +81,85 @@ fn code_send_posts_the_rendered_content() {
     );
 }
 
+const PDF_SHA256: &str = "ccac55e87ec85819f85630feb88522f771cf4d4fc3a40b7f97fd124a128dfcb7";
+const PDF: [u8; 7] = [0x25, 0x50, 0x44, 0x46, 0x00, 0x9f, 0xff];
+
+fn invoice_upload(bucket: &ScriptedServer) -> Answer {
+    Answer::json(
+        200,
+        json!({"files": [{
+            "sha256": PDF_SHA256,
+            "status": "upload",
+            "url": format!("{}/bucket/team/2/{PDF_SHA256}?X-Amz-Signature=signed", bucket.url),
+            "method": "PUT",
+            "headers": {"content-length": "7", "x-amz-checksum-sha256": "signed-checksum"},
+            "url_expires_at": "2026-11-09T12:15:00Z",
+        }]}),
+    )
+}
+
+fn invoice() -> CodeEmail {
+    CodeEmail::new("user@example.com", "invoice", "Your invoice")
+        .text("Attached.")
+        .cc("finance@example.com")
+        .bcc("audit@example.com")
+        .attachment(EmailAttachment::new("invoice.pdf", PDF))
+}
+
 #[test]
-fn code_send_carries_copies_and_attachments() {
-    let server = ScriptedServer::start(vec![accepted()]);
+fn code_send_uploads_the_file_then_sends_its_hash() {
+    let bucket = ScriptedServer::start(vec![Answer::xml(200, "")]);
+    let server = ScriptedServer::start(vec![invoice_upload(&bucket), accepted()]);
     let client = client_for(&server);
 
-    client
-        .emails()
-        .send(
-            CodeEmail::new("user@example.com", "invoice", "Your invoice")
-                .text("Attached.")
-                .cc("finance@example.com")
-                .bcc("audit@example.com")
-                .attachment(EmailAttachment::new(
-                    "invoice.pdf",
-                    [0x25, 0x50, 0x44, 0x46, 0x00, 0x9f, 0xff],
-                )),
-        )
-        .unwrap();
+    client.emails().send(invoice()).unwrap();
 
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, UPLOADS_PATH);
     assert_eq!(
-        server.requests()[0].json(),
+        requests[0].json(),
+        json!({"files": [{"sha256": PDF_SHA256, "size": 7}]})
+    );
+    let put = &bucket.requests()[0];
+    assert_eq!(put.method, "PUT");
+    assert_eq!(put.body, PDF);
+    assert_eq!(put.header("x-amz-checksum-sha256"), Some("signed-checksum"));
+    assert_eq!(put.header("authorization"), None);
+    assert_eq!(
+        requests[1].json(),
         json!({
             "template_key": "invoice",
             "subject": "Your invoice",
             "text": "Attached.",
             "cc": ["finance@example.com"],
             "bcc": ["audit@example.com"],
-            "attachments": [{"filename": "invoice.pdf", "content": "JVBERgCf/w=="}],
+            "attachments": [{"sha256": PDF_SHA256, "filename": "invoice.pdf"}],
             "capture_engagement": true,
             "to": "user@example.com",
         })
     );
+}
+
+#[test]
+fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
+    let bucket = ScriptedServer::start(vec![Answer::xml(
+        403,
+        "<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>",
+    )]);
+    let server = ScriptedServer::start(vec![invoice_upload(&bucket)]);
+    let client = client_for(&server);
+
+    let error = client.emails().send(invoice()).unwrap_err();
+
+    assert_eq!(error.code(), "attachment_upload_failed");
+    assert_eq!(error.status(), Some(403));
+    assert_eq!(error.kind(), EmailErrorKind::ApplicationError);
+    assert_eq!(
+        error.why(),
+        Some("The file store answered AccessDenied: Request has expired")
+    );
+    assert_eq!(server.requests().len(), 1, "no email is sent");
 }
 
 #[test]

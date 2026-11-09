@@ -1,8 +1,9 @@
 use std::fmt;
 
-use base64::Engine as _;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 /// What every send takes, whatever its form.
 #[derive(Debug, Clone, Default)]
@@ -173,10 +174,10 @@ impl CodeEmail {
         self
     }
 
-    /// Adds a file to the email. Call it again to add more, at most 10
-    /// files and 512 KB of file content in total, counted before Base64
-    /// encoding. PostHog refuses a file type that mailbox providers block,
-    /// such as `.exe`.
+    /// Adds a file to the email. Call it again to add more, at most 10 files
+    /// and 40 MB for the whole email after Base64 encoding, which leaves about
+    /// 29 MB for the files. PostHog refuses a file type that mailbox providers
+    /// block, such as `.exe`.
     pub fn attachment(mut self, attachment: EmailAttachment) -> Self {
         self.attachments.push(attachment);
         self
@@ -223,7 +224,9 @@ impl CodeEmail {
 /// A file sent with a [`CodeEmail`].
 ///
 /// PostHog can't fetch a file from a path or URL: read the file and pass its
-/// bytes. Its `Debug` output never shows the content.
+/// bytes. Before the send, the client uploads each file PostHog doesn't have
+/// yet straight to PostHog's file store, then sends the email naming each file
+/// by its SHA-256. Its `Debug` output never shows the content.
 ///
 /// ```
 /// use posthog_rs::{CodeEmail, EmailAttachment};
@@ -237,26 +240,26 @@ impl CodeEmail {
 /// ```
 #[derive(Clone)]
 pub struct EmailAttachment {
-    filename: String,
-    content_base64: String,
+    pub(crate) filename: String,
+    pub(crate) content: Bytes,
+    pub(crate) sha256: String,
     content_type: Option<String>,
     content_id: Option<String>,
 }
 
 impl EmailAttachment {
     /// A file from its bytes, with the name the recipient sees, such as
-    /// `"invoice.pdf"`. The client encodes the bytes as Base64 here, once.
-    pub fn new(filename: impl Into<String>, content: impl AsRef<[u8]>) -> Self {
-        let content_base64 = base64::engine::general_purpose::STANDARD.encode(content);
-        Self::from_base64(filename, content_base64)
-    }
-
-    /// A file whose content is already standard Base64, without line breaks.
-    /// The client sends it as is.
-    pub fn from_base64(filename: impl Into<String>, content: impl Into<String>) -> Self {
+    /// `"invoice.pdf"`. The client hashes the bytes here, once.
+    pub fn new(filename: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
+        let content = Bytes::from(content.into());
+        let sha256 = Sha256::digest(&content)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         Self {
             filename: filename.into(),
-            content_base64: content.into(),
+            content,
+            sha256,
             content_type: None,
             content_id: None,
         }
@@ -276,19 +279,21 @@ impl EmailAttachment {
         self
     }
 
-    /// The attachment as the send request carries it.
-    pub(crate) fn to_json(&self) -> Value {
-        let mut attachment = json!({
-            "filename": self.filename,
-            "content": self.content_base64,
-        });
+    /// The file as the upload request names it.
+    pub(crate) fn to_upload_json(&self) -> Value {
+        json!({"sha256": self.sha256, "size": self.content.len()})
+    }
+
+    /// The file as the send request references it.
+    pub(crate) fn to_reference_json(&self) -> Value {
+        let mut reference = json!({"sha256": self.sha256, "filename": self.filename});
         if let Some(content_type) = &self.content_type {
-            attachment["content_type"] = json!(content_type);
+            reference["content_type"] = json!(content_type);
         }
         if let Some(content_id) = &self.content_id {
-            attachment["content_id"] = json!(content_id);
+            reference["content_id"] = json!(content_id);
         }
-        attachment
+        reference
     }
 }
 
@@ -296,10 +301,8 @@ impl fmt::Debug for EmailAttachment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EmailAttachment")
             .field("filename", &self.filename)
-            .field(
-                "content",
-                &format_args!("<{} Base64 characters>", self.content_base64.len()),
-            )
+            .field("content", &format_args!("<{} bytes>", self.content.len()))
+            .field("sha256", &self.sha256)
             .field("content_type", &self.content_type)
             .field("content_id", &self.content_id)
             .finish()

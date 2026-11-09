@@ -396,8 +396,7 @@ pub struct posthog_rs::EmailAttachment
 impl posthog_rs::EmailAttachment
 pub fn posthog_rs::EmailAttachment::content_id(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::EmailAttachment::content_type(self, impl core::convert::Into<alloc::string::String>) -> Self
-pub fn posthog_rs::EmailAttachment::from_base64(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
-pub fn posthog_rs::EmailAttachment::new(impl core::convert::Into<alloc::string::String>, impl core::convert::AsRef<[u8]>) -> Self
+pub fn posthog_rs::EmailAttachment::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::vec::Vec<u8>>) -> Self
 impl core::fmt::Debug for posthog_rs::EmailAttachment
 pub fn posthog_rs::EmailAttachment::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct posthog_rs::EmailError(_)

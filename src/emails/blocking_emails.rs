@@ -5,8 +5,8 @@ use reqwest::header::HeaderMap;
 use reqwest::Method;
 
 use super::error::EmailError;
-use super::shared::{self, Accepted, EmailTracker, Reply};
-use super::types::{EmailStatus, SendEmail, SendEmailResult};
+use super::shared::{self, Accepted, EmailTracker, Reply, Upload};
+use super::types::{EmailAttachment, EmailStatus, SendEmail, SendEmailResult};
 use crate::client::{parse_retry_after, ClientOptions};
 
 #[doc = include_str!("guide.md")]
@@ -37,10 +37,15 @@ impl<'a> Emails<'a> {
     /// flight and an unavailable service are retried with the same idempotency
     /// key.
     ///
+    /// A [`CodeEmail`](crate::CodeEmail) with attachments first asks PostHog
+    /// which files it lacks, uploads those straight to PostHog's file store,
+    /// then sends the email naming each file by its SHA-256.
+    ///
     /// # Errors
     ///
     /// Returns an [`EmailError`] when an argument check fails, the client is
-    /// disabled, shut down or has no `secret_key`, or PostHog did not queue the
+    /// disabled, shut down or has no `secret_key`, the file store refused an
+    /// upload (`attachment_upload_failed`), or PostHog did not queue the
     /// email.
     ///
     /// # Examples
@@ -86,9 +91,12 @@ impl<'a> Emails<'a> {
             .tracker
             .admit(self.options.is_disabled(), shared::SEND_NOT_DONE)?;
         let connection = shared::connect(self.options, shared::SEND_KEY_NEEDED)?;
+        let max_retries = prepared.max_retries.unwrap_or(connection.max_retries);
+        if !prepared.attachments.is_empty() {
+            self.upload(&prepared.attachments, &connection, max_retries)?;
+        }
         let headers = connection.headers(Some(&prepared.idempotency_key))?;
         let url = format!("{}{}", connection.app_host, shared::SEND_PATH);
-        let max_retries = prepared.max_retries.unwrap_or(connection.max_retries);
         let reply = self.request(
             Method::POST,
             &url,
@@ -131,6 +139,28 @@ impl<'a> Emails<'a> {
         shared::parse_status_reply(reply)
     }
 
+    /// Uploads each file PostHog lacks, so the send can name it by its hash.
+    fn upload(
+        &self,
+        attachments: &[EmailAttachment],
+        connection: &shared::Connection,
+        max_retries: u32,
+    ) -> Result<(), EmailError> {
+        let request = shared::uploads_request(connection, attachments)?;
+        let reply = self.request(
+            Method::POST,
+            &request.url,
+            &request.headers,
+            Some(&request.body),
+            connection,
+            max_retries,
+        )?;
+        for upload in shared::uploads_to_make(reply, attachments, connection.timeout)? {
+            retrying(max_retries, || self.put(&upload))?;
+        }
+        Ok(())
+    }
+
     /// Sends the request until PostHog answers `2xx`, retrying what
     /// [`shared::retry_delay`] allows. Every attempt sends the same headers, so
     /// a send keeps its idempotency key.
@@ -143,21 +173,10 @@ impl<'a> Emails<'a> {
         connection: &shared::Connection,
         max_retries: u32,
     ) -> Result<Accepted, EmailError> {
-        let mut attempt = 0;
-        loop {
-            let error = match self
-                .attempt(method.clone(), url, headers, body, connection)
+        retrying(max_retries, || {
+            self.attempt(method.clone(), url, headers, body, connection)
                 .and_then(shared::accept)
-            {
-                Ok(reply) => return Ok(reply),
-                Err(error) => error,
-            };
-            let Some(delay) = shared::retry_delay(&error, attempt, max_retries) else {
-                return Err(error);
-            };
-            std::thread::sleep(delay);
-            attempt += 1;
-        }
+        })
     }
 
     fn attempt(
@@ -168,13 +187,8 @@ impl<'a> Emails<'a> {
         body: Option<&[u8]>,
         connection: &shared::Connection,
     ) -> Result<Reply, EmailError> {
-        let http = self.http.ok_or_else(|| {
-            EmailError::new(
-                "client_disabled",
-                "The PostHog client has no HTTP client, so it is disabled.",
-            )
-        })?;
-        let mut request = http
+        let mut request = self
+            .http()?
             .request(method, url)
             .timeout(connection.timeout)
             .headers(headers.clone());
@@ -185,6 +199,51 @@ impl<'a> Emails<'a> {
         let status = response.status().as_u16();
         let retry_after = parse_retry_after(response.headers());
         shared::reply_from_body(status, retry_after, read_capped(response))
+    }
+
+    /// PUTs one file with only the headers PostHog signed, never the secret
+    /// key.
+    fn put(&self, upload: &Upload) -> Result<(), EmailError> {
+        let response = self
+            .http()?
+            .request(upload.method.clone(), &upload.url)
+            .timeout(upload.timeout)
+            .headers(upload.headers.clone())
+            .body(upload.content.clone())
+            .send()
+            .map_err(|error| upload.request_error(error))?;
+        let status = response.status().as_u16();
+        let retry_after = parse_retry_after(response.headers());
+        upload.check_reply(status, retry_after, read_capped(response).ok())
+    }
+
+    fn http(&self) -> Result<&'a HttpClient, EmailError> {
+        self.http.ok_or_else(|| {
+            EmailError::new(
+                "client_disabled",
+                "The PostHog client has no HTTP client, so it is disabled.",
+            )
+        })
+    }
+}
+
+/// Runs `attempt` until it succeeds, retrying what [`shared::retry_delay`]
+/// allows.
+fn retrying<T>(
+    max_retries: u32,
+    mut attempt: impl FnMut() -> Result<T, EmailError>,
+) -> Result<T, EmailError> {
+    let mut attempts = 0;
+    loop {
+        let error = match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let Some(delay) = shared::retry_delay(&error, attempts, max_retries) else {
+            return Err(error);
+        };
+        std::thread::sleep(delay);
+        attempts += 1;
     }
 }
 

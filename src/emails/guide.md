@@ -26,13 +26,21 @@ with [`Emails::get`].
 A [`CodeEmail`](crate::CodeEmail) takes `cc`, `bcc` and files: add each
 with [`cc`](crate::CodeEmail::cc), [`bcc`](crate::CodeEmail::bcc) and
 [`attachment`](crate::CodeEmail::attachment). PostHog takes at most 10
-addresses in each of `cc` and `bcc`, and at most 10 files with 512 KB of
-file content in total, counted before Base64 encoding.
+addresses in each of `cc` and `bcc`. An email carries at most 10 files and
+40 MB after Base64 encoding, which leaves about 29 MB for the files. The
+client checks both before it sends anything, and refuses the send with
+`too_many_attachments` or `message_too_large`.
 A template made in PostHog sets its own recipients and content, so a
-[`TemplateEmail`](crate::TemplateEmail) takes none of them. A PostHog
-version that doesn't take one of these fields yet refuses the send with a
-`validation_error` whose [`field`](crate::EmailError::field) names it, and
-never sends the email without it.
+[`TemplateEmail`](crate::TemplateEmail) takes none of them.
+
+The client sends files in two steps. It asks PostHog which files it lacks,
+naming each by its SHA-256 and size, and uploads those straight to
+PostHog's file store, without your secret key. A file this project sent
+before isn't uploaded again. Once every upload succeeded, it sends the email
+naming each file by its SHA-256. If the file store refuses an upload, the
+send fails with `attachment_upload_failed` and the store's answer in
+[`why`](crate::EmailError::why), and no email is sent. Allow your app to
+reach the file store's host as well as your PostHog app host.
 
 # Timeouts and retries
 
