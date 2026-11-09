@@ -51,7 +51,8 @@ default. A request retries network errors, rate limits, a send still in
 flight and an unavailable service `email_request_max_retries` times, 2 by
 default, after about 1 and then 2 seconds, or after the server's
 `Retry-After` when that is longer. A `Retry-After` over 30 seconds fails at
-once. An upload gets one more second for each 128 KiB of its file, so a
+once. An upload also retries the file store's `500`, `502` and `504`. An
+upload gets one more second for each 128 KiB of its file, so a
 29 MB file has about 4 minutes. Every attempt of a send carries the same
 idempotency key, so a retry never sends twice. When a job runner already retries the send, set
 `max_retries(0)` on it and pass an idempotency key that names the email.

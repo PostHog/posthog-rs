@@ -290,35 +290,42 @@ async fn the_same_file_attached_twice_is_uploaded_once() {
 }
 
 #[tokio::test]
-async fn an_unavailable_file_store_is_retried_before_the_send() {
-    let bucket = ScriptedServer::start_async(vec![
-        Answer::xml(
-            503,
-            "<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>",
-        ),
-        Answer::xml(200, ""),
-    ])
-    .await;
-    let server = ScriptedServer::start_async(vec![
-        Answer::json(
-            200,
-            json!({"files": [upload_slot(&bucket, PDF_SHA256, PDF.len()), present_slot(PNG_SHA256)]}),
-        ),
-        accepted(),
-    ])
-    .await;
-    let client = client_for(&server).await;
+async fn a_file_store_server_error_is_retried_before_the_send() {
+    for (status, code) in [
+        (500, "InternalError"),
+        (502, "BadGateway"),
+        (503, "SlowDown"),
+        (504, "GatewayTimeout"),
+    ] {
+        let bucket = ScriptedServer::start_async(vec![
+            Answer::xml(
+                status,
+                &format!("<Error><Code>{code}</Code><Message>Try again.</Message></Error>"),
+            ),
+            Answer::xml(200, ""),
+        ])
+        .await;
+        let server = ScriptedServer::start_async(vec![
+            Answer::json(
+                200,
+                json!({"files": [upload_slot(&bucket, PDF_SHA256, PDF.len()), present_slot(PNG_SHA256)]}),
+            ),
+            accepted(),
+        ])
+        .await;
+        let client = client_for(&server).await;
 
-    client
-        .emails()
-        .send(invoice_with_copies_and_files().max_retries(1))
-        .await
-        .unwrap();
+        client
+            .emails()
+            .send(invoice_with_copies_and_files().max_retries(1))
+            .await
+            .unwrap_or_else(|error| panic!("{}: {}", status, error));
 
-    let puts = bucket.requests();
-    assert_eq!(puts.len(), 2);
-    assert_eq!(puts[1].body, PDF);
-    assert_eq!(server.requests().len(), 2, "one upload request, one send");
+        let puts = bucket.requests();
+        assert_eq!(puts.len(), 2, "{status}");
+        assert_eq!(puts[1].body, PDF);
+        assert_eq!(server.requests().len(), 2, "one upload request, one send");
+    }
 }
 
 #[tokio::test]

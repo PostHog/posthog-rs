@@ -736,6 +736,9 @@ fn is_retryable(error: &EmailError) -> bool {
         None => error.is_network_error(),
         Some(409) => error.code() == "idempotency_key_in_flight",
         Some(429) => error.kind() != EmailErrorKind::MonthlyQuotaExceeded,
+        // A file store's 500, 502 and 504 are transient too, and a PUT of the
+        // same bytes is safe to repeat.
+        Some(500 | 502 | 504) => error.code() == UPLOAD_FAILED,
         Some(status) => status == 503,
     }
 }
@@ -1232,6 +1235,8 @@ mod tests {
             None
         );
         assert_eq!(retry_delay(&answered(500, "api_error", None), 0, 2), None);
+        assert!(retry_delay(&answered(500, UPLOAD_FAILED, None), 0, 2).is_some());
+        assert_eq!(retry_delay(&answered(400, UPLOAD_FAILED, None), 0, 2), None);
         assert_eq!(
             retry_delay(&answered(400, "invalid_input", None), 0, 2),
             None

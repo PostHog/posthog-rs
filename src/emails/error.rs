@@ -29,7 +29,8 @@ pub enum EmailErrorKind {
     RateLimitExceeded,
     /// PostHog answered `429` with `quota_limited`: the monthly quota is spent.
     MonthlyQuotaExceeded,
-    /// PostHog answered `503`, or the request failed on the network.
+    /// PostHog answered `503`, the file store answered `500`, `502`, `503` or
+    /// `504` to an upload, or the request failed on the network.
     ServiceUnavailable,
     /// Anything else.
     ApplicationError,
@@ -56,7 +57,7 @@ impl EmailErrorKind {
     pub(crate) fn of(status: Option<u16>, code: &str) -> Self {
         if code == "attachment_upload_failed" {
             return match status {
-                Some(503) => EmailErrorKind::ServiceUnavailable,
+                Some(500 | 502 | 503 | 504) => EmailErrorKind::ServiceUnavailable,
                 _ => EmailErrorKind::ApplicationError,
             };
         }
@@ -320,6 +321,11 @@ mod tests {
             ),
             (
                 Some(503),
+                "attachment_upload_failed",
+                Kind::ServiceUnavailable,
+            ),
+            (
+                Some(500),
                 "attachment_upload_failed",
                 Kind::ServiceUnavailable,
             ),
