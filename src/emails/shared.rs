@@ -386,9 +386,9 @@ impl Upload {
         ))
     }
 
-    /// A PUT that got no answer from the file store.
-    /// The upload's network error. It drops the URL from the source, because a
-    /// presigned URL's query signs the upload.
+    /// A PUT that got no answer from the file store, or couldn't be built. It
+    /// drops the URL from the source, because a presigned URL's query signs the
+    /// upload.
     pub(crate) fn request_error(&self, error: reqwest::Error) -> EmailError {
         let (code, failed) = if error.is_builder() {
             ("unexpected_error", "could not be built")

@@ -330,12 +330,10 @@ async fn a_file_store_server_error_is_retried_before_the_send() {
 
 #[tokio::test]
 async fn a_failed_upload_never_shows_the_signed_url() {
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let unreachable = format!(
-        "http://{}/bucket/{PDF_SHA256}?X-Amz-Signature=secret-signature",
-        closed.local_addr().unwrap()
+        "{}/bucket/{PDF_SHA256}?X-Amz-Signature=secret-signature",
+        closed_url()
     );
-    drop(closed);
     for (url, code) in [
         (unreachable.as_str(), "network_error"),
         (
