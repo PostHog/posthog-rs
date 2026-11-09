@@ -90,7 +90,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
                 .from("Acme <security@example.com>")
                 .reply_to("help@example.com")
                 .capture_engagement(false)
-                .track_opens_and_clicks(false)
+                .track_opens_and_clicks(true)
                 .distinct_id("user_123")
                 .idempotency_key("password-reset:user_123"),
         )
@@ -109,7 +109,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
             "from": "Acme <security@example.com>",
             "reply_to": ["help@example.com"],
             "capture_engagement": false,
-            "track_opens_and_clicks": false,
+            "track_opens_and_clicks": true,
             "distinct_id": "user_123",
             "to": "user@example.com",
         })

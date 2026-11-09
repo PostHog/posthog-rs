@@ -694,7 +694,7 @@ mod tests {
                 .text("Hi")
                 .reply_to("a@example.com")
                 .reply_to("b@example.com")
-                .track_opens_and_clicks(true)
+                .track_opens_and_clicks(false)
                 .into(),
         )
         .unwrap();
@@ -706,7 +706,7 @@ mod tests {
                 "text": "Hi",
                 "reply_to": ["a@example.com", "b@example.com"],
                 "capture_engagement": true,
-                "track_opens_and_clicks": true,
+                "track_opens_and_clicks": false,
                 "to": "user@example.com",
             })
         );
