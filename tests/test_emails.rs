@@ -256,6 +256,121 @@ async fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
 }
 
 #[tokio::test]
+async fn the_same_file_attached_twice_is_uploaded_once() {
+    let bucket = ScriptedServer::start_async(vec![Answer::xml(200, "")]).await;
+    let slot = upload_slot(&bucket, PDF_SHA256, PDF.len());
+    let server = ScriptedServer::start_async(vec![
+        Answer::json(200, json!({"files": [slot.clone(), slot]})),
+        accepted(),
+    ])
+    .await;
+    let client = client_for(&server).await;
+
+    client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "invoice", "Your invoices")
+                .html("<p>Two copies</p>")
+                .attachment(EmailAttachment::new("invoice.pdf", PDF))
+                .attachment(EmailAttachment::new("copy.pdf", PDF)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(bucket.requests().len(), 1);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].json()["attachments"],
+        json!([
+            {"sha256": PDF_SHA256, "filename": "invoice.pdf"},
+            {"sha256": PDF_SHA256, "filename": "copy.pdf"},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn an_unavailable_file_store_is_retried_before_the_send() {
+    let bucket = ScriptedServer::start_async(vec![
+        Answer::xml(
+            503,
+            "<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>",
+        ),
+        Answer::xml(200, ""),
+    ])
+    .await;
+    let server = ScriptedServer::start_async(vec![
+        Answer::json(
+            200,
+            json!({"files": [upload_slot(&bucket, PDF_SHA256, PDF.len()), present_slot(PNG_SHA256)]}),
+        ),
+        accepted(),
+    ])
+    .await;
+    let client = client_for(&server).await;
+
+    client
+        .emails()
+        .send(invoice_with_copies_and_files().max_retries(1))
+        .await
+        .unwrap();
+
+    let puts = bucket.requests();
+    assert_eq!(puts.len(), 2);
+    assert_eq!(puts[1].body, PDF);
+    assert_eq!(server.requests().len(), 2, "one upload request, one send");
+}
+
+#[tokio::test]
+async fn a_failed_upload_never_shows_the_signed_url() {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let unreachable = format!(
+        "http://{}/bucket/{PDF_SHA256}?X-Amz-Signature=secret-signature",
+        closed.local_addr().unwrap()
+    );
+    drop(closed);
+    for (url, code) in [
+        (unreachable.as_str(), "network_error"),
+        (
+            "no-scheme?X-Amz-Signature=secret-signature",
+            "unexpected_error",
+        ),
+    ] {
+        let slot = json!({
+            "sha256": PDF_SHA256,
+            "status": "upload",
+            "url": url,
+            "method": "PUT",
+            "headers": {"content-length": "7"},
+            "url_expires_at": "2026-11-09T12:15:00Z",
+        });
+        let server = ScriptedServer::start_async(vec![Answer::json(
+            200,
+            json!({"files": [slot, present_slot(PNG_SHA256)]}),
+        )])
+        .await;
+        let client = client_for(&server).await;
+
+        let error = client
+            .emails()
+            .send(invoice_with_copies_and_files().max_retries(0))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), code);
+        assert_eq!(error.field(), Some("attachments__0"));
+        let mut chain = format!("{error} {error:?}");
+        let mut source = std::error::Error::source(&error);
+        while let Some(cause) = source {
+            chain.push_str(&format!(" {cause} {cause:?}"));
+            source = cause.source();
+        }
+        assert!(!chain.contains("secret-signature"), "{}", chain);
+        assert_eq!(server.requests().len(), 1, "no email is sent");
+    }
+}
+
+#[tokio::test]
 async fn an_upload_request_posthog_refuses_sends_nothing() {
     let server = ScriptedServer::start_async(vec![Answer::json(
         400,

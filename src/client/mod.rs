@@ -146,8 +146,9 @@ pub struct ClientOptions {
     /// see its documentation for the limits of `shutdown_timeout_ms`.
     ///
     /// Only supply clients whose default headers and cookies are safe to send to
-    /// PostHog. Do not share clients carrying credentials for unrelated services;
-    /// the SDK cannot inspect or filter those defaults.
+    /// PostHog and to its file store, which email attachments upload to. Do not
+    /// share clients carrying credentials for unrelated services; the SDK cannot
+    /// inspect or filter those defaults.
     #[cfg(feature = "async-client")]
     #[builder(default, setter(strip_option))]
     http_client: Option<reqwest::Client>,
@@ -167,8 +168,9 @@ pub struct ClientOptions {
     /// It is not a hard limit on the total time spent waiting for the worker.
     ///
     /// Only supply clients whose default headers and cookies are safe to send to
-    /// PostHog. Do not share clients carrying credentials for unrelated services;
-    /// the SDK cannot inspect or filter those defaults.
+    /// PostHog and to its file store, which email attachments upload to. Do not
+    /// share clients carrying credentials for unrelated services; the SDK cannot
+    /// inspect or filter those defaults.
     ///
     /// Create and finally drop application-owned blocking clients, including handles
     /// held in options and builders, outside async runtimes. SDK shutdown does not

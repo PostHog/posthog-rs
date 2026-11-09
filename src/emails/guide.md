@@ -40,7 +40,9 @@ before isn't uploaded again. Once every upload succeeded, it sends the email
 naming each file by its SHA-256. If the file store refuses an upload, the
 send fails with `attachment_upload_failed` and the store's answer in
 [`why`](crate::EmailError::why), and no email is sent. Allow your app to
-reach the file store's host as well as your PostHog app host.
+reach the file store's host as well as your PostHog app host. Uploads use
+the client's HTTP client, so a custom client's default headers reach the
+file store too.
 
 # Timeouts and retries
 
@@ -49,8 +51,9 @@ default. A request retries network errors, rate limits, a send still in
 flight and an unavailable service `email_request_max_retries` times, 2 by
 default, after about 1 and then 2 seconds, or after the server's
 `Retry-After` when that is longer. A `Retry-After` over 30 seconds fails at
-once. Every attempt of a send carries the same idempotency key, so a retry
-never sends twice. When a job runner already retries the send, set
+once. An upload gets one more second for each 128 KiB of its file, so a
+29 MB file has about 4 minutes. Every attempt of a send carries the same
+idempotency key, so a retry never sends twice. When a job runner already retries the send, set
 `max_retries(0)` on it and pass an idempotency key that names the email.
 
 # Moving from another email provider

@@ -387,16 +387,23 @@ impl Upload {
     }
 
     /// A PUT that got no answer from the file store.
+    /// The upload's network error. It drops the URL from the source, because a
+    /// presigned URL's query signs the upload.
     pub(crate) fn request_error(&self, error: reqwest::Error) -> EmailError {
+        let (code, failed) = if error.is_builder() {
+            ("unexpected_error", "could not be built")
+        } else {
+            ("network_error", "failed")
+        };
         EmailError::new(
-            "network_error",
+            code,
             format!(
-                "The upload of {} to the file store failed, so no email was sent.",
+                "The upload of {} to the file store {failed}, so no email was sent.",
                 self.filename
             ),
         )
         .with_field(Some(self.field()))
-        .with_source(error)
+        .with_source(error.without_url())
     }
 
     fn field(&self) -> String {
