@@ -71,6 +71,61 @@ Blocking applications use these explicit helpers; they have no ambient scope.
 This integration adds analytics context to events. It does not add attributes
 to application-owned tracing or OpenTelemetry spans or install a trace provider.
 
+## Transactional email
+
+`client.emails()` sends one email per call from your backend, from an email
+template made transactional in PostHog or from content your code rendered. It
+needs `secret_key` set to a project secret API key (`phs_...`) with the
+`transactional_email:write` scope, which the "Send transactional email" preset
+in your project settings gives. Keys made with `hog_flow:write` still work.
+Requests go to your region's app host, derived from a
+PostHog Cloud `host`. Set `app_host` when `host` is a reverse proxy: the proxy
+must not receive the secret key.
+
+```rust
+use posthog_rs::{ClientOptionsBuilder, CodeEmail, TemplateEmail};
+use serde_json::json;
+
+let options = ClientOptionsBuilder::default()
+    .api_key("phc_project_key".to_string())
+    .secret_key("phs_project_secret_key")
+    .host("https://eu.i.posthog.com")
+    .build()?;
+let posthog = posthog_rs::client(options).await;
+
+// A template made in PostHog, by its ID.
+let sent = posthog
+    .emails()
+    .send(
+        TemplateEmail::new("jane@example.com", "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b")
+            .template_data(json!({ "name": "Jane" }))
+            .distinct_id("user_123")
+            .idempotency_key("welcome:user_123"),
+    )
+    .await?;
+
+// Content your code rendered, named by a key. For a React email, render it
+// to HTML in your app first.
+posthog
+    .emails()
+    .send(
+        CodeEmail::new("jane@example.com", "password-reset", "Reset your password")
+            .html(rendered_html)
+            .distinct_id("user_123"),
+    )
+    .await?;
+
+// What happened to the first email.
+let status = posthog.emails().get(&sent.id).await?;
+```
+
+A result means PostHog queued the email, not that it was delivered. Pass
+`distinct_id` so the email's events go to your user. Every attempt of a send
+carries the same idempotency key, so the client's retries never send twice;
+pass an `idempotency_key` that names the email when your own job runner
+retries too, and set `max_retries(0)` on the send. A failed send returns an
+`EmailError`: branch on `code()`, such as `quota_limited`, or on `kind()`.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and test instructions.
@@ -78,3 +133,45 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and test instructions.
 ## Releasing
 
 See [RELEASING.md](RELEASING.md).
+
+## Application HTTP context
+
+With the `async-client` feature, use `PostHogReqwestClient` to pass the current request's
+analytics IDs to selected application hosts. This is separate from event ingestion.
+
+```rust
+use posthog_rs::{PostHogReqwestClient, RequestContext};
+
+async fn example() -> Result<(), reqwest::Error> {
+    let http = PostHogReqwestClient::new(
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)),
+        ["api.example.com"],
+    )?;
+    let request = http.client().post("https://api.example.com/work")
+        .body("application payload").build()?;
+    let response = RequestContext::new().distinct_id("person").session_id("session")
+        .scope(http.execute(request)).await?;
+    Ok(())
+}
+```
+
+Build requests with `http.client()`, then send them with `http.execute(request)`.
+Calling reqwest's `send` directly does not add context. The helper reads context when
+the execute future runs, so each request uses the active IDs. A spawned task needs
+an explicit `RequestContext::scope` with the context it must carry.
+
+Host entries match exactly after trimming and case normalization. Use hostnames only,
+without schemes, ports, paths, or wildcards. The helper replaces stale PostHog headers
+on matched requests, omits missing or invalid IDs, and leaves other requests unchanged.
+It does not create IDs. Do not set PostHog tracing headers as reqwest client default
+headers: those application-owned defaults can apply to any host.
+
+This opt-in client **disables automatic redirects**, including same-host redirects.
+It returns the original redirect response. This prevents analytics IDs from following
+a redirect to another host. If the application follows a redirect, build a new request
+for the destination and pass it to `execute` to check the host again. Use a separate
+client for automatic redirects. Other builder settings and request fields are retained.
+The helper returns normal HTTP responses and reqwest errors to the caller.
+
+This integration supports asynchronous reqwest 0.13 requests. It does not install a
+global client, change an existing application client, or add OpenTelemetry span support.

@@ -180,6 +180,31 @@ pub fn posthog_rs::ClientOptionsBuilderError::from(derive_builder::error::Uninit
 impl core::error::Error for posthog_rs::ClientOptionsBuilderError
 impl core::fmt::Display for posthog_rs::ClientOptionsBuilderError
 pub fn posthog_rs::ClientOptionsBuilderError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum posthog_rs::EmailDeliveryStatus
+pub posthog_rs::EmailDeliveryStatus::Bounced
+pub posthog_rs::EmailDeliveryStatus::Complained
+pub posthog_rs::EmailDeliveryStatus::Delivered
+pub posthog_rs::EmailDeliveryStatus::Failed
+pub posthog_rs::EmailDeliveryStatus::Other(alloc::string::String)
+pub posthog_rs::EmailDeliveryStatus::Queued
+pub posthog_rs::EmailDeliveryStatus::Sent
+impl posthog_rs::EmailDeliveryStatus
+pub fn posthog_rs::EmailDeliveryStatus::as_str(&self) -> &str
+#[non_exhaustive] pub enum posthog_rs::EmailErrorKind
+pub posthog_rs::EmailErrorKind::ApplicationError
+pub posthog_rs::EmailErrorKind::ConcurrentIdempotentRequests
+pub posthog_rs::EmailErrorKind::InvalidIdempotentRequest
+pub posthog_rs::EmailErrorKind::InvalidPermission
+pub posthog_rs::EmailErrorKind::MissingApiKey
+pub posthog_rs::EmailErrorKind::MonthlyQuotaExceeded
+pub posthog_rs::EmailErrorKind::NotFound
+pub posthog_rs::EmailErrorKind::RateLimitExceeded
+pub posthog_rs::EmailErrorKind::ServiceUnavailable
+pub posthog_rs::EmailErrorKind::ValidationError
+impl posthog_rs::EmailErrorKind
+pub fn posthog_rs::EmailErrorKind::as_str(self) -> &'static str
+impl core::fmt::Display for posthog_rs::EmailErrorKind
+pub fn posthog_rs::EmailErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum posthog_rs::Endpoint
 pub posthog_rs::Endpoint::Batch
 pub posthog_rs::Endpoint::Capture
@@ -194,6 +219,7 @@ pub posthog_rs::Error::AlreadyInitialized
 pub posthog_rs::Error::BadRequest(alloc::string::String)
 pub posthog_rs::Error::BillingLimitExceeded(alloc::string::String)
 pub posthog_rs::Error::Connection(alloc::string::String)
+pub posthog_rs::Error::Email(posthog_rs::EmailError)
 pub posthog_rs::Error::InconclusiveMatch(alloc::string::String)
 pub posthog_rs::Error::InvalidTimestamp(alloc::string::String)
 pub posthog_rs::Error::NotInitialized
@@ -204,7 +230,10 @@ pub posthog_rs::Error::ServerError
 pub posthog_rs::Error::ServerError::message: alloc::string::String
 pub posthog_rs::Error::ServerError::status: u16
 pub posthog_rs::Error::Unauthorized
+impl core::convert::From<posthog_rs::EmailError> for posthog_rs::Error
+pub fn posthog_rs::Error::from(posthog_rs::EmailError) -> Self
 impl core::error::Error for posthog_rs::Error
+pub fn posthog_rs::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Display for posthog_rs::Error
 pub fn posthog_rs::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub enum posthog_rs::ErrorTrackingOptionsBuilderError
@@ -245,6 +274,13 @@ pub fn posthog_rs::FlagValue::default() -> Self
 pub posthog_rs::PostHogError::Capture(posthog_rs::CaptureFailure<'a>)
 pub posthog_rs::PostHogError::FeatureFlags(posthog_rs::FlagsFailure<'a>)
 pub posthog_rs::PostHogError::LocalEvaluation(posthog_rs::LocalEvaluationFailure<'a>)
+#[non_exhaustive] pub enum posthog_rs::SendEmail
+pub posthog_rs::SendEmail::Code(posthog_rs::CodeEmail)
+pub posthog_rs::SendEmail::Template(posthog_rs::TemplateEmail)
+impl core::convert::From<posthog_rs::CodeEmail> for posthog_rs::SendEmail
+pub fn posthog_rs::SendEmail::from(posthog_rs::CodeEmail) -> Self
+impl core::convert::From<posthog_rs::TemplateEmail> for posthog_rs::SendEmail
+pub fn posthog_rs::SendEmail::from(posthog_rs::TemplateEmail) -> Self
 pub struct posthog_rs::AsyncFlagPoller
 impl posthog_rs::AsyncFlagPoller
 pub async fn posthog_rs::AsyncFlagPoller::is_running(&self) -> bool
@@ -293,6 +329,7 @@ pub async fn posthog_rs::Client::capture_batch_immediate(&self, alloc::vec::Vec<
 pub async fn posthog_rs::Client::capture_exception<E>(&self, &E) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub async fn posthog_rs::Client::capture_exception_with<E>(&self, &E, posthog_rs::CaptureExceptionOptions) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized
 pub async fn posthog_rs::Client::capture_immediate(&self, posthog_rs::Event) -> core::result::Result<posthog_rs::CaptureSummary, posthog_rs::Error>
+pub fn posthog_rs::Client::emails(&self) -> posthog_rs::Emails<'_>
 pub fn posthog_rs::Client::evaluate_feature_flag_locally(&self, &posthog_rs::FeatureFlag, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<posthog_rs::FlagValue, posthog_rs::Error>
 pub async fn posthog_rs::Client::evaluate_flags<S: core::convert::Into<alloc::string::String>>(&self, S, posthog_rs::EvaluateFlagsOptions) -> core::result::Result<posthog_rs::FeatureFlagEvaluations, posthog_rs::Error>
 pub async fn posthog_rs::Client::evaluate_flags_with_context(&self, &posthog_rs::RequestContext, posthog_rs::EvaluateFlagsOptions) -> core::result::Result<posthog_rs::FeatureFlagEvaluations, posthog_rs::Error>
@@ -315,10 +352,13 @@ pub fn posthog_rs::ClientOptions::from((&str, &str)) -> Self
 pub struct posthog_rs::ClientOptionsBuilder
 impl posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::api_key(&mut self, alloc::string::String) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::app_host<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::blocking_http_client(&mut self, reqwest::blocking::client::Client) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::capture_compression(&mut self, posthog_rs::CaptureCompression) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::disable_geoip(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::disabled(&mut self, bool) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::email_request_max_retries(&mut self, u32) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::email_request_timeout_seconds(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::enable_local_evaluation(&mut self, bool) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::error_tracking(&mut self, posthog_rs::ErrorTrackingOptions) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::feature_flags_request_max_retries(&mut self, u32) -> &mut Self
@@ -332,6 +372,7 @@ pub fn posthog_rs::ClientOptionsBuilder::local_evaluation_only(&mut self, bool) 
 pub fn posthog_rs::ClientOptionsBuilder::max_batch_size(&mut self, usize) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::max_capture_attempts(&mut self, u32) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::max_queue_size(&mut self, usize) -> &mut Self
+pub fn posthog_rs::ClientOptionsBuilder::migrated_from<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::poll_interval_seconds(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::request_timeout_seconds(&mut self, u64) -> &mut Self
 pub fn posthog_rs::ClientOptionsBuilder::retry_initial_backoff_ms(&mut self, u64) -> &mut Self
@@ -345,6 +386,19 @@ pub fn posthog_rs::ClientOptionsBuilder::on_error<F>(&mut self, F) -> &mut Self 
 pub fn posthog_rs::ClientOptionsBuilder::personal_api_key<VALUE: core::convert::Into<alloc::string::String>>(&mut self, VALUE) -> &mut Self
 impl core::default::Default for posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::default() -> Self
+pub struct posthog_rs::CodeEmail
+impl posthog_rs::CodeEmail
+pub fn posthog_rs::CodeEmail::capture_engagement(self, bool) -> Self
+pub fn posthog_rs::CodeEmail::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::CodeEmail::from(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::CodeEmail::html(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::CodeEmail::idempotency_key(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::CodeEmail::max_retries(self, u32) -> Self
+pub fn posthog_rs::CodeEmail::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::CodeEmail::reply_to(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::CodeEmail::text(self, impl core::convert::Into<alloc::string::String>) -> Self
+impl core::convert::From<posthog_rs::CodeEmail> for posthog_rs::SendEmail
+pub fn posthog_rs::SendEmail::from(posthog_rs::CodeEmail) -> Self
 pub struct posthog_rs::Cohort
 pub posthog_rs::Cohort::properties: serde_json::value::Value
 pub struct posthog_rs::CohortDefinition
@@ -353,6 +407,37 @@ pub posthog_rs::CohortDefinition::properties: serde_json::value::Value
 impl posthog_rs::CohortDefinition
 pub fn posthog_rs::CohortDefinition::new(alloc::string::String, alloc::vec::Vec<posthog_rs::Property>) -> Self
 pub fn posthog_rs::CohortDefinition::parse_properties(&self) -> alloc::vec::Vec<posthog_rs::Property>
+pub struct posthog_rs::EmailError(_)
+impl posthog_rs::EmailError
+pub fn posthog_rs::EmailError::code(&self) -> &str
+pub fn posthog_rs::EmailError::docs_url(&self) -> core::option::Option<&str>
+pub fn posthog_rs::EmailError::field(&self) -> core::option::Option<&str>
+pub fn posthog_rs::EmailError::fix(&self) -> core::option::Option<&str>
+pub fn posthog_rs::EmailError::kind(&self) -> posthog_rs::EmailErrorKind
+pub fn posthog_rs::EmailError::message(&self) -> &str
+pub fn posthog_rs::EmailError::retry_after(&self) -> core::option::Option<core::time::Duration>
+pub fn posthog_rs::EmailError::status(&self) -> core::option::Option<u16>
+pub fn posthog_rs::EmailError::why(&self) -> core::option::Option<&str>
+impl core::convert::From<posthog_rs::EmailError> for posthog_rs::Error
+pub fn posthog_rs::Error::from(posthog_rs::EmailError) -> Self
+impl core::error::Error for posthog_rs::EmailError
+pub fn posthog_rs::EmailError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Display for posthog_rs::EmailError
+pub fn posthog_rs::EmailError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct posthog_rs::EmailStatus
+pub posthog_rs::EmailStatus::created_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub posthog_rs::EmailStatus::id: alloc::string::String
+pub posthog_rs::EmailStatus::reason: core::option::Option<alloc::string::String>
+pub posthog_rs::EmailStatus::status: posthog_rs::EmailDeliveryStatus
+pub posthog_rs::EmailStatus::status_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+#[non_exhaustive] pub struct posthog_rs::EmailWarning
+pub posthog_rs::EmailWarning::code: alloc::string::String
+pub posthog_rs::EmailWarning::fix: core::option::Option<alloc::string::String>
+pub posthog_rs::EmailWarning::message: alloc::string::String
+pub struct posthog_rs::Emails<'a>
+impl<'a> posthog_rs::Emails<'a>
+pub async fn posthog_rs::Emails<'a>::get(&self, &str) -> core::result::Result<posthog_rs::EmailStatus, posthog_rs::EmailError>
+pub async fn posthog_rs::Emails<'a>::send(&self, impl core::convert::Into<posthog_rs::SendEmail>) -> core::result::Result<posthog_rs::SendEmailResult, posthog_rs::EmailError>
 pub struct posthog_rs::EndpointManager
 impl posthog_rs::EndpointManager
 pub fn posthog_rs::EndpointManager::api_host(&self) -> alloc::string::String
@@ -515,6 +600,11 @@ pub posthog_rs::MultivariateFilter::variants: alloc::vec::Vec<posthog_rs::Multiv
 pub struct posthog_rs::MultivariateVariant
 pub posthog_rs::MultivariateVariant::key: alloc::string::String
 pub posthog_rs::MultivariateVariant::rollout_percentage: f64
+pub struct posthog_rs::PostHogReqwestClient
+impl posthog_rs::PostHogReqwestClient
+pub fn posthog_rs::PostHogReqwestClient::client(&self) -> &reqwest::async_impl::client::Client
+pub async fn posthog_rs::PostHogReqwestClient::execute(&self, reqwest::async_impl::request::Request) -> core::result::Result<reqwest::async_impl::response::Response, reqwest::error::Error>
+pub fn posthog_rs::PostHogReqwestClient::new<I, S>(reqwest::async_impl::client::ClientBuilder, I) -> core::result::Result<Self, reqwest::error::Error> where I: core::iter::traits::collect::IntoIterator<Item = S>, S: core::convert::AsRef<str>
 pub struct posthog_rs::Property
 pub posthog_rs::Property::key: alloc::string::String
 pub posthog_rs::Property::operator: alloc::string::String
@@ -533,6 +623,19 @@ pub fn posthog_rs::RequestContext::new() -> Self
 pub fn posthog_rs::RequestContext::property(self, impl core::convert::Into<alloc::string::String>, impl serde_core::ser::Serialize) -> core::result::Result<Self, posthog_rs::Error>
 pub async fn posthog_rs::RequestContext::scope<F: core::future::future::Future>(self, F) -> <F as core::future::future::Future>::Output
 pub fn posthog_rs::RequestContext::session_id(self, impl core::convert::Into<alloc::string::String>) -> Self
+#[non_exhaustive] pub struct posthog_rs::SendEmailResult
+pub posthog_rs::SendEmailResult::id: alloc::string::String
+pub posthog_rs::SendEmailResult::replayed: bool
+pub posthog_rs::SendEmailResult::warnings: alloc::vec::Vec<posthog_rs::EmailWarning>
+pub struct posthog_rs::TemplateEmail
+impl posthog_rs::TemplateEmail
+pub fn posthog_rs::TemplateEmail::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::TemplateEmail::idempotency_key(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::TemplateEmail::max_retries(self, u32) -> Self
+pub fn posthog_rs::TemplateEmail::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::TemplateEmail::template_data(self, serde_json::value::Value) -> Self
+impl core::convert::From<posthog_rs::TemplateEmail> for posthog_rs::SendEmail
+pub fn posthog_rs::SendEmail::from(posthog_rs::TemplateEmail) -> Self
 pub struct posthog_rs::TraceContext
 impl posthog_rs::TraceContext
 pub fn posthog_rs::TraceContext::new<T: core::convert::Into<alloc::string::String>, S: core::convert::Into<alloc::string::String>>(T, S) -> Self

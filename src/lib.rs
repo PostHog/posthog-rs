@@ -89,6 +89,7 @@
 mod client;
 mod compression;
 mod constants;
+mod emails;
 mod endpoints;
 mod error;
 #[cfg(feature = "error-tracking")]
@@ -101,6 +102,8 @@ mod feature_flags;
 mod global;
 mod local_evaluation;
 mod request_context;
+#[cfg(feature = "async-client")]
+mod reqwest_client;
 #[cfg(feature = "tower")]
 pub mod tower;
 pub use request_context::RequestContext;
@@ -123,6 +126,12 @@ pub use client::{CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogEr
 // Endpoints
 pub use endpoints::{
     Endpoint, EndpointManager, DEFAULT_HOST, EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT,
+};
+
+// Emails
+pub use emails::{
+    CodeEmail, EmailDeliveryStatus, EmailError, EmailErrorKind, EmailStatus, EmailWarning, Emails,
+    SendEmail, SendEmailResult, TemplateEmail,
 };
 
 // Error
@@ -172,3 +181,6 @@ pub use global::flush;
 pub use global::init_global_client as init_global;
 pub use global::is_disabled as global_is_disabled;
 pub use global::shutdown;
+
+#[cfg(feature = "async-client")]
+pub use reqwest_client::PostHogReqwestClient;

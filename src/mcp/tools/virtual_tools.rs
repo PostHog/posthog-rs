@@ -48,7 +48,7 @@ pub(crate) const SENTIMENTS: [&str; 4] = ["positive", "neutral", "negative", "mi
 
 pub(crate) const FEEDBACK_REPLY: &str = "Your feedback was recorded for the server's developers. No additional tools are available - continue with the tools already listed.";
 
-const FEEDBACK_DESCRIPTION: &str = "Send feedback about this server to its developers. Most important: report a missing capability whenever no available tool fits your task, even if you can work around it (feedback_type \"missing_capability\"). Also welcome: a tool that failed or confused you, an unhelpful error, or something that worked well. This records the feedback; it does not add or change tools. Do not include user PII or sensitive content.";
+const FEEDBACK_DESCRIPTION: &str = "Send feedback about this server to its developers: a capability no listed tool provides, a tool that failed or confused you, an unhelpful error, or something that worked well. Records the feedback for the server's developers; it does not add or change tools. Leave out personal and sensitive details.";
 
 /// The built-in report schema, with the host's description and fields.
 fn feedback_descriptor(name: &str, options: &McpOptions) -> Value {
@@ -80,7 +80,7 @@ fn built_in_feedback_descriptor(name: &str, description: &str) -> Value {
                 "feedback_type": {
                     "type": "string",
                     "enum": FEEDBACK_TYPES,
-                    "description": "What kind of feedback this is. Use 'missing_capability' when the tool you needed does not exist in the tool list - nothing failed, the capability is absent (this is the most valuable report; send it even if you found a workaround). Use 'issue' when an existing tool behaved badly: it failed, returned a confusing error, or its description or schema misled you. Use 'praise' when something worked notably well. Use 'other' for anything else.",
+                    "description": "What kind of feedback this is. Use 'missing_capability' when the tool you needed does not exist in the tool list - nothing failed, the capability is absent. Use 'issue' when an existing tool behaved badly: it failed, returned a confusing error, or its description or schema misled you. Use 'praise' when something worked notably well. Use 'other' for anything else.",
                 },
                 "summary": {
                     "type": "string",
@@ -114,19 +114,22 @@ fn built_in_feedback_descriptor(name: &str, description: &str) -> Value {
             },
             "required": ["feedback_type", "summary"],
         },
-        "annotations": {
-            "title": "Send feedback",
-            "readOnlyHint": true,
-            "openWorldHint": true,
-            "idempotentHint": true,
-            "destructiveHint": false,
-        },
+        "annotations": records_data_annotations(),
+    })
+}
+
+fn records_data_annotations() -> Value {
+    json!({
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "idempotentHint": false,
+        "destructiveHint": false,
     })
 }
 
 pub(crate) const MISSING_CAPABILITY_REPLY: &str = "Unfortunately, we have shown you the full tool list. We have noted your feedback and will work to improve the tool list in the future.";
 
-const MISSING_CAPABILITY_DESCRIPTION: &str = "Check for additional tools whenever your task might benefit from specialized capabilities - even if existing tools could work as a fallback.";
+const MISSING_CAPABILITY_DESCRIPTION: &str = "Report that the user's request needs a capability this server does not have. Records the report for the server's developers; it does not return or add tools.";
 const MISSING_CAPABILITY_CONTEXT_DESCRIPTION: &str = "A description of your goal and what kind of tool would help accomplish it. Describe people and entities by role, such as \"a customer\", and leave out personal and identifying information.";
 
 fn missing_capability_descriptor(name: &str) -> Value {
@@ -140,12 +143,6 @@ fn missing_capability_descriptor(name: &str) -> Value {
             },
             "required": ["context"],
         },
-        "annotations": {
-            "title": "Get More Tools",
-            "readOnlyHint": true,
-            "openWorldHint": true,
-            "idempotentHint": true,
-            "destructiveHint": false,
-        },
+        "annotations": records_data_annotations(),
     })
 }

@@ -10,6 +10,7 @@ use serde_json::json;
 use tracing::{debug, instrument, trace, warn};
 
 use super::get_default_user_agent;
+use crate::emails::{EmailTracker, Emails};
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
@@ -63,6 +64,8 @@ pub struct Client {
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
     /// Background event transport. `None` for disabled clients.
     transport: Option<Arc<TransportHandle>>,
+    /// Email requests in flight, which `shutdown` waits for.
+    email_tracker: EmailTracker,
 }
 
 /// Implementation of [`FeatureFlagEvaluationsHost`] that emits dedup-aware
@@ -206,6 +209,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         _flag_poller: flag_poller,
         flag_event_host: OnceLock::new(),
         transport,
+        email_tracker: EmailTracker::default(),
     }
 }
 
@@ -346,6 +350,15 @@ impl Client {
         }
     }
 
+    /// Transactional email: send email from templates made in PostHog or from
+    /// content your code rendered, and read the status of each email sent.
+    ///
+    /// Needs `secret_key` set to a Project Secret API Key with the
+    /// `transactional_email:write` scope. See [`Emails`] for setup.
+    pub fn emails(&self) -> Emails<'_> {
+        Emails::new(&self.options, self.client.as_ref(), &self.email_tracker)
+    }
+
     /// Whether the client is disabled (no transport; capture is a no-op). Used
     /// by the panic hook to skip building an event it could never send.
     #[cfg(feature = "error-tracking")]
@@ -401,10 +414,27 @@ impl Client {
     }
 
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
-    /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
-    /// disabled clients. When called from a transport callback, queues shutdown
-    /// without waiting for or joining the current worker thread.
+    /// calls are no-ops. After shutdown, `capture` drops events and
+    /// [`emails`](Self::emails) refuses requests with `client_closed`. Email
+    /// requests already in flight, retries included, get until
+    /// `shutdown_timeout_ms` from the start of shutdown to finish. When called
+    /// from a transport callback, queues shutdown without waiting for email
+    /// requests or joining the current worker thread.
     pub async fn shutdown(&self) {
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(self.options.shutdown_timeout_ms);
+        let called_from_transport_worker = self
+            .transport
+            .as_ref()
+            .is_some_and(|transport| transport.on_worker_thread());
+        self.email_tracker.close();
+        self.shutdown_transport().await;
+        if !called_from_transport_worker {
+            self.email_tracker.wait_idle(deadline).await;
+        }
+    }
+
+    async fn shutdown_transport(&self) {
         let Some(transport) = &self.transport else {
             return;
         };
@@ -1505,6 +1535,47 @@ mod teardown_tests {
     }
 
     #[tokio::test]
+    async fn shutdown_from_worker_callback_waits_for_no_email_request() {
+        let client_slot = Arc::new(Mutex::new(None::<Arc<Client>>));
+        let callback_slot = Arc::clone(&client_slot);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let options = crate::ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .host("http://localhost:0".to_string())
+            .flush_at(1usize)
+            .shutdown_timeout_ms(10_000u64)
+            .before_send(move |_| {
+                let client = Arc::clone(
+                    callback_slot
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .as_ref()
+                        .expect("client installed before capture"),
+                );
+                futures::executor::block_on(client.shutdown());
+                shutdown_tx.send(()).unwrap();
+                None
+            })
+            .build()
+            .unwrap();
+        let client = Arc::new(client(options).await);
+        *client_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&client));
+        let email_in_flight = client
+            .email_tracker
+            .admit(false, "nothing was sent")
+            .unwrap();
+
+        client.capture(Event::new("shutdown-in-callback", "user-1"));
+        shutdown_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("shutdown from the transport worker waited for an email request");
+
+        drop(email_in_flight);
+        client_slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn drop_from_worker_callback_closes_without_blocking() {
         let client_slot = Arc::new(Mutex::new(None::<Client>));
         let callback_slot = Arc::clone(&client_slot);
@@ -1560,6 +1631,7 @@ mod minimal_gate_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            email_tracker: EmailTracker::default(),
         };
         client
             .flag_event_host
@@ -1660,6 +1732,7 @@ mod local_payload_tests {
             _flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
+            email_tracker: EmailTracker::default(),
         };
         client
             .flag_event_host
