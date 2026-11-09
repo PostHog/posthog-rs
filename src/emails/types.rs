@@ -160,11 +160,12 @@ impl CodeEmail {
         self
     }
 
-    /// Whether the email carries open and click tracking: PostHog's open pixel
-    /// and links rewritten to count clicks. Defaults to `true`. With `false`,
-    /// the email goes out without either, so PostHog can't count its opens and
-    /// clicks. Independent of [`capture_engagement`](Self::capture_engagement),
-    /// which decides whether engagement events are captured on the recipient's
+    /// Whether PostHog tracks opens and clicks of the email. Defaults to
+    /// `true`. With `false`, the email goes out without PostHog's open pixel,
+    /// so PostHog can't count its opens. PostHog doesn't track clicks on
+    /// emails sent from code, so their links are never rewritten either way.
+    /// Independent of [`capture_engagement`](Self::capture_engagement), which
+    /// decides whether engagement events are captured on the recipient's
     /// person.
     ///
     /// A PostHog version that predates this option rejects a send that sets
