@@ -148,7 +148,19 @@ pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     })
 }
 
+/// Reserve the longest consent representation (`false`), so every valid state
+/// can opt in/out or clear the override without exceeding its configured bound.
+pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
+    snapshot_size(snapshot).saturating_add(usize::from(snapshot.opt_out != Some(false)))
+}
+
 pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
+    if snapshot_capacity(snapshot) as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "State snapshot exceeds store limit",
+        ));
+    }
     let mut buffer = RecordBuffer {
         bytes: Vec::new(),
         limit: max_bytes,
@@ -267,8 +279,8 @@ impl FileStateStore {
             return Err(RestoreFailure::Unavailable(invalid_state()));
         }
         let decoded = Self::decode_restored(&encoded)?;
-        // Mandatory identity and device state still obey the current write bound.
-        if snapshot_size(&decoded.snapshot) as u64 > self.max_bytes {
+        // Mandatory identity, device, and consent state still obey the current write bound.
+        if snapshot_capacity(&decoded.snapshot) as u64 > self.max_bytes {
             return Err(RestoreFailure::Corrupt(invalid_state()));
         }
         Ok(Some(decoded))
