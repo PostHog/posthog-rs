@@ -376,6 +376,41 @@ async fn a_failed_upload_never_shows_the_signed_url() {
 }
 
 #[tokio::test]
+async fn an_upload_route_404_is_not_found_on_attachments_and_sends_nothing() {
+    for (answer, message) in [
+        (
+            Answer::json(
+                404,
+                json!({"type": "invalid_request", "code": "not_found", "detail": "Not found.", "attr": null}),
+            ),
+            "Not found.",
+        ),
+        (
+            Answer::xml(404, "<h1>Not Found</h1>"),
+            "PostHog answered HTTP 404.",
+        ),
+    ] {
+        let server = ScriptedServer::start_async(vec![answer]).await;
+        let client = client_for(&server).await;
+
+        let error = client
+            .emails()
+            .send(invoice_with_copies_and_files())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "not_found");
+        assert_eq!(error.status(), Some(404));
+        assert_eq!(error.kind(), EmailErrorKind::NotFound);
+        assert_eq!(error.field(), Some("attachments"));
+        assert_eq!(error.message(), message);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "no email is sent");
+        assert_eq!(requests[0].path, UPLOADS_PATH);
+    }
+}
+
+#[tokio::test]
 async fn an_upload_request_posthog_refuses_sends_nothing() {
     let server = ScriptedServer::start_async(vec![Answer::json(
         400,

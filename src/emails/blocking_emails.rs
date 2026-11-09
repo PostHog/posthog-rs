@@ -147,14 +147,16 @@ impl<'a> Emails<'a> {
         max_retries: u32,
     ) -> Result<(), EmailError> {
         let request = shared::uploads_request(connection, attachments)?;
-        let reply = self.request(
-            Method::POST,
-            &request.url,
-            &request.headers,
-            Some(&request.body),
-            connection,
-            max_retries,
-        )?;
+        let reply = self
+            .request(
+                Method::POST,
+                &request.url,
+                &request.headers,
+                Some(&request.body),
+                connection,
+                max_retries,
+            )
+            .map_err(shared::upload_route_error)?;
         for upload in shared::uploads_to_make(reply, attachments, connection.timeout)? {
             retrying(max_retries, || self.put(&upload))?;
         }

@@ -162,7 +162,8 @@ impl<'a> Emails<'a> {
                 connection,
                 max_retries,
             )
-            .await?;
+            .await
+            .map_err(shared::upload_route_error)?;
         for upload in shared::uploads_to_make(reply, attachments, connection.timeout)? {
             retrying(max_retries, || self.put(&upload)).await?;
         }

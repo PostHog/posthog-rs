@@ -175,6 +175,12 @@ impl EmailError {
         }))
     }
 
+    pub(crate) fn with_code(mut self, code: &str) -> Self {
+        self.0.kind = EmailErrorKind::of(self.0.status, code);
+        self.0.code = code.to_string();
+        self
+    }
+
     pub(crate) fn with_field(mut self, field: Option<String>) -> Self {
         self.0.field = field;
         self

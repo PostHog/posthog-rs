@@ -163,6 +163,22 @@ fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
 }
 
 #[test]
+fn an_upload_route_404_is_not_found_on_attachments_and_sends_nothing() {
+    let server = ScriptedServer::start(vec![Answer::json(
+        404,
+        json!({"type": "invalid_request", "code": "not_found", "detail": "Not found.", "attr": null}),
+    )]);
+    let client = client_for(&server);
+
+    let error = client.emails().send(invoice()).unwrap_err();
+
+    assert_eq!(error.code(), "not_found");
+    assert_eq!(error.field(), Some("attachments"));
+    assert_eq!(error.message(), "Not found.");
+    assert_eq!(server.requests().len(), 1, "no email is sent");
+}
+
+#[test]
 fn retries_reuse_the_idempotency_key() {
     let server = ScriptedServer::start(vec![unavailable(), accepted()]);
     let client = client_for(&server);

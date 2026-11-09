@@ -319,6 +319,22 @@ pub(crate) struct UploadsRequest {
     pub(crate) body: Vec<u8>,
 }
 
+/// PostHog's refusal of the upload request. A `404` means this PostHog has no
+/// upload route or sending email from code is off for the project, and the
+/// client can't tell which. It reports PostHog's own answer, `not_found` when
+/// the reply named no code, on `attachments`.
+pub(crate) fn upload_route_error(error: EmailError) -> EmailError {
+    if error.status() != Some(404) {
+        return error;
+    }
+    let field = error.field().unwrap_or("attachments").to_string();
+    let error = match error.code() {
+        "api_error" => error.with_code("not_found"),
+        _ => error,
+    };
+    error.with_field(Some(field))
+}
+
 pub(crate) fn uploads_request(
     connection: &Connection,
     attachments: &[EmailAttachment],
