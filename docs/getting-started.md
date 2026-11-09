@@ -1,5 +1,11 @@
 # Getting started
 
+The Rust SDK runs on your server.
+
+To send your first event, add `posthog-rs` and `tokio`, create a client with your project token from your [project settings](https://app.posthog.com/project/settings), and call `capture`.
+
+A background worker sends queued events, so call `shutdown` before your process exits, or the last events are lost.
+
 ## Install
 
 ```bash
