@@ -97,6 +97,7 @@ pub struct CodeEmail {
     pub(crate) from: Option<String>,
     pub(crate) reply_to: Vec<String>,
     pub(crate) capture_engagement: bool,
+    pub(crate) track_opens_and_clicks: Option<bool>,
     pub(crate) options: SendOptions,
 }
 
@@ -120,6 +121,7 @@ impl CodeEmail {
             from: None,
             reply_to: Vec::new(),
             capture_engagement: true,
+            track_opens_and_clicks: None,
             options: SendOptions::default(),
         }
     }
@@ -155,6 +157,20 @@ impl CodeEmail {
     /// captures nothing, whatever the send asks.
     pub fn capture_engagement(mut self, capture: bool) -> Self {
         self.capture_engagement = capture;
+        self
+    }
+
+    /// Whether the email carries open and click tracking: PostHog's open pixel
+    /// and links rewritten to count clicks. Defaults to `true`. With `false`,
+    /// the email goes out without either, so PostHog can't count its opens and
+    /// clicks. Independent of [`capture_engagement`](Self::capture_engagement),
+    /// which decides whether engagement events are captured on the recipient's
+    /// person.
+    ///
+    /// A PostHog version that predates this option rejects a send that sets
+    /// it. Left unset, the send doesn't include it.
+    pub fn track_opens_and_clicks(mut self, track: bool) -> Self {
+        self.track_opens_and_clicks = Some(track);
         self
     }
 

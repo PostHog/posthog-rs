@@ -379,6 +379,7 @@ pub fn posthog_rs::CodeEmail::max_retries(self, u32) -> Self
 pub fn posthog_rs::CodeEmail::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::CodeEmail::reply_to(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::CodeEmail::text(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::CodeEmail::track_opens_and_clicks(self, bool) -> Self
 impl core::convert::From<posthog_rs::CodeEmail> for posthog_rs::SendEmail
 pub fn posthog_rs::SendEmail::from(posthog_rs::CodeEmail) -> Self
 pub struct posthog_rs::Cohort

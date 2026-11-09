@@ -90,6 +90,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
                 .from("Acme <security@example.com>")
                 .reply_to("help@example.com")
                 .capture_engagement(false)
+                .track_opens_and_clicks(false)
                 .distinct_id("user_123")
                 .idempotency_key("password-reset:user_123"),
         )
@@ -108,6 +109,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
             "from": "Acme <security@example.com>",
             "reply_to": ["help@example.com"],
             "capture_engagement": false,
+            "track_opens_and_clicks": false,
             "distinct_id": "user_123",
             "to": "user@example.com",
         })
@@ -119,7 +121,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
 }
 
 #[tokio::test]
-async fn code_send_defaults_engagement_capture_on() {
+async fn code_send_defaults_engagement_capture_on_and_omits_tracking() {
     let server = ScriptedServer::start_async(vec![accepted()]).await;
     let client = client_for(&server).await;
 
