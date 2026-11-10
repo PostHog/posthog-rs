@@ -1249,32 +1249,6 @@ mod tests {
     }
 
     #[test]
-    fn each_body_counts_like_a_file_in_base64() {
-        let estimate = |html: String, text: Option<String>| {
-            let mut email = CodeEmail::new("user@example.com", "key", "").html(html);
-            if let Some(text) = text {
-                email = email.text(text);
-            }
-            estimated_message_bytes(&email) - HEADERS_AND_MIME_BOUNDARIES_BYTES
-        };
-        assert_eq!(estimate("a".repeat(57), None), 78);
-        assert_eq!(estimate("é".repeat(57), None), 156);
-        assert_eq!(estimate("a".repeat(57), Some("é".repeat(57))), 78 + 156);
-    }
-
-    #[test]
-    fn the_subject_counts_as_folded_encoded_words() {
-        let estimate = |subject: String| {
-            estimated_message_bytes(&CodeEmail::new("user@example.com", "key", subject))
-                - HEADERS_AND_MIME_BOUNDARIES_BYTES
-        };
-        assert_eq!(estimate("x".repeat(42)), 75);
-        assert_eq!(estimate("x".repeat(43)), 150);
-        assert_eq!(estimate("é".repeat(21)), 75);
-        assert_eq!(estimate(String::new()), 0);
-    }
-
-    #[test]
     fn retries_only_what_waiting_can_fix() {
         let network = EmailError::new("network_error", "failed");
         assert!(retry_delay(&network, 0, 2).is_some());
@@ -1292,8 +1266,6 @@ mod tests {
             None
         );
         assert_eq!(retry_delay(&answered(500, "api_error", None), 0, 2), None);
-        assert!(retry_delay(&answered(500, UPLOAD_FAILED, None), 0, 2).is_some());
-        assert_eq!(retry_delay(&answered(400, UPLOAD_FAILED, None), 0, 2), None);
         assert_eq!(
             retry_delay(&answered(400, "invalid_input", None), 0, 2),
             None

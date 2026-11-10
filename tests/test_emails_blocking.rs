@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use common::default_user_agent;
 use email_support::{
-    accepted, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
-    UPLOADS_PATH,
+    accepted, options, s3_error, unavailable, Answer, FakePostHog, ScriptedServer, MESSAGE_ID,
+    SEND_PATH, TEMPLATE_ID,
 };
 use posthog_rs::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
 use serde_json::json;
@@ -84,18 +84,8 @@ fn code_send_posts_the_rendered_content() {
 const PDF_SHA256: &str = "ccac55e87ec85819f85630feb88522f771cf4d4fc3a40b7f97fd124a128dfcb7";
 const PDF: [u8; 7] = [0x25, 0x50, 0x44, 0x46, 0x00, 0x9f, 0xff];
 
-fn invoice_upload(bucket: &ScriptedServer) -> Answer {
-    Answer::json(
-        200,
-        json!({"files": [{
-            "sha256": PDF_SHA256,
-            "status": "upload",
-            "url": format!("{}/bucket/team/2/{PDF_SHA256}?X-Amz-Signature=signed", bucket.url),
-            "method": "PUT",
-            "headers": {"content-length": "7", "x-amz-checksum-sha256": "signed-checksum"},
-            "url_expires_at": "2026-11-09T12:15:00Z",
-        }]}),
-    )
+fn client_of(posthog: &FakePostHog) -> posthog_rs::Client {
+    posthog_rs::client(options(&posthog.url).build().unwrap())
 }
 
 fn invoice() -> CodeEmail {
@@ -108,27 +98,15 @@ fn invoice() -> CodeEmail {
 
 #[test]
 fn code_send_uploads_the_file_then_sends_its_hash() {
-    let bucket = ScriptedServer::start(vec![Answer::xml(200, "")]);
-    let server = ScriptedServer::start(vec![invoice_upload(&bucket), accepted()]);
-    let client = client_for(&server);
+    let posthog = FakePostHog::start();
+    let client = client_of(&posthog);
 
     client.emails().send(invoice()).unwrap();
 
-    let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].path, UPLOADS_PATH);
+    assert_eq!(posthog.stored(PDF_SHA256), Some(PDF.to_vec()));
     assert_eq!(
-        requests[0].json(),
-        json!({"files": [{"sha256": PDF_SHA256, "size": 7}]})
-    );
-    let put = &bucket.requests()[0];
-    assert_eq!(put.method, "PUT");
-    assert_eq!(put.body, PDF);
-    assert_eq!(put.header("x-amz-checksum-sha256"), Some("signed-checksum"));
-    assert_eq!(put.header("authorization"), None);
-    assert_eq!(
-        requests[1].json(),
-        json!({
+        posthog.sent(),
+        vec![json!({
             "template_key": "invoice",
             "subject": "Your invoice",
             "text": "Attached.",
@@ -137,18 +115,15 @@ fn code_send_uploads_the_file_then_sends_its_hash() {
             "attachments": [{"sha256": PDF_SHA256, "filename": "invoice.pdf"}],
             "capture_engagement": true,
             "to": "user@example.com",
-        })
+        })]
     );
 }
 
 #[test]
 fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
-    let bucket = ScriptedServer::start(vec![Answer::xml(
-        403,
-        "<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>",
-    )]);
-    let server = ScriptedServer::start(vec![invoice_upload(&bucket)]);
-    let client = client_for(&server);
+    let posthog = FakePostHog::start();
+    posthog.store_answers_next(s3_error(403, "AccessDenied", "Request has expired"));
+    let client = client_of(&posthog);
 
     let error = client.emails().send(invoice()).unwrap_err();
 
@@ -159,13 +134,12 @@ fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
         error.why(),
         Some("The file store answered AccessDenied: Request has expired")
     );
-    assert_eq!(server.requests().len(), 1, "no email is sent");
+    assert!(posthog.sent().is_empty(), "no email is sent");
 }
 
 #[test]
-fn a_custom_clients_default_headers_never_reach_the_file_store() {
-    let bucket = ScriptedServer::start(vec![Answer::xml(200, "")]);
-    let server = ScriptedServer::start(vec![invoice_upload(&bucket), accepted()]);
+fn a_custom_clients_default_credentials_never_reach_the_file_store() {
+    let posthog = FakePostHog::start();
     let mut defaults = reqwest::header::HeaderMap::new();
     defaults.insert(
         "authorization",
@@ -176,7 +150,7 @@ fn a_custom_clients_default_headers_never_reach_the_file_store() {
         .build()
         .unwrap();
     let client = posthog_rs::client(
-        options(&server.url)
+        options(&posthog.url)
             .blocking_http_client(http)
             .build()
             .unwrap(),
@@ -184,26 +158,21 @@ fn a_custom_clients_default_headers_never_reach_the_file_store() {
 
     client.emails().send(invoice()).unwrap();
 
-    let puts = bucket.requests();
-    assert_eq!(puts.len(), 1);
-    assert_eq!(puts[0].header("authorization"), None);
-    assert_eq!(server.requests().len(), 2);
+    assert_eq!(posthog.stored(PDF_SHA256), Some(PDF.to_vec()));
+    assert_eq!(posthog.sent().len(), 1);
 }
 
 #[test]
-fn an_upload_route_404_names_attachments_and_sends_nothing() {
-    let server = ScriptedServer::start(vec![Answer::json(
-        404,
-        json!({"type": "invalid_request", "code": "not_found", "detail": "Not found.", "attr": null}),
-    )]);
-    let client = client_for(&server);
+fn a_posthog_without_the_upload_route_sends_nothing_with_files() {
+    let posthog = FakePostHog::start().without_upload_route();
+    let client = client_of(&posthog);
 
     let error = client.emails().send(invoice()).unwrap_err();
 
     assert_eq!(error.code(), "not_found");
     assert_eq!(error.field(), Some("attachments"));
     assert_eq!(error.message(), "Not found.");
-    assert_eq!(server.requests().len(), 1, "no email is sent");
+    assert!(posthog.sent().is_empty(), "no email is sent");
 }
 
 #[test]

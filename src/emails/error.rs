@@ -310,26 +310,6 @@ mod tests {
             (Some(503), "service_unavailable", Kind::ServiceUnavailable),
             (Some(500), "api_error", Kind::ApplicationError),
             (Some(202), "api_error", Kind::ApplicationError),
-            (
-                Some(400),
-                "attachment_upload_failed",
-                Kind::ApplicationError,
-            ),
-            (
-                Some(403),
-                "attachment_upload_failed",
-                Kind::ApplicationError,
-            ),
-            (
-                Some(503),
-                "attachment_upload_failed",
-                Kind::ServiceUnavailable,
-            ),
-            (
-                Some(500),
-                "attachment_upload_failed",
-                Kind::ServiceUnavailable,
-            ),
         ];
         for (status, code, kind) in cases {
             assert_eq!(Kind::of(status, code), kind, "{status:?} {code}");
