@@ -60,6 +60,18 @@ options)` uses the context identity. An absent identity returns an empty flag
 result without a network request. Flag access events retain the context from
 evaluation, including when the result is read after the request ends.
 
+MCP analytics (the `mcp` feature) applies the context to every MCP event over
+HTTP, although `rmcp` runs each request handler in a task of its own. It reads
+the `RequestContext` that `PostHogLayer` or your middleware placed in the
+request extensions. A context scoped around the code that sends the event takes
+priority. The MCP identity from the `identify` callback stays the distinct ID
+and wins over the context identity. An anonymous request keeps its MCP session
+ID as the distinct ID and the `process_person_profile: false` option. Context
+properties and options fill only keys the event leaves unset, before the MCP
+`before_send` hook runs. Options from `McpOptionsBuilder::event_options` and
+`ToolCallRequest::event_option` win over context options, and the call's own
+option wins over the callback's.
+
 Spawned tasks and streaming response bodies do not inherit context. Pass a
 context clone and use `.scope(...)` explicitly for work that must retain it.
 Request completion, errors, panics, and cancellation remove the scoped context.
@@ -75,6 +87,61 @@ Blocking applications use these explicit helpers; they have no ambient scope.
 
 This integration adds analytics context to events. It does not add attributes
 to application-owned tracing or OpenTelemetry spans or install a trace provider.
+
+## Transactional email
+
+`client.emails()` sends one email per call from your backend, from an email
+template made transactional in PostHog or from content your code rendered. It
+needs `secret_key` set to a project secret API key (`phs_...`) with the
+`transactional_email:write` scope, which the "Send transactional email" preset
+in your project settings gives. Keys made with `hog_flow:write` still work.
+Requests go to your region's app host, derived from a
+PostHog Cloud `host`. Set `app_host` when `host` is a reverse proxy: the proxy
+must not receive the secret key.
+
+```rust
+use posthog::{ClientOptionsBuilder, CodeEmail, TemplateEmail};
+use serde_json::json;
+
+let options = ClientOptionsBuilder::default()
+    .api_key("phc_project_key".to_string())
+    .secret_key("phs_project_secret_key")
+    .host("https://eu.i.posthog.com")
+    .build()?;
+let posthog = posthog::client(options).await;
+
+// A template made in PostHog, by its ID.
+let sent = posthog
+    .emails()
+    .send(
+        TemplateEmail::new("jane@example.com", "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b")
+            .template_data(json!({ "name": "Jane" }))
+            .distinct_id("user_123")
+            .idempotency_key("welcome:user_123"),
+    )
+    .await?;
+
+// Content your code rendered, named by a key. For a React email, render it
+// to HTML in your app first.
+posthog
+    .emails()
+    .send(
+        CodeEmail::new("jane@example.com", "password-reset", "Reset your password")
+            .html(rendered_html)
+            .distinct_id("user_123"),
+    )
+    .await?;
+
+// What happened to the first email.
+let status = posthog.emails().get(&sent.id).await?;
+```
+
+A result means PostHog queued the email, not that it was delivered. Pass
+`distinct_id` so the email's events go to your user. Every attempt of a send
+carries the same idempotency key, so the client's retries never send twice;
+pass an `idempotency_key` that names the email when your own job runner
+retries too, and set `max_retries(0)` on the send. A failed send returns an
+`EmailError`: branch on `code()`, such as `quota_limited`, or on `kind()`.
 
 ## Contributing
 

@@ -1,7 +1,8 @@
 //! Advertises the enabled analytics arguments on each listed tool. `context`
-//! and `llm_model` are required, because models fill required arguments, and
-//! analytics strips them before the server validates the call.
-//! `conversation_id` is optional: the agent has no handle on its first call.
+//! is required, because models fill required arguments, and analytics strips
+//! it before the server validates the call. `llm_model` and `conversation_id`
+//! are optional: a client reports its model in `_meta`, and the agent has no
+//! conversation handle on its first call.
 
 use serde_json::{json, Map, Value};
 
@@ -44,7 +45,7 @@ impl ArgumentInjection {
             add_argument(tool, CONTEXT, &self.context_description, true);
         }
         if self.enabled.llm_model {
-            add_argument(tool, LLM_MODEL, &self.llm_model_description, true);
+            add_argument(tool, LLM_MODEL, &self.llm_model_description, false);
         }
         if self.enabled.conversation_id {
             let added = add_argument(tool, CONVERSATION_ID, CONVERSATION_ID_DESCRIPTION, false);
@@ -134,7 +135,7 @@ mod tests {
             "inputSchema": { "type": "object", "properties": { "query": {} }, "required": ["query"] },
         });
         let schema = injection().inject(&tool)["inputSchema"].clone();
-        assert_eq!(schema["required"], json!(["query", "context", "llm_model"]));
+        assert_eq!(schema["required"], json!(["query", "context"]));
         assert_eq!(schema["properties"]["context"]["type"], "string");
         assert_eq!(schema["properties"]["conversation_id"]["type"], "string");
     }
@@ -147,7 +148,7 @@ mod tests {
         });
         let schema = injection().inject(&tool)["inputSchema"].clone();
         assert_eq!(schema["properties"]["context"], json!({ "type": "string" }));
-        assert_eq!(schema["required"], json!(["llm_model"]));
+        assert!(schema.get("required").is_none());
     }
 
     #[test]
