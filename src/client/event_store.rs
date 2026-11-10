@@ -37,6 +37,14 @@ impl StorageDirectory {
     }
 }
 
+impl Drop for StorageDirectory {
+    fn drop(&mut self) {
+        // A subprocess between fork and exec can still hold the file description.
+        // Release the lease when its last SDK owner drops, not when that child exits.
+        let _ = fs2::FileExt::unlock(&self._lock);
+    }
+}
+
 fn create_directory(path: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);

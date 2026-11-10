@@ -24,6 +24,24 @@ impl Drop for TestDirectory {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn directory_lease_ends_with_its_last_owner_despite_inherited_descriptors() {
+    let directory = TestDirectory::new();
+    let lease = directory.lease();
+    // A child between fork and exec holds the same open file description.
+    let inherited = lease._lock.try_clone().unwrap();
+    let other_owner = Arc::clone(&lease);
+    drop(lease);
+    assert!(StorageDirectory::open(&directory.0).is_err());
+    drop(other_owner);
+    let reopened = directory.lease();
+    drop(inherited);
+    assert!(StorageDirectory::open(&directory.0).is_err());
+    drop(reopened);
+    assert!(StorageDirectory::open(&directory.0).is_ok());
+}
+
 fn limits() -> StoreLimits {
     StoreLimits {
         max_events: 10,
