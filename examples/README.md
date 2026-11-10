@@ -15,8 +15,6 @@ cargo run --no-default-features --features stateful,tls --example stateful
 
 This blocking example uses automatic local persistence, anonymous identity,
 explicit capture/screen, a native privacy hook, and separate drain reports.
-See [stateful client behavior](../docs/stateful-client.md) for configuration,
-admission limits, storage failure handling, async initialization and drains.
 
 ## Running the Examples
 
