@@ -555,6 +555,8 @@ fn write_failure_memory_fallback_remains_byte_bounded_while_offline() {
             bytes,
         ),
     );
+    // Finish empty-store recovery before measuring the fallback queue.
+    handle.flush_blocking();
     assert_eq!(handle.enqueue_prepared(event.clone()), Admission::Accepted);
     handle.flush_blocking();
     assert_eq!(
