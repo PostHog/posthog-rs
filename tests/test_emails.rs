@@ -122,10 +122,12 @@ const PDF_SHA256: &str = "ccac55e87ec85819f85630feb88522f771cf4d4fc3a40b7f97fd12
 const PNG_SHA256: &str = "0f4636c78f65d3639ece5a064b5ae753e3408614a14fb18ab4d7540d2c248543";
 const PDF: [u8; 7] = [0x25, 0x50, 0x44, 0x46, 0x00, 0x9f, 0xff];
 const PNG: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
-/// The largest file one email can carry with empty bodies, from the spec.
-const LARGEST_FILE: usize = 29_182_875;
+/// The largest file one email can carry with empty bodies and a subject of
+/// 1 to 42 bytes, which the server counts as one 75-byte encoded word. With an
+/// empty subject too, the spec's largest is 29,182,875 bytes.
+const LARGEST_FILE: usize = 29_182_821;
 const LARGEST_FILE_SHA256: &str =
-    "28f197eae8bd57e7c2a94d2062d2cef0a04b34e7fd3e0c743d88cda2217f069c";
+    "ad2836b77dbd8d3f589f455d74b0a09c1c6d43c69093027bf9d35286e1e75640";
 
 fn upload_slot(bucket: &ScriptedServer, sha256: &str, size: usize) -> serde_json::Value {
     json!({
@@ -513,22 +515,36 @@ async fn an_email_over_40_mb_after_base64_is_refused_before_any_request() {
     let client = client_for(&server).await;
     let largest = EmailAttachment::new("scan.pdf", vec![0u8; LARGEST_FILE]);
     let one_byte_more = EmailAttachment::new("scan.pdf", vec![0u8; LARGEST_FILE + 1]);
-    let email = |body: &str, file: &EmailAttachment| {
-        CodeEmail::new("user@example.com", "scan", "Your scan")
+    let email = |subject: &str, body: &str, file: &EmailAttachment| {
+        CodeEmail::new("user@example.com", "scan", subject)
             .text(body)
             .attachment(file.clone())
             .max_retries(0)
     };
+    let one_word = "x".repeat(42);
+    let two_words = "x".repeat(43);
 
-    for (body, file) in [("", &one_byte_more), ("x", &largest)] {
-        let error = client.emails().send(email(body, file)).await.unwrap_err();
+    for (subject, body, file) in [
+        (one_word.as_str(), "", &one_byte_more),
+        (one_word.as_str(), "x", &largest),
+        (two_words.as_str(), "", &largest),
+    ] {
+        let error = client
+            .emails()
+            .send(email(subject, body, file))
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), "message_too_large");
         assert_eq!(error.kind(), EmailErrorKind::ValidationError);
         assert_eq!(error.field(), Some("attachments"));
     }
     assert!(server.requests().is_empty());
 
-    client.emails().send(email("", &largest)).await.unwrap();
+    client
+        .emails()
+        .send(email(&one_word, "", &largest))
+        .await
+        .unwrap();
     assert_eq!(server.requests().len(), 2, "the largest file goes out");
 }
 

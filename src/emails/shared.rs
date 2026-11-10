@@ -37,6 +37,10 @@ const MAX_TEMPLATE_KEY_LEN: usize = 400;
 const MAX_ATTACHMENTS: usize = 10;
 const MAX_MESSAGE_BYTES: u64 = 40_000_000;
 const HEADERS_AND_MIME_BOUNDARIES_BYTES: u64 = 64 * 1024;
+/// A subject travels as encoded words of up to 42 bytes, each 75 bytes once
+/// folded into the header.
+const SUBJECT_BYTES_PER_ENCODED_WORD: u64 = 42;
+const FOLDED_ENCODED_WORD_BYTES: u64 = 75;
 /// The slowest upload the client waits for: 1 Mbit/s on top of the email
 /// timeout, so the largest file gets about four minutes.
 const MIN_UPLOAD_BYTES_PER_SECOND: u64 = 128 * 1024;
@@ -212,15 +216,19 @@ fn check_attachments(email: &CodeEmail) -> Result<(), EmailError> {
 }
 
 /// The size of the email as the email provider counts it, the way PostHog
-/// estimates it: each file and body in Base64 with line breaks, plus room for
-/// the headers and MIME boundaries.
+/// estimates it: each file and body in Base64 with line breaks, the subject
+/// as folded encoded words, plus room for the other headers and the MIME
+/// boundaries.
 fn estimated_message_bytes(email: &CodeEmail) -> u64 {
     let files = email.attachments.iter().map(|file| file.content.len());
     let bodies = email.html.iter().chain(&email.text).map(String::len);
+    let subject = (email.subject.len() as u64).div_ceil(SUBJECT_BYTES_PER_ENCODED_WORD)
+        * FOLDED_ENCODED_WORD_BYTES;
     files
         .chain(bodies)
         .map(|size| base64_transfer_bytes(size as u64))
         .sum::<u64>()
+        + subject
         + HEADERS_AND_MIME_BOUNDARIES_BYTES
 }
 
@@ -1243,7 +1251,7 @@ mod tests {
     #[test]
     fn each_body_counts_like_a_file_in_base64() {
         let estimate = |html: String, text: Option<String>| {
-            let mut email = CodeEmail::new("user@example.com", "key", "Subject").html(html);
+            let mut email = CodeEmail::new("user@example.com", "key", "").html(html);
             if let Some(text) = text {
                 email = email.text(text);
             }
@@ -1252,6 +1260,18 @@ mod tests {
         assert_eq!(estimate("a".repeat(57), None), 78);
         assert_eq!(estimate("é".repeat(57), None), 156);
         assert_eq!(estimate("a".repeat(57), Some("é".repeat(57))), 78 + 156);
+    }
+
+    #[test]
+    fn the_subject_counts_as_folded_encoded_words() {
+        let estimate = |subject: String| {
+            estimated_message_bytes(&CodeEmail::new("user@example.com", "key", subject))
+                - HEADERS_AND_MIME_BOUNDARIES_BYTES
+        };
+        assert_eq!(estimate("x".repeat(42)), 75);
+        assert_eq!(estimate("x".repeat(43)), 150);
+        assert_eq!(estimate("é".repeat(21)), 75);
+        assert_eq!(estimate(String::new()), 0);
     }
 
     #[test]
