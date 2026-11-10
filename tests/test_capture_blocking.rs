@@ -8,6 +8,8 @@
 //! `posthog-attempt`; exhausting the attempt budget takes `max_capture_attempts`
 //! flushes. Wire-format assertions are unchanged from the synchronous model.
 
+mod common;
+
 use httpmock::prelude::*;
 use posthog::{ClientOptionsBuilder, Event};
 use serde_json::json;
@@ -730,4 +732,123 @@ fn blocking_disabled_client_noop() {
     client.capture(Event::new("test", "user-1"));
     client.flush();
     mock.assert_calls(0);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SendPath {
+    Capture,
+    Batch,
+    Historical,
+    Immediate,
+    BatchImmediate,
+    Ai,
+    AiBatch,
+    AiImmediate,
+    AiBatchImmediate,
+    Alias,
+    GroupIdentify,
+    #[cfg(feature = "error-tracking")]
+    Exception,
+}
+
+impl SendPath {
+    const ALL: &'static [SendPath] = &[
+        SendPath::Capture,
+        SendPath::Batch,
+        SendPath::Historical,
+        SendPath::Immediate,
+        SendPath::BatchImmediate,
+        SendPath::Ai,
+        SendPath::AiBatch,
+        SendPath::AiImmediate,
+        SendPath::AiBatchImmediate,
+        SendPath::Alias,
+        SendPath::GroupIdentify,
+        #[cfg(feature = "error-tracking")]
+        SendPath::Exception,
+    ];
+
+    fn endpoint(self) -> &'static str {
+        match self {
+            SendPath::Ai
+            | SendPath::AiBatch
+            | SendPath::AiImmediate
+            | SendPath::AiBatchImmediate => "/i/v1/ai/events",
+            _ => "/i/v1/analytics/events",
+        }
+    }
+
+    /// `false` for the paths that send an event the SDK builds.
+    fn takes_events(self) -> bool {
+        match self {
+            SendPath::Alias | SendPath::GroupIdentify => false,
+            #[cfg(feature = "error-tracking")]
+            SendPath::Exception => false,
+            _ => true,
+        }
+    }
+
+    fn send(self, client: &posthog::Client, events: Vec<Event>) {
+        match self {
+            SendPath::Capture => events.into_iter().for_each(|event| client.capture(event)),
+            SendPath::Batch => client.capture_batch(events, false),
+            SendPath::Historical => client.capture_batch(events, true),
+            SendPath::Immediate => {
+                for event in events {
+                    client.capture_immediate(event).unwrap();
+                }
+            }
+            SendPath::BatchImmediate => {
+                client.capture_batch_immediate(events, false).unwrap();
+            }
+            SendPath::Ai => events
+                .into_iter()
+                .for_each(|event| client.capture_ai(event)),
+            SendPath::AiBatch => client.capture_ai_batch(events, false),
+            SendPath::AiImmediate => {
+                for event in events {
+                    client.capture_ai_immediate(event).unwrap();
+                }
+            }
+            SendPath::AiBatchImmediate => {
+                client.capture_ai_batch_immediate(events, false).unwrap();
+            }
+            SendPath::Alias => client.alias("old-id", "user-1"),
+            SendPath::GroupIdentify => client
+                .group_identify("company", "acme", json!({ "name": "Acme" }))
+                .unwrap(),
+            #[cfg(feature = "error-tracking")]
+            SendPath::Exception => {
+                let error = std::io::Error::other("boom");
+                client.capture_exception(&error).unwrap();
+            }
+        }
+        client.flush();
+    }
+}
+
+#[test]
+fn blocking_every_send_path_applies_the_lib_pair_rule() {
+    for &path in SendPath::ALL {
+        let server = MockServer::start();
+        let wire = common::record_wire_events(&server, path.endpoint());
+        let client = create_capture_client(server.base_url());
+        let context = format!("{path:?}");
+
+        if path.takes_events() {
+            let cases = common::lib_cases();
+            let events = cases
+                .iter()
+                .map(|case| case.event("$ai_generation"))
+                .collect();
+            path.send(&client, events);
+            for case in &cases {
+                case.assert_wire(&common::wire_properties(&wire, Some(case.name)), &context);
+            }
+        } else {
+            path.send(&client, Vec::new());
+            let unset = &common::lib_cases()[0];
+            unset.assert_wire(&common::wire_properties(&wire, None), &context);
+        }
+    }
 }

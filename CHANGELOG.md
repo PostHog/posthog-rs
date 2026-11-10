@@ -1,5 +1,61 @@
 # posthog-rs
 
+## 0.31.3 — 2026-11-11
+
+### Patch changes
+
+- [2e77fbb](https://github.com/posthog/posthog-rs/commit/2e77fbb60e805c7e25ca1ca59b4308222b1c6d9e) Relative date filters in local flag evaluation now follow the server: months and years are calendar steps instead of 30 and 365 days, `7d` without a leading `-` is accepted, and a number of 10,000 or more is inconclusive instead of panicking. — Thanks @luantaraschi for your first contribution 🎉!
+
+## 0.31.2 — 2026-11-06
+
+### Patch changes
+
+- [98d2bf1](https://github.com/posthog/posthog-rs/commit/98d2bf1b6186e9461efa70977f1a28f5dca34899) Aligned the `mcp` module with the sdk-specs MCP spec. The `get_more_tools` tool now advertises `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint` as `false`, because a call records an event. The injected `context` argument has a shorter description, and the injected `llm_model` argument is no longer required. This changes your published tool definitions; if your server is listed in the ChatGPT or Claude directories, those platforms may re-review the updated tools. — Thanks @lucasheriques!
+
+## 0.31.1 — 2026-11-05
+
+### Patch changes
+
+- [7d78b25](https://github.com/posthog/posthog-rs/commit/7d78b2554219bb146557e7bc2ad22fc1cb40feaf) Reworded the descriptions of the injected `conversation_id` and `llm_model` arguments and the `get_more_tools` virtual tool so they describe the field instead of instructing the model. This changes your published tool definitions; if your server is listed in the ChatGPT or Claude directories, those platforms may re-review the updated tools. — Thanks @lucasheriques!
+
+## 0.31.0 — 2026-11-05
+
+### Minor changes
+
+- [1b43466](https://github.com/posthog/posthog-rs/commit/1b4346656c1cbcd6a43f785596d2b387361fea92) The new `client.emails()` sends transactional email from your Rust code and reads each email's delivery status.
+  
+  ```rust
+  use posthog_rs::{ClientOptionsBuilder, CodeEmail};
+  
+  let options = ClientOptionsBuilder::default()
+      .api_key("phc_...".to_string())
+      .secret_key("phs_...")
+      .build()?;
+  let posthog = posthog_rs::client(options).await;
+  
+  let sent = posthog
+      .emails()
+      .send(
+          CodeEmail::new("user@example.com", "password-reset", "Reset your password")
+              .html(rendered_html)
+              .distinct_id("user_123"),
+      )
+      .await?;
+  
+  let status = posthog.emails().get(&sent.id).await?;
+  println!("{}", status.status.as_str()); // "delivered", "bounced", ...
+  ```
+  
+  You can also send a template made in PostHog with `TemplateEmail::new` and its `template_id`.
+  
+  You need a project secret API key, the kind that starts with `phs_`. Create one under **Project secret API keys** in your project settings. Set its **Transactional email** scope to Write to send emails, or to Read for a key that only reads statuses. Set it with `secret_key` on `ClientOptionsBuilder`. Set `app_host` to your PostHog app URL when you self-host PostHog or send through a reverse proxy.
+  
+  PostHog records each email's delivery, opens and clicks on the person with that `distinct_id`. It groups every email with the same `template_key`, so you see their metrics and logs in one place. The SDK retries a request that hits a network error, a rate limit or an outage twice by default. Every send carries an idempotency key, so a retry never sends the email twice. Pass your own `idempotency_key`, such as `welcome:user_123`, and your job runner's retries are safe too.
+  
+  A `CodeEmail` also takes `.from()`, `.reply_to()` and `.capture_engagement(false)`. Set `migrated_from` on `ClientOptionsBuilder` to tell PostHog which email provider you moved from. A failed call returns an `EmailError` with PostHog's `code()` and the HTTP `status()`.
+  
+  Docs: [Send transactional emails with Rust](https://posthog.com/docs/workflows/transactional-emails/rust) and the [transactional email overview](https://posthog.com/docs/workflows/transactional-emails). — Thanks @Silthus for your first contribution 🎉!
+
 ## 0.30.0 — 2026-10-28
 
 ### Minor changes
@@ -35,7 +91,7 @@
 ### Minor changes
 
 - [6bc074f](https://github.com/posthog/posthog-rs/commit/6bc074fa707efc3e2c0bf9a27f95f89ad534014c) Honor definition snapshots' `property_matching_version` during local flag evaluation, including group conditions, recursive cohorts, and flag dependencies. Version 2 uses explicit case-insensitive equality instead of legacy boolean coercion; missing metadata and other versions retain legacy matching. Empty filters retain recursive truthiness in both versions. Keep matching semantics and definitions together across cache refreshes and version-only updates.
-
+  
   `LocalEvaluationResponse` and `EvaluationContext` struct literals now require a `property_matching_version` field (use `1` for legacy behavior); older serialized definitions still load without it. The context-free `match_feature_flag` helper remains legacy. — Thanks @marandaneto!
 
 ## 0.25.5 — 2026-09-15

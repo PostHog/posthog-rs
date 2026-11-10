@@ -6,9 +6,7 @@ use serde_json::Value;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::constants::{
-    LEGACY_OPTION_PROPERTIES, SDK_INFO_PROPERTIES, SESSION_ID_PROP, WINDOW_ID_PROP,
-};
+use crate::constants::{LEGACY_OPTION_PROPERTIES, SESSION_ID_PROP, WINDOW_ID_PROP};
 use crate::event::{merge_groups_into, Event};
 
 /// RFC 3339 UTC with 3, 6 or 9 fractional digits: the fewest that keep every
@@ -68,9 +66,6 @@ impl CaptureEvent {
         let timestamp = wire_timestamp(event.timestamp().map_or(now, |ts| ts.and_utc()));
 
         let options = merge_options(event, &mut properties);
-        for key in SDK_INFO_PROPERTIES {
-            properties.remove(*key);
-        }
 
         let session_id = lift_string_property(&mut properties, SESSION_ID_PROP);
         let window_id = lift_string_property(&mut properties, WINDOW_ID_PROP);
@@ -209,11 +204,6 @@ pub struct CaptureErrorResponse {
 }
 
 /// Wire-shape tests for the capture event builder.
-///
-/// Note on `$lib`/`$lib_version`: they are never carried in `properties`. The
-/// SDK sends its identity in the `posthog-sdk-info` header and capture
-/// materializes the properties server-side; the header is covered by
-/// `client::capture::tests::build_headers_sdk_info_is_canonical_lib_slash_version`.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,17 +276,21 @@ mod tests {
     }
 
     #[test]
-    fn event_drops_caller_set_lib_properties() {
+    fn event_keeps_caller_set_lib_properties() {
         let mut event = Event::new("test_event", "user-1");
         event.insert_prop("$lib", "custom-lib").unwrap();
-        event.insert_prop("$lib_version", "9.9.9").unwrap();
+        event
+            .insert_prop("$lib_version", serde_json::Value::Null)
+            .unwrap();
+        event.insert_prop("$lib_version__major", 9).unwrap();
         event.insert_prop("plain", "kept").unwrap();
 
         let wire = CaptureEvent::from_event(&event);
         let props = wire.properties.as_object().unwrap();
-        assert!(!props.contains_key("$lib"));
-        assert!(!props.contains_key("$lib_version"));
-        assert_eq!(props.get("plain"), Some(&serde_json::json!("kept")));
+        assert_eq!(props.get("$lib"), Some(&json!("custom-lib")));
+        assert_eq!(props.get("$lib_version"), Some(&serde_json::Value::Null));
+        assert_eq!(props.get("$lib_version__major"), Some(&json!(9)));
+        assert_eq!(props.get("plain"), Some(&json!("kept")));
     }
 
     // -- property -> options extraction --------------------------------------
