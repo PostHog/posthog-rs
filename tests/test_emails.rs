@@ -92,6 +92,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
                 .text("Reset")
                 .from("Acme <security@example.com>")
                 .reply_to("help@example.com")
+                .reply_to("support@example.com")
                 .tracking(EmailTrackingOptions::new().clicks(true).engagement(false))
                 .distinct_id("user_123")
                 .idempotency_key("password-reset:user_123"),
@@ -109,7 +110,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
             "html": "<p>Reset</p>",
             "text": "Reset",
             "from": "Acme <security@example.com>",
-            "reply_to": ["help@example.com"],
+            "reply_to": ["help@example.com", "support@example.com"],
             "tracking": {"clicks": true, "engagement": false},
             "distinct_id": "user_123",
             "to": "user@example.com",
@@ -147,6 +148,8 @@ async fn code_send_leaves_out_tracking_and_engagement_capture_it_was_not_given()
 async fn code_send_sends_the_tracking_it_was_given() {
     let cases: Vec<(EmailTracking, serde_json::Value)> = vec![
         (true.into(), json!(true)),
+        (false.into(), json!(false)),
+        (EmailTracking::On, json!(true)),
         (EmailTracking::Off, json!(false)),
         (
             EmailTrackingOptions::new().clicks(true).into(),
@@ -159,6 +162,13 @@ async fn code_send_sends_the_tracking_it_was_given() {
                 .engagement(false)
                 .into(),
             json!({"opens": true, "clicks": false, "engagement": false}),
+        ),
+        (
+            EmailTrackingOptions::new()
+                .opens(false)
+                .engagement(true)
+                .into(),
+            json!({"opens": false, "engagement": true}),
         ),
         (EmailTrackingOptions::new().into(), json!({})),
     ];

@@ -687,28 +687,6 @@ mod tests {
     }
 
     #[test]
-    fn code_send_lists_reply_to() {
-        let prepared = prepare_send(
-            CodeEmail::new("user@example.com", "password-reset", "Reset")
-                .text("Hi")
-                .reply_to("a@example.com")
-                .reply_to("b@example.com")
-                .into(),
-        )
-        .unwrap();
-        assert_eq!(
-            body(&prepared),
-            json!({
-                "template_key": "password-reset",
-                "subject": "Reset",
-                "text": "Hi",
-                "reply_to": ["a@example.com", "b@example.com"],
-                "to": "user@example.com",
-            })
-        );
-    }
-
-    #[test]
     fn argument_checks_name_the_field() {
         let cases: Vec<(SendEmail, &str, &str)> = vec![
             (
