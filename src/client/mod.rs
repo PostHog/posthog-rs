@@ -146,9 +146,10 @@ pub struct ClientOptions {
     /// see its documentation for the limits of `shutdown_timeout_ms`.
     ///
     /// Only supply clients whose default headers and cookies are safe to send to
-    /// PostHog and to its file store, which email attachments upload to. Do not
-    /// share clients carrying credentials for unrelated services; the SDK cannot
-    /// inspect or filter those defaults.
+    /// PostHog. Do not share clients carrying credentials for unrelated services;
+    /// the SDK cannot inspect or filter those defaults. Email attachments upload
+    /// to PostHog's file store through a client the SDK builds, so these
+    /// defaults never reach it.
     #[cfg(feature = "async-client")]
     #[builder(default, setter(strip_option))]
     http_client: Option<reqwest::Client>,
@@ -168,9 +169,10 @@ pub struct ClientOptions {
     /// It is not a hard limit on the total time spent waiting for the worker.
     ///
     /// Only supply clients whose default headers and cookies are safe to send to
-    /// PostHog and to its file store, which email attachments upload to. Do not
-    /// share clients carrying credentials for unrelated services; the SDK cannot
-    /// inspect or filter those defaults.
+    /// PostHog. Do not share clients carrying credentials for unrelated services;
+    /// the SDK cannot inspect or filter those defaults. Email attachments upload
+    /// to PostHog's file store through a client the SDK builds, so these
+    /// defaults never reach it.
     ///
     /// Create and finally drop application-owned blocking clients, including handles
     /// held in options and builders, outside async runtimes. SDK shutdown does not
@@ -388,6 +390,16 @@ impl ClientOptions {
     /// project API key is missing or blank after trimming.
     pub fn is_disabled(&self) -> bool {
         self.disabled
+    }
+
+    #[cfg(feature = "async-client")]
+    pub(crate) fn has_custom_http_client(&self) -> bool {
+        self.http_client.is_some()
+    }
+
+    #[cfg(not(feature = "async-client"))]
+    pub(crate) fn has_custom_blocking_http_client(&self) -> bool {
+        self.blocking_http_client.is_some()
     }
 
     fn sanitize(mut self) -> Self {

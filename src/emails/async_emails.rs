@@ -164,8 +164,9 @@ impl<'a> Emails<'a> {
             )
             .await
             .map_err(shared::upload_route_error)?;
+        let http = self.upload_http()?;
         for upload in shared::uploads_to_make(reply, attachments, connection.timeout)? {
-            retrying(max_retries, || self.put(&upload)).await?;
+            retrying(max_retries, || self.put(&http, &upload)).await?;
         }
         Ok(())
     }
@@ -216,10 +217,9 @@ impl<'a> Emails<'a> {
     }
 
     /// PUTs one file with only the headers PostHog signed, never the secret
-    /// key.
-    async fn put(&self, upload: &Upload) -> Result<(), EmailError> {
-        let response = self
-            .http()?
+    /// key or a supplied client's default headers.
+    async fn put(&self, http: &HttpClient, upload: &Upload) -> Result<(), EmailError> {
+        let response = http
             .request(upload.method.clone(), &upload.url)
             .timeout(upload.timeout)
             .headers(upload.headers.clone())
@@ -230,6 +230,19 @@ impl<'a> Emails<'a> {
         let status = response.status().as_u16();
         let retry_after = parse_retry_after(response.headers());
         upload.check_reply(status, retry_after, read_capped(response).await.ok())
+    }
+
+    /// The client that uploads files. A client the app supplied may carry
+    /// default headers, such as credentials, that must never reach the file
+    /// store, so uploads then go through a client the SDK builds.
+    fn upload_http(&self) -> Result<HttpClient, EmailError> {
+        let http = self.http()?;
+        if !self.options.has_custom_http_client() {
+            return Ok(http.clone());
+        }
+        HttpClient::builder()
+            .build()
+            .map_err(shared::upload_client_error)
     }
 
     fn http(&self) -> Result<&'a HttpClient, EmailError> {

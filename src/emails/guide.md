@@ -43,8 +43,10 @@ send fails with `attachment_upload_failed` and the store's answer in
 the upload route, a project with sending email from code off, or an
 `app_host` that isn't PostHog's refuses the files with `not_found` on
 `attachments`, and no email is sent. Allow your app to reach the file
-store's host as well as your PostHog app host. Uploads use the client's
-HTTP client, so a custom client's default headers reach the file store too.
+store's host as well as your PostHog app host. When you supply your
+own HTTP client, uploads go through a client the SDK builds, so your
+client's default headers never reach the file store. That client takes its
+proxy from `HTTPS_PROXY`.
 
 # Timeouts and retries
 

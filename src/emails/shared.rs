@@ -606,6 +606,14 @@ pub(crate) fn request_error(error: reqwest::Error) -> EmailError {
     EmailError::new("network_error", "The request to PostHog failed.").with_source(error)
 }
 
+pub(crate) fn upload_client_error(error: reqwest::Error) -> EmailError {
+    EmailError::new(
+        "unexpected_error",
+        "The client could not build the HTTP client that uploads files, so no email was sent.",
+    )
+    .with_source(error)
+}
+
 /// A reply body that could not be read. Like any network error it is
 /// retried, because an accepted send may already be queued.
 pub(crate) fn read_error(error: impl std::error::Error + Send + Sync + 'static) -> EmailError {

@@ -163,6 +163,34 @@ fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
 }
 
 #[test]
+fn a_custom_clients_default_headers_never_reach_the_file_store() {
+    let bucket = ScriptedServer::start(vec![Answer::xml(200, "")]);
+    let server = ScriptedServer::start(vec![invoice_upload(&bucket), accepted()]);
+    let mut defaults = reqwest::header::HeaderMap::new();
+    defaults.insert(
+        "authorization",
+        "Bearer phx_app_credential".parse().unwrap(),
+    );
+    let http = reqwest::blocking::Client::builder()
+        .default_headers(defaults)
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(
+        options(&server.url)
+            .blocking_http_client(http)
+            .build()
+            .unwrap(),
+    );
+
+    client.emails().send(invoice()).unwrap();
+
+    let puts = bucket.requests();
+    assert_eq!(puts.len(), 1);
+    assert_eq!(puts[0].header("authorization"), None);
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[test]
 fn an_upload_route_404_is_not_found_on_attachments_and_sends_nothing() {
     let server = ScriptedServer::start(vec![Answer::json(
         404,

@@ -256,6 +256,49 @@ async fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
 }
 
 #[tokio::test]
+async fn a_custom_clients_default_headers_never_reach_the_file_store() {
+    let bucket = ScriptedServer::start_async(vec![Answer::xml(200, "")]).await;
+    let server = ScriptedServer::start_async(vec![
+        Answer::json(
+            200,
+            json!({"files": [upload_slot(&bucket, PDF_SHA256, PDF.len()), present_slot(PNG_SHA256)]}),
+        ),
+        accepted(),
+    ])
+    .await;
+    let mut defaults = reqwest::header::HeaderMap::new();
+    defaults.insert(
+        "authorization",
+        "Bearer phx_app_credential".parse().unwrap(),
+    );
+    defaults.insert("x-application", "billing".parse().unwrap());
+    let http = reqwest::Client::builder()
+        .default_headers(defaults)
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(options(&server.url).http_client(http).build().unwrap()).await;
+
+    client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap();
+
+    let puts = bucket.requests();
+    assert_eq!(puts.len(), 1);
+    assert_eq!(puts[0].header("authorization"), None);
+    assert_eq!(puts[0].header("x-application"), None);
+    assert_eq!(
+        puts[0].header("x-amz-checksum-sha256"),
+        Some("signed-checksum")
+    );
+    assert_eq!(puts[0].body, PDF);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].header("authorization"), Some("Bearer phs_test"));
+}
+
+#[tokio::test]
 async fn the_same_file_attached_twice_is_uploaded_once() {
     let bucket = ScriptedServer::start_async(vec![Answer::xml(200, "")]).await;
     let slot = upload_slot(&bucket, PDF_SHA256, PDF.len());
