@@ -1,6 +1,7 @@
 //! A real PostHog client pointed at a mock endpoint, recording each event as
 //! the client sends it.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use httpmock::prelude::*;
@@ -10,6 +11,9 @@ use serde_json::Value;
 pub struct Recorder {
     pub client: Arc<Client>,
     events: Arc<Mutex<Vec<Event>>>,
+    /// Events as sent, keyed by `uuid` so a matcher that runs more than once
+    /// for a request records each event once.
+    wire: Arc<Mutex<HashMap<String, Value>>>,
     _endpoint: MockServer,
 }
 
@@ -21,8 +25,18 @@ impl Recorder {
     /// An endpoint that answers every capture with `status`.
     pub async fn with_status(status: u16) -> Self {
         let endpoint = MockServer::start();
-        endpoint.mock(|when, then| {
-            when.any_request();
+        let wire = Arc::new(Mutex::new(HashMap::new()));
+        let sent = wire.clone();
+        endpoint.mock(move |when, then| {
+            when.is_true(move |request| {
+                let body: Value = serde_json::from_slice(request.body_ref()).unwrap_or_default();
+                let mut sent = sent.lock().unwrap();
+                for event in body["batch"].as_array().cloned().unwrap_or_default() {
+                    let uuid = event["uuid"].as_str().unwrap_or_default().to_string();
+                    sent.insert(uuid, event);
+                }
+                true
+            });
             then.status(status)
                 .json_body(serde_json::json!({ "status": 1 }));
         });
@@ -40,8 +54,36 @@ impl Recorder {
         Self {
             client: Arc::new(posthog::client(options).await),
             events,
+            wire,
             _endpoint: endpoint,
         }
+    }
+
+    /// The properties of the only `name` event as it was sent.
+    pub async fn sent_properties(&self, name: &str) -> Value {
+        self.sent(name).await["properties"].clone()
+    }
+
+    /// The only `name` event as it was sent.
+    pub async fn sent(&self, name: &str) -> Value {
+        let mut sent: Vec<Value> = self
+            .sent_events()
+            .await
+            .into_iter()
+            .filter(|event| event["event"] == name)
+            .collect();
+        assert_eq!(
+            sent.len(),
+            1,
+            "expected exactly one {name} sent, got {sent:#?}"
+        );
+        sent.remove(0)
+    }
+
+    /// Every event as it was sent.
+    pub async fn sent_events(&self) -> Vec<Value> {
+        self.client.flush().await;
+        self.wire.lock().unwrap().values().cloned().collect()
     }
 
     pub async fn events(&self) -> Vec<Event> {

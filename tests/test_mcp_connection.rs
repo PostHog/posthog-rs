@@ -61,11 +61,22 @@ async fn a_successful_call_produces_one_event_with_the_required_properties() {
         "posthog_mcp_analytics"
     );
     assert_eq!(text_property(&event, "$lib"), "posthog-rs-mcp");
+    assert_eq!(
+        text_property(&event, "$lib_version"),
+        env!("CARGO_PKG_VERSION")
+    );
     assert_eq!(text_property(&event, "$mcp_server_name"), "docs-server");
     let session_id = text_property(&event, "$session_id");
     assert!(session_id.starts_with("ses_"));
     assert_eq!(event.distinct_id(), session_id);
-    assert_eq!(property(&event, "$process_person_profile"), &json!(false));
+    let options = serde_json::to_value(event.options()).unwrap();
+    assert_eq!(
+        options,
+        json!({ "process_person_profile": false }),
+        "a connection carries no request context"
+    );
+    assert!(!event.properties().contains_key("$process_person_profile"));
+    assert!(!event.properties().contains_key("$request_path"));
 }
 
 #[tokio::test]
@@ -319,6 +330,63 @@ async fn a_very_large_response_still_produces_a_bounded_event() {
 }
 
 #[tokio::test]
+async fn mcp_events_are_sent_as_mcp_analytics_with_its_version() {
+    let recorder = Recorder::new().await;
+    let client = connect(&recorder, TestServer::new(), McpOptions::default()).await;
+
+    call(&client, "search_docs", json!({ "query": "flags" })).await;
+
+    let sent = recorder.sent_properties("$mcp_tool_call").await;
+    assert_eq!(sent["$lib"], "posthog-rs-mcp");
+    assert_eq!(sent["$lib_version"], env!("CARGO_PKG_VERSION"));
+    // The SDK's version parts describe `posthog-rs`, so another `$lib` never gets them.
+    assert!(sent.get("$lib_version__major").is_none(), "{}", sent);
+}
+
+#[tokio::test]
+async fn an_mcp_hook_can_rename_the_lib_and_the_sdk_adds_no_version() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .before_send(|mut event| {
+            event.insert_prop("$lib", "custom-mcp").unwrap();
+            event.remove_prop("$lib_version");
+            Some(event)
+        })
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    call(&client, "search_docs", json!({ "query": "flags" })).await;
+
+    let sent = recorder.sent_properties("$mcp_tool_call").await;
+    assert_eq!(sent["$lib"], "custom-mcp");
+    assert!(sent.get("$lib_version").is_none(), "{}", sent);
+    assert!(sent.get("$lib_version__major").is_none(), "{}", sent);
+}
+
+#[tokio::test]
+async fn an_mcp_hook_that_removes_the_lib_gets_the_sdk_label() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .before_send(|mut event| {
+            event.remove_prop("$lib");
+            Some(event)
+        })
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    call(&client, "search_docs", json!({ "query": "flags" })).await;
+
+    // The `McpOptions` hook runs before the client fills `$lib`.
+    let sent = recorder.sent_properties("$mcp_tool_call").await;
+    assert_eq!(sent["$lib"], "posthog-rs");
+    assert_eq!(sent["$lib_version"], env!("CARGO_PKG_VERSION"));
+    let major: u64 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap();
+    assert_eq!(sent["$lib_version__major"], major);
+}
+
+#[tokio::test]
 async fn a_failing_before_send_hook_drops_the_event_but_not_the_result() {
     let recorder = Recorder::new().await;
     let options = McpOptionsBuilder::default()
@@ -407,10 +475,8 @@ async fn an_identified_call_processes_the_person() {
     let event = recorder.only("$mcp_tool_call").await;
     assert_eq!(event.distinct_id(), "user-123");
     assert_eq!(property(&event, "$set"), &json!({ "plan": "pro" }));
-    assert_ne!(
-        event.properties().get("$process_person_profile"),
-        Some(&json!(false))
-    );
+    assert_eq!(event.options().get("process_person_profile"), None);
+    assert!(!event.properties().contains_key("$process_person_profile"));
     assert_eq!(property(&event, "$groups"), &json!({ "company": "acme" }));
 }
 
@@ -455,6 +521,79 @@ async fn the_virtual_tool_is_not_advertised_by_default() {
     let tools = client.list_all_tools().await.unwrap();
 
     assert!(tools.iter().all(|tool| tool.name != "get_more_tools"));
+}
+
+#[tokio::test]
+async fn the_virtual_tool_declares_that_it_records_data() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .missing_capability_tool("")
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "get_more_tools")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&tool.annotations).unwrap(),
+        serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_listed_tool_describes_context_and_leaves_llm_model_optional() {
+    let recorder = Recorder::new().await;
+    let client = connect(&recorder, TestServer::new(), McpOptions::default()).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "search_docs")
+        .unwrap();
+    let schema = serde_json::Value::Object((*tool.input_schema).clone());
+    assert_eq!(
+        schema["properties"]["context"]["description"],
+        "A few words on why you are calling this tool, for the server developer's analytics. Describe people and things by role, such as \"a customer\". Do not quote the user or include names, emails, or other personal details."
+    );
+    assert!(schema["properties"]["llm_model"].is_object());
+    let required = schema["required"].as_array().unwrap();
+    assert!(required.contains(&"context".into()), "{}", schema);
+    assert!(!required.contains(&"llm_model".into()), "{}", schema);
+}
+
+#[tokio::test]
+async fn no_advertised_description_instructs_the_model_beyond_the_call() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .missing_capability_tool("")
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+
+    assert!(tools.iter().any(|tool| tool.name == "get_more_tools"));
+    let advertised = serde_json::to_string(&tools).unwrap().to_lowercase();
+    for phrase in [
+        "parallel tool calls",
+        "system prompt",
+        "even if existing tools",
+        "most important",
+        "even if you can work around it",
+        "send it even if",
+    ] {
+        assert!(!advertised.contains(phrase), "{}: {}", phrase, advertised);
+    }
 }
 
 #[tokio::test]

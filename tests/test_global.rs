@@ -26,6 +26,8 @@ fn global_client_lifecycle() {
                 batch.len() == 1
                     && batch[0]["event"] == "global-event"
                     && batch[0]["distinct_id"] == "user-1"
+                    && batch[0]["properties"]["$lib"] == "posthog-rs"
+                    && batch[0]["properties"]["$lib_version"] == env!("CARGO_PKG_VERSION")
             })
         });
         then.status(200).json_body(json!({"results": {}}));

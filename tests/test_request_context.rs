@@ -216,6 +216,54 @@ async fn queued_batch_and_exception_context_survives_scope_end() {
 
 #[cfg(feature = "async-client")]
 #[tokio::test]
+async fn flag_called_events_apply_the_lib_pair_rule_to_the_request_context() {
+    use httpmock::prelude::*;
+    use serde_json::{json, Value};
+    let sdk_version = env!("CARGO_PKG_VERSION");
+    // (context `$lib`, context `$lib_version`, wire `$lib`, wire `$lib_version`, SDK parts)
+    let cases = [
+        (Some("mw"), Some("2.0.0"), "mw", Some("2.0.0"), false),
+        (Some("mw"), None, "mw", None, false),
+        (None, Some("2.0.0"), "posthog-rs", Some(sdk_version), true),
+    ];
+    for (context_lib, context_version, wire_lib, wire_version, parts) in cases {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200)
+                .json_body(json!({"featureFlags": {"feature": true}}));
+        });
+        let capture = server.mock(|when, then| {
+            when.method(POST).is_true(move |request| {
+                let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
+                let properties = &body["batch"][0]["properties"];
+                body["batch"][0]["event"] == "$feature_flag_called"
+                    && properties["$lib"] == wire_lib
+                    && properties.get("$lib_version") == wire_version.map(Value::from).as_ref()
+                    && properties.get("$lib_version__major").is_some() == parts
+            });
+            then.status(200).json_body(json!({"results": {}}));
+        });
+        let client = posthog::client(("phc_test", server.base_url().as_str())).await;
+        let mut context = RequestContext::new().distinct_id("flag-user");
+        if let Some(lib) = context_lib {
+            context = context.property("$lib", lib).unwrap();
+        }
+        if let Some(version) = context_version {
+            context = context.property("$lib_version", version).unwrap();
+        }
+        let flags = client
+            .evaluate_flags_with_context(&context, Default::default())
+            .await
+            .unwrap();
+        assert!(flags.is_enabled("feature"));
+        client.flush().await;
+        capture.assert_calls(1);
+    }
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
 async fn flag_snapshot_keeps_originating_context_after_request_ends() {
     use httpmock::prelude::*;
     use serde_json::{json, Value};
