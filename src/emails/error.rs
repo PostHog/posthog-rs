@@ -193,7 +193,7 @@ impl EmailError {
     }
 
     /// PostHog's error code, such as `quota_limited`, `recipient_suppressed`,
-    /// `recipient_opted_out` or `unknown_category`, or an SDK code, such as
+    /// `recipient_opted_out` or `category_mismatch`, or an SDK code, such as
     /// `network_error`, `missing_secret_key` or `invalid_template_id`.
     pub fn code(&self) -> &str {
         &self.0.code

@@ -130,8 +130,9 @@ pub use endpoints::{
 
 // Emails
 pub use emails::{
-    CodeEmail, EmailDeliveryStatus, EmailError, EmailErrorKind, EmailStatus, EmailWarning, Emails,
-    SendEmail, SendEmailResult, TemplateEmail, TRANSACTIONAL_CATEGORY,
+    CodeEmail, EmailCategory, EmailDeliveryStatus, EmailError, EmailErrorKind, EmailStatus,
+    EmailWarning, Emails, MessageCategory, MessageCategoryType, SendEmail, SendEmailResult,
+    TemplateEmail,
 };
 
 // Error

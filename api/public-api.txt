@@ -162,6 +162,11 @@ pub fn posthog_rs::ClientOptionsBuilderError::from(derive_builder::error::Uninit
 impl core::error::Error for posthog_rs::ClientOptionsBuilderError
 impl core::fmt::Display for posthog_rs::ClientOptionsBuilderError
 pub fn posthog_rs::ClientOptionsBuilderError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum posthog_rs::EmailCategory
+pub posthog_rs::EmailCategory::Defined(posthog_rs::MessageCategory)
+pub posthog_rs::EmailCategory::Transactional
+impl core::convert::From<posthog_rs::MessageCategory> for posthog_rs::EmailCategory
+pub fn posthog_rs::EmailCategory::from(posthog_rs::MessageCategory) -> Self
 #[non_exhaustive] pub enum posthog_rs::EmailDeliveryStatus
 pub posthog_rs::EmailDeliveryStatus::Bounced
 pub posthog_rs::EmailDeliveryStatus::Complained
@@ -252,6 +257,11 @@ pub posthog_rs::FlagValue::Boolean(bool)
 pub posthog_rs::FlagValue::String(alloc::string::String)
 impl core::default::Default for posthog_rs::FlagValue
 pub fn posthog_rs::FlagValue::default() -> Self
+#[non_exhaustive] pub enum posthog_rs::MessageCategoryType
+pub posthog_rs::MessageCategoryType::Marketing
+pub posthog_rs::MessageCategoryType::Transactional
+impl posthog_rs::MessageCategoryType
+pub fn posthog_rs::MessageCategoryType::as_str(self) -> &'static str
 #[non_exhaustive] pub enum posthog_rs::PostHogError<'a>
 pub posthog_rs::PostHogError::Capture(posthog_rs::CaptureFailure<'a>)
 pub posthog_rs::PostHogError::FeatureFlags(posthog_rs::FlagsFailure<'a>)
@@ -371,7 +381,7 @@ pub fn posthog_rs::ClientOptionsBuilder::default() -> Self
 pub struct posthog_rs::CodeEmail
 impl posthog_rs::CodeEmail
 pub fn posthog_rs::CodeEmail::capture_engagement(self, bool) -> Self
-pub fn posthog_rs::CodeEmail::category(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::CodeEmail::category(self, impl core::convert::Into<posthog_rs::EmailCategory>) -> Self
 pub fn posthog_rs::CodeEmail::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::CodeEmail::from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::CodeEmail::html(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -578,6 +588,12 @@ pub fn posthog_rs::LocalEvaluator::evaluate_all_flags(&self, &str, &std::collect
 pub fn posthog_rs::LocalEvaluator::evaluate_flag(&self, &str, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<core::option::Option<posthog_rs::FlagValue>, posthog_rs::InconclusiveMatchError>
 pub fn posthog_rs::LocalEvaluator::evaluate_flag_simple(&self, &str, &str, &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>, &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>) -> core::result::Result<core::option::Option<posthog_rs::FlagValue>, posthog_rs::InconclusiveMatchError>
 pub fn posthog_rs::LocalEvaluator::new(posthog_rs::FlagCache) -> Self
+pub struct posthog_rs::MessageCategory
+impl posthog_rs::MessageCategory
+pub fn posthog_rs::MessageCategory::description(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::MessageCategory::new(impl core::convert::Into<alloc::string::String>, posthog_rs::MessageCategoryType, impl core::convert::Into<alloc::string::String>) -> Self
+impl core::convert::From<posthog_rs::MessageCategory> for posthog_rs::EmailCategory
+pub fn posthog_rs::EmailCategory::from(posthog_rs::MessageCategory) -> Self
 pub struct posthog_rs::MultivariateFilter
 pub posthog_rs::MultivariateFilter::variants: alloc::vec::Vec<posthog_rs::MultivariateVariant>
 pub struct posthog_rs::MultivariateVariant
@@ -628,7 +644,6 @@ pub posthog_rs::V1ErrorResponse::error_description: core::option::Option<alloc::
 pub posthog_rs::V1ErrorResponse::error_uri: core::option::Option<alloc::string::String>
 pub const posthog_rs::DEFAULT_HOST: &str
 pub const posthog_rs::EU_INGESTION_ENDPOINT: &str
-pub const posthog_rs::TRANSACTIONAL_CATEGORY: &str
 pub const posthog_rs::US_INGESTION_ENDPOINT: &str
 pub fn posthog_rs::capture(posthog_rs::Event)
 pub async fn posthog_rs::capture_exception<E>(&E) -> core::result::Result<(), posthog_rs::Error> where E: core::error::Error + ?core::marker::Sized

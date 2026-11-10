@@ -1,10 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-/// The built-in category of [`CodeEmail::category`]: transactional email, as
-/// a send without a category is.
-pub const TRANSACTIONAL_CATEGORY: &str = "transactional";
-
 /// What every send takes, whatever its form.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SendOptions {
@@ -101,7 +97,7 @@ pub struct CodeEmail {
     pub(crate) from: Option<String>,
     pub(crate) reply_to: Vec<String>,
     pub(crate) capture_engagement: bool,
-    pub(crate) category: Option<String>,
+    pub(crate) category: Option<EmailCategory>,
     pub(crate) options: SendOptions,
 }
 
@@ -164,14 +160,21 @@ impl CodeEmail {
         self
     }
 
-    /// The email's message category. Without it, or with
-    /// [`TRANSACTIONAL_CATEGORY`], PostHog sends transactional email.
+    /// The email's message category: [`EmailCategory::Transactional`], or a
+    /// [`MessageCategory`] that the send defines. Without it, PostHog sends
+    /// transactional email with no category.
     ///
-    /// Any other value is the key of one of the project's marketing message
-    /// categories, such as `"product-updates"`. A marketing send honors the
-    /// recipient's opt-outs, and its `html` (or `text`, without `html`) needs
-    /// the `{{ unsubscribe_url }}` placeholder.
-    pub fn category(mut self, category: impl Into<String>) -> Self {
+    /// When `template_key` names a template made in PostHog, the send follows
+    /// that template's category. PostHog refuses the send with:
+    ///
+    /// - `category_mismatch` when the key exists with another type,
+    /// - `too_many_categories` when it would create a category past the
+    ///   project's limit,
+    /// - `unsubscribe_link_required` when a marketing email has no
+    ///   `{{ unsubscribe_url }}` placeholder,
+    /// - `recipient_opted_out` when the recipient opted out of the category
+    ///   or of all marketing email.
+    pub fn category(mut self, category: impl Into<EmailCategory>) -> Self {
         self.category = Some(category.into());
         self
     }
@@ -202,6 +205,94 @@ impl CodeEmail {
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.options.max_retries = Some(max_retries);
         self
+    }
+}
+
+/// The message category of a [`CodeEmail`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EmailCategory {
+    /// Transactional email with no category, as a send without a category is.
+    Transactional,
+    /// A category the send defines in code.
+    Defined(MessageCategory),
+}
+
+impl From<MessageCategory> for EmailCategory {
+    fn from(category: MessageCategory) -> Self {
+        EmailCategory::Defined(category)
+    }
+}
+
+/// A message category, defined in code by its key.
+///
+/// PostHog creates the category on the first send with its key, and updates
+/// its name and description when they change. A key that exists with another
+/// type refuses the send with `category_mismatch`.
+///
+/// A marketing send honors the recipient's opt-outs, and its `html` (or
+/// `text`, without `html`) needs the `{{ unsubscribe_url }}` placeholder.
+///
+/// ```
+/// use posthog_rs::{CodeEmail, MessageCategory, MessageCategoryType};
+///
+/// # let rendered_html = String::new();
+/// let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in review")
+///     .html(rendered_html)
+///     .category(
+///         MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
+///             .description("Monthly product news"),
+///     );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageCategory {
+    pub(crate) key: String,
+    pub(crate) category_type: MessageCategoryType,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+}
+
+impl MessageCategory {
+    /// A category with this key, type and name. The key is unique in the
+    /// project, such as `"newsletter"`, and the name is what recipients see
+    /// on their email preferences page.
+    pub fn new(
+        key: impl Into<String>,
+        category_type: MessageCategoryType,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            category_type,
+            name: name.into(),
+            description: None,
+        }
+    }
+
+    /// What the category's emails are about.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+}
+
+/// The kind of email a [`MessageCategory`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MessageCategoryType {
+    /// Email the recipient can opt out of, such as a newsletter.
+    Marketing,
+    /// Email the recipient needs, such as a receipt. It skips opt-outs.
+    Transactional,
+}
+
+impl MessageCategoryType {
+    /// The type as PostHog sends it, such as `"marketing"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageCategoryType::Marketing => "marketing",
+            MessageCategoryType::Transactional => "transactional",
+        }
     }
 }
 

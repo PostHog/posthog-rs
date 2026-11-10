@@ -126,12 +126,25 @@ pass an `idempotency_key` that names the email when your own job runner
 retries too, and set `max_retries(0)` on the send. A failed send returns an
 `EmailError`: branch on `code()`, such as `quota_limited`, or on `kind()`.
 
-A code send is transactional unless you set its `category`. To send marketing
-email, pass the key of one of your project's marketing message categories,
-such as `.category("product-updates")`. A marketing send honors the
-recipient's opt-outs, and its `html` (or `text`, without `html`) needs the
-`{{ unsubscribe_url }}` placeholder, which PostHog fills with the recipient's
-preferences link.
+A code send is transactional unless you set its `category`. A
+`MessageCategory` defines the category in code: PostHog creates it by its key
+on the first send, and updates its name and description when they change.
+
+```rust
+use posthog_rs::{CodeEmail, MessageCategory, MessageCategoryType};
+
+let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in review")
+    .html(rendered_html)
+    .category(
+        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
+            .description("Monthly product news"),
+    );
+```
+
+A marketing send honors the recipient's opt-outs, and its `html` (or `text`,
+without `html`) needs the `{{ unsubscribe_url }}` placeholder, which PostHog
+fills with the recipient's preferences link. `EmailCategory::Transactional`
+sends transactional email with no category, as leaving `category` out does.
 
 ## Contributing
 

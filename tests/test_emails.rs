@@ -11,7 +11,10 @@ use email_support::{
     accepted, closed_url, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH,
     TEMPLATE_ID,
 };
-use posthog_rs::{CodeEmail, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
+use posthog_rs::{
+    CodeEmail, EmailDeliveryStatus, EmailErrorKind, MessageCategory, MessageCategoryType,
+    TemplateEmail,
+};
 use serde_json::json;
 
 async fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
@@ -90,7 +93,14 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
                 .from("Acme <security@example.com>")
                 .reply_to("help@example.com")
                 .capture_engagement(false)
-                .category("product-updates")
+                .category(
+                    MessageCategory::new(
+                        "newsletter",
+                        MessageCategoryType::Marketing,
+                        "Newsletter",
+                    )
+                    .description("Monthly product news"),
+                )
                 .distinct_id("user_123")
                 .idempotency_key("password-reset:user_123"),
         )
@@ -109,7 +119,12 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
             "from": "Acme <security@example.com>",
             "reply_to": ["help@example.com"],
             "capture_engagement": false,
-            "category": "product-updates",
+            "category": {
+                "key": "newsletter",
+                "type": "marketing",
+                "name": "Newsletter",
+                "description": "Monthly product news",
+            },
             "distinct_id": "user_123",
             "to": "user@example.com",
         })
@@ -238,7 +253,7 @@ async fn refusals_keep_posthogs_code_and_are_not_retried() {
             EmailErrorKind::InvalidIdempotentRequest,
         ),
         (422, "recipient_suppressed", EmailErrorKind::ValidationError),
-        (400, "unknown_category", EmailErrorKind::ValidationError),
+        (400, "too_many_categories", EmailErrorKind::ValidationError),
         (400, "category_mismatch", EmailErrorKind::ValidationError),
         (
             400,
