@@ -3229,8 +3229,8 @@ mod tests {
             event
         }
 
-        /// Serialized wire size of `event` as the worker will measure it. Sizes
-        /// are deterministic: the timestamp and uuid are fixed-width.
+        /// Serialized wire size of `event`. Set its timestamp before measuring
+        /// exact byte boundaries: wire timestamps have variable fractional precision.
         fn wire_total(event: &Event, builder: &mut ClientOptionsBuilder) -> usize {
             let opts = builder.build().unwrap();
             let event =
@@ -3442,13 +3442,15 @@ mod tests {
             let server = MockServer::start();
             let mock = path_mock(&server, CAPTURE_AI_PATH);
             let mut builder = options(server.base_url());
-            let size = wire_total(&sized_event("e1", 100), &mut builder);
+            let mut event = sized_event("e1", 100);
+            event.set_timestamp(Utc::now()).unwrap();
+            let size = wire_total(&event, &mut builder);
             let lane = LaneConfig {
                 batch_bytes_target: Some(size),
                 ..plain_ai()
             };
             let handle = spawn(&mut builder, lane);
-            handle.enqueue(sized_event("e1", 100));
+            handle.enqueue(event);
             handle.tick();
             mock.assert_calls(1);
             assert_eq!(handle.pending(), 0);
