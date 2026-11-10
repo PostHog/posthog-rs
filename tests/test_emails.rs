@@ -232,9 +232,10 @@ async fn a_file_store_redirect_is_never_followed() {
     // follows one, with the SDK's own client or one the app supplied.
     for supplied in [false, true] {
         let posthog = FakePostHog::start_async().await;
-        let elsewhere = ScriptedServer::start_async(vec![Answer::json(200, json!({}))]).await;
+        // Another file store, which would keep the file if the PUT reached it.
+        let elsewhere = FakePostHog::start_async().await;
         posthog.store(&PNG);
-        posthog.store_redirects_next_to(&elsewhere.url);
+        posthog.store_redirects_next_to(&elsewhere.store_url());
         let mut builder = options(&posthog.url);
         if supplied {
             builder.http_client(reqwest::Client::new());
@@ -252,9 +253,9 @@ async fn a_file_store_redirect_is_never_followed() {
         assert_eq!(error.field(), Some("attachments__0"), "{}", supplied);
         assert!(error.message().contains("invoice.pdf"), "{}", error);
         let chain = error_chain(&error);
-        assert!(!chain.contains(&elsewhere.url), "{}", chain);
+        assert!(!chain.contains(&elsewhere.store_url()), "{}", chain);
         assert!(!chain.contains("X-Amz-Signature"), "{}", chain);
-        assert!(elsewhere.requests().is_empty(), "{}", supplied);
+        assert!(elsewhere.stored(PDF_SHA256).is_none(), "{}", supplied);
         assert!(posthog.stored(PDF_SHA256).is_none(), "{}", supplied);
         assert!(posthog.sent().is_empty(), "{}", supplied);
     }

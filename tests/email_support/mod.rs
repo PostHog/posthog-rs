@@ -308,6 +308,11 @@ impl FakePostHog {
         self.state.lock().unwrap().redirect_next_to = Some(other_store.to_string());
     }
 
+    /// The file store's URL, plain http.
+    pub fn store_url(&self) -> String {
+        self.state.lock().unwrap().store_url.clone()
+    }
+
     /// The latest version of the file with this hash.
     pub fn stored(&self, sha256: &str) -> Option<Vec<u8>> {
         self.versions(sha256).pop()
