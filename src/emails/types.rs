@@ -269,7 +269,8 @@ impl MessageCategory {
         }
     }
 
-    /// What the category's emails are about.
+    /// What the category's emails are about. Without it, the category keeps
+    /// its description, and `""` clears it.
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self

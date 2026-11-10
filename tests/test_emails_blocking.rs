@@ -64,6 +64,12 @@ fn code_send_posts_the_rendered_content() {
             MessageCategory::new("receipts", MessageCategoryType::Transactional, "Receipts").into(),
             json!({"key": "receipts", "type": "transactional", "name": "Receipts"}),
         ),
+        (
+            MessageCategory::new("receipts", MessageCategoryType::Transactional, "Receipts")
+                .description("")
+                .into(),
+            json!({"key": "receipts", "type": "transactional", "name": "Receipts", "description": ""}),
+        ),
     ];
     for (category, wire) in cases {
         let server = ScriptedServer::start(vec![accepted()]);
