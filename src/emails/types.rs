@@ -161,13 +161,16 @@ impl CodeEmail {
     }
 
     /// The email's message category: [`EmailCategory::Transactional`], or a
-    /// [`MessageCategory`] that the send defines. Without it, PostHog sends
-    /// transactional email with no category.
+    /// [`MessageCategory`] that the send defines. Without it, the send follows
+    /// the category of the template that `template_key` names, or is
+    /// transactional with no category.
     ///
-    /// When `template_key` names a template made in PostHog, the send follows
-    /// that template's category. PostHog refuses the send with:
+    /// [`EmailCategory::Transactional`] asks for transactional email with no
+    /// category. PostHog refuses the send with:
     ///
-    /// - `category_mismatch` when the key exists with another type,
+    /// - `category_mismatch` when the key exists with another type, or when
+    ///   `template_key` names a template in another category, including
+    ///   [`EmailCategory::Transactional`] for a template in a category,
     /// - `too_many_categories` when it would create a category past the
     ///   project's limit,
     /// - `unsubscribe_link_required` when a marketing email has no
@@ -212,7 +215,9 @@ impl CodeEmail {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EmailCategory {
-    /// Transactional email with no category, as a send without a category is.
+    /// Transactional email with no category. Unlike a send without a
+    /// category, it doesn't follow the category of the template that
+    /// `template_key` names: PostHog refuses it on a template in a category.
     Transactional,
     /// A category the send defines in code.
     Defined(MessageCategory),

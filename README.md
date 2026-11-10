@@ -143,8 +143,13 @@ let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in 
 
 A marketing send honors the recipient's opt-outs, and its `html` (or `text`,
 without `html`) needs the `{{ unsubscribe_url }}` placeholder, which PostHog
-fills with the recipient's preferences link. `EmailCategory::Transactional`
-sends transactional email with no category, as leaving `category` out does.
+fills with the recipient's preferences link.
+
+Leave `category` out for transactional email with no category, or for the
+category of the template that `template_key` names.
+`EmailCategory::Transactional` asks for transactional email with no category,
+so PostHog refuses it with `category_mismatch` when `template_key` names a
+template in a category.
 
 ## Contributing
 

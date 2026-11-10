@@ -140,6 +140,150 @@ fn script(answers: Vec<Answer>) -> (Arc<Mutex<Vec<Recorded>>>, Responder) {
     (requests, Box::new(respond))
 }
 
+const CODE_SEND_FIELDS: &[&str] = &[
+    "to",
+    "template_key",
+    "subject",
+    "html",
+    "text",
+    "from",
+    "reply_to",
+    "capture_engagement",
+    "distinct_id",
+    "category",
+];
+const CATEGORY_FIELDS: &[&str] = &["key", "type", "name", "description"];
+
+/// An accepted send's recipient and the key of the category it went out in.
+pub type Sent = (String, Option<String>);
+
+/// A fake of PostHog's code send for a project whose templates may sit in a
+/// category. A `template_key` that names one of `templates` follows that
+/// template's category when the send leaves `category` out; any other
+/// category, `"transactional"` included, is refused with `category_mismatch`.
+pub struct SendApi {
+    pub url: String,
+    sent: Arc<Mutex<Vec<Sent>>>,
+    _server: MockServer,
+}
+
+impl SendApi {
+    /// `templates` maps a template key to its category's key and type, or to
+    /// `None` for a template with no category.
+    pub async fn start_async(templates: Vec<(&str, Option<(&str, &str)>)>) -> Self {
+        let templates: HashMap<String, Option<(String, String)>> = templates
+            .into_iter()
+            .map(|(key, category)| {
+                (
+                    key.to_string(),
+                    category.map(|(key, kind)| (key.to_string(), kind.to_string())),
+                )
+            })
+            .collect();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&sent);
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method("POST").path(SEND_PATH);
+                then.respond_with(move |request: &HttpMockRequest| {
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&request.body_vec()).unwrap_or_default();
+                    let (status, reply) = match code_send(&body, &templates) {
+                        Ok(sent) => {
+                            recorded.lock().unwrap().push(sent);
+                            (202, serde_json::json!({"message_id": MESSAGE_ID}))
+                        }
+                        Err((status, code)) => (
+                            status,
+                            serde_json::json!({"code": code, "detail": "Refused.", "attr": "category"}),
+                        ),
+                    };
+                    HttpMockResponse::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(reply.to_string())
+                        .build()
+                });
+            })
+            .await;
+        Self {
+            url: server.base_url(),
+            sent,
+            _server: server,
+        }
+    }
+
+    pub fn sent(&self) -> Vec<Sent> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+type Refusal = (u16, &'static str);
+
+fn code_send(
+    body: &serde_json::Value,
+    templates: &HashMap<String, Option<(String, String)>>,
+) -> Result<Sent, Refusal> {
+    let fields = body.as_object().ok_or((400, "invalid_input"))?;
+    if fields
+        .keys()
+        .any(|field| !CODE_SEND_FIELDS.contains(&field.as_str()))
+    {
+        return Err((400, "invalid_input"));
+    }
+    let to = fields
+        .get("to")
+        .and_then(|to| to.as_str())
+        .ok_or((400, "invalid_input"))?
+        .to_string();
+    let category = fields.get("category").unwrap_or(&serde_json::Value::Null);
+    let defined = defined_category(category)?;
+    let template_key = fields
+        .get("template_key")
+        .and_then(|key| key.as_str())
+        .ok_or((400, "invalid_input"))?;
+    let Some(template_category) = templates.get(template_key) else {
+        return Ok((to, defined.map(|(key, _)| key)));
+    };
+    let follows = match (template_category, category, &defined) {
+        (_, serde_json::Value::Null, _) => true,
+        (None, serde_json::Value::String(_), _) => true,
+        (Some(template), _, Some(defined)) => template == defined,
+        _ => false,
+    };
+    if !follows {
+        return Err((400, "category_mismatch"));
+    }
+    Ok((to, template_category.clone().map(|(key, _)| key)))
+}
+
+/// The key and type of a category object, `None` for no category or
+/// `"transactional"`, or a refusal for anything else.
+fn defined_category(category: &serde_json::Value) -> Result<Option<(String, String)>, Refusal> {
+    let invalid = (400, "invalid_input");
+    match category {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(value) if value == "transactional" => Ok(None),
+        serde_json::Value::Object(fields) => {
+            let text = |name: &str| fields.get(name).and_then(|value| value.as_str());
+            if fields.iter().any(|(name, value)| {
+                !CATEGORY_FIELDS.contains(&name.as_str()) || !value.is_string()
+            }) {
+                return Err(invalid);
+            }
+            let (Some(key), Some(kind), Some(_)) = (text("key"), text("type"), text("name")) else {
+                return Err(invalid);
+            };
+            if kind != "marketing" && kind != "transactional" {
+                return Err(invalid);
+            }
+            Ok(Some((key.to_string(), kind.to_string())))
+        }
+        _ => Err(invalid),
+    }
+}
+
 /// A server that answers `202` with a 10 MB `content-length`, sends 1.1 MiB
 /// of it, then holds the connection open. Only a client that stops reading at
 /// its cap gets an answer before its request timeout. httpmock always sends

@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 
 use common::default_user_agent;
 use email_support::{
-    accepted, closed_url, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH,
-    TEMPLATE_ID,
+    accepted, closed_url, options, unavailable, Answer, ScriptedServer, SendApi, MESSAGE_ID,
+    SEND_PATH, TEMPLATE_ID,
 };
 use posthog_rs::{
-    CodeEmail, EmailDeliveryStatus, EmailErrorKind, MessageCategory, MessageCategoryType,
-    TemplateEmail,
+    CodeEmail, EmailCategory, EmailDeliveryStatus, EmailErrorKind, MessageCategory,
+    MessageCategoryType, TemplateEmail,
 };
 use serde_json::json;
 
@@ -156,6 +156,50 @@ async fn code_send_defaults_engagement_capture_on() {
             "to": "user@example.com",
         })
     );
+}
+
+async fn client_with_a_newsletter_template() -> (posthog_rs::Client, SendApi) {
+    let api =
+        SendApi::start_async(vec![("november-digest", Some(("newsletter", "marketing")))]).await;
+    let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+    (client, api)
+}
+
+fn digest_email() -> CodeEmail {
+    CodeEmail::new("user@example.com", "november-digest", "Your November")
+        .html("<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>")
+}
+
+#[tokio::test]
+async fn a_send_for_a_template_in_a_category_follows_its_category() {
+    let (client, api) = client_with_a_newsletter_template().await;
+
+    client.emails().send(digest_email()).await.unwrap();
+
+    assert_eq!(
+        api.sent(),
+        vec![(
+            "user@example.com".to_string(),
+            Some("newsletter".to_string())
+        )]
+    );
+}
+
+#[tokio::test]
+async fn transactional_on_a_template_in_a_category_is_refused() {
+    let (client, api) = client_with_a_newsletter_template().await;
+
+    let error = client
+        .emails()
+        .send(digest_email().category(EmailCategory::Transactional))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        (error.code(), error.kind()),
+        ("category_mismatch", EmailErrorKind::ValidationError)
+    );
+    assert_eq!(api.sent(), vec![]);
 }
 
 #[tokio::test]
