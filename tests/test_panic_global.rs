@@ -35,7 +35,15 @@ fn is_panic_exception(req: &HttpMockRequest) -> bool {
         && body
             .pointer("/batch/0/properties/$exception_list/0/type")
             .and_then(|v| v.as_str())
-            == Some("Panic");
+            == Some("Panic")
+        && body
+            .pointer("/batch/0/properties/$lib")
+            .and_then(|v| v.as_str())
+            == Some("posthog-rs")
+        && body
+            .pointer("/batch/0/properties/$lib_version")
+            .and_then(|v| v.as_str())
+            == Some(env!("CARGO_PKG_VERSION"));
     let Some(frames) = body
         .pointer("/batch/0/properties/$exception_list/0/stacktrace/frames")
         .and_then(|v| v.as_array())

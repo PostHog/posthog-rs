@@ -6,9 +6,7 @@ use serde_json::Value;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::constants::{
-    LEGACY_OPTION_PROPERTIES, SDK_INFO_PROPERTIES, SESSION_ID_PROP, WINDOW_ID_PROP,
-};
+use crate::constants::{LEGACY_OPTION_PROPERTIES, SESSION_ID_PROP, WINDOW_ID_PROP};
 use crate::event::{merge_groups_into, Event};
 
 /// RFC 3339 UTC with 3, 6 or 9 fractional digits: the fewest that keep every
@@ -60,18 +58,6 @@ impl CaptureEvent {
     /// worker can stamp a deterministic timestamp from its clock when the event
     /// carries none of its own.
     pub(crate) fn from_event_at(event: &Event, now: DateTime<Utc>) -> Self {
-        Self::convert_event_at(event, now, false)
-    }
-
-    /// Convert a producer-prepared stateful event after enrichment and hooks.
-    /// Capture-time SDK properties stay with the event through storage/retry;
-    /// missing or hook-removed attribution is not filled again here.
-    #[cfg(feature = "stateful")]
-    pub(crate) fn from_stateful_event_at(event: &Event, now: DateTime<Utc>) -> Self {
-        Self::convert_event_at(event, now, true)
-    }
-
-    fn convert_event_at(event: &Event, now: DateTime<Utc>, retain_sdk_properties: bool) -> Self {
         let mut properties = event.properties().clone();
         // The pipeline merges groups before `before_send`; this covers groups a
         // hook adds and events built directly.
@@ -80,11 +66,6 @@ impl CaptureEvent {
         let timestamp = wire_timestamp(event.timestamp().map_or(now, |ts| ts.and_utc()));
 
         let options = merge_options(event, &mut properties);
-        if !retain_sdk_properties {
-            for key in SDK_INFO_PROPERTIES {
-                properties.remove(*key);
-            }
-        }
 
         let session_id = lift_string_property(&mut properties, SESSION_ID_PROP);
         let window_id = lift_string_property(&mut properties, WINDOW_ID_PROP);
@@ -102,6 +83,14 @@ impl CaptureEvent {
             properties: serde_json::to_value(properties)
                 .unwrap_or(serde_json::Value::Object(Default::default())),
         }
+    }
+
+    /// Convert a producer-prepared stateful event after enrichment and hooks.
+    /// Capture-time SDK properties stay with the event through storage/retry;
+    /// missing or hook-removed attribution is not filled again here.
+    #[cfg(feature = "stateful")]
+    pub(crate) fn from_stateful_event_at(event: &Event, now: DateTime<Utc>) -> Self {
+        Self::from_event_at(event, now)
     }
 }
 
@@ -227,10 +216,6 @@ pub struct CaptureErrorResponse {
 mod stateful_tests;
 
 /// Wire-shape tests for the capture event builder.
-///
-/// The server conversion removes `$lib`/`$lib_version` from `properties`.
-/// That path sends SDK identity in the `posthog-sdk-info` header; the header is covered by
-/// `client::capture::tests::build_headers_sdk_info_is_canonical_lib_slash_version`.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,17 +288,21 @@ mod tests {
     }
 
     #[test]
-    fn event_drops_caller_set_lib_properties() {
+    fn event_keeps_caller_set_lib_properties() {
         let mut event = Event::new("test_event", "user-1");
         event.insert_prop("$lib", "custom-lib").unwrap();
-        event.insert_prop("$lib_version", "9.9.9").unwrap();
+        event
+            .insert_prop("$lib_version", serde_json::Value::Null)
+            .unwrap();
+        event.insert_prop("$lib_version__major", 9).unwrap();
         event.insert_prop("plain", "kept").unwrap();
 
         let wire = CaptureEvent::from_event(&event);
         let props = wire.properties.as_object().unwrap();
-        assert!(!props.contains_key("$lib"));
-        assert!(!props.contains_key("$lib_version"));
-        assert_eq!(props.get("plain"), Some(&serde_json::json!("kept")));
+        assert_eq!(props.get("$lib"), Some(&json!("custom-lib")));
+        assert_eq!(props.get("$lib_version"), Some(&serde_json::Value::Null));
+        assert_eq!(props.get("$lib_version__major"), Some(&json!(9)));
+        assert_eq!(props.get("plain"), Some(&json!("kept")));
     }
 
     // -- property -> options extraction --------------------------------------
