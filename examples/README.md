@@ -17,8 +17,6 @@ This blocking example uses automatic local persistence, anonymous identity,
 registered context, explicit capture/screen, a native privacy hook, and separate drain
 reports. Optionally set `POSTHOG_DISTINCT_ID` to identify a user and
 `POSTHOG_GROUP_KEY` to associate an organization (enabling person processing).
-See [stateful client behavior](../docs/stateful-client.md) for configuration,
-admission limits, storage failure handling, async initialization and drains.
 
 ## Running the Examples
 
