@@ -159,8 +159,10 @@ async fn code_send_defaults_engagement_capture_on() {
 }
 
 async fn client_with_a_newsletter_template() -> (posthog_rs::Client, SendApi) {
-    let api =
-        SendApi::start_async(vec![("november-digest", Some(("newsletter", "marketing")))]).await;
+    let api = SendApi::start_async()
+        .await
+        .with_category("newsletter", "marketing", "Newsletter", "")
+        .with_template("november-digest", Some("newsletter"));
     let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
     (client, api)
 }

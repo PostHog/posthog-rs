@@ -157,130 +157,215 @@ const CATEGORY_FIELDS: &[&str] = &["key", "type", "name", "description"];
 /// An accepted send's recipient and the key of the category it went out in.
 pub type Sent = (String, Option<String>);
 
-/// A fake of PostHog's code send for a project whose templates may sit in a
-/// category. A `template_key` that names one of `templates` follows that
-/// template's category when the send leaves `category` out; any other
-/// category, `"transactional"` included, is refused with `category_mismatch`.
+/// A category as the fake project stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCategory {
+    pub category_type: String,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Default)]
+struct Project {
+    categories: HashMap<String, StoredCategory>,
+    /// Template key to the key of its category, if it has one.
+    templates: HashMap<String, Option<String>>,
+    sent: Vec<Sent>,
+}
+
+/// A fake of PostHog's code send that keeps a project's categories and
+/// templates. A category object upserts the category by key. A `template_key`
+/// that names one of the project's templates follows that template's category
+/// when the send leaves `category` out; any other category, `"transactional"`
+/// included, is refused with `category_mismatch`.
 pub struct SendApi {
     pub url: String,
-    sent: Arc<Mutex<Vec<Sent>>>,
+    project: Arc<Mutex<Project>>,
     _server: MockServer,
 }
 
 impl SendApi {
-    /// `templates` maps a template key to its category's key and type, or to
-    /// `None` for a template with no category.
-    pub async fn start_async(templates: Vec<(&str, Option<(&str, &str)>)>) -> Self {
-        let templates: HashMap<String, Option<(String, String)>> = templates
-            .into_iter()
-            .map(|(key, category)| {
-                (
-                    key.to_string(),
-                    category.map(|(key, kind)| (key.to_string(), kind.to_string())),
-                )
-            })
-            .collect();
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&sent);
+    /// For blocking tests.
+    pub fn start() -> Self {
+        let server = MockServer::start();
+        let project = Arc::new(Mutex::new(Project::default()));
+        let respond = responder(Arc::clone(&project));
+        server.mock(|when, then| {
+            when.method("POST").path(SEND_PATH);
+            then.respond_with(respond);
+        });
+        Self::new(server, project)
+    }
+
+    /// For async tests, where httpmock's blocking calls would block the runtime.
+    pub async fn start_async() -> Self {
         let server = MockServer::start_async().await;
+        let project = Arc::new(Mutex::new(Project::default()));
+        let respond = responder(Arc::clone(&project));
         server
             .mock_async(|when, then| {
                 when.method("POST").path(SEND_PATH);
-                then.respond_with(move |request: &HttpMockRequest| {
-                    let body: serde_json::Value =
-                        serde_json::from_slice(&request.body_vec()).unwrap_or_default();
-                    let (status, reply) = match code_send(&body, &templates) {
-                        Ok(sent) => {
-                            recorded.lock().unwrap().push(sent);
-                            (202, serde_json::json!({"message_id": MESSAGE_ID}))
-                        }
-                        Err((status, code)) => (
-                            status,
-                            serde_json::json!({"code": code, "detail": "Refused.", "attr": "category"}),
-                        ),
-                    };
-                    HttpMockResponse::builder()
-                        .status(status)
-                        .header("content-type", "application/json")
-                        .body(reply.to_string())
-                        .build()
-                });
+                then.respond_with(respond);
             })
             .await;
+        Self::new(server, project)
+    }
+
+    fn new(server: MockServer, project: Arc<Mutex<Project>>) -> Self {
         Self {
             url: server.base_url(),
-            sent,
+            project,
             _server: server,
         }
     }
 
+    pub fn with_category(
+        self,
+        key: &str,
+        category_type: &str,
+        name: &str,
+        description: &str,
+    ) -> Self {
+        self.project.lock().unwrap().categories.insert(
+            key.to_string(),
+            StoredCategory {
+                category_type: category_type.to_string(),
+                name: name.to_string(),
+                description: description.to_string(),
+            },
+        );
+        self
+    }
+
+    pub fn with_template(self, template_key: &str, category_key: Option<&str>) -> Self {
+        self.project
+            .lock()
+            .unwrap()
+            .templates
+            .insert(template_key.to_string(), category_key.map(str::to_string));
+        self
+    }
+
+    pub fn category(&self, key: &str) -> Option<StoredCategory> {
+        self.project.lock().unwrap().categories.get(key).cloned()
+    }
+
     pub fn sent(&self) -> Vec<Sent> {
-        self.sent.lock().unwrap().clone()
+        self.project.lock().unwrap().sent.clone()
     }
 }
 
-type Refusal = (u16, &'static str);
+fn responder(project: Arc<Mutex<Project>>) -> Responder {
+    Box::new(move |request: &HttpMockRequest| {
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body_vec()).unwrap_or_default();
+        let mut project = project.lock().unwrap();
+        let (status, reply) = match code_send(&body, &mut project) {
+            Ok(sent) => {
+                project.sent.push(sent);
+                (202, serde_json::json!({"message_id": MESSAGE_ID}))
+            }
+            Err((status, code)) => (
+                status,
+                serde_json::json!({"code": code, "detail": "Refused.", "attr": "category"}),
+            ),
+        };
+        HttpMockResponse::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(reply.to_string())
+            .build()
+    })
+}
 
-fn code_send(
-    body: &serde_json::Value,
-    templates: &HashMap<String, Option<(String, String)>>,
-) -> Result<Sent, Refusal> {
-    let fields = body.as_object().ok_or((400, "invalid_input"))?;
+type Refusal = (u16, &'static str);
+const INVALID: Refusal = (400, "invalid_input");
+
+fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Refusal> {
+    let fields = body.as_object().ok_or(INVALID)?;
     if fields
         .keys()
         .any(|field| !CODE_SEND_FIELDS.contains(&field.as_str()))
     {
-        return Err((400, "invalid_input"));
+        return Err(INVALID);
     }
-    let to = fields
-        .get("to")
-        .and_then(|to| to.as_str())
-        .ok_or((400, "invalid_input"))?
-        .to_string();
+    let text = |name: &str| fields.get(name).and_then(|value| value.as_str());
+    let to = text("to").ok_or(INVALID)?.to_string();
+    let template_key = text("template_key").ok_or(INVALID)?;
     let category = fields.get("category").unwrap_or(&serde_json::Value::Null);
     let defined = defined_category(category)?;
-    let template_key = fields
-        .get("template_key")
-        .and_then(|key| key.as_str())
-        .ok_or((400, "invalid_input"))?;
-    let Some(template_category) = templates.get(template_key) else {
-        return Ok((to, defined.map(|(key, _)| key)));
-    };
-    let follows = match (template_category, category, &defined) {
-        (_, serde_json::Value::Null, _) => true,
-        (None, serde_json::Value::String(_), _) => true,
-        (Some(template), _, Some(defined)) => template == defined,
-        _ => false,
-    };
-    if !follows {
-        return Err((400, "category_mismatch"));
+    if let Some(template_category) = project.templates.get(template_key).cloned() {
+        let follows = match (&template_category, category, &defined) {
+            (_, serde_json::Value::Null, _) => true,
+            (None, serde_json::Value::String(_), _) => true,
+            (Some(key), _, Some(defined)) => {
+                key == text_of(defined, "key")
+                    && project.categories[key].category_type == text_of(defined, "type")
+            }
+            _ => false,
+        };
+        if !follows {
+            return Err((400, "category_mismatch"));
+        }
+        return Ok((to, template_category));
     }
-    Ok((to, template_category.clone().map(|(key, _)| key)))
+    let Some(defined) = defined else {
+        return Ok((to, None));
+    };
+    let key = text_of(defined, "key");
+    let category_type = text_of(defined, "type");
+    if let Some(stored) = project.categories.get(key) {
+        if stored.category_type != category_type {
+            return Err((400, "category_mismatch"));
+        }
+    }
+    let unsubscribe = regex::Regex::new(r"\{\{\s*unsubscribe_url\s*\}\}").unwrap();
+    let content = text("html").or_else(|| text("text")).unwrap_or_default();
+    if category_type == "marketing" && !unsubscribe.is_match(content) {
+        return Err((400, "unsubscribe_link_required"));
+    }
+    let stored = project
+        .categories
+        .entry(key.to_string())
+        .or_insert_with(|| StoredCategory {
+            category_type: category_type.to_string(),
+            name: String::new(),
+            description: String::new(),
+        });
+    stored.name = text_of(defined, "name").to_string();
+    if let Some(description) = defined.get("description").and_then(|value| value.as_str()) {
+        stored.description = description.to_string();
+    }
+    Ok((to, Some(key.to_string())))
 }
 
-/// The key and type of a category object, `None` for no category or
-/// `"transactional"`, or a refusal for anything else.
-fn defined_category(category: &serde_json::Value) -> Result<Option<(String, String)>, Refusal> {
-    let invalid = (400, "invalid_input");
+fn text_of<'a>(fields: &'a serde_json::Map<String, serde_json::Value>, name: &str) -> &'a str {
+    fields[name].as_str().unwrap()
+}
+
+/// A category object's fields, `None` for no category or `"transactional"`,
+/// or a refusal for anything else.
+fn defined_category(
+    category: &serde_json::Value,
+) -> Result<Option<&serde_json::Map<String, serde_json::Value>>, Refusal> {
     match category {
         serde_json::Value::Null => Ok(None),
         serde_json::Value::String(value) if value == "transactional" => Ok(None),
         serde_json::Value::Object(fields) => {
-            let text = |name: &str| fields.get(name).and_then(|value| value.as_str());
-            if fields.iter().any(|(name, value)| {
-                !CATEGORY_FIELDS.contains(&name.as_str()) || !value.is_string()
-            }) {
-                return Err(invalid);
+            let valid = fields
+                .iter()
+                .all(|(name, value)| CATEGORY_FIELDS.contains(&name.as_str()) && value.is_string())
+                && ["key", "type", "name"]
+                    .iter()
+                    .all(|name| fields.contains_key(*name))
+                && ["marketing", "transactional"].contains(&text_of(fields, "type"));
+            if valid {
+                Ok(Some(fields))
+            } else {
+                Err(INVALID)
             }
-            let (Some(key), Some(kind), Some(_)) = (text("key"), text("type"), text("name")) else {
-                return Err(invalid);
-            };
-            if kind != "marketing" && kind != "transactional" {
-                return Err(invalid);
-            }
-            Ok(Some((key.to_string(), kind.to_string())))
         }
-        _ => Err(invalid),
+        _ => Err(INVALID),
     }
 }
 

@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use common::default_user_agent;
 use email_support::{
-    accepted, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    accepted, options, unavailable, Answer, ScriptedServer, SendApi, StoredCategory, MESSAGE_ID,
+    SEND_PATH, TEMPLATE_ID,
 };
 use posthog_rs::{
     CodeEmail, EmailCategory, EmailDeliveryStatus, EmailErrorKind, MessageCategory,
@@ -96,6 +97,43 @@ fn code_send_posts_the_rendered_content() {
                 "category": wire,
                 "to": "user@example.com",
             })
+        );
+    }
+}
+
+#[test]
+fn a_send_updates_its_category_description() {
+    let cases = [
+        (None, "Old news"),
+        (Some(""), ""),
+        (Some("Monthly product news"), "Monthly product news"),
+    ];
+    for (description, stored) in cases {
+        let api = SendApi::start().with_category("newsletter", "marketing", "News", "Old news");
+        let client = posthog_rs::client(options(&api.url).build().unwrap());
+        let mut category =
+            MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter");
+        if let Some(description) = description {
+            category = category.description(description);
+        }
+
+        client
+            .emails()
+            .send(
+                CodeEmail::new("user@example.com", "monthly-digest", "Your month")
+                    .html("<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>")
+                    .category(category),
+            )
+            .unwrap();
+
+        assert_eq!(
+            api.category("newsletter"),
+            Some(StoredCategory {
+                category_type: "marketing".into(),
+                name: "Newsletter".into(),
+                description: stored.into(),
+            }),
+            "description {description:?}"
         );
     }
 }
