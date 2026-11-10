@@ -662,7 +662,6 @@ impl EmailTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::MessageCategoryType;
     use super::*;
     use serde_json::json;
 
@@ -716,11 +715,6 @@ mod tests {
                 .text("Hi")
                 .reply_to("a@example.com")
                 .reply_to("b@example.com")
-                .category(MessageCategory::new(
-                    "receipts",
-                    MessageCategoryType::Transactional,
-                    "Receipts",
-                ))
                 .into(),
         )
         .unwrap();
@@ -732,7 +726,6 @@ mod tests {
                 "text": "Hi",
                 "reply_to": ["a@example.com", "b@example.com"],
                 "capture_engagement": true,
-                "category": {"key": "receipts", "type": "transactional", "name": "Receipts"},
                 "to": "user@example.com",
             })
         );
