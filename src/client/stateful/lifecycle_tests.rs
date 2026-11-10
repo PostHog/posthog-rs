@@ -344,7 +344,9 @@ fn property_and_group_mutations_complete_while_state_io_is_gated() {
     assert!(after.registered.is_empty() && after.groups.is_empty());
     assert!(after.context_revision > before.context_revision);
     let live = client.state.as_ref().unwrap().snapshot();
-    assert_eq!(live, after);
+    // Flag-load completion can advance independently of the gated state write.
+    assert!(live.same_persisted_state(&after));
+    assert_eq!(live.context_revision, after.context_revision);
     client.shutdown_blocking(None);
     drop(client);
     gate.dropped.recv_timeout(WAIT).unwrap();
