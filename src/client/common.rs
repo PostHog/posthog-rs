@@ -18,6 +18,9 @@ use crate::Event;
 use tracing::{debug, error, warn};
 
 use super::transport::TransportHandle;
+use super::{CRATE_VERSION, SDK_USERAGENT_NAME};
+use crate::constants::{LIB_PROP, LIB_VERSION_PART_PROPS, LIB_VERSION_PROP};
+use crate::event::names_a_library;
 
 /// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
 /// dedup cache. On overflow the entire map is reset (matches the JS SDK).
@@ -49,6 +52,51 @@ fn apply_runtime_context(event: &mut Event) {
         "$os_version",
         serde_json::Value::String(context.os_version.clone()),
     );
+}
+
+/// The crate version as `[major, minor, patch]`, for the
+/// `$lib_version__major/minor/patch` properties. `None` if it doesn't parse.
+fn lib_version_parts() -> Option<[u64; 3]> {
+    static PARTS: OnceLock<Option<[u64; 3]>> = OnceLock::new();
+    *PARTS.get_or_init(|| {
+        Some([
+            env!("CARGO_PKG_VERSION_MAJOR").parse().ok()?,
+            env!("CARGO_PKG_VERSION_MINOR").parse().ok()?,
+            env!("CARGO_PKG_VERSION_PATCH").parse().ok()?,
+        ])
+    })
+}
+
+/// Fills `$lib` and `$lib_version` as a pair with the identity the
+/// `posthog-sdk-info` header names, after every other layer and before the
+/// hooks. Only a non-empty string counts as set.
+///
+/// - No `$lib`: both get the SDK's values, replacing a lone `$lib_version`.
+/// - `$lib` is `posthog-rs` with no `$lib_version`: the version is filled.
+/// - Any other `$lib`: both are left as they are, so another library's name
+///   never gets this crate's version.
+///
+/// The `__major/minor/patch` parts are written whenever the SDK writes
+/// `$lib_version`, and only then, so they always match it.
+fn apply_sdk_identity(event: &mut Event) {
+    let properties = event.properties();
+    let lib = properties.get(LIB_PROP);
+    let fill_lib = !names_a_library(lib);
+    if !fill_lib
+        && (lib.and_then(serde_json::Value::as_str) != Some(SDK_USERAGENT_NAME)
+            || names_a_library(properties.get(LIB_VERSION_PROP)))
+    {
+        return;
+    }
+    if fill_lib {
+        event.set_prop(LIB_PROP, SDK_USERAGENT_NAME.into());
+    }
+    event.set_prop(LIB_VERSION_PROP, CRATE_VERSION.into());
+    if let Some(parts) = lib_version_parts() {
+        for (key, part) in LIB_VERSION_PART_PROPS.iter().zip(parts.iter()) {
+            event.set_prop(*key, (*part).into());
+        }
+    }
 }
 
 fn flag_event_dedup_cache() -> FlagEventDedupCache {
@@ -118,6 +166,8 @@ pub(super) fn preprocess_capture_event(
     apply_runtime_context(&mut event);
     apply_capture_defaults(&mut event, defaults);
     event.merge_groups_into_properties();
+    // After every other fill, so the pair rule sees the final `$lib`.
+    apply_sdk_identity(&mut event);
     // Trims after every SDK fill and before the hooks, so properties a hook
     // adds to a minimized `$feature_flag_called` event are sent.
     event.apply_minimal_flag_called_allowlist();
@@ -909,6 +959,52 @@ mod tests {
         assert_eq!(event.properties().get("$os"), Some(&json!("custom-os")));
         assert!(event.properties().contains_key("$os_version"));
         assert!(!event.properties().contains_key("$os_arch"));
+    }
+
+    fn version_parts(event: &Event) -> Vec<Option<&serde_json::Value>> {
+        LIB_VERSION_PART_PROPS
+            .iter()
+            .map(|key| event.properties().get(*key))
+            .collect()
+    }
+
+    #[test]
+    fn sdk_version_parts_are_the_crate_version_as_numbers() {
+        let mut event = Event::new("test", "user-1");
+
+        apply_sdk_identity(&mut event);
+
+        let expected: Vec<serde_json::Value> = [
+            env!("CARGO_PKG_VERSION_MAJOR"),
+            env!("CARGO_PKG_VERSION_MINOR"),
+            env!("CARGO_PKG_VERSION_PATCH"),
+        ]
+        .iter()
+        .map(|part| json!(part.parse::<u64>().unwrap()))
+        .collect();
+        assert_eq!(
+            version_parts(&event),
+            expected.iter().map(Some).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sdk_version_parts_replace_the_callers_only_with_the_sdk_version() {
+        // The SDK writes `$lib_version`, so its parts replace the caller's.
+        let mut filled = Event::new("test", "user-1");
+        filled.insert_prop("$lib_version", "9.9.9").unwrap();
+        filled.insert_prop("$lib_version__major", 9u64).unwrap();
+        apply_sdk_identity(&mut filled);
+        let mut sdk = Event::new("test", "user-1");
+        apply_sdk_identity(&mut sdk);
+        assert_eq!(version_parts(&filled), version_parts(&sdk));
+
+        // The caller named the library, so its parts stay and none are added.
+        let mut kept = Event::new("test", "user-1");
+        kept.insert_prop("$lib", "custom-lib").unwrap();
+        kept.insert_prop("$lib_version__major", 9u64).unwrap();
+        apply_sdk_identity(&mut kept);
+        assert_eq!(version_parts(&kept), vec![Some(&json!(9)), None, None]);
     }
 
     #[test]

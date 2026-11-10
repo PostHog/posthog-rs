@@ -165,6 +165,25 @@ Point an MCP client at that command. Shows:
 - Instrumenting an `rmcp` server in one call
 - The `get_more_tools` virtual tool
 
+### 7. Transactional Email
+
+Sends one email, then reads its status:
+
+```bash
+export POSTHOG_API_KEY=phc_your_project_key
+export POSTHOG_SECRET_KEY=phs_your_project_secret_key  # with transactional_email:write
+export EMAIL_TO=you@example.com
+# Optional: a template made transactional in PostHog. Without it, the
+# example sends HTML it rendered itself.
+export POSTHOG_EMAIL_TEMPLATE_ID=your_template_uuid
+cargo run --example send_email
+```
+
+Shows:
+- Sending a template made in PostHog with `TemplateEmail`
+- Sending content your code rendered with `CodeEmail`
+- Reading the email's delivery status
+
 ## Key Concepts
 
 ### Feature Flag Types

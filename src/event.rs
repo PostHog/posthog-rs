@@ -19,8 +19,8 @@ use crate::Error;
 /// had, plus whatever a hook adds. Beyond the evaluation properties it keeps
 /// cheap, static, low-cardinality identity useful for platform/runtime
 /// breakdowns (`$lib`, `$lib_version`, `$os`, `$os_version`), processing-control
-/// sentinels this SDK sets (`$geoip_disable`, `$process_person_profile`,
-/// `$is_server`), correctness-required `$groups`, and linkage identifiers.
+/// sentinels (`$geoip_disable`, `$process_person_profile`, `$is_server`),
+/// correctness-required `$groups`, and linkage identifiers.
 pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
     // Identity
     "$feature_flag",
@@ -108,6 +108,12 @@ pub(crate) fn fill_property(
             }
         }
     }
+}
+
+/// Whether a `$lib` or `$lib_version` value counts as set: only a non-empty
+/// string does. A missing key, `null`, `""` and non-strings are all unset.
+pub(crate) fn names_a_library(value: Option<&serde_json::Value>) -> bool {
+    matches!(value, Some(serde_json::Value::String(text)) if !text.is_empty())
 }
 
 /// An [`Event`] represents an interaction a user has with your app or
@@ -214,8 +220,7 @@ impl Event {
     /// Generates a random distinct ID and sets the `process_person_profile`
     /// option to `false` so PostHog does not create a person profile for the
     /// event. To process one anyway, set the option to `true` with
-    /// [`Event::insert_option`]; a legacy `$process_person_profile` property
-    /// does not override an option. A `null` or removed option counts as unset,
+    /// [`Event::insert_option`]. A `null` or removed option counts as unset,
     /// so the SDK sets `false` again before `before_send`.
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
         let mut options = HashMap::new();
@@ -279,8 +284,8 @@ impl Event {
     /// # Remarks
     ///
     /// Sent unchecked: PostHog ignores unknown keys and drops the event if a
-    /// known key has an unusable value. A non-`null` option wins over its legacy
-    /// `$` property, such as `$process_person_profile`.
+    /// known key has an unusable value. Legacy option properties still work,
+    /// but an option overrides its legacy property. Use options.
     pub fn insert_option<K: Into<String>, V: Serialize>(
         &mut self,
         key: K,
@@ -537,6 +542,11 @@ impl Event {
         value: serde_json::Value,
     ) {
         fill_property(&mut self.properties, key.into(), value);
+    }
+
+    /// Set a property, replacing any value it had.
+    pub(crate) fn set_prop<K: Into<String>>(&mut self, key: K, value: serde_json::Value) {
+        self.properties.insert(key.into(), value);
     }
 
     /// Insert a default option only if the caller left it unset (missing or `null`).
