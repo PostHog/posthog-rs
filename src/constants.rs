@@ -9,16 +9,22 @@ pub(crate) const PRODUCT_TOUR_ID_PROP: &str = "$product_tour_id";
 pub(crate) const SESSION_ID_PROP: &str = "$session_id";
 pub(crate) const WINDOW_ID_PROP: &str = "$window_id";
 
+// The library that produced an event, sent in `properties` as set at send time.
+pub(crate) const LIB_PROP: &str = "$lib";
+pub(crate) const LIB_VERSION_PROP: &str = "$lib_version";
+/// The SDK's own `$lib_version` as numbers, written only with that version.
+pub(crate) const LIB_VERSION_PART_PROPS: [&str; 3] = [
+    "$lib_version__major",
+    "$lib_version__minor",
+    "$lib_version__patch",
+];
+
 // Wire option-object keys.
 pub(crate) const COOKIELESS_MODE_OPT: &str = "cookieless_mode";
 pub(crate) const DISABLE_SKEW_CORRECTION_OPT: &str = "disable_skew_correction";
 pub(crate) const PRODUCT_TOUR_ID_OPT: &str = "product_tour_id";
 /// Set to `false` by [`crate::Event::new_anon`].
 pub(crate) const PROCESS_PERSON_PROFILE_OPT: &str = "process_person_profile";
-
-/// Capture sets these from the `PostHog-Sdk-Info` header and appends them after
-/// the event's own keys, so a copy left in `properties` is a duplicate JSON key.
-pub(crate) const SDK_INFO_PROPERTIES: &[&str] = &["$lib", "$lib_version"];
 
 /// (legacy property, option) pairs; only these keys have a legacy fallback.
 pub(crate) const LEGACY_OPTION_PROPERTIES: &[(&str, &str)] = &[

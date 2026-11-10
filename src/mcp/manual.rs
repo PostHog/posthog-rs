@@ -28,6 +28,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use rmcp::model::{CallToolResult, Implementation, InputRequiredResult, JsonObject, Tool};
+use serde::Serialize;
 
 use super::analytics::{Core, McpAnalytics};
 use super::call::{
@@ -64,6 +65,7 @@ pub struct ToolCallRequest {
     transport_session: TransportSession,
     server: Option<Implementation>,
     started: Option<Instant>,
+    event_options: JsonObject,
 }
 
 impl ToolCallRequest {
@@ -78,6 +80,7 @@ impl ToolCallRequest {
             transport_session: TransportSession::None,
             server: None,
             started: None,
+            event_options: JsonObject::new(),
         }
     }
 
@@ -108,6 +111,27 @@ impl ToolCallRequest {
     pub fn server(mut self, server: Implementation) -> Self {
         self.server = Some(server);
         self
+    }
+
+    /// Sets a capture option, such as `disable_skew_correction`, on every
+    /// event of this call, its `$exception` included. It wins over
+    /// [`McpOptionsBuilder::event_options`](super::McpOptionsBuilder::event_options)
+    /// and the request context. An anonymous call keeps
+    /// `process_person_profile: false`. A `null` value sets nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Serialization`](crate::Error::Serialization) if
+    /// `value` cannot be serialized.
+    pub fn event_option(
+        mut self,
+        key: impl Into<String>,
+        value: impl Serialize,
+    ) -> Result<Self, crate::Error> {
+        let value = serde_json::to_value(value)
+            .map_err(|error| crate::Error::Serialization(error.to_string()))?;
+        self.event_options.insert(key.into(), value);
+        Ok(self)
     }
 
     /// When the request arrived, if before [`McpAnalytics::start_tool_call`].
@@ -274,5 +298,6 @@ fn scope(request: &ToolCallRequest) -> RequestScope<'_> {
         server: server.unwrap_or_default(),
         timestamp: Utc::now() - elapsed,
         started,
+        event_options: Some(&request.event_options),
     }
 }

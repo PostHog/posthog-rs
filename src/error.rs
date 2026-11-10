@@ -1,6 +1,15 @@
 use std::fmt::{Display, Formatter};
 
-impl std::error::Error for Error {}
+use crate::emails::EmailError;
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Email(error) => error.source(),
+            _ => None,
+        }
+    }
+}
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -21,6 +30,7 @@ impl Display for Error {
             Error::BillingLimitExceeded(msg) => {
                 write!(f, "Billing Limit Exceeded: {msg}")
             }
+            Error::Email(error) => write!(f, "Email Error: {error}"),
         }
     }
 }
@@ -58,6 +68,14 @@ pub enum Error {
     Unauthorized,
     /// HTTP 402 — billing quota exceeded (non-retryable)
     BillingLimitExceeded(String),
+    /// A transactional email request failed; see [`EmailError`].
+    Email(EmailError),
+}
+
+impl From<EmailError> for Error {
+    fn from(error: EmailError) -> Self {
+        Error::Email(error)
+    }
 }
 
 impl Error {

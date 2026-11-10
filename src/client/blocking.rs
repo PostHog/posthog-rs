@@ -15,6 +15,7 @@ use tracing::trace;
 use tracing::{instrument, warn};
 
 use super::get_default_user_agent;
+use crate::emails::{EmailTracker, Emails};
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
 use crate::error_tracking::{build_exception_event, CaptureExceptionOptions};
@@ -45,6 +46,8 @@ pub struct Client {
     /// Background AI event transport, spawned on the first `capture_ai*` call
     /// so clients that never emit AI events pay for no extra thread.
     ai_transport: OnceLock<Arc<TransportHandle>>,
+    /// Email requests in flight, which `shutdown` waits for.
+    email_tracker: EmailTracker,
 }
 
 /// Construct a blocking PostHog client from an API key or [`ClientOptions`].
@@ -128,6 +131,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         flag_event_host: OnceLock::new(),
         transport,
         ai_transport: OnceLock::new(),
+        email_tracker: EmailTracker::default(),
     }
 }
 
@@ -405,10 +409,16 @@ impl Client {
     }
 
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
-    /// calls are no-ops. After shutdown, `capture` drops events. A no-op for
-    /// disabled clients.
+    /// calls are no-ops. After shutdown, `capture` drops events and
+    /// [`emails`](Self::emails) refuses requests with `client_closed`. Email
+    /// requests already in flight on other threads, retries included, get
+    /// until `shutdown_timeout_ms` from the start of shutdown to finish.
     pub fn shutdown(&self) {
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(self.options.shutdown_timeout_ms);
+        self.email_tracker.close();
         self.close_lanes_blocking();
+        self.email_tracker.wait_idle(deadline);
     }
 
     /// Flush, stop, and join every lane. Order matters: mark the analytics lane
@@ -446,6 +456,15 @@ impl Client {
         for transport in lanes {
             transport.join();
         }
+    }
+
+    /// Transactional email: send email from templates made in PostHog or from
+    /// content your code rendered, and read the status of each email sent.
+    ///
+    /// Needs `secret_key` set to a Project Secret API Key with the
+    /// `transactional_email:write` scope. See [`Emails`] for setup.
+    pub fn emails(&self) -> Emails<'_> {
+        Emails::new(&self.options, self.client.as_ref(), &self.email_tracker)
     }
 
     /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
@@ -1233,6 +1252,7 @@ mod minimal_gate_tests {
             flag_event_host: OnceLock::new(),
             transport: None,
             ai_transport: OnceLock::new(),
+            email_tracker: EmailTracker::default(),
         };
         client
             .flag_event_host
@@ -1312,6 +1332,7 @@ mod local_payload_tests {
             flag_event_host: OnceLock::new(),
             transport: None,
             ai_transport: OnceLock::new(),
+            email_tracker: EmailTracker::default(),
         };
         client
             .flag_event_host
