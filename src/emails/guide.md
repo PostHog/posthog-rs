@@ -41,12 +41,13 @@ naming each file by its SHA-256. If the file store refuses an upload, the
 send fails with `attachment_upload_failed` and the store's answer in
 [`why`](crate::EmailError::why), and no email is sent. A PostHog without
 the upload route, a project with sending email from code off, or an
-`app_host` that isn't PostHog's refuses the files with `not_found` on
-`attachments`, and no email is sent. Allow your app to reach the file
-store's host as well as your PostHog app host. When you supply your
-own HTTP client, uploads go through a client the SDK builds, so your
-client's default headers never reach the file store. That client takes its
-proxy from `HTTPS_PROXY`.
+`app_host` that isn't PostHog's answers the upload request with `404`: the
+send fails with PostHog's answer, such as `not_found`, on `attachments`,
+and no email is sent. Allow your app to reach the file store's host as
+well as your PostHog app host. When you supply your own HTTP client,
+uploads go through a client the SDK builds, so your client's default
+headers never reach the file store. That client takes its proxy from
+`HTTPS_PROXY`.
 
 # Timeouts and retries
 

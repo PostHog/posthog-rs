@@ -191,7 +191,7 @@ fn a_custom_clients_default_headers_never_reach_the_file_store() {
 }
 
 #[test]
-fn an_upload_route_404_is_not_found_on_attachments_and_sends_nothing() {
+fn an_upload_route_404_names_attachments_and_sends_nothing() {
     let server = ScriptedServer::start(vec![Answer::json(
         404,
         json!({"type": "invalid_request", "code": "not_found", "detail": "Not found.", "attr": null}),

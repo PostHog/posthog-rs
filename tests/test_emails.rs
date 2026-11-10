@@ -419,17 +419,19 @@ async fn a_failed_upload_never_shows_the_signed_url() {
 }
 
 #[tokio::test]
-async fn an_upload_route_404_is_not_found_on_attachments_and_sends_nothing() {
-    for (answer, message) in [
+async fn an_upload_route_404_names_attachments_and_sends_nothing() {
+    for (answer, code, message) in [
         (
             Answer::json(
                 404,
                 json!({"type": "invalid_request", "code": "not_found", "detail": "Not found.", "attr": null}),
             ),
+            "not_found",
             "Not found.",
         ),
         (
             Answer::xml(404, "<h1>Not Found</h1>"),
+            "api_error",
             "PostHog answered HTTP 404.",
         ),
     ] {
@@ -442,7 +444,7 @@ async fn an_upload_route_404_is_not_found_on_attachments_and_sends_nothing() {
             .await
             .unwrap_err();
 
-        assert_eq!(error.code(), "not_found");
+        assert_eq!(error.code(), code);
         assert_eq!(error.status(), Some(404));
         assert_eq!(error.kind(), EmailErrorKind::NotFound);
         assert_eq!(error.field(), Some("attachments"));
