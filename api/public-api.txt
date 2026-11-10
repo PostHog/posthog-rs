@@ -427,6 +427,8 @@ pub fn posthog_rs::EmailTrackingOptions::clicks(self, bool) -> Self
 pub fn posthog_rs::EmailTrackingOptions::engagement(self, bool) -> Self
 pub fn posthog_rs::EmailTrackingOptions::new() -> Self
 pub fn posthog_rs::EmailTrackingOptions::opens(self, bool) -> Self
+impl core::convert::From<posthog_rs::EmailTrackingOptions> for posthog_rs::EmailTracking
+pub fn posthog_rs::EmailTracking::from(posthog_rs::EmailTrackingOptions) -> Self
 #[non_exhaustive] pub struct posthog_rs::EmailWarning
 pub posthog_rs::EmailWarning::code: alloc::string::String
 pub posthog_rs::EmailWarning::fix: core::option::Option<alloc::string::String>
