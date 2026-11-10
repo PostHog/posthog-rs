@@ -111,6 +111,10 @@ fn client_with_writer(config: &Config, state: StateWriter) -> Client {
         disabled: false,
         shutdown_timeout: config.shutdown_timeout,
         producer: Some(Producer::new(config)),
+        flag_loader: Some(super::super::flags::FlagLoader::new(
+            config.transport_options(),
+            config.on_feature_flags.clone(),
+        )),
         state: Some(state),
         transport: Some(
             TransportHandle::spawn_stateful(

@@ -22,10 +22,13 @@ use crate::feature_flags::FlagValue;
 ///
 /// Carries everything needed to emit a fully-detailed `$feature_flag_called`
 /// event without a follow-up network call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EvaluatedFlagRecord {
     pub enabled: bool,
     pub variant: Option<String>,
+    // A cached JSON null is a present payload, distinct from no payload.
+    #[serde(with = "cached_payload")]
     pub payload: Option<Value>,
     pub id: Option<u64>,
     pub version: Option<u32>,
@@ -41,6 +44,31 @@ pub(crate) struct EvaluatedFlagRecord {
     /// the value tied to this flag's evaluation, never a later read of shared
     /// mutable client state.
     pub minimal_flag_called_events: bool,
+}
+
+// Private cache encoding: an empty array means absent, a singleton preserves
+// every JSON value (including null). Public getters still expose Option<Value>.
+mod cached_payload {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::Value;
+
+    pub(super) fn serialize<S: Serializer>(
+        payload: &Option<Value>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        payload.as_slice().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Value>, D::Error> {
+        let mut values = Vec::<Value>::deserialize(deserializer)?;
+        match values.len() {
+            0 => Ok(None),
+            1 => Ok(values.pop()),
+            _ => Err(serde::de::Error::custom("Invalid cached flag payload")),
+        }
+    }
 }
 
 /// Parameters dispatched to [`FeatureFlagEvaluationsHost::capture_flag_called_event_if_needed`]
@@ -322,7 +350,15 @@ impl FeatureFlagEvaluations {
 
         let flag = self.flags.get(key);
         let response = flag.map(flag_value_for);
-        let properties = self.build_called_event_properties(key, flag, &response);
+        let properties = flag_called_properties(
+            key,
+            flag,
+            &response,
+            self.request_id.as_deref(),
+            self.evaluated_at,
+            self.errors_while_computing,
+            self.quota_limited,
+        );
 
         // Minimize iff the gate pinned on this flag's record is on AND the flag
         // is known to have no linked experiment. Any missing signal (gate off,
@@ -343,83 +379,86 @@ impl FeatureFlagEvaluations {
                 context: self.request_context.clone(),
             });
     }
+}
 
-    fn build_called_event_properties(
-        &self,
-        key: &str,
-        flag: Option<&EvaluatedFlagRecord>,
-        response: &Option<FlagValue>,
-    ) -> HashMap<String, Value> {
-        let mut props: HashMap<String, Value> = HashMap::new();
-        props.insert("$feature_flag".into(), json!(key));
-        let response_json = match response {
-            Some(v) => flag_value_to_json(v),
-            None => Value::Null,
-        };
-        props.insert("$feature_flag_response".into(), response_json.clone());
-        props.insert(format!("$feature/{key}"), response_json);
+pub(crate) fn flag_called_properties(
+    key: &str,
+    flag: Option<&EvaluatedFlagRecord>,
+    response: &Option<FlagValue>,
+    request_id: Option<&str>,
+    evaluated_at: Option<i64>,
+    errors_while_computing: bool,
+    quota_limited: bool,
+) -> HashMap<String, Value> {
+    let mut props: HashMap<String, Value> = HashMap::new();
+    props.insert("$feature_flag".into(), json!(key));
+    let response_json = match response {
+        Some(v) => flag_value_to_json(v),
+        None => Value::Null,
+    };
+    props.insert("$feature_flag_response".into(), response_json.clone());
+    props.insert(format!("$feature/{key}"), response_json);
 
-        let locally_evaluated = flag.is_some_and(|f| f.locally_evaluated);
-        props.insert("locally_evaluated".into(), json!(locally_evaluated));
+    let locally_evaluated = flag.is_some_and(|f| f.locally_evaluated);
+    props.insert("locally_evaluated".into(), json!(locally_evaluated));
 
-        // Record the server's experiment signal when known, so minimization's
-        // impact can be segmented by it. Omitted entirely when unknown (never
-        // fabricated as `false`).
-        if let Some(has_experiment) = flag.and_then(|f| f.has_experiment) {
-            props.insert("$feature_flag_has_experiment".into(), json!(has_experiment));
-        }
-
-        if let Some(flag) = flag {
-            if let Some(payload) = &flag.payload {
-                props.insert("$feature_flag_payload".into(), payload.clone());
-            }
-            if let Some(id) = flag.id {
-                if id != 0 {
-                    props.insert("$feature_flag_id".into(), json!(id));
-                }
-            }
-            if let Some(version) = flag.version {
-                if version != 0 {
-                    props.insert("$feature_flag_version".into(), json!(version));
-                }
-            }
-            if let Some(reason) = &flag.reason {
-                if !reason.is_empty() {
-                    props.insert("$feature_flag_reason".into(), json!(reason));
-                }
-            }
-        }
-
-        if let Some(request_id) = &self.request_id {
-            props.insert("$feature_flag_request_id".into(), json!(request_id));
-        }
-
-        if !locally_evaluated {
-            if let Some(evaluated_at) = self.evaluated_at {
-                props.insert("$feature_flag_evaluated_at".into(), json!(evaluated_at));
-            }
-        }
-
-        // Comma-joined `$feature_flag_error` matching the single-flag path's
-        // granularity: response-level errors (errors-while-computing,
-        // quota-limited) combine with per-flag errors (flag-missing) so
-        // consumers can filter by type.
-        let mut errors: Vec<&str> = Vec::new();
-        if self.errors_while_computing {
-            errors.push("errors_while_computing_flags");
-        }
-        if self.quota_limited {
-            errors.push("quota_limited");
-        }
-        if flag.is_none() {
-            errors.push("flag_missing");
-        }
-        if !errors.is_empty() {
-            props.insert("$feature_flag_error".into(), json!(errors.join(",")));
-        }
-
-        props
+    // Record the server's experiment signal when known, so minimization's
+    // impact can be segmented by it. Omitted entirely when unknown (never
+    // fabricated as `false`).
+    if let Some(has_experiment) = flag.and_then(|f| f.has_experiment) {
+        props.insert("$feature_flag_has_experiment".into(), json!(has_experiment));
     }
+
+    if let Some(flag) = flag {
+        if let Some(payload) = &flag.payload {
+            props.insert("$feature_flag_payload".into(), payload.clone());
+        }
+        if let Some(id) = flag.id {
+            if id != 0 {
+                props.insert("$feature_flag_id".into(), json!(id));
+            }
+        }
+        if let Some(version) = flag.version {
+            if version != 0 {
+                props.insert("$feature_flag_version".into(), json!(version));
+            }
+        }
+        if let Some(reason) = &flag.reason {
+            if !reason.is_empty() {
+                props.insert("$feature_flag_reason".into(), json!(reason));
+            }
+        }
+    }
+
+    if let Some(request_id) = request_id {
+        props.insert("$feature_flag_request_id".into(), json!(request_id));
+    }
+
+    if !locally_evaluated {
+        if let Some(evaluated_at) = evaluated_at {
+            props.insert("$feature_flag_evaluated_at".into(), json!(evaluated_at));
+        }
+    }
+
+    // Comma-joined `$feature_flag_error` matching the single-flag path's
+    // granularity: response-level errors (errors-while-computing,
+    // quota-limited) combine with per-flag errors (flag-missing) so
+    // consumers can filter by type.
+    let mut errors: Vec<&str> = Vec::new();
+    if errors_while_computing {
+        errors.push("errors_while_computing_flags");
+    }
+    if quota_limited {
+        errors.push("quota_limited");
+    }
+    if flag.is_none() {
+        errors.push("flag_missing");
+    }
+    if !errors.is_empty() {
+        props.insert("$feature_flag_error".into(), json!(errors.join(",")));
+    }
+
+    props
 }
 
 impl std::fmt::Debug for FeatureFlagEvaluations {
@@ -437,7 +476,7 @@ impl std::fmt::Debug for FeatureFlagEvaluations {
     }
 }
 
-fn flag_value_for(flag: &EvaluatedFlagRecord) -> FlagValue {
+pub(crate) fn flag_value_for(flag: &EvaluatedFlagRecord) -> FlagValue {
     if !flag.enabled {
         FlagValue::Boolean(false)
     } else if let Some(variant) = &flag.variant {

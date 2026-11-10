@@ -18,6 +18,7 @@ fn properties(value: Value) -> HashMap<String, Value> {
 
 fn config() -> Config {
     let mut conf = Config::new("phc_test");
+    conf.preload_feature_flags = false;
     conf.persistence = Persistence::Memory;
     conf.host = "http://127.0.0.1:1".into();
     conf.bootstrap_anonymous_id = Some("anonymous".into());
@@ -369,7 +370,7 @@ fn legacy_context_migrates_on_mutation_and_invalid_current_records_are_preserved
             client.shutdown_blocking(None).state,
             PersistenceOutcome::Persisted
         );
-        assert_eq!(directory.state()["version"], 5);
+        assert_eq!(directory.state()["version"], 6);
         assert_eq!(
             directory.state()["state"]["registered"],
             json!({"migrated":true})

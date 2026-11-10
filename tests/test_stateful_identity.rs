@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 fn config() -> Config {
     let mut config = Config::new("phc_test");
+    config.preload_feature_flags = false;
     config.persistence = Persistence::Memory;
     config.host = "http://127.0.0.1:1".into();
     config.bootstrap_anonymous_id = Some("anonymous".into());
@@ -205,7 +206,7 @@ fn rejected_identify_keeps_identity_without_replaying_link_and_properties_remain
 fn a_full_queue_keeps_identity_and_does_not_cache_a_rejected_property_update() {
     let server = MockServer::start();
     let request = server.mock(|when, then| {
-        when.method(POST);
+        when.method(POST).path("/i/v1/analytics/events");
         then.status(200);
     });
     let mut conf = config();
@@ -487,7 +488,7 @@ fn version_one_state_migrates_on_mutation_and_future_state_is_preserved() {
     client.shutdown_blocking(None);
     drop(client);
     let state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(state["version"], 5);
+    assert_eq!(state["version"], 6);
     assert_eq!(state["state"]["identified"], true);
     assert_eq!(state["state"]["anonymous_id"], "legacy");
     assert!(state["state"].get("person_properties").is_none());

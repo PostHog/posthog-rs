@@ -42,6 +42,7 @@ impl Drop for Directory {
 
 fn memory_config() -> Config {
     let mut config = Config::new("phc_test");
+    config.preload_feature_flags = false;
     config.host = "http://127.0.0.1:1".into();
     config.persistence = Persistence::Memory;
     config.shutdown_timeout = Duration::from_millis(50);

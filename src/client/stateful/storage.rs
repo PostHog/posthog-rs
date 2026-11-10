@@ -131,15 +131,18 @@ struct StateRecord<T> {
 
 pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     crate::client::capture::json_len(&StateRecord {
-        version: 5,
+        version: 6,
         state: snapshot,
     })
 }
 
-/// Reserve the longest consent and session representations so every valid state
-/// can change consent or session timing without exceeding its configured bound.
+/// Reserve mandatory state first, excluding optional cached flag results. The
+/// longest consent and session representations must always remain writable.
 pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
     snapshot_size(snapshot)
+        .saturating_sub(
+            crate::client::capture::json_len(&snapshot.flags.cache.as_deref()).saturating_sub(4),
+        )
         .saturating_add(usize::from(snapshot.opt_out != Some(false)))
         .saturating_add(
             super::sessions::StoredSession::reserved_bytes()
@@ -156,6 +159,20 @@ pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result
             "State snapshot exceeds store limit",
         ));
     }
+    if snapshot.flags.cache.is_none() {
+        return encode_record(snapshot, max_bytes);
+    }
+    // A cache may fit the memory bound but not the remaining disk capacity or
+    // the whole-record decoder depth. It must not poison unrelated state writes.
+    if let Ok(encoded) = encode_record(snapshot, max_bytes) {
+        return Ok(encoded);
+    }
+    let mut mandatory = snapshot.clone();
+    mandatory.flags.cache = None;
+    encode_record(&mandatory, max_bytes)
+}
+
+fn encode_record(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
     let mut buffer = RecordBuffer {
         bytes: Vec::new(),
         limit: max_bytes,
@@ -163,7 +180,7 @@ pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result
     serde_json::to_writer(
         &mut buffer,
         &StateRecord {
-            version: 5,
+            version: 6,
             state: snapshot,
         },
     )
@@ -302,20 +319,30 @@ impl FileStateStore {
                 snapshot.opt_out = old.opt_out;
                 snapshot
             }
-            4 => {
+            4 | 5 => {
                 let mut state = record
                     .state
                     .as_object()
                     .cloned()
                     .ok_or_else(invalid_state)?;
-                if state.contains_key("session") {
+                if state.contains_key("flags") {
                     return Err(invalid_state());
                 }
-                state.insert("session".into(), serde_json::Value::Null);
+                if record.version == 4 {
+                    if state.contains_key("session") {
+                        return Err(invalid_state());
+                    }
+                    state.insert("session".into(), serde_json::Value::Null);
+                }
+                state.insert(
+                    "flags".into(),
+                    serde_json::to_value(super::flag_state::FlagState::default())
+                        .map_err(|_| invalid_state())?,
+                );
                 serde_json::from_value(serde_json::Value::Object(state))
                     .map_err(|_| invalid_state())?
             }
-            5 => serde_json::from_value(record.state).map_err(|_| invalid_state())?,
+            6 => serde_json::from_value(record.state).map_err(|_| invalid_state())?,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

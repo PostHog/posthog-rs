@@ -3,6 +3,13 @@
 
 mod config;
 mod consent;
+mod flag_bootstrap;
+mod flag_listeners;
+mod flag_reads;
+mod flag_report;
+mod flag_state;
+mod flag_targeting;
+mod flags;
 mod identity;
 #[cfg(feature = "async-client")]
 mod initialization;
@@ -14,7 +21,10 @@ mod storage;
 mod writer;
 
 pub use crate::client::on_error::InitializationFailure;
+pub use crate::client::transport::flags::LoadError as FeatureFlagLoadError;
 pub use config::Config;
+pub use flag_listeners::{FeatureFlagsSubscription, FeatureFlagsUpdate};
+pub use flag_reads::{FeatureFlagContext, FeatureFlagResult};
 pub use identity::{Identify, PersonProfiles};
 pub use producer::{Capture, CaptureOutcome};
 pub use runtime::{Client, DeliveryOutcome, DrainReport, PersistenceOutcome};
@@ -39,6 +49,9 @@ struct Snapshot {
     opt_out: Option<bool>,
     registered: HashMap<String, Value>,
     groups: HashMap<String, String>,
+    flags: flag_state::FlagState,
+    #[serde(skip)]
+    flag_load: flag_state::FlagLoadState,
     #[serde(deserialize_with = "Option::<sessions::StoredSession>::deserialize")]
     session: Option<sessions::StoredSession>,
     #[serde(skip)]
@@ -62,6 +75,8 @@ impl Snapshot {
             opt_out: None,
             registered: HashMap::new(),
             groups: HashMap::new(),
+            flags: flag_state::FlagState::default(),
+            flag_load: flag_state::FlagLoadState::default(),
             session: None,
             sessions: sessions::Sessions::default(),
             context_revision: 0,
@@ -78,13 +93,16 @@ impl Snapshot {
             && self.opt_out == other.opt_out
             && self.registered == other.registered
             && self.groups == other.groups
+            && self.flags == other.flags
             && self.session == other.session
     }
 
     fn is_valid(&self) -> bool {
-        self.session
-            .as_ref()
-            .map_or(true, sessions::StoredSession::is_valid)
+        self.flags.is_valid()
+            && self
+                .session
+                .as_ref()
+                .map_or(true, sessions::StoredSession::is_valid)
             && !self.anonymous_id.trim().is_empty()
             && !self.distinct_id.trim().is_empty()
             && self

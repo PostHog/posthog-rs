@@ -529,7 +529,7 @@ fn local_record(
     }
 }
 
-fn remote_record_from_detail(
+pub(super) fn remote_record_from_detail(
     detail: FlagDetail,
     minimal_flag_called_events: bool,
 ) -> EvaluatedFlagRecord {

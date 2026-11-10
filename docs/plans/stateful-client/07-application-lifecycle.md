@@ -1,6 +1,6 @@
 # PR 7 — Application lifecycle analytics
 
-Status: planned. Predecessor: [PR 6](06-sessions.md). Uses storage, consent, and the normal event pipeline.
+Status: deferred beyond the current stateful milestone. This document retains the proposed extension for future work; its tasks are not current stack completion gates. [Feature flags](08-feature-flags.md) follows [sessions](06-sessions.md) directly. The existing session environment signals remain session controls.
 
 ## Outcome and scope
 

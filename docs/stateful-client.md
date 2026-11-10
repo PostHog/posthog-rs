@@ -142,22 +142,170 @@ State and queued events share the namespace lease. Storage errors report through
 unsupported state is preserved rather than overwritten. State and event persistence
 can degrade independently.
 
-State records use version 5 for identity, profile flags, explicit consent, registered
-properties, remembered groups and optional persistent session timing. Valid version-1
-identity records restore as anonymous; version-2 records retain identity/profile flags.
-Both use the configured consent default; version-3 records retain explicit consent.
-Versions 1–3 restore empty registered properties and groups; version 4 retains them.
-All legacy versions restore without a session and migrate on the next state write.
-The bounded state reserves room for consent changes and session bookkeeping. A migrated
-record must fit that bound; otherwise restore reports a storage error and falls back
-to fresh memory state without overwriting the file. Older SDKs preserve unsupported
-version-5 files rather than rewriting them. Event records and namespace
-paths are unchanged. A flush drains the captured state revision, not a transaction
-between state and event files.
+State records use version 6 for identity, profile flags, explicit consent, registered
+properties, remembered groups, optional persistent session timing and flag-targeting
+state. Valid version-1 identity records restore as anonymous; version-2 records retain
+identity/profile flags. Both use the configured consent default; version-3 records
+retain explicit consent. Versions 1–3 restore empty registered properties and groups;
+version 4 retains them. Versions 1–4 restore without a session; version 5 retains its
+session data. Versions 1–5 restore empty flag-targeting state and migrate on the next
+state write.
+
+The bounded state reserves room for consent changes and session bookkeeping. Optional
+cached flag results are written only when they fit the remaining byte and codec limits;
+omitting them from disk does not discard live values or targeting overrides. A migrated
+mandatory record must fit the configured bound; otherwise restore reports a storage
+error and falls back to fresh memory state without overwriting the file. Cached results
+restore only for matching identity, groups, targeting properties and GeoIP configuration.
+Older SDKs preserve unsupported version-6 files rather than rewriting them. Event
+records and namespace paths are unchanged. A flush drains the captured mandatory state
+revision, not a transaction between state and event files or a guarantee that optional
+cached results were persisted.
 
 Initialization does not wait for network connectivity or backlog delivery. Recovery
 may temporarily reserve queue capacity after readiness. A ready client can therefore
 report `CaptureOutcome::Full`; readiness is not a promise of free queue capacity.
+
+## Feature flag reads and loading
+
+`get_feature_flag(key, send_feature_flag_event)`, `is_feature_enabled(key, option)`
+and `get_feature_flag_result(key, option)` synchronously read cached values; none
+fetches flags. Unknown/unavailable returns `None`, while known disabled returns
+`Some(false)` or a result with `enabled = false` and no variant. Rich results include
+decoded payload, producing context/revision and per-record response metadata. This
+context can predate current targeting, especially after a partial refresh.
+
+The event option is `Option<bool>`: `None` inherits
+`Config::send_feature_flag_event` (true), and `Some(false)` suppresses reporting.
+Known reads attempt `$feature_flag_called` through normal hooks, prospective consent
+and bounded admission. Opt-out suppresses analytics, not returned values; reporting
+failure never changes the read result. Helpers use existing session attribution
+passively without starting or extending a session.
+
+All three getters share a 1,024-entry accepted-only tracker keyed by identity, group
+mapping, key and response. Pending duplicates are reserved without holding locks
+across hooks. Drop, panic or rejected admission releases the reservation. Capacity
+pressure evicts oldest accepted entries individually; an all-pending tracker skips
+new reports. Context changes, reloads and shutdown clear tracking; it is not persisted.
+The hash keys are constant-size fingerprints, not retained copies of targeting data.
+
+Full events retain producing-record metadata and setup bootstrap context. A valid
+remote response ends global bootstrap use even when a partial result keeps older
+records. Server-gated minimization applies the existing allowlist after hooks when
+that record explicitly reports no linked experiment. Capture v1 option placement is
+preserved. Full flag payload properties retain their JSON values, including nulls;
+ordinary custom-property null normalization still applies to other properties.
+
+`get_feature_flags()` exports cached values as `Option<HashMap<String, FlagValue>>`.
+Known false values stay false; unknown keys are omitted. `get_feature_flag_payload(key)`
+returns `Option<Value>` without reparsing decoded strings; `Some(Value::Null)` is a
+present null, while `None` means unknown, unavailable or no payload.
+`get_feature_flag_payloads()` exports only present payloads. Both bulk methods return
+`None` for unavailable, disabled or closed clients; an available empty snapshot
+returns `Some(empty_map)`.
+
+These three methods read memory only, emit no analytics, and do not create or extend
+sessions. They work while opted out or configured with `PersonProfiles::Never`.
+Each call takes one coherent snapshot and returns owned values. Mutating the result
+does not modify the client; separate calls may observe different snapshots during
+reload. Property-only targeting changes can retain values from earlier targeting
+until refresh. Call `reload_feature_flags()` explicitly when fresh evaluation is needed.
+
+`Config::preload_feature_flags` defaults to true: setup requests flags asynchronously
+after restoring state and reconciling identity. Initialization does not wait for HTTP
+or require flags to load successfully. Preload is allowed while opted out or configured
+with `PersonProfiles::Never`, and does not emit analytics. Set the option to false to
+suppress only the startup request; manual and context-triggered reloads remain enabled.
+
+`Config::bootstrap_feature_flags` optionally replaces restored flag values before
+preload. It keeps only `FlagValue::Boolean(true)` and nonempty variants, together
+with their `bootstrap_feature_flag_payloads` entries. Payloads are already-decoded
+JSON: strings stay strings and null remains present. `None` leaves a restored cache
+alone; `Some(HashMap::new())` installs an empty snapshot. Orphan/disabled payloads
+are ignored. Reset clears the seed and never reapplies it.
+
+Bootstrap uses the same 10,000-record / 2 MiB serialized cache bounds. An oversized
+snapshot is rejected atomically, preserves restored values, and reports through
+`on_error` without disabling the client. Setup reporting context is retained only
+in memory. A valid remote response, including partial results, ends global bootstrap
+use; complete responses replace values/payloads and partial responses retain
+unrecomputed entries. This status does not imply every cached key was recomputed.
+
+### Flag notifications
+
+Use `Config::on_feature_flags(callback)` to observe bootstrap or restored values
+before initialization returns, then subsequent remote completions. Use
+`Client::on_feature_flags(callback)` at runtime; it immediately delivers available
+cache or completed-load status and returns a `FeatureFlagsSubscription`.
+Call `unsubscribe()` explicitly (repeated calls are safe). Dropping the handle
+does not unsubscribe, and retaining it does not retain the client or its workers.
+
+Callbacks receive `&FeatureFlagsUpdate`: an immutable map of rich results with
+per-record provenance, the last completed evaluation context, and load status.
+`flags: None` means unavailable; `Some(empty_map)` is known empty. Failures,
+including quota and capacity rejection, notify with retained usable flags and a
+sanitized `FeatureFlagLoadError`. Partial computation and malformed payloads also
+set `errors_loading`. Load status is process-local, not restored from disk;
+persisted records keep their own producing metadata. Clone the notification to
+retain it. Subscribing does not fetch flags or emit analytics.
+
+Each dispatch visits existing registrations in order, outside SDK locks, and
+isolates panics. Immediate notifications run on the caller, setup notifications
+on the initializing thread, and remote notifications on the shared delivery worker.
+These sources can overlap or reenter; there is no UI dispatcher or callback mutex.
+A slow remote listener delays other delivery work. Use weak client references in
+callbacks to avoid an application-created ownership cycle.
+
+Listeners may read, capture, reset, reload, or unsubscribe. Flush/shutdown called
+from a listener request the work but return `Deferred` instead of waiting.
+Reset preserves subscriptions while discarding obsolete loads; terminal shutdown
+ends registrations. Eligibility is rechecked before each dispatch, so reset/close
+in one listener suppresses later obsolete notifications. Already-dispatched callbacks
+may finish with their original snapshot. There is no global close/setup subscription
+transfer between distinct Rust clients.
+
+`reload_feature_flags()` requests flags for the current distinct/anonymous identity,
+remembered groups and targeting properties. It returns without waiting for HTTP and
+remains available while opted out. Registered analytics properties and platform
+context are not implicitly included in targeting. Reload emits no analytics.
+
+`set_person_properties_for_flags(properties, reload)` and
+`set_group_properties_for_flags(type, properties, reload)` merge local targeting.
+Null is a value; empty maps and blank group types are ignored. The corresponding
+reset methods clear all person overrides, or one/all group types (`Some(type)`/`None`),
+without changing identity, membership or server-side profiles. For all four methods,
+`reload: None` defaults to true; `Some(false)` suppresses the request. Nonempty setters
+and resetters can refresh unchanged targeting. These methods emit no analytics and
+remain available while opted out or configured with `PersonProfiles::Never`.
+Mandatory state byte/codec limits apply atomically; rejected updates do not reload.
+
+Valid `identify` and `set_person_properties` calls mirror set-once values only into
+absent keys, then apply set values. Mirroring happens before hooks and independently
+of analytics dedup/admission. Anonymous-to-different-ID identification reloads;
+same-ID promotion reloads only with supplied properties. Already-identified property
+updates and `set_person_properties` do not immediately reload. Existing profile and
+reset-before-switch guards still apply. Identity reset clears targeting and requests
+flags for the new anonymous identity; setup bootstrap is not reapplied.
+
+Requests run on the existing delivery worker with one active and one latest pending
+refresh. Active HTTP or retry backoff can delay delivery and flush, but not capture
+admission or state mutation. Identity, group and targeting changes invalidate older
+in-flight responses, even if no replacement request is scheduled. Consent, session
+activity and registered analytics properties do not invalidate flag evaluations.
+
+Complete responses replace the cache; partial responses merge successfully evaluated
+records, preserving each retained record's original payload, request metadata and
+producing context. Same-user property changes may retain last-known values in memory;
+identity/group changes clear them. Restart restores only records whose full producing
+context matches restored targeting. HTTP, quota, malformed-response and cache-capacity
+failures retain usable cached values and report through `on_error`.
+
+Requests, responses and live cached data each have a 2 MiB serialized-byte limit;
+response/cache maps also have a 10,000-record limit. Cache accounting includes per-record
+producing contexts and metadata, so a valid response can exceed cache capacity after
+normalization or a partial merge. These limits do not measure total allocator memory.
+Optional cache omission on disk does not discard live values or block mandatory state
+persistence.
 
 ## Registered properties and groups
 
@@ -187,7 +335,12 @@ and restart. Hooks can change local context without changing their outer snapsho
 All mutations update memory before returning and use the same asynchronous state
 writer. A successful state drain confirms the captured revision; a crash before
 persistence may restore older context. Group analytics and state persistence are
-independent outcomes. Flag targeting and reloads are not part of these APIs yet.
+independent outcomes. Changed membership clears that type's old targeting, merges
+incoming properties and reloads flags. Same-membership properties merge without an
+immediate reload. Direct `group_identify` mirrors only for the currently remembered
+key of that type, so another group's profile cannot contaminate current targeting.
+Removing membership clears its overrides and reloads; removing an absent membership
+does not request flags.
 
 ## Sessions
 

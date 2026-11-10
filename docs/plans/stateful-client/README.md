@@ -1,10 +1,10 @@
 # Stateful Rust client: implementation stack
 
-Status: the shared-delivery foundation is signed draft [PR 334](https://github.com/PostHog/posthog-rs/pull/334), with independent reviews and CI complete. The public stateful client/storage/event foundation is implemented and locally validated; its full-domain review and publication are pending. Later analytics phases and replay remain planned. This directory tracks the eight implementation PRs and their contracts.
+Status: phases 1–6 are published as signed draft PRs with independent reviews and CI complete: [334](https://github.com/PostHog/posthog-rs/pull/334), [337](https://github.com/PostHog/posthog-rs/pull/337), [343](https://github.com/PostHog/posthog-rs/pull/343), [344](https://github.com/PostHog/posthog-rs/pull/344), [346](https://github.com/PostHog/posthog-rs/pull/346), and [347](https://github.com/PostHog/posthog-rs/pull/347). Application lifecycle analytics is deferred. Stateful feature flags follows sessions directly, making seven implementation PRs; original phase numbers are retained. Replay remains a separate follow-up.
 
 ## Goal and scope
 
-Deliver an engine-neutral stateful client in the PostHog Rust SDK, alongside the existing stateless/server client. Share delivery and protocol code. The Rust client owns identity, consent, property enrichment, sessions, lifecycle policy, and current-user feature flags.
+Deliver an engine-neutral stateful client in the PostHog Rust SDK, alongside the existing stateless/server client. Share delivery and protocol code. The Rust client owns identity, consent, property enrichment, sessions, and current-user feature flags.
 
 Rust correctness is the primary gate. Unreal is a later consumer, not the compatibility baseline for this API. C ABI changes, Unreal migration, engine rendering, and Unreal release infrastructure are outside this stack. Preserve existing published Rust contracts; do not inherit prerelease Unreal defaults or public shapes without an independent justification.
 
@@ -22,8 +22,8 @@ Each PR is based on the preceding PR for review. The semantic dependencies below
 | 4 | Consent | 2, 3, delivery controls in 1 | [Consent](04-consent.md) |
 | 5 | Registered properties and groups | 2, 3, 4 | [Properties and groups](05-properties-and-groups.md) |
 | 6 | Sessions | 2, 3, 4 | [Sessions](06-sessions.md) |
-| 7 | Application lifecycle analytics | 2, 4, 6 | [Lifecycle](07-application-lifecycle.md) |
-| 8 | Stateful feature flags | 2–6; integrates with 7 | [Feature flags](08-feature-flags.md) |
+| Deferred | Application lifecycle analytics (original phase 7) | 2, 4, 6 | [Lifecycle](07-application-lifecycle.md) |
+| 8 | Stateful feature flags | 2–6; directly above sessions | [Feature flags](08-feature-flags.md) |
 | Follow-up | Replay policy, attribution, delivery | Stateful stack, especially 4, 6, 8 | [Replay](09-replay-follow-up.md) |
 
 Bootstrap ownership follows the domains: PR 2 establishes anonymous bootstrap and the identity schema; PR 3 adds identified bootstrap and reconciliation; PR 8 adds flag/payload bootstrap and reporting. PR 2 also owns explicit screen-event capture; platform screen observation stays in consumers. Optional session bootstrap is a PR 6 scope decision.
@@ -56,7 +56,7 @@ Record these in the foundation PR design, with alternatives and the chosen contr
 - State backend interface, namespace ownership, memory-only behavior, bounds, versioning, and initialization failures.
 - Hook execution/reentrancy, recursive capture, close-from-hook behavior, and final admission validation.
 - Anonymous/device identity fields and lifetimes, including whether a separate long-lived device ID is needed; do not equate an identified person ID with a device ID.
-- Phase 8 protocol scope: decide whether `/flags?v=4` and config-version-2 experiment exposure are included or explicitly deferred.
+- Phase 8 protocol scope: `/flags/?v=2` with legacy-response compatibility; typed v4 values and config-version-2 direct experiment exposure are deferred.
 - Supported OS/toolchain/MSRV matrix and dependency implications.
 - State snapshot/transition ordering under concurrent mutation, reset, capture, and background completions.
 - Public default values grounded in canonical specs and peers rather than inherited from an engine adapter.
@@ -76,7 +76,7 @@ Use three distinct evidence categories in each PR:
 
 Node is not the stateful JS reference. Node uses `PostHogCoreStateless`; React Native uses `PostHogCore`. Android's shared `PostHog` is stateful and its server client uses `PostHogStateless`. Their queues and storage also contain mutable state.
 
-Lifecycle analytics has peer precedent in platform integrations, not uniformly in shared stateful cores. Its placement in Rust is a deliberate factoring choice rather than an existing shared-core consensus.
+Lifecycle analytics has peer precedent in platform integrations, not uniformly in shared stateful cores. The retained lifecycle plan is a deferred extension, not a milestone prerequisite.
 
 ### Source anchors
 
@@ -135,4 +135,4 @@ PR 1 uses branch `feat/stateful-delivery`, based on `v1` at `b244fc38384e44473f4
 - Commands and result artifact locations.
 - Unresolved findings, validation gaps, and next ready action.
 
-Next action: implement the stateful client/storage foundation on `feat/stateful-client` above PR 1. Its agreed runtime, automatic persistence, degraded-initialization, and capture-time attribution contracts are recorded in the client foundation plan.
+Next action: implement stateful feature flags on `feat/stateful-feature-flags` above sessions PR 347 (`2aac10eb141314c30f3273da47899336f8003e60`). The flags plan records the selected protocol, asynchronous preload, and targeting/reload policy. Final whole-stack verification follows the flags implementation and review.

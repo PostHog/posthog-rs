@@ -147,6 +147,59 @@ impl Drop for WorkerExit {
     }
 }
 
+/// Shared validated mutations without thread ownership. Holding this access
+/// cannot defer the owning writer's close or trigger an OS-thread join on drop.
+#[derive(Clone)]
+pub(super) struct StateAccess {
+    shared: Arc<Shared>,
+    clock: Arc<dyn Clock>,
+    options: WriterOptions,
+}
+
+impl StateAccess {
+    /// Read shared state without extending the owning writer's open lifetime.
+    pub(super) fn snapshot(&self) -> Option<Arc<Snapshot>> {
+        let state = self.shared.lock();
+        state.closing.is_none().then(|| state.snapshot.clone())
+    }
+
+    pub(super) fn mutate<T>(
+        &self,
+        change: impl FnOnce(&mut Snapshot) -> T,
+    ) -> Result<(u64, T), UpdateError> {
+        let result = {
+            let mut state = self.shared.lock();
+            if state.closing.is_some() {
+                return Err(UpdateError::Closed);
+            }
+            let mut candidate = (*state.snapshot).clone();
+            let result = change(&mut candidate);
+            candidate
+                .reconcile_flag_revision(&state.snapshot)
+                .ok_or(UpdateError::Full)?;
+            // Process-local session activity does not change the already-validated
+            // persistence representation. Only changed persisted fields need encoding.
+            if candidate.same_persisted_state(&state.snapshot) {
+                if candidate != *state.snapshot {
+                    state.snapshot = Arc::new(candidate);
+                }
+                return Ok((state.revision, result));
+            }
+            validate(&candidate, self.options.max_bytes)?;
+            let revision = state.revision.checked_add(1).ok_or(UpdateError::Full)?;
+            state.snapshot = Arc::new(candidate);
+            state.revision = revision;
+            if state.mode == Mode::Persistent && state.due.is_none() {
+                state.due =
+                    Some(self.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
+            }
+            (revision, result)
+        };
+        self.shared.notify();
+        Ok(result)
+    }
+}
+
 pub(super) struct StateWriter {
     shared: Arc<Shared>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -265,37 +318,19 @@ impl StateWriter {
         self.mutate(change).map(|(revision, ())| revision)
     }
 
+    pub(super) fn access(&self) -> StateAccess {
+        StateAccess {
+            shared: self.shared.clone(),
+            clock: self.clock.clone(),
+            options: self.options,
+        }
+    }
+
     pub(super) fn mutate<T>(
         &self,
         change: impl FnOnce(&mut Snapshot) -> T,
     ) -> Result<(u64, T), UpdateError> {
-        let result = {
-            let mut state = self.shared.lock();
-            if state.closing.is_some() {
-                return Err(UpdateError::Closed);
-            }
-            let mut candidate = (*state.snapshot).clone();
-            let result = change(&mut candidate);
-            // Process-local session activity does not change the already-validated
-            // persistence representation. Only changed persisted fields need encoding.
-            if candidate.same_persisted_state(&state.snapshot) {
-                if candidate != *state.snapshot {
-                    state.snapshot = Arc::new(candidate);
-                }
-                return Ok((state.revision, result));
-            }
-            validate(&candidate, self.options.max_bytes)?;
-            let revision = state.revision.checked_add(1).ok_or(UpdateError::Full)?;
-            state.snapshot = Arc::new(candidate);
-            state.revision = revision;
-            if state.mode == Mode::Persistent && state.due.is_none() {
-                state.due =
-                    Some(self.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
-            }
-            (revision, result)
-        };
-        self.shared.notify();
-        Ok(result)
+        self.access().mutate(change)
     }
 
     /// Capture one revision to drain, expediting coalescing but not retry cooldown.
@@ -369,6 +404,7 @@ impl StateWriter {
             let mut state = self.shared.lock();
             if state.closing.is_none() {
                 state.closing = Some(deadline);
+                Arc::make_mut(&mut state.snapshot).flag_load.reports.clear();
                 if state.mode == Mode::Persistent
                     && state.persisted < state.revision
                     && state.failures == 0

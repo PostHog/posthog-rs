@@ -238,6 +238,7 @@ fn restored_expiry_uses_wall_age_then_monotonic_time_including_maximum() {
 fn memory_activity_keeps_persistence_revision_while_persistent_boundaries_advance_it() {
     for persistence in [SessionPersistence::Memory, SessionPersistence::Persistent] {
         let mut config = super::super::Config::new("phc_test");
+        config.preload_feature_flags = false;
         config.persistence = super::super::Persistence::Memory;
         config.session_persistence = persistence;
         let client = Client::init_blocking(config);
@@ -265,6 +266,7 @@ fn capture_session_snapshot_survives_max_boundary_between_clock_reads() {
     }
     let now = time();
     let mut config = super::super::Config::new("phc_test");
+    config.preload_feature_flags = false;
     config.persistence = super::super::Persistence::Memory;
     config.host = "http://127.0.0.1:1".into();
     let seen = Arc::new(Mutex::new(None));
@@ -324,6 +326,7 @@ fn capture_uses_injected_clock_and_passive_helpers_never_extend_or_create() {
     let now = time();
     let clock = Arc::new(TestClock(Mutex::new(now)));
     let mut config = super::super::Config::new("phc_test");
+    config.preload_feature_flags = false;
     config.persistence = super::super::Persistence::Memory;
     config.host = "http://127.0.0.1:1".into();
     let events = Arc::new(Mutex::new(Vec::new()));

@@ -18,6 +18,16 @@ registered context, explicit capture/screen, a native privacy hook, and separate
 reports. It opts into persistent sessions so repeated invocations in the same scope
 can share an unexpired session; the SDK default keeps sessions in memory. Optionally set `POSTHOG_DISTINCT_ID` to identify a user and
 `POSTHOG_GROUP_KEY` to associate an organization (enabling person processing).
+Set `POSTHOG_OPT_OUT=true` or `false` to explicitly change consent; leaving it unset
+preserves the stored choice. Opt-out suppresses new analytics, not delivery of
+previously admitted events or flag loading.
+
+The example observes flag-load notifications, sets explicit person targeting, and
+requests a refresh after identity/group changes. `POSTHOG_FLAG_KEY` optionally reads
+a cached flag and payload. A known flag read reports access when consent allows;
+`None` means unavailable, not disabled. Initialization and successful drains do not
+promise remote flag success. The listener reports load errors and is explicitly
+unsubscribed before shutdown. Notifications can run on the caller or shared worker.
 See [stateful client behavior](../docs/stateful-client.md) for configuration,
 admission limits, storage failure handling, async initialization and drains.
 
