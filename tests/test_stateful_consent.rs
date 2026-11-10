@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 fn config() -> Config {
     let mut conf = Config::new("phc_test");
+    conf.preload_feature_flags = false;
     conf.persistence = Persistence::Memory;
     conf.host = "http://127.0.0.1:1".into();
     conf.bootstrap_anonymous_id = Some("anonymous".into());

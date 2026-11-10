@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 fn config() -> Config {
     let mut config = Config::new("phc_test");
+    config.preload_feature_flags = false;
     config.persistence = Persistence::Memory;
     config.host = "http://127.0.0.1:1".into();
     config.flush_at = 1000;

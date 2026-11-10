@@ -6,6 +6,147 @@ use crate::client::PostHogError;
 use chrono::{DateTime, Utc};
 use std::sync::{mpsc, Weak};
 
+#[test]
+fn shared_access_validates_candidates_without_owning_writer_lifetime() {
+    let path = std::env::temp_dir().join(format!("posthog-state-access-{}", uuid::Uuid::now_v7()));
+    let (store, _) = FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096).unwrap();
+    let writer = StateWriter::new(
+        Snapshot::anonymous("initial".into()),
+        Backend::Persistent {
+            store: Box::new(store),
+            restored: false,
+        },
+        options(),
+        Vec::new(),
+        Arc::new(SystemClock),
+    )
+    .unwrap();
+    let access = writer.access();
+    assert_eq!(
+        access.mutate(|state| state.distinct_id.clear()),
+        Err(UpdateError::Invalid)
+    );
+    assert_eq!(writer.snapshot().distinct_id, "initial");
+    access
+        .mutate(|state| state.distinct_id = "updated".into())
+        .unwrap();
+    assert_eq!(
+        writer.wait_blocking(writer.checkpoint()),
+        DrainOutcome::Persisted
+    );
+    drop(writer);
+    assert_eq!(
+        access.mutate(|state| state.distinct_id = "late".into()),
+        Err(UpdateError::Closed)
+    );
+    let lease =
+        StorageDirectory::open(&path).expect("shared access must not own the store or its lease");
+    drop(lease);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn flag_http_uses_shared_worker_without_blocking_state_mutation_or_admission() {
+    use crate::client::transport::{flags::Task, Admission, TransportHandle};
+    use crate::client::ClientOptionsBuilder;
+    use serde_json::json;
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(1))
+                }
+                Err(error) => panic!("bounded flag fixture accept: {}", error),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            assert!(header.len() < 8192);
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        let header = String::from_utf8(header).unwrap();
+        let length: usize = header
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().unwrap())
+            })
+            .unwrap();
+        assert!(length <= crate::client::transport::flags::MAX_REQUEST_BYTES);
+        stream.read_exact(&mut vec![0; length]).unwrap();
+        entered_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let body = b"{\"flags\":{}}";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    });
+    let settings = ClientOptionsBuilder::default()
+        .api_key("phc_test".into())
+        .host(host)
+        .feature_flags_request_timeout_seconds(10u64)
+        .feature_flags_request_max_retries(0u32)
+        .flush_at(100usize)
+        .flush_interval_ms(60_000u64)
+        .shutdown_timeout_ms(0u64)
+        .build()
+        .unwrap();
+    let transport = TransportHandle::spawn_stateful(settings, None, 4096).unwrap();
+    let writer = StateWriter::new(
+        Snapshot::anonymous("initial".into()),
+        Backend::Memory,
+        options(),
+        Vec::new(),
+        Arc::new(SystemClock),
+    )
+    .unwrap();
+    let access = writer.access();
+    let (complete_tx, complete_rx) = mpsc::channel();
+    assert!(transport.schedule_flags(
+        Task::new(&json!({"distinct_id":"initial"}), move |result| {
+            assert!(result.is_ok());
+            // A completion uses the original validated lock, not a new state owner.
+            let result = access.mutate(|state| state.distinct_id.clone());
+            complete_tx.send(result).unwrap();
+        })
+        .unwrap()
+    ));
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let updated = writer.mutate(|state| state.distinct_id = "while-http-blocked".into());
+    let mut event =
+        crate::capture_event::CaptureEvent::from_event(&crate::Event::new("ordinary", "person"));
+    event.event = "while-http-blocked".into();
+    let admitted = transport.enqueue_prepared(event);
+    release_tx.send(()).unwrap();
+    let observed = complete_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    transport.close_blocking();
+    server.join().unwrap();
+    assert!(updated.is_ok());
+    assert_eq!(admitted, Admission::Accepted);
+    assert_eq!(observed.unwrap().1, "while-http-blocked");
+}
+
 struct ManualClock(Mutex<Instant>);
 
 impl ManualClock {

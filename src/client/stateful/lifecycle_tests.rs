@@ -123,6 +123,10 @@ fn client_with_store(
         shutdown_timeout: config.shutdown_timeout,
         shutdown: Some(shutdown),
         producer: Some(Producer::new(config)),
+        flag_loader: Some(super::super::flags::FlagLoader::new(
+            config.transport_options(),
+            config.on_feature_flags.clone(),
+        )),
         state: Some(state),
         transport: Some(
             TransportHandle::spawn_stateful_with_deadline(

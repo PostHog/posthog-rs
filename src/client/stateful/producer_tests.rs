@@ -275,7 +275,7 @@ fn registered_context_matches_stateless_fill_and_wire_precedence() {
     }
     let mut baseline = CaptureEvent::from_event_at(&server, now());
     // Stateful-only null cleanup is the already established difference.
-    normalize_custom_properties(&mut baseline.properties);
+    normalize_custom_properties(&mut baseline.properties, false);
     for key in [
         "scalar",
         "object",

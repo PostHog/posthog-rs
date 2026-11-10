@@ -509,6 +509,9 @@ pub(super) fn run(
             None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
         match wake {
+            Ok(Control::Flags(_)) => unreachable!("request-worker-only flags"),
+            #[cfg(test)]
+            Ok(Control::RequestBarrier(_)) => unreachable!("request-worker-only barrier"),
             Ok(Control::QueueWake) => {
                 queue.clear_wake();
                 waiting_for_executor = false;

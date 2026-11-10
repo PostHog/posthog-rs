@@ -49,13 +49,53 @@ fn reexports_stateful_client_and_its_public_entry_points() {
         posthog_rs::stateful::SessionPersistence,
         posthog::stateful::SessionPersistence,
     >();
+    assert_same_type::<
+        posthog_rs::stateful::FeatureFlagContext,
+        posthog::stateful::FeatureFlagContext,
+    >();
+    assert_same_type::<posthog_rs::stateful::FeatureFlagResult, posthog::stateful::FeatureFlagResult>(
+    );
+    assert_same_type::<
+        posthog_rs::stateful::FeatureFlagsUpdate,
+        posthog::stateful::FeatureFlagsUpdate,
+    >();
+    assert_same_type::<
+        posthog_rs::stateful::FeatureFlagLoadError,
+        posthog::stateful::FeatureFlagLoadError,
+    >();
+    assert_same_type::<
+        posthog_rs::stateful::FeatureFlagsSubscription,
+        posthog::stateful::FeatureFlagsSubscription,
+    >();
     let mut config = Config::new("phc_test");
+    config.preload_feature_flags = false;
+    config.send_feature_flag_event = false;
+    config.bootstrap_feature_flags = Some(std::collections::HashMap::from([(
+        "ready".into(),
+        posthog_rs::FlagValue::Boolean(true),
+    )]));
+    config.bootstrap_feature_flag_payloads = Some(Default::default());
+    config.on_feature_flags(|_| {});
     config.session_mode = posthog_rs::stateful::SessionMode::Manual;
     config.session_persistence = posthog_rs::stateful::SessionPersistence::Persistent;
     config.persistence = Persistence::Memory;
     config.disabled = true;
     config.opt_out = true;
     let client = Client::init_blocking(config);
+    client.reload_feature_flags();
+    client.set_person_properties_for_flags(Default::default(), Some(false));
+    client.reset_person_properties_for_flags(None);
+    client.set_group_properties_for_flags("company", Default::default(), Some(false));
+    client.reset_group_properties_for_flags(None, None);
+    assert_eq!(client.get_feature_flag("ready", None), None);
+    assert_eq!(client.is_feature_enabled("ready", Some(false)), None);
+    assert_eq!(client.get_feature_flag_result("ready", None), None);
+    assert_eq!(client.get_feature_flag_payload("ready"), None);
+    assert_eq!(client.get_feature_flags(), None);
+    assert_eq!(client.get_feature_flag_payloads(), None);
+    let subscription = client.on_feature_flags(|_| {});
+    subscription.clone().unsubscribe();
+    subscription.unsubscribe();
     client.identify(posthog_rs::stateful::Identify::new("user"));
     client.alias("alias");
     client.set_person_properties(Default::default(), Default::default());

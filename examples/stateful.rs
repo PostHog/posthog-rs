@@ -1,6 +1,7 @@
 //! Run with `cargo run --features stateful --example stateful`.
 //! Set POSTHOG_PROJECT_TOKEN; POSTHOG_HOST, POSTHOG_DATA_DIR and
-//! POSTHOG_DISTINCT_ID and POSTHOG_GROUP_KEY are optional.
+//! POSTHOG_DISTINCT_ID, POSTHOG_GROUP_KEY, POSTHOG_FLAG_KEY and
+//! POSTHOG_OPT_OUT (true/false) are optional.
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -22,6 +23,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(event)
     });
     let client = Client::init_blocking(config);
+    if let Ok(opt_out) = std::env::var("POSTHOG_OPT_OUT") {
+        if opt_out.parse::<bool>()? {
+            client.opt_out();
+        } else {
+            client.opt_in();
+        }
+    }
+    println!("opted out: {}", client.is_opt_out());
+    let subscription = client.on_feature_flags(|update| {
+        println!(
+            "flags available: {}, known flags: {}, loading errors: {}",
+            update.flags.is_some(),
+            update.flags.as_ref().map_or(0, HashMap::len),
+            update.errors_loading
+        );
+    });
     // Attempt previously queued work before the example records new events.
     println!("startup drain: {:?}", client.flush_blocking());
     if let Ok(id) = std::env::var("POSTHOG_DISTINCT_ID") {
@@ -34,6 +51,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(group) = std::env::var("POSTHOG_GROUP_KEY") {
         client.group("organization", group, None);
     }
+    // Analytics registration is not implicit flag targeting. Combine explicit
+    // targeting with the final identity/group context before requesting a refresh.
+    client.set_person_properties_for_flags(
+        HashMap::from([("application".into(), json!("rust-example"))]),
+        Some(false),
+    );
+    client.reload_feature_flags();
     let mut event = Capture::new("example opened");
     event
         .properties
@@ -42,6 +66,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("session: {:?}", client.peek_session_id());
     println!("screen: {:?}", client.screen("Example", HashMap::new()));
     println!("flush: {:?}", client.flush_blocking());
+    if let Ok(key) = std::env::var("POSTHOG_FLAG_KEY") {
+        // Cached read only: None is unavailable, not false. A known value reports
+        // access unless consent disallows it. Shutdown drains that event too.
+        println!(
+            "cached flag {key}: {:?}",
+            client.get_feature_flag(&key, None)
+        );
+        println!("payload {key}: {:?}", client.get_feature_flag_payload(&key));
+    }
+    subscription.unsubscribe();
     println!(
         "shutdown: {:?}",
         client.shutdown_blocking(Some(Duration::from_secs(5)))

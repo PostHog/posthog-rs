@@ -535,3 +535,6 @@ fn device_bytes_are_mandatory_and_failed_updates_preserve_identity_and_consent()
     assert!(store.save(&too_large).is_err());
     assert_eq!(store.load().unwrap(), Some(snapshot));
 }
+
+#[path = "flag_storage_tests.rs"]
+mod flag_tests;
