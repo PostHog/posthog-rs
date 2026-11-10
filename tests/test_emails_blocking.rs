@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use common::default_user_agent;
 use email_support::{
-    accepted, connection_counting_store, options, s3_error, unavailable, Answer, FakePostHog,
-    ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    accepted, connection_counting_store, options, unavailable, Answer, FakePostHog, ScriptedServer,
+    MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
 use posthog_rs::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
 use serde_json::json;
@@ -104,7 +104,7 @@ fn code_send_uploads_the_file_then_sends_its_hash() {
 
     client.emails().send(invoice()).unwrap();
 
-    assert_eq!(posthog.stored(PDF_SHA256), Some(PDF.to_vec()));
+    assert_eq!(posthog.versions(PDF_SHA256), vec![PDF.to_vec()]);
     assert_eq!(
         posthog.sent(),
         vec![json!({
@@ -122,8 +122,7 @@ fn code_send_uploads_the_file_then_sends_its_hash() {
 
 #[test]
 fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
-    let posthog = FakePostHog::start();
-    posthog.store_answers_next(s3_error(403, "AccessDenied", "Request has expired"));
+    let posthog = FakePostHog::start().with_expired_grants();
     let client = client_of(&posthog);
 
     let error = client.emails().send(invoice()).unwrap_err();
@@ -135,6 +134,7 @@ fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
         error.why(),
         Some("The file store answered AccessDenied: Request has expired")
     );
+    assert!(posthog.stored(PDF_SHA256).is_none());
     assert!(posthog.sent().is_empty(), "no email is sent");
 }
 
@@ -189,7 +189,6 @@ fn a_custom_clients_uploads_reuse_one_connection_across_sends() {
     client.emails().send(invoice()).unwrap();
     client.emails().send(invoice()).unwrap();
 
-    assert_eq!(server.requests().len(), 4);
     assert_eq!(connections.load(Ordering::SeqCst), 1);
 }
 

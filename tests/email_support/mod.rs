@@ -161,12 +161,16 @@ fn response(answer: &Answer) -> HttpMockResponse {
 }
 
 /// PostHog's upload and send routes and its file store, in memory, behaving
-/// like the real ones. Both routes take only the secret key `phs_test`. The
-/// upload route answers `present` for a stored file and a presigned `PUT`
-/// otherwise. The store keeps a file only when the `PUT` carries the signed
-/// checksum, its bytes match it, and no other credentials come with the
-/// signature, as S3 requires. A send is accepted only when each file it names
-/// is stored.
+/// like the real ones:
+/// - Both routes take only `POST`, JSON and the secret key `phs_test`.
+/// - The upload route answers `present` for a stored file and a presigned
+///   `PUT` otherwise, or `field_not_accepted` when files are off for the
+///   project. A PostHog from before the route answers Django's `404`.
+/// - The store keeps a version of a file only when the `PUT` comes before its
+///   grant expires, carries the checksum the grant signed, holds bytes that
+///   match it, and brings no other credentials, as S3 requires.
+/// - A send needs a subject and a body, and is accepted only when each file it
+///   names is stored.
 pub struct FakePostHog {
     pub url: String,
     state: Arc<Mutex<FakeState>>,
@@ -178,10 +182,22 @@ pub struct FakePostHog {
 struct FakeState {
     store_url: String,
     without_upload_route: bool,
-    stored: HashMap<String, Vec<u8>>,
-    store_answers: usize,
+    files_off: bool,
+    grants: Grants,
+    versions: HashMap<String, Vec<Vec<u8>>>,
     store_faults: VecDeque<Answer>,
     sent: Vec<serde_json::Value>,
+}
+
+/// What the upload route signs into each grant.
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Grants {
+    #[default]
+    Valid,
+    /// Already expired, as a grant held too long.
+    Expired,
+    /// For other bytes than the file's.
+    ForOtherBytes,
 }
 
 impl FakePostHog {
@@ -243,14 +259,40 @@ impl FakePostHog {
         self
     }
 
+    /// A project that can't send files yet.
+    pub fn with_files_off(self) -> Self {
+        self.state.lock().unwrap().files_off = true;
+        self
+    }
+
+    /// Grants that expired before the upload.
+    pub fn with_expired_grants(self) -> Self {
+        self.state.lock().unwrap().grants = Grants::Expired;
+        self
+    }
+
+    /// Grants signed for other bytes than the file's.
+    pub fn with_grants_for_other_bytes(self) -> Self {
+        self.state.lock().unwrap().grants = Grants::ForOtherBytes;
+        self
+    }
+
+    /// Grants whose URL points at `store_url` instead of the store.
+    pub fn with_store_at(self, store_url: &str) -> Self {
+        self.state.lock().unwrap().store_url = store_url.to_string();
+        self
+    }
+
     /// Stores a file, as an earlier send would have.
     pub fn store(&self, bytes: &[u8]) {
-        let sha256 = hex(&Sha256::digest(bytes));
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
         self.state
             .lock()
             .unwrap()
-            .stored
-            .insert(sha256, bytes.to_vec());
+            .versions
+            .entry(sha256)
+            .or_default()
+            .push(bytes.to_vec());
     }
 
     /// The store answers its next upload with `answer`, a fault the SDK can't
@@ -259,13 +301,16 @@ impl FakePostHog {
         self.state.lock().unwrap().store_faults.push_back(answer);
     }
 
+    /// The latest version of the file with this hash.
     pub fn stored(&self, sha256: &str) -> Option<Vec<u8>> {
-        self.state.lock().unwrap().stored.get(sha256).cloned()
+        self.versions(sha256).pop()
     }
 
-    /// How many uploads the store answered.
-    pub fn uploads(&self) -> usize {
-        self.state.lock().unwrap().store_answers
+    /// Every version of the file with this hash, oldest first, as a
+    /// versioned bucket keeps them.
+    pub fn versions(&self, sha256: &str) -> Vec<Vec<u8>> {
+        let state = self.state.lock().unwrap();
+        state.versions.get(sha256).cloned().unwrap_or_default()
     }
 
     /// The emails PostHog accepted.
@@ -275,17 +320,58 @@ impl FakePostHog {
 }
 
 fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer {
+    let path = request.uri().path().to_string();
+    let mut state = state.lock().unwrap();
+    let route_exists = path == SEND_PATH || (path == UPLOADS_PATH && !state.without_upload_route);
+    if !route_exists {
+        return django_error(404, "invalid_request", "not_found", "Not found.", None);
+    }
     if header(request, "authorization").as_deref() != Some("Bearer phs_test") {
-        return Answer::json(
+        return django_error(
             401,
-            serde_json::json!({"type": "authentication_error", "code": "not_authenticated", "detail": "Invalid secret key.", "attr": null}),
+            "authentication_error",
+            "not_authenticated",
+            "Invalid secret key.",
+            None,
         );
     }
-    let body: serde_json::Value =
-        serde_json::from_slice(&request.body_vec()).unwrap_or(serde_json::Value::Null);
-    let mut state = state.lock().unwrap();
-    let path = request.uri().path().to_string();
-    if path == UPLOADS_PATH && !state.without_upload_route {
+    if request.method_str() != "POST" {
+        return django_error(
+            405,
+            "invalid_request",
+            "method_not_allowed",
+            "Method not allowed.",
+            None,
+        );
+    }
+    if header(request, "content-type").as_deref() != Some("application/json") {
+        return django_error(
+            415,
+            "invalid_request",
+            "unsupported_media_type",
+            "Unsupported media type in request.",
+            None,
+        );
+    }
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body_vec()) else {
+        return django_error(
+            400,
+            "invalid_request",
+            "parse_error",
+            "JSON parse error.",
+            None,
+        );
+    };
+    if path == UPLOADS_PATH {
+        if state.files_off {
+            return django_error(
+                400,
+                "invalid_request",
+                "field_not_accepted",
+                "This project can't send files yet, so PostHog didn't prepare the uploads.",
+                Some("files"),
+            );
+        }
         let slots: Vec<_> = body["files"]
             .as_array()
             .into_iter()
@@ -294,19 +380,40 @@ fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer
             .collect();
         return Answer::json(200, serde_json::json!({"files": slots}));
     }
-    if path != SEND_PATH {
-        return Answer::json(
-            404,
-            serde_json::json!({"type": "invalid_request", "code": "not_found", "detail": "Not found.", "attr": null}),
+    for field in ["subject"] {
+        if body[field].as_str().unwrap_or_default().is_empty() {
+            return django_error(
+                400,
+                "validation_error",
+                "blank",
+                "This field may not be blank.",
+                Some(field),
+            );
+        }
+    }
+    let has_body = ["html", "text"]
+        .iter()
+        .any(|field| !body[*field].as_str().unwrap_or_default().is_empty());
+    if !has_body {
+        return django_error(
+            400,
+            "validation_error",
+            "invalid_input",
+            "Give the email an html or text body.",
+            Some("html"),
         );
     }
     let references = body["attachments"].as_array().cloned().unwrap_or_default();
     for (index, reference) in references.iter().enumerate() {
         let sha256 = reference["sha256"].as_str().unwrap_or_default();
-        if !state.stored.contains_key(sha256) {
-            return Answer::json(
+        if !state.versions.contains_key(sha256) {
+            let attr = format!("attachments__{}", index);
+            return django_error(
                 400,
-                serde_json::json!({"type": "validation_error", "code": "attachment_not_uploaded", "detail": "This file wasn't uploaded.", "attr": format!("attachments__{index}")}),
+                "validation_error",
+                "attachment_not_uploaded",
+                "This file wasn't uploaded.",
+                Some(&attr),
             );
         }
     }
@@ -314,19 +421,39 @@ fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer
     accepted()
 }
 
+fn django_error(status: u16, kind: &str, code: &str, detail: &str, attr: Option<&str>) -> Answer {
+    Answer::json(
+        status,
+        serde_json::json!({"type": kind, "code": code, "detail": detail, "attr": attr}),
+    )
+}
+
 fn upload_slot(state: &FakeState, file: &serde_json::Value) -> serde_json::Value {
     let sha256 = file["sha256"].as_str().unwrap_or_default();
-    if state.stored.contains_key(sha256) {
+    if state.versions.contains_key(sha256) {
         return serde_json::json!({"sha256": sha256, "status": "present", "expires_at": "2026-12-16T12:00:00Z"});
     }
+    let signed_for = match state.grants {
+        Grants::ForOtherBytes => format!("{:x}", Sha256::digest(b"other bytes")),
+        _ => sha256.to_string(),
+    };
+    let checksum = base64::engine::general_purpose::STANDARD.encode(unhex(&signed_for));
+    let expires = if state.grants == Grants::Expired {
+        0
+    } else {
+        u64::MAX
+    };
     serde_json::json!({
         "sha256": sha256,
         "status": "upload",
-        "url": format!("{}/bucket/team/2/{sha256}?X-Amz-Signature=signed", state.store_url),
+        "url": format!(
+            "{}/bucket/team/2/{}?X-Amz-Expires-At={}&X-Amz-Checksum={}&X-Amz-Signature=signed",
+            state.store_url, sha256, expires, signed_for
+        ),
         "method": "PUT",
         "headers": {
             "content-length": file["size"].to_string(),
-            "x-amz-checksum-sha256": base64::engine::general_purpose::STANDARD.encode(unhex(sha256)),
+            "x-amz-checksum-sha256": checksum,
         },
         "url_expires_at": "2026-11-09T12:15:00Z",
     })
@@ -334,7 +461,6 @@ fn upload_slot(state: &FakeState, file: &serde_json::Value) -> serde_json::Value
 
 fn store_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer {
     let mut state = state.lock().unwrap();
-    state.store_answers += 1;
     if let Some(fault) = state.store_faults.pop_front() {
         return fault;
     }
@@ -342,19 +468,22 @@ fn store_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer {
     let Some(sha256) = path.strip_prefix("/bucket/team/2/") else {
         return s3_error(404, "NoSuchKey", "The specified key does not exist.");
     };
-    if request.method_str() != "PUT"
-        || !request
-            .uri()
-            .query()
-            .unwrap_or_default()
-            .contains("X-Amz-Signature=")
-    {
+    let query = request.query_params_map();
+    if request.method_str() != "PUT" || !query.contains_key("X-Amz-Signature") {
         return s3_error(403, "AccessDenied", "Access Denied");
     }
     if header(request, "authorization").is_some() {
         return s3_error(400, "InvalidArgument", "Only one auth mechanism allowed; only the X-Amz-Algorithm query parameter, Signature query string parameter or the Authorization header should be specified");
     }
-    let signed = base64::engine::general_purpose::STANDARD.encode(unhex(sha256));
+    let expires: u64 = query
+        .get("X-Amz-Expires-At")
+        .and_then(|at| at.parse().ok())
+        .unwrap_or(0);
+    if expires == 0 {
+        return s3_error(403, "AccessDenied", "Request has expired");
+    }
+    let signed_for = query.get("X-Amz-Checksum").cloned().unwrap_or_default();
+    let signed = base64::engine::general_purpose::STANDARD.encode(unhex(&signed_for));
     if header(request, "x-amz-checksum-sha256").as_deref() != Some(signed.as_str()) {
         return s3_error(
             403,
@@ -363,14 +492,18 @@ fn store_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer {
         );
     }
     let body = request.body_vec();
-    if hex(&Sha256::digest(&body)) != sha256 {
+    if format!("{:x}", Sha256::digest(&body)) != signed_for {
         return s3_error(
             400,
             "BadDigest",
             "The SHA256 you specified did not match the calculated checksum.",
         );
     }
-    state.stored.insert(sha256.to_string(), body);
+    state
+        .versions
+        .entry(sha256.to_string())
+        .or_default()
+        .push(body);
     Answer::xml(200, "")
 }
 
@@ -388,10 +521,6 @@ fn header(request: &HttpMockRequest, name: &str) -> Option<String> {
         .iter()
         .find(|(header, _)| header.eq_ignore_ascii_case(name))
         .map(|(_, value)| value.clone())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn unhex(text: &str) -> Vec<u8> {
