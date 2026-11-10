@@ -12,8 +12,8 @@ use email_support::{
     SEND_PATH, TEMPLATE_ID,
 };
 use posthog_rs::{
-    CodeEmail, EmailCategory, EmailDeliveryStatus, EmailErrorKind, MessageCategory,
-    MessageCategoryType, TemplateEmail,
+    CodeEmail, EmailDeliveryStatus, EmailErrorKind, MessageCategory, MessageCategoryType,
+    TemplateEmail,
 };
 use serde_json::json;
 
@@ -59,46 +59,29 @@ fn template_send_posts_the_flat_body_with_auth() {
 
 #[test]
 fn code_send_posts_the_rendered_content() {
-    let cases = [
-        (EmailCategory::Transactional, json!("transactional")),
-        (
-            MessageCategory::new("receipts", MessageCategoryType::Transactional, "Receipts").into(),
-            json!({"key": "receipts", "type": "transactional", "name": "Receipts"}),
-        ),
-        (
-            MessageCategory::new("receipts", MessageCategoryType::Transactional, "Receipts")
-                .description("")
-                .into(),
-            json!({"key": "receipts", "type": "transactional", "name": "Receipts", "description": ""}),
-        ),
-    ];
-    for (category, wire) in cases {
-        let server = ScriptedServer::start(vec![accepted()]);
-        let client = client_for(&server);
+    let server = ScriptedServer::start(vec![accepted()]);
+    let client = client_for(&server);
 
-        client
-            .emails()
-            .send(
-                CodeEmail::new("user@example.com", "password-reset", "Reset your password")
-                    .html("<p>Reset</p>")
-                    .from("Acme <security@example.com>")
-                    .category(category),
-            )
-            .unwrap();
+    client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "password-reset", "Reset your password")
+                .html("<p>Reset</p>")
+                .from("Acme <security@example.com>"),
+        )
+        .unwrap();
 
-        assert_eq!(
-            server.requests()[0].json(),
-            json!({
-                "template_key": "password-reset",
-                "subject": "Reset your password",
-                "html": "<p>Reset</p>",
-                "from": "Acme <security@example.com>",
-                "capture_engagement": true,
-                "category": wire,
-                "to": "user@example.com",
-            })
-        );
-    }
+    assert_eq!(
+        server.requests()[0].json(),
+        json!({
+            "template_key": "password-reset",
+            "subject": "Reset your password",
+            "html": "<p>Reset</p>",
+            "from": "Acme <security@example.com>",
+            "capture_engagement": true,
+            "to": "user@example.com",
+        })
+    );
 }
 
 #[test]

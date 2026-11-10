@@ -246,6 +246,10 @@ impl SendApi {
         self
     }
 
+    pub fn categories(&self) -> HashMap<String, StoredCategory> {
+        self.project.lock().unwrap().categories.clone()
+    }
+
     pub fn category(&self, key: &str) -> Option<StoredCategory> {
         self.project.lock().unwrap().categories.get(key).cloned()
     }

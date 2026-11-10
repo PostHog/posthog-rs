@@ -3,13 +3,14 @@
 mod common;
 mod email_support;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::default_user_agent;
 use email_support::{
-    accepted, closed_url, options, unavailable, Answer, ScriptedServer, SendApi, MESSAGE_ID,
-    SEND_PATH, TEMPLATE_ID,
+    accepted, closed_url, options, unavailable, Answer, ScriptedServer, SendApi, StoredCategory,
+    MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
 use posthog_rs::{
     CodeEmail, EmailCategory, EmailDeliveryStatus, EmailErrorKind, MessageCategory,
@@ -93,14 +94,6 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
                 .from("Acme <security@example.com>")
                 .reply_to("help@example.com")
                 .capture_engagement(false)
-                .category(
-                    MessageCategory::new(
-                        "newsletter",
-                        MessageCategoryType::Marketing,
-                        "Newsletter",
-                    )
-                    .description("Monthly product news"),
-                )
                 .distinct_id("user_123")
                 .idempotency_key("password-reset:user_123"),
         )
@@ -119,12 +112,6 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
             "from": "Acme <security@example.com>",
             "reply_to": ["help@example.com"],
             "capture_engagement": false,
-            "category": {
-                "key": "newsletter",
-                "type": "marketing",
-                "name": "Newsletter",
-                "description": "Monthly product news",
-            },
             "distinct_id": "user_123",
             "to": "user@example.com",
         })
@@ -202,6 +189,64 @@ async fn transactional_on_a_template_in_a_category_is_refused() {
         ("category_mismatch", EmailErrorKind::ValidationError)
     );
     assert_eq!(api.sent(), vec![]);
+}
+
+#[tokio::test]
+async fn a_send_creates_its_category_in_the_project() {
+    let cases = [
+        (
+            "newsletter",
+            MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
+                .description("Monthly product news"),
+            StoredCategory {
+                category_type: "marketing".into(),
+                name: "Newsletter".into(),
+                description: "Monthly product news".into(),
+            },
+        ),
+        (
+            "receipts",
+            MessageCategory::new("receipts", MessageCategoryType::Transactional, "Receipts"),
+            StoredCategory {
+                category_type: "transactional".into(),
+                name: "Receipts".into(),
+                description: "".into(),
+            },
+        ),
+    ];
+    for (key, category, stored) in cases {
+        let api = SendApi::start_async().await;
+        let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+
+        client
+            .emails()
+            .send(digest_email().category(category))
+            .await
+            .unwrap();
+
+        assert_eq!(api.categories(), HashMap::from([(key.to_string(), stored)]));
+        assert_eq!(
+            api.sent(),
+            vec![("user@example.com".to_string(), Some(key.to_string()))]
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_send_without_a_category_is_transactional() {
+    for category in [None, Some(EmailCategory::Transactional)] {
+        let api = SendApi::start_async().await;
+        let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+        let mut email = digest_email();
+        if let Some(category) = category {
+            email = email.category(category);
+        }
+
+        client.emails().send(email).await.unwrap();
+
+        assert_eq!(api.sent(), vec![("user@example.com".to_string(), None)]);
+        assert_eq!(api.categories(), HashMap::new());
+    }
 }
 
 #[tokio::test]
