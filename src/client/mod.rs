@@ -149,7 +149,9 @@ pub struct ClientOptions {
     /// PostHog. Do not share clients carrying credentials for unrelated services;
     /// the SDK cannot inspect or filter those defaults. Email attachments upload
     /// to PostHog's file store through a client the SDK builds, so these
-    /// defaults never reach it.
+    /// defaults never reach it. Nor do the supplied client's root certificates,
+    /// TLS options or proxy: that client trusts the system's roots and takes
+    /// its proxy from the environment, such as `HTTPS_PROXY`.
     #[cfg(feature = "async-client")]
     #[builder(default, setter(strip_option))]
     http_client: Option<reqwest::Client>,
@@ -172,7 +174,9 @@ pub struct ClientOptions {
     /// PostHog. Do not share clients carrying credentials for unrelated services;
     /// the SDK cannot inspect or filter those defaults. Email attachments upload
     /// to PostHog's file store through a client the SDK builds, so these
-    /// defaults never reach it.
+    /// defaults never reach it. Nor do the supplied client's root certificates,
+    /// TLS options or proxy: that client trusts the system's roots and takes
+    /// its proxy from the environment, such as `HTTPS_PROXY`.
     ///
     /// Create and finally drop application-owned blocking clients, including handles
     /// held in options and builders, outside async runtimes. SDK shutdown does not
