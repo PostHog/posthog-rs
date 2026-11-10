@@ -176,7 +176,8 @@ impl CodeEmail {
 
     /// Adds a file to the email. Call it again to add more, at most 10 files
     /// and 40 MB for the whole email after Base64 encoding, which leaves about
-    /// 29 MB for the files. PostHog refuses a file type that mailbox providers
+    /// 29 MB for the files. The 40 MB counts the bodies too, and the HTML twice
+    /// without text, because PostHog derives the text from it. PostHog refuses a file type that mailbox providers
     /// block, such as `.exe`.
     pub fn attachment(mut self, attachment: EmailAttachment) -> Self {
         self.attachments.push(attachment);

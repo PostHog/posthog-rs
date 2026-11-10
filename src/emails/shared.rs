@@ -218,10 +218,14 @@ fn check_attachments(email: &CodeEmail) -> Result<(), EmailError> {
 /// The size of the email as the email provider counts it, the way PostHog
 /// estimates it: each file and body in Base64 with line breaks, the subject
 /// as folded encoded words, plus room for the other headers and the MIME
-/// boundaries.
+/// boundaries. Without text, PostHog sends text it derives from the HTML and
+/// counts that too. The derived text is never longer than the HTML, so the
+/// HTML counts twice.
 fn estimated_message_bytes(email: &CodeEmail) -> u64 {
     let files = email.attachments.iter().map(|file| file.content.len());
-    let bodies = email.html.iter().chain(&email.text).map(String::len);
+    let html = email.html.as_deref().unwrap_or_default();
+    let text = email.text.as_deref().filter(|text| !text.is_empty());
+    let bodies = [html, text.unwrap_or(html)].map(str::len);
     let subject = (email.subject.len() as u64).div_ceil(SUBJECT_BYTES_PER_ENCODED_WORD)
         * FOLDED_ENCODED_WORD_BYTES;
     files
@@ -425,9 +429,34 @@ impl Upload {
         .with_source(error.without_url())
     }
 
+    /// PostHog named an upload URL that isn't https while the app host is.
+    /// The error leaves the URL out, because its query signs the upload.
+    fn not_https_error(&self, status: u16) -> EmailError {
+        EmailError::from_response(
+            status,
+            None,
+            Some(format!(
+                "PostHog named an upload URL that isn't https, so {} would travel unencrypted, and no email was sent.",
+                self.filename
+            )),
+            None,
+        )
+        .with_field(Some(self.field()))
+        .with_details(
+            Some("Your app_host uses https, and PostHog's file store URL doesn't.".into()),
+            Some("Fix the file store's URL so it uses https. Only an app_host that is plain http, such as a PostHog on your own machine, lets files upload over plain http.".into()),
+            None,
+        )
+    }
+
     fn field(&self) -> String {
         format!("attachments__{}", self.index)
     }
+}
+
+fn has_scheme(url: &str, scheme: &str) -> bool {
+    url.get(..scheme.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
 }
 
 fn xml_text<'a>(body: &'a str, tag: &str) -> Option<&'a str> {
@@ -438,11 +467,15 @@ fn xml_text<'a>(body: &'a str, tag: &str) -> Option<&'a str> {
 }
 
 /// The files PostHog answered `upload` for, each once, in the send's order.
+/// Each upload URL must be https, so the file and its signed URL travel
+/// encrypted, unless the app host is plain http itself, as a PostHog on the
+/// developer's own machine is.
 pub(crate) fn uploads_to_make(
     reply: Accepted,
     attachments: &[EmailAttachment],
-    timeout: Duration,
+    connection: &Connection,
 ) -> Result<Vec<Upload>, EmailError> {
+    let plain_http_allowed = has_scheme(&connection.app_host, "http://");
     let Accepted { status, fields } = reply;
     let malformed = || {
         EmailError::from_response(
@@ -467,7 +500,11 @@ pub(crate) fn uploads_to_make(
             Some("present") => {}
             Some("upload") if !uploading.insert(&attachment.sha256) => {}
             Some("upload") => {
-                let upload = upload(index, attachment, slot, timeout).ok_or_else(malformed)?;
+                let upload =
+                    upload(index, attachment, slot, connection.timeout).ok_or_else(malformed)?;
+                if !plain_http_allowed && !has_scheme(&upload.url, "https://") {
+                    return Err(upload.not_https_error(status));
+                }
                 uploads.push(upload);
             }
             _ => return Err(malformed()),

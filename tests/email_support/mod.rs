@@ -380,16 +380,14 @@ fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer
             .collect();
         return Answer::json(200, serde_json::json!({"files": slots}));
     }
-    for field in ["subject"] {
-        if body[field].as_str().unwrap_or_default().is_empty() {
-            return django_error(
-                400,
-                "validation_error",
-                "blank",
-                "This field may not be blank.",
-                Some(field),
-            );
-        }
+    if body["subject"].as_str().unwrap_or_default().is_empty() {
+        return django_error(
+            400,
+            "validation_error",
+            "blank",
+            "This field may not be blank.",
+            Some("subject"),
+        );
     }
     let has_body = ["html", "text"]
         .iter()
@@ -599,6 +597,65 @@ pub fn connection_counting_store() -> (String, Arc<AtomicUsize>) {
         }
     });
     (url, connections)
+}
+
+/// The test certificate authority that signed [`tls_front`]'s certificate,
+/// for a client that should trust it.
+pub fn test_certificate_authority() -> reqwest::Certificate {
+    reqwest::Certificate::from_der(include_bytes!("tls/ca.der")).unwrap()
+}
+
+/// An https URL in front of a plain-http test server: it takes TLS with a
+/// certificate for 127.0.0.1 that [`test_certificate_authority`] signed, and
+/// passes the bytes on to `plain_url`.
+///
+/// The certificates were made once, valid for a hundred years, with:
+///
+/// ```sh
+/// openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout ca.key -out ca.pem \
+///   -days 36500 -subj "/CN=posthog-rs test CA" \
+///   -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign"
+/// openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout leaf.key -out leaf.csr -subj "/CN=127.0.0.1"
+/// printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' > ext
+/// openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out leaf.pem -days 36500 -extfile ext
+/// openssl x509 -in ca.pem -outform DER -out ca.der
+/// openssl x509 -in leaf.pem -outform DER -out leaf.der
+/// openssl pkcs8 -topk8 -nocrypt -in leaf.key -outform DER -out leaf.key.der
+/// ```
+pub async fn tls_front(plain_url: &str) -> String {
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::rustls::{crypto::aws_lc_rs, ServerConfig};
+
+    let config = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(
+                include_bytes!("tls/leaf.der").to_vec(),
+            )],
+            PrivatePkcs8KeyDer::from(include_bytes!("tls/leaf.key.der").to_vec()).into(),
+        )
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let target = plain_url.trim_start_matches("http://").to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("https://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let (acceptor, target) = (acceptor.clone(), target.clone());
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(socket).await else {
+                    return;
+                };
+                let Ok(mut plain) = tokio::net::TcpStream::connect(&target).await else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut tls, &mut plain).await;
+            });
+        }
+    });
+    url
 }
 
 /// A URL where nothing listens. A port freed by another test could be taken by

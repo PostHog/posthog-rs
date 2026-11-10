@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use common::default_user_agent;
 use email_support::{
-    accepted, closed_url, connection_counting_store, options, s3_error, unavailable, Answer,
-    FakePostHog, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    accepted, closed_url, connection_counting_store, options, s3_error, test_certificate_authority,
+    tls_front, unavailable, Answer, FakePostHog, ScriptedServer, MESSAGE_ID, SEND_PATH,
+    TEMPLATE_ID,
 };
 use posthog_rs::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
 use serde_json::json;
@@ -320,6 +321,30 @@ async fn a_file_store_server_error_is_retried_before_the_send() {
 }
 
 #[tokio::test]
+async fn a_refused_upload_is_not_retried() {
+    // A refusal such as an expired grant fails the same way on a retry, so the
+    // send stops at once, even with retries left.
+    let posthog = FakePostHog::start_async().await;
+    posthog.store(&PNG);
+    posthog.store_answers_next(s3_error(403, "AccessDenied", "Request has expired"));
+    let client = client_of(&posthog).await;
+
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files().max_retries(1))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "attachment_upload_failed");
+    assert_eq!(error.field(), Some("attachments__0"));
+    assert!(
+        posthog.stored(PDF_SHA256).is_none(),
+        "the upload isn't tried again"
+    );
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[tokio::test]
 async fn a_file_store_server_error_past_the_retries_is_service_unavailable() {
     for status in [500, 502, 503, 504] {
         let posthog = FakePostHog::start_async().await;
@@ -361,15 +386,73 @@ async fn a_failed_upload_never_shows_the_signed_url() {
 
         assert_eq!(error.code(), code);
         assert_eq!(error.field(), Some("attachments__0"));
-        let mut chain = format!("{error} {error:?}");
-        let mut source = std::error::Error::source(&error);
-        while let Some(cause) = source {
-            chain.push_str(&format!(" {cause} {cause:?}"));
-            source = cause.source();
-        }
+        let chain = error_chain(&error);
         assert!(!chain.contains("X-Amz-Signature"), "{}", chain);
         assert!(posthog.sent().is_empty(), "no email is sent");
     }
+}
+
+/// The error with every source, printed both ways.
+fn error_chain(error: &posthog_rs::EmailError) -> String {
+    let mut chain = format!("{error} {error:?}");
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        chain.push_str(&format!(" {cause} {cause:?}"));
+        source = cause.source();
+    }
+    chain
+}
+
+#[tokio::test]
+async fn an_upload_url_that_isnt_https_sends_nothing() {
+    // PostHog, reached over https, names a file store URL that is plain http,
+    // as a misconfigured store would: the file and its signed URL would travel
+    // unencrypted.
+    let posthog = FakePostHog::start_async().await;
+    let app_host = tls_front(&posthog.url).await;
+    let http = reqwest::Client::builder()
+        .tls_certs_only([test_certificate_authority()])
+        .build()
+        .unwrap();
+    let client = posthog_rs::client(options(&app_host).http_client(http).build().unwrap()).await;
+
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.field(), Some("attachments__0"));
+    assert!(error.message().contains("invoice.pdf"), "{}", error);
+    assert!(
+        error.fix().unwrap().contains("file store's URL"),
+        "{:?}",
+        error.fix()
+    );
+    let chain = error_chain(&error);
+    assert!(!chain.contains("X-Amz-Signature"), "{}", chain);
+    assert!(!chain.contains("http://"), "{}", chain);
+    assert!(posthog.stored(PDF_SHA256).is_none(), "nothing is uploaded");
+    assert!(posthog.stored(PNG_SHA256).is_none(), "nothing is uploaded");
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[tokio::test]
+async fn a_plain_http_app_host_lets_files_upload_over_plain_http() {
+    // A PostHog on the developer's machine, reached over plain http, names a
+    // plain-http file store, and the files upload.
+    let posthog = FakePostHog::start_async().await;
+    assert!(posthog.url.starts_with("http://"), "{}", posthog.url);
+    let client = client_of(&posthog).await;
+
+    client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap();
+
+    assert_eq!(posthog.stored(PDF_SHA256), Some(PDF.to_vec()));
+    assert_eq!(posthog.sent().len(), 1);
 }
 
 #[tokio::test]
@@ -473,6 +556,7 @@ async fn an_email_over_40_mb_after_base64_is_refused_before_any_request() {
     let one_byte_more = EmailAttachment::new("scan.pdf", vec![0u8; 29_182_819]);
     let fits_no_subject = file(29_182_872);
     let fits_a_57_byte_body = file(29_182_764);
+    let fits_two_57_byte_bodies = file(29_182_707);
     let fits_57_and_114_byte_bodies = file(29_182_650);
     let one_word: &str = &"x".repeat(42);
     let two_words: &str = &"x".repeat(43);
@@ -496,8 +580,15 @@ async fn an_email_over_40_mb_after_base64_is_refused_before_any_request() {
         // An empty subject adds nothing: the send passes the size check and
         // PostHog refuses the blank subject.
         ("", "", "x", &fits_no_subject, "blank"),
-        ("x", ascii, "", &fits_a_57_byte_body, "sent"),
-        ("x", two_byte, "", &fits_a_57_byte_body, "message_too_large"),
+        // Without text, the HTML counts twice: see the next test.
+        ("x", ascii, "", &fits_two_57_byte_bodies, "sent"),
+        (
+            "x",
+            two_byte,
+            "",
+            &fits_two_57_byte_bodies,
+            "message_too_large",
+        ),
         ("x", "", ascii, &fits_a_57_byte_body, "sent"),
         ("x", "", two_byte, &fits_a_57_byte_body, "message_too_large"),
         ("x", ascii, two_byte, &fits_57_and_114_byte_bodies, "sent"),
@@ -535,6 +626,44 @@ async fn an_email_over_40_mb_after_base64_is_refused_before_any_request() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn an_html_only_email_counts_its_html_twice() {
+    // Without text, PostHog sends text it derives from the HTML and counts it
+    // too. The derived text is never longer than the HTML, so the client
+    // counts the HTML twice: this body fits once beside the file, as text,
+    // but not twice, as HTML alone.
+    let posthog = FakePostHog::start_async().await;
+    let bytes = vec![0u8; 29_182_764];
+    let sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let file = EmailAttachment::new("scan.pdf", bytes);
+    let body = "a".repeat(57);
+    let email = || {
+        CodeEmail::new("user@example.com", "scan", "x")
+            .attachment(file.clone())
+            .max_retries(0)
+    };
+    let client = client_of(&posthog).await;
+
+    let error = client
+        .emails()
+        .send(email().html(body.as_str()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "message_too_large");
+    assert_eq!(error.field(), Some("attachments"));
+    assert!(posthog.stored(&sha256).is_none(), "nothing is uploaded");
+    assert!(posthog.sent().is_empty(), "no email is sent");
+
+    client
+        .emails()
+        .send(email().text(body.as_str()))
+        .await
+        .unwrap();
+    assert!(posthog.stored(&sha256).is_some());
+    assert_eq!(posthog.sent().len(), 1);
 }
 
 #[test]

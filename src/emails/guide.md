@@ -28,7 +28,9 @@ with [`cc`](crate::CodeEmail::cc), [`bcc`](crate::CodeEmail::bcc) and
 [`attachment`](crate::CodeEmail::attachment). PostHog takes at most 10
 addresses in each of `cc` and `bcc`. An email carries at most 10 files and
 40 MB after Base64 encoding, which leaves about 29 MB for the files. The
-client checks both before it sends anything, and refuses the send with
+40 MB counts the bodies and the subject too, and the HTML twice when the
+email has no text, because PostHog then sends text it derives from the HTML.
+The client checks both before it sends anything, and refuses the send with
 `too_many_attachments` or `message_too_large`.
 A template made in PostHog sets its own recipients and content, so a
 [`TemplateEmail`](crate::TemplateEmail) takes none of them.
@@ -44,7 +46,11 @@ the upload route, a project with sending email from code off, or an
 `app_host` that isn't PostHog's answers the upload request with `404`: the
 send fails with PostHog's answer, such as `not_found`, on `attachments`,
 and no email is sent. Allow your app to reach the file store's host as
-well as your PostHog app host. When you supply your own HTTP client,
+well as your PostHog app host. Uploads go only over https: when PostHog
+names a file store URL that isn't https, the send fails on that attachment
+before any upload, and no email is sent. Fix the file store's URL. Only an
+`app_host` that is itself plain `http`, such as a PostHog on your own
+machine, lets files upload over plain `http`. When you supply your own HTTP client,
 uploads go through a client the SDK builds, so your client's default
 headers never reach the file store. That client trusts the system's root
 certificates and takes its proxy from the environment, such as

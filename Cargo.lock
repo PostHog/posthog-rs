@@ -1741,6 +1741,7 @@ dependencies = [
  "sha1",
  "sha2",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-layer",
  "tower-service",

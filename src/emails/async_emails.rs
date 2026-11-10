@@ -169,7 +169,7 @@ impl<'a> Emails<'a> {
             .await
             .map_err(shared::upload_route_error)?;
         let http = self.upload_http()?;
-        for upload in shared::uploads_to_make(reply, attachments, connection.timeout)? {
+        for upload in shared::uploads_to_make(reply, attachments, connection)? {
             retrying(max_retries, || self.put(http, &upload)).await?;
         }
         Ok(())
