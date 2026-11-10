@@ -18,8 +18,6 @@ registered context, explicit capture/screen, a native privacy hook, and separate
 reports. It opts into persistent sessions so repeated invocations in the same scope
 can share an unexpired session; the SDK default keeps sessions in memory. Optionally set `POSTHOG_DISTINCT_ID` to identify a user and
 `POSTHOG_GROUP_KEY` to associate an organization (enabling person processing).
-See [stateful client behavior](../docs/stateful-client.md) for configuration,
-admission limits, storage failure handling, async initialization and drains.
 
 ## Running the Examples
 
