@@ -28,8 +28,6 @@ a cached flag and payload. A known flag read reports access when consent allows;
 `None` means unavailable, not disabled. Initialization and successful drains do not
 promise remote flag success. The listener reports load errors and is explicitly
 unsubscribed before shutdown. Notifications can run on the caller or shared worker.
-See [stateful client behavior](../docs/stateful-client.md) for configuration,
-admission limits, storage failure handling, async initialization and drains.
 
 ## Running the Examples
 
