@@ -425,12 +425,57 @@ pub fn endless_body_server() -> String {
     url
 }
 
-/// A URL where nothing listens.
-pub fn closed_url() -> String {
+/// A file store that accepts every upload and counts the connections it was
+/// opened, so a test can see whether uploads reuse a connection. httpmock
+/// doesn't show connections, so this one is a raw socket.
+pub fn connection_counting_store() -> (String, Arc<AtomicUsize>) {
+    use std::io::{BufRead, BufReader, Read, Write};
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
-    url
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&connections);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            counted.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream);
+                loop {
+                    let mut length = 0;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some((name, value)) = line.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") {
+                                length = value.trim().parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                    let mut body = vec![0; length];
+                    if reader.read_exact(&mut body).is_err() {
+                        return;
+                    }
+                    let answer = b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n";
+                    if reader.get_mut().write_all(answer).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (url, connections)
+}
+
+/// A URL where nothing listens. A port freed by another test could be taken by
+/// a server a parallel test starts; port 1 is reserved, so nothing does.
+pub fn closed_url() -> String {
+    "http://127.0.0.1:1".to_string()
 }
 
 pub fn options(app_host: &str) -> posthog_rs::ClientOptionsBuilder {

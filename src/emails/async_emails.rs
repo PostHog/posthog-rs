@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::OnceLock;
 
 use reqwest::header::HeaderMap;
 use reqwest::{Client as HttpClient, Method};
@@ -12,6 +13,7 @@ use crate::client::{parse_retry_after, ClientOptions};
 pub struct Emails<'a> {
     options: &'a ClientOptions,
     http: Option<&'a HttpClient>,
+    upload_http: &'a OnceLock<HttpClient>,
     tracker: &'a EmailTracker,
 }
 
@@ -19,11 +21,13 @@ impl<'a> Emails<'a> {
     pub(crate) fn new(
         options: &'a ClientOptions,
         http: Option<&'a HttpClient>,
+        upload_http: &'a OnceLock<HttpClient>,
         tracker: &'a EmailTracker,
     ) -> Self {
         Self {
             options,
             http,
+            upload_http,
             tracker,
         }
     }
@@ -166,7 +170,7 @@ impl<'a> Emails<'a> {
             .map_err(shared::upload_route_error)?;
         let http = self.upload_http()?;
         for upload in shared::uploads_to_make(reply, attachments, connection.timeout)? {
-            retrying(max_retries, || self.put(&http, &upload)).await?;
+            retrying(max_retries, || self.put(http, &upload)).await?;
         }
         Ok(())
     }
@@ -234,15 +238,20 @@ impl<'a> Emails<'a> {
 
     /// The client that uploads files. A client the app supplied may carry
     /// default headers, such as credentials, that must never reach the file
-    /// store, so uploads then go through a client the SDK builds.
-    fn upload_http(&self) -> Result<HttpClient, EmailError> {
+    /// store, so uploads then go through a client the SDK builds once and
+    /// keeps, so its connections are reused.
+    fn upload_http(&self) -> Result<&'a HttpClient, EmailError> {
         let http = self.http()?;
         if !self.options.has_custom_http_client() {
-            return Ok(http.clone());
+            return Ok(http);
         }
-        HttpClient::builder()
+        if let Some(built) = self.upload_http.get() {
+            return Ok(built);
+        }
+        let built = HttpClient::builder()
             .build()
-            .map_err(shared::upload_client_error)
+            .map_err(shared::upload_client_error)?;
+        Ok(self.upload_http.get_or_init(|| built))
     }
 
     fn http(&self) -> Result<&'a HttpClient, EmailError> {

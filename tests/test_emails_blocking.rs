@@ -3,13 +3,14 @@
 mod common;
 mod email_support;
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::default_user_agent;
 use email_support::{
-    accepted, options, s3_error, unavailable, Answer, FakePostHog, ScriptedServer, MESSAGE_ID,
-    SEND_PATH, TEMPLATE_ID,
+    accepted, connection_counting_store, options, s3_error, unavailable, Answer, FakePostHog,
+    ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
 use posthog_rs::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
 use serde_json::json;
@@ -160,6 +161,36 @@ fn a_custom_clients_default_credentials_never_reach_the_file_store() {
 
     assert_eq!(posthog.stored(PDF_SHA256), Some(PDF.to_vec()));
     assert_eq!(posthog.sent().len(), 1);
+}
+
+#[test]
+fn a_custom_clients_uploads_reuse_one_connection_across_sends() {
+    let (store, connections) = connection_counting_store();
+    let slot = Answer::json(
+        200,
+        json!({"files": [{
+            "sha256": PDF_SHA256,
+            "status": "upload",
+            "url": format!("{}/bucket/team/2/{}?X-Amz-Signature=signed", store, PDF_SHA256),
+            "method": "PUT",
+            "headers": {"content-length": "7"},
+            "url_expires_at": "2026-11-09T12:15:00Z",
+        }]}),
+    );
+    let server = ScriptedServer::start(vec![slot.clone(), accepted(), slot, accepted()]);
+    let http = reqwest::blocking::Client::builder().build().unwrap();
+    let client = posthog_rs::client(
+        options(&server.url)
+            .blocking_http_client(http)
+            .build()
+            .unwrap(),
+    );
+
+    client.emails().send(invoice()).unwrap();
+    client.emails().send(invoice()).unwrap();
+
+    assert_eq!(server.requests().len(), 4);
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
 }
 
 #[test]
