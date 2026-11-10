@@ -186,6 +186,7 @@ struct FakeState {
     grants: Grants,
     versions: HashMap<String, Vec<Vec<u8>>>,
     store_faults: VecDeque<Answer>,
+    redirect_next_to: Option<String>,
     sent: Vec<serde_json::Value>,
 }
 
@@ -299,6 +300,12 @@ impl FakePostHog {
     /// make it produce.
     pub fn store_answers_next(&self, answer: Answer) {
         self.state.lock().unwrap().store_faults.push_back(answer);
+    }
+
+    /// The store answers its next upload with a `307` to the same path and
+    /// query on `other_store`, as a store that moved the file elsewhere would.
+    pub fn store_redirects_next_to(&self, other_store: &str) {
+        self.state.lock().unwrap().redirect_next_to = Some(other_store.to_string());
     }
 
     /// The latest version of the file with this hash.
@@ -461,6 +468,15 @@ fn store_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer {
     let mut state = state.lock().unwrap();
     if let Some(fault) = state.store_faults.pop_front() {
         return fault;
+    }
+    if let Some(other_store) = state.redirect_next_to.take() {
+        let location = format!("{}{}", other_store, request.uri().path_and_query().unwrap());
+        return s3_error(
+            307,
+            "TemporaryRedirect",
+            "Please re-send this request to the specified temporary endpoint.",
+        )
+        .header("location", &location);
     }
     let path = request.uri().path().to_string();
     let Some(sha256) = path.strip_prefix("/bucket/team/2/") else {

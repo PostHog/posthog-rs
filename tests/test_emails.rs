@@ -227,6 +227,40 @@ async fn a_custom_clients_default_credentials_never_reach_the_file_store() {
 }
 
 #[tokio::test]
+async fn a_file_store_redirect_is_never_followed() {
+    // A redirect could lead the file to a plain-http host, so an upload never
+    // follows one, with the SDK's own client or one the app supplied.
+    for supplied in [false, true] {
+        let posthog = FakePostHog::start_async().await;
+        let elsewhere = ScriptedServer::start_async(vec![Answer::json(200, json!({}))]).await;
+        posthog.store(&PNG);
+        posthog.store_redirects_next_to(&elsewhere.url);
+        let mut builder = options(&posthog.url);
+        if supplied {
+            builder.http_client(reqwest::Client::new());
+        }
+        let client = posthog_rs::client(builder.build().unwrap()).await;
+
+        let error = client
+            .emails()
+            .send(invoice_with_copies_and_files())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "attachment_upload_failed", "{}", supplied);
+        assert_eq!(error.status(), Some(307), "{}", supplied);
+        assert_eq!(error.field(), Some("attachments__0"), "{}", supplied);
+        assert!(error.message().contains("invoice.pdf"), "{}", error);
+        let chain = error_chain(&error);
+        assert!(!chain.contains(&elsewhere.url), "{}", chain);
+        assert!(!chain.contains("X-Amz-Signature"), "{}", chain);
+        assert!(elsewhere.requests().is_empty(), "{}", supplied);
+        assert!(posthog.stored(PDF_SHA256).is_none(), "{}", supplied);
+        assert!(posthog.sent().is_empty(), "{}", supplied);
+    }
+}
+
+#[tokio::test]
 async fn a_custom_clients_uploads_reuse_one_connection_across_sends() {
     let (store, connections) = connection_counting_store();
     let slot = |sha256: &str, size: usize| {
@@ -322,25 +356,26 @@ async fn a_file_store_server_error_is_retried_before_the_send() {
 
 #[tokio::test]
 async fn a_refused_upload_is_not_retried() {
-    // A refusal such as an expired grant fails the same way on a retry, so the
-    // send stops at once, even with retries left.
-    let posthog = FakePostHog::start_async().await;
-    posthog.store(&PNG);
-    posthog.store_answers_next(s3_error(403, "AccessDenied", "Request has expired"));
+    // An expired grant fails the same way on every try, so the send stops at
+    // once with retries left. Four retries would wait at least 12 seconds.
+    let posthog = FakePostHog::start_async().await.with_expired_grants();
     let client = client_of(&posthog).await;
+    let started = Instant::now();
 
     let error = client
         .emails()
-        .send(invoice_with_copies_and_files().max_retries(1))
+        .send(invoice_with_copies_and_files().max_retries(4))
         .await
         .unwrap_err();
 
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
     assert_eq!(error.code(), "attachment_upload_failed");
     assert_eq!(error.field(), Some("attachments__0"));
-    assert!(
-        posthog.stored(PDF_SHA256).is_none(),
-        "the upload isn't tried again"
-    );
+    assert!(posthog.stored(PDF_SHA256).is_none());
     assert!(posthog.sent().is_empty(), "no email is sent");
 }
 
@@ -422,6 +457,8 @@ async fn an_upload_url_that_isnt_https_sends_nothing() {
         .await
         .unwrap_err();
 
+    assert_eq!(error.code(), "api_error");
+    assert_eq!(error.kind(), EmailErrorKind::ApplicationError);
     assert_eq!(error.field(), Some("attachments__0"));
     assert!(error.message().contains("invoice.pdf"), "{}", error);
     assert!(

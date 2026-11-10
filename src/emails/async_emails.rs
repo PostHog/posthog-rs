@@ -236,19 +236,17 @@ impl<'a> Emails<'a> {
         upload.check_reply(status, retry_after, read_capped(response).await.ok())
     }
 
-    /// The client that uploads files. A client the app supplied may carry
-    /// default headers, such as credentials, that must never reach the file
-    /// store, so uploads then go through a client the SDK builds once and
-    /// keeps, so its connections are reused.
+    /// The client that uploads files, built once and kept so its connections
+    /// are reused. A client the app supplied may carry default headers, such
+    /// as credentials, that must never reach the file store. And it follows no
+    /// redirect, which could lead the file to a host that isn't https.
     fn upload_http(&self) -> Result<&'a HttpClient, EmailError> {
-        let http = self.http()?;
-        if !self.options.has_custom_http_client() {
-            return Ok(http);
-        }
+        self.http()?;
         if let Some(built) = self.upload_http.get() {
             return Ok(built);
         }
         let built = HttpClient::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(shared::upload_client_error)?;
         Ok(self.upload_http.get_or_init(|| built))

@@ -396,16 +396,6 @@ impl ClientOptions {
         self.disabled
     }
 
-    #[cfg(feature = "async-client")]
-    pub(crate) fn has_custom_http_client(&self) -> bool {
-        self.http_client.is_some()
-    }
-
-    #[cfg(not(feature = "async-client"))]
-    pub(crate) fn has_custom_blocking_http_client(&self) -> bool {
-        self.blocking_http_client.is_some()
-    }
-
     fn sanitize(mut self) -> Self {
         self.api_key = self.api_key.trim().to_string();
         if self.api_key.is_empty() {

@@ -46,16 +46,19 @@ the upload route, a project with sending email from code off, or an
 `app_host` that isn't PostHog's answers the upload request with `404`: the
 send fails with PostHog's answer, such as `not_found`, on `attachments`,
 and no email is sent. Allow your app to reach the file store's host as
-well as your PostHog app host. Uploads go only over https: when PostHog
-names a file store URL that isn't https, the send fails on that attachment
-before any upload, and no email is sent. Fix the file store's URL. Only an
-`app_host` that is itself plain `http`, such as a PostHog on your own
-machine, lets files upload over plain `http`. When you supply your own HTTP client,
-uploads go through a client the SDK builds, so your client's default
-headers never reach the file store. That client trusts the system's root
-certificates and takes its proxy from the environment, such as
-`HTTPS_PROXY`. None of your client's own settings apply to uploads: a root
-certificate, TLS option or proxy set in code doesn't reach them.
+well as your PostHog app host.
+
+Uploads go only over https: when PostHog names a file store URL that isn't
+https, the send fails with `api_error` on that attachment before any
+upload, and no email is sent. Fix the file store's URL. Only an `app_host` that is itself plain
+`http`, such as a PostHog on your own machine, lets files upload over plain
+`http`. Uploads go through a client the SDK builds, even when you supply
+your own HTTP client, so your client's default headers never reach the
+file store. That client follows no redirect, so a file never moves to
+another host, trusts the system's root certificates, and takes its proxy
+from the environment, such as `HTTPS_PROXY`. None of your client's own
+settings apply to uploads: a root certificate, TLS option or proxy set in
+code doesn't reach them.
 
 # Timeouts and retries
 

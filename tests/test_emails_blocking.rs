@@ -139,6 +139,27 @@ fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
 }
 
 #[test]
+fn a_file_store_redirect_is_never_followed() {
+    let posthog = FakePostHog::start();
+    let elsewhere = ScriptedServer::start(vec![Answer::json(200, json!({}))]);
+    posthog.store_redirects_next_to(&elsewhere.url);
+    let client = client_of(&posthog);
+
+    let error = client.emails().send(invoice()).unwrap_err();
+
+    assert_eq!(error.code(), "attachment_upload_failed");
+    assert_eq!(error.status(), Some(307));
+    assert!(error.message().contains("invoice.pdf"), "{}", error);
+    assert!(!format!("{error} {error:?}").contains(&elsewhere.url));
+    assert!(
+        elsewhere.requests().is_empty(),
+        "nothing reaches the other host"
+    );
+    assert!(posthog.stored(PDF_SHA256).is_none());
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[test]
 fn a_custom_clients_default_credentials_never_reach_the_file_store() {
     let posthog = FakePostHog::start();
     let mut defaults = reqwest::header::HeaderMap::new();

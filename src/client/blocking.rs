@@ -69,8 +69,7 @@ pub struct Client {
     transport: Option<Arc<TransportHandle>>,
     /// Email requests in flight, which `shutdown` waits for.
     email_tracker: EmailTracker,
-    /// The client that uploads email attachments when the app supplied its
-    /// own, built on the first upload.
+    /// The client that uploads email attachments, built on the first upload.
     email_upload_client: OnceLock<HttpClient>,
 }
 
