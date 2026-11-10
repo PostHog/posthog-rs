@@ -8,7 +8,7 @@ pub(crate) const MISSING_CAPABILITY_TOOL: &str = "get_more_tools";
 
 pub(crate) const MISSING_CAPABILITY_REPLY: &str = "Unfortunately, we have shown you the full tool list. We have noted your feedback and will work to improve the tool list in the future.";
 
-const MISSING_CAPABILITY_DESCRIPTION: &str = "Check for additional tools whenever your task might benefit from specialized capabilities - even if existing tools could work as a fallback.";
+const MISSING_CAPABILITY_DESCRIPTION: &str = "Report that the user's request needs a capability this server does not have. Records the report for the server's developers; it does not return or add tools.";
 const MISSING_CAPABILITY_CONTEXT_DESCRIPTION: &str = "A description of your goal and what kind of tool would help accomplish it. Describe people and entities by role, such as \"a customer\", and leave out personal and identifying information.";
 
 pub(crate) fn missing_capability_descriptor(name: &str) -> Value {
@@ -23,10 +23,9 @@ pub(crate) fn missing_capability_descriptor(name: &str) -> Value {
             "required": ["context"],
         },
         "annotations": {
-            "title": "Get More Tools",
-            "readOnlyHint": true,
-            "openWorldHint": true,
-            "idempotentHint": true,
+            "readOnlyHint": false,
+            "openWorldHint": false,
+            "idempotentHint": false,
             "destructiveHint": false,
         },
     })

@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use crate::mcp::capture::{ClientIdentity, ServerIdentity};
 use crate::mcp::request_info::RequestInfo;
 use crate::mcp::session::{TokenClient, TransportSession};
+use crate::RequestContext;
 
 const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
 const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
@@ -29,6 +30,8 @@ pub(crate) struct RequestScope<'a> {
     pub(crate) timestamp: DateTime<Utc>,
     /// When the request arrived, which a call's duration runs from.
     pub(crate) started: Instant,
+    /// Capture options the manual API set on this call.
+    pub(crate) event_options: Option<&'a Map<String, Value>>,
 }
 
 impl<'a> RequestScope<'a> {
@@ -68,6 +71,11 @@ impl<'a> RequestScope<'a> {
             user_agent: self.header(USER_AGENT_HEADER),
             vendor: self.header(VENDOR_CLIENT_HEADER),
         }
+    }
+
+    /// The analytics context HTTP middleware, such as `PostHogLayer`, attached to the request.
+    pub(crate) fn request_context(&self) -> Option<RequestContext> {
+        self.http?.extensions.get::<RequestContext>().cloned()
     }
 
     pub(crate) fn meta_field(&self, key: &str, field: &str) -> Option<&'a Value> {
