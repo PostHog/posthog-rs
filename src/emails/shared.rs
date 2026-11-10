@@ -234,12 +234,11 @@ fn code_body(email: &CodeEmail) -> Result<Map<String, Value>, EmailError> {
             Value::Array(email.reply_to.iter().cloned().map(Value::String).collect()),
         );
     }
-    body.insert(
-        "capture_engagement".into(),
-        Value::Bool(email.capture_engagement),
-    );
-    if let Some(track) = email.track_opens_and_clicks {
-        body.insert("track_opens_and_clicks".into(), Value::Bool(track));
+    if let Some(tracking) = &email.tracking {
+        body.insert("tracking".into(), tracking.to_json());
+    }
+    if let Some(capture) = email.capture_engagement {
+        body.insert("capture_engagement".into(), Value::Bool(capture));
     }
     Ok(body)
 }
@@ -688,13 +687,12 @@ mod tests {
     }
 
     #[test]
-    fn code_send_sets_engagement_tracking_and_lists_reply_to() {
+    fn code_send_lists_reply_to() {
         let prepared = prepare_send(
             CodeEmail::new("user@example.com", "password-reset", "Reset")
                 .text("Hi")
                 .reply_to("a@example.com")
                 .reply_to("b@example.com")
-                .track_opens_and_clicks(false)
                 .into(),
         )
         .unwrap();
@@ -705,8 +703,6 @@ mod tests {
                 "subject": "Reset",
                 "text": "Hi",
                 "reply_to": ["a@example.com", "b@example.com"],
-                "capture_engagement": true,
-                "track_opens_and_clicks": false,
                 "to": "user@example.com",
             })
         );

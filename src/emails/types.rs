@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// What every send takes, whatever its form.
 #[derive(Debug, Clone, Default)]
@@ -96,8 +96,8 @@ pub struct CodeEmail {
     pub(crate) text: Option<String>,
     pub(crate) from: Option<String>,
     pub(crate) reply_to: Vec<String>,
-    pub(crate) capture_engagement: bool,
-    pub(crate) track_opens_and_clicks: Option<bool>,
+    pub(crate) tracking: Option<EmailTracking>,
+    pub(crate) capture_engagement: Option<bool>,
     pub(crate) options: SendOptions,
 }
 
@@ -120,8 +120,8 @@ impl CodeEmail {
             text: None,
             from: None,
             reply_to: Vec::new(),
-            capture_engagement: true,
-            track_opens_and_clicks: None,
+            tracking: None,
+            capture_engagement: None,
             options: SendOptions::default(),
         }
     }
@@ -151,27 +151,35 @@ impl CodeEmail {
         self
     }
 
-    /// Whether PostHog captures the email's engagement events (sent,
-    /// delivered, opened, clicked, bounced) as events of the recipient.
-    /// Defaults to `true`. A project whose admin turned engagement capture off
-    /// captures nothing, whatever the send asks.
-    pub fn capture_engagement(mut self, capture: bool) -> Self {
-        self.capture_engagement = capture;
+    /// What PostHog tracks for this email: [`EmailTracking::On`],
+    /// [`EmailTracking::Off`], or [`EmailTrackingOptions`] to set each kind on
+    /// its own. Takes a `bool` too.
+    ///
+    /// Without it, PostHog counts opens and captures engagement events, but
+    /// doesn't rewrite links to count clicks, because a link in an email sent
+    /// from code can carry a login or password reset token.
+    ///
+    /// ```
+    /// use posthog_rs::{CodeEmail, EmailTrackingOptions};
+    ///
+    /// // The digest's links carry no login or reset token, so count clicks.
+    /// let email = CodeEmail::new("jane@example.com", "weekly-digest", "Your weekly digest")
+    ///     .html("<p>Read this week's posts: https://example.com/blog</p>")
+    ///     .tracking(EmailTrackingOptions::new().clicks(true));
+    /// ```
+    pub fn tracking(mut self, tracking: impl Into<EmailTracking>) -> Self {
+        self.tracking = Some(tracking.into());
         self
     }
 
-    /// Whether PostHog tracks opens and clicks of the email. Defaults to
-    /// `true`. With `false`, the email goes out without PostHog's open pixel,
-    /// so PostHog can't count its opens. PostHog doesn't track clicks on
-    /// emails sent from code, so their links are never rewritten either way.
-    /// Independent of [`capture_engagement`](Self::capture_engagement), which
-    /// decides whether engagement events are captured on the recipient's
-    /// person.
-    ///
-    /// A PostHog version that predates this option rejects a send that sets
-    /// it. Left unset, the send doesn't include it.
-    pub fn track_opens_and_clicks(mut self, track: bool) -> Self {
-        self.track_opens_and_clicks = Some(track);
+    /// Whether PostHog captures the email's engagement events (sent,
+    /// delivered, opened, clicked, bounced) as events of the recipient.
+    /// Defaults to `true`. A project whose admin turned engagement capture off
+    /// captures nothing, whatever the send asks. PostHog refuses a send that
+    /// sets both this and [`tracking`](Self::tracking).
+    #[deprecated(note = "use `tracking` with `EmailTrackingOptions::engagement` instead")]
+    pub fn capture_engagement(mut self, capture: bool) -> Self {
+        self.capture_engagement = Some(capture);
         self
     }
 
@@ -201,6 +209,100 @@ impl CodeEmail {
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.options.max_retries = Some(max_retries);
         self
+    }
+}
+
+/// What PostHog tracks for a [`CodeEmail`]. A `bool` or an
+/// [`EmailTrackingOptions`] converts into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmailTracking {
+    /// Tracks opens and clicks and captures engagement events. Use it only
+    /// when the email's links are safe to send through a redirect.
+    On,
+    /// Turns off every kind of tracking, including kinds PostHog adds later.
+    /// PostHog then can't count the email's opens and clicks, and captures no
+    /// engagement events.
+    Off,
+    /// Sets each kind of tracking on its own.
+    Custom(EmailTrackingOptions),
+}
+
+impl EmailTracking {
+    pub(crate) fn to_json(self) -> Value {
+        match self {
+            EmailTracking::On => Value::Bool(true),
+            EmailTracking::Off => Value::Bool(false),
+            EmailTracking::Custom(options) => options.to_json(),
+        }
+    }
+}
+
+impl From<bool> for EmailTracking {
+    fn from(track: bool) -> Self {
+        if track {
+            EmailTracking::On
+        } else {
+            EmailTracking::Off
+        }
+    }
+}
+
+impl From<EmailTrackingOptions> for EmailTracking {
+    fn from(options: EmailTrackingOptions) -> Self {
+        EmailTracking::Custom(options)
+    }
+}
+
+/// Each kind of tracking of a [`CodeEmail`], on or off. A kind you don't set
+/// keeps its default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmailTrackingOptions {
+    opens: Option<bool>,
+    clicks: Option<bool>,
+    engagement: Option<bool>,
+}
+
+impl EmailTrackingOptions {
+    /// Every kind at its default.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether PostHog adds its open pixel to count opens. Defaults to `true`.
+    /// Click tracking needs open tracking.
+    pub fn opens(mut self, track: bool) -> Self {
+        self.opens = Some(track);
+        self
+    }
+
+    /// Whether PostHog rewrites the email's links to count clicks. Defaults to
+    /// `false`. Turn it on only when the links are safe to send through a
+    /// redirect, so not for a login or password reset link. A link with a
+    /// `data-ph-no-track` attribute is never rewritten.
+    pub fn clicks(mut self, track: bool) -> Self {
+        self.clicks = Some(track);
+        self
+    }
+
+    /// Whether PostHog captures the email's engagement events, such as opens
+    /// and clicks, as events of the recipient. Defaults to `true`.
+    pub fn engagement(mut self, capture: bool) -> Self {
+        self.engagement = Some(capture);
+        self
+    }
+
+    fn to_json(self) -> Value {
+        let mut object = Map::new();
+        for (key, value) in [
+            ("opens", self.opens),
+            ("clicks", self.clicks),
+            ("engagement", self.engagement),
+        ] {
+            if let Some(value) = value {
+                object.insert(key.into(), Value::Bool(value));
+            }
+        }
+        Value::Object(object)
     }
 }
 

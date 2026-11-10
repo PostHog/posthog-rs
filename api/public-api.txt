@@ -187,6 +187,14 @@ impl posthog_rs::EmailErrorKind
 pub fn posthog_rs::EmailErrorKind::as_str(self) -> &'static str
 impl core::fmt::Display for posthog_rs::EmailErrorKind
 pub fn posthog_rs::EmailErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum posthog_rs::EmailTracking
+pub posthog_rs::EmailTracking::Custom(posthog_rs::EmailTrackingOptions)
+pub posthog_rs::EmailTracking::Off
+pub posthog_rs::EmailTracking::On
+impl core::convert::From<bool> for posthog_rs::EmailTracking
+pub fn posthog_rs::EmailTracking::from(bool) -> Self
+impl core::convert::From<posthog_rs::EmailTrackingOptions> for posthog_rs::EmailTracking
+pub fn posthog_rs::EmailTracking::from(posthog_rs::EmailTrackingOptions) -> Self
 pub enum posthog_rs::Endpoint
 pub posthog_rs::Endpoint::Batch
 pub posthog_rs::Endpoint::Capture
@@ -379,7 +387,7 @@ pub fn posthog_rs::CodeEmail::max_retries(self, u32) -> Self
 pub fn posthog_rs::CodeEmail::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::CodeEmail::reply_to(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::CodeEmail::text(self, impl core::convert::Into<alloc::string::String>) -> Self
-pub fn posthog_rs::CodeEmail::track_opens_and_clicks(self, bool) -> Self
+pub fn posthog_rs::CodeEmail::tracking(self, impl core::convert::Into<posthog_rs::EmailTracking>) -> Self
 impl core::convert::From<posthog_rs::CodeEmail> for posthog_rs::SendEmail
 pub fn posthog_rs::SendEmail::from(posthog_rs::CodeEmail) -> Self
 pub struct posthog_rs::Cohort
@@ -413,6 +421,12 @@ pub posthog_rs::EmailStatus::id: alloc::string::String
 pub posthog_rs::EmailStatus::reason: core::option::Option<alloc::string::String>
 pub posthog_rs::EmailStatus::status: posthog_rs::EmailDeliveryStatus
 pub posthog_rs::EmailStatus::status_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub struct posthog_rs::EmailTrackingOptions
+impl posthog_rs::EmailTrackingOptions
+pub fn posthog_rs::EmailTrackingOptions::clicks(self, bool) -> Self
+pub fn posthog_rs::EmailTrackingOptions::engagement(self, bool) -> Self
+pub fn posthog_rs::EmailTrackingOptions::new() -> Self
+pub fn posthog_rs::EmailTrackingOptions::opens(self, bool) -> Self
 #[non_exhaustive] pub struct posthog_rs::EmailWarning
 pub posthog_rs::EmailWarning::code: alloc::string::String
 pub posthog_rs::EmailWarning::fix: core::option::Option<alloc::string::String>
