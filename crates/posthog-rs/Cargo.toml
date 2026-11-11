@@ -1,7 +1,7 @@
 [package]
 name = "posthog-rs"
 license = "MIT"
-version = "0.30.0"
+version = "0.31.3"
 authors = ["PostHog <engineering@posthog.com>"]
 description = "Compatibility package for the official PostHog Rust SDK; use posthog for new projects."
 repository = "https://github.com/posthog/posthog-rs"
@@ -10,7 +10,7 @@ edition = "2018"
 rust-version = "1.78.0"
 
 [dependencies]
-posthog = { path = "../..", version = "0.30.0", default-features = false }
+posthog = { path = "../..", version = "0.31.3", default-features = false }
 
 [features]
 default = ["posthog/default"]
