@@ -137,6 +137,47 @@ pub(crate) enum Admission {
     Closed,
 }
 
+enum PreparedWarning {
+    Count {
+        endpoint: Endpoint,
+        capacity: usize,
+    },
+    #[cfg(feature = "stateful")]
+    Bytes,
+}
+
+/// Admission is final; only its application-facing diagnostic is deferred.
+#[must_use]
+pub(crate) struct PreparedAdmission {
+    pub(crate) admission: Admission,
+    warning: Option<PreparedWarning>,
+}
+
+impl PreparedAdmission {
+    fn new(admission: Admission) -> Self {
+        Self {
+            admission,
+            warning: None,
+        }
+    }
+
+    pub(crate) fn report(self) -> Admission {
+        match self.warning {
+            Some(PreparedWarning::Count { endpoint, capacity }) => {
+                warn!(
+                    "posthog-rs: event queue full for {endpoint} (capacity {capacity}); dropping events"
+                );
+            }
+            #[cfg(feature = "stateful")]
+            Some(PreparedWarning::Bytes) => {
+                warn!("posthog-rs: event queue byte limit reached; rejecting new event");
+            }
+            None => {}
+        }
+        self.admission
+    }
+}
+
 /// Completion signal handed to the worker so the caller can wait for a flush or
 /// shutdown to finish. The worker calls [`Completion::signal`] without needing a
 /// runtime — `oneshot::Sender::send` and `mpsc::Sender::send` are both runtime-free.
@@ -462,18 +503,47 @@ impl TransportHandle {
     /// defaults, hooks, or wire conversion. The producer owns those steps.
     #[cfg_attr(not(feature = "stateful"), allow(dead_code))]
     pub(crate) fn enqueue_prepared(&self, event: CaptureEvent) -> Admission {
+        self.enqueue_prepared_deferred(event).report()
+    }
+
+    /// Callback-free admission for callers holding SDK state locks. Report the
+    /// returned diagnostic only after releasing those locks: tracing is user code.
+    pub(crate) fn enqueue_prepared_deferred(&self, event: CaptureEvent) -> PreparedAdmission {
         if self.closed.load(Ordering::Acquire) {
-            return Admission::Closed;
+            return PreparedAdmission::new(Admission::Closed);
         }
-        if !self.try_reserve() {
-            return Admission::Full;
+        match reserve_slot(&self.len, self.max_queue_size) {
+            Some(0) => self.full_warned.store(false, Ordering::Release),
+            Some(_) => {}
+            None => {
+                return PreparedAdmission {
+                    admission: Admission::Full,
+                    warning: (!self.full_warned.swap(true, Ordering::AcqRel)).then_some(
+                        PreparedWarning::Count {
+                            endpoint: self.endpoint,
+                            capacity: self.max_queue_size,
+                        },
+                    ),
+                };
+            }
         }
+        #[allow(unused_mut)]
         let mut event = DeliveryEvent::from(event);
-        if !self.reserve_prepared_bytes(&mut event) {
-            dec_len(&self.len, 1);
-            return Admission::Full;
+        #[cfg(feature = "stateful")]
+        if let Some(budget) = &self.byte_budget {
+            let bytes = super::event_store::record_size(&event.wire);
+            let Some(reservation) = budget.reserve(bytes) else {
+                let warning = (!self.full_warned.swap(true, Ordering::Relaxed))
+                    .then_some(PreparedWarning::Bytes);
+                dec_len(&self.len, 1);
+                return PreparedAdmission {
+                    admission: Admission::Full,
+                    warning,
+                };
+            };
+            event.reservation = Some(reservation);
         }
-        if self
+        let admission = if self
             .tx
             .send(Control::Prepared {
                 event: Box::new(event),
@@ -484,22 +554,8 @@ impl TransportHandle {
             Admission::Closed
         } else {
             Admission::Accepted
-        }
-    }
-
-    fn reserve_prepared_bytes(&self, _event: &mut DeliveryEvent) -> bool {
-        #[cfg(feature = "stateful")]
-        if let Some(budget) = &self.byte_budget {
-            let bytes = super::event_store::record_size(&_event.wire);
-            let Some(reservation) = budget.reserve(bytes) else {
-                if !self.full_warned.swap(true, Ordering::Relaxed) {
-                    warn!("posthog-rs: event queue byte limit reached; rejecting new event");
-                }
-                return false;
-            };
-            _event.reservation = Some(reservation);
-        }
-        true
+        };
+        PreparedAdmission::new(admission)
     }
 
     /// Like `enqueue`, but never logs — no full-queue `warn!`. The panic hook
