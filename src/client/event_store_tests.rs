@@ -290,11 +290,13 @@ fn recovery_byte_budget_defers_a_record_until_it_fits() {
     let empty = store.recover(2, size - 1).unwrap();
     assert!(empty.events.is_empty());
     assert!(empty.more);
+    assert!(!empty.advanced);
     let one = store.recover(2, size).unwrap();
     assert_eq!(one.events.len(), 1);
     assert_eq!(one.events[0].key, first);
     assert_eq!(one.events[0].bytes, size);
     assert!(one.more);
+    assert!(one.advanced);
     let two = store.recover(2, size).unwrap();
     assert_eq!(two.events.len(), 1);
     assert!(!two.more);

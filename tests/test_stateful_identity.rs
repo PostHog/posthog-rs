@@ -313,6 +313,54 @@ fn slow_hook_does_not_block_reset_or_poison_new_generation_dedup() {
 }
 
 #[test]
+fn rejected_identity_updates_report_sanitized_reasons() {
+    #[derive(Clone)]
+    struct Recorder(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Recorder {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut conf = config();
+    conf.max_state_bytes = 256;
+    let (client, events) = observed(conf);
+    let original = client.get_distinct_id();
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let sink = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || Recorder(sink.clone()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    client.identify(" \t");
+    let private_id = format!("private-identity-{}", "x".repeat(1000));
+    let mut identify = Identify::new(private_id.clone());
+    identify
+        .set
+        .insert("private-property".into(), json!("private-value"));
+    client.identify(identify);
+    assert_eq!(client.get_distinct_id(), original);
+    assert!(!client.is_identified());
+    assert!(events.lock().unwrap().is_empty());
+    let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("identity update requires a nonblank distinct ID"));
+    assert!(logs.contains("identity update exceeds client-state capacity"));
+    assert!(!logs.contains(&private_id));
+    assert!(!logs.contains("private-property"));
+    assert!(!logs.contains("private-value"));
+    output.lock().unwrap().clear();
+    client.shutdown_blocking(None);
+    client.identify(" \t");
+    assert!(output.lock().unwrap().is_empty());
+}
+
+#[test]
 fn invalid_state_size_disabled_and_closed_mutations_do_nothing() {
     let mut conf = config();
     conf.max_state_bytes = 512;
@@ -438,9 +486,27 @@ fn matching_bootstrap_upgrades_without_an_event_and_never_gates_reconciliation()
         conf.bootstrap_identified_id = Some("anonymous".into());
         conf.person_profiles = mode;
         let (client, events) = observed(conf);
-        assert_eq!(client.is_identified(), mode != PersonProfiles::Never);
+        assert!(client.is_identified());
+        assert_eq!(client.get_distinct_id(), "anonymous");
         assert_eq!(client.get_anonymous_id(), "anonymous");
         assert!(events.lock().unwrap().is_empty());
+        client.capture("restored seed");
+        assert_eq!(
+            events.lock().unwrap()[0].properties()["$is_identified"],
+            true
+        );
+        assert_eq!(
+            events.lock().unwrap()[0].options()["process_person_profile"],
+            mode != PersonProfiles::Never
+        );
+        client.shutdown_blocking(None);
+        drop(client);
+        let mut restored = directory.config();
+        restored.person_profiles = mode;
+        let client = Client::init_blocking(restored);
+        assert!(client.is_identified());
+        assert_eq!(client.get_distinct_id(), "anonymous");
+        assert_eq!(client.get_anonymous_id(), "anonymous");
         client.shutdown_blocking(None);
     }
     let mut fresh_never = config();
