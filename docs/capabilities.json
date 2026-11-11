@@ -6,6 +6,7 @@
   "Client::capture_exception": "capture-exception",
   "Client::capture_exception_with": "capture-exception",
   "Client::capture_immediate": "capture",
+  "Client::emails": "emails",
   "Client::evaluate_feature_flag_locally": "local-feature-flag-evaluator",
   "Client::evaluate_flags": "evaluate-flags",
   "Client::evaluate_flags_with_context": "evaluate-flags",
