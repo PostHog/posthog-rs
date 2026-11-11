@@ -123,6 +123,7 @@ pub struct StorageError {
 }
 
 impl StorageError {
+    #[cfg(any(feature = "stateful", test))]
     pub(crate) fn from_io(error: &std::io::Error) -> Self {
         Self {
             kind: error.kind(),
