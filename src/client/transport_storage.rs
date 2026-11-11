@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use super::{dec_len, reserve_slot, DeliveryEvent, Pipeline, QueuedEvent};
 use crate::client::common::apply_on_error_hooks;
 use crate::client::event_store::StoreKey;
-use crate::client::{PostHogError, StorageFailure, StorageOperation};
+use crate::client::{PostHogError, StorageError, StorageFailure, StorageOperation};
 
 impl Pipeline {
     pub(super) fn report_storage_error(&self, operation: StorageOperation, error: &io::Error) {
@@ -18,9 +18,13 @@ impl Pipeline {
             // Error messages supplied by backends can contain paths or payloads.
             tracing::warn!(?operation, kind = ?error.kind(), "posthog-rs: storage operation failed");
         } else {
+            let error = StorageError::from_io(error);
             apply_on_error_hooks(
                 &self.options.on_error,
-                &PostHogError::Storage(StorageFailure { operation, error }),
+                &PostHogError::Storage(StorageFailure {
+                    operation,
+                    error: &error,
+                }),
             );
         }
     }
@@ -32,9 +36,10 @@ impl Pipeline {
         if let Some(store) = &mut self.storage.store {
             match store.put(&event.wire) {
                 Ok(key) => event.store_key = Some(key),
-                Err(error) => {
-                    // Keep delivering this already accepted event from memory.
-                    self.report_storage_error(StorageOperation::Write, &error);
+                Err(failure) => {
+                    event.store_key = failure.key;
+                    // A failed durability confirmation may still own a record.
+                    self.report_storage_error(StorageOperation::Write, &failure.error);
                 }
             }
         }
@@ -146,7 +151,8 @@ impl Pipeline {
                     return;
                 }
             };
-            self.storage.recovery_pending = recovered.more;
+            let more = recovered.more;
+            self.storage.recovery_pending = more || recovered.retry_pending;
             for error in recovered.errors {
                 self.report_storage_error(StorageOperation::Read, &error);
             }
@@ -192,7 +198,7 @@ impl Pipeline {
                 .collect();
             drop(memory); // Return unused window capacity before sending.
             self.send_queued_batch(events, false, deadline);
-            if !force {
+            if !force || !more {
                 return;
             }
         }

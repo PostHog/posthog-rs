@@ -18,8 +18,8 @@ mod summary;
 pub(crate) use common::apply_on_error_hooks;
 pub(crate) use on_error::OnErrorHook;
 pub use on_error::{
-    CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError, StorageFailure,
-    StorageOperation,
+    CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError, StorageError,
+    StorageFailure, StorageOperation,
 };
 pub use summary::CaptureSummary;
 
