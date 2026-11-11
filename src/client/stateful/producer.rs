@@ -272,7 +272,7 @@ impl Client {
             let opted_out = self.snapshot_opted_out(snapshot);
             let now = self.producer.as_ref().unwrap().session_clock.now();
             snapshot.session_operation(super::sessions::Operation::Activity, now, opted_out);
-            let session_id = snapshot.sessions.active_id(now.monotonic);
+            let session_id = snapshot.sessions.active_id(now.elapsed);
             (snapshot.clone(), session_id)
         });
         let Ok((_, (snapshot, session_id))) = snapshot else {
@@ -288,14 +288,9 @@ impl Client {
     /// Passive SDK events inspect attribution without maintaining the session.
     /// The caller owns the recursion guard and the operation's identity snapshot.
     pub(super) fn capture_snapshot(&self, input: Capture, snapshot: &Snapshot) -> CaptureOutcome {
-        let session_id = snapshot.sessions.active_id(
-            self.producer
-                .as_ref()
-                .unwrap()
-                .session_clock
-                .now()
-                .monotonic,
-        );
+        let session_id = snapshot
+            .sessions
+            .active_id(self.producer.as_ref().unwrap().session_clock.now().elapsed);
         self.capture_with_session(input, snapshot, session_id)
     }
 

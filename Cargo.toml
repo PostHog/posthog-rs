@@ -49,6 +49,9 @@ futures-util = { version = "0.3", default-features = false, features = [
     "std",
 ], optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", optional = true }
+
 [dev-dependencies]
 axum = { version = "0.8", default-features = false }
 tower = { version = "0.5", features = ["util"] }
@@ -81,7 +84,7 @@ default = ["async-client", "error-tracking", "tls"]
 e2e-test = []
 async-client = ["tokio"]
 test-harness = []
-stateful = ["dep:fs2", "dep:dirs", "serde_json/float_roundtrip"]
+stateful = ["dep:fs2", "dep:dirs", "dep:libc", "serde_json/float_roundtrip"]
 error-tracking = ["dep:backtrace", "dep:findshlibs"]
 tls = ["reqwest/rustls"]
 tls-no-provider = ["reqwest/rustls-no-provider"]
