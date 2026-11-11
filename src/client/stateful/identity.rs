@@ -6,7 +6,12 @@ use sha1::{Digest, Sha1};
 
 use super::producer::CaptureGuard;
 use super::writer::UpdateError;
-use super::{Capture, CaptureOutcome, Client, Snapshot};
+use super::{Capture, Client, Snapshot};
+use crate::client::transport::Admission;
+
+#[cfg(test)]
+#[path = "identity_tests.rs"]
+mod tests;
 
 /// Default person processing and permission to use identity/profile operations.
 /// Per-event options and before-send hooks retain the ordinary Rust precedence.
@@ -131,14 +136,14 @@ impl Client {
                     .properties
                     .insert("$anon_distinct_id".into(), old_id.into());
             }
-            Some((event, state.clone()))
+            Some((event, state.clone(), !was_anonymous))
         });
         if reset_required {
             tracing::warn!("posthog-rs: reset before identifying a different user");
         }
         match result {
-            Ok((_, Some((event, snapshot)))) => {
-                self.capture_person(event, &snapshot, Some(fingerprint));
+            Ok((_, Some((event, snapshot, deduplicate)))) => {
+                self.capture_person(event, &snapshot, Some(fingerprint), deduplicate);
             }
             Err(UpdateError::Full) => {
                 tracing::warn!("posthog-rs: identity update exceeds client-state capacity");
@@ -169,7 +174,7 @@ impl Client {
             event
                 .properties
                 .insert("distinct_id".into(), snapshot.distinct_id.clone().into());
-            self.capture_person(event, &snapshot, None);
+            self.capture_person(event, &snapshot, None, false);
         }
     }
 
@@ -199,6 +204,7 @@ impl Client {
                 person_event("$set", set, set_once),
                 &snapshot,
                 Some(fingerprint),
+                true,
             );
         }
     }
@@ -222,6 +228,7 @@ impl Client {
                 person_event("$set", HashMap::new(), HashMap::new()),
                 &snapshot,
                 None,
+                false,
             );
         }
     }
@@ -241,18 +248,43 @@ impl Client {
         });
     }
 
-    fn capture_person(&self, event: Capture, snapshot: &Snapshot, fingerprint: Option<[u8; 20]>) {
-        if matches!(
-            self.capture_snapshot(event, snapshot),
-            CaptureOutcome::Accepted { .. }
-        ) {
-            if let Some(fingerprint) = fingerprint {
-                let _ = self.state.as_ref().unwrap().mutate(|state| {
-                    if state.generation == snapshot.generation {
-                        state.person_properties = Some(fingerprint);
-                    }
-                });
-            }
+    fn capture_person(
+        &self,
+        event: Capture,
+        snapshot: &Snapshot,
+        fingerprint: Option<[u8; 20]>,
+        deduplicate: bool,
+    ) {
+        let Some(fingerprint) = fingerprint else {
+            self.capture_snapshot(event, snapshot);
+            return;
+        };
+        let Ok(wire) = self.prepare_snapshot(event, snapshot) else {
+            return;
+        };
+        let mut admission = None;
+        self.state.as_ref().unwrap().admit_person(
+            snapshot.generation,
+            fingerprint,
+            deduplicate,
+            || {
+                if self.closed.load(Ordering::Acquire) {
+                    return false;
+                }
+                let result = self
+                    .transport
+                    .as_ref()
+                    .unwrap()
+                    .enqueue_prepared_deferred(wire);
+                let accepted = result.admission == Admission::Accepted;
+                admission = Some(result);
+                accepted
+            },
+        );
+        // Full-queue tracing subscribers may inspect/reset state. No SDK lock
+        // may be held while reporting the already-final admission result.
+        if let Some(admission) = admission {
+            admission.report();
         }
     }
 
