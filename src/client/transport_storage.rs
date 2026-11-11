@@ -163,6 +163,9 @@ impl Pipeline {
             }
             dec_len(&self.len, reserved - recovered.events.len());
             if recovered.events.is_empty() {
+                if force && recovered.advanced && recovered.more {
+                    continue;
+                }
                 return;
             }
             let events = recovered

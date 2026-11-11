@@ -120,8 +120,10 @@ pub enum StorageOperation {
 /// Details of a storage failure. The callback runs on the thread performing
 /// storage I/O, not on an ordinary capture caller.
 ///
-/// Failure to write does not roll back in-memory state. Failure to remove an
-/// acknowledged event may cause duplicate delivery after restart.
+/// Failure to write does not roll back in-memory state. A write can fail after
+/// creating a record, so the error does not guarantee that no disk copy exists.
+/// Such a record, or an acknowledged record whose removal failed, can cause
+/// duplicate delivery after restart.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct StorageFailure<'a> {
@@ -172,7 +174,12 @@ impl<'a> CaptureFailure<'a> {
 
     /// The batch-level cause: a permanent reject, exhausted transport/HTTP
     /// retries, or a serialization failure.
-    #[doc = "\n`None` only when the request itself succeeded (`2xx`) but some events were not\npersisted after the retry budget — inspect [`event_results`](Self::event_results)."]
+    ///
+    /// `None` when the request succeeded (`2xx`) but individual events were
+    /// rejected or exhausted finite retries. With persistent delivery, permanent
+    /// failures can be reported while retryable events remain queued; `None`
+    /// does not mean the original batch has finished. Inspect
+    /// [`event_results`](Self::event_results).
     pub fn error(&self) -> Option<&Error> {
         self.error
     }
@@ -189,7 +196,13 @@ impl<'a> CaptureFailure<'a> {
     }
 
     /// Number of events this failure dropped (lost).
-    #[doc = "\nCounts only undelivered events (`retry`/`drop`), including any finalized on\nearlier attempts. This can be smaller than [`event_results`](Self::event_results)`.len()`,\nwhich also reports persisted `ok`/`warning` verdicts — filter by status before\ntreating an entry as lost."]
+    ///
+    /// Counts only undelivered events (`retry`/`drop`). With finite retries this
+    /// includes losses finalized on earlier attempts. Persistent delivery counts
+    /// only permanent losses in this callback, not retained retryable events or
+    /// losses reported by earlier callbacks. This can be smaller than
+    /// [`event_results`](Self::event_results)`.len()`, which also reports persisted
+    /// `ok`/`warning` verdicts; filter by status before treating an entry as lost.
     ///
     /// It also counts each copy capture dropped because an earlier event in the
     /// same request had its uuid, as reported by an entry's
@@ -212,14 +225,16 @@ impl<'a> CaptureFailure<'a> {
 
     /// Per-event server verdicts for the capture batch.
     ///
-    /// Maps event UUID to its [`EventResult`]. Includes **all** verdicts the
-    /// batch collected — persisted (`ok`/`warning`) as well as lost
-    /// (`retry`/`drop`) — so this map can be larger than
+    /// Maps event UUID to its [`EventResult`]. Includes persisted (`ok`/`warning`)
+    /// as well as lost (`retry`/`drop`) verdicts, so this map can be larger than
     /// [`event_count`](Self::event_count); filter by
-    /// [`EventStatus`](crate::EventStatus) to isolate the failures. Complete
-    /// when [`error`](Self::error) is `None` (a `2xx` where events weren't
-    /// persisted after retries); possibly partial on a batch-level failure
-    /// (only verdicts collected from earlier attempts).
+    /// [`EventStatus`](crate::EventStatus) to isolate the failures.
+    ///
+    /// With finite retries, includes all verdicts the batch collected: complete
+    /// when [`error`](Self::error) is `None`, or possibly partial on a batch-level
+    /// failure. With persistent delivery, a callback can report permanent failures
+    /// before the batch finishes. Retained retryable events are absent from this
+    /// map, and later callbacks can omit verdicts reported by earlier callbacks.
     ///
     /// An entry's [`duplicates_dropped`](EventResult::duplicates_dropped) counts
     /// lost copies that shared its uuid; they have no entry of their own.
