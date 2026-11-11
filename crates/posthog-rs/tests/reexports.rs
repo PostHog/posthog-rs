@@ -87,12 +87,10 @@ fn reexports_stateful_client_and_its_public_entry_points() {
     client.reset_person_properties_for_flags(None);
     client.set_group_properties_for_flags("company", Default::default(), Some(false));
     client.reset_group_properties_for_flags(None, None);
-    assert_eq!(client.get_feature_flag("ready", None), None);
-    assert_eq!(client.is_feature_enabled("ready", Some(false)), None);
-    assert_eq!(client.get_feature_flag_result("ready", None), None);
-    assert_eq!(client.get_feature_flag_payload("ready"), None);
+    let lookup: posthog_rs::stateful::FeatureFlagLookup<'_> = client.feature_flag("ready");
+    assert_eq!(lookup.get(), None);
+    assert_eq!(client.feature_flag("ready").send_event(false).get(), None);
     assert_eq!(client.get_feature_flags(), None);
-    assert_eq!(client.get_feature_flag_payloads(), None);
     let subscription = client.on_feature_flags(|_| {});
     subscription.clone().unsubscribe();
     subscription.unsubscribe();

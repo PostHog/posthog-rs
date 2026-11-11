@@ -8,8 +8,6 @@ use serde_json::Value;
 
 use super::flag_state::CachedFlag;
 use super::{Client, Snapshot};
-use crate::feature_flag_evaluations::flag_value_for;
-use crate::FlagValue;
 
 /// Inputs that produced a cached flag, not necessarily the latest targeting.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,89 +78,83 @@ impl FeatureFlagResult {
     }
 }
 
-impl Client {
-    /// Read a cached value without fetching. None means unavailable/unknown.
-    /// Reports access by default; None inherits Config::send_feature_flag_event.
-    /// Reporting is synchronous through hooks and bounded admission, never HTTP.
-    /// Its success does not change the returned value. Consent still applies.
-    #[must_use]
-    pub fn get_feature_flag(
-        &self,
-        key: &str,
-        send_feature_flag_event: Option<bool>,
-    ) -> Option<FlagValue> {
-        self.read_flag(key, send_feature_flag_event, |flag| {
-            flag_value_for(&flag.record)
-        })
+/// A lazy cached-flag lookup created by [`Client::feature_flag`].
+/// No cache read or access reporting occurs until [`Self::get`] is called.
+#[must_use = "call get() to read the feature flag"]
+pub struct FeatureFlagLookup<'a> {
+    client: &'a Client,
+    key: &'a str,
+    send_event: Option<bool>,
+}
+
+impl FeatureFlagLookup<'_> {
+    /// Override access reporting for this lookup. Without an override, `get()`
+    /// uses [`Config::send_feature_flag_event`](super::Config::send_feature_flag_event).
+    /// Consent still applies. Set false for a silent payload read.
+    pub fn send_event(mut self, send: bool) -> Self {
+        self.send_event = Some(send);
+        self
     }
 
-    /// Read cached enablement: Some(false) is known disabled, None unavailable.
-    /// Uses the same event override and deduplication as get_feature_flag.
+    /// Read the current cached value, decoded payload and producing context as
+    /// one owned result, without fetching. None means unavailable/unknown,
+    /// including disabled or closed clients; a known false flag is Some(result)
+    /// with enabled=false. A disabled result has no variant.
+    ///
+    /// Property-only targeting updates can retain an earlier result; its context
+    /// describes that earlier evaluation. A present JSON null payload remains
+    /// Some(Value::Null), and decoded strings are not parsed again.
+    ///
+    /// Access reporting runs synchronously through hooks and bounded admission,
+    /// never HTTP. Reporting success does not change the returned result.
     #[must_use]
-    pub fn is_feature_enabled(
-        &self,
-        key: &str,
-        send_feature_flag_event: Option<bool>,
-    ) -> Option<bool> {
-        self.read_flag(key, send_feature_flag_event, |flag| flag.record.enabled)
-    }
-
-    /// Read value, decoded payload and producing context as one owned result.
-    /// A disabled result has no variant. Property-only targeting updates can
-    /// retain an earlier result; context describes that earlier evaluation.
-    /// Uses the same event override and deduplication as get_feature_flag.
-    #[must_use]
-    pub fn get_feature_flag_result(
-        &self,
-        key: &str,
-        send_feature_flag_event: Option<bool>,
-    ) -> Option<FeatureFlagResult> {
-        self.read_flag(key, send_feature_flag_event, |flag| {
-            FeatureFlagResult::from_cached(key, flag)
-        })
-    }
-
-    fn read_flag<T>(
-        &self,
-        key: &str,
-        send: Option<bool>,
-        read: impl FnOnce(&CachedFlag) -> T,
-    ) -> Option<T> {
-        let snapshot = self.flag_snapshot()?;
-        let flag = snapshot.flags.cache.as_ref()?.flags.get(key)?;
-        let result = read(flag);
-        if send.unwrap_or(self.producer.as_ref()?.send_feature_flag_event) {
-            self.report_flag_access(key, &snapshot, flag);
+    pub fn get(self) -> Option<FeatureFlagResult> {
+        let snapshot = self.client.flag_snapshot()?;
+        let flag = snapshot.flags.cache.as_ref()?.flags.get(self.key)?;
+        let result = FeatureFlagResult::from_cached(self.key, flag);
+        if self
+            .send_event
+            .unwrap_or(self.client.producer.as_ref()?.send_feature_flag_event)
+        {
+            self.client.report_flag_access(self.key, &snapshot, flag);
         }
         Some(result)
     }
+}
 
-    /// Return the cached JSON payload without fetching flags or emitting analytics.
-    /// None means unavailable, unknown, or no payload. Some(Value::Null) is a
-    /// present JSON null. Already-decoded strings are not parsed again.
-    #[must_use]
-    pub fn get_feature_flag_payload(&self, key: &str) -> Option<Value> {
-        let snapshot = self.flag_snapshot()?;
-        snapshot
-            .flags
-            .cache
-            .as_ref()?
-            .flags
-            .get(key)?
-            .record
-            .payload
-            .clone()
+impl Client {
+    /// Build a cached-flag lookup. The cache is read only when `get()` is called.
+    /// Access reporting defaults to Config::send_feature_flag_event.
+    ///
+    /// ```
+    /// # fn example(client: &posthog::stateful::Client) {
+    /// let enabled = client.feature_flag("checkout").get()
+    ///     .map_or(false, |flag| flag.enabled);
+    /// let variant = client.feature_flag("button-color").get()
+    ///     .and_then(|flag| flag.variant)
+    ///     .unwrap_or_else(|| "control".into());
+    /// let payload = client.feature_flag("checkout").send_event(false).get()
+    ///     .and_then(|flag| flag.payload);
+    /// # }
+    /// ```
+    pub fn feature_flag<'a>(&'a self, key: &'a str) -> FeatureFlagLookup<'a> {
+        FeatureFlagLookup {
+            client: self,
+            key,
+            send_event: None,
+        }
     }
 
-    /// Export all cached flag values without fetching flags or emitting analytics.
+    /// Export all cached rich results without fetching flags or emitting analytics.
     /// None means unavailable (including disabled/closed); Some(empty) is a known
     /// empty snapshot. Known false values are included, missing keys are omitted.
     ///
-    /// Values reflect their last evaluation. Property-only targeting changes may
-    /// retain old values until reload. Each call reads one coherent snapshot;
-    /// separate calls can observe different snapshots during a refresh.
+    /// Each result includes its decoded payload and producing context. Property-only
+    /// targeting changes may retain old results until reload. Each call reads one
+    /// coherent snapshot and returns owned values; mutating the returned map or
+    /// results never changes the client's cache.
     #[must_use]
-    pub fn get_feature_flags(&self) -> Option<HashMap<String, FlagValue>> {
+    pub fn get_feature_flags(&self) -> Option<HashMap<String, FeatureFlagResult>> {
         let snapshot = self.flag_snapshot()?;
         Some(
             snapshot
@@ -171,33 +163,7 @@ impl Client {
                 .as_ref()?
                 .flags
                 .iter()
-                .map(|(key, flag)| (key.clone(), flag_value_for(&flag.record)))
-                .collect(),
-        )
-    }
-
-    /// Export the present cached payloads, including JSON nulls. Known flags
-    /// without a payload are omitted. None means no available cache; Some(empty)
-    /// means the available cache has no payloads. Performs no I/O or analytics.
-    ///
-    /// As with get_feature_flags, a call reads one snapshot and returns owned
-    /// values. Mutating the returned map never changes the client's cache.
-    #[must_use]
-    pub fn get_feature_flag_payloads(&self) -> Option<HashMap<String, Value>> {
-        let snapshot = self.flag_snapshot()?;
-        Some(
-            snapshot
-                .flags
-                .cache
-                .as_ref()?
-                .flags
-                .iter()
-                .filter_map(|(key, flag)| {
-                    flag.record
-                        .payload
-                        .clone()
-                        .map(|payload| (key.clone(), payload))
-                })
+                .map(|(key, flag)| (key.clone(), FeatureFlagResult::from_cached(key, flag)))
                 .collect(),
         )
     }
