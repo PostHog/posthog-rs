@@ -613,3 +613,107 @@ fn async_drains_and_shutdown_need_no_owned_runtime_and_match_blocking_results() 
     assert_send(writer.wait_async(revision));
     assert_send(writer.join_async());
 }
+
+#[test]
+fn person_admission_serializes_early_checks_and_commits_in_queue_order() {
+    let writer = Arc::new(
+        StateWriter::new(
+            Snapshot::anonymous("anonymous".into()),
+            Backend::Memory,
+            options(),
+            vec![],
+            Arc::new(SystemClock),
+        )
+        .unwrap(),
+    );
+    let a = [1; 20];
+    let b = [2; 20];
+    writer.admit_person(0, a, true, || true);
+    let admitted = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first_writer = writer.clone();
+    let first_admitted = admitted.clone();
+    let first = thread::spawn(move || {
+        first_writer.admit_person(0, b, true, || {
+            first_admitted.lock().unwrap().push(b);
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            true
+        });
+    });
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Admission has happened, but its fingerprint has not yet been committed.
+    // Even an early pre-hook check must not read the old fingerprint A here.
+    assert!(matches!(
+        writer.shared.state.try_lock(),
+        Err(std::sync::TryLockError::WouldBlock)
+    ));
+    let second_writer = writer.clone();
+    let second_admitted = admitted.clone();
+    let second = thread::spawn(move || {
+        let (_, duplicate) = second_writer
+            .mutate(|state| state.person_properties == Some(a))
+            .unwrap();
+        assert!(!duplicate);
+        second_writer.admit_person(0, a, true, || {
+            second_admitted.lock().unwrap().push(a);
+            true
+        });
+    });
+    release_tx.send(()).unwrap();
+    first.join().unwrap();
+    second.join().unwrap();
+    assert_eq!(*admitted.lock().unwrap(), [b, a]);
+    assert_eq!(writer.snapshot().person_properties, Some(a));
+    writer.admit_person(0, b, true, || {
+        admitted.lock().unwrap().push(b);
+        true
+    });
+    writer.admit_person(0, b, true, || panic!("serial duplicate admitted"));
+    assert_eq!(*admitted.lock().unwrap(), [b, a, b]);
+    assert_eq!(writer.snapshot().person_properties, Some(b));
+}
+
+#[test]
+fn person_admission_commits_only_acceptance_in_its_generation_without_persistence_work() {
+    let (writer, _calls, _clock) = controlled(vec![]);
+    let revision = writer.checkpoint();
+    #[cfg(feature = "async-client")]
+    let progress = writer.shared.progress.subscribe();
+    let a = [1; 20];
+    let b = [2; 20];
+    writer.admit_person(0, a, true, || true);
+    writer.admit_person(0, b, true, || false);
+    assert_eq!(writer.snapshot().person_properties, Some(a));
+    #[cfg(feature = "async-client")]
+    assert!(!progress.has_changed().unwrap());
+    assert_eq!(writer.checkpoint(), revision);
+    assert!(writer.shared.lock().due.is_none());
+    // A transition event is not suppressible even if an overlapping update
+    // has already committed the same properties in the new identity scope.
+    let mut transitions = 0;
+    writer.admit_person(0, a, false, || {
+        transitions += 1;
+        true
+    });
+    assert_eq!(transitions, 1);
+    writer
+        .update(|state| {
+            state.generation = 1;
+            state.person_properties = Some(b);
+        })
+        .unwrap();
+    let mut old_events = 0;
+    writer.admit_person(0, b, true, || {
+        old_events += 1;
+        true
+    });
+    writer.admit_person(0, a, true, || {
+        old_events += 1;
+        true
+    });
+    assert_eq!(old_events, 2);
+    assert_eq!(writer.snapshot().person_properties, Some(b));
+    assert_eq!(writer.checkpoint(), revision);
+}

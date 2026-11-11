@@ -302,32 +302,51 @@ impl Client {
         snapshot: &Snapshot,
         session_id: Option<Uuid>,
     ) -> CaptureOutcome {
-        if self.closed.load(Ordering::Acquire) {
-            return CaptureOutcome::Closed;
-        }
-        if self.snapshot_opted_out(snapshot) {
-            return CaptureOutcome::OptedOut;
-        }
-        let wire =
-            match self
-                .producer
-                .as_ref()
-                .unwrap()
-                .prepare(input, snapshot, Utc::now(), session_id)
-            {
-                Ok(wire) => wire,
-                Err(outcome) => return outcome,
-            };
-        // A hook can close the client. Its outer capture must not be admitted.
-        if self.closed.load(Ordering::Acquire) {
-            return CaptureOutcome::Closed;
-        }
+        let wire = match self.prepare_with_session(input, snapshot, session_id) {
+            Ok(wire) => wire,
+            Err(outcome) => return outcome,
+        };
         let uuid = wire.uuid;
         match self.transport.as_ref().unwrap().enqueue_prepared(wire) {
             Admission::Accepted => CaptureOutcome::Accepted { uuid },
             Admission::Full => CaptureOutcome::Full,
             Admission::Closed => CaptureOutcome::Closed,
         }
+    }
+
+    /// Prepare outside SDK locks; hooks can inspect, reset, or close the client.
+    pub(super) fn prepare_snapshot(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+    ) -> Result<CaptureEvent, CaptureOutcome> {
+        let session_id = snapshot
+            .sessions
+            .active_id(self.producer.as_ref().unwrap().session_clock.now().elapsed);
+        self.prepare_with_session(input, snapshot, session_id)
+    }
+
+    fn prepare_with_session(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+        session_id: Option<Uuid>,
+    ) -> Result<CaptureEvent, CaptureOutcome> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CaptureOutcome::Closed);
+        }
+        if self.snapshot_opted_out(snapshot) {
+            return Err(CaptureOutcome::OptedOut);
+        }
+        let wire =
+            self.producer
+                .as_ref()
+                .unwrap()
+                .prepare(input, snapshot, Utc::now(), session_id)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CaptureOutcome::Closed);
+        }
+        Ok(wire)
     }
 
     /// Capture `$screen` through the ordinary event pipeline. The explicit name
