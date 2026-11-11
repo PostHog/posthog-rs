@@ -186,7 +186,23 @@ MCP events from the `mcp` feature take the request context too. `rmcp` runs each
 
 The blocking client has no scoped context, and `RequestContext::current()` returns `None`. Apply a context to each event yourself with `RequestContext::event` or `RequestContext::apply_to_event`, and use `evaluate_flags_with_context` for flags.
 
-A context `process_person_profile` option of `false` also reaches `alias` and `group_identify`. PostHog drops `$create_alias` and `$groupidentify` events that have person processing off, and records an `invalid_event_when_process_person_profile_is_false` ingestion warning in your project. Capture accepts these events before the drop, so `on_error` does not see it. In 0.x, a context that turned person processing off already reached these calls.
+A context `process_person_profile` option or `$process_person_profile` property of `false` also reaches `alias` and `group_identify`. PostHog drops `$create_alias` and `$groupidentify` events that have person processing off, and records an `invalid_event_when_process_person_profile_is_false` ingestion warning in your project, so they never merge a person or update a group. It keeps a `$set` event but ignores its person update. Capture accepts these events before the drop, so `on_error` does not see it. In 0.x, a context that turned person processing off already reached these calls.
+
+`alias` and `group_identify` take no options. To keep their events, set the option in a `before_send` hook, which runs after the context is applied:
+
+```rust
+let options = posthog::ClientOptionsBuilder::default()
+    .api_key("phc_project_token".to_string())
+    .before_send(|mut event| {
+        if matches!(event.event_name(), "$create_alias" | "$groupidentify") {
+            let _ = event.insert_option("process_person_profile", true);
+        }
+        Some(event)
+    })
+    .build()?;
+```
+
+For an event you build with `Event::new`, such as `$identify` or `$set`, call `insert_option("process_person_profile", true)` on it. An event option wins over the context.
 
 ### Session and window IDs
 
