@@ -24,9 +24,10 @@ impl Pipeline {
         if let Some(store) = &mut self.storage.store {
             match store.put(&event.wire) {
                 Ok(key) => event.store_key = Some(key),
-                Err(error) => {
-                    // Keep delivering this already accepted event from memory.
-                    self.report_storage_error(StorageOperation::Write, &error);
+                Err(failure) => {
+                    event.store_key = failure.key;
+                    // A failed durability confirmation may still own a record.
+                    self.report_storage_error(StorageOperation::Write, &failure.error);
                 }
             }
         }
@@ -138,7 +139,8 @@ impl Pipeline {
                     return;
                 }
             };
-            self.storage.recovery_pending = recovered.more;
+            let more = recovered.more;
+            self.storage.recovery_pending = more || recovered.retry_pending;
             for error in recovered.errors {
                 self.report_storage_error(StorageOperation::Read, &error);
             }
@@ -184,7 +186,7 @@ impl Pipeline {
                 .collect();
             drop(memory); // Return unused window capacity before sending.
             self.send_queued_batch(events, false, deadline);
-            if !force {
+            if !force || !more {
                 return;
             }
         }
