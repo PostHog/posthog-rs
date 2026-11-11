@@ -43,8 +43,8 @@ pub struct Config {
     /// Readiness does not wait for a response. False suppresses only startup preload,
     /// not manual reloads or identity/group/targeting-triggered refreshes.
     pub preload_feature_flags: bool,
-    /// Report value/enablement/result reads through `$feature_flag_called` by
-    /// default. Individual reads can override this; consent still applies.
+    /// Report completed single-flag lookups through `$feature_flag_called` by
+    /// default. Individual lookups can override this; consent still applies.
     pub send_feature_flag_event: bool,
     /// Optional initial flags snapshot, replacing restored values before preload.
     /// Only true and nonempty variants are served. None preserves restored values;

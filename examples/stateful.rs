@@ -69,11 +69,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(key) = std::env::var("POSTHOG_FLAG_KEY") {
         // Cached read only: None is unavailable, not false. A known value reports
         // access unless consent disallows it. Shutdown drains that event too.
+        let result = client.feature_flag(&key).get();
+        println!("cached flag {key}: {result:?}");
         println!(
-            "cached flag {key}: {:?}",
-            client.get_feature_flag(&key, None)
+            "enabled: {}",
+            result.as_ref().is_some_and(|flag| flag.enabled)
         );
-        println!("payload {key}: {:?}", client.get_feature_flag_payload(&key));
+        println!("payload {key}: {:?}", result.and_then(|flag| flag.payload));
     }
     subscription.unsubscribe();
     println!(

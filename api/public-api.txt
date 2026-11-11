@@ -219,6 +219,9 @@ pub fn posthog::stateful::Client::session_id(&self) -> core::option::Option<uuid
 pub fn posthog::stateful::Client::set_app_in_background(&self, bool)
 pub fn posthog::stateful::Client::start_session(&self)
 impl posthog::stateful::Client
+pub fn posthog::stateful::Client::feature_flag<'a>(&'a self, &'a str) -> posthog::stateful::FeatureFlagLookup<'a>
+pub fn posthog::stateful::Client::get_feature_flags(&self) -> core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, posthog::stateful::FeatureFlagResult>>
+impl posthog::stateful::Client
 pub async fn posthog::stateful::Client::flush(&self) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::flush_blocking(&self) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::get_anonymous_id(&self) -> alloc::string::String
@@ -228,13 +231,6 @@ pub fn posthog::stateful::Client::init_blocking(posthog::stateful::Config) -> Se
 pub fn posthog::stateful::Client::is_disabled(&self) -> bool
 pub async fn posthog::stateful::Client::shutdown(&self, core::option::Option<core::time::Duration>) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::shutdown_blocking(&self, core::option::Option<core::time::Duration>) -> posthog::stateful::DrainReport
-impl posthog::stateful::Client
-pub fn posthog::stateful::Client::get_feature_flag(&self, &str, core::option::Option<bool>) -> core::option::Option<posthog::FlagValue>
-pub fn posthog::stateful::Client::get_feature_flag_payload(&self, &str) -> core::option::Option<serde_json::value::Value>
-pub fn posthog::stateful::Client::get_feature_flag_payloads(&self) -> core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>
-pub fn posthog::stateful::Client::get_feature_flag_result(&self, &str, core::option::Option<bool>) -> core::option::Option<posthog::stateful::FeatureFlagResult>
-pub fn posthog::stateful::Client::get_feature_flags(&self) -> core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, posthog::FlagValue>>
-pub fn posthog::stateful::Client::is_feature_enabled(&self, &str, core::option::Option<bool>) -> core::option::Option<bool>
 impl posthog::stateful::Client
 pub fn posthog::stateful::Client::group(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>)
 pub fn posthog::stateful::Client::group_identify(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>)
@@ -305,6 +301,10 @@ pub posthog::stateful::FeatureFlagContext::distinct_id: alloc::string::String
 pub posthog::stateful::FeatureFlagContext::group_properties: std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>
 pub posthog::stateful::FeatureFlagContext::groups: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub posthog::stateful::FeatureFlagContext::person_properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub struct posthog::stateful::FeatureFlagLookup<'a>
+impl posthog::stateful::FeatureFlagLookup<'_>
+pub fn posthog::stateful::FeatureFlagLookup<'_>::get(self) -> core::option::Option<posthog::stateful::FeatureFlagResult>
+pub fn posthog::stateful::FeatureFlagLookup<'_>::send_event(self, bool) -> Self
 #[non_exhaustive] pub struct posthog::stateful::FeatureFlagResult
 pub posthog::stateful::FeatureFlagResult::context: posthog::stateful::FeatureFlagContext
 pub posthog::stateful::FeatureFlagResult::enabled: bool

@@ -24,7 +24,7 @@ pub use crate::client::on_error::InitializationFailure;
 pub use crate::client::transport::flags::LoadError as FeatureFlagLoadError;
 pub use config::Config;
 pub use flag_listeners::{FeatureFlagsSubscription, FeatureFlagsUpdate};
-pub use flag_reads::{FeatureFlagContext, FeatureFlagResult};
+pub use flag_reads::{FeatureFlagContext, FeatureFlagLookup, FeatureFlagResult};
 pub use identity::{Identify, PersonProfiles};
 pub use producer::{Capture, CaptureOutcome};
 pub use runtime::{Client, DeliveryOutcome, DrainReport, PersistenceOutcome};

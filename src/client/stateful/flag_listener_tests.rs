@@ -283,8 +283,12 @@ fn blocked_remote_callback_does_not_hold_state_or_registration_locks() {
     server.respond();
     entered_rx.recv_timeout(WAIT).unwrap();
     assert_eq!(
-        client.get_feature_flag("ready", Some(false)),
-        Some(FlagValue::Boolean(true))
+        client
+            .feature_flag("ready")
+            .send_event(false)
+            .get()
+            .map(|flag| flag.enabled),
+        Some(true)
     );
     client.register(HashMap::from([(
         "while-listener-blocked".into(),

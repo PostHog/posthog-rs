@@ -65,12 +65,12 @@ fn reports_are_not_restored_from_the_persistent_flag_cache() {
         let events = observe(&mut c);
         let client = Client::init_blocking(c);
         assert_eq!(
-            client.get_feature_flag("a", None),
-            Some(FlagValue::Boolean(true))
+            client.feature_flag("a").get().map(|flag| flag.enabled),
+            Some(true)
         );
         assert_eq!(
-            client.get_feature_flag("a", None),
-            Some(FlagValue::Boolean(true))
+            client.feature_flag("a").get().map(|flag| flag.enabled),
+            Some(true)
         );
         assert_eq!(events.lock().unwrap().len(), 1);
         assert_eq!(
@@ -91,8 +91,8 @@ fn runtime_free_async_client_reports_synchronously_from_cached_getters() {
     futures::executor::block_on(async {
         let client = Client::init(c).await;
         assert_eq!(
-            client.get_feature_flag("a", None),
-            Some(FlagValue::Boolean(true))
+            client.feature_flag("a").get().map(|flag| flag.enabled),
+            Some(true)
         );
         assert_eq!(events.lock().unwrap().len(), 1);
         client.shutdown(None).await;
@@ -100,7 +100,7 @@ fn runtime_free_async_client_reports_synchronously_from_cached_getters() {
 }
 
 #[test]
-fn defaults_overrides_all_getters_and_consent_share_accepted_dedup() {
+fn defaults_overrides_and_consent_share_accepted_dedup() {
     for default in [false, true] {
         let server = MockServer::start();
         accept(&server);
@@ -111,40 +111,72 @@ fn defaults_overrides_all_getters_and_consent_share_accepted_dedup() {
         let events = observe(&mut c);
         let client = Client::init_blocking(c);
         assert_eq!(
-            client.get_feature_flag("a", Some(false)),
-            Some(FlagValue::Boolean(true))
+            client
+                .feature_flag("a")
+                .send_event(false)
+                .get()
+                .map(|flag| flag.enabled),
+            Some(true)
         );
-        assert_eq!(client.get_feature_flag_result("missing", None), None);
-        assert_eq!(client.is_feature_enabled("missing", None), None);
+        assert_eq!(client.feature_flag("missing").get(), None);
+        assert_eq!(
+            client
+                .feature_flag("missing")
+                .get()
+                .map(|flag| flag.enabled),
+            None
+        );
         assert!(events.lock().unwrap().is_empty());
-        let result = client.get_feature_flag_result("a", None).unwrap();
+        let result = client.feature_flag("a").get().unwrap();
         assert!(result.enabled);
         assert_eq!(result.variant, None);
         assert_eq!(result.payload, Some(Value::Null));
         assert_eq!(result.context.distinct_id, "device");
         assert_eq!(events.lock().unwrap().len(), usize::from(default));
-        assert_eq!(client.is_feature_enabled("a", Some(true)), Some(true));
         assert_eq!(
-            client.get_feature_flag("a", Some(true)),
-            Some(FlagValue::Boolean(true))
+            client
+                .feature_flag("a")
+                .send_event(true)
+                .get()
+                .map(|flag| flag.enabled),
+            Some(true)
+        );
+        assert_eq!(
+            client
+                .feature_flag("a")
+                .send_event(true)
+                .get()
+                .map(|flag| flag.enabled),
+            Some(true)
         );
         assert_eq!(events.lock().unwrap().len(), 1);
         client.opt_out();
         assert_eq!(
-            client.get_feature_flag("b", Some(true)),
-            Some(FlagValue::String("blue".into()))
+            client
+                .feature_flag("b")
+                .send_event(true)
+                .get()
+                .and_then(|flag| flag.variant),
+            Some("blue".into())
         );
         assert_eq!(events.lock().unwrap().len(), 1);
         client.opt_in();
         assert_eq!(
-            client.get_feature_flag("b", Some(true)),
-            Some(FlagValue::String("blue".into()))
+            client
+                .feature_flag("b")
+                .send_event(true)
+                .get()
+                .and_then(|flag| flag.variant),
+            Some("blue".into())
         );
         assert_eq!(events.lock().unwrap().len(), 2);
         assert_eq!(client.peek_session_id(), None);
         client.shutdown_blocking(None);
-        assert_eq!(client.get_feature_flag("a", None), None);
-        assert_eq!(client.get_feature_flag_result("a", None), None);
+        assert_eq!(
+            client.feature_flag("a").get().map(|flag| flag.enabled),
+            None
+        );
+        assert_eq!(client.feature_flag("a").get(), None);
     }
 }
 
@@ -203,16 +235,19 @@ fn minimization_is_pinned_and_final_after_hooks_with_wire_options_preserved() {
             let session = client.peek_session_id();
             client.reload_feature_flags();
             client.flush_blocking();
-            let result = client.get_feature_flag_result("flag", None).unwrap();
+            let result = client.feature_flag("flag").get().unwrap();
             assert!(!result.enabled);
             assert_eq!(result.variant, None);
             assert_eq!(result.id, Some(12));
             assert_eq!(result.payload, Some(json!({"nested":null})));
             assert_eq!(
-                client.get_feature_flag("flag", None),
-                Some(FlagValue::Boolean(false))
+                client.feature_flag("flag").get().map(|flag| flag.enabled),
+                Some(false)
             );
-            assert_eq!(client.is_feature_enabled("flag", None), Some(false));
+            assert_eq!(
+                client.feature_flag("flag").get().map(|flag| flag.enabled),
+                Some(false)
+            );
             assert_eq!(client.peek_session_id(), session);
             client.flush_blocking();
             flags.assert_calls(1);
@@ -237,8 +272,8 @@ fn dropped_and_panicking_hooks_release_reservations() {
     let client = Client::init_blocking(c);
     for _ in 0..4 {
         assert_eq!(
-            client.get_feature_flag("a", None),
-            Some(FlagValue::Boolean(true))
+            client.feature_flag("a").get().map(|flag| flag.enabled),
+            Some(true)
         );
     }
     assert_eq!(calls.load(Ordering::SeqCst), 3);
@@ -252,14 +287,14 @@ fn full_queue_does_not_commit_a_report() {
     c.max_queue_size = 1;
     let events = observe(&mut c);
     let client = Client::init_blocking(c);
-    let _ = client.get_feature_flag("a", None);
+    let _ = client.feature_flag("a").get();
     for _ in 0..2 {
-        let _ = client.get_feature_flag("b", None);
+        let _ = client.feature_flag("b").get();
     }
     assert_eq!(events.lock().unwrap().len(), 3);
     client.flush_blocking();
-    let _ = client.get_feature_flag("b", None);
-    let _ = client.get_feature_flag("b", None);
+    let _ = client.feature_flag("b").get();
+    let _ = client.feature_flag("b").get();
     assert_eq!(events.lock().unwrap().len(), 4);
 }
 
@@ -280,18 +315,21 @@ fn concurrent_duplicate_reads_do_not_wait_for_user_hooks() {
     });
     let client = Arc::new(Client::init_blocking(c));
     let first = client.clone();
-    let first = std::thread::spawn(move || first.get_feature_flag("a", None));
+    let first = std::thread::spawn(move || first.feature_flag("a").get().map(|flag| flag.enabled));
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     let second = client.clone();
     let (done_tx, done_rx) = mpsc::channel();
-    let second =
-        std::thread::spawn(move || done_tx.send(second.get_feature_flag("a", None)).unwrap());
+    let second = std::thread::spawn(move || {
+        done_tx
+            .send(second.feature_flag("a").get().map(|flag| flag.enabled))
+            .unwrap()
+    });
     let duplicate = done_rx.recv_timeout(Duration::from_secs(1));
     release_tx.send(()).unwrap();
-    assert_eq!(first.join().unwrap(), Some(FlagValue::Boolean(true)));
+    assert_eq!(first.join().unwrap(), Some(true));
     second.join().unwrap();
-    assert_eq!(duplicate.unwrap(), Some(FlagValue::Boolean(true)));
-    let _ = client.get_feature_flag_result("a", None);
+    assert_eq!(duplicate.unwrap(), Some(true));
+    let _ = client.feature_flag("a").get();
     assert_eq!(hooks.load(Ordering::SeqCst), 1);
 }
 
@@ -314,26 +352,26 @@ fn reentrant_reads_and_opt_out_keep_return_and_outer_capture_coherent() {
         let client = inside.lock().unwrap().upgrade().unwrap();
         seen.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
-            client.get_feature_flag("a", None),
-            Some(FlagValue::Boolean(true))
+            client.feature_flag("a").get().map(|flag| flag.enabled),
+            Some(true)
         );
-        assert!(client.get_feature_flag_result("b", None).is_some());
+        assert!(client.feature_flag("b").get().is_some());
         client.opt_out();
         Some(event)
     });
     let client = Arc::new(Client::init_blocking(c));
     *weak.lock().unwrap() = Arc::downgrade(&client);
     assert_eq!(
-        client.get_feature_flag("a", None),
-        Some(FlagValue::Boolean(true))
+        client.feature_flag("a").get().map(|flag| flag.enabled),
+        Some(true)
     );
     assert!(client.is_opt_out());
     client.flush_blocking();
     wire.assert_calls(1);
     client.opt_in();
-    let _ = client.get_feature_flag("a", None);
+    let _ = client.feature_flag("a").get();
     assert_eq!(hooks.load(Ordering::SeqCst), 1);
-    let _ = client.get_feature_flag("b", None);
+    let _ = client.feature_flag("b").get();
     assert_eq!(hooks.load(Ordering::SeqCst), 2);
 }
 
@@ -344,7 +382,7 @@ fn partial_reload_preserves_per_record_metadata_and_ends_bootstrap_globally() {
     let mut c = config(&server);
     let events = observe(&mut c);
     let client = Client::init_blocking(c);
-    let before = client.get_feature_flag_result("a", None).unwrap();
+    let before = client.feature_flag("a").get().unwrap();
     client.set_person_properties_for_flags(
         HashMap::from([("plan".into(), json!("pro"))]),
         Some(false),
@@ -354,8 +392,8 @@ fn partial_reload_preserves_per_record_metadata_and_ends_bootstrap_globally() {
     });
     client.reload_feature_flags();
     client.flush_blocking();
-    let retained = client.get_feature_flag_result("a", None).unwrap();
-    let current = client.get_feature_flag_result("b", None).unwrap();
+    let retained = client.feature_flag("a").get().unwrap();
+    let current = client.feature_flag("b").get().unwrap();
     assert_eq!(retained, before);
     assert!(retained.context.person_properties.is_empty());
     assert_eq!(retained.request_id, None);
@@ -404,9 +442,12 @@ fn reset_or_shutdown_from_hook_does_not_deadlock_or_replace_returned_result() {
         });
         let client = Arc::new(Client::init_blocking(c));
         *weak.lock().unwrap() = Arc::downgrade(&client);
-        let result = client.get_feature_flag_result("a", None).unwrap();
+        let result = client.feature_flag("a").get().unwrap();
         assert_eq!(result.context.distinct_id, "device");
         assert!(result.enabled);
-        assert_eq!(client.get_feature_flag("a", None), None);
+        assert_eq!(
+            client.feature_flag("a").get().map(|flag| flag.enabled),
+            None
+        );
     }
 }

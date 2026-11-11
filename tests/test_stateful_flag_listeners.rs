@@ -84,7 +84,14 @@ fn setup_runtime_order_panic_isolation_drop_and_silent_opted_out_reads() {
         assert_eq!(a.payload, Some(Value::Null));
         a.payload = Some(json!("changed copy"));
     }
-    assert_eq!(client.get_feature_flag_payload("a"), Some(Value::Null));
+    assert_eq!(
+        client
+            .feature_flag("a")
+            .send_event(false)
+            .get()
+            .and_then(|flag| flag.payload),
+        Some(Value::Null)
+    );
     drop(client.on_feature_flags(move |data| {
         tx.send((3, data.clone())).unwrap();
     }));
@@ -317,7 +324,7 @@ fn immediate_callback_can_capture_read_flush_and_request_deferred_shutdown() {
     client.on_feature_flags(move |data| {
         let client = weak.upgrade().unwrap();
         assert_eq!(
-            client.get_feature_flag_result("a", Some(false)),
+            client.feature_flag("a").send_event(false).get(),
             Some(data.flags.as_ref().unwrap()["a"].clone())
         );
         assert_eq!(client.capture("listener-event"), CaptureOutcome::Dropped);

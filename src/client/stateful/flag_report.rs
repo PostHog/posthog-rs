@@ -249,7 +249,7 @@ mod tests {
         config.bootstrap_feature_flags =
             Some(HashMap::from([("a".into(), FlagValue::Boolean(true))]));
         let client = Client::init_blocking(config);
-        let _ = client.get_feature_flag("a", None);
+        let _ = client.feature_flag("a").get();
         assert_eq!(
             client
                 .state
