@@ -96,6 +96,7 @@ pub struct CodeEmail {
     pub(crate) text: Option<String>,
     pub(crate) from: Option<String>,
     pub(crate) reply_to: Vec<String>,
+    pub(crate) sensitive: Option<bool>,
     pub(crate) tracking: Option<EmailTracking>,
     pub(crate) capture_engagement: Option<bool>,
     pub(crate) options: SendOptions,
@@ -120,6 +121,7 @@ impl CodeEmail {
             text: None,
             from: None,
             reply_to: Vec::new(),
+            sensitive: None,
             tracking: None,
             capture_engagement: None,
             options: SendOptions::default(),
@@ -151,21 +153,43 @@ impl CodeEmail {
         self
     }
 
+    /// Whether the email carries a login link, a reset token or a code.
+    /// PostHog keeps a sensitive email's links unchanged, leaves its subject
+    /// off engagement events and keeps its content out of logs.
+    ///
+    /// Without it, the email takes the setting of the saved template whose
+    /// key is the email's `template_key`, or is sensitive when no template has
+    /// that key.
+    ///
+    /// ```
+    /// use posthog_rs::CodeEmail;
+    ///
+    /// // The digest carries no login link, reset token or code, so PostHog
+    /// // counts its clicks too.
+    /// let email = CodeEmail::new("jane@example.com", "weekly-digest", "Your weekly digest")
+    ///     .html(r#"<p><a href="https://example.com/blog">Read this week's posts</a></p>"#)
+    ///     .sensitive(false);
+    /// ```
+    pub fn sensitive(mut self, sensitive: bool) -> Self {
+        self.sensitive = Some(sensitive);
+        self
+    }
+
     /// What PostHog tracks for this email: [`EmailTracking::On`],
     /// [`EmailTracking::Off`], or [`EmailTrackingOptions`] to set each kind on
     /// its own. Takes a `bool` too.
     ///
-    /// Without it, PostHog counts opens and captures engagement events, but
-    /// doesn't rewrite links to count clicks, because a link in an email sent
-    /// from code can carry a login or password reset token.
+    /// Without it, PostHog counts opens, captures engagement events, and
+    /// rewrites links to count clicks only when the email isn't
+    /// [`sensitive`](Self::sensitive).
     ///
     /// ```
     /// use posthog_rs::{CodeEmail, EmailTrackingOptions};
     ///
-    /// // The digest's links carry no login or reset token, so count clicks.
+    /// // Count the digest's clicks, but capture no engagement events.
     /// let email = CodeEmail::new("jane@example.com", "weekly-digest", "Your weekly digest")
-    ///     .html("<p>Read this week's posts: https://example.com/blog</p>")
-    ///     .tracking(EmailTrackingOptions::new().clicks(true));
+    ///     .html(r#"<p><a href="https://example.com/blog">Read this week's posts</a></p>"#)
+    ///     .tracking(EmailTrackingOptions::new().clicks(true).engagement(false));
     /// ```
     pub fn tracking(mut self, tracking: impl Into<EmailTracking>) -> Self {
         self.tracking = Some(tracking.into());
@@ -269,15 +293,16 @@ impl EmailTrackingOptions {
     }
 
     /// Whether PostHog adds its open pixel to count opens. Defaults to `true`.
-    /// Click tracking needs open tracking.
+    /// With opens off, PostHog counts no clicks, and refuses clicks on.
     pub fn opens(mut self, track: bool) -> Self {
         self.opens = Some(track);
         self
     }
 
     /// Whether PostHog rewrites the email's links to count clicks. Defaults to
-    /// `false`. Turn it on only when the links are safe to send through a
-    /// redirect, so not for a login or password reset link. A link with a
+    /// `true` when the email isn't [`sensitive`](CodeEmail::sensitive) and
+    /// `false` when it is. Turn it on only when the links are safe to send
+    /// through a redirect, so not for a login or password reset link. A link with a
     /// `data-ph-no-track` attribute is never rewritten.
     pub fn clicks(mut self, track: bool) -> Self {
         self.clicks = Some(track);

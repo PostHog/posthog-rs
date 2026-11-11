@@ -234,6 +234,9 @@ fn code_body(email: &CodeEmail) -> Result<Map<String, Value>, EmailError> {
             Value::Array(email.reply_to.iter().cloned().map(Value::String).collect()),
         );
     }
+    if let Some(sensitive) = email.sensitive {
+        body.insert("sensitive".into(), Value::Bool(sensitive));
+    }
     if let Some(tracking) = &email.tracking {
         body.insert("tracking".into(), tracking.to_json());
     }

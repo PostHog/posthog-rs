@@ -123,7 +123,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
 }
 
 #[tokio::test]
-async fn code_send_leaves_out_tracking_and_engagement_capture_it_was_not_given() {
+async fn code_send_leaves_out_sensitivity_tracking_and_engagement_capture_it_was_not_given() {
     let server = ScriptedServer::start_async(vec![accepted()]).await;
     let client = client_for(&server).await;
 
@@ -196,6 +196,49 @@ async fn code_send_sends_the_tracking_it_was_given() {
                 "to": "user@example.com",
             })
         );
+    }
+}
+
+#[tokio::test]
+async fn code_send_sends_the_sensitivity_it_was_given() {
+    let cases = vec![
+        (
+            CodeEmail::new("user@example.com", "digest", "Your digest")
+                .text("Hi")
+                .sensitive(true),
+            json!({"sensitive": true}),
+        ),
+        (
+            CodeEmail::new("user@example.com", "digest", "Your digest")
+                .text("Hi")
+                .sensitive(false),
+            json!({"sensitive": false}),
+        ),
+        (
+            CodeEmail::new("user@example.com", "digest", "Your digest")
+                .text("Hi")
+                .sensitive(false)
+                .tracking(EmailTrackingOptions::new().clicks(false)),
+            json!({"sensitive": false, "tracking": {"clicks": false}}),
+        ),
+    ];
+    for (email, sent) in cases {
+        let server = ScriptedServer::start_async(vec![accepted()]).await;
+        let client = client_for(&server).await;
+
+        client.emails().send(email).await.unwrap();
+
+        let mut expected = json!({
+            "template_key": "digest",
+            "subject": "Your digest",
+            "text": "Hi",
+            "to": "user@example.com",
+        });
+        expected
+            .as_object_mut()
+            .unwrap()
+            .extend(sent.as_object().unwrap().clone());
+        assert_eq!(server.requests()[0].json(), expected);
     }
 }
 
