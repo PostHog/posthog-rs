@@ -92,6 +92,9 @@ pub(crate) struct Recovery {
     pub(crate) events: Vec<StoredEvent>,
     pub(crate) errors: Vec<io::Error>,
     pub(crate) more: bool,
+    /// The recovery cursor advanced past at least one record, including skipped
+    /// invalid records. False for an empty page blocked by available capacity.
+    pub(crate) advanced: bool,
 }
 
 /// Only the delivery worker calls these methods. Admission never invokes a
@@ -361,6 +364,7 @@ impl EventStore for FileEventStore {
             visited += 1;
         }
         result.more = visited < eligible;
+        result.advanced = visited > 0;
         Ok(result)
     }
 
