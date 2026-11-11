@@ -96,6 +96,12 @@ impl DrainReport {
 /// Storage failures instead allow enabled memory-backed operation. No network
 /// request is required to establish readiness.
 ///
+/// Persistent namespaces permit only one live owner. A second client with the
+/// same storage scope uses a generated or bootstrap identity in memory instead
+/// of restoring the first client's identity. Share an `Arc<Client>` when the
+/// identity should be shared; see [`Persistence`] for namespace ownership and
+/// retrying persistent initialization.
+///
 /// Dropping the client requests shutdown and blocks until its workers finish,
 /// except from a worker callback where waiting would deadlock. In-flight I/O
 /// and callbacks can exceed the shutdown scheduling budget.
@@ -419,7 +425,13 @@ impl Client {
         let transport = self.transport.as_ref().unwrap();
         let state = self.state.as_ref().unwrap();
         transport.wait_stopped().await;
+        if self.on_worker_thread() {
+            return DrainReport::deferred();
+        }
         let persisted = state.join_async().await;
+        if self.on_worker_thread() {
+            return DrainReport::deferred();
+        }
         transport.join();
         DrainReport {
             state: persisted.into(),

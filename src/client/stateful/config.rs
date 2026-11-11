@@ -22,6 +22,8 @@ pub struct Config {
     /// Storage selection. Defaults to the OS local application-data directory.
     pub persistence: Persistence,
     /// Isolates storage for instances using the same host and project. Default: "default".
+    /// Each persistent namespace has one live owner; see [`Persistence`] for
+    /// sharing a client or selecting independent identities.
     pub instance_name: String,
     /// Seed a fresh scope's anonymous identity. Persisted identity takes precedence.
     pub bootstrap_anonymous_id: Option<String>,

@@ -1,6 +1,108 @@
 use super::*;
 use std::future::Future;
+use std::pin::Pin;
 use std::task::{Context, Poll};
+
+use futures::FutureExt;
+
+type InlineFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+struct InlineTask(Mutex<Option<InlineFuture>>);
+
+impl InlineTask {
+    fn new(future: impl Future<Output = ()> + Send + 'static) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(Some(Box::pin(future)))))
+    }
+
+    fn poll(task: &Arc<Self>) -> Poll<()> {
+        let waker = futures::task::waker(task.clone());
+        let mut context = Context::from_waker(&waker);
+        let mut slot = task.0.lock().unwrap();
+        let Some(future) = slot.as_mut() else {
+            return Poll::Ready(());
+        };
+        let result = future.as_mut().poll(&mut context);
+        if result.is_ready() {
+            slot.take();
+        }
+        result
+    }
+}
+
+impl futures::task::ArcWake for InlineTask {
+    fn wake_by_ref(task: &Arc<Self>) {
+        let _ = Self::poll(task);
+    }
+}
+
+#[test]
+fn async_writer_join_resumed_inline_on_its_worker_defers() {
+    let directory = Directory::new();
+    let (state, gate) = gated_writer(&directory);
+    gate.entered.recv_timeout(WAIT).unwrap();
+    let state = Arc::new(state);
+    state.request_close_before(Instant::now() + Duration::from_secs(30));
+    let waiting = state.clone();
+    let (tx, rx) = mpsc::channel();
+    let task = InlineTask::new(async move {
+        let result = std::panic::AssertUnwindSafe(waiting.join_async())
+            .catch_unwind()
+            .await;
+        tx.send((thread::current().id(), result)).unwrap();
+    });
+    assert!(InlineTask::poll(&task).is_pending());
+    gate.release.send(()).unwrap();
+    let (resumed_on, result) = rx.recv_timeout(WAIT).unwrap();
+    let worker = gate.dropped.recv_timeout(WAIT).unwrap();
+    assert_eq!(resumed_on, worker);
+    assert_eq!(
+        result.unwrap(),
+        super::super::super::writer::DrainOutcome::Deferred
+    );
+    assert_eq!(
+        state.join_blocking(),
+        super::super::super::writer::DrainOutcome::Persisted
+    );
+}
+
+#[test]
+fn async_shutdown_resumed_inline_on_transport_worker_defers() {
+    let server = MockServer::start();
+    let rejected = server.mock(|when, then| {
+        when.method(POST);
+        then.status(400);
+    });
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let mut config = config();
+    config.host = server.base_url();
+    config.flush_at = 1;
+    config.on_error(move |_| {
+        entered_tx.send(thread::current().id()).unwrap();
+        release_rx.lock().unwrap().recv_timeout(GATE_WAIT).unwrap();
+    });
+    let client = Arc::new(Client::init_blocking(config));
+    client.capture("rejected");
+    let worker = entered_rx.recv_timeout(WAIT).unwrap();
+    let waiting = client.clone();
+    let (tx, rx) = mpsc::channel();
+    let task = InlineTask::new(async move {
+        let result = std::panic::AssertUnwindSafe(waiting.shutdown(Some(Duration::from_secs(30))))
+            .catch_unwind()
+            .await;
+        tx.send((thread::current().id(), result)).unwrap();
+    });
+    assert!(InlineTask::poll(&task).is_pending());
+    release_tx.send(()).unwrap();
+    let (resumed_on, result) = rx.recv_timeout(WAIT).unwrap();
+    assert_eq!(resumed_on, worker);
+    assert_eq!(result.unwrap().delivery, DeliveryOutcome::Deferred);
+    assert_eq!(
+        client.shutdown_blocking(None).delivery,
+        DeliveryOutcome::Stopped
+    );
+    rejected.assert_calls(1);
+}
 
 #[test]
 fn async_flush_captures_revision_and_cancellation_keeps_client_open() {

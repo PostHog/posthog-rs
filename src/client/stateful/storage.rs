@@ -19,6 +19,16 @@ use crate::client::{OnErrorHook, StorageOperation};
 use crate::endpoints::EndpointManager;
 
 /// Persistence selection for client state and admitted events.
+///
+/// A disk namespace has one live owner, including across processes. A second
+/// client using the same root, host, project token and instance name cannot
+/// restore that namespace. It reports a storage error through `on_error` and
+/// remains enabled with a generated or bootstrap identity and memory-only state
+/// and events. Reinitialize after the owner exits to retry persistent storage.
+///
+/// Share one client through `Arc<Client>` when components need the same identity.
+/// Use distinct [`Config::instance_name`](super::Config::instance_name) values
+/// for independent identities and storage.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub enum Persistence {
