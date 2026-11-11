@@ -97,8 +97,8 @@ pub(crate) struct Recovery {
     pub(crate) more: bool,
     /// Unreadable records remain eligible on a later recovery pass.
     pub(crate) retry_pending: bool,
-    /// The recovery cursor advanced past at least one record, including skipped
-    /// invalid records. False for an empty page blocked by available capacity.
+    /// This recovery pass visited at least one record, including failed reads
+    /// or skipped invalid records. False when blocked by available capacity.
     pub(crate) advanced: bool,
 }
 
