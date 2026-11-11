@@ -62,22 +62,22 @@ impl StoredSession {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LiveSession {
     stored: StoredSession,
-    observed: Instant,
+    observed: SessionTick,
     start_age: Duration,
     activity_age: Duration,
 }
 
 impl LiveSession {
-    fn expired(&self, now: Instant) -> bool {
-        let elapsed = now.saturating_duration_since(self.observed);
+    fn expired(&self, now: SessionTick) -> bool {
+        let elapsed = now.elapsed_since(self.observed);
         self.start_age.saturating_add(elapsed) >= MAX_AGE
             || self.activity_age.saturating_add(elapsed) >= IDLE
     }
 
-    fn touch(&mut self, now: Instant) {
+    fn touch(&mut self, now: SessionTick) {
         self.start_age = self
             .start_age
-            .saturating_add(now.saturating_duration_since(self.observed));
+            .saturating_add(now.elapsed_since(self.observed));
         self.activity_age = Duration::ZERO;
         self.observed = now;
         // Logical wall timing follows monotonic progress during this process,
@@ -97,9 +97,57 @@ pub(super) struct Sessions {
     live: Option<LiveSession>,
 }
 
+/// Session-only elapsed time. Keep the std clock alongside Linux boot time so
+/// failed/unsupported boot-clock reads can fall back without mixing clock epochs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SessionTick {
+    monotonic: Instant,
+    boot_time: Option<Duration>,
+}
+
+impl SessionTick {
+    fn now() -> Self {
+        Self {
+            monotonic: Instant::now(),
+            boot_time: boot_time(),
+        }
+    }
+
+    fn elapsed_since(self, earlier: Self) -> Duration {
+        if let (Some(now), Some(then)) = (self.boot_time, earlier.boot_time) {
+            if let Some(elapsed) = now.checked_sub(then) {
+                return elapsed;
+            }
+        }
+        self.monotonic.saturating_duration_since(earlier.monotonic)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn boot_time() -> Option<Duration> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes a timespec to a valid, exclusively borrowed
+    // pointer. CLOCK_BOOTTIME counts full-system suspend without wall-clock jumps.
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) } != 0 {
+        return None;
+    }
+    if time.tv_sec < 0 || !(0..1_000_000_000).contains(&time.tv_nsec) {
+        return None;
+    }
+    Some(Duration::new(time.tv_sec as u64, time.tv_nsec as u32))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn boot_time() -> Option<Duration> {
+    None
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct SessionTime {
-    pub(super) monotonic: Instant,
+    pub(super) elapsed: SessionTick,
     pub(super) wall_ms: u64,
 }
 
@@ -111,7 +159,7 @@ pub(super) struct SystemSessionClock;
 impl SessionClock for SystemSessionClock {
     fn now(&self) -> SessionTime {
         SessionTime {
-            monotonic: Instant::now(),
+            elapsed: SessionTick::now(),
             wall_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -142,11 +190,11 @@ impl Sessions {
             .filter(|stored| stored.activity_ms <= now.wall_ms)
             .map(|stored| LiveSession {
                 stored: stored.clone(),
-                observed: now.monotonic,
+                observed: now.elapsed,
                 start_age: Duration::from_millis(now.wall_ms - stored.started_ms),
                 activity_age: Duration::from_millis(now.wall_ms - stored.activity_ms),
             })
-            .filter(|live| mode == SessionMode::Manual || !live.expired(now.monotonic));
+            .filter(|live| mode == SessionMode::Manual || !live.expired(now.elapsed));
         Self {
             mode,
             persistence,
@@ -168,7 +216,7 @@ impl Sessions {
             .flatten()
     }
 
-    pub(super) fn active_id(&self, now: Instant) -> Option<Uuid> {
+    pub(super) fn active_id(&self, now: SessionTick) -> Option<Uuid> {
         self.live
             .as_ref()
             .filter(|live| self.mode == SessionMode::Manual || !live.expired(now))
@@ -182,7 +230,7 @@ impl Sessions {
                 started_ms: now.wall_ms,
                 activity_ms: now.wall_ms,
             },
-            observed: now.monotonic,
+            observed: now.elapsed,
             start_age: Duration::ZERO,
             activity_age: Duration::ZERO,
         });
@@ -195,7 +243,7 @@ impl Sessions {
         if self
             .live
             .as_ref()
-            .is_some_and(|live| live.expired(now.monotonic))
+            .is_some_and(|live| live.expired(now.elapsed))
         {
             self.live = None;
         }
@@ -204,7 +252,7 @@ impl Sessions {
         }
         match self.live.as_mut() {
             None => self.start(now),
-            Some(live) if activity => live.touch(now.monotonic),
+            Some(live) if activity => live.touch(now.elapsed),
             Some(_) => {}
         }
     }
@@ -221,12 +269,9 @@ impl Sessions {
                     return;
                 }
                 if background {
-                    if let Some(live) = self
-                        .live
-                        .as_mut()
-                        .filter(|live| !live.expired(now.monotonic))
+                    if let Some(live) = self.live.as_mut().filter(|live| !live.expired(now.elapsed))
                     {
-                        live.touch(now.monotonic);
+                        live.touch(now.elapsed);
                     }
                 } else {
                     self.maintain(now, true);
@@ -269,7 +314,7 @@ impl Client {
                 let now = self.producer.as_ref().unwrap().session_clock.now();
                 let opted_out = self.snapshot_opted_out(snapshot);
                 snapshot.session_operation(operation, now, opted_out);
-                snapshot.sessions.active_id(now.monotonic)
+                snapshot.sessions.active_id(now.elapsed)
             })
             .ok()
             .and_then(|(_, id)| id)

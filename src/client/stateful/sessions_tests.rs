@@ -3,13 +3,29 @@ use std::sync::{Arc, Mutex};
 
 fn time() -> SessionTime {
     SessionTime {
-        monotonic: Instant::now(),
+        elapsed: SessionTick {
+            monotonic: Instant::now(),
+            boot_time: Some(Duration::from_secs(100)),
+        },
         wall_ms: 1_700_000_000_000,
     }
 }
 fn later(now: SessionTime, elapsed: Duration) -> SessionTime {
     SessionTime {
-        monotonic: now.monotonic + elapsed,
+        elapsed: SessionTick {
+            monotonic: now.elapsed.monotonic + elapsed,
+            boot_time: now.elapsed.boot_time.map(|time| time + elapsed),
+        },
+        wall_ms: now.wall_ms + elapsed.as_millis() as u64,
+    }
+}
+// Full-system suspend advances boot time while the std monotonic clock is frozen.
+fn suspended(now: SessionTime, elapsed: Duration) -> SessionTime {
+    SessionTime {
+        elapsed: SessionTick {
+            monotonic: now.elapsed.monotonic,
+            boot_time: now.elapsed.boot_time.map(|time| time + elapsed),
+        },
         wall_ms: now.wall_ms + elapsed.as_millis() as u64,
     }
 }
@@ -31,7 +47,7 @@ fn exact_idle_boundary_and_read_only_inspection() {
         let original = sessions.live.as_ref().unwrap().stored.id;
         let before = sessions.clone();
         assert_eq!(
-            sessions.active_id(later(now, elapsed).monotonic).is_some(),
+            sessions.active_id(later(now, elapsed).elapsed).is_some(),
             elapsed < IDLE
         );
         assert_eq!(sessions, before);
@@ -47,17 +63,17 @@ fn exact_idle_boundary_and_read_only_inspection() {
 fn getters_do_not_extend_activity_and_continuous_activity_reaches_maximum() {
     let now = time();
     let mut sessions = active(now);
-    let id = sessions.active_id(now.monotonic);
+    let id = sessions.active_id(now.elapsed);
     sessions.apply(Operation::Maintain, later(now, IDLE / 2), false);
     sessions.apply(Operation::Maintain, later(now, IDLE), false);
-    assert_ne!(sessions.active_id(later(now, IDLE).monotonic), id);
+    assert_ne!(sessions.active_id(later(now, IDLE).elapsed), id);
     for boundary in [
         MAX_AGE - Duration::from_nanos(1),
         MAX_AGE,
         MAX_AGE + Duration::from_nanos(1),
     ] {
         let mut sessions = active(now);
-        let original = sessions.active_id(now.monotonic);
+        let original = sessions.active_id(now.elapsed);
         for minute in 1..(24 * 60) {
             sessions.apply(
                 Operation::Activity,
@@ -67,7 +83,7 @@ fn getters_do_not_extend_activity_and_continuous_activity_reaches_maximum() {
         }
         sessions.apply(Operation::Activity, later(now, boundary), false);
         assert_eq!(
-            sessions.active_id(later(now, boundary).monotonic) == original,
+            sessions.active_id(later(now, boundary).elapsed) == original,
             boundary < MAX_AGE
         );
     }
@@ -104,13 +120,13 @@ fn manual_boundaries_are_explicit_and_start_is_idempotent() {
     sessions.apply(Operation::Start, later(now, MAX_AGE * 3), false);
     assert_eq!(sessions, original);
     assert_eq!(
-        sessions.active_id(later(now, MAX_AGE * 3).monotonic),
-        original.active_id(now.monotonic)
+        sessions.active_id(later(now, MAX_AGE * 3).elapsed),
+        original.active_id(now.elapsed)
     );
     sessions.apply(Operation::Reset, now, false);
     assert_ne!(
-        sessions.active_id(now.monotonic),
-        original.active_id(now.monotonic)
+        sessions.active_id(now.elapsed),
+        original.active_id(now.elapsed)
     );
     sessions.apply(Operation::End, now, false);
     assert!(sessions.live.is_none());
@@ -140,19 +156,28 @@ fn opted_out_operations_preserve_session_but_end_and_environment_work() {
 #[test]
 fn wall_clock_jumps_do_not_change_live_expiry_and_restart_rejects_future_timing() {
     let now = time();
-    for wall_ms in [0, now.wall_ms + 10 * MAX_AGE.as_millis() as u64] {
-        let mut sessions = active(now);
-        let original = sessions.active_id(now.monotonic);
-        let jump = SessionTime {
-            wall_ms,
-            ..later(now, IDLE / 2)
+    for boot_time in [None, now.elapsed.boot_time] {
+        let now = SessionTime {
+            elapsed: SessionTick {
+                boot_time,
+                ..now.elapsed
+            },
+            ..now
         };
-        sessions.apply(Operation::Activity, jump, false);
-        assert_eq!(sessions.active_id(jump.monotonic), original);
-        assert_eq!(
-            sessions.live.as_ref().unwrap().stored.activity_ms,
-            now.wall_ms + (IDLE / 2).as_millis() as u64
-        );
+        for wall_ms in [0, now.wall_ms + 10 * MAX_AGE.as_millis() as u64] {
+            let mut sessions = active(now);
+            let original = sessions.active_id(now.elapsed);
+            let jump = SessionTime {
+                wall_ms,
+                ..later(now, IDLE / 2)
+            };
+            sessions.apply(Operation::Activity, jump, false);
+            assert_eq!(sessions.active_id(jump.elapsed), original);
+            assert_eq!(
+                sessions.live.as_ref().unwrap().stored.activity_ms,
+                now.wall_ms + (IDLE / 2).as_millis() as u64
+            );
+        }
     }
     let stored = active(now).live.unwrap().stored;
     let rollback = SessionTime {
@@ -191,7 +216,7 @@ fn restored_expiry_uses_wall_age_then_monotonic_time_including_maximum() {
         assert_eq!(sessions.live.is_some(), age < IDLE);
         if age < IDLE {
             assert!(sessions
-                .active_id(now.monotonic + Duration::from_millis(1))
+                .active_id(later(now, Duration::from_millis(1)).elapsed)
                 .is_none());
         }
     }
@@ -353,4 +378,174 @@ fn capture_uses_injected_clock_and_passive_helpers_never_extend_or_create() {
     assert_eq!(seen[2].properties()["$session_id"], original.to_string());
     assert!(!seen[3].properties().contains_key("$session_id"));
     assert_eq!(seen[4].properties()["$session_id"], next.to_string());
+}
+
+#[test]
+fn suspended_elapsed_rotates_at_idle_and_max_age_in_memory_and_persistent_modes() {
+    for persistence in [SessionPersistence::Memory, SessionPersistence::Persistent] {
+        for limit in [IDLE, MAX_AGE] {
+            for boundary in [
+                limit - Duration::from_nanos(1),
+                limit,
+                limit + Duration::from_nanos(1),
+            ] {
+                let now = time();
+                let clock = Arc::new(TestClock(Mutex::new(now)));
+                let mut config = super::super::Config::new("phc_test");
+                config.persistence = super::super::Persistence::Memory;
+                config.session_persistence = persistence;
+                let mut client = Client::init_blocking(config);
+                client.producer.as_mut().unwrap().session_clock = clock.clone();
+                let original = client.session_id();
+                let mut before_suspend = now;
+                if limit == MAX_AGE {
+                    // Keep idle below 30 minutes, then suspend for the final minute.
+                    for minute in 1..(24 * 60) {
+                        before_suspend = later(now, Duration::from_secs(minute * 60));
+                        *clock.0.lock().unwrap() = before_suspend;
+                        client.session_activity();
+                    }
+                }
+                let suspended_for = boundary - before_suspend.elapsed.elapsed_since(now.elapsed);
+                let mut resumed = suspended(before_suspend, suspended_for);
+                // Independently move wall time backwards: live expiry uses elapsed time.
+                resumed.wall_ms = 0;
+                *clock.0.lock().unwrap() = resumed;
+                assert_eq!(client.session_id() == original, boundary < limit);
+                let snapshot = client.state.as_ref().unwrap().snapshot();
+                assert_eq!(
+                    snapshot.session.is_some(),
+                    persistence == SessionPersistence::Persistent
+                );
+                if let Some(stored) = &snapshot.session {
+                    assert_eq!(Some(stored.id), client.peek_session_id());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn suspended_activity_keeps_logical_persisted_timing_and_restored_expiry() {
+    let now = time();
+    let mut sessions = Sessions {
+        persistence: SessionPersistence::Persistent,
+        ..active(now)
+    };
+    let original = sessions.active_id(now.elapsed);
+    let resumed = SessionTime {
+        wall_ms: 0,
+        ..suspended(now, IDLE / 2)
+    };
+    sessions.apply(Operation::Activity, resumed, false);
+    assert_eq!(sessions.active_id(resumed.elapsed), original);
+    let stored = sessions.stored().unwrap();
+    assert_eq!(stored.started_ms, now.wall_ms);
+    assert_eq!(
+        stored.activity_ms,
+        now.wall_ms + (IDLE / 2).as_millis() as u64
+    );
+
+    let restart = later(now, IDLE);
+    let mut restored = Sessions::restored(
+        Some(&stored),
+        SessionMode::Automatic,
+        SessionPersistence::Persistent,
+        restart,
+    );
+    assert_eq!(restored.active_id(restart.elapsed), original);
+    let expired = suspended(restart, IDLE / 2);
+    restored.apply(Operation::Maintain, expired, false);
+    assert_ne!(restored.active_id(expired.elapsed), original);
+}
+
+#[test]
+fn unavailable_or_regressed_boot_clock_falls_back_to_std_elapsed_time() {
+    let now = time();
+    let later = later(now, IDLE);
+    for (earlier_boot, later_boot) in [
+        (None, None),
+        (None, later.elapsed.boot_time),
+        (now.elapsed.boot_time, None),
+        (now.elapsed.boot_time, Some(Duration::ZERO)),
+    ] {
+        let earlier = SessionTick {
+            boot_time: earlier_boot,
+            ..now.elapsed
+        };
+        let later = SessionTick {
+            boot_time: later_boot,
+            ..later.elapsed
+        };
+        assert_eq!(later.elapsed_since(earlier), IDLE);
+        let mut sessions = active(SessionTime {
+            elapsed: earlier,
+            ..now
+        });
+        let original = sessions.active_id(earlier);
+        sessions.apply(
+            Operation::Maintain,
+            SessionTime {
+                elapsed: later,
+                ..now
+            },
+            false,
+        );
+        assert_ne!(sessions.active_id(later), original);
+        assert_eq!(sessions.live.as_ref().unwrap().start_age, Duration::ZERO);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_system_session_clock_samples_boottime() {
+    let before = boot_time().expect("Linux CLOCK_BOOTTIME must be available");
+    let now = SystemSessionClock.now();
+    let after = boot_time().unwrap();
+    let sampled = now
+        .elapsed
+        .boot_time
+        .expect("session clock must use CLOCK_BOOTTIME");
+    assert!((before..=after).contains(&sampled));
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn non_linux_system_session_clock_uses_std_elapsed_time() {
+    let before = Instant::now();
+    let now = SystemSessionClock.now();
+    let after = Instant::now();
+    assert!(now.elapsed.boot_time.is_none());
+    assert!((before..=after).contains(&now.elapsed.monotonic));
+}
+
+#[test]
+fn capture_after_suspend_rotates_and_attributes_in_both_persistence_modes() {
+    for persistence in [SessionPersistence::Memory, SessionPersistence::Persistent] {
+        let now = time();
+        let clock = Arc::new(TestClock(Mutex::new(now)));
+        let seen = Arc::new(Mutex::new(None));
+        let hook_seen = seen.clone();
+        let mut config = super::super::Config::new("phc_test");
+        config.persistence = super::super::Persistence::Memory;
+        config.session_persistence = persistence;
+        config.before_send(move |event| {
+            *hook_seen.lock().unwrap() = Some(event);
+            None
+        });
+        let mut client = Client::init_blocking(config);
+        client.producer.as_mut().unwrap().session_clock = clock.clone();
+        let original = client.session_id();
+        *clock.0.lock().unwrap() = suspended(now, IDLE);
+        assert_eq!(
+            client.capture("resumed"),
+            super::super::CaptureOutcome::Dropped
+        );
+        let next = client.peek_session_id();
+        assert_ne!(next, original);
+        assert_eq!(
+            seen.lock().unwrap().as_ref().unwrap().properties()["$session_id"],
+            next.unwrap().to_string()
+        );
+    }
 }
