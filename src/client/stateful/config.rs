@@ -19,12 +19,16 @@ pub struct Config {
     pub host: String,
     /// Explicitly disable this client. Defaults to false.
     pub disabled: bool,
-    /// Default collection choice when no explicit consent is stored, including after
-    /// reset. False by default. A persisted opt-in/out choice takes precedence.
+    /// Default collection choice when no explicit consent can be restored,
+    /// including after reset or state-storage open/read failure. False by default.
+    /// Set true when unavailable consent must require opt-in. A successfully
+    /// restored explicit opt-in/out choice takes precedence.
     pub opt_out: bool,
     /// Storage selection. Defaults to the OS local application-data directory.
     pub persistence: Persistence,
     /// Isolates storage for instances using the same host and project. Default: "default".
+    /// Each persistent namespace has one live owner; see [`Persistence`] for
+    /// sharing a client or selecting independent identities.
     pub instance_name: String,
     /// Seed a fresh scope's anonymous identity. Persisted identity takes precedence.
     pub bootstrap_anonymous_id: Option<String>,

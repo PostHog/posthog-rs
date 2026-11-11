@@ -28,8 +28,14 @@ pub struct Capture {
     /// remembered groups, platform context and SDK defaults using Rust's fill rules.
     pub properties: HashMap<String, Value>,
     /// Explicit wire options, with the same precedence as the server Event API.
+    /// With the default configuration, a fresh anonymous client sends
+    /// process_person_profile=false. Set this option to true to enable processing
+    /// for this event.
     pub options: HashMap<String, Value>,
     /// Typed groups override entries of the same type in properties.$groups.
+    /// Group analytics requires person processing; typed groups alone do not
+    /// enable it. When needed, set
+    /// `capture.options.insert("process_person_profile".into(), true.into())`.
     pub groups: HashMap<String, String>,
     /// Capture-time override, normalized to UTC on the wire.
     pub timestamp: Option<DateTime<Utc>>,

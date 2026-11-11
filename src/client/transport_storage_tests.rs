@@ -8,7 +8,7 @@ use httpmock::{Method::POST, MockServer};
 use uuid::Uuid;
 
 use super::tests::{options, ManualClock};
-use super::{Admission, CaptureEvent, LaneConfig, StorageState, TransportHandle};
+use super::{Admission, CaptureEvent, Clock, LaneConfig, StorageState, TransportHandle};
 use crate::client::event_store::{
     EventStore, FileEventStore, Recovery, StorageDirectory, StoreKey, StoreLimits,
 };
@@ -175,6 +175,116 @@ fn mixed_capture_time_sdk_versions_survive_recovery_and_partial_retry() {
     recovered.assert_calls(1);
     assert!(directory.records().is_empty());
     assert_eq!(hook_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn durable_events_survive_incomplete_success_bodies_but_not_complete_invalid_json() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for mode in ["truncated", "timeout", "invalid-json"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let (close_tx, close_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let header_end = loop {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    break end + 4;
+                }
+                assert!(request.len() < 64 * 1024);
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let length: usize = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .unwrap()
+                .1
+                .trim()
+                .parse()
+                .unwrap();
+            while request.len() < header_end + length {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let body = if mode == "invalid-json" {
+                "not JSON"
+            } else {
+                "{\"results\":"
+            };
+            let declared = if mode == "invalid-json" {
+                body.len()
+            } else {
+                body.len() + 100
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n{body}"
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            if mode == "timeout" {
+                close_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+        });
+        let directory = TestDirectory::new();
+        let event = wire(mode);
+        directory.open().put(&event).unwrap();
+        let failures = Arc::new(AtomicUsize::new(0));
+        let observed = failures.clone();
+        let handle = TransportHandle::spawn_configured(
+            options(host)
+                .request_timeout_seconds(1u64)
+                .max_capture_attempts(1u32)
+                .on_error(move |failure| {
+                    if matches!(failure, PostHogError::Capture(_)) {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+                .build()
+                .unwrap(),
+            LaneConfig::analytics(),
+            Arc::new(ManualClock::new()),
+            StorageState::new(Box::new(directory.open()), 64 * 1024),
+        );
+        handle.flush_blocking();
+        let _ = close_tx.send(());
+        server.join().unwrap();
+        let retained = mode != "invalid-json";
+        assert_eq!(directory.records().len(), usize::from(retained), "{mode}");
+        assert_eq!(handle.pending(), usize::from(retained), "{mode}");
+        assert_eq!(
+            failures.load(Ordering::SeqCst),
+            usize::from(!retained),
+            "{mode}"
+        );
+        handle.shutdown_blocking();
+        assert_eq!(handle.pending(), 0);
+        if retained {
+            let server = MockServer::start();
+            let success = server.mock(|when, then| {
+                when.method(POST);
+                then.status(200).json_body(serde_json::json!({"results":{
+                    (event.uuid.to_string()):{"result":"ok"}
+                }}));
+            });
+            let recovered = persistent(&server, &ManualClock::new(), directory.open());
+            recovered.flush_blocking();
+            success.assert_calls(1);
+            assert!(directory.records().is_empty());
+            recovered.shutdown_blocking();
+        }
+    }
 }
 
 #[test]
@@ -573,6 +683,117 @@ fn write_failure_memory_fallback_remains_byte_bounded_while_offline() {
 }
 
 #[test]
+fn shutdown_warnings_distinguish_memory_losses_from_persisted_events() {
+    struct FailSecondPut(FileEventStore, usize);
+    impl EventStore for FailSecondPut {
+        fn recover(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
+            self.0.recover(count, bytes)
+        }
+        fn put(&mut self, event: &CaptureEvent) -> io::Result<StoreKey> {
+            self.1 += 1;
+            if self.1 == 2 {
+                Err(io::Error::other(
+                    "test write failure before record creation",
+                ))
+            } else {
+                self.0.put(event)
+            }
+        }
+        fn remove(&mut self, key: StoreKey) -> io::Result<()> {
+            self.0.remove(key)
+        }
+    }
+    for path in ["cooldown", "expired", "attempt", "buffered", "chunks"] {
+        let server = MockServer::start();
+        let offline = server.mock(|when, then| {
+            when.method(POST);
+            then.status(503);
+        });
+        let directory = TestDirectory::new();
+        let clock = ManualClock::new();
+        let len = Arc::new(std::sync::atomic::AtomicUsize::new(2));
+        let mut pipeline = super::Pipeline::new(
+            &options(server.base_url())
+                .max_capture_attempts(1u32)
+                .build()
+                .unwrap(),
+            LaneConfig::analytics(),
+            Arc::new(clock.clone()),
+            len.clone(),
+        )
+        .unwrap();
+        pipeline.storage =
+            StorageState::new(Box::new(FailSecondPut(directory.open(), 0)), 64 * 1024);
+        let mut events: Vec<_> = vec![wire("durable"), wire("memory-only")]
+            .into_iter()
+            .map(super::DeliveryEvent::from)
+            .collect();
+        for event in &mut events {
+            pipeline.persist(event);
+        }
+        assert!(events[0].store_key.is_some());
+        assert!(events[1].store_key.is_none());
+        let ((), logs) = crate::client::tests::with_logs(|| match path {
+            "cooldown" | "expired" => {
+                pipeline.send_prepared(events, false, None);
+                if path == "expired" {
+                    clock.advance(
+                        pipeline.retries[0]
+                            .next_at
+                            .saturating_duration_since(clock.now()),
+                    );
+                }
+                pipeline.flush_retries(Some(clock.now()));
+            }
+            "attempt" => {
+                pipeline.send_prepared(events, false, Some(clock.now() + Duration::from_secs(30)))
+            }
+            "buffered" => {
+                let mut buffer = super::LiveBuffer::Deferred(
+                    events
+                        .into_iter()
+                        .map(super::QueuedEvent::Prepared)
+                        .collect(),
+                );
+                super::send_buffer(&mut pipeline, &mut buffer, 100, Some(clock.now()));
+            }
+            "chunks" => {
+                pipeline.lane.batch_bytes_target = Some(1);
+                pipeline.send_queued_batch(
+                    events
+                        .into_iter()
+                        .map(super::QueuedEvent::Prepared)
+                        .collect(),
+                    false,
+                    Some(clock.now()),
+                );
+            }
+            _ => unreachable!(),
+        });
+        assert!(logs.contains("dropping 1 "), "{}: {}", path, logs);
+        assert!(
+            logs.contains("without confirmed persistence"),
+            "{}: {}",
+            path,
+            logs
+        );
+        assert!(
+            logs.contains("1 persisted event(s) remain on disk"),
+            "{}: {}",
+            path,
+            logs
+        );
+        assert_eq!(logs.lines().count(), 1, "{path}: {logs}");
+        assert_eq!(len.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(directory.records().len(), 1);
+        offline.assert_calls(usize::from(matches!(
+            path,
+            "cooldown" | "expired" | "attempt"
+        )));
+    }
+}
+
+#[test]
 fn recovery_and_retry_share_the_same_byte_budget_across_pages() {
     let server = MockServer::start();
     let directory = TestDirectory::new();
@@ -773,6 +994,55 @@ fn failed_recovery_reports_read_error_releases_reservations_and_preserves_disk()
     success.assert_calls(2);
     assert!(directory.records().is_empty());
     handle.shutdown_blocking();
+}
+
+#[test]
+fn forced_recovery_continues_after_empty_corrupt_pages() {
+    for shutdown in [false, true] {
+        let server = MockServer::start();
+        let directory = TestDirectory::new();
+        let valid = wire("valid-recovered");
+        {
+            let mut store = directory.open();
+            for _ in 0..3 {
+                store.put(&wire("corrupt-page")).unwrap();
+            }
+            store.put(&valid).unwrap();
+        }
+        let corrupt: Vec<_> = directory.records().into_iter().take(3).collect();
+        for path in &corrupt {
+            fs::write(path, b"not JSON").unwrap();
+        }
+        let success = server.mock(|when, then| {
+            when.method(POST).body_excludes("corrupt-page");
+            then.status(200).json_body(serde_json::json!({"results":{
+                (valid.uuid.to_string()):{"result":"ok"}
+            }}));
+        });
+        let handle = TransportHandle::spawn_configured(
+            options(server.base_url())
+                .max_batch_size(1usize)
+                .shutdown_timeout_ms(5000u64)
+                .build()
+                .unwrap(),
+            LaneConfig::analytics(),
+            Arc::new(ManualClock::new()),
+            StorageState::new(Box::new(directory.open()), 64 * 1024),
+        );
+        if shutdown {
+            handle.shutdown_blocking();
+        } else {
+            handle.flush_blocking();
+        }
+        success.assert_calls(1);
+        assert!(directory.records().is_empty());
+        assert!(corrupt
+            .iter()
+            .all(|path| path.with_extension("corrupt").exists()));
+        assert_eq!(handle.pending(), 0);
+        assert_eq!(handle.byte_budget.as_ref().unwrap().available(), 64 * 1024);
+        handle.shutdown_blocking();
+    }
 }
 
 #[test]
