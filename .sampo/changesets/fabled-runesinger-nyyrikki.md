@@ -2,4 +2,4 @@
 cargo/posthog: minor
 ---
 
-Add storage failure details to on_error and internal bounded prepared-event persistence on the shared delivery worker.
+Add persistent event delivery for stateful clients and report storage failures through `on_error`.
