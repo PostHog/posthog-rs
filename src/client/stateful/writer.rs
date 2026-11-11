@@ -296,6 +296,26 @@ impl StateWriter {
         Ok(result)
     }
 
+    /// Compare, admit, and commit process-local person bookkeeping in queue order.
+    /// `admit` must not run hooks, tracing subscribers, or application wakers.
+    /// Fingerprints are not persisted, so this cannot schedule a writer notification.
+    pub(super) fn admit_person(
+        &self,
+        generation: u64,
+        fingerprint: [u8; 20],
+        deduplicate: bool,
+        admit: impl FnOnce() -> bool,
+    ) {
+        let mut state = self.shared.lock();
+        let same_generation = state.snapshot.generation == generation;
+        if same_generation && deduplicate && state.snapshot.person_properties == Some(fingerprint) {
+            return;
+        }
+        if admit() && same_generation && state.closing.is_none() {
+            Arc::make_mut(&mut state.snapshot).person_properties = Some(fingerprint);
+        }
+    }
+
     /// Capture one revision to drain, expediting coalescing but not retry cooldown.
     pub(super) fn checkpoint(&self) -> u64 {
         let revision = {
