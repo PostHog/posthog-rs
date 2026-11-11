@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -1410,39 +1410,83 @@ fn match_flag_dependency_property(
     })
 }
 
-/// Parse a relative date string like "-7d", "-24h", "-2w", "-3m", "-1y"
-/// Returns the DateTime<Utc> that the relative date represents
+/// Parse a relative date string like "-7d", "7d", "-24h", "-2w", "-3m" or "-1y".
+/// Returns the DateTime<Utc> that the relative date represents.
 fn parse_relative_date(value: &str) -> Option<DateTime<Utc>> {
-    let value = value.trim();
-    // Need at least 3 chars: "-", digit(s), and unit (e.g., "-7d")
-    if value.len() < 3 || !value.starts_with('-') {
+    parse_relative_date_at(value, Utc::now())
+}
+
+/// Relative date lookback from `now`, following the local evaluator spec and the
+/// server's `relative_date.rs`: an optional leading `-`, a number below 10,000 and
+/// one of `h`, `d`, `w`, `m` or `y`. Months and years are calendar steps that clamp
+/// the day after every step, so March 31 minus two months is January 28.
+fn parse_relative_date_at(value: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    static RELATIVE_DATE: OnceLock<Regex> = OnceLock::new();
+    let captures = RELATIVE_DATE
+        .get_or_init(|| Regex::new(r"^-?([0-9]+)([hdwmy])$").expect("valid relative date regex"))
+        .captures(value.trim())?;
+    let number: i64 = captures[1].parse().ok()?;
+    // The cap also keeps the arithmetic below far away from chrono's limits.
+    if number >= 10_000 {
         return None;
     }
 
-    let (num_str, unit) = value[1..].split_at(value.len() - 2);
-    let num: i64 = num_str.parse().ok()?;
-
-    let duration = match unit {
-        "h" => chrono::Duration::hours(num),
-        "d" => chrono::Duration::days(num),
-        "w" => chrono::Duration::weeks(num),
-        "m" => chrono::Duration::days(num * 30), // Approximate month as 30 days
-        "y" => chrono::Duration::days(num * 365), // Approximate year as 365 days
+    let naive = now.naive_utc();
+    let result = match &captures[2] {
+        "h" => naive - chrono::Duration::hours(number),
+        "d" => naive - chrono::Duration::days(number),
+        "w" => naive - chrono::Duration::weeks(number),
+        "m" => subtract_months(naive, number)?,
+        "y" => subtract_years(naive, number)?,
         _ => return None,
     };
+    Some(result.and_utc())
+}
 
-    Some(Utc::now() - duration)
+/// Step back one month at a time and clamp the day after every step.
+fn subtract_months(now: NaiveDateTime, months: i64) -> Option<NaiveDateTime> {
+    // Count months from year 0 so stepping back never has to special-case January.
+    let year_month = |index: i64| (index.div_euclid(12) as i32, index.rem_euclid(12) as u32 + 1);
+    let mut index = i64::from(now.year()) * 12 + i64::from(now.month0());
+    let mut day = now.day();
+    for _ in 0..months {
+        index -= 1;
+        let (year, month) = year_month(index);
+        day = day.min(days_in_month(year, month));
+    }
+    let (year, month) = year_month(index);
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    Some(date.and_time(now.time()))
+}
+
+/// Step back whole years. Only February 29 can clamp: the first step lands in a
+/// common year, and the day stays the 28th after that.
+fn subtract_years(now: NaiveDateTime, years: i64) -> Option<NaiveDateTime> {
+    let day = if years > 0 && now.month() == 2 && now.day() == 29 {
+        28
+    } else {
+        now.day()
+    };
+    let date = NaiveDate::from_ymd_opt(now.year() - years as i32, now.month(), day)?;
+    Some(date.and_time(now.time()))
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if NaiveDate::from_ymd_opt(year, 2, 29).is_some() => 29,
+        2 => 28,
+        _ => 31,
+    }
 }
 
 /// Parse a date value from a string (ISO date, ISO datetime, or relative date)
 fn parse_date_value(value: &serde_json::Value) -> Option<DateTime<Utc>> {
     let date_str = value.as_str()?;
 
-    // Try relative date first (e.g., "-7d")
-    if date_str.starts_with('-') && date_str.len() > 1 {
-        if let Some(dt) = parse_relative_date(date_str) {
-            return Some(dt);
-        }
+    // Try relative date first (e.g., "-7d" or "7d")
+    if let Some(dt) = parse_relative_date(date_str) {
+        return Some(dt);
     }
 
     // Try ISO datetime with timezone (e.g., "2024-06-15T10:30:00Z")
@@ -2664,6 +2708,100 @@ mod tests {
             json!(six_months_ago.format("%Y-%m-%d").to_string()),
         );
         assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    fn utc(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn test_relative_months_and_years_clamp_after_every_step() {
+        let cases = [
+            ("2025-03-31T12:00:00Z", "-1m", "2025-02-28T12:00:00Z"),
+            ("2025-05-31T12:00:00Z", "-1m", "2025-04-30T12:00:00Z"),
+            ("2024-03-31T12:00:00Z", "-1m", "2024-02-29T12:00:00Z"),
+            ("2025-03-31T12:00:00Z", "-2m", "2025-01-28T12:00:00Z"),
+            ("2025-03-31T12:00:00Z", "-13m", "2024-02-28T12:00:00Z"),
+            ("2025-12-31T12:00:00Z", "-10m", "2025-02-28T12:00:00Z"),
+            ("2019-01-29T12:00:00Z", "-12m", "2018-01-28T12:00:00Z"),
+            ("2025-01-08T00:00:00Z", "-12m", "2024-01-08T00:00:00Z"),
+            ("2019-01-29T12:00:00Z", "-1y", "2018-01-29T12:00:00Z"),
+            ("2024-02-29T12:00:00Z", "-1y", "2023-02-28T12:00:00Z"),
+            ("2024-02-29T12:00:00Z", "-4y", "2020-02-28T12:00:00Z"),
+            ("2025-03-31T12:00:00Z", "-0m", "2025-03-31T12:00:00Z"),
+        ];
+        for (now, value, expected) in cases.iter() {
+            assert_eq!(
+                parse_relative_date_at(value, utc(now)),
+                Some(utc(expected)),
+                "{} from {}",
+                value,
+                now
+            );
+        }
+    }
+
+    #[test]
+    fn test_relative_date_grammar() {
+        let now = utc("2025-01-08T00:00:00Z");
+        assert_eq!(
+            parse_relative_date_at("1d", now),
+            Some(utc("2025-01-07T00:00:00Z"))
+        );
+        assert_eq!(
+            parse_relative_date_at("-1h", now),
+            Some(utc("2025-01-07T23:00:00Z"))
+        );
+        assert_eq!(
+            parse_relative_date_at("-1w", now),
+            Some(utc("2025-01-01T00:00:00Z"))
+        );
+        assert_eq!(
+            parse_relative_date_at("1y", now),
+            Some(utc("2024-01-08T00:00:00Z"))
+        );
+        assert!(parse_relative_date_at("-9999y", now).is_some());
+        for value in [
+            "10000d",
+            "-10000h",
+            "-999999999999d",
+            "99999999999999999999d",
+            "7",
+            "d",
+            "-d",
+            "7D",
+            "7s",
+            "1.5d",
+            "--7d",
+            "+7d",
+            "",
+        ]
+        .iter()
+        {
+            assert_eq!(parse_relative_date_at(value, now), None, "{}", value);
+        }
+    }
+
+    #[test]
+    fn test_is_date_after_with_unsigned_and_out_of_range_relative_dates() {
+        let mut properties = HashMap::new();
+        properties.insert(
+            "last_seen".to_string(),
+            json!(chrono::Utc::now().to_rfc3339()),
+        );
+        let prop = |value: &str| Property {
+            key: "last_seen".to_string(),
+            value: json!(value),
+            operator: "is_date_after".to_string(),
+            property_type: None,
+        };
+
+        assert!(match_property(&prop("7d"), &properties).unwrap());
+        // Out of range is inconclusive, and the subtraction must not panic.
+        assert!(match_property(&prop("-10000d"), &properties).is_err());
+        assert!(match_property(&prop("-999999999999d"), &properties).is_err());
     }
 
     #[test]
