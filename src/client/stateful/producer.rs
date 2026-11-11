@@ -264,31 +264,40 @@ impl Client {
 
     /// The caller owns the recursion guard and the operation's identity snapshot.
     pub(super) fn capture_snapshot(&self, input: Capture, snapshot: &Snapshot) -> CaptureOutcome {
-        if self.closed.load(Ordering::Acquire) {
-            return CaptureOutcome::Closed;
-        }
-        if self.snapshot_opted_out(snapshot) {
-            return CaptureOutcome::OptedOut;
-        }
-        let wire = match self
-            .producer
-            .as_ref()
-            .unwrap()
-            .prepare(input, snapshot, Utc::now())
-        {
+        let wire = match self.prepare_snapshot(input, snapshot) {
             Ok(wire) => wire,
             Err(outcome) => return outcome,
         };
-        // A hook can close the client. Its outer capture must not be admitted.
-        if self.closed.load(Ordering::Acquire) {
-            return CaptureOutcome::Closed;
-        }
         let uuid = wire.uuid;
         match self.transport.as_ref().unwrap().enqueue_prepared(wire) {
             Admission::Accepted => CaptureOutcome::Accepted { uuid },
             Admission::Full => CaptureOutcome::Full,
             Admission::Closed => CaptureOutcome::Closed,
         }
+    }
+
+    /// Prepare outside SDK locks; hooks can inspect, reset, or close the client.
+    pub(super) fn prepare_snapshot(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+    ) -> Result<CaptureEvent, CaptureOutcome> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CaptureOutcome::Closed);
+        }
+        if self.snapshot_opted_out(snapshot) {
+            return Err(CaptureOutcome::OptedOut);
+        }
+        let wire = self
+            .producer
+            .as_ref()
+            .unwrap()
+            .prepare(input, snapshot, Utc::now())?;
+        // A hook can close the client. Its outer capture must not be admitted.
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CaptureOutcome::Closed);
+        }
+        Ok(wire)
     }
 
     /// Capture `$screen` through the ordinary event pipeline. The explicit name

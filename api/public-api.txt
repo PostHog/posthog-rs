@@ -763,9 +763,16 @@ pub fn posthog::RequestContext::session_id(self, impl core::convert::Into<alloc:
 pub posthog::SendEmailResult::id: alloc::string::String
 pub posthog::SendEmailResult::replayed: bool
 pub posthog::SendEmailResult::warnings: alloc::vec::Vec<posthog::EmailWarning>
+#[non_exhaustive] pub struct posthog::StorageError
+impl posthog::StorageError
+pub fn posthog::StorageError::kind(&self) -> core::io::error::ErrorKind
+pub fn posthog::StorageError::raw_os_error(&self) -> core::option::Option<i32>
+impl core::error::Error for posthog::StorageError
+impl core::fmt::Display for posthog::StorageError
+pub fn posthog::StorageError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct posthog::StorageFailure<'a>
 impl posthog::StorageFailure<'_>
-pub fn posthog::StorageFailure<'_>::error(&self) -> &std::io::error::Error
+pub fn posthog::StorageFailure<'_>::error(&self) -> &posthog::StorageError
 pub fn posthog::StorageFailure<'_>::operation(&self) -> posthog::StorageOperation
 pub struct posthog::TemplateEmail
 impl posthog::TemplateEmail
