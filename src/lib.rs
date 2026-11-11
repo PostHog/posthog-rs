@@ -160,8 +160,8 @@ pub use client::ClientOptions;
 pub use client::ClientOptionsBuilder;
 pub use client::ClientOptionsBuilderError;
 pub use client::{
-    CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError, StorageFailure,
-    StorageOperation,
+    CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError, StorageError,
+    StorageFailure, StorageOperation,
 };
 
 // Endpoints

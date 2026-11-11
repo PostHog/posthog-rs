@@ -109,8 +109,46 @@ pub enum StorageOperation {
 #[non_exhaustive]
 pub struct StorageFailure<'a> {
     pub(crate) operation: StorageOperation,
-    pub(crate) error: &'a std::io::Error,
+    pub(crate) error: &'a StorageError,
 }
+
+/// An immutable snapshot of an I/O or decoding error. It preserves the error
+/// kind, OS code and display message without retaining a backend's mutable source.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct StorageError {
+    kind: std::io::ErrorKind,
+    raw_os_error: Option<i32>,
+    message: String,
+}
+
+impl StorageError {
+    pub(crate) fn from_io(error: &std::io::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+            message: error.to_string(),
+        }
+    }
+
+    /// The classification of the original I/O error.
+    pub fn kind(&self) -> std::io::ErrorKind {
+        self.kind
+    }
+
+    /// The OS error code, when the original error supplied one.
+    pub fn raw_os_error(&self) -> Option<i32> {
+        self.raw_os_error
+    }
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StorageError {}
 
 impl StorageFailure<'_> {
     /// The operation that failed.
@@ -118,9 +156,9 @@ impl StorageFailure<'_> {
         self.operation
     }
 
-    /// The underlying I/O or decoding error. Custom backends may include file
-    /// paths or other application context in the error; handle it accordingly.
-    pub fn error(&self) -> &std::io::Error {
+    /// An immutable diagnostic for the I/O or decoding error. The message may
+    /// contain paths or other application context supplied by the backend.
+    pub fn error(&self) -> &StorageError {
         self.error
     }
 }
@@ -421,7 +459,10 @@ mod tests {
             })
             .build()
             .unwrap();
-        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "write failed");
+        let error = StorageError::from_io(&std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "write failed",
+        ));
         super::super::common::apply_on_error_hooks(
             &opts.on_error,
             &PostHogError::Storage(StorageFailure {
@@ -436,6 +477,27 @@ mod tests {
                 std::io::ErrorKind::PermissionDenied
             ))
         );
+    }
+
+    #[test]
+    fn storage_diagnostics_preserve_error_details_and_unwind_safety() {
+        fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        unwind_safe::<crate::PostHogError<'static>>();
+        unwind_safe::<StorageFailure<'static>>();
+        unwind_safe::<StorageError>();
+
+        let source = std::io::Error::from_raw_os_error(2);
+        let diagnostic = StorageError::from_io(&source);
+        assert_eq!(diagnostic.kind(), source.kind());
+        assert_eq!(diagnostic.raw_os_error(), source.raw_os_error());
+        assert_eq!(diagnostic.to_string(), source.to_string());
+        let custom = StorageError::from_io(&std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid record",
+        ));
+        assert_eq!(custom.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(custom.raw_os_error(), None);
+        assert_eq!(custom.to_string(), "invalid record");
     }
 
     #[test]

@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::tests::{options, ManualClock};
 use super::{Admission, CaptureEvent, Clock, LaneConfig, StorageState, TransportHandle};
 use crate::client::event_store::{
-    EventStore, FileEventStore, Recovery, StorageDirectory, StoreKey, StoreLimits,
+    EventStore, FileEventStore, Recovery, StorageDirectory, StoreKey, StoreLimits, StoreWriteError,
 };
 use crate::{Event, PostHogError, StorageOperation};
 
@@ -295,15 +295,12 @@ impl EventStore for BlockedWriteFailure {
         Ok(Recovery::default())
     }
 
-    fn put(&mut self, _: &CaptureEvent) -> io::Result<StoreKey> {
+    fn put(&mut self, _: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
         if let Some(entered) = self.entered.take() {
             entered.send(std::thread::current().id()).unwrap();
             self.release.recv().unwrap();
         }
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "test write failure",
-        ))
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "test write failure").into())
     }
 
     fn remove(&mut self, _: StoreKey) -> io::Result<()> {
@@ -429,13 +426,85 @@ fn unsupported_file_record_reports_write_error_and_delivers_from_memory() {
     assert!(recovered.errors.is_empty());
 }
 
+struct UncertainWrite(FileEventStore, bool);
+
+impl EventStore for UncertainWrite {
+    fn recover(&mut self, events: usize, bytes: u64) -> io::Result<Recovery> {
+        self.0.recover(events, bytes)
+    }
+    fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
+        let key = self.0.put(event)?;
+        if std::mem::replace(&mut self.1, false) {
+            Err(StoreWriteError {
+                key: Some(key),
+                error: io::Error::other("directory sync failed"),
+            })
+        } else {
+            Ok(key)
+        }
+    }
+    fn remove(&mut self, key: StoreKey) -> io::Result<()> {
+        self.0.remove(key)
+    }
+}
+
+#[test]
+fn uncertain_write_keys_are_acknowledged_and_release_spool_capacity() {
+    let server = MockServer::start();
+    let directory = TestDirectory::new();
+    let first = wire("uncertain-first");
+    let second = wire("next");
+    let sent = server.mock(|when, then| {
+        when.method(POST);
+        then.status(200).json_body(serde_json::json!({"results": {
+            (first.uuid.to_string()): {"result":"ok"},
+            (second.uuid.to_string()): {"result":"ok"}
+        }}));
+    });
+    let store = FileEventStore::open(
+        StorageDirectory::open(&directory.0).unwrap(),
+        StoreLimits {
+            max_events: 1,
+            max_bytes: 128 * 1024,
+            max_record_bytes: 4096,
+        },
+    )
+    .unwrap();
+    let (tx, rx) = mpsc::channel();
+    let handle = TransportHandle::spawn_persistent(
+        options(server.base_url())
+            .on_error(move |failure| {
+                if let PostHogError::Storage(failure) = failure {
+                    tx.send(failure.operation()).unwrap();
+                }
+            })
+            .build()
+            .unwrap(),
+        Box::new(UncertainWrite(store, true)),
+        64 * 1024,
+    );
+    handle.flush_blocking();
+    assert_eq!(handle.enqueue_prepared(first), Admission::Accepted);
+    handle.flush_blocking();
+    assert!(directory.records().is_empty());
+    assert_eq!(handle.enqueue_prepared(second), Admission::Accepted);
+    handle.flush_blocking();
+    assert!(directory.records().is_empty());
+    handle.shutdown_blocking();
+    sent.assert_calls(2);
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![StorageOperation::Write]
+    );
+}
+
 struct RemovalFailure(FileEventStore);
 
 impl EventStore for RemovalFailure {
     fn recover(&mut self, events: usize, bytes: u64) -> io::Result<Recovery> {
         self.0.recover(events, bytes)
     }
-    fn put(&mut self, event: &CaptureEvent) -> io::Result<StoreKey> {
+    fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
         self.0.put(event)
     }
     fn remove(&mut self, _: StoreKey) -> io::Result<()> {
@@ -587,12 +656,10 @@ fn shutdown_warnings_distinguish_memory_losses_from_persisted_events() {
         fn recover(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
             self.0.recover(count, bytes)
         }
-        fn put(&mut self, event: &CaptureEvent) -> io::Result<StoreKey> {
+        fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
             self.1 += 1;
             if self.1 == 2 {
-                Err(io::Error::other(
-                    "test write failure before record creation",
-                ))
+                Err(io::Error::other("test write failure before record creation").into())
             } else {
                 self.0.put(event)
             }
@@ -764,7 +831,7 @@ impl EventStore for BlockedRecovery {
         }
         self.inner.recover(events, bytes)
     }
-    fn put(&mut self, event: &CaptureEvent) -> io::Result<StoreKey> {
+    fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
         self.inner.put(event)
     }
     fn remove(&mut self, key: StoreKey) -> io::Result<()> {
@@ -828,6 +895,60 @@ fn recovery_reserves_capacity_before_io_and_pages_a_larger_old_backlog() {
     handle.shutdown_blocking();
 }
 
+#[test]
+fn transient_record_read_failure_recovers_in_process_without_starving_other_events() {
+    let server = MockServer::start();
+    let directory = TestDirectory::new();
+    let first = wire("blocked-old");
+    let second = wire("healthy-old");
+    let fresh = wire("fresh");
+    let (blocked_path, backup) = {
+        let mut store = directory.open();
+        store.put(&first).unwrap();
+        store.put(&second).unwrap();
+        let path = directory.records()[0].clone();
+        let backup = path.with_extension("waiting");
+        (path, backup)
+    };
+    let store = directory.open();
+    fs::rename(&blocked_path, &backup).unwrap();
+    fs::create_dir(&blocked_path).unwrap();
+    let recovered = server.mock(|when, then| {
+        when.method(POST).body_includes(first.uuid.to_string());
+        then.status(200).json_body(serde_json::json!({"results": {
+            (first.uuid.to_string()): {"result":"ok"}
+        }}));
+    });
+    let healthy = server.mock(|when, then| {
+        when.method(POST).body_includes(second.uuid.to_string());
+        then.status(200).json_body(serde_json::json!({"results": {
+            (second.uuid.to_string()): {"result":"ok"}
+        }}));
+    });
+    let live = server.mock(|when, then| {
+        when.method(POST).body_includes(fresh.uuid.to_string());
+        then.status(200).json_body(serde_json::json!({"results": {
+            (fresh.uuid.to_string()): {"result":"ok"}
+        }}));
+    });
+    let clock = ManualClock::new();
+    let handle = persistent(&server, &clock, store);
+    handle.flush_blocking();
+    healthy.assert_calls(1);
+    recovered.assert_calls(0);
+    assert_eq!(handle.enqueue_prepared(fresh), Admission::Accepted);
+    handle.flush_blocking();
+    live.assert_calls(1);
+    fs::remove_dir(&blocked_path).unwrap();
+    fs::rename(backup, blocked_path).unwrap();
+    clock.advance(Duration::from_secs(11));
+    handle.tick();
+    recovered.assert_calls(1);
+    healthy.assert_calls(1);
+    assert!(directory.records().is_empty());
+    handle.shutdown_blocking();
+}
+
 struct ReadFailure(FileEventStore);
 
 impl EventStore for ReadFailure {
@@ -837,7 +958,7 @@ impl EventStore for ReadFailure {
             "test read failure",
         ))
     }
-    fn put(&mut self, event: &CaptureEvent) -> io::Result<StoreKey> {
+    fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
         self.0.put(event)
     }
     fn remove(&mut self, key: StoreKey) -> io::Result<()> {

@@ -123,8 +123,8 @@ fn nested_records_roundtrip_up_to_the_recovery_depth_limit() {
                 result.unwrap();
             } else {
                 let error = result.unwrap_err();
-                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-                assert_eq!(error.to_string(), "Invalid persisted event record");
+                assert_eq!(error.error.kind(), io::ErrorKind::InvalidData);
+                assert_eq!(error.error.to_string(), "Invalid persisted event record");
                 assert_eq!(store.count, 0);
                 assert_eq!(store.bytes, 0);
                 assert_eq!(store.last_key, 0);
@@ -209,7 +209,7 @@ fn byte_and_record_limits_are_enforced_without_partial_files() {
     let mut oversized = record.clone();
     oversized.properties = serde_json::json!({"large": "x".repeat(size as usize)});
     assert_eq!(
-        store.put(&oversized).unwrap_err().kind(),
+        store.put(&oversized).unwrap_err().error.kind(),
         io::ErrorKind::InvalidInput
     );
     assert_eq!(store.count, 0);
@@ -390,7 +390,7 @@ fn candidate_selection_is_bounded_before_payload_reads() {
         let store = directory.open(limits());
         store.events_path.clone()
     };
-    for key in 1..=200 {
+    for key in 1..=RECOVERY_INDEX_LIMIT + 1 {
         fs::write(path.join(format!("{key:020}.json")), b"invalid").unwrap();
     }
     let mut store = directory.open(StoreLimits {
@@ -399,11 +399,102 @@ fn candidate_selection_is_bounded_before_payload_reads() {
     });
     let (selected, total) = store.candidates(3).unwrap();
     assert_eq!(selected, vec![StoreKey(1), StoreKey(2), StoreKey(3)]);
-    assert_eq!(total, 200);
+    assert_eq!(total, RECOVERY_INDEX_LIMIT + 1);
+    assert!(store.startup_index.is_none());
     let recovered = store.recover(200, 64 * 1024).unwrap();
     assert_eq!(recovered.errors.len(), 3);
     assert!(recovered.more);
     assert!(path.join("00000000000000000004.json").exists());
+}
+
+#[test]
+fn indexed_recovery_reuses_one_bounded_filename_scan() {
+    let directory = TestDirectory::new();
+    {
+        let mut store = directory.open(limits());
+        for index in 0..7 {
+            store.put(&event(&format!("event-{index}"))).unwrap();
+        }
+    }
+    let mut store = directory.open(limits());
+    assert_eq!(store.directory_scans.get(), 1);
+    let mut recovered = Vec::new();
+    loop {
+        let page = store.recover(2, 64 * 1024).unwrap();
+        assert!(page.errors.is_empty());
+        assert!(!page.retry_pending);
+        for record in page.events {
+            recovered.push(record.event.event);
+            store.remove(record.key).unwrap();
+        }
+        if !page.more {
+            break;
+        }
+    }
+    assert_eq!(
+        recovered,
+        (0..7).map(|i| format!("event-{i}")).collect::<Vec<_>>()
+    );
+    assert_eq!(store.directory_scans.get(), 1);
+    assert!(store.recover(2, 64 * 1024).unwrap().events.is_empty());
+}
+
+#[test]
+fn unreadable_record_retries_after_healthy_pages_without_reloading_owned_records() {
+    let directory = TestDirectory::new();
+    let first = {
+        let mut store = directory.open(limits());
+        let first = store.put(&event("temporarily-unreadable")).unwrap();
+        store.put(&event("healthy-second")).unwrap();
+        store.put(&event("healthy-third")).unwrap();
+        first
+    };
+    let mut store = directory.open(limits());
+    let path = store.path(first);
+    let backup = path.with_extension("waiting");
+    fs::rename(&path, &backup).unwrap();
+    fs::create_dir(&path).unwrap();
+    let failed = store.recover(1, 64 * 1024).unwrap();
+    assert_eq!(failed.errors.len(), 1);
+    assert!(failed.events.is_empty());
+    assert!(failed.more && failed.retry_pending);
+    let second = store.recover(1, 64 * 1024).unwrap();
+    assert_eq!(second.events[0].event.event, "healthy-second");
+    assert!(second.more);
+    let third = store.recover(1, 64 * 1024).unwrap();
+    assert_eq!(third.events[0].event.event, "healthy-third");
+    assert!(!third.more && third.retry_pending);
+    let still_failed = store.recover(1, 64 * 1024).unwrap();
+    assert_eq!(still_failed.errors.len(), 1);
+    assert!(!still_failed.more && still_failed.retry_pending);
+    fs::remove_dir(&path).unwrap();
+    fs::rename(backup, &path).unwrap();
+    let retried = store.recover(1, 64 * 1024).unwrap();
+    assert_eq!(retried.events.len(), 1);
+    assert_eq!(retried.events[0].key, first);
+    assert!(!retried.more && !retried.retry_pending);
+    assert!(store.recover(10, 64 * 1024).unwrap().events.is_empty());
+    assert_eq!(store.directory_scans.get(), 1);
+}
+
+#[test]
+fn post_rename_sync_failure_retains_key_until_acknowledgement() {
+    let directory = TestDirectory::new();
+    let mut store = directory.open(StoreLimits {
+        max_events: 1,
+        ..limits()
+    });
+    store.fail_directory_sync.set(true);
+    let failure = store.put(&event("uncertain")).unwrap_err();
+    let key = failure.key.expect("the renamed record remains owned");
+    assert_eq!(failure.error.kind(), io::ErrorKind::Other);
+    assert!(store.path(key).is_file());
+    assert_eq!(store.count, 1);
+    assert!(store.bytes > 0);
+    assert!(store.put(&event("full")).is_err());
+    store.remove(key).unwrap();
+    assert_eq!((store.count, store.bytes), (0, 0));
+    assert!(store.put(&event("next")).is_ok());
 }
 
 #[test]
