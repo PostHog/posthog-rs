@@ -854,6 +854,19 @@ impl From<CaptureEvent> for DeliveryEvent {
     }
 }
 
+impl DeliveryEvent {
+    fn has_store_key(&self) -> bool {
+        #[cfg(feature = "stateful")]
+        {
+            self.store_key.is_some()
+        }
+        #[cfg(not(feature = "stateful"))]
+        {
+            false
+        }
+    }
+}
+
 impl AsRef<CaptureEvent> for DeliveryEvent {
     fn as_ref(&self) -> &CaptureEvent {
         &self.wire
@@ -903,6 +916,20 @@ impl LiveBuffer {
 
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    fn persisted(&self) -> usize {
+        match self {
+            Self::Deferred(events) => events
+                .iter()
+                .filter(
+                    |event| matches!(event, QueuedEvent::Prepared(event) if event.has_store_key()),
+                )
+                .count(),
+            Self::Prepared { events, .. } => {
+                events.iter().filter(|event| event.has_store_key()).count()
+            }
+        }
     }
 
     fn clear(&mut self) {
@@ -1232,7 +1259,7 @@ fn send_buffer(
 ) {
     while !buffer.is_empty() {
         if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
-            pipeline.warn_shutdown_drop(buffer.len(), "buffered ");
+            pipeline.warn_shutdown_drop(buffer.len(), buffer.persisted(), "buffered ");
             dec_len(&pipeline.len, buffer.len());
             buffer.clear();
             return;
@@ -1434,8 +1461,13 @@ impl Pipeline {
                 let mut chunks = chunk_by_bytes(measured, target).into_iter();
                 while let Some(chunk) = chunks.next() {
                     if deadline.is_some_and(|d| self.clock.now() >= d) {
-                        let dropped = chunk.len() + chunks.map(|c| c.len()).sum::<usize>();
-                        self.warn_shutdown_drop(dropped, "");
+                        let mut dropped = 0;
+                        let mut persisted = 0;
+                        for chunk in std::iter::once(chunk).chain(chunks) {
+                            dropped += chunk.len();
+                            persisted += chunk.iter().filter(|event| event.has_store_key()).count();
+                        }
+                        self.warn_shutdown_drop(dropped, persisted, "");
                         dec_len(&self.len, dropped);
                         return;
                     }
@@ -1590,22 +1622,35 @@ impl Pipeline {
                 let status = resp.status().as_u16();
                 http_status = Some(status);
                 let retry_after = capture::parse_retry_after(resp.headers());
-                let text = resp.text().unwrap_or_else(|_| "Unknown error".to_string());
-                let step = capture::after_response_with_retention(
-                    &self.options,
-                    &batch.request_id,
-                    batch.attempt,
-                    status,
-                    retry_after,
-                    &text,
-                    &mut batch.pending,
-                    &mut batch.final_results,
-                    retention,
-                );
-                if !self.options.on_error.is_empty() && !(200..=299).contains(&status) {
-                    response_body = Some(text);
+                match resp.text() {
+                    Err(error) if retaining && (200..=299).contains(&status) => {
+                        capture::after_transport_error_with_retention(
+                            &self.options,
+                            &batch.request_id,
+                            batch.attempt,
+                            error.to_string(),
+                            retention,
+                        )
+                    }
+                    body => {
+                        let text = body.unwrap_or_else(|_| "Unknown error".to_string());
+                        let step = capture::after_response_with_retention(
+                            &self.options,
+                            &batch.request_id,
+                            batch.attempt,
+                            status,
+                            retry_after,
+                            &text,
+                            &mut batch.pending,
+                            &mut batch.final_results,
+                            retention,
+                        );
+                        if !self.options.on_error.is_empty() && !(200..=299).contains(&status) {
+                            response_body = Some(text);
+                        }
+                        step
+                    }
                 }
-                step
             }
         };
 
@@ -1698,7 +1743,15 @@ impl Pipeline {
                 }
                 if deadline.is_some() {
                     if retaining {
-                        warn!("posthog-rs: shutdown left undelivered events; persisted records remain queued");
+                        self.warn_retained_shutdown(
+                            batch.pending.len(),
+                            batch
+                                .pending
+                                .iter()
+                                .filter(|event| event.has_store_key())
+                                .count(),
+                            "undelivered ",
+                        );
                     } else {
                         warn!(
                             "posthog-rs: dropping {} undelivered event(s) for {} on shutdown",
@@ -1750,13 +1803,29 @@ impl Pipeline {
                 && self.clock.now() < batch.next_at
             {
                 if deadline.is_some() {
-                    // Teardown releases memory but preserves durable records.
+                    self.warn_retained_shutdown(
+                        batch.pending.len(),
+                        batch
+                            .pending
+                            .iter()
+                            .filter(|event| event.has_store_key())
+                            .count(),
+                        "undelivered ",
+                    );
                     dec_len(&self.len, batch.pending.len());
                 } else {
                     self.retries.push_back(batch);
                 }
             } else if deadline.is_some_and(|d| self.clock.now() >= d) {
-                self.warn_shutdown_drop(batch.pending.len(), "undelivered ");
+                self.warn_shutdown_drop(
+                    batch.pending.len(),
+                    batch
+                        .pending
+                        .iter()
+                        .filter(|event| event.has_store_key())
+                        .count(),
+                    "undelivered ",
+                );
                 dec_len(&self.len, batch.pending.len());
             } else {
                 self.attempt(batch, deadline);
@@ -1764,19 +1833,29 @@ impl Pipeline {
         }
     }
 
-    fn warn_shutdown_drop(&self, count: usize, category: &str) {
+    fn warn_shutdown_drop(&self, count: usize, persisted: usize, category: &str) {
         if self.retry_retention() == super::capture::RetryRetention::Discard {
             warn!(
                 "posthog-rs: shutdown timeout reached; dropping {count} {category}event(s) for {}",
                 self.lane.endpoint
             );
         } else {
-            warn!("posthog-rs: shutdown timeout reached; releasing {count} {category}event(s) from memory for {}; persisted records remain on disk", self.lane.endpoint);
+            self.warn_retained_shutdown(count, persisted, category);
         }
     }
 
-    /// Fire the `on_error` hooks for a terminal capture outcome. `error` is
-    /// `None` only for a `2xx` whose events weren't persisted after retries.
+    fn warn_retained_shutdown(&self, count: usize, persisted: usize, category: &str) {
+        let unconfirmed = count - persisted;
+        if unconfirmed > 0 {
+            warn!("posthog-rs: shutdown stopped delivery for {}; dropping {unconfirmed} {category}event(s) without confirmed persistence; {persisted} persisted event(s) remain on disk", self.lane.endpoint);
+        } else {
+            warn!("posthog-rs: shutdown stopped delivery for {}; releasing {count} {category}event(s) from memory; {persisted} persisted event(s) remain on disk", self.lane.endpoint);
+        }
+    }
+
+    /// Fire the `on_error` hooks for permanent capture losses. `error` is None
+    /// for per-event losses from a 2xx, including losses reported while other
+    /// events remain queued for persistent delivery.
     fn fire_capture(
         &self,
         batch: &RetryBatch,
