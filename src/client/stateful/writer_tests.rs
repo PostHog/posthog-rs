@@ -498,6 +498,34 @@ fn no_op_invalid_and_oversized_mutations_do_not_change_memory_or_revision() {
 }
 
 #[test]
+fn process_local_bookkeeping_updates_do_not_advance_persisted_revision() {
+    let original = Snapshot::anonymous("initial".into());
+    let writer = StateWriter::new(
+        original.clone(),
+        Backend::Memory,
+        options(),
+        vec![],
+        Arc::new(SystemClock),
+    )
+    .unwrap();
+    assert_eq!(
+        writer.update(|state| {
+            state.generation = 1;
+            state.context_revision = 2;
+            state.person_properties = Some([3; 20]);
+        }),
+        Ok(1)
+    );
+    let current = writer.snapshot();
+    assert!(current.same_persisted_state(&original));
+    assert_eq!(current.generation, 1);
+    assert_eq!(current.context_revision, 2);
+    assert_eq!(current.person_properties, Some([3; 20]));
+    assert_eq!(writer.checkpoint(), 1);
+    assert_eq!(writer.wait_blocking(1), DrainOutcome::MemoryOnly);
+}
+
+#[test]
 fn concurrent_mutations_are_synchronously_visible_without_lost_updates() {
     let writer = Arc::new(
         StateWriter::new(

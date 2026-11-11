@@ -5,6 +5,7 @@ use serde_json::Value;
 use sha1::{Digest, Sha1};
 
 use super::producer::CaptureGuard;
+use super::writer::UpdateError;
 use super::{Capture, CaptureOutcome, Client, Snapshot};
 
 /// Default person processing and permission to use identity/profile operations.
@@ -100,6 +101,7 @@ impl Client {
         };
         let input = input.into();
         if input.distinct_id.trim().is_empty() {
+            tracing::warn!("posthog-rs: identity update requires a nonblank distinct ID");
             return;
         }
         let fingerprint = properties_hash(&input.set, &input.set_once);
@@ -152,11 +154,20 @@ impl Client {
         if reset_required {
             tracing::warn!("posthog-rs: reset before identifying a different user");
         }
-        if let Ok((_, Some((event, snapshot, refresh)))) = result {
-            if reload && refresh {
-                self.reload_feature_flags();
+        match result {
+            Ok((_, Some((event, snapshot, refresh)))) => {
+                if reload && refresh {
+                    self.reload_feature_flags();
+                }
+                self.capture_person(event, &snapshot, Some(fingerprint));
             }
-            self.capture_person(event, &snapshot, Some(fingerprint));
+            Err(UpdateError::Full) => {
+                tracing::warn!("posthog-rs: identity update exceeds client-state capacity");
+            }
+            Err(UpdateError::Invalid) => {
+                tracing::warn!("posthog-rs: identity update cannot be encoded in client state");
+            }
+            _ => {}
         }
     }
 
@@ -289,14 +300,12 @@ impl Client {
                 tracing::warn!("posthog-rs: bootstrap differs from the identified user; reset before switching");
             }
         } else if current.distinct_id == id {
-            if self.producer.as_ref().unwrap().person_profiles != PersonProfiles::Never {
-                let _ = self.state.as_ref().unwrap().mutate(|state| {
-                    state.identified = true;
-                    state.person_processing = true;
-                    state.generation = state.generation.wrapping_add(1);
-                    state.person_properties = None;
-                });
-            }
+            let _ = self.state.as_ref().unwrap().mutate(|state| {
+                state.identified = true;
+                state.person_processing = true;
+                state.generation = state.generation.wrapping_add(1);
+                state.person_properties = None;
+            });
         } else {
             // Reconcile setup identity without an intermediate flags request.
             self.identify_with_reload(id, false);

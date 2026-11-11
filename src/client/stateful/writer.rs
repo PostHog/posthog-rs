@@ -454,6 +454,9 @@ impl StateWriter {
             }
             let _ = progress.changed().await;
         };
+        if self.on_worker_thread() {
+            return DrainOutcome::Deferred;
+        }
         self.join();
         outcome
     }
