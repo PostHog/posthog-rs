@@ -12,7 +12,9 @@ use super::{
     Admission, Clock, LaneConfig, StartupFailure, StorageState, SystemClock, TransportHandle,
 };
 use crate::capture_event::CaptureEvent;
-use crate::client::event_store::{record_size, EventStore, FileEventStore, Recovery, StoreKey};
+use crate::client::event_store::{
+    record_size, EventStore, FileEventStore, Recovery, StoreKey, StoreWriteError,
+};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -111,7 +113,7 @@ impl EventStore for GatedRecovery {
         self.inner.recover(events, bytes)
     }
 
-    fn put(&mut self, event: &CaptureEvent) -> io::Result<StoreKey> {
+    fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
         self.inner.put(event)
     }
 
