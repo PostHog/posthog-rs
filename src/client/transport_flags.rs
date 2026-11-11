@@ -296,7 +296,7 @@ fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
     }
     let response: FeatureFlagsResponse =
         serde_json::from_value(value).map_err(|_| LoadError::InvalidResponse)?;
-    let serialized_payloads = matches!(&response, FeatureFlagsResponse::V2 { .. });
+    let legacy_response = matches!(&response, FeatureFlagsResponse::Legacy { .. });
     let details = extract_flag_details(response);
     if details.quota_limited {
         return Err(LoadError::QuotaLimited);
@@ -311,15 +311,15 @@ fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
         .into_iter()
         .map(|(key, mut detail)| {
             // Detach before the shared record conversion: its existing server policy
-            // normalizes strings with a raw-string fallback. Stateful v2 decodes once
-            // and omits malformed strings; legacy payloads are already JSON values.
+            // normalizes strings with a raw-string fallback. Remote string payloads
+            // in both response formats are serialized JSON; decode once and omit
+            // malformed strings before storing the normalized cache.
             let payload = detail
                 .metadata
                 .as_mut()
                 .and_then(|metadata| metadata.payload.take());
             let payload = match payload {
-                Some(Value::String(raw)) if serialized_payloads => match serde_json::from_str(&raw)
-                {
+                Some(Value::String(raw)) => match serde_json::from_str(&raw) {
                     Ok(value) => Some(value),
                     Err(_) => {
                         invalid_payloads = true;
@@ -329,7 +329,7 @@ fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
                 other => other,
             };
             let mut record = remote_record_from_detail(detail, minimal);
-            if !serialized_payloads {
+            if legacy_response {
                 // Legacy normalization synthesizes metadata only to carry payloads.
                 record.id = None;
                 record.version = None;

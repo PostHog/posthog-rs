@@ -249,6 +249,93 @@ fn v2_rich_reads_preserve_disabled_values_and_decoded_payload_types_without_repa
 }
 
 #[test]
+fn legacy_http_payloads_decode_once_before_rich_reads() {
+    let server = MockServer::start();
+    let payloads = [
+        Value::Null,
+        json!(false),
+        json!(0),
+        json!(""),
+        json!("123"),
+        json!("true"),
+        json!([1, null]),
+        json!({"nested":null}),
+    ];
+    let mut flags = serde_json::Map::new();
+    let mut wire_payloads = serde_json::Map::new();
+    for (index, payload) in payloads.iter().enumerate() {
+        let key = format!("flag-{index}");
+        flags.insert(key.clone(), json!(true));
+        wire_payloads.insert(key, json!(serde_json::to_string(payload).unwrap()));
+    }
+    flags.insert("bad".into(), json!(true));
+    wire_payloads.insert("bad".into(), json!("{broken"));
+    let response = server.mock(|when, then| {
+        when.path("/flags/");
+        then.status(200).json_body(json!({"featureFlags":flags,
+            "featureFlagPayloads":wire_payloads,"requestId":"legacy"}));
+    });
+    let analytics = server.mock(|when, then| {
+        when.path("/i/v1/analytics/events");
+        then.status(200);
+    });
+    let client = Client::init_blocking(config(&server));
+    client.reload_feature_flags();
+    client.flush_blocking();
+    let all = client.get_feature_flags().unwrap();
+    for (index, payload) in payloads.iter().enumerate() {
+        let key = format!("flag-{index}");
+        let result = client.feature_flag(&key).send_event(false).get().unwrap();
+        assert_eq!(result.payload.as_ref(), Some(payload));
+        assert_eq!(all[&key], result);
+        assert_eq!(result.request_id.as_deref(), Some("legacy"));
+        assert_eq!(result.id, None);
+        assert_eq!(result.version, None);
+    }
+    assert!(all["bad"].enabled);
+    assert_eq!(all["bad"].payload, None);
+    client.flush_blocking();
+    response.assert_calls(1);
+    analytics.assert_calls(0);
+}
+
+#[test]
+fn remote_empty_variants_are_known_disabled_results() {
+    for body in [
+        json!({"featureFlags":{"empty":"","disabled":false}}),
+        json!({"flags":{
+            "empty":{"key":"empty","enabled":true,"variant":""},
+            "disabled":{"key":"disabled","enabled":false,"variant":"ignored"}
+        }}),
+    ] {
+        let server = MockServer::start();
+        let response = server.mock(|when, then| {
+            when.path("/flags/");
+            then.status(200).json_body(body);
+        });
+        let client = Client::init_blocking(config(&server));
+        client.reload_feature_flags();
+        client.flush_blocking();
+        let result = client
+            .feature_flag("empty")
+            .send_event(false)
+            .get()
+            .unwrap();
+        assert!(
+            !result.enabled,
+            "an empty variant is a known disabled evaluation"
+        );
+        assert_eq!(result.variant.as_deref(), Some(""));
+        let results = client.get_feature_flags().unwrap();
+        assert_eq!(results["empty"], result);
+        assert!(!results["disabled"].enabled);
+        assert_eq!(results["disabled"].variant, None);
+        assert_eq!(client.feature_flag("missing").get(), None);
+        response.assert_calls(1);
+    }
+}
+
+#[test]
 fn unavailable_empty_disabled_invalid_and_closed_have_explicit_results() {
     let server = MockServer::start();
     let requests = server.mock(|_, then| {

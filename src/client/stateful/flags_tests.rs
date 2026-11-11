@@ -163,7 +163,7 @@ fn seed(client: &Client) {
 fn public_reload_sends_exact_current_context_while_opted_out() {
     let server = Server::new(vec![(
         200,
-        json!({"featureFlags":{"checkout":false},"featureFlagPayloads":{"checkout":"123"},"requestId":"wire"}),
+        json!({"featureFlags":{"checkout":false},"featureFlagPayloads":{"checkout":"\"123\""},"requestId":"wire"}),
     )]);
     let mut config = config(&server.host);
     config.disable_geoip = true;

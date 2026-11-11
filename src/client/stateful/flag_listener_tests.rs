@@ -19,7 +19,8 @@ fn setup_empty_bootstrap_notifies_before_gated_default_preload() {
     server.request();
     assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
     server.respond();
-    assert!(!rx.recv_timeout(WAIT).unwrap().flags.unwrap()["remote"].enabled);
+    assert!(rx.recv_timeout(WAIT).unwrap().flags.unwrap().is_empty());
+    assert!(!client.get_feature_flags().unwrap()["remote"].enabled);
     client.flush_blocking();
     server.finish();
 }
@@ -55,7 +56,8 @@ fn same_context_reload_in_first_listener_does_not_starve_later_listener() {
     let first = first_before_second_response
         .expect("queued reload must not suppress a committed notification for later listeners");
     assert!(first.flags.unwrap()["first"].enabled);
-    assert!(!second.flags.unwrap()["second"].enabled);
+    assert!(second.flags.unwrap().is_empty());
+    assert!(!client.get_feature_flags().unwrap()["second"].enabled);
 }
 
 #[test]
@@ -132,10 +134,10 @@ fn reset_discards_inflight_completion_and_does_not_replay_it_to_new_listener() {
     let fresh = rx.recv_timeout(WAIT).unwrap();
     assert_eq!(fresh, late_rx.recv_timeout(WAIT).unwrap());
     assert_eq!(fresh.context.distinct_id, client.get_distinct_id());
-    assert_eq!(
-        fresh.flags.unwrap().keys().collect::<Vec<_>>(),
-        vec!["fresh"]
-    );
+    assert!(fresh.flags.unwrap().is_empty());
+    let all = client.get_feature_flags().unwrap();
+    assert_eq!(all.keys().collect::<Vec<_>>(), vec!["fresh"]);
+    assert!(!all["fresh"].enabled);
     client.flush_blocking();
     server.finish();
 }
@@ -182,7 +184,8 @@ fn reentrant_reset_preserves_registration_and_snapshot_but_skips_remaining_old_d
         let (seen, data) = rx.recv_timeout(WAIT).unwrap();
         assert_eq!(seen, id);
         assert_eq!(data.context.distinct_id, client.get_distinct_id());
-        assert!(!data.flags.unwrap()["new"].enabled);
+        assert!(data.flags.unwrap().is_empty());
+        assert!(!client.get_feature_flags().unwrap()["new"].enabled);
     }
     client.flush_blocking();
     server.finish();

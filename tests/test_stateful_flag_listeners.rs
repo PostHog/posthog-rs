@@ -53,6 +53,55 @@ fn load(
 }
 
 #[test]
+fn listeners_project_enabled_flags_without_changing_bulk_results() {
+    for body in [
+        json!({"featureFlags":{"on":true,"off":false,"empty":""}}),
+        json!({"flags":{
+            "on":{"key":"on","enabled":true},
+            "off":{"key":"off","enabled":false},
+            "empty":{"key":"empty","enabled":true,"variant":""}
+        }}),
+    ] {
+        let server = MockServer::start();
+        let mut setup = config(&server);
+        setup.bootstrap_feature_flags = None;
+        setup.bootstrap_feature_flag_payloads = None;
+        let client = Client::init_blocking(setup);
+        let (tx, rx) = mpsc::channel();
+        client.on_feature_flags(move |data| tx.send(data.clone()).unwrap());
+        let loaded = load(&client, &server, &rx, 200, body);
+        let enabled = loaded.flags.as_ref().unwrap();
+        assert_eq!(enabled.len(), 1);
+        assert!(enabled["on"].enabled);
+        let all = client.get_feature_flags().unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(!all["off"].enabled);
+        assert!(!all["empty"].enabled);
+        assert_eq!(all["empty"].variant.as_deref(), Some(""));
+        let (late_tx, late_rx) = mpsc::channel();
+        let late = client.on_feature_flags(move |data| late_tx.send(data.clone()).unwrap());
+        assert_eq!(update(&late_rx).flags, loaded.flags);
+        late.unsubscribe();
+        let failed = load(&client, &server, &rx, 503, json!({}));
+        assert!(failed.errors_loading);
+        assert_eq!(failed.flags, loaded.flags);
+        let disabled = load(
+            &client,
+            &server,
+            &rx,
+            200,
+            json!({"featureFlags":{"on":false,"off":false,"empty":""}}),
+        );
+        assert_eq!(disabled.flags, Some(HashMap::new()));
+        assert!(!disabled.errors_loading);
+        assert_eq!(client.get_feature_flags().unwrap().len(), 3);
+        let (late_tx, late_rx) = mpsc::channel();
+        client.on_feature_flags(move |data| late_tx.send(data.clone()).unwrap());
+        assert_eq!(update(&late_rx).flags, Some(HashMap::new()));
+    }
+}
+
+#[test]
 fn setup_runtime_order_panic_isolation_drop_and_silent_opted_out_reads() {
     let server = MockServer::start();
     let mut c = config(&server);
@@ -105,10 +154,10 @@ fn setup_runtime_order_panic_isolation_drop_and_silent_opted_out_reads() {
     for id in [1, 2, 3] {
         let (actual, data) = rx.recv_timeout(WAIT).unwrap();
         assert_eq!(actual, id);
-        let a = &data.flags.unwrap()["a"];
-        assert!(!a.enabled);
-        assert_eq!(a.variant, None);
-        assert_eq!(a.request_id.as_deref(), Some("remote"));
+        let flags = data.flags.unwrap();
+        assert!(!flags.contains_key("a"));
+        assert_eq!(flags["b"].variant.as_deref(), Some("green"));
+        assert_eq!(flags["b"].request_id.as_deref(), Some("remote"));
     }
     flags.assert_calls(1);
     assert_eq!(events.load(Ordering::SeqCst), 0);
@@ -147,8 +196,11 @@ fn failures_partial_provenance_malformed_payloads_and_known_empty_are_not_confla
     assert_eq!(partial.error, None);
     assert_eq!(partial.context.person_properties["role"], "new");
     let flags = partial.flags.unwrap();
-    assert_eq!(flags["a"].context.person_properties["role"], "new");
-    assert_eq!(flags["a"].request_id.as_deref(), Some("partial"));
+    assert!(!flags.contains_key("a"));
+    let all = client.get_feature_flags().unwrap();
+    assert!(!all["a"].enabled);
+    assert_eq!(all["a"].context.person_properties["role"], "new");
+    assert_eq!(all["a"].request_id.as_deref(), Some("partial"));
     assert!(flags["b"].context.person_properties.is_empty());
     assert_eq!(flags["b"].request_id, None);
     client.set_person_properties_for_flags(
