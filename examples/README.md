@@ -9,12 +9,16 @@ Set `POSTHOG_PROJECT_TOKEN` and optionally `POSTHOG_HOST` and
 
 ```bash
 cargo run --features stateful --example stateful
+# Identify a user (omit POSTHOG_DISTINCT_ID to remain anonymous):
+POSTHOG_DISTINCT_ID=user-123 cargo run --features stateful --example stateful
 # Without the async client feature:
 cargo run --no-default-features --features stateful,tls --example stateful
 ```
 
-This blocking example uses automatic local persistence, anonymous identity,
-explicit capture/screen, a native privacy hook, and separate drain reports.
+This blocking example uses automatic local persistence, anonymous or identified
+identity, explicit capture/screen, a native privacy hook, and separate drain reports.
+Identity persists between runs. Call `client.reset()` before identifying a different
+user in the same storage scope.
 
 ## Running the Examples
 
