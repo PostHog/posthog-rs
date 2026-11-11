@@ -220,9 +220,13 @@ pub(super) fn report_storage_error(
     if hooks.is_empty() {
         tracing::warn!(?operation, kind = ?error.kind(), "posthog-rs: storage operation failed");
     } else {
+        let error = super::StorageError::from_io(error);
         apply_on_error_hooks(
             hooks,
-            &PostHogError::Storage(super::StorageFailure { operation, error }),
+            &PostHogError::Storage(super::StorageFailure {
+                operation,
+                error: &error,
+            }),
         );
     }
 }
