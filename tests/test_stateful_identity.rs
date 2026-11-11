@@ -640,3 +640,65 @@ fn async_initialization_exposes_the_same_synchronous_identity_api() {
         client.shutdown(Some(Duration::ZERO)).await;
     });
 }
+
+#[test]
+fn person_admission_full_warnings_can_read_and_reset_client_state() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing_subscriber::prelude::*;
+
+    struct ResetOnWarning {
+        client: Weak<Client>,
+        calls: Arc<AtomicUsize>,
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ResetOnWarning {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let client = self.client.upgrade().unwrap();
+                assert_eq!(client.get_distinct_id(), "anonymous");
+                client.reset();
+                self.calls.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    for byte_limit in [false, true] {
+        let mut conf = config();
+        if byte_limit {
+            conf.max_queue_bytes = 1;
+            conf.max_record_bytes = 1;
+        } else {
+            conf.max_queue_size = 1;
+        }
+        let client = Arc::new(Client::init_blocking(conf));
+        assert!(!client.is_disabled());
+        if !byte_limit {
+            assert!(matches!(
+                client.capture("occupy"),
+                CaptureOutcome::Accepted { .. }
+            ));
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(ResetOnWarning {
+            client: Arc::downgrade(&client),
+            calls: calls.clone(),
+        });
+        let producer = client.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tracing::subscriber::with_default(subscriber, || {
+                producer.set_person_properties(properties(json!({"plan":"A"})), HashMap::new());
+            });
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("full-queue tracing held the person admission lock");
+        worker.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_ne!(client.get_distinct_id(), "anonymous");
+    }
+}
