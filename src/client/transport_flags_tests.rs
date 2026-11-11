@@ -61,27 +61,48 @@ fn v2_payloads_decode_once_with_reporting_metadata() {
 }
 
 #[test]
-fn malformed_v2_payload_is_absent_but_legacy_strings_and_null_are_values() {
+fn malformed_wire_payload_is_absent_in_both_response_formats() {
     for raw in ["", "invalid sensitive data", "{broken"] {
-        let loaded = decode(&response(json!(raw))).unwrap();
-        assert!(loaded.invalid_payloads);
-        assert_eq!(loaded.records["checkout"].payload, None);
-        assert!(loaded.records["checkout"].enabled);
+        for bytes in [
+            response(json!(raw)),
+            serde_json::to_vec(&json!({"featureFlags":{"checkout":true},
+                "featureFlagPayloads":{"checkout":raw}}))
+            .unwrap(),
+        ] {
+            let loaded = decode(&bytes).unwrap();
+            assert!(loaded.invalid_payloads);
+            assert_eq!(loaded.records["checkout"].payload, None);
+            assert!(loaded.records["checkout"].enabled);
+        }
     }
-    for value in [
-        json!(""),
-        json!("123"),
-        json!("true"),
-        json!("{broken"),
-        Value::Null,
+}
+
+#[test]
+fn legacy_wire_payloads_decode_once_without_synthetic_metadata() {
+    for (value, expected) in [
+        (json!("null"), Value::Null),
+        (json!("false"), json!(false)),
+        (json!("0"), json!(0)),
+        (json!("\"123\""), json!("123")),
+        (json!("\"true\""), json!("true")),
+        (json!("\"\""), json!("")),
+        (json!("[1,null]"), json!([1, null])),
+        (json!("{\"a\":null}"), json!({"a":null})),
+        (Value::Null, Value::Null),
+        (json!(false), json!(false)),
+        (json!(0), json!(0)),
+        (json!([1, null]), json!([1, null])),
+        (json!({"a":null}), json!({"a":null})),
     ] {
         let loaded = decode(
-            &serde_json::to_vec(&json!({"featureFlags":{"checkout":false},
-            "featureFlagPayloads":{"checkout":value}}))
+            &serde_json::to_vec(&json!({
+                "featureFlags":{"checkout":false},
+                "featureFlagPayloads":{"checkout":value}
+            }))
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(loaded.records["checkout"].payload, Some(value));
+        assert_eq!(loaded.records["checkout"].payload, Some(expected));
         assert_eq!(loaded.records["checkout"].id, None);
         assert_eq!(loaded.records["checkout"].version, None);
         assert!(!loaded.records["checkout"].enabled);
@@ -133,7 +154,7 @@ fn legacy_envelope_preserves_partial_request_and_reporting_metadata() {
     assert_eq!(loaded.request_id.as_deref(), Some("legacy-request"));
     assert_eq!(loaded.evaluated_at, Some(456));
     assert!(loaded.records["checkout"].minimal_flag_called_events);
-    assert_eq!(loaded.records["checkout"].payload, Some(json!("123")));
+    assert_eq!(loaded.records["checkout"].payload, Some(json!(123)));
     assert!(!loaded.records["checkout"].enabled);
     assert_eq!(loaded.records["checkout"].id, None);
     let historical =

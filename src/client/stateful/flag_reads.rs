@@ -59,7 +59,7 @@ impl FeatureFlagResult {
     pub(super) fn from_cached(key: &str, flag: &CachedFlag) -> Self {
         Self {
             key: key.into(),
-            enabled: flag.record.enabled,
+            enabled: flag.record.enabled && flag.record.variant.as_deref() != Some(""),
             variant: if flag.record.enabled {
                 flag.record.variant.clone()
             } else {
@@ -99,7 +99,8 @@ impl FeatureFlagLookup<'_> {
     /// Read the current cached value, decoded payload and producing context as
     /// one owned result, without fetching. None means unavailable/unknown,
     /// including disabled or closed clients; a known false flag is Some(result)
-    /// with enabled=false. A disabled result has no variant.
+    /// with enabled=false. A boolean-disabled result has no variant; an empty
+    /// variant is retained and reads as disabled.
     ///
     /// Property-only targeting updates can retain an earlier result; its context
     /// describes that earlier evaluation. A present JSON null payload remains

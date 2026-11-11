@@ -13,7 +13,9 @@ use super::{Client, FeatureFlagContext, FeatureFlagLoadError, FeatureFlagResult,
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FeatureFlagsUpdate {
-    /// None means no usable cache. Some(empty) is an available empty snapshot.
+    /// Enabled cached flags only. None means no usable cache. Some(empty) means
+    /// the cache is available but contains no enabled flags. Use
+    /// [`Client::get_feature_flags`] to inspect known disabled results.
     pub flags: Option<HashMap<String, FeatureFlagResult>>,
     pub context: FeatureFlagContext,
     /// True for load failure, computation errors or malformed payloads.
@@ -38,7 +40,10 @@ impl FeatureFlagsUpdate {
                 cache
                     .flags
                     .iter()
-                    .map(|(key, flag)| (key.clone(), FeatureFlagResult::from_cached(key, flag)))
+                    .filter_map(|(key, flag)| {
+                        let result = FeatureFlagResult::from_cached(key, flag);
+                        result.enabled.then(|| (key.clone(), result))
+                    })
                     .collect()
             }),
             context: FeatureFlagContext::from_context(context),
