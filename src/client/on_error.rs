@@ -85,7 +85,7 @@ pub enum PostHogError<'a> {
     /// A stateful client could not be enabled. The returned client is disabled.
     #[cfg(feature = "stateful")]
     Initialization(InitializationFailure),
-    /// A stateful project-configuration request failed. Cached settings remain usable.
+    /// A stateful remote-configuration request failed. Cached settings remain usable.
     #[cfg(feature = "stateful")]
     RemoteConfig(RemoteConfigFailure),
     /// A screenshot failed encoding, validation or terminal delivery.
@@ -111,7 +111,7 @@ impl ReplayFailure {
     }
 }
 
-/// A project-configuration diagnostic without tokens, URLs or response bodies.
+/// A remote-configuration diagnostic without tokens, URLs or response bodies.
 #[cfg(feature = "stateful")]
 #[derive(Debug)]
 #[non_exhaustive]

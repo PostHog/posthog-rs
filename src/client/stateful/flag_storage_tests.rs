@@ -316,7 +316,7 @@ fn old_schema_migration_is_strict_and_lazy_and_current_flags_fields_are_required
     legacy["state"]
         .as_object_mut()
         .unwrap()
-        .remove("project_config");
+        .remove("remote_config");
     assert_eq!(
         FileStateStore::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap(),
         snapshot
@@ -334,7 +334,7 @@ fn old_schema_migration_is_strict_and_lazy_and_current_flags_fields_are_required
         value["state"]
             .as_object_mut()
             .unwrap()
-            .remove("project_config");
+            .remove("remote_config");
         if version == 4 {
             value["state"].as_object_mut().unwrap().remove("session");
         }

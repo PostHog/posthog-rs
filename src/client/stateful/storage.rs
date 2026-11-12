@@ -154,7 +154,7 @@ pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
             crate::client::capture::json_len(&snapshot.flags.cache.as_deref()).saturating_sub(4),
         )
         .saturating_sub(
-            crate::client::capture::json_len(&snapshot.project_config.as_deref()).saturating_sub(4),
+            crate::client::capture::json_len(&snapshot.remote_config.as_deref()).saturating_sub(4),
         )
         .saturating_add(usize::from(snapshot.opt_out != Some(false)))
         .saturating_add(
@@ -179,7 +179,7 @@ fn encode_snapshot_with_outcome(
             "State snapshot exceeds store limit",
         ));
     }
-    if snapshot.flags.cache.is_none() && snapshot.project_config.is_none() {
+    if snapshot.flags.cache.is_none() && snapshot.remote_config.is_none() {
         return encode_record(snapshot, max_bytes).map(|bytes| (bytes, SaveOutcome::default()));
     }
     // A cache may fit the memory bound but not the remaining disk capacity or
@@ -192,12 +192,12 @@ fn encode_snapshot_with_outcome(
     if let Ok(encoded) = encode_record(&mandatory, max_bytes) {
         return Ok((encoded, SaveOutcome::default()));
     }
-    mandatory.project_config = None;
+    mandatory.remote_config = None;
     let bytes = encode_record(&mandatory, max_bytes)?;
     Ok((
         bytes,
         SaveOutcome {
-            project_config_omitted: snapshot.project_config.is_some(),
+            remote_config_omitted: snapshot.remote_config.is_some(),
         },
     ))
 }
@@ -229,10 +229,10 @@ fn encode_record(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
     Ok(buffer.bytes)
 }
 
-/// A successful mandatory-state write may omit optional project settings.
+/// A successful mandatory-state write may omit optional remote configuration.
 #[derive(Debug, Default)]
 pub(super) struct SaveOutcome {
-    pub(super) project_config_omitted: bool,
+    pub(super) remote_config_omitted: bool,
 }
 
 /// Blocking backend calls belong exclusively to the state-persistence worker.
@@ -361,7 +361,7 @@ impl FileStateStore {
                     .as_object()
                     .cloned()
                     .ok_or_else(invalid_state)?;
-                if state.contains_key("flags") || state.contains_key("project_config") {
+                if state.contains_key("flags") || state.contains_key("remote_config") {
                     return Err(invalid_state());
                 }
                 if record.version == 4 {
@@ -370,7 +370,7 @@ impl FileStateStore {
                     }
                     state.insert("session".into(), serde_json::Value::Null);
                 }
-                state.insert("project_config".into(), serde_json::Value::Null);
+                state.insert("remote_config".into(), serde_json::Value::Null);
                 state.insert(
                     "flags".into(),
                     serde_json::to_value(super::flag_state::FlagState::default())
@@ -385,10 +385,10 @@ impl FileStateStore {
                     .as_object()
                     .cloned()
                     .ok_or_else(invalid_state)?;
-                if state.contains_key("project_config") {
+                if state.contains_key("remote_config") {
                     return Err(invalid_state());
                 }
-                state.insert("project_config".into(), serde_json::Value::Null);
+                state.insert("remote_config".into(), serde_json::Value::Null);
                 serde_json::from_value(serde_json::Value::Object(state))
                     .map_err(|_| invalid_state())?
             }
