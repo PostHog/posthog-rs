@@ -129,7 +129,9 @@ pub(crate) enum Control {
     #[cfg(feature = "session-replay")]
     ReplayFailure(&'static str),
     #[cfg(feature = "session-replay")]
-    ReplayClosing(Instant),
+    DeliveryClosing(Instant),
+    #[cfg(feature = "session-replay")]
+    ReplayShutdownAbandoned,
     /// Like [`Control::Flush`], but sends the freshly captured live buffer
     /// *before* older held retries. Used by the panic hook so a retry backlog
     /// behind a slow endpoint can't starve the just-enqueued `$exception` within
@@ -706,7 +708,7 @@ impl TransportHandle {
                 if let Control::Shutdown { deadline, .. } = &mut control {
                     let end = encoder.gate.close_deadline(*deadline);
                     *deadline = Some(end);
-                    let _ = self.tx.send(Control::ReplayClosing(end));
+                    let _ = self.tx.send(Control::DeliveryClosing(end));
                 }
                 return match encoder.gate.control(control) {
                     Ok(()) => true,
@@ -1261,12 +1263,18 @@ fn run_worker(
             }
         };
         #[cfg(feature = "session-replay")]
-        let wait = match pipeline.replay.next_due() {
-            Some(due) => Some(wait.map_or_else(
-                || due.saturating_duration_since(clock.now()),
-                |w| w.min(due.saturating_duration_since(clock.now())),
-            )),
-            None => wait,
+        let wait = if pipeline.closing.is_some_and(|end| clock.now() >= end) {
+            // The encoder can still be draining; wait for its messages without
+            // spinning on delivery timers whose budget has already expired.
+            None
+        } else {
+            match pipeline.replay.next_due(pipeline.closing) {
+                Some(due) => Some(wait.map_or_else(
+                    || due.saturating_duration_since(clock.now()),
+                    |w| w.min(due.saturating_duration_since(clock.now())),
+                )),
+                None => wait,
+            }
         };
         let wake = match wait {
             None => match rx.recv() {
@@ -1292,7 +1300,9 @@ fn run_worker(
             #[cfg(feature = "session-replay")]
             Wake::Msg(Control::ReplayFrame(frame)) => pipeline.admit_replay(*frame),
             #[cfg(feature = "session-replay")]
-            Wake::Msg(Control::ReplayClosing(end)) => pipeline.close_replay(end),
+            Wake::Msg(Control::DeliveryClosing(end)) => pipeline.close_delivery(end),
+            #[cfg(feature = "session-replay")]
+            Wake::Msg(Control::ReplayShutdownAbandoned) => pipeline.report_replay_shutdown(None),
             #[cfg(feature = "session-replay")]
             Wake::Msg(Control::ReplayFailure(message)) => {
                 replay::report(&pipeline.options, message, None)
@@ -1388,7 +1398,10 @@ fn run_worker(
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
                 pipeline.recover_due(Some(deadline), true);
                 #[cfg(feature = "session-replay")]
-                pipeline.service_replay(true, Some(deadline));
+                {
+                    pipeline.service_replay(true, Some(deadline));
+                    pipeline.abandon_replay();
+                }
                 completion.signal();
                 // A flush/shutdown that raced in behind this Shutdown is still queued;
                 // signal those completions so their callers don't block forever.
@@ -1413,7 +1426,10 @@ fn run_worker(
                 pipeline.flush_retries(Some(deadline));
                 pipeline.recover_due(Some(deadline), true);
                 #[cfg(feature = "session-replay")]
-                pipeline.service_replay(true, Some(deadline));
+                {
+                    pipeline.service_replay(true, Some(deadline));
+                    pipeline.abandon_replay();
+                }
                 return;
             }
         }
@@ -1455,7 +1471,10 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             #[cfg(feature = "stateful")]
             Control::RemoteConfig { .. } => {}
             #[cfg(feature = "session-replay")]
-            Control::ReplayFrame(_) | Control::ReplayFailure(_) | Control::ReplayClosing(_) => {}
+            Control::ReplayFrame(_)
+            | Control::ReplayFailure(_)
+            | Control::DeliveryClosing(_)
+            | Control::ReplayShutdownAbandoned => {}
             Control::Flush(c)
             | Control::FlushCaptures(c)
             | Control::Shutdown { completion: c, .. } => c.signal(),
@@ -1478,6 +1497,7 @@ fn send_buffer(
     max_batch_size: usize,
     deadline: Option<Instant>,
 ) {
+    let deadline = pipeline.delivery_deadline(deadline);
     while !buffer.is_empty() {
         if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
             pipeline.warn_shutdown_drop(buffer.len(), buffer.persisted(), "buffered ");
@@ -1515,6 +1535,7 @@ fn drain_historical(
     historical: &mut VecDeque<Vec<Event>>,
     deadline: Option<Instant>,
 ) {
+    let deadline = pipeline.delivery_deadline(deadline);
     while let Some(chunk) = historical.pop_front() {
         if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
             let dropped = chunk.len() + historical.iter().map(Vec::len).sum::<usize>();
@@ -1582,6 +1603,8 @@ struct Pipeline {
     retries: VecDeque<RetryBatch>,
     #[cfg(feature = "session-replay")]
     replay: replay::Queue,
+    #[cfg(feature = "session-replay")]
+    closing: Option<Instant>,
     #[cfg(feature = "stateful")]
     storage: StorageState,
 }
@@ -1605,9 +1628,17 @@ impl Pipeline {
             retries: VecDeque::new(),
             #[cfg(feature = "session-replay")]
             replay: replay::Queue::default(),
+            #[cfg(feature = "session-replay")]
+            closing: None,
             #[cfg(feature = "stateful")]
             storage: StorageState::default(),
         })
+    }
+
+    fn delivery_deadline(&self, deadline: Option<Instant>) -> Option<Instant> {
+        #[cfg(feature = "session-replay")]
+        let deadline = deadline.into_iter().chain(self.closing).min();
+        deadline
     }
 
     fn retry_retention(&self) -> super::capture::RetryRetention {
@@ -1657,6 +1688,7 @@ impl Pipeline {
         historical_migration: bool,
         deadline: Option<Instant>,
     ) {
+        let deadline = self.delivery_deadline(deadline);
         let defaults = self.options.capture_defaults();
         let original = events.len();
         let processed: Vec<QueuedEvent> = events
@@ -1785,6 +1817,7 @@ impl Pipeline {
         use super::capture::{self, Step};
         use crate::capture_event::{BatchRequestRef, CaptureErrorResponse};
 
+        let deadline = self.delivery_deadline(deadline);
         let retention = self.retry_retention();
         let retaining = retention != super::capture::RetryRetention::Discard;
         #[cfg(feature = "stateful")]
@@ -2020,6 +2053,7 @@ impl Pipeline {
     }
 
     fn flush_retries(&mut self, deadline: Option<Instant>) {
+        let deadline = self.delivery_deadline(deadline);
         // `Some` is the shutdown/disconnect path: release memory on failure or
         // deadline expiry rather than scheduling another attempt. Persisted
         // records remain available for the next process.

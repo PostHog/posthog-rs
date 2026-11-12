@@ -62,6 +62,9 @@ jobs:
       - name: Clippy (stateful)
         run: cargo clippy --tests --features stateful -- -D warnings
 
+      - name: Clippy (session replay)
+        run: cargo clippy --tests --features session-replay -- -D warnings
+
   public-api:
     name: Public API
     if: github.event_name == 'pull_request'
@@ -119,6 +122,14 @@ jobs:
             toolchain: "1.78.0"
             cache-key: msrv-stateful-blocking
             command: cargo check --locked --package posthog --lib --no-default-features --features stateful,error-tracking,tls
+          - name: MSRV (session replay, async client)
+            toolchain: "1.78.0"
+            cache-key: msrv-replay-async
+            command: cargo check --locked --package posthog --lib --features session-replay
+          - name: MSRV (session replay, blocking client)
+            toolchain: "1.78.0"
+            cache-key: msrv-replay-blocking
+            command: cargo check --locked --package posthog --lib --no-default-features --features session-replay,error-tracking,tls
           - name: MSRV of the mcp feature
             toolchain: "1.88.0"
             cache-key: msrv-mcp
@@ -192,6 +203,12 @@ jobs:
           - name: Unit test (stateful, blocking client)
             cache-key: stateful-blocking
             command: cargo test --locked --no-default-features --features stateful,error-tracking,tls
+          - name: Unit test (session replay)
+            cache-key: session-replay
+            command: cargo test --locked --package posthog --features session-replay
+          - name: Unit test (session replay, blocking client)
+            cache-key: session-replay-blocking
+            command: cargo test --locked --package posthog --no-default-features --features session-replay,error-tracking,tls
           - name: Stateful client, storage and transport (macOS)
             os: macos-latest
             cache-key: stateful-macos

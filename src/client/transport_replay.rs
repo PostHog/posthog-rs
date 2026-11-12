@@ -20,7 +20,7 @@ pub(super) struct Queue {
     waiting: Vec<EncodedFrame>,
     since: Option<Instant>,
     retries: VecDeque<Batch>,
-    closing: Option<Instant>,
+    shutdown_reported: bool,
 }
 struct Batch {
     frames: Vec<EncodedFrame>,
@@ -34,15 +34,12 @@ impl Queue {
         }
         self.waiting.push(frame);
     }
-    pub(super) fn next_due(&self) -> Option<Instant> {
+    pub(super) fn next_due(&self, closing: Option<Instant>) -> Option<Instant> {
         self.since
             .map(|since| since + INTERVAL)
             .into_iter()
             .chain(self.retries.iter().map(|b| b.due))
-            .chain(
-                self.closing
-                    .filter(|_| !self.waiting.is_empty() || !self.retries.is_empty()),
-            )
+            .chain(closing.filter(|_| !self.waiting.is_empty() || !self.retries.is_empty()))
             .min()
     }
     fn take_ready(&mut self, now: Instant, force: bool) -> Vec<Batch> {
@@ -100,20 +97,32 @@ impl Pipeline {
     pub(super) fn admit_replay(&mut self, frame: EncodedFrame) {
         self.replay.push(frame, self.clock.now());
     }
-    pub(super) fn close_replay(&mut self, deadline: Instant) {
-        self.replay.closing = Some(
-            self.replay
-                .closing
-                .map_or(deadline, |old| old.min(deadline)),
-        );
+    pub(super) fn close_delivery(&mut self, deadline: Instant) {
+        self.closing = Some(self.closing.map_or(deadline, |old| old.min(deadline)));
         self.service_replay(true, Some(deadline));
     }
+    pub(super) fn report_replay_shutdown(&mut self, status: Option<u16>) {
+        if !self.replay.shutdown_reported {
+            self.replay.shutdown_reported = true;
+            report(
+                &self.options,
+                "Screenshot delivery abandoned during shutdown",
+                status,
+            );
+        }
+    }
+    pub(super) fn abandon_replay(&mut self) {
+        if !self.replay.waiting.is_empty() || !self.replay.retries.is_empty() {
+            self.report_replay_shutdown(None);
+        }
+        self.replay.waiting.clear();
+        self.replay.retries.clear();
+        self.replay.since = None;
+    }
     pub(super) fn service_replay(&mut self, force: bool, deadline: Option<Instant>) {
-        let deadline = deadline.into_iter().chain(self.replay.closing).min();
+        let deadline = self.delivery_deadline(deadline);
         if deadline.is_some_and(|end| self.clock.now() >= end) {
-            self.replay.waiting.clear();
-            self.replay.retries.clear();
-            self.replay.since = None;
+            self.abandon_replay();
             return;
         }
         let ready = self.replay.take_ready(self.clock.now(), force);
@@ -123,6 +132,7 @@ impl Pipeline {
     }
     fn send_replay(&mut self, mut batch: Batch, deadline: Option<Instant>) {
         if deadline.is_some_and(|end| self.clock.now() >= end) {
+            self.report_replay_shutdown(None);
             return;
         }
         let length = batch.frames.iter().try_fold(1usize, |n, frame| {
@@ -149,17 +159,21 @@ impl Pipeline {
             body.extend_from_slice(&frame.bytes);
         }
         body.push(b']');
-        let mut gzip = GzEncoder::new(
-            RecordBuffer {
-                bytes: Vec::new(),
-                limit: MAX_BODY_BYTES as u64,
-            },
-            Compression::default(),
-        );
-        let body = gzip
-            .write_all(&body)
-            .and_then(|()| gzip.finish())
-            .map(|body| body.bytes);
+        let compressed = self.options.capture_compression.is_some();
+        let body = if compressed {
+            let mut gzip = GzEncoder::new(
+                RecordBuffer {
+                    bytes: Vec::new(),
+                    limit: MAX_BODY_BYTES as u64,
+                },
+                Compression::default(),
+            );
+            gzip.write_all(&body)
+                .and_then(|()| gzip.finish())
+                .map(|body| body.bytes)
+        } else {
+            Ok(body)
+        };
         let Ok(body) = body else {
             report(
                 &self.options,
@@ -175,18 +189,22 @@ impl Pipeline {
         if timeout.is_zero() {
             return;
         }
-        let result = self
+        let request = self
             .http
             .post(format!("{}/s/", self.options.endpoints().base_host()))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::CONTENT_ENCODING, "gzip")
             .header(
                 reqwest::header::USER_AGENT,
                 crate::client::get_default_user_agent(),
             )
             .timeout(timeout)
-            .body(body)
-            .send();
+            .body(body);
+        let request = if compressed {
+            request.header(reqwest::header::CONTENT_ENCODING, "gzip")
+        } else {
+            request
+        };
+        let result = request.send();
         let mut retry_after = None;
         let status = match result {
             Err(_) => None,
@@ -195,7 +213,9 @@ impl Pipeline {
                 retry_after = parse_retry_after(response.headers());
                 let mut bytes = Vec::new();
                 if response.take(4097).read_to_end(&mut bytes).is_err() {
-                    None
+                    // A failed optional body cannot turn a known rejection into
+                    // an unknown transport failure. Successful bodies may carry quota state.
+                    (!(200..=299).contains(&status)).then_some(status)
                 } else {
                     let quota = serde_json::from_slice::<serde_json::Value>(&bytes)
                         .ok()
@@ -229,11 +249,18 @@ impl Pipeline {
                 "Screenshot upload permanently rejected",
                 Some(status),
             ),
-            _ if deadline.is_some() => {}
+            _ if deadline.is_some() => self.report_replay_shutdown(status),
             _ => {
                 batch.attempt = batch.attempt.saturating_add(1);
-                batch.due = self.clock.now()
-                    + capture_backoff_duration(&self.options, batch.attempt, retry_after);
+                let delay = capture_backoff_duration(&self.options, batch.attempt, retry_after);
+                batch.due = self.clock.now() + delay;
+                tracing::debug!(
+                    status,
+                    attempt = batch.attempt,
+                    retained_frames = batch.frames.len(),
+                    retry_delay_ms = delay.as_millis(),
+                    "posthog-rs: retrying screenshot upload"
+                );
                 self.replay.retries.push_back(batch);
             }
         }
