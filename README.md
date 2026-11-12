@@ -126,6 +126,34 @@ pass an `idempotency_key` that names the email when your own job runner
 retries too, and set `max_retries(0)` on the send. A failed send returns an
 `EmailError`: branch on `code()`, such as `quota_limited`, or on `kind()`.
 
+A code send takes a `category` to send marketing email or to file the email
+under a message category. A `MessageCategory` defines the category in code: PostHog creates it with its
+name and description on the first send with its key. Later sends keep the
+category's name and description, so change them in PostHog.
+
+```rust
+use posthog_rs::{CodeEmail, MessageCategory, MessageCategoryType};
+
+let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in review")
+    .html(rendered_html)
+    .category(
+        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
+            .description("Monthly product news"),
+    );
+```
+
+A marketing send honors the recipient's opt-outs, and its `html` (or `text`,
+without `html`) needs the `{{ unsubscribe_url }}` placeholder, which PostHog
+fills with the recipient's preferences link.
+
+Leave `category` out for transactional email with no category, or for the
+transactional category of the template that `template_key` names.
+`EmailCategory::Transactional` asks for transactional email with no category,
+so PostHog refuses it with `category_mismatch` when `template_key` names a
+template in a category. A template made in PostHog sends transactional email
+only: PostHog refuses a `TemplateEmail` of a template in a marketing category,
+or a `CodeEmail` whose `template_key` names one, with `marketing_template`.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and test instructions.

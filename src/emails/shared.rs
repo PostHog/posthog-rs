@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use super::error::{EmailError, EmailErrorKind};
 use super::types::{
-    CodeEmail, EmailDeliveryStatus, EmailStatus, EmailWarning, SendEmail, SendEmailResult,
-    SendOptions, TemplateEmail,
+    CodeEmail, EmailCategory, EmailDeliveryStatus, EmailStatus, EmailWarning, MessageCategory,
+    SendEmail, SendEmailResult, SendOptions, TemplateEmail,
 };
 use crate::client::{get_default_user_agent, ClientOptions};
 
@@ -238,7 +238,31 @@ fn code_body(email: &CodeEmail) -> Result<Map<String, Value>, EmailError> {
         "capture_engagement".into(),
         Value::Bool(email.capture_engagement),
     );
+    if let Some(category) = &email.category {
+        body.insert("category".into(), category_json(category));
+    }
     Ok(body)
+}
+
+fn category_json(category: &EmailCategory) -> Value {
+    match category {
+        EmailCategory::Transactional => Value::String("transactional".into()),
+        EmailCategory::Defined(category) => defined_category_json(category),
+    }
+}
+
+fn defined_category_json(category: &MessageCategory) -> Value {
+    let mut fields = Map::new();
+    fields.insert("key".into(), Value::String(category.key.clone()));
+    fields.insert(
+        "type".into(),
+        Value::String(category.category_type.as_str().into()),
+    );
+    fields.insert("name".into(), Value::String(category.name.clone()));
+    if let Some(description) = &category.description {
+        fields.insert("description".into(), Value::String(description.clone()));
+    }
+    Value::Object(fields)
 }
 
 /// The status read's path for a message ID, or an argument error.

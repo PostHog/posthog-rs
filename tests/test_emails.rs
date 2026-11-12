@@ -3,15 +3,19 @@
 mod common;
 mod email_support;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::default_user_agent;
 use email_support::{
-    accepted, closed_url, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH,
-    TEMPLATE_ID,
+    accepted, closed_url, options, unavailable, Answer, ScriptedServer, SendApi, StoredCategory,
+    MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
-use posthog_rs::{CodeEmail, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
+use posthog_rs::{
+    CodeEmail, EmailCategory, EmailDeliveryStatus, EmailErrorKind, MessageCategory,
+    MessageCategoryType, TemplateEmail,
+};
 use serde_json::json;
 
 async fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
@@ -141,6 +145,133 @@ async fn code_send_defaults_engagement_capture_on() {
     );
 }
 
+async fn client_with_a_receipts_template() -> (posthog_rs::Client, SendApi) {
+    let api = SendApi::start_async()
+        .await
+        .with_category("receipts", "transactional", "Receipts", "")
+        .with_template("order-receipt", Some("receipts"));
+    let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+    (client, api)
+}
+
+fn digest_email() -> CodeEmail {
+    CodeEmail::new("user@example.com", "november-digest", "Your November")
+        .html("<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>")
+}
+
+fn receipt_email() -> CodeEmail {
+    CodeEmail::new("user@example.com", "order-receipt", "Your receipt")
+        .html("<p>Thanks for your order.</p>")
+}
+
+#[tokio::test]
+async fn a_send_for_a_template_in_a_category_follows_its_category() {
+    let (client, api) = client_with_a_receipts_template().await;
+
+    client.emails().send(receipt_email()).await.unwrap();
+
+    assert_eq!(
+        api.sent(),
+        vec![("user@example.com".to_string(), Some("receipts".to_string()))]
+    );
+}
+
+#[tokio::test]
+async fn transactional_on_a_template_in_a_category_is_refused() {
+    let (client, api) = client_with_a_receipts_template().await;
+
+    let error = client
+        .emails()
+        .send(receipt_email().category(EmailCategory::Transactional))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        (error.code(), error.kind()),
+        ("category_mismatch", EmailErrorKind::ValidationError)
+    );
+    assert_eq!(api.sent(), vec![]);
+}
+
+#[tokio::test]
+async fn a_send_for_a_template_in_a_marketing_category_is_refused() {
+    let api = SendApi::start_async()
+        .await
+        .with_category("newsletter", "marketing", "Newsletter", "")
+        .with_template("november-digest", Some("newsletter"));
+    let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+
+    let error = client.emails().send(digest_email()).await.unwrap_err();
+
+    assert_eq!(
+        (error.code(), error.kind(), error.status()),
+        (
+            "marketing_template",
+            EmailErrorKind::ValidationError,
+            Some(400)
+        )
+    );
+    assert_eq!(api.sent(), vec![]);
+}
+
+#[tokio::test]
+async fn a_send_creates_its_category_in_the_project() {
+    let cases = [
+        (
+            "newsletter",
+            MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
+                .description("Monthly product news"),
+            StoredCategory {
+                category_type: "marketing".into(),
+                name: "Newsletter".into(),
+                description: "Monthly product news".into(),
+            },
+        ),
+        (
+            "receipts",
+            MessageCategory::new("receipts", MessageCategoryType::Transactional, "Receipts"),
+            StoredCategory {
+                category_type: "transactional".into(),
+                name: "Receipts".into(),
+                description: "".into(),
+            },
+        ),
+    ];
+    for (key, category, stored) in cases {
+        let api = SendApi::start_async().await;
+        let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+
+        client
+            .emails()
+            .send(digest_email().category(category))
+            .await
+            .unwrap();
+
+        assert_eq!(api.categories(), HashMap::from([(key.to_string(), stored)]));
+        assert_eq!(
+            api.sent(),
+            vec![("user@example.com".to_string(), Some(key.to_string()))]
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_send_without_a_category_is_transactional() {
+    for category in [None, Some(EmailCategory::Transactional)] {
+        let api = SendApi::start_async().await;
+        let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+        let mut email = digest_email();
+        if let Some(category) = category {
+            email = email.category(category);
+        }
+
+        client.emails().send(email).await.unwrap();
+
+        assert_eq!(api.sent(), vec![("user@example.com".to_string(), None)]);
+        assert_eq!(api.categories(), HashMap::new());
+    }
+}
+
 #[tokio::test]
 async fn retries_reuse_the_idempotency_key() {
     let server = ScriptedServer::start_async(vec![unavailable(), accepted()]).await;
@@ -236,6 +367,16 @@ async fn refusals_keep_posthogs_code_and_are_not_retried() {
             EmailErrorKind::InvalidIdempotentRequest,
         ),
         (422, "recipient_suppressed", EmailErrorKind::ValidationError),
+        (400, "too_many_categories", EmailErrorKind::ValidationError),
+        (400, "category_mismatch", EmailErrorKind::ValidationError),
+        (
+            400,
+            "unsubscribe_link_required",
+            EmailErrorKind::ValidationError,
+        ),
+        (400, "copies_not_allowed", EmailErrorKind::ValidationError),
+        (400, "marketing_template", EmailErrorKind::ValidationError),
+        (422, "recipient_opted_out", EmailErrorKind::ValidationError),
     ];
     for (status, code, kind) in cases {
         let server = ScriptedServer::start_async(vec![Answer::json(

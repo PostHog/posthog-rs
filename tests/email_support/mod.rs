@@ -140,6 +140,248 @@ fn script(answers: Vec<Answer>) -> (Arc<Mutex<Vec<Recorded>>>, Responder) {
     (requests, Box::new(respond))
 }
 
+const CODE_SEND_FIELDS: &[&str] = &[
+    "to",
+    "template_key",
+    "subject",
+    "html",
+    "text",
+    "from",
+    "reply_to",
+    "capture_engagement",
+    "distinct_id",
+    "category",
+];
+const CATEGORY_FIELDS: &[&str] = &["key", "type", "name", "description"];
+
+/// An accepted send's recipient and the key of the category it went out in.
+pub type Sent = (String, Option<String>);
+
+/// A category as the fake project stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCategory {
+    pub category_type: String,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Default)]
+struct Project {
+    categories: HashMap<String, StoredCategory>,
+    /// Template key to the key of its category, if it has one.
+    templates: HashMap<String, Option<String>>,
+    sent: Vec<Sent>,
+}
+
+/// A fake of PostHog's code send that keeps a project's categories and
+/// templates. A category object creates the category when its key is new and
+/// leaves an existing one as it is. A `template_key` that names a template in
+/// a marketing category is refused with `marketing_template`. One that names
+/// another of the project's templates follows that template's category when
+/// the send leaves `category` out. A category other than the template's, or
+/// `"transactional"` for a template in a category, is refused with
+/// `category_mismatch`.
+pub struct SendApi {
+    pub url: String,
+    project: Arc<Mutex<Project>>,
+    _server: MockServer,
+}
+
+impl SendApi {
+    /// For blocking tests.
+    pub fn start() -> Self {
+        let server = MockServer::start();
+        let project = Arc::new(Mutex::new(Project::default()));
+        let respond = responder(Arc::clone(&project));
+        server.mock(|when, then| {
+            when.method("POST").path(SEND_PATH);
+            then.respond_with(respond);
+        });
+        Self::new(server, project)
+    }
+
+    /// For async tests, where httpmock's blocking calls would block the runtime.
+    pub async fn start_async() -> Self {
+        let server = MockServer::start_async().await;
+        let project = Arc::new(Mutex::new(Project::default()));
+        let respond = responder(Arc::clone(&project));
+        server
+            .mock_async(|when, then| {
+                when.method("POST").path(SEND_PATH);
+                then.respond_with(respond);
+            })
+            .await;
+        Self::new(server, project)
+    }
+
+    fn new(server: MockServer, project: Arc<Mutex<Project>>) -> Self {
+        Self {
+            url: server.base_url(),
+            project,
+            _server: server,
+        }
+    }
+
+    pub fn with_category(
+        self,
+        key: &str,
+        category_type: &str,
+        name: &str,
+        description: &str,
+    ) -> Self {
+        self.project.lock().unwrap().categories.insert(
+            key.to_string(),
+            StoredCategory {
+                category_type: category_type.to_string(),
+                name: name.to_string(),
+                description: description.to_string(),
+            },
+        );
+        self
+    }
+
+    pub fn with_template(self, template_key: &str, category_key: Option<&str>) -> Self {
+        self.project
+            .lock()
+            .unwrap()
+            .templates
+            .insert(template_key.to_string(), category_key.map(str::to_string));
+        self
+    }
+
+    pub fn categories(&self) -> HashMap<String, StoredCategory> {
+        self.project.lock().unwrap().categories.clone()
+    }
+
+    pub fn category(&self, key: &str) -> Option<StoredCategory> {
+        self.project.lock().unwrap().categories.get(key).cloned()
+    }
+
+    pub fn sent(&self) -> Vec<Sent> {
+        self.project.lock().unwrap().sent.clone()
+    }
+}
+
+fn responder(project: Arc<Mutex<Project>>) -> Responder {
+    Box::new(move |request: &HttpMockRequest| {
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body_vec()).unwrap_or_default();
+        let mut project = project.lock().unwrap();
+        let (status, reply) = match code_send(&body, &mut project) {
+            Ok(sent) => {
+                project.sent.push(sent);
+                (202, serde_json::json!({"message_id": MESSAGE_ID}))
+            }
+            Err((status, code)) => (
+                status,
+                serde_json::json!({"code": code, "detail": "Refused.", "attr": "category"}),
+            ),
+        };
+        HttpMockResponse::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(reply.to_string())
+            .build()
+    })
+}
+
+type Refusal = (u16, &'static str);
+const INVALID: Refusal = (400, "invalid_input");
+
+fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Refusal> {
+    let fields = body.as_object().ok_or(INVALID)?;
+    if fields
+        .keys()
+        .any(|field| !CODE_SEND_FIELDS.contains(&field.as_str()))
+    {
+        return Err(INVALID);
+    }
+    let text = |name: &str| fields.get(name).and_then(|value| value.as_str());
+    let to = text("to").ok_or(INVALID)?.to_string();
+    let template_key = text("template_key").ok_or(INVALID)?;
+    let category = fields.get("category").unwrap_or(&serde_json::Value::Null);
+    let defined = defined_category(category)?;
+    if let Some(template_category) = project.templates.get(template_key).cloned() {
+        if template_category
+            .as_ref()
+            .is_some_and(|key| project.categories[key].category_type == "marketing")
+        {
+            return Err((400, "marketing_template"));
+        }
+        let follows = match (&template_category, category, &defined) {
+            (_, serde_json::Value::Null, _) => true,
+            (None, serde_json::Value::String(_), _) => true,
+            (Some(key), _, Some(defined)) => {
+                key == text_of(defined, "key")
+                    && project.categories[key].category_type == text_of(defined, "type")
+            }
+            _ => false,
+        };
+        if !follows {
+            return Err((400, "category_mismatch"));
+        }
+        return Ok((to, template_category));
+    }
+    let Some(defined) = defined else {
+        return Ok((to, None));
+    };
+    let key = text_of(defined, "key");
+    let category_type = text_of(defined, "type");
+    if let Some(stored) = project.categories.get(key) {
+        if stored.category_type != category_type {
+            return Err((400, "category_mismatch"));
+        }
+    }
+    let unsubscribe = regex::Regex::new(r"\{\{\s*unsubscribe_url\s*\}\}").unwrap();
+    let content = text("html").or_else(|| text("text")).unwrap_or_default();
+    if category_type == "marketing" && !unsubscribe.is_match(content) {
+        return Err((400, "unsubscribe_link_required"));
+    }
+    project
+        .categories
+        .entry(key.to_string())
+        .or_insert_with(|| StoredCategory {
+            category_type: category_type.to_string(),
+            name: text_of(defined, "name").to_string(),
+            description: defined
+                .get("description")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        });
+    Ok((to, Some(key.to_string())))
+}
+
+fn text_of<'a>(fields: &'a serde_json::Map<String, serde_json::Value>, name: &str) -> &'a str {
+    fields[name].as_str().unwrap()
+}
+
+/// A category object's fields, `None` for no category or `"transactional"`,
+/// or a refusal for anything else.
+fn defined_category(
+    category: &serde_json::Value,
+) -> Result<Option<&serde_json::Map<String, serde_json::Value>>, Refusal> {
+    match category {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(value) if value == "transactional" => Ok(None),
+        serde_json::Value::Object(fields) => {
+            let valid = fields
+                .iter()
+                .all(|(name, value)| CATEGORY_FIELDS.contains(&name.as_str()) && value.is_string())
+                && ["key", "type", "name"]
+                    .iter()
+                    .all(|name| fields.contains_key(*name))
+                && ["marketing", "transactional"].contains(&text_of(fields, "type"));
+            if valid {
+                Ok(Some(fields))
+            } else {
+                Err(INVALID)
+            }
+        }
+        _ => Err(INVALID),
+    }
+}
+
 /// A server that answers `202` with a 10 MB `content-length`, sends 1.1 MiB
 /// of it, then holds the connection open. Only a client that stops reading at
 /// its cap gets an answer before its request timeout. httpmock always sends

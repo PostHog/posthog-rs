@@ -3,14 +3,19 @@
 mod common;
 mod email_support;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::default_user_agent;
 use email_support::{
-    accepted, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    accepted, options, unavailable, Answer, ScriptedServer, SendApi, StoredCategory, MESSAGE_ID,
+    SEND_PATH, TEMPLATE_ID,
 };
-use posthog_rs::{CodeEmail, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
+use posthog_rs::{
+    CodeEmail, EmailDeliveryStatus, EmailErrorKind, MessageCategory, MessageCategoryType,
+    TemplateEmail,
+};
 use serde_json::json;
 
 fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
@@ -78,6 +83,44 @@ fn code_send_posts_the_rendered_content() {
             "to": "user@example.com",
         })
     );
+}
+
+#[test]
+fn a_send_leaves_an_existing_category_as_it_is() {
+    let api = SendApi::start();
+    let client = posthog_rs::client(options(&api.url).build().unwrap());
+    let send = |category: MessageCategory| {
+        client
+            .emails()
+            .send(
+                CodeEmail::new("user@example.com", "monthly-digest", "Your month")
+                    .html("<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>")
+                    .category(category),
+            )
+            .unwrap();
+    };
+
+    send(
+        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
+            .description("Monthly product news"),
+    );
+    send(
+        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Product news")
+            .description(""),
+    );
+
+    assert_eq!(
+        api.categories(),
+        HashMap::from([(
+            "newsletter".to_string(),
+            StoredCategory {
+                category_type: "marketing".into(),
+                name: "Newsletter".into(),
+                description: "Monthly product news".into(),
+            }
+        )])
+    );
+    assert_eq!(api.sent().len(), 2);
 }
 
 #[test]

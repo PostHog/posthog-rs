@@ -12,7 +12,9 @@ pub(crate) struct SendOptions {
 /// One email from an email template made transactional in PostHog, sent by
 /// the template's ID.
 ///
-/// The template sets its own sender, subject and content.
+/// The template sets its own sender, subject and content. A template made in
+/// PostHog sends transactional email only: PostHog refuses a send of a
+/// template in a marketing category with `marketing_template`.
 ///
 /// ```
 /// use posthog_rs::TemplateEmail;
@@ -76,7 +78,9 @@ impl TemplateEmail {
 ///
 /// It needs [`html`](Self::html), [`text`](Self::text) or both. Without
 /// `text`, PostHog derives it from the `html`. To send a React email, render
-/// it to HTML in your app and pass the HTML.
+/// it to HTML in your app and pass the HTML. PostHog refuses a send whose
+/// `template_key` names a template in a marketing category with
+/// `marketing_template`.
 ///
 /// ```
 /// use posthog_rs::CodeEmail;
@@ -97,6 +101,7 @@ pub struct CodeEmail {
     pub(crate) from: Option<String>,
     pub(crate) reply_to: Vec<String>,
     pub(crate) capture_engagement: bool,
+    pub(crate) category: Option<EmailCategory>,
     pub(crate) options: SendOptions,
 }
 
@@ -120,6 +125,7 @@ impl CodeEmail {
             from: None,
             reply_to: Vec::new(),
             capture_engagement: true,
+            category: None,
             options: SendOptions::default(),
         }
     }
@@ -158,6 +164,28 @@ impl CodeEmail {
         self
     }
 
+    /// The email's message category: [`EmailCategory::Transactional`], or a
+    /// [`MessageCategory`] that the send defines. Without it, the send follows
+    /// the transactional category of the template that `template_key` names,
+    /// or is transactional with no category.
+    ///
+    /// [`EmailCategory::Transactional`] asks for transactional email with no
+    /// category. PostHog refuses the send with:
+    ///
+    /// - `category_mismatch` when the key exists with another type, or when
+    ///   `template_key` names a template in another category, including
+    ///   [`EmailCategory::Transactional`] for a template in a category,
+    /// - `too_many_categories` when it would create a category past the
+    ///   project's limit,
+    /// - `unsubscribe_link_required` when a marketing email has no
+    ///   `{{ unsubscribe_url }}` placeholder,
+    /// - `recipient_opted_out` when the recipient opted out of the category
+    ///   or of all marketing email.
+    pub fn category(mut self, category: impl Into<EmailCategory>) -> Self {
+        self.category = Some(category.into());
+        self
+    }
+
     /// The recipient's distinct ID in your product. The email's events go to
     /// this person. Without it, they go to a person whose distinct ID is the
     /// email address.
@@ -184,6 +212,98 @@ impl CodeEmail {
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.options.max_retries = Some(max_retries);
         self
+    }
+}
+
+/// The message category of a [`CodeEmail`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EmailCategory {
+    /// Transactional email with no category. Unlike a send without a
+    /// category, it doesn't follow the category of the template that
+    /// `template_key` names: PostHog refuses it on a template in a category.
+    Transactional,
+    /// A category the send defines in code.
+    Defined(MessageCategory),
+}
+
+impl From<MessageCategory> for EmailCategory {
+    fn from(category: MessageCategory) -> Self {
+        EmailCategory::Defined(category)
+    }
+}
+
+/// A message category, defined in code by its key.
+///
+/// PostHog creates the category with its name and description on the first
+/// send with its key. Later sends with that key keep the category's name and
+/// description, so change them in PostHog. A key that exists with another
+/// type refuses the send with `category_mismatch`.
+///
+/// A marketing send honors the recipient's opt-outs, and its `html` (or
+/// `text`, without `html`) needs the `{{ unsubscribe_url }}` placeholder.
+///
+/// ```
+/// use posthog_rs::{CodeEmail, MessageCategory, MessageCategoryType};
+///
+/// # let rendered_html = String::new();
+/// let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in review")
+///     .html(rendered_html)
+///     .category(
+///         MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
+///             .description("Monthly product news"),
+///     );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageCategory {
+    pub(crate) key: String,
+    pub(crate) category_type: MessageCategoryType,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+}
+
+impl MessageCategory {
+    /// A category with this key, type and name. The key is unique in the
+    /// project, such as `"newsletter"`, and the name is what recipients see
+    /// on their email preferences page.
+    pub fn new(
+        key: impl Into<String>,
+        category_type: MessageCategoryType,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            category_type,
+            name: name.into(),
+            description: None,
+        }
+    }
+
+    /// What the category's emails are about. PostHog uses it only when the
+    /// send creates the category.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+}
+
+/// The kind of email a [`MessageCategory`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MessageCategoryType {
+    /// Email the recipient can opt out of, such as a newsletter.
+    Marketing,
+    /// Email the recipient needs, such as a receipt. It skips opt-outs.
+    Transactional,
+}
+
+impl MessageCategoryType {
+    /// The type as PostHog sends it, such as `"marketing"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageCategoryType::Marketing => "marketing",
+            MessageCategoryType::Transactional => "transactional",
+        }
     }
 }
 
@@ -298,8 +418,8 @@ pub struct EmailStatus {
     pub created_at: DateTime<Utc>,
     /// When the email reached its current status.
     pub status_at: DateTime<Utc>,
-    /// Why a failed email was not sent, such as `provider_error` or
-    /// `recipient_suppressed`, or the bounce type of a bounced email: `hard`,
-    /// `soft` or `unknown`. `None` otherwise.
+    /// Why a failed email was not sent, such as `provider_error`,
+    /// `recipient_suppressed` or `recipient_opted_out`, or the bounce type of
+    /// a bounced email: `hard`, `soft` or `unknown`. `None` otherwise.
     pub reason: Option<String>,
 }
