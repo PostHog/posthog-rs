@@ -341,6 +341,10 @@ pub fn posthog::stateful::Identify::from(alloc::string::String) -> Self
 #[non_exhaustive] pub struct posthog::stateful::InitializationFailure
 impl posthog::stateful::InitializationFailure
 pub fn posthog::stateful::InitializationFailure::message(&self) -> &str
+#[non_exhaustive] pub struct posthog::stateful::RemoteConfigFailure
+impl posthog::stateful::RemoteConfigFailure
+pub fn posthog::stateful::RemoteConfigFailure::message(&self) -> &str
+pub fn posthog::stateful::RemoteConfigFailure::status(&self) -> core::option::Option<u16>
 pub mod posthog::tower
 pub struct posthog::tower::PostHogLayer
 impl posthog::tower::PostHogLayer
@@ -465,6 +469,7 @@ pub posthog::PostHogError::Capture(posthog::CaptureFailure<'a>)
 pub posthog::PostHogError::FeatureFlags(posthog::FlagsFailure<'a>)
 pub posthog::PostHogError::Initialization(posthog::stateful::InitializationFailure)
 pub posthog::PostHogError::LocalEvaluation(posthog::LocalEvaluationFailure<'a>)
+pub posthog::PostHogError::RemoteConfig(posthog::stateful::RemoteConfigFailure)
 pub posthog::PostHogError::Storage(posthog::StorageFailure<'a>)
 #[non_exhaustive] pub enum posthog::SendEmail
 pub posthog::SendEmail::Code(posthog::CodeEmail)

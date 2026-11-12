@@ -244,13 +244,13 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
         blocked: bool,
     }
     impl StateStore for BlockedStore {
-        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<()> {
+        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<SaveOutcome> {
             if !self.blocked {
                 self.blocked = true;
                 self.entered.send(()).unwrap();
                 self.release.recv().unwrap();
             }
-            Ok(())
+            Ok(SaveOutcome::default())
         }
     }
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -307,6 +307,23 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
 
 #[test]
 fn old_schema_migration_is_strict_and_lazy_and_current_flags_fields_are_required() {
+    let snapshot = Snapshot::anonymous("old-v6".into());
+    let mut legacy = serde_json::to_value(StateRecord {
+        version: 6,
+        state: &snapshot,
+    })
+    .unwrap();
+    legacy["state"]
+        .as_object_mut()
+        .unwrap()
+        .remove("project_config");
+    assert_eq!(
+        FileStateStore::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap(),
+        snapshot
+    );
+    let mut incomplete_current = legacy;
+    incomplete_current["version"] = json!(7);
+    assert!(FileStateStore::decode(&serde_json::to_vec(&incomplete_current).unwrap()).is_err());
     for version in [4, 5] {
         let mut value = serde_json::to_value(StateRecord {
             version,
@@ -314,6 +331,10 @@ fn old_schema_migration_is_strict_and_lazy_and_current_flags_fields_are_required
         })
         .unwrap();
         value["state"].as_object_mut().unwrap().remove("flags");
+        value["state"]
+            .as_object_mut()
+            .unwrap()
+            .remove("project_config");
         if version == 4 {
             value["state"].as_object_mut().unwrap().remove("session");
         }
@@ -327,7 +348,7 @@ fn old_schema_migration_is_strict_and_lazy_and_current_flags_fields_are_required
         assert_eq!(fs::read(store.path()).unwrap(), bytes);
         store.save(&snapshot).unwrap();
         let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-        assert_eq!(saved["version"], 6);
+        assert_eq!(saved["version"], 7);
         value["state"]["flags"] = saved["state"]["flags"].clone();
         assert!(FileStateStore::decode(&serde_json::to_vec(&value).unwrap()).is_err());
     }

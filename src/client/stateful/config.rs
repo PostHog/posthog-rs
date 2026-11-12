@@ -43,9 +43,11 @@ pub struct Config {
     /// Default person processing and identity/group-operation policy. Default: IdentifiedOnly.
     /// Explicit capture options and hooks retain their normal precedence.
     pub person_profiles: PersonProfiles,
-    /// Request current-user flags asynchronously after local setup. Default: true.
-    /// Readiness does not wait for a response. False suppresses only startup preload,
-    /// not manual reloads or identity/group/targeting-triggered refreshes.
+    /// Preload current-user flags after the asynchronous project settings request.
+    /// Default: true. A successful project response with hasFeatureFlags=false
+    /// skips preload; unavailable settings fall back to loading flags. Readiness
+    /// does not wait for either response. False suppresses only startup preload,
+    /// not project settings or manual/identity/group/targeting-triggered refreshes.
     pub preload_feature_flags: bool,
     /// Report completed single-flag lookups through `$feature_flag_called` by
     /// default. Individual lookups can override this; consent still applies.
@@ -156,7 +158,7 @@ impl Config {
         self
     }
 
-    /// Observe initialization, storage, and delivery failures. Hooks run in
+    /// Observe initialization, storage, project settings, and delivery failures. Hooks run in
     /// registration order, outside state locks; panics are caught. The callback
     /// may run concurrently on initialization and worker threads. Do not emit
     /// analytics from it, which can create a delivery-failure feedback loop.

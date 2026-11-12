@@ -15,12 +15,13 @@ mod identity;
 mod initialization;
 mod producer;
 mod properties;
+mod remote_config;
 mod runtime;
 mod sessions;
 mod storage;
 mod writer;
 
-pub use crate::client::on_error::InitializationFailure;
+pub use crate::client::on_error::{InitializationFailure, RemoteConfigFailure};
 pub use crate::client::transport::flags::LoadError as FeatureFlagLoadError;
 pub use config::Config;
 pub use flag_listeners::{FeatureFlagsSubscription, FeatureFlagsUpdate};
@@ -50,6 +51,10 @@ struct Snapshot {
     registered: HashMap<String, Value>,
     groups: HashMap<String, String>,
     flags: flag_state::FlagState,
+    #[serde(with = "remote_config::cache_serde")]
+    project_config: Option<std::sync::Arc<crate::client::transport::remote_config::ProjectConfig>>,
+    #[serde(skip)]
+    project_config_loading: bool,
     #[serde(skip)]
     flag_load: flag_state::FlagLoadState,
     #[serde(deserialize_with = "Option::<sessions::StoredSession>::deserialize")]
@@ -76,6 +81,8 @@ impl Snapshot {
             registered: HashMap::new(),
             groups: HashMap::new(),
             flags: flag_state::FlagState::default(),
+            project_config: None,
+            project_config_loading: false,
             flag_load: flag_state::FlagLoadState::default(),
             session: None,
             sessions: sessions::Sessions::default(),
@@ -94,11 +101,16 @@ impl Snapshot {
             && self.registered == other.registered
             && self.groups == other.groups
             && self.flags == other.flags
+            && self.project_config == other.project_config
             && self.session == other.session
     }
 
     fn is_valid(&self) -> bool {
         self.flags.is_valid()
+            && self
+                .project_config
+                .as_ref()
+                .map_or(true, |config| config.valid())
             && self
                 .session
                 .as_ref()

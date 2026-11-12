@@ -14,6 +14,23 @@ SDK usage examples and code snippets live in the official documentation so they 
 - [Rust library docs](https://posthog.com/docs/libraries/rust)
 - Stateful application client (`stateful` feature): local anonymous identity, capture/screen, native hooks and persistent delivery.
 
+## Stateful project settings
+
+The `stateful` client loads project settings asynchronously at initialization,
+without delaying readiness. Settings use the configured persistence scope and
+survive identity changes and reset. Failed refreshes retain the last valid settings;
+`Persistence::Memory` keeps them in memory only.
+
+Startup feature flags load after project settings. A successful
+`hasFeatureFlags: false` response skips preload and clears stale server flags while
+preserving bootstrap values. Missing or unavailable settings fall back to loading
+flags. `Config::preload_feature_flags = false` suppresses startup flag loading, not
+project settings. Explicit and targeting-triggered flag refreshes remain available.
+Project-request failures are reported through `Config::on_error`. Project cache
+writes are best effort: when settings exceed state-storage bounds, live settings
+remain available and `on_error` receives a storage diagnostic. Successful state
+drains describe mandatory state, not guaranteed cache retention.
+
 ## Request context
 
 With the optional `tower` feature, `tower::PostHogLayer` reads

@@ -221,7 +221,7 @@ fn persistent_session_continues_but_memory_mode_clears_disk_session() {
         PersistenceOutcome::Persisted
     );
     drop(client);
-    assert_eq!(directory.state()["version"], 6);
+    assert_eq!(directory.state()["version"], 7);
     assert_eq!(directory.state()["state"]["session"]["id"], id.to_string());
     let client = Client::init_blocking(directory.config());
     assert_eq!(client.peek_session_id(), Some(id));
@@ -283,6 +283,10 @@ fn legacy_v4_migrates_lazily_and_invalid_session_files_are_preserved() {
     legacy["version"] = json!(4);
     legacy["state"].as_object_mut().unwrap().remove("session");
     legacy["state"].as_object_mut().unwrap().remove("flags");
+    legacy["state"]
+        .as_object_mut()
+        .unwrap()
+        .remove("project_config");
     directory.replace(&legacy);
     let bytes = std::fs::read(directory.path()).unwrap();
     let client = Client::init_blocking(directory.config());
@@ -293,7 +297,7 @@ fn legacy_v4_migrates_lazily_and_invalid_session_files_are_preserved() {
     client.shutdown_blocking(None);
     drop(client);
     let valid = directory.state();
-    assert_eq!(valid["version"], 6);
+    assert_eq!(valid["version"], 7);
     for invalid in [
         json!("bad"),
         json!({"id":"not-a-uuid","started_ms":1,"activity_ms":2}),

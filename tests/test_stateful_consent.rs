@@ -190,7 +190,7 @@ fn persisted_explicit_choice_wins_over_opposite_startup_default() {
             PersistenceOutcome::Persisted
         );
         drop(client);
-        assert_eq!(directory.state()["version"], 6);
+        assert_eq!(directory.state()["version"], 7);
         assert_eq!(directory.state()["state"]["opt_out"], choice);
         let mut conf = directory.config();
         conf.opt_out = !choice;
@@ -345,7 +345,7 @@ fn legacy_records_use_startup_default_without_eager_rewrite() {
             PersistenceOutcome::Persisted
         );
         drop(client);
-        assert_eq!(directory.state()["version"], 6);
+        assert_eq!(directory.state()["version"], 7);
         assert_eq!(directory.state()["state"]["opt_out"], false);
     }
 }

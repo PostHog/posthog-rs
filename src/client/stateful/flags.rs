@@ -13,7 +13,7 @@ use crate::client::ClientOptions;
 use crate::endpoints::Endpoint;
 
 pub(super) struct FlagLoader {
-    options: Arc<ClientOptions>,
+    pub(super) options: Arc<ClientOptions>,
     // Serialize request snapshotting and enqueueing, not network execution. An
     // older caller must not overwrite a newer caller's pending refresh.
     scheduling: Mutex<()>,
@@ -55,8 +55,34 @@ impl FlagLoader {
     }
 
     fn reload(&self, access: StateAccess, transport: &TransportHandle) {
+        self.schedule(access, None, |task| {
+            transport.schedule_flags(task);
+        });
+    }
+
+    pub(super) fn startup_task(
+        &self,
+        access: StateAccess,
+        expected_request: u64,
+    ) -> Option<flags::Task> {
+        let mut task = None;
+        self.schedule(access, Some(expected_request), |prepared| {
+            task = Some(prepared)
+        });
+        task
+    }
+
+    fn schedule(
+        &self,
+        access: StateAccess,
+        expected_request: Option<u64>,
+        enqueue: impl FnOnce(flags::Task),
+    ) {
         let scheduling = self.scheduling.lock().unwrap_or_else(|p| p.into_inner());
         let request = access.mutate(|state| {
+            if expected_request.is_some_and(|expected| state.flag_load.request != expected) {
+                return None;
+            }
             let sequence = state.flag_load.request.checked_add(1)?;
             state.flag_load.request = sequence;
             state.flag_load.reports.clear();
@@ -85,7 +111,7 @@ impl FlagLoader {
         });
         let failure = match task {
             Ok(task) => {
-                transport.schedule_flags(task);
+                enqueue(task);
                 None
             }
             Err(error) => Some(error),

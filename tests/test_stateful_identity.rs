@@ -554,7 +554,7 @@ fn version_one_state_migrates_on_mutation_and_future_state_is_preserved() {
     client.shutdown_blocking(None);
     drop(client);
     let state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(state["version"], 6);
+    assert_eq!(state["version"], 7);
     assert_eq!(state["state"]["identified"], true);
     assert_eq!(state["state"]["anonymous_id"], "legacy");
     assert!(state["state"].get("person_properties").is_none());

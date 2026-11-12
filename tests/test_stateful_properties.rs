@@ -370,7 +370,7 @@ fn legacy_context_migrates_on_mutation_and_invalid_current_records_are_preserved
             client.shutdown_blocking(None).state,
             PersistenceOutcome::Persisted
         );
-        assert_eq!(directory.state()["version"], 6);
+        assert_eq!(directory.state()["version"], 7);
         assert_eq!(
             directory.state()["state"]["registered"],
             json!({"migrated":true})

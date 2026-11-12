@@ -141,17 +141,20 @@ struct StateRecord<T> {
 
 pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     crate::client::capture::json_len(&StateRecord {
-        version: 6,
+        version: 7,
         state: snapshot,
     })
 }
 
-/// Reserve mandatory state first, excluding optional cached flag results. The
+/// Reserve mandatory state first, excluding optional flag and project caches. The
 /// longest consent and session representations must always remain writable.
 pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
     snapshot_size(snapshot)
         .saturating_sub(
             crate::client::capture::json_len(&snapshot.flags.cache.as_deref()).saturating_sub(4),
+        )
+        .saturating_sub(
+            crate::client::capture::json_len(&snapshot.project_config.as_deref()).saturating_sub(4),
         )
         .saturating_add(usize::from(snapshot.opt_out != Some(false)))
         .saturating_add(
@@ -163,23 +166,40 @@ pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
 /// Encode and validate the same bounded representation for both memory admission
 /// and persistence. This function performs no filesystem operations.
 pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
+    encode_snapshot_with_outcome(snapshot, max_bytes).map(|(bytes, _)| bytes)
+}
+
+fn encode_snapshot_with_outcome(
+    snapshot: &Snapshot,
+    max_bytes: u64,
+) -> io::Result<(Vec<u8>, SaveOutcome)> {
     if snapshot_capacity(snapshot) as u64 > max_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "State snapshot exceeds store limit",
         ));
     }
-    if snapshot.flags.cache.is_none() {
-        return encode_record(snapshot, max_bytes);
+    if snapshot.flags.cache.is_none() && snapshot.project_config.is_none() {
+        return encode_record(snapshot, max_bytes).map(|bytes| (bytes, SaveOutcome::default()));
     }
     // A cache may fit the memory bound but not the remaining disk capacity or
     // the whole-record decoder depth. It must not poison unrelated state writes.
     if let Ok(encoded) = encode_record(snapshot, max_bytes) {
-        return Ok(encoded);
+        return Ok((encoded, SaveOutcome::default()));
     }
     let mut mandatory = snapshot.clone();
     mandatory.flags.cache = None;
-    encode_record(&mandatory, max_bytes)
+    if let Ok(encoded) = encode_record(&mandatory, max_bytes) {
+        return Ok((encoded, SaveOutcome::default()));
+    }
+    mandatory.project_config = None;
+    let bytes = encode_record(&mandatory, max_bytes)?;
+    Ok((
+        bytes,
+        SaveOutcome {
+            project_config_omitted: snapshot.project_config.is_some(),
+        },
+    ))
 }
 
 fn encode_record(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
@@ -190,7 +210,7 @@ fn encode_record(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
     serde_json::to_writer(
         &mut buffer,
         &StateRecord {
-            version: 6,
+            version: 7,
             state: snapshot,
         },
     )
@@ -209,13 +229,19 @@ fn encode_record(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
     Ok(buffer.bytes)
 }
 
+/// A successful mandatory-state write may omit optional project settings.
+#[derive(Debug, Default)]
+pub(super) struct SaveOutcome {
+    pub(super) project_config_omitted: bool,
+}
+
 /// Blocking backend calls belong exclusively to the state-persistence worker.
 pub(super) trait StateStore: Send + 'static {
-    fn save(&mut self, snapshot: &Snapshot) -> io::Result<()>;
+    fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome>;
 }
 
 impl StateStore for FileStateStore {
-    fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
+    fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome> {
         FileStateStore::save(self, snapshot)
     }
 }
@@ -335,7 +361,7 @@ impl FileStateStore {
                     .as_object()
                     .cloned()
                     .ok_or_else(invalid_state)?;
-                if state.contains_key("flags") {
+                if state.contains_key("flags") || state.contains_key("project_config") {
                     return Err(invalid_state());
                 }
                 if record.version == 4 {
@@ -344,6 +370,7 @@ impl FileStateStore {
                     }
                     state.insert("session".into(), serde_json::Value::Null);
                 }
+                state.insert("project_config".into(), serde_json::Value::Null);
                 state.insert(
                     "flags".into(),
                     serde_json::to_value(super::flag_state::FlagState::default())
@@ -352,7 +379,20 @@ impl FileStateStore {
                 serde_json::from_value(serde_json::Value::Object(state))
                     .map_err(|_| invalid_state())?
             }
-            6 => serde_json::from_value(record.state).map_err(|_| invalid_state())?,
+            6 => {
+                let mut state = record
+                    .state
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(invalid_state)?;
+                if state.contains_key("project_config") {
+                    return Err(invalid_state());
+                }
+                state.insert("project_config".into(), serde_json::Value::Null);
+                serde_json::from_value(serde_json::Value::Object(state))
+                    .map_err(|_| invalid_state())?
+            }
+            7 => serde_json::from_value(record.state).map_err(|_| invalid_state())?,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -368,8 +408,8 @@ impl FileStateStore {
 
     /// Only the state writer calls this. A completed replacement is not a
     /// multi-file transaction with event storage or a universal power-loss guarantee.
-    pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
-        let encoded = encode_snapshot(snapshot, self.max_bytes)?;
+    pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome> {
+        let (encoded, outcome) = encode_snapshot_with_outcome(snapshot, self.max_bytes)?;
         let temporary = self.directory.path().join("state.json.tmp");
         // The lease and single writer exclude live concurrent writes. A stale
         // temporary is an uncommitted write from a previous process/attempt.
@@ -387,7 +427,7 @@ impl FileStateStore {
         if result.is_err() {
             let _ = fs::remove_file(temporary);
         }
-        result
+        result.map(|()| outcome)
     }
 }
 

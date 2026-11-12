@@ -32,54 +32,69 @@ impl Server {
         let (release, release_rx) = mpsc::channel();
         let thread = thread::spawn(move || {
             for (status, response) in responses {
-                let deadline = Instant::now() + WAIT;
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error)
-                            if error.kind() == std::io::ErrorKind::WouldBlock
-                                && Instant::now() < deadline =>
-                        {
-                            thread::sleep(Duration::from_millis(1))
+                loop {
+                    let deadline = Instant::now() + WAIT;
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error)
+                                if error.kind() == std::io::ErrorKind::WouldBlock
+                                    && Instant::now() < deadline =>
+                            {
+                                thread::sleep(Duration::from_millis(1))
+                            }
+                            Err(error) => panic!("bounded flag fixture accept: {}", error),
                         }
-                        Err(error) => panic!("bounded flag fixture accept: {}", error),
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(WAIT)).unwrap();
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") {
+                        assert!(header.len() < 8192);
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).unwrap();
+                        header.push(byte[0]);
                     }
-                };
-                stream.set_nonblocking(false).unwrap();
-                stream.set_read_timeout(Some(WAIT)).unwrap();
-                let mut header = Vec::new();
-                while !header.ends_with(b"\r\n\r\n") {
-                    assert!(header.len() < 8192);
-                    let mut byte = [0];
-                    stream.read_exact(&mut byte).unwrap();
-                    header.push(byte[0]);
+                    let header = String::from_utf8(header).unwrap();
+                    if header.starts_with("GET /array/") && header.contains("/config HTTP/1.1\r\n")
+                    {
+                        let body = br#"{"hasFeatureFlags":true}"#;
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                            body.len()
+                        )
+                        .unwrap();
+                        stream.write_all(body).unwrap();
+                        continue;
+                    }
+                    assert!(header.starts_with("POST /flags/?v=2 HTTP/1.1\r\n"));
+                    let length: usize = header
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    assert!(length <= flags::MAX_REQUEST_BYTES);
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    requests_tx
+                        .send(serde_json::from_slice(&body).unwrap())
+                        .unwrap();
+                    release_rx.recv_timeout(WAIT).unwrap();
+                    let body = serde_json::to_vec(&response).unwrap();
+                    write!(
+                        stream,
+                        "HTTP/1.1 {} Test\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                        status,
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&body).unwrap();
+                    break;
                 }
-                let header = String::from_utf8(header).unwrap();
-                assert!(header.starts_with("POST /flags/?v=2 HTTP/1.1\r\n"));
-                let length: usize = header
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse().unwrap())
-                    })
-                    .unwrap();
-                assert!(length <= flags::MAX_REQUEST_BYTES);
-                let mut body = vec![0; length];
-                stream.read_exact(&mut body).unwrap();
-                requests_tx
-                    .send(serde_json::from_slice(&body).unwrap())
-                    .unwrap();
-                release_rx.recv_timeout(WAIT).unwrap();
-                let body = serde_json::to_vec(&response).unwrap();
-                write!(
-                    stream,
-                    "HTTP/1.1 {} Test\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
-                    status,
-                    body.len()
-                )
-                .unwrap();
-                stream.write_all(&body).unwrap();
             }
         });
         Self {

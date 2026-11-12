@@ -383,8 +383,11 @@ fn cancelling_initialization_cleans_up_without_blocking_the_polling_thread() {
     let release_rx = Mutex::new(release_rx);
     let (dropped_tx, dropped_rx) = mpsc::channel();
     let dropped = Dropped(dropped_tx);
-    config.on_error(move |_| {
+    config.on_error(move |failure| {
         let _ = &dropped;
+        if !matches!(failure, PostHogError::Storage(_)) {
+            return;
+        }
         entered_tx.send(std::thread::current().id()).unwrap();
         release_rx
             .lock()
