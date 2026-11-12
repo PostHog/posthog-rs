@@ -462,7 +462,8 @@ impl Client {
     /// requests or joining the current worker thread.
     ///
     /// In a web server, call this after the server future resolves, such as
-    /// after `run().await` in an actix or axum `main`.
+    /// after `HttpServer::run().await` (actix) or `axum::serve(..).await`
+    /// (axum) returns.
     pub async fn shutdown(&self) {
         let deadline =
             std::time::Instant::now() + Duration::from_millis(self.options.shutdown_timeout_ms);

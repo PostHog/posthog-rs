@@ -39,6 +39,8 @@ async fn main() -> Result<(), posthog::Error> {
 
 The SDK logs through [`tracing`](https://docs.rs/tracing) under the `posthog` target. Add a subscriber to your application to see the logs.
 
+This example needs the `env-filter` feature of `tracing-subscriber`. Add `tracing-subscriber = { version = "0.3", features = ["env-filter"] }` to your dependencies.
+
 ```rust
 use tracing_subscriber::EnvFilter;
 
