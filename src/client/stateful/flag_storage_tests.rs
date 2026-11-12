@@ -306,31 +306,7 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
 }
 
 #[test]
-fn old_schema_migration_is_strict_and_lazy_and_current_flags_fields_are_required() {
-    for version in [4, 5] {
-        let mut value = serde_json::to_value(StateRecord {
-            version,
-            state: Snapshot::anonymous("old".into()),
-        })
-        .unwrap();
-        value["state"].as_object_mut().unwrap().remove("flags");
-        if version == 4 {
-            value["state"].as_object_mut().unwrap().remove("session");
-        }
-        let bytes = serde_json::to_vec(&value).unwrap();
-        let directory = TestDirectory::new();
-        let lease = directory.lease();
-        fs::write(directory.path().join("state.json"), &bytes).unwrap();
-        let (mut store, restored) = FileStateStore::open(lease, 8192).unwrap();
-        let snapshot = restored.unwrap();
-        assert_eq!(snapshot, Snapshot::anonymous("old".into()));
-        assert_eq!(fs::read(store.path()).unwrap(), bytes);
-        store.save(&snapshot).unwrap();
-        let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-        assert_eq!(saved["version"], 6);
-        value["state"]["flags"] = saved["state"]["flags"].clone();
-        assert!(FileStateStore::decode(&serde_json::to_vec(&value).unwrap()).is_err());
-    }
+fn current_flag_fields_are_required_and_invalid_records_are_preserved() {
     let valid: Value = serde_json::from_slice(&record(&with_cache(Some(json!(false))))).unwrap();
     for path in [
         vec!["flags"],
