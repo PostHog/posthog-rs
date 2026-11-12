@@ -34,3 +34,25 @@ async fn main() -> Result<(), posthog::Error> {
 ```
 
 `capture` queues the event and returns at once. Call `shutdown` before the process exits.
+
+In a web server, put the call after the server future resolves, such as after `run().await` in an actix or axum `main`.
+
+## Read SDK logs
+
+The SDK logs through [`tracing`](https://docs.rs/tracing) under the `posthog` target. Add a subscriber to your application to see the logs.
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+```
+
+Set `RUST_LOG` to choose the level.
+
+```bash
+RUST_LOG=posthog=debug cargo run
+```
+
+Use `posthog=warn` for warnings and errors only. Use `posthog=trace` for detailed local evaluation and cache logs.
