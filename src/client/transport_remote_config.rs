@@ -161,6 +161,135 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failure_diagnostics_report_once_and_omit_request_and_response_data() {
+        use crate::client::{ClientOptionsBuilder, OnErrorHook};
+        use httpmock::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Log(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Log {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for (error, message, status) in [
+            (
+                LoadError::Network,
+                "Remote configuration request failed",
+                None,
+            ),
+            (
+                LoadError::Http(503),
+                "Remote configuration returned an unsuccessful HTTP status",
+                Some(503),
+            ),
+            (
+                LoadError::InvalidResponse,
+                "Remote configuration response is invalid",
+                None,
+            ),
+            (
+                LoadError::ResponseTooLarge,
+                "Remote configuration response exceeds its byte limit",
+                None,
+            ),
+        ] {
+            for with_hook in [false, true] {
+                let server = MockServer::start();
+                let body = if error == LoadError::ResponseTooLarge {
+                    format!("private-body-marker{}", "x".repeat(MAX_CONFIG_BYTES))
+                } else {
+                    "private-body-marker".to_owned()
+                };
+                let response = server.mock(|when, then| {
+                    when.method(GET)
+                        .path("/private-url-marker/array/private-token-marker/config");
+                    then.status(if let LoadError::Http(status) = error {
+                        status
+                    } else {
+                        200
+                    })
+                    .body(body);
+                });
+                let host = if error == LoadError::Network {
+                    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let host =
+                        format!("http://{}/private-url-marker", socket.local_addr().unwrap());
+                    drop(socket);
+                    host
+                } else {
+                    server.url("/private-url-marker")
+                };
+                let mut options = ClientOptionsBuilder::default()
+                    .api_key("private-token-marker".to_owned())
+                    .host(host)
+                    .request_timeout_seconds(1u64)
+                    .build()
+                    .unwrap();
+                let diagnostics = Arc::new(Mutex::new(Vec::new()));
+                if with_hook {
+                    let seen = diagnostics.clone();
+                    options.on_error.push(OnErrorHook::new(move |diagnostic| {
+                        if let PostHogError::RemoteConfig(failure) = diagnostic {
+                            seen.lock().unwrap().push((
+                                failure.message().to_owned(),
+                                failure.status(),
+                                format!("{diagnostic:?}"),
+                            ));
+                        }
+                    }));
+                }
+                let logs = Log(Arc::new(Mutex::new(Vec::new())));
+                let writer = logs.clone();
+                let subscriber = tracing_subscriber::fmt()
+                    .with_env_filter("posthog=warn")
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone())
+                    .finish();
+                let _guard = tracing::subscriber::set_default(subscriber);
+                let (tx, rx) = std::sync::mpsc::channel();
+                Task::new(
+                    config_url(options.endpoints().base_host(), &options.api_key).unwrap(),
+                    move |result| {
+                        tx.send(result.err()).unwrap();
+                        None
+                    },
+                )
+                .run(&reqwest::blocking::Client::new(), &options);
+                assert_eq!(rx.recv().unwrap(), Some(error));
+                let diagnostics = diagnostics.lock().unwrap();
+                assert_eq!(diagnostics.len(), usize::from(with_hook));
+                if with_hook {
+                    assert_eq!(diagnostics[0].0, message);
+                    assert_eq!(diagnostics[0].1, status);
+                }
+                let warnings = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+                if !with_hook {
+                    assert!(warnings.contains(message));
+                }
+                for marker in [
+                    "private-token-marker",
+                    "private-url-marker",
+                    "private-body-marker",
+                ] {
+                    assert!(!warnings.contains(marker));
+                    for diagnostic in diagnostics.iter() {
+                        assert!(!diagnostic.2.contains(marker));
+                    }
+                }
+                response.assert_calls(usize::from(error != LoadError::Network));
+            }
+        }
+    }
+
+    #[test]
     fn asset_routing_preserves_proxy_prefix_and_encodes_token() {
         for (host, expected) in [
             (

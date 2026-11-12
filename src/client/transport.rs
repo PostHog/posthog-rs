@@ -117,7 +117,10 @@ pub(crate) enum Control {
     #[cfg(feature = "stateful")]
     Flags(Arc<flags::Slot>),
     #[cfg(feature = "stateful")]
-    RemoteConfig(remote_config::Task),
+    RemoteConfig {
+        task: remote_config::Task,
+        closed: Arc<AtomicBool>,
+    },
     /// Like [`Control::Flush`], but sends the freshly captured live buffer
     /// *before* older held retries. Used by the panic hook so a retry backlog
     /// behind a slow endpoint can't starve the just-enqueued `$exception` within
@@ -234,7 +237,7 @@ pub(crate) struct TransportHandle {
     /// Pending `Capture` events not yet pulled by the worker. Gates the bounded queue.
     len: Arc<AtomicUsize>,
     /// Set once `shutdown`/`Drop` begins; blocks further enqueue and control sends.
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
     #[cfg(all(feature = "stateful", feature = "async-client"))]
     stopped: Option<tokio::sync::watch::Receiver<()>>,
@@ -459,7 +462,7 @@ impl TransportHandle {
         Self {
             tx,
             len,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(worker),
             #[cfg(all(feature = "stateful", feature = "async-client"))]
             stopped,
@@ -488,7 +491,13 @@ impl TransportHandle {
     pub(super) fn schedule_remote_config(&self, task: remote_config::Task) -> bool {
         self.flags.is_some()
             && !self.closed.load(Ordering::Acquire)
-            && self.tx.send(Control::RemoteConfig(task)).is_ok()
+            && self
+                .tx
+                .send(Control::RemoteConfig {
+                    task,
+                    closed: self.closed.clone(),
+                })
+                .is_ok()
     }
 
     fn try_reserve(&self) -> bool {
@@ -1188,7 +1197,11 @@ fn run_worker(
             #[cfg(feature = "stateful")]
             Wake::Msg(Control::Flags(slot)) => slot.run(&pipeline.http, &pipeline.options),
             #[cfg(feature = "stateful")]
-            Wake::Msg(Control::RemoteConfig(task)) => task.run(&pipeline.http, &pipeline.options),
+            Wake::Msg(Control::RemoteConfig { task, closed }) => {
+                if !closed.load(Ordering::Acquire) {
+                    task.run(&pipeline.http, &pipeline.options);
+                }
+            }
             Wake::Msg(Control::Capture { event }) => {
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
@@ -1335,7 +1348,7 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             #[cfg(feature = "stateful")]
             Control::Flags(slot) => slot.close(),
             #[cfg(feature = "stateful")]
-            Control::RemoteConfig(_) => {}
+            Control::RemoteConfig { .. } => {}
             Control::Flush(c)
             | Control::FlushCaptures(c)
             | Control::Shutdown { completion: c, .. } => c.signal(),
