@@ -11,7 +11,10 @@ use email_support::{
     accepted, closed_url, options, unavailable, Answer, ScriptedServer, MESSAGE_ID, SEND_PATH,
     TEMPLATE_ID,
 };
-use posthog_rs::{CodeEmail, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
+use posthog_rs::{
+    CodeEmail, EmailDeliveryStatus, EmailErrorKind, EmailTracking, EmailTrackingOptions,
+    TemplateEmail,
+};
 use serde_json::json;
 
 async fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
@@ -89,7 +92,8 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
                 .text("Reset")
                 .from("Acme <security@example.com>")
                 .reply_to("help@example.com")
-                .capture_engagement(false)
+                .reply_to("support@example.com")
+                .tracking(EmailTrackingOptions::new().clicks(true).engagement(false))
                 .distinct_id("user_123")
                 .idempotency_key("password-reset:user_123"),
         )
@@ -106,8 +110,8 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
             "html": "<p>Reset</p>",
             "text": "Reset",
             "from": "Acme <security@example.com>",
-            "reply_to": ["help@example.com"],
-            "capture_engagement": false,
+            "reply_to": ["help@example.com", "support@example.com"],
+            "tracking": {"clicks": true, "engagement": false},
             "distinct_id": "user_123",
             "to": "user@example.com",
         })
@@ -119,7 +123,7 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
 }
 
 #[tokio::test]
-async fn code_send_defaults_engagement_capture_on() {
+async fn code_send_leaves_out_sensitivity_tracking_and_engagement_capture_it_was_not_given() {
     let server = ScriptedServer::start_async(vec![accepted()]).await;
     let client = client_for(&server).await;
 
@@ -135,10 +139,137 @@ async fn code_send_defaults_engagement_capture_on() {
             "template_key": "welcome",
             "subject": "Welcome",
             "text": "Hi",
-            "capture_engagement": true,
             "to": "user@example.com",
         })
     );
+}
+
+#[tokio::test]
+async fn code_send_sends_the_tracking_it_was_given() {
+    let cases: Vec<(EmailTracking, serde_json::Value)> = vec![
+        (true.into(), json!(true)),
+        (false.into(), json!(false)),
+        (EmailTracking::On, json!(true)),
+        (EmailTracking::Off, json!(false)),
+        (
+            EmailTrackingOptions::new().clicks(true).into(),
+            json!({"clicks": true}),
+        ),
+        (
+            EmailTrackingOptions::new()
+                .opens(true)
+                .clicks(false)
+                .engagement(false)
+                .into(),
+            json!({"opens": true, "clicks": false, "engagement": false}),
+        ),
+        (
+            EmailTrackingOptions::new()
+                .opens(false)
+                .engagement(true)
+                .into(),
+            json!({"opens": false, "engagement": true}),
+        ),
+        (EmailTrackingOptions::new().into(), json!({})),
+    ];
+    for (tracking, expected) in cases {
+        let server = ScriptedServer::start_async(vec![accepted()]).await;
+        let client = client_for(&server).await;
+
+        client
+            .emails()
+            .send(
+                CodeEmail::new("user@example.com", "digest", "Your digest")
+                    .text("Hi")
+                    .tracking(tracking),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            server.requests()[0].json(),
+            json!({
+                "template_key": "digest",
+                "subject": "Your digest",
+                "text": "Hi",
+                "tracking": expected,
+                "to": "user@example.com",
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn code_send_sends_the_sensitivity_it_was_given() {
+    let cases = vec![
+        (
+            CodeEmail::new("user@example.com", "digest", "Your digest")
+                .text("Hi")
+                .sensitive(true),
+            json!({"sensitive": true}),
+        ),
+        (
+            CodeEmail::new("user@example.com", "digest", "Your digest")
+                .text("Hi")
+                .sensitive(false),
+            json!({"sensitive": false}),
+        ),
+        (
+            CodeEmail::new("user@example.com", "digest", "Your digest")
+                .text("Hi")
+                .sensitive(false)
+                .tracking(EmailTrackingOptions::new().clicks(false)),
+            json!({"sensitive": false, "tracking": {"clicks": false}}),
+        ),
+    ];
+    for (email, sent) in cases {
+        let server = ScriptedServer::start_async(vec![accepted()]).await;
+        let client = client_for(&server).await;
+
+        client.emails().send(email).await.unwrap();
+
+        let mut expected = json!({
+            "template_key": "digest",
+            "subject": "Your digest",
+            "text": "Hi",
+            "to": "user@example.com",
+        });
+        expected
+            .as_object_mut()
+            .unwrap()
+            .extend(sent.as_object().unwrap().clone());
+        assert_eq!(server.requests()[0].json(), expected);
+    }
+}
+
+#[tokio::test]
+#[allow(deprecated)]
+async fn code_send_still_sends_the_deprecated_engagement_capture() {
+    for capture in [false, true] {
+        let server = ScriptedServer::start_async(vec![accepted()]).await;
+        let client = client_for(&server).await;
+
+        client
+            .emails()
+            .send(
+                CodeEmail::new("user@example.com", "welcome", "Welcome")
+                    .text("Hi")
+                    .capture_engagement(capture),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            server.requests()[0].json(),
+            json!({
+                "template_key": "welcome",
+                "subject": "Welcome",
+                "text": "Hi",
+                "capture_engagement": capture,
+                "to": "user@example.com",
+            })
+        );
+    }
 }
 
 #[tokio::test]

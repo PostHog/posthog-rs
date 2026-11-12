@@ -74,7 +74,6 @@ fn code_send_posts_the_rendered_content() {
             "subject": "Reset your password",
             "html": "<p>Reset</p>",
             "from": "Acme <security@example.com>",
-            "capture_engagement": true,
             "to": "user@example.com",
         })
     );
