@@ -476,6 +476,32 @@ async fn an_upload_url_that_isnt_https_sends_nothing() {
 }
 
 #[tokio::test]
+async fn an_upload_grant_with_too_many_headers_sends_nothing() {
+    // A malformed or compromised upload route signs a grant with more headers
+    // than a header map can hold: the send fails instead of panicking.
+    let posthog = FakePostHog::start_async()
+        .await
+        .with_too_many_grant_headers();
+    posthog.store(&PNG);
+    let client = client_of(&posthog).await;
+
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "api_error");
+    assert!(
+        error.message().contains("without an answer for each file"),
+        "{}",
+        error
+    );
+    assert!(posthog.stored(PDF_SHA256).is_none(), "nothing is uploaded");
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[tokio::test]
 async fn a_plain_http_app_host_lets_files_upload_over_plain_http() {
     // A PostHog on the developer's machine, reached over plain http, names a
     // plain-http file store, and the files upload.

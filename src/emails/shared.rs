@@ -522,10 +522,14 @@ fn upload(
     let method = Method::from_bytes(text(slot, "method")?.as_bytes()).ok()?;
     let mut headers = HeaderMap::new();
     for (name, value) in slot.get("headers")?.as_object()? {
-        headers.insert(
-            HeaderName::from_bytes(name.as_bytes()).ok()?,
-            HeaderValue::from_str(value.as_str()?).ok()?,
-        );
+        // `insert` panics past the map's size limit, which a malformed reply
+        // can reach, so a reply that would overflow it reads as malformed.
+        headers
+            .try_insert(
+                HeaderName::from_bytes(name.as_bytes()).ok()?,
+                HeaderValue::from_str(value.as_str()?).ok()?,
+            )
+            .ok()?;
     }
     let size = attachment.content.len() as u64;
     Some(Upload {

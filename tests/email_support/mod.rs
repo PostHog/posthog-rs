@@ -199,6 +199,9 @@ enum Grants {
     Expired,
     /// For other bytes than the file's.
     ForOtherBytes,
+    /// With more headers than a header map can hold, as a malformed or
+    /// compromised upload route could send.
+    WithTooManyHeaders,
 }
 
 impl FakePostHog {
@@ -275,6 +278,12 @@ impl FakePostHog {
     /// Grants signed for other bytes than the file's.
     pub fn with_grants_for_other_bytes(self) -> Self {
         self.state.lock().unwrap().grants = Grants::ForOtherBytes;
+        self
+    }
+
+    /// Grants with more headers than a header map can hold.
+    pub fn with_too_many_grant_headers(self) -> Self {
+        self.state.lock().unwrap().grants = Grants::WithTooManyHeaders;
         self
     }
 
@@ -453,6 +462,17 @@ fn upload_slot(state: &FakeState, file: &serde_json::Value) -> serde_json::Value
     } else {
         u64::MAX
     };
+    let mut headers = serde_json::json!({
+        "content-length": file["size"].to_string(),
+        "x-amz-checksum-sha256": checksum,
+    });
+    if state.grants == Grants::WithTooManyHeaders {
+        // One more than the 32,768 entries a header map holds.
+        let extra = headers.as_object_mut().unwrap();
+        for index in 0..32_767 {
+            extra.insert(format!("{index:x}"), serde_json::json!(""));
+        }
+    }
     serde_json::json!({
         "sha256": sha256,
         "status": "upload",
@@ -461,10 +481,7 @@ fn upload_slot(state: &FakeState, file: &serde_json::Value) -> serde_json::Value
             state.store_url, sha256, expires, signed_for
         ),
         "method": "PUT",
-        "headers": {
-            "content-length": file["size"].to_string(),
-            "x-amz-checksum-sha256": checksum,
-        },
+        "headers": headers,
         "url_expires_at": "2026-11-09T12:15:00Z",
     })
 }
