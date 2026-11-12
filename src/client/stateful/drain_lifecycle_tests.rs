@@ -144,7 +144,7 @@ fn async_flush_captures_revision_and_cancellation_keeps_client_open() {
 fn async_drains_from_state_writer_callback_defer_without_cross_worker_waits() {
     struct FailingStore;
     impl StateStore for FailingStore {
-        fn save(&mut self, _: &Snapshot) -> io::Result<()> {
+        fn save(&mut self, _: &Snapshot) -> io::Result<SaveOutcome> {
             Err(io::Error::other("test state write failure"))
         }
     }

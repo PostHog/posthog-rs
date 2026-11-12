@@ -510,6 +510,7 @@ pub(super) fn run(
         };
         match wake {
             Ok(Control::Flags(_)) => unreachable!("request-worker-only flags"),
+            Ok(Control::RemoteConfig(_)) => unreachable!("request-worker-only config"),
             #[cfg(test)]
             Ok(Control::RequestBarrier(_)) => unreachable!("request-worker-only barrier"),
             Ok(Control::QueueWake) => {

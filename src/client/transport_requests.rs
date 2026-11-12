@@ -1,4 +1,4 @@
-//! Stateful flag execution. This owner never holds event storage.
+//! Stateful configuration/flag execution. This owner never holds event storage.
 
 use super::{build_http, flags, ClientOptions, Completion, Control, StartupFailure};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,6 +41,7 @@ impl Worker {
                             let _ = tx.send(());
                         }
                         Control::Flags(slot) => slot.run(&http, &options),
+                        Control::RemoteConfig(task) => task.run(&http, &options),
                         _ => break,
                     }
                 }

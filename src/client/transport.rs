@@ -52,6 +52,9 @@ mod queue;
 #[cfg(feature = "stateful")]
 #[path = "transport_requests.rs"]
 mod requests;
+#[cfg(feature = "stateful")]
+#[path = "transport_remote_config.rs"]
+pub(super) mod remote_config;
 #[cfg(all(test, feature = "stateful"))]
 #[path = "transport_startup_tests.rs"]
 mod startup_tests;
@@ -127,6 +130,8 @@ pub(crate) enum Control {
     Flags(Arc<flags::Slot>),
     #[cfg(all(test, feature = "stateful"))]
     RequestBarrier(mpsc::Sender<()>),
+    #[cfg(feature = "stateful")]
+    RemoteConfig(remote_config::Task),
     /// Like [`Control::Flush`], but sends the freshly captured live buffer
     /// *before* older held retries. Used by the panic hook so a retry backlog
     /// behind a slow endpoint can't starve the just-enqueued `$exception` within
@@ -601,6 +606,15 @@ impl TransportHandle {
         worker.sender().send(Control::RequestBarrier(tx)).unwrap();
         rx.recv_timeout(Duration::from_secs(5))
             .expect("request worker did not reach bounded completion barrier");
+    }
+
+    #[cfg(feature = "stateful")]
+    pub(super) fn schedule_remote_config(&self, task: remote_config::Task) -> bool {
+        !self.closed.load(Ordering::Acquire)
+            && self
+                .requests
+                .as_ref()
+                .is_some_and(|worker| worker.sender().send(Control::RemoteConfig(task)).is_ok())
     }
 
     fn try_reserve(&self) -> bool {
@@ -1364,6 +1378,8 @@ fn run_worker(
             Wake::Msg(Control::Flags(_)) => unreachable!("request-worker-only flags"),
             #[cfg(all(test, feature = "stateful"))]
             Wake::Msg(Control::RequestBarrier(_)) => unreachable!("request-worker-only barrier"),
+            #[cfg(feature = "stateful")]
+            Wake::Msg(Control::RemoteConfig(_)) => unreachable!("request-worker-only config"),
             Wake::Msg(Control::Capture { event }) => {
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
@@ -1514,6 +1530,8 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             Control::Flags(slot) => slot.close(),
             #[cfg(all(test, feature = "stateful"))]
             Control::RequestBarrier(_) => {}
+            #[cfg(feature = "stateful")]
+            Control::RemoteConfig(_) => {}
             Control::Flush(c)
             | Control::FlushCaptures(c)
             | Control::Shutdown { completion: c, .. } => c.signal(),

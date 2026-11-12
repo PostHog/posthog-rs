@@ -1,6 +1,6 @@
 use super::*;
 use crate::client::event_store::StorageDirectory;
-use crate::client::stateful::storage::FileStateStore;
+use crate::client::stateful::storage::{FileStateStore, SaveOutcome};
 use crate::client::transport::SystemClock;
 use crate::client::PostHogError;
 use chrono::{DateTime, Utc};
@@ -251,7 +251,7 @@ impl WriteCall {
 struct ControlledStore(mpsc::Sender<WriteCall>);
 
 impl StateStore for ControlledStore {
-    fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
+    fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome> {
         let (reply, completion) = mpsc::channel();
         self.0
             .send(WriteCall {
@@ -263,6 +263,7 @@ impl StateStore for ControlledStore {
         completion
             .recv()
             .unwrap_or_else(|_| Err(io::Error::other("test write interrupted")))
+            .map(|()| SaveOutcome::default())
     }
 }
 
@@ -711,7 +712,7 @@ fn shutdown_does_not_interrupt_an_inflight_write_and_waits_for_backend_release()
 fn worker_panic_degrades_to_memory_and_wakes_waiters() {
     struct PanickingStore;
     impl StateStore for PanickingStore {
-        fn save(&mut self, _: &Snapshot) -> io::Result<()> {
+        fn save(&mut self, _: &Snapshot) -> io::Result<SaveOutcome> {
             panic!("test backend failure")
         }
     }

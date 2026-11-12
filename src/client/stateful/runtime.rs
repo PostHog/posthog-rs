@@ -123,7 +123,7 @@ pub struct Client {
     shutdown_timeout: Duration,
     shutdown: Option<shutdown::Shutdown>,
     pub(super) producer: Option<Producer>,
-    pub(super) flag_loader: Option<super::flags::FlagLoader>,
+    pub(super) flag_loader: Option<Arc<super::flags::FlagLoader>>,
     pub(super) state: Option<StateWriter>,
     pub(super) transport: Option<TransportHandle>,
     pub(super) closed: AtomicBool,
@@ -285,10 +285,10 @@ impl Client {
             shutdown: Some(shutdown),
             shutdown_timeout: config.shutdown_timeout,
             producer: Some(producer),
-            flag_loader: Some(super::flags::FlagLoader::new(
+            flag_loader: Some(Arc::new(super::flags::FlagLoader::new(
                 config.transport_options(),
                 config.on_feature_flags.clone(),
-            )),
+            ))),
             state: Some(state),
             transport: Some(transport),
             closed: AtomicBool::new(false),
@@ -305,9 +305,7 @@ impl Client {
             .unwrap()
             .listeners
             .notify_ready(&client.state.as_ref().unwrap().access());
-        if config.preload_feature_flags {
-            client.reload_feature_flags();
-        }
+        client.load_remote_config(config.preload_feature_flags);
         client
     }
 

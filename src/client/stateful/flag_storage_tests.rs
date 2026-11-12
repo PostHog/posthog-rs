@@ -246,13 +246,13 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
         blocked: bool,
     }
     impl StateStore for BlockedStore {
-        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<()> {
+        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<SaveOutcome> {
             if !self.blocked {
                 self.blocked = true;
                 self.entered.send(()).unwrap();
                 self.release.recv().unwrap();
             }
-            Ok(())
+            Ok(SaveOutcome::default())
         }
     }
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
