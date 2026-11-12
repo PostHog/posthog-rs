@@ -141,7 +141,7 @@ struct StateRecord<T> {
 
 pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     crate::client::capture::json_len(&StateRecord {
-        version: 3,
+        version: 1,
         state: snapshot,
     })
 }
@@ -211,7 +211,7 @@ impl FileStateStore {
             return Err(invalid_state());
         }
         let snapshot = Self::decode(&encoded)?;
-        // A migrated record must also fit the current in-memory/write bound.
+        // Restored state must also fit the current in-memory/write bound.
         if snapshot_capacity(&snapshot) as u64 > self.max_bytes {
             return Err(invalid_state());
         }
@@ -221,45 +221,14 @@ impl FileStateStore {
     fn decode(encoded: &[u8]) -> io::Result<Snapshot> {
         let record: StateRecord<serde_json::Value> =
             serde_json::from_slice(encoded).map_err(|_| invalid_state())?;
-        let snapshot: Snapshot = match record.version {
-            1 => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct AnonymousState {
-                    anonymous_id: String,
-                    distinct_id: String,
-                }
-                let old: AnonymousState =
-                    serde_json::from_value(record.state).map_err(|_| invalid_state())?;
-                let mut snapshot = Snapshot::anonymous(old.anonymous_id);
-                snapshot.distinct_id = old.distinct_id;
-                snapshot
-            }
-            2 => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct PersonState {
-                    anonymous_id: String,
-                    distinct_id: String,
-                    identified: bool,
-                    person_processing: bool,
-                }
-                let old: PersonState =
-                    serde_json::from_value(record.state).map_err(|_| invalid_state())?;
-                let mut snapshot = Snapshot::anonymous(old.anonymous_id);
-                snapshot.distinct_id = old.distinct_id;
-                snapshot.identified = old.identified;
-                snapshot.person_processing = old.person_processing;
-                snapshot
-            }
-            3 => serde_json::from_value(record.state).map_err(|_| invalid_state())?,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Unsupported state store version",
-                ))
-            }
-        };
+        if record.version != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unsupported state store version",
+            ));
+        }
+        let snapshot: Snapshot =
+            serde_json::from_value(record.state).map_err(|_| invalid_state())?;
         if !snapshot.is_valid() {
             return Err(invalid_state());
         }
@@ -282,7 +251,7 @@ impl FileStateStore {
         serde_json::to_writer(
             &mut buffer,
             &StateRecord {
-                version: 3,
+                version: 1,
                 state: snapshot,
             },
         )
