@@ -126,8 +126,8 @@ pass an `idempotency_key` that names the email when your own job runner
 retries too, and set `max_retries(0)` on the send. A failed send returns an
 `EmailError`: branch on `code()`, such as `quota_limited`, or on `kind()`.
 
-A code send is transactional unless you set its `category`. A
-`MessageCategory` defines the category in code: PostHog creates it with its
+A code send takes a `category` to send marketing email or to file the email
+under a message category. A `MessageCategory` defines the category in code: PostHog creates it with its
 name and description on the first send with its key. Later sends keep the
 category's name and description, so change them in PostHog.
 
