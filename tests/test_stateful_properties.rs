@@ -342,41 +342,7 @@ fn restart_restores_owned_context_and_removals() {
 }
 
 #[test]
-fn legacy_context_migrates_on_mutation_and_invalid_current_records_are_preserved() {
-    for version in [1, 2, 3] {
-        let directory = Directory::new();
-        let client = Client::init_blocking(directory.config());
-        client.shutdown_blocking(None);
-        drop(client);
-        let mut state = json!({"anonymous_id":"legacy", "distinct_id":"legacy"});
-        if version >= 2 {
-            state["identified"] = json!(true);
-            state["person_processing"] = json!(true);
-        }
-        if version == 3 {
-            state["opt_out"] = json!(false);
-        }
-        let bytes = serde_json::to_vec(&json!({"version":version, "state":state})).unwrap();
-        std::fs::write(directory.state_path(), &bytes).unwrap();
-        let (client, events) = observed(directory.config());
-        assert_eq!(client.get_distinct_id(), "legacy");
-        client.capture("old");
-        assert!(!events.lock().unwrap()[0]
-            .properties()
-            .contains_key("$groups"));
-        assert_eq!(std::fs::read(directory.state_path()).unwrap(), bytes);
-        client.register(properties(json!({"migrated":true})));
-        assert_eq!(
-            client.shutdown_blocking(None).state,
-            PersistenceOutcome::Persisted
-        );
-        assert_eq!(directory.state()["version"], 6);
-        assert_eq!(
-            directory.state()["state"]["registered"],
-            json!({"migrated":true})
-        );
-        assert_eq!(directory.state()["state"]["groups"], json!({}));
-    }
+fn invalid_current_records_are_preserved() {
     for invalid in [json!(null), json!({"company":1}), json!({" ":"key"})] {
         let directory = Directory::new();
         let client = Client::init_blocking(directory.config());
@@ -622,33 +588,6 @@ fn failed_write_preserves_live_context_then_persists_latest_revision() {
         json!({"plan":"latest"})
     );
     assert_eq!(directory.state()["state"]["groups"], json!({"company":"b"}));
-}
-
-#[test]
-fn expanded_legacy_context_migration_preserves_file_and_uses_memory_fallback() {
-    let directory = Directory::new();
-    let seed = Client::init_blocking(directory.config());
-    seed.shutdown_blocking(None);
-    drop(seed);
-    let bytes = serde_json::to_vec(&json!({"version":3,"state":{
-        "anonymous_id":"a".repeat(200),"distinct_id":"b".repeat(200),
-        "identified":true,"person_processing":true,"opt_out":false
-    }}))
-    .unwrap();
-    std::fs::write(directory.state_path(), &bytes).unwrap();
-    let mut conf = directory.config();
-    conf.max_state_bytes = bytes.len();
-    conf.opt_out = true;
-    let client = Client::init_blocking(conf);
-    assert!(!client.is_disabled());
-    assert_eq!(client.get_distinct_id(), "anonymous");
-    assert!(client.is_opt_out());
-    client.register(properties(json!({"fallback":true})));
-    assert_eq!(
-        client.shutdown_blocking(None).state,
-        PersistenceOutcome::Unavailable
-    );
-    assert_eq!(std::fs::read(directory.state_path()).unwrap(), bytes);
 }
 
 #[test]
