@@ -303,6 +303,7 @@ The SDK therefore keeps the request context from turning person processing off f
 - **`before_send`.** The hook sees the resolved value as the option, without a `$process_person_profile` property next to it. It can change the option, and the SDK sends what the hook returns. A hook that removes the option sends the event without one.
 - **Hooks that build or rename events.** The SDK checks the event name when you capture the event. A `before_send` hook that builds an event with one of these names, or renames an event to one, must set the option itself.
 - **Contexts you apply yourself.** When you apply a request context yourself with `RequestContext::event` or `RequestContext::apply_to_event`, set the `process_person_profile` option on an identify-style event afterwards, not the legacy `$process_person_profile` property. The SDK ignores a legacy property set after that, because the default option already won.
+- **Keeping one personless.** To send an identify-style event without person processing, set the `process_person_profile` option to `false` on the event or in `before_send`, or turn off person processing for the project in PostHog.
 
 To set options on the events that `alias` and `group_identify` send, build them with `Event::alias` and `Event::group_identify`, then capture them:
 
