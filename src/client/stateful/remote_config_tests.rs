@@ -92,7 +92,7 @@ fn no_flags_hint_preserves_bootstrap_after_suppressed_property_changes() {
 }
 
 #[test]
-fn project_cache_capacity_failure_reports_without_discarding_live_or_mandatory_state() {
+fn remote_config_cache_capacity_failure_reports_without_discarding_live_or_mandatory_state() {
     let root =
         std::env::temp_dir().join(format!("posthog-config-capacity-{}", uuid::Uuid::now_v7()));
     let server = MockServer::start();
@@ -131,7 +131,7 @@ fn project_cache_capacity_failure_reports_without_discarding_live_or_mandatory_s
         .as_ref()
         .unwrap()
         .snapshot()
-        .project_config
+        .remote_config
         .is_some());
     let diagnostic = diagnostic_rx
         .recv_timeout(std::time::Duration::from_secs(5))
@@ -141,7 +141,7 @@ fn project_cache_capacity_failure_reports_without_discarding_live_or_mandatory_s
         (
             crate::StorageOperation::Write,
             std::io::ErrorKind::InvalidInput,
-            "Project configuration cache exceeds state storage bounds; live settings retained"
+            "Remote configuration cache exceeds state storage bounds; live settings retained"
                 .into(),
         )
     );
@@ -149,7 +149,7 @@ fn project_cache_capacity_failure_reports_without_discarding_live_or_mandatory_s
     let stored: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join(scope).join("state.json")).unwrap())
             .unwrap();
-    assert_eq!(stored["state"]["project_config"], json!(null));
+    assert_eq!(stored["state"]["remote_config"], json!(null));
     assert_eq!(stored["state"]["distinct_id"], "cache-device");
     assert_eq!(stored["state"]["registered"]["kept"], true);
     client.shutdown_blocking(None);
@@ -171,7 +171,7 @@ fn project_cache_capacity_failure_reports_without_discarding_live_or_mandatory_s
         .as_ref()
         .unwrap()
         .snapshot()
-        .project_config
+        .remote_config
         .is_none());
     restored.shutdown_blocking(None);
     drop(restored);
@@ -235,7 +235,7 @@ fn failed_refresh_keeps_config_but_does_not_apply_a_cached_false_preload_hint() 
         .as_ref()
         .unwrap()
         .snapshot()
-        .project_config
+        .remote_config
         .clone();
     assert!(cached.is_some());
     project.delete();
@@ -247,7 +247,7 @@ fn failed_refresh_keeps_config_but_does_not_apply_a_cached_false_preload_hint() 
     client.flush_blocking();
     flags.assert_calls(1);
     assert_eq!(
-        client.state.as_ref().unwrap().snapshot().project_config,
+        client.state.as_ref().unwrap().snapshot().remote_config,
         cached
     );
     client.shutdown_blocking(None);
@@ -274,7 +274,7 @@ fn successful_missing_or_malformed_replay_fields_replace_prior_enablement() {
                 .as_ref()
                 .unwrap()
                 .snapshot()
-                .project_config
+                .remote_config
                 .as_ref()
                 .unwrap()
                 .session_recording,
@@ -297,7 +297,7 @@ fn successful_missing_or_malformed_replay_fields_replace_prior_enablement() {
                 .as_ref()
                 .unwrap()
                 .snapshot()
-                .project_config
+                .remote_config
                 .as_ref()
                 .unwrap()
                 .session_recording,
@@ -334,20 +334,20 @@ fn no_flags_hint_preserves_bootstrap_values_and_config_survives_reset() {
         .as_ref()
         .unwrap()
         .snapshot()
-        .project_config
+        .remote_config
         .clone();
     client.reset();
     client.flush_blocking();
     flags.assert_calls(1);
     assert_eq!(
-        client.state.as_ref().unwrap().snapshot().project_config,
+        client.state.as_ref().unwrap().snapshot().remote_config,
         cached
     );
     client.shutdown_blocking(None);
 }
 
 #[test]
-fn project_config_restores_from_the_configured_state_store() {
+fn remote_config_restores_from_the_configured_state_store() {
     let root = std::env::temp_dir().join(format!("posthog-config-{}", uuid::Uuid::now_v7()));
     let server = MockServer::start();
     let mut project = server.mock(|when, then| {
@@ -368,9 +368,17 @@ fn project_config_restores_from_the_configured_state_store() {
         .as_ref()
         .unwrap()
         .snapshot()
-        .project_config
+        .remote_config
         .clone();
     assert!(cached.is_some());
+    let scope = super::super::storage::namespace(&server.base_url(), "example-project", "default");
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join(scope).join("state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        stored["state"]["remote_config"]["session_recording"],
+        json!({})
+    );
     client.shutdown_blocking(None);
     drop(client);
     project.delete();
@@ -380,12 +388,12 @@ fn project_config_restores_from_the_configured_state_store() {
     });
     let restored = Client::init_blocking(settings());
     assert_eq!(
-        restored.state.as_ref().unwrap().snapshot().project_config,
+        restored.state.as_ref().unwrap().snapshot().remote_config,
         cached
     );
     restored.flush_blocking();
     assert_eq!(
-        restored.state.as_ref().unwrap().snapshot().project_config,
+        restored.state.as_ref().unwrap().snapshot().remote_config,
         cached
     );
     restored.shutdown_blocking(None);
@@ -442,7 +450,7 @@ fn initialization_is_async_and_pending_config_survives_reset_without_duplicate_f
             .as_ref()
             .unwrap()
             .snapshot()
-            .project_config
+            .remote_config
             .is_some());
         client.shutdown_blocking(None);
     }
@@ -498,6 +506,6 @@ fn shutdown_during_config_does_not_start_flags_or_install_late_settings() {
         .as_ref()
         .unwrap()
         .snapshot()
-        .project_config
+        .remote_config
         .is_none());
 }

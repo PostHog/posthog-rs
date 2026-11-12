@@ -1,4 +1,4 @@
-//! Project configuration requests on the client's existing delivery worker.
+//! Remote configuration requests on the client's existing delivery worker.
 
 use std::io::Read;
 use std::time::Duration;
@@ -16,12 +16,12 @@ pub(crate) const MAX_CONFIG_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ProjectConfig {
+pub(crate) struct RemoteConfig {
     pub(crate) has_feature_flags: Option<bool>,
     pub(crate) session_recording: Option<Value>,
 }
 
-impl ProjectConfig {
+impl RemoteConfig {
     pub(crate) fn valid(&self) -> bool {
         self.session_recording
             .as_ref()
@@ -54,13 +54,13 @@ pub(crate) fn config_url(host: &str, project_token: &str) -> Option<String> {
     Some(url.into())
 }
 
-fn decode(bytes: &[u8]) -> Result<ProjectConfig, LoadError> {
+fn decode(bytes: &[u8]) -> Result<RemoteConfig, LoadError> {
     if bytes.len() > MAX_CONFIG_BYTES {
         return Err(LoadError::ResponseTooLarge);
     }
     let value: Value = serde_json::from_slice(bytes).map_err(|_| LoadError::InvalidResponse)?;
     let object = value.as_object().ok_or(LoadError::InvalidResponse)?;
-    let config = ProjectConfig {
+    let config = RemoteConfig {
         has_feature_flags: object.get("hasFeatureFlags").and_then(Value::as_bool),
         session_recording: object
             .get("sessionRecording")
@@ -74,7 +74,7 @@ fn decode(bytes: &[u8]) -> Result<ProjectConfig, LoadError> {
     }
 }
 
-type Complete = dyn FnOnce(Result<ProjectConfig, LoadError>) -> Option<flags::Task> + Send;
+type Complete = dyn FnOnce(Result<RemoteConfig, LoadError>) -> Option<flags::Task> + Send;
 
 pub(crate) struct Task {
     url: String,
@@ -84,7 +84,7 @@ pub(crate) struct Task {
 impl Task {
     pub(crate) fn new(
         url: String,
-        complete: impl FnOnce(Result<ProjectConfig, LoadError>) -> Option<flags::Task> + Send + 'static,
+        complete: impl FnOnce(Result<RemoteConfig, LoadError>) -> Option<flags::Task> + Send + 'static,
     ) -> Self {
         Self {
             url,
@@ -104,7 +104,7 @@ impl Task {
         match follow_up {
             Ok(Some(task)) => task.run(http, options),
             Ok(None) => {}
-            Err(_) => tracing::warn!("posthog-rs: project config completion panicked"),
+            Err(_) => tracing::warn!("posthog-rs: remote config completion panicked"),
         }
     }
 }
@@ -113,7 +113,7 @@ fn fetch(
     http: &reqwest::blocking::Client,
     options: &ClientOptions,
     url: &str,
-) -> Result<ProjectConfig, LoadError> {
+) -> Result<RemoteConfig, LoadError> {
     let response = http
         .get(url)
         .header(
@@ -136,16 +136,15 @@ fn fetch(
 
 pub(crate) fn report(options: &ClientOptions, error: LoadError) {
     let (message, status) = match error {
-        LoadError::Network => ("Project configuration request failed", None),
+        LoadError::Network => ("Remote configuration request failed", None),
         LoadError::Http(status) => (
-            "Project configuration returned an unsuccessful HTTP status",
+            "Remote configuration returned an unsuccessful HTTP status",
             Some(status),
         ),
-        LoadError::InvalidResponse => ("Project configuration response is invalid", None),
-        LoadError::ResponseTooLarge => (
-            "Project configuration response exceeds its byte limit",
-            None,
-        ),
+        LoadError::InvalidResponse => ("Remote configuration response is invalid", None),
+        LoadError::ResponseTooLarge => {
+            ("Remote configuration response exceeds its byte limit", None)
+        }
     };
     if options.on_error.is_empty() {
         tracing::warn!("posthog-rs: {message}; status={status:?}");

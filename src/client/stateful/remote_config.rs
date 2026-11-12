@@ -1,4 +1,4 @@
-//! Project settings outlive identity changes; flag evaluation remains user-scoped.
+//! Remote configuration outlives identity changes; flag evaluation remains user-scoped.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -15,10 +15,10 @@ impl Client {
         }
         let access = self.state.as_ref().unwrap().access();
         let requested = access.mutate(|state| {
-            if state.project_config_loading {
+            if state.remote_config_loading {
                 return None;
             }
-            state.project_config_loading = true;
+            state.remote_config_loading = true;
             Some(state.flag_load.request)
         });
         let Ok((_, Some(expected_request))) = requested else {
@@ -29,7 +29,7 @@ impl Client {
         let Some(url) =
             remote_config::config_url(options.endpoints().base_host(), &options.api_key)
         else {
-            let _ = access.mutate(|state| state.project_config_loading = false);
+            let _ = access.mutate(|state| state.remote_config_loading = false);
             remote_config::report(&options, remote_config::LoadError::InvalidResponse);
             if preload_flags {
                 self.reload_feature_flags();
@@ -39,12 +39,12 @@ impl Client {
         let completion_access = access.clone();
         let task = remote_config::Task::new(url, move |result| {
             let installed = completion_access.mutate(|state| {
-                state.project_config_loading = false;
+                state.remote_config_loading = false;
                 let mut notify = None;
                 let preload = match result {
                     Ok(config) => {
                         let no_flags = config.has_feature_flags == Some(false);
-                        state.project_config = Some(Arc::new(config));
+                        state.remote_config = Some(Arc::new(config));
                         // Independent flag requests are not governed by the startup hint.
                         if no_flags && state.flag_load.request == expected_request {
                             let context =
@@ -113,7 +113,7 @@ impl Client {
             .unwrap()
             .schedule_remote_config(task)
         {
-            let _ = access.mutate(|state| state.project_config_loading = false);
+            let _ = access.mutate(|state| state.remote_config_loading = false);
         }
     }
 }
@@ -123,12 +123,12 @@ impl Client {
 mod tests;
 
 pub(super) mod cache_serde {
-    use crate::client::transport::remote_config::ProjectConfig;
+    use crate::client::transport::remote_config::RemoteConfig;
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
 
     pub(crate) fn serialize<S: serde::Serializer>(
-        value: &Option<Arc<ProjectConfig>>,
+        value: &Option<Arc<RemoteConfig>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         value.as_deref().serialize(serializer)
@@ -136,7 +136,7 @@ pub(super) mod cache_serde {
 
     pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<Option<Arc<ProjectConfig>>, D::Error> {
-        Option::<ProjectConfig>::deserialize(deserializer).map(|config| config.map(Arc::new))
+    ) -> Result<Option<Arc<RemoteConfig>>, D::Error> {
+        Option::<RemoteConfig>::deserialize(deserializer).map(|config| config.map(Arc::new))
     }
 }
