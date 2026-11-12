@@ -666,6 +666,7 @@ fn request_size_error_hooks_can_mutate_and_reload_without_a_lock_cycle() {
 #[test]
 fn evaluation_revision_changes_only_with_effective_context_and_rejected_mutations_are_atomic() {
     let client = Client::init_blocking(config("http://127.0.0.1:1"));
+    client.flush_blocking();
     seed(&client);
     client.register(HashMap::from([("analytics-only".into(), json!(1))]));
     client.opt_out();
