@@ -46,7 +46,7 @@ fn limits() -> StoreLimits {
 
 fn record(snapshot: &Snapshot) -> Vec<u8> {
     serde_json::to_vec(&StateRecord {
-        version: 5,
+        version: 1,
         state: snapshot,
     })
     .unwrap()
@@ -70,7 +70,7 @@ fn consent_encoding_reserves_space_for_every_choice_and_requires_a_valid_field()
         Some(serde_json::json!(0)),
     ] {
         let mut value = serde_json::to_value(StateRecord {
-            version: 5,
+            version: 1,
             state: &snapshot,
         })
         .unwrap();
