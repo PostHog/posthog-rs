@@ -67,7 +67,7 @@ trap cleanup EXIT
     # and focused on externally meaningful API changes.
     cargo +"$toolchain" public-api \
         --package "$package" \
-        --features mcp,stateful,tower \
+        --features mcp,stateful,tower,session-replay \
         --simplified --simplified --simplified \
         --color never
 } > "$tmp_file"

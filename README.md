@@ -31,6 +31,13 @@ writes are best effort: when settings exceed state-storage bounds, live settings
 remain available and `on_error` receives a storage diagnostic. Successful state
 drains describe mandatory state, not guaranteed cache retention.
 
+## Screenshot replay
+
+The optional `session-replay` feature adds manual screenshot recording to the
+stateful client. Hosts supply already-masked, downscaled BGRA pixels; Rust owns
+encoding, attribution, bounded admission and memory-only delivery.
+See [manual screenshot replay](docs/session-replay.md).
+
 ## Request context
 
 With the optional `tower` feature, `tower::PostHogLayer` reads

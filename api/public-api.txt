@@ -180,12 +180,20 @@ pub posthog::stateful::PersistenceOutcome::WriteFailed
 pub posthog::stateful::PersonProfiles::Always
 pub posthog::stateful::PersonProfiles::IdentifiedOnly
 pub posthog::stateful::PersonProfiles::Never
+#[non_exhaustive] pub enum posthog::stateful::PixelFormat
+pub posthog::stateful::PixelFormat::Bgra8888
 #[non_exhaustive] pub enum posthog::stateful::SessionMode
 pub posthog::stateful::SessionMode::Automatic
 pub posthog::stateful::SessionMode::Manual
 #[non_exhaustive] pub enum posthog::stateful::SessionPersistence
 pub posthog::stateful::SessionPersistence::Memory
 pub posthog::stateful::SessionPersistence::Persistent
+#[non_exhaustive] pub enum posthog::stateful::SubmitOutcome
+pub posthog::stateful::SubmitOutcome::Accepted
+pub posthog::stateful::SubmitOutcome::Closed
+pub posthog::stateful::SubmitOutcome::Reentrant
+pub posthog::stateful::SubmitOutcome::Stale
+pub posthog::stateful::SubmitOutcome::WrongRecorder
 #[non_exhaustive] pub struct posthog::stateful::Capture
 pub posthog::stateful::Capture::event: alloc::string::String
 pub posthog::stateful::Capture::groups: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
@@ -250,6 +258,8 @@ pub fn posthog::stateful::Client::reset_group_properties_for_flags(&self, core::
 pub fn posthog::stateful::Client::reset_person_properties_for_flags(&self, core::option::Option<bool>)
 pub fn posthog::stateful::Client::set_group_properties_for_flags(&self, impl core::convert::Into<alloc::string::String>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, core::option::Option<bool>)
 pub fn posthog::stateful::Client::set_person_properties_for_flags(&self, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, core::option::Option<bool>)
+impl posthog::stateful::Client
+pub fn posthog::stateful::Client::session_replay(&self) -> posthog::stateful::SessionReplay
 impl core::ops::drop::Drop for posthog::stateful::Client
 pub fn posthog::stateful::Client::drop(&mut self)
 pub struct posthog::stateful::Config
@@ -284,6 +294,7 @@ pub posthog::stateful::Config::sdk_version: alloc::string::String
 pub posthog::stateful::Config::send_feature_flag_event: bool
 pub posthog::stateful::Config::session_mode: posthog::stateful::SessionMode
 pub posthog::stateful::Config::session_persistence: posthog::stateful::SessionPersistence
+pub posthog::stateful::Config::session_replay: posthog::stateful::ReplayConfig
 pub posthog::stateful::Config::shutdown_timeout: core::time::Duration
 pub posthog::stateful::Config::state_coalesce: core::time::Duration
 impl posthog::stateful::Config
@@ -328,6 +339,11 @@ pub posthog::stateful::FeatureFlagsUpdate::errors_loading: bool
 pub posthog::stateful::FeatureFlagsUpdate::flags: core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, posthog::stateful::FeatureFlagResult>>
 pub posthog::stateful::FeatureFlagsUpdate::invalid_payloads: bool
 pub posthog::stateful::FeatureFlagsUpdate::partial: bool
+pub struct posthog::stateful::FrameLayout
+pub posthog::stateful::FrameLayout::format: posthog::stateful::PixelFormat
+pub posthog::stateful::FrameLayout::height: u32
+pub posthog::stateful::FrameLayout::row_stride_bytes: usize
+pub posthog::stateful::FrameLayout::width: u32
 #[non_exhaustive] pub struct posthog::stateful::Identify
 pub posthog::stateful::Identify::distinct_id: alloc::string::String
 pub posthog::stateful::Identify::set: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
@@ -345,6 +361,27 @@ pub fn posthog::stateful::InitializationFailure::message(&self) -> &str
 impl posthog::stateful::RemoteConfigFailure
 pub fn posthog::stateful::RemoteConfigFailure::message(&self) -> &str
 pub fn posthog::stateful::RemoteConfigFailure::status(&self) -> core::option::Option<u16>
+#[non_exhaustive] pub struct posthog::stateful::ReplayConfig
+pub posthog::stateful::ReplayConfig::jpeg_quality: u8
+pub posthog::stateful::ReplayConfig::max_frames_in_flight: usize
+impl core::default::Default for posthog::stateful::ReplayConfig
+pub fn posthog::stateful::ReplayConfig::default() -> Self
+#[non_exhaustive] pub struct posthog::stateful::ReplayFailure
+impl posthog::stateful::ReplayFailure
+pub fn posthog::stateful::ReplayFailure::message(&self) -> &str
+pub fn posthog::stateful::ReplayFailure::status(&self) -> core::option::Option<u16>
+pub struct posthog::stateful::ReplayFrame
+impl posthog::stateful::ReplayFrame
+pub fn posthog::stateful::ReplayFrame::pixels_mut(&mut self) -> &mut [u8]
+impl core::ops::drop::Drop for posthog::stateful::ReplayFrame
+pub fn posthog::stateful::ReplayFrame::drop(&mut self)
+pub struct posthog::stateful::SessionReplay(_)
+impl posthog::stateful::SessionReplay
+pub fn posthog::stateful::SessionReplay::begin_frame(&self, posthog::stateful::FrameLayout) -> core::option::Option<posthog::stateful::ReplayFrame>
+pub fn posthog::stateful::SessionReplay::is_active(&self) -> bool
+pub fn posthog::stateful::SessionReplay::start(&self)
+pub fn posthog::stateful::SessionReplay::stop(&self)
+pub fn posthog::stateful::SessionReplay::submit_frame(&self, posthog::stateful::ReplayFrame) -> posthog::stateful::SubmitOutcome
 pub mod posthog::tower
 pub struct posthog::tower::PostHogLayer
 impl posthog::tower::PostHogLayer
@@ -470,6 +507,7 @@ pub posthog::PostHogError::FeatureFlags(posthog::FlagsFailure<'a>)
 pub posthog::PostHogError::Initialization(posthog::stateful::InitializationFailure)
 pub posthog::PostHogError::LocalEvaluation(posthog::LocalEvaluationFailure<'a>)
 pub posthog::PostHogError::RemoteConfig(posthog::stateful::RemoteConfigFailure)
+pub posthog::PostHogError::Replay(posthog::stateful::ReplayFailure)
 pub posthog::PostHogError::Storage(posthog::StorageFailure<'a>)
 #[non_exhaustive] pub enum posthog::SendEmail
 pub posthog::SendEmail::Code(posthog::CodeEmail)

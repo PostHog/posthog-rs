@@ -88,6 +88,27 @@ pub enum PostHogError<'a> {
     /// A stateful project-configuration request failed. Cached settings remain usable.
     #[cfg(feature = "stateful")]
     RemoteConfig(RemoteConfigFailure),
+    /// A screenshot failed encoding, validation or terminal delivery.
+    #[cfg(feature = "session-replay")]
+    Replay(ReplayFailure),
+}
+
+/// A sanitized screenshot failure; never contains pixels, tokens or attribution.
+#[cfg(feature = "session-replay")]
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ReplayFailure {
+    pub(crate) message: &'static str,
+    pub(crate) status: Option<u16>,
+}
+#[cfg(feature = "session-replay")]
+impl ReplayFailure {
+    pub fn message(&self) -> &str {
+        self.message
+    }
+    pub fn status(&self) -> Option<u16> {
+        self.status
+    }
 }
 
 /// A project-configuration diagnostic without tokens, URLs or response bodies.

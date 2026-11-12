@@ -13,14 +13,18 @@ mod flags;
 mod identity;
 #[cfg(feature = "async-client")]
 mod initialization;
-mod producer;
+pub(super) mod producer;
 mod properties;
 mod remote_config;
+#[cfg(feature = "session-replay")]
+pub(super) mod replay;
 mod runtime;
 mod sessions;
 mod storage;
 mod writer;
 
+#[cfg(feature = "session-replay")]
+pub use crate::client::on_error::ReplayFailure;
 pub use crate::client::on_error::{InitializationFailure, RemoteConfigFailure};
 pub use crate::client::transport::flags::LoadError as FeatureFlagLoadError;
 pub use config::Config;
@@ -28,6 +32,10 @@ pub use flag_listeners::{FeatureFlagsSubscription, FeatureFlagsUpdate};
 pub use flag_reads::{FeatureFlagContext, FeatureFlagLookup, FeatureFlagResult};
 pub use identity::{Identify, PersonProfiles};
 pub use producer::{Capture, CaptureOutcome};
+#[cfg(feature = "session-replay")]
+pub use replay::{
+    FrameLayout, PixelFormat, ReplayConfig, ReplayFrame, SessionReplay, SubmitOutcome,
+};
 pub use runtime::{Client, DeliveryOutcome, DrainReport, PersistenceOutcome};
 pub use sessions::{SessionMode, SessionPersistence};
 pub use storage::Persistence;
@@ -66,6 +74,9 @@ struct Snapshot {
     // Process-local bookkeeping shares the same lock as identity, but is not persisted.
     #[serde(skip)]
     generation: u64,
+    #[cfg(feature = "session-replay")]
+    #[serde(skip)]
+    replay_consent_generation: u64,
     #[serde(skip)]
     person_properties: Option<[u8; 20]>,
 }
@@ -88,6 +99,8 @@ impl Snapshot {
             sessions: sessions::Sessions::default(),
             context_revision: 0,
             generation: 0,
+            #[cfg(feature = "session-replay")]
+            replay_consent_generation: 0,
             person_properties: None,
         }
     }

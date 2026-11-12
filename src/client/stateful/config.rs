@@ -52,6 +52,9 @@ pub struct Config {
     /// Report completed single-flag lookups through `$feature_flag_called` by
     /// default. Individual lookups can override this; consent still applies.
     pub send_feature_flag_event: bool,
+    /// Manual screenshot encoding and capacity, with the session-replay feature.
+    #[cfg(feature = "session-replay")]
+    pub session_replay: super::ReplayConfig,
     /// Optional initial flags snapshot, replacing restored values before preload.
     /// Only true and nonempty variants are served. None preserves restored values;
     /// Some(empty) installs an empty snapshot. Reset does not reapply this seed.
@@ -120,6 +123,8 @@ impl Config {
             person_profiles: PersonProfiles::IdentifiedOnly,
             preload_feature_flags: true,
             send_feature_flag_event: true,
+            #[cfg(feature = "session-replay")]
+            session_replay: super::ReplayConfig::default(),
             bootstrap_feature_flags: None,
             bootstrap_feature_flag_payloads: None,
             flush_at: 20,
@@ -174,6 +179,8 @@ impl Config {
     /// registration order, after enrichment and outside client-state locks.
     /// Returning None or panicking drops the event. Each mutable hook is
     /// serialized across captures; do not wait for another capture from a hook.
+    /// Screenshots run this chain after JPEG encoding on the encoder worker,
+    /// before replay delivery. Submission acceptance precedes that filtering.
     pub fn before_send<F>(&mut self, hook: F) -> &mut Self
     where
         F: FnMut(Event) -> Option<Event> + Send + 'static,
@@ -194,6 +201,12 @@ impl Config {
     }
 
     pub(super) fn invalid_reason(&self) -> Option<&'static str> {
+        #[cfg(feature = "session-replay")]
+        if !(1..=100).contains(&self.session_replay.jpeg_quality)
+            || self.session_replay.max_frames_in_flight == 0
+        {
+            return Some("replay JPEG quality must be 1..=100 and frame capacity must be positive");
+        }
         if self.project_token.is_empty() {
             return Some("project_token is empty; supply a project token to enable the client");
         }

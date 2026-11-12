@@ -50,6 +50,8 @@ impl From<DrainOutcome> for PersistenceOutcome {
 #[non_exhaustive]
 pub enum DeliveryOutcome {
     /// A flush attempt completed; retries or persisted backlog may remain.
+    /// With session-replay, includes preceding submitted encoding and eligible
+    /// screenshot delivery, but not frames held by the host.
     Attempted,
     /// The worker has stopped. Undelivered persisted records may remain.
     Stopped,
@@ -113,6 +115,8 @@ pub struct Client {
     pub(super) state: Option<StateWriter>,
     pub(super) transport: Option<TransportHandle>,
     pub(super) closed: AtomicBool,
+    #[cfg(feature = "session-replay")]
+    pub(super) replay: Option<Arc<super::replay::Controller>>,
 }
 
 impl Client {
@@ -256,7 +260,19 @@ impl Client {
                 return Self::disabled(&config, Some("Invalid mandatory state configuration"));
             }
         };
+        #[cfg(feature = "session-replay")]
+        let replay = super::replay::Controller::new(&state, &transport, &producer, &config);
+        #[cfg(feature = "session-replay")]
+        if replay.is_none() {
+            crate::client::transport::replay::report(
+                &config.transport_options(),
+                "Screenshot encoder could not start; analytics remains enabled",
+                None,
+            );
+        }
         let client = Self {
+            #[cfg(feature = "session-replay")]
+            replay,
             disabled: false,
             shutdown_timeout: config.shutdown_timeout,
             producer: Some(producer),
@@ -299,6 +315,8 @@ impl Client {
             disabled: true,
             shutdown_timeout: config.shutdown_timeout,
             producer: None,
+            #[cfg(feature = "session-replay")]
+            replay: None,
             flag_loader: None,
             state: None,
             transport: None,
@@ -409,6 +427,10 @@ impl Client {
         // The first caller selects one deadline for both workers. Later calls,
         // including Drop, cannot restart or extend that drain budget.
         if !self.closed.swap(true, Ordering::AcqRel) {
+            #[cfg(feature = "session-replay")]
+            if let Some(replay) = &self.replay {
+                replay.close();
+            }
             let callbacks = self.flag_loader.as_ref().unwrap().listeners.close();
             self.transport
                 .as_ref()

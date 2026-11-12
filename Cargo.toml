@@ -45,6 +45,7 @@ rmcp = { version = "3.7", default-features = false, features = [
 url = { version = "2.5", optional = true }
 fancy-regex = { version = "0.19", optional = true }
 base64 = { version = "0.22", optional = true }
+jpeg-encoder = { version = "0.6.1", optional = true }
 futures-util = { version = "0.3", default-features = false, features = [
     "std",
 ], optional = true }
@@ -85,6 +86,7 @@ e2e-test = []
 async-client = ["tokio"]
 test-harness = []
 stateful = ["dep:fs2", "dep:dirs", "dep:libc", "serde_json/float_roundtrip"]
+session-replay = ["stateful", "dep:jpeg-encoder", "dep:base64"]
 error-tracking = ["dep:backtrace", "dep:findshlibs"]
 tls = ["reqwest/rustls"]
 tls-no-provider = ["reqwest/rustls-no-provider"]
@@ -102,6 +104,10 @@ mcp = [
 [[example]]
 name = "stateful"
 required-features = ["stateful"]
+
+[[example]]
+name = "stateful_replay"
+required-features = ["session-replay"]
 
 [workspace]
 members = [".", "compliance/adapter", "crates/posthog-rs"]
