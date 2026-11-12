@@ -7,6 +7,7 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use common::{record_wire_events, wire_event, WireEvents};
@@ -439,6 +440,80 @@ client_test!(before_send_sees_the_default_and_has_the_final_say, {
     let renamed = wire_event(&events, Some("renamed"));
     assert_eq!(renamed["event"], "$identify");
     assert_wire_option(&events, "renamed", None);
+});
+
+/// The `process_person_profile` option and legacy property a `before_send` hook saw.
+type HookView = (Option<Value>, Option<Value>);
+
+client_test!(before_send_never_sees_a_shadowed_legacy_property, {
+    let server = MockServer::start();
+    let events = record_wire_events(&server, ANALYTICS_PATH);
+    let seen: Arc<Mutex<HashMap<String, HookView>>> = Arc::default();
+    let hook_seen = seen.clone();
+    let mut builder = options(&server);
+    builder.before_send(move |mut event| {
+        let tag = event.properties()["case"].as_str().unwrap().to_string();
+        let view = (
+            event.options().get(OPTION).cloned(),
+            event.properties().get(LEGACY).cloned(),
+        );
+        if tag.ends_with("option_removed") {
+            event.remove_option(OPTION);
+        }
+        hook_seen.lock().unwrap().insert(tag, view);
+        Some(event)
+    });
+    let client = call!(posthog::client(builder.build().unwrap()));
+    let (t, f) = (|| json!(true), || json!(false));
+    // A hook that removes the option sends none when the property was shadowed.
+    let cases: Vec<(Case, &str, HookView)> = vec![
+        (
+            case("context_legacy", Some(t())).context_legacy(f()),
+            "$identify",
+            (Some(t()), None),
+        ),
+        (
+            case("context_legacy_option_removed", None).context_legacy(f()),
+            "$identify",
+            (Some(t()), None),
+        ),
+        (
+            case("generated_option_removed", None)
+                .generated()
+                .context_legacy(t()),
+            "$identify",
+            (Some(f()), None),
+        ),
+        (
+            case("option_and_legacy", Some(f())).option(f()).legacy(t()),
+            "$identify",
+            (Some(f()), None),
+        ),
+        // Other events keep the property, so the hook sees it as before.
+        (
+            case("context_legacy", Some(f())).context_legacy(f()),
+            "work",
+            (None, Some(f())),
+        ),
+        (
+            case("context_legacy_option_removed", Some(f())).context_legacy(f()),
+            "work",
+            (None, Some(f())),
+        ),
+    ];
+    for (case, name, _) in &cases {
+        let mut event = case.event(name);
+        case.context().apply_to_event(&mut event);
+        client.capture(event);
+    }
+    call!(client.flush());
+
+    let seen = seen.lock().unwrap();
+    for (case, name, view) in &cases {
+        let tag = case.tag(name);
+        assert_eq!(seen.get(&tag), Some(view), "hook, {tag}");
+        assert_wire_option(&events, &tag, case.expected.as_ref());
+    }
 });
 
 #[cfg(feature = "async-client")]

@@ -633,7 +633,7 @@ impl Event {
     /// A `null` option or property counts as unset; a `null` property stays for capture
     /// to remove. Idempotent while no layer has filled the event.
     pub(crate) fn apply_identify_style_person_default(&mut self) {
-        if !IDENTIFY_STYLE_EVENTS.contains(&self.event.as_str()) {
+        if !self.is_identify_style() {
             return;
         }
         // The personless default from `new_anon` is the SDK's, not the caller's.
@@ -661,6 +661,24 @@ impl Event {
         self.personless_default = false;
         self.options
             .insert(PROCESS_PERSON_PROFILE_OPT.into(), value);
+    }
+
+    /// On an [`IDENTIFY_STYLE_EVENTS`] event whose `process_person_profile` option is set,
+    /// remove the `$process_person_profile` property that capture would ignore. Runs right
+    /// before `before_send`, so the hook sees one value, and a hook that removes the option
+    /// cannot bring back a layered property value.
+    pub(crate) fn remove_shadowed_legacy_person_property(&mut self) {
+        let option_set = self
+            .options
+            .get(PROCESS_PERSON_PROFILE_OPT)
+            .is_some_and(|value| !value.is_null());
+        if option_set && self.is_identify_style() {
+            self.properties.remove(PROCESS_PERSON_PROFILE_PROP);
+        }
+    }
+
+    fn is_identify_style(&self) -> bool {
+        IDENTIFY_STYLE_EVENTS.contains(&self.event.as_str())
     }
 
     pub(crate) fn groups(&self) -> &HashMap<String, String> {
