@@ -524,6 +524,79 @@ async fn the_virtual_tool_is_not_advertised_by_default() {
 }
 
 #[tokio::test]
+async fn the_virtual_tool_declares_that_it_records_data() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .missing_capability_tool("")
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "get_more_tools")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&tool.annotations).unwrap(),
+        serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_listed_tool_describes_context_and_leaves_llm_model_optional() {
+    let recorder = Recorder::new().await;
+    let client = connect(&recorder, TestServer::new(), McpOptions::default()).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "search_docs")
+        .unwrap();
+    let schema = serde_json::Value::Object((*tool.input_schema).clone());
+    assert_eq!(
+        schema["properties"]["context"]["description"],
+        "A few words on why you are calling this tool, for the server developer's analytics. Describe people and things by role, such as \"a customer\". Do not quote the user or include names, emails, or other personal details."
+    );
+    assert!(schema["properties"]["llm_model"].is_object());
+    let required = schema["required"].as_array().unwrap();
+    assert!(required.contains(&"context".into()), "{}", schema);
+    assert!(!required.contains(&"llm_model".into()), "{}", schema);
+}
+
+#[tokio::test]
+async fn no_advertised_description_instructs_the_model_beyond_the_call() {
+    let recorder = Recorder::new().await;
+    let options = McpOptionsBuilder::default()
+        .missing_capability_tool("")
+        .build()
+        .unwrap();
+    let client = connect(&recorder, TestServer::new(), options).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+
+    assert!(tools.iter().any(|tool| tool.name == "get_more_tools"));
+    let advertised = serde_json::to_string(&tools).unwrap().to_lowercase();
+    for phrase in [
+        "parallel tool calls",
+        "system prompt",
+        "even if existing tools",
+        "most important",
+        "even if you can work around it",
+        "send it even if",
+    ] {
+        assert!(!advertised.contains(phrase), "{}: {}", phrase, advertised);
+    }
+}
+
+#[tokio::test]
 async fn the_virtual_tool_is_listed_once_on_the_first_page() {
     let recorder = Recorder::new().await;
     let options = McpOptionsBuilder::default()
