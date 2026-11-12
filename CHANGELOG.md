@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.31.3 — 2026-11-11
+
+### Patch changes
+
+- [2e77fbb](https://github.com/posthog/posthog-rs/commit/2e77fbb60e805c7e25ca1ca59b4308222b1c6d9e) Relative date filters in local flag evaluation now follow the server: months and years are calendar steps instead of 30 and 365 days, `7d` without a leading `-` is accepted, and a number of 10,000 or more is inconclusive instead of panicking. — Thanks @luantaraschi for your first contribution 🎉!
+
 ## 0.31.2 — 2026-11-06
 
 ### Patch changes
