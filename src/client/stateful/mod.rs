@@ -33,9 +33,12 @@ pub use sessions::{SessionMode, SessionPersistence};
 pub use storage::Persistence;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::client::transport::remote_config::RemoteConfig;
 
 /// The complete mandatory state persisted as one versioned snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +55,7 @@ struct Snapshot {
     groups: HashMap<String, String>,
     flags: flag_state::FlagState,
     #[serde(with = "remote_config::cache_serde")]
-    remote_config: Option<std::sync::Arc<crate::client::transport::remote_config::RemoteConfig>>,
+    remote_config: Option<Arc<RemoteConfig>>,
     #[serde(skip)]
     remote_config_loading: bool,
     #[serde(skip)]
