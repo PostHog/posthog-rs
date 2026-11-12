@@ -344,6 +344,10 @@ fn deeply_nested_bootstrap_is_live_but_cannot_poison_mandatory_persistence() {
         Some(payload)
     );
     assert_eq!(
+        client.flush_blocking().state,
+        crate::stateful::PersistenceOutcome::Persisted
+    );
+    assert_eq!(
         client.shutdown_blocking(None).state,
         crate::stateful::PersistenceOutcome::Persisted
     );
