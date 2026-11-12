@@ -29,20 +29,41 @@ pub(crate) enum TextPass {
     /// Text the agent narrated, such as the intent, which can also carry
     /// personal data.
     FreeText,
+    /// Object keys inside free text: the name passes and personal data.
+    FreeName,
 }
 
 impl TextPass {
     pub(crate) fn apply(self, text: &str) -> String {
         match self {
-            TextPass::Name => {
-                let text = json_members::redact_json_members(text);
-                let text = secrets::redact_known_secrets(&tokens::redact_tokens(&text));
-                urls::redact_urls(&text)
-            }
+            TextPass::Name => urls::redact_urls(&redact_name_credentials(text)),
             TextPass::Captured => urls::redact_urls(&redact_credentials(text)),
             TextPass::FreeText => urls::redact_urls(&pii::redact_pii(&redact_credentials(text))),
+            TextPass::FreeName => {
+                urls::redact_urls(&pii::redact_pii(&redact_name_credentials(text)))
+            }
         }
     }
+
+    /// The pass for object keys in a payload this pass redacts: the entropy
+    /// check would redact field names.
+    pub(crate) fn for_keys(self) -> TextPass {
+        match self {
+            TextPass::FreeText | TextPass::FreeName => TextPass::FreeName,
+            TextPass::Name | TextPass::Captured => TextPass::Name,
+        }
+    }
+
+    /// Whether numbers are read as text, as free text sent as JSON text is:
+    /// a number can hold a card or phone number.
+    pub(crate) fn reads_numbers(self) -> bool {
+        matches!(self, TextPass::FreeText | TextPass::FreeName)
+    }
+}
+
+fn redact_name_credentials(text: &str) -> String {
+    let text = json_members::redact_json_members(text);
+    secrets::redact_known_secrets(&tokens::redact_tokens(&text))
 }
 
 fn redact_credentials(text: &str) -> String {

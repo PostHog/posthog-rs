@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
 
 use super::text::bounded_text;
 use crate::mcp::contract::limits::{
@@ -82,7 +82,17 @@ fn bound(value: &Value, remaining_depth: usize, pass: TextPass, budget: &mut usi
         Value::Object(_) if remaining_depth == 0 => Value::from(NESTED_OBJECT_MARKER),
         Value::Array(items) => bound_array(items, remaining_depth - 1, pass, budget),
         Value::Object(object) => bound_object(object, remaining_depth - 1, pass, budget),
+        Value::Number(number) if pass.reads_numbers() => bound_number(number, pass),
         other => other.clone(),
+    }
+}
+
+/// `[redacted]` as a string, so JSON text stays valid.
+fn bound_number(number: &Number, pass: TextPass) -> Value {
+    let text = number.to_string();
+    match pass.apply(&text) == text {
+        true => Value::Number(number.clone()),
+        false => Value::from(REDACTED),
     }
 }
 
@@ -143,13 +153,13 @@ fn bound_entry(
         true => Value::from(REDACTED),
         false => bound(value, remaining_depth, pass, budget),
     };
-    (bounded_key(key), value)
+    (bounded_key(key, pass), value)
 }
 
 /// A key is a captured string too, since data such as a signed URL can be the
-/// key, but it gets only the name passes: entropy would redact field names.
-fn bounded_key(key: &str) -> String {
-    bounded_text(key, MAX_PAYLOAD_KEY_LENGTH, TextPass::Name)
+/// key, but it skips the entropy check, which would redact field names.
+fn bounded_key(key: &str, pass: TextPass) -> String {
+    bounded_text(key, MAX_PAYLOAD_KEY_LENGTH, pass.for_keys())
 }
 
 fn kept_entries(length: usize) -> usize {

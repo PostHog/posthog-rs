@@ -125,8 +125,9 @@ fn free_text(text: &str, limit: usize) -> Option<String> {
 }
 
 /// A string as free text, a number or boolean as is, and any other JSON as
-/// text within the same limit, redacted leaf by leaf before it is written. A
-/// field named like a credential is redacted whole, as any such key is.
+/// text within the same limit, its keys, strings and numbers redacted as free
+/// text before it is written. A field named like a credential is redacted
+/// whole, as any such key is.
 fn captured_extra(name: &str, value: &Value) -> Option<Value> {
     if is_credential_key(name) {
         return Some(Value::from(REDACTED));
