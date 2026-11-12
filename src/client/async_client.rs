@@ -296,6 +296,10 @@ impl Client {
     /// cannot describe a merge, so the event is dropped with a warning rather
     /// than sent.
     ///
+    /// The event sends `process_person_profile: true`, so a request context
+    /// cannot turn person processing off for it. To set options on it, build it
+    /// with [`Event::alias`] and capture it.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -327,6 +331,10 @@ impl Client {
     ///
     /// Fire-and-forget, like [`Client::capture`], for a blank `group_type` or
     /// `group_key`: the event is dropped with a warning rather than sent.
+    ///
+    /// The event sends `process_person_profile: true`, so a request context
+    /// cannot turn person processing off for it. To set options on it, build it
+    /// with [`Event::group_identify`] and capture it.
     ///
     /// The event's distinct id is the request context's distinct id when one is
     /// set, else `$<group_type>_<group_key>`. The context session id is never added.

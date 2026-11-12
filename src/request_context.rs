@@ -111,7 +111,16 @@ impl RequestContext {
     }
 
     /// Pins these defaults before delivery. Explicit event identity, properties and options win.
+    ///
+    /// An identify-style event, such as `$identify` or `$create_alias`, first gets
+    /// `process_person_profile` from its own option or `$process_person_profile` property,
+    /// else `true` unless the SDK generated its distinct ID, so the context cannot turn
+    /// person processing off for it.
     pub fn apply_to_event(&self, event: &mut Event) {
+        // Only before the first context fill, so a context value never counts as the caller's.
+        if !event.request_context_applied {
+            event.apply_identify_style_person_default();
+        }
         let skip_session = event.event_name() == "$groupidentify";
         for (key, value) in &self.properties {
             // A session on `$groupidentify` would reassign the session to the group's distinct id.
@@ -178,6 +187,8 @@ pub(crate) fn current_distinct_id() -> Option<String> {
 
 pub(crate) fn apply_current_context(event: &mut Event) {
     if !event.request_context_applied {
+        // Also reached with no scoped context, such as from the blocking client.
+        event.apply_identify_style_person_default();
         #[cfg(feature = "async-client")]
         let _ = CURRENT.try_with(|context| context.apply_to_event(event));
     }

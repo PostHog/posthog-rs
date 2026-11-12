@@ -202,10 +202,10 @@ pub fn record_wire_events(server: &httpmock::MockServer, path: &str) -> WireEven
     events
 }
 
-/// The `properties` of the one recorded event whose `case` property is `case`,
-/// or of the only recorded event when `case` is `None`.
+/// The one recorded event whose `case` property is `case`, or the only
+/// recorded event when `case` is `None`.
 #[allow(dead_code)]
-pub fn wire_properties(events: &WireEvents, case: Option<&str>) -> serde_json::Value {
+pub fn wire_event(events: &WireEvents, case: Option<&str>) -> serde_json::Value {
     let events = events.lock().unwrap();
     let matching: Vec<&serde_json::Value> = events
         .values()
@@ -215,5 +215,11 @@ pub fn wire_properties(events: &WireEvents, case: Option<&str>) -> serde_json::V
         })
         .collect();
     assert_eq!(matching.len(), 1, "events for case {case:?}: {matching:?}");
-    matching[0]["properties"].clone()
+    matching[0].clone()
+}
+
+/// The `properties` of the event [`wire_event`] finds.
+#[allow(dead_code)]
+pub fn wire_properties(events: &WireEvents, case: Option<&str>) -> serde_json::Value {
+    wire_event(events, case)["properties"].clone()
 }

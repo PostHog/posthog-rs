@@ -136,7 +136,7 @@ let call = ToolCallRequest::new("search_docs", None).event_option("product_tour_
 
 Keys are strings and values are any JSON value. The SDK sends options as given, so a new option that PostHog adds needs no SDK upgrade. PostHog validates them: it ignores keys it does not know, converts common forms of a known key's value (for a boolean, `"yes"`, `"off"` or `0`), and drops the event if a known key has a value it cannot read. That drop reaches `on_error` as a per-event `drop` with the detail `invalid_options`. `before_send` hooks can read and change options with `Event::options`, `insert_option`, and `remove_option`.
 
-Review your `before_send` hooks for the new event shape. To change an option, use `insert_option`. A hook that returns a new `Event` must copy the options of the event it received, or the event is sent without them. That includes the `process_person_profile` option that `Event::new_anon` sets to `false`, so PostHog would create a person for the generated ID.
+Review your `before_send` hooks for the new event shape. To change an option, use `insert_option`. A hook that returns a new `Event` must copy the options of the event it received, or the event is sent without them. That includes the `process_person_profile` option that `Event::new_anon` sets to `false`, so PostHog would create a person for the generated ID, and the `true` the SDK sets on [identify-style events](#identify-style-events).
 
 Each option replaces a legacy option property:
 
@@ -183,6 +183,7 @@ An event's properties and options come from three layers. For the same key, a la
 `before_send` runs after all three and can change any value. The SDK has no client-wide layer for properties or options.
 
 - A context `process_person_profile` option replaces the `false` that `Event::new_anon` sets.
+- An [identify-style event](#identify-style-events) gets `process_person_profile: true` before the context applies, unless it sets its own value or the SDK generated its distinct ID.
 - `$feature_flag_called` events now take a request context value over the client's `$is_server` and `$geoip_disable` defaults, as other events do. A per-call `disable_geoip` wins over both, and `Some(false)` sends `$geoip_disable: false`. In 0.x, `Some(false)` sent nothing, so a request context `$geoip_disable` applied.
 - `disable_geoip` defaults to `false`, as in 0.x and unlike PostHog's other server SDKs, so PostHog adds GeoIP properties based on the IP address of your server. To turn this off, call `.disable_geoip(true)` on `ClientOptionsBuilder`.
 
@@ -192,23 +193,26 @@ MCP events from the `mcp` feature take the request context too. `rmcp` runs each
 
 The blocking client has no scoped context, and `RequestContext::current()` returns `None`. Apply a context to each event yourself with `RequestContext::event` or `RequestContext::apply_to_event`, and use `evaluate_flags_with_context` for flags.
 
-A context `process_person_profile` option or `$process_person_profile` property of `false` also reaches `alias` and `group_identify`. PostHog drops `$create_alias` and `$groupidentify` events that have person processing off, and records an `invalid_event_when_process_person_profile_is_false` ingestion warning in your project, so they never merge a person or update a group. It keeps a `$set` event but ignores its person update. Capture accepts these events before the drop, so `on_error` does not see it. In 0.x, a context that turned person processing off already reached these calls.
+### Identify-style events
 
-`alias` and `group_identify` take no options. To keep their events, set the option in a `before_send` hook, which runs after the context is applied:
+`$identify`, `$create_alias`, `$merge_dangerously`, `$groupidentify`, `$set` and `$set_once` events default to `process_person_profile: true`. These events merge persons or update person or group properties, which PostHog skips when person processing is off. It drops `$create_alias` and `$groupidentify` events that have person processing off and records an `invalid_event_when_process_person_profile_is_false` ingestion warning in your project. Capture accepts these events before the drop, so `on_error` does not see it. The SDK therefore keeps the request context from turning person processing off for them. This covers `alias`, `group_identify`, and any event with one of these names that you build and capture yourself.
+
+- The event's own value wins over every layer. An event that sets the `process_person_profile` option keeps it. An event that sets only the legacy `$process_person_profile` property sends that value as the option. A `null` value counts as unset.
+- Otherwise the SDK sets the option to `true` before it applies the request context, so a context option or property of `false` does not reach these events.
+- An event whose distinct ID the SDK generated gets no default and stays personless. That is an event from `Event::new_anon`, from `Event::new` with a blank ID, or from `RequestContext::event` without a context distinct ID. A `$process_person_profile` property you set on such an event wins over the personless `false`.
+- `before_send` sees the resolved value and can change it, and the SDK sends what the hook returns.
+- The SDK checks the event name when you capture the event. A `before_send` hook that builds an event with one of these names, or renames an event to one, must set the option itself.
+
+To set options on the events that `alias` and `group_identify` send, build them with `Event::alias` and `Event::group_identify`, then capture them:
 
 ```rust
-let options = posthog::ClientOptionsBuilder::default()
-    .api_key("phc_project_token".to_string())
-    .before_send(|mut event| {
-        if matches!(event.event_name(), "$create_alias" | "$groupidentify") {
-            let _ = event.insert_option("process_person_profile", true);
-        }
-        Some(event)
-    })
-    .build()?;
+if let Some(mut event) = posthog::Event::alias("anon-abc123".into(), "user-42".into()) {
+    event.insert_option("disable_skew_correction", true)?;
+    client.capture(event);
+}
 ```
 
-For an event you build with `Event::new`, such as `$identify` or `$set`, call `insert_option("process_person_profile", true)` on it. An event option wins over the context.
+In 0.x, a context that turned person processing off reached `alias` and `group_identify`, and PostHog dropped their events.
 
 ### Session and window IDs
 

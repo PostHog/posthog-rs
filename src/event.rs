@@ -6,9 +6,22 @@ use serde::Serialize;
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::constants::{PROCESS_PERSON_PROFILE_OPT, PROCESS_PERSON_PROFILE_PROP};
 use crate::feature_flag_evaluations::FeatureFlagEvaluations;
 use crate::request_context::current_distinct_id;
 use crate::Error;
+
+/// Events that merge persons or update person or group properties, which PostHog skips or
+/// drops when person processing is off, so they default to `process_person_profile: true`
+/// (see [`Event::apply_identify_style_person_default`]).
+pub(crate) const IDENTIFY_STYLE_EVENTS: [&str; 6] = [
+    "$identify",
+    "$create_alias",
+    "$merge_dangerously",
+    "$groupidentify",
+    "$set",
+    "$set_once",
+];
 
 /// The only properties retained on a minimized `$feature_flag_called` event.
 ///
@@ -200,7 +213,7 @@ impl Event {
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
         let mut options = HashMap::new();
         options.insert(
-            crate::constants::PROCESS_PERSON_PROFILE_OPT.into(),
+            PROCESS_PERSON_PROFILE_OPT.into(),
             serde_json::Value::Bool(false),
         );
         Self {
@@ -269,7 +282,7 @@ impl Event {
         let as_json =
             serde_json::to_value(value).map_err(|e| Error::Serialization(e.to_string()))?;
         let key = key.into();
-        if key == crate::constants::PROCESS_PERSON_PROFILE_OPT {
+        if key == PROCESS_PERSON_PROFILE_OPT {
             self.personless_default = false;
         }
         let _ = self.options.insert(key, as_json);
@@ -278,7 +291,7 @@ impl Event {
 
     /// Remove a capture option from the event and return its previous value, if any.
     pub fn remove_option(&mut self, key: &str) -> Option<serde_json::Value> {
-        if key == crate::constants::PROCESS_PERSON_PROFILE_OPT {
+        if key == PROCESS_PERSON_PROFILE_OPT {
             self.personless_default = false;
         }
         self.options.remove(key)
@@ -322,25 +335,44 @@ impl Event {
         Ok(())
     }
 
-    /// Build the `$create_alias` event backing [`crate::Client::alias`].
+    /// Build the `$create_alias` event that [`crate::Client::alias`] sends, so you
+    /// can set options on it before you capture it.
     ///
-    /// The event is attributed to `previous_id`, which is also mirrored into
-    /// `properties.distinct_id` alongside the merge target in `properties.alias`
-    /// — the shape posthog-python, posthog-js-lite, and posthog-php all send.
+    /// # Parameters
     ///
-    /// Returns `None` when either ID is blank. A merge needs both sides, so a
-    /// blank one can only produce a malformed event; the SDKs above drop it with
-    /// a warning rather than sending it, and so do we.
+    /// - `previous_id`: ID already known to PostHog, such as an anonymous ID.
+    /// - `distinct_id`: ID it should be merged into, such as a logged-in user ID.
     ///
-    /// Properties are built directly rather than through `insert_prop` so
-    /// construction is infallible: both values are strings, which cannot fail to
-    /// serialize, leaving no always-`Ok` `Result` for callers to discard.
-    pub(crate) fn alias(previous_id: String, distinct_id: String) -> Option<Self> {
+    /// # Returns
+    ///
+    /// The event, attributed to `previous_id`, which is also mirrored into
+    /// `properties.distinct_id` alongside the merge target in `properties.alias`.
+    /// Returns `None` and logs a warning when either ID is blank, because a merge
+    /// needs both sides.
+    ///
+    /// # Remarks
+    ///
+    /// The SDK sends `process_person_profile: true` on this event unless you set
+    /// the option, so a request context cannot turn person processing off for it.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn send(posthog: &posthog::Client) -> Result<(), posthog::Error> {
+    /// if let Some(mut event) = posthog::Event::alias("anon-abc123".into(), "user-42".into()) {
+    ///     event.insert_option("disable_skew_correction", true)?;
+    ///     posthog.capture(event);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn alias(previous_id: String, distinct_id: String) -> Option<Self> {
         if previous_id.trim().is_empty() || distinct_id.trim().is_empty() {
             warn!("alias() called with a blank id, dropping the $create_alias event");
             return None;
         }
 
+        // Built directly rather than through `insert_prop`, so construction cannot fail.
         let mut properties = HashMap::new();
         properties.insert(
             "distinct_id".to_string(),
@@ -363,20 +395,48 @@ impl Event {
         })
     }
 
-    /// Build the `$groupidentify` event backing [`crate::Client::group_identify`].
+    /// Build the `$groupidentify` event that [`crate::Client::group_identify`]
+    /// sends, so you can set options on it before you capture it.
     ///
-    /// Sets `$group_type`, `$group_key`, and `$group_set` in `properties`.
-    /// The event takes the request context's distinct id when one is set, else
-    /// `format!("${group_type}_{group_key}")`.
+    /// # Parameters
     ///
-    /// Returns `Ok(None)` when either `group_type` or `group_key` is blank (a
-    /// warning is logged and the event is dropped).
+    /// - `group_type`: Group type, such as `"company"`.
+    /// - `group_key`: Unique identifier for the group, such as an ID in your database.
+    /// - `properties`: Any serializable object or JSON map of group properties.
+    ///
+    /// # Returns
+    ///
+    /// The event, with `$group_type`, `$group_key`, and `$group_set` in its
+    /// properties. Its distinct ID is the request context's distinct ID when one
+    /// is set, else `$<group_type>_<group_key>`. Returns `Ok(None)` and logs a
+    /// warning when `group_type` or `group_key` is blank.
+    ///
+    /// # Errors
     ///
     /// Returns [`Error::Serialization`] if `properties` fails to serialize to
-    /// JSON, or if it does not serialize to a JSON object — PostHog ingestion
-    /// requires `$group_set` to be an object and silently drops the event
-    /// otherwise.
-    pub(crate) fn group_identify<P: Serialize>(
+    /// JSON, or if it does not serialize to a JSON object. PostHog requires
+    /// `$group_set` to be an object and silently drops the event otherwise.
+    ///
+    /// # Remarks
+    ///
+    /// The SDK sends `process_person_profile: true` on this event unless you set
+    /// the option, so a request context cannot turn person processing off for it.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn send(posthog: &posthog::Client) -> Result<(), posthog::Error> {
+    /// let properties = serde_json::json!({ "name": "Awesome Inc." });
+    /// if let Some(mut event) =
+    ///     posthog::Event::group_identify("company".into(), "acme_123".into(), properties)?
+    /// {
+    ///     event.insert_option("disable_skew_correction", true)?;
+    ///     posthog.capture(event);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn group_identify<P: Serialize>(
         group_type: String,
         group_key: String,
         properties: P,
@@ -535,7 +595,7 @@ impl Event {
             return;
         }
         let key = key.into();
-        if key == crate::constants::PROCESS_PERSON_PROFILE_OPT && self.personless_default {
+        if key == PROCESS_PERSON_PROFILE_OPT && self.personless_default {
             self.personless_default = false;
             self.options.insert(key, value);
             return;
@@ -555,12 +615,52 @@ impl Event {
         }
         let slot = self
             .options
-            .entry(crate::constants::PROCESS_PERSON_PROFILE_OPT.to_string())
+            .entry(PROCESS_PERSON_PROFILE_OPT.to_string())
             .or_insert(serde_json::Value::Null);
         if slot.is_null() {
             *slot = serde_json::Value::Bool(false);
             self.personless_default = true;
         }
+    }
+
+    /// On an [`IDENTIFY_STYLE_EVENTS`] event, resolve `process_person_profile` from the
+    /// caller's own values before any layer fills it, so no layer can turn person processing
+    /// off for it.
+    ///
+    /// A caller option stays. Else a caller `$process_person_profile` property moves into
+    /// the option, so a layer cannot fill the option first. Else the option is set to
+    /// `true`, unless the SDK generated the distinct ID, which keeps the personless default.
+    /// A `null` option or property counts as unset; a `null` property stays for capture
+    /// to remove. Idempotent while no layer has filled the event.
+    pub(crate) fn apply_identify_style_person_default(&mut self) {
+        if !IDENTIFY_STYLE_EVENTS.contains(&self.event.as_str()) {
+            return;
+        }
+        // The personless default from `new_anon` is the SDK's, not the caller's.
+        let caller_option = !self.personless_default
+            && self
+                .options
+                .get(PROCESS_PERSON_PROFILE_OPT)
+                .is_some_and(|value| !value.is_null());
+        if caller_option {
+            return;
+        }
+        let legacy = self
+            .properties
+            .get(PROCESS_PERSON_PROFILE_PROP)
+            .filter(|value| !value.is_null())
+            .cloned();
+        let value = match legacy {
+            Some(legacy) => {
+                self.properties.remove(PROCESS_PERSON_PROFILE_PROP);
+                legacy
+            }
+            None if self.personless => return,
+            None => serde_json::Value::Bool(true),
+        };
+        self.personless_default = false;
+        self.options
+            .insert(PROCESS_PERSON_PROFILE_OPT.into(), value);
     }
 
     pub(crate) fn groups(&self) -> &HashMap<String, String> {
