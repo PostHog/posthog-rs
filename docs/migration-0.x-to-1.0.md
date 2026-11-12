@@ -20,6 +20,7 @@ Read the checklist first, then the sections that apply to you.
 - [ ] A proxy redirects capture or `/flags` requests → [Prepare your proxy](#prepare-your-proxy)
 - [ ] You pass a personal API key (`phx_...`) as the project `api_key` → [Use a project token](#use-a-project-token)
 - [ ] Your build environment has no C compiler → [Check your C compiler](#check-your-c-compiler)
+- [ ] You run a self-hosted PostHog → [Prepare your proxy](#prepare-your-proxy)
 
 **During your upgrade**
 
@@ -80,6 +81,8 @@ If you send events through your own reverse proxy, update it before you upgrade:
 - **Accept request bodies up to 20 MB.** AI requests are often larger than 1 MB, the default limit in nginx and ingress-nginx. A `413` from the proxy fails the batch.
 
 PostHog's managed reverse proxy already does this. See the [proxy guides](https://posthog.com/docs/advanced/proxy).
+
+A self-hosted PostHog must serve both `/i/v1/analytics/events` and `/i/v1/ai/events`. On self-hosted PostHog, a separate capture service serves the AI route.
 
 The capture and `/flags` HTTP clients the SDK builds follow a redirect only when it's a `307` or `308` to the same scheme, host, and port. They follow at most 5 redirects in a row.
 
@@ -266,7 +269,7 @@ An unset `capture_ai_compression` sends AI bodies uncompressed. Set `CaptureComp
 - **Generated IDs.** The SDK gives every event a UUIDv7 `uuid` and every request a UUIDv7 request ID.
 - **When the SDK assigns a uuid.** The SDK assigns an event's uuid when you hand the event to `capture` or `capture_immediate`, not in `Event::new`. Capturing a cloned or reused `Event` twice now sends two uuids. In 0.x.x both copies shared one uuid, so PostHog kept only one of them.
 - **Your own uuids.** A uuid set with `Event::set_uuid` is still sent as given on every capture. If you set your own, keep it unique.
-- **Duplicates.** When two events in one request share a `uuid`, PostHog keeps the first and drops the later copies. The SDK reports each dropped copy through `on_error` and `CaptureSummary` with the reason `duplicate_event_uuid`. An entry's `EventResult::duplicates_dropped` counts the copies dropped with it.
+- **Duplicates.** When two events in one request share a `uuid`, PostHog keeps the first and drops the later copies. The SDK reports each dropped copy through `on_error` and `CaptureSummary` with the reason `duplicate_event_uuid`. An entry's `EventResult::duplicates_dropped` counts the copies dropped with it. Older PostHog versions reject the whole request with HTTP `400` `duplicate_event_uuid` instead.
 - **Duplicates of a retried event.** If the kept copy comes back `retry` in the background worker, those dropped copies aren't reported. PostHog still raises a `duplicate_event_uuid` ingestion warning in your project.
 
 ### Check timestamps
@@ -468,7 +471,7 @@ During shutdown, the SDK makes one final attempt per batch:
 
 The SDK retries transient request failures. From a partial response, it retries only the events with retryable results.
 
-| Behavior | 0.x.x | 1.x.x |
+| Behavior | 0.x.x (V0) | 1.x.x |
 | --- | --- | --- |
 | Capture attempts (`max_capture_attempts`) | 3 by default | 4 by default |
 | First retry wait (`retry_initial_backoff_ms`) | 200 ms | 100 ms |
@@ -476,6 +479,8 @@ The SDK retries transient request failures. From a partial response, it retries 
 | First remote `/flags` retry wait | 200 ms by default | 300 ms |
 
 In 0.x.x, the V0 path retried a `429` only when it had a `Retry-After` header, and never retried a `404`. In 1.x.x, every other status is terminal.
+
+A `404` that lasts through every attempt can mean the PostHog deployment has no capture v1 route, for example an older self-hosted install (see [Prepare your proxy](#prepare-your-proxy)).
 
 In 0.x.x, remote `/flags` retries used the capture retry options, with a first wait of 200 ms by default. In 1.x.x, they wait 300 ms before the first retry and double up to 30 s. They no longer use the capture retry options.
 
