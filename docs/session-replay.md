@@ -17,8 +17,15 @@ config.persistence = Persistence::Memory;
 config.session_replay.jpeg_quality = 65;
 config.session_replay.max_frames_in_flight = 2;
 let client = Client::init_blocking(config);
+// Wait for the initial remote-settings attempt before this one-shot capture.
+client.flush_blocking();
 let replay = client.session_replay();
 replay.start();
+if !replay.is_active() {
+    // Remote settings, consent or the session can still prevent recording.
+    client.shutdown_blocking(None);
+    return;
+}
 
 // Immediately before host acquisition/readback:
 let layout = FrameLayout {
@@ -64,7 +71,8 @@ minimum duration, malformed controls and V2 trigger groups prevent recording.
 An endpoint override other than `/s/` is unsupported. Unrelated extension fields
 are tolerated. This is not full replay ingestion-control parity.
 
-Acquisition fixes identity, session, timestamp, UUID and ordering. Submission
+Acquisition fixes identity, session, timestamp, UUID and ordering. The replay
+window ID is the session ID, so a new session also starts a new replay window. Submission
 rechecks identity, consent transitions and the current session; changes during
 readback reject the frame instead of reattributing it. Backgrounding adds no
 special invalidation, but ordinary session expiry still applies. Screenshots
@@ -104,8 +112,9 @@ downscale before acquisition to control memory and encoding cost.
 
 ## Delivery and lifecycle
 
-Native screenshot events go to `/s/` on the existing delivery worker, using gzip,
-not analytics v1 ingestion. Every request contains one session/distinct-ID pair.
+Native screenshot events go to `/s/` on the existing delivery worker, not analytics
+v1 ingestion. Requests use gzip by default; setting `capture_compression = None`
+sends plain JSON without a compression header. Every request contains one session/distinct-ID pair.
 Batches are at most two frames and become eligible at two encoded frames or one
 second after the first is ready. The shared worker and HTTP can delay attempts.
 
@@ -113,7 +122,8 @@ Retryable failures remain in memory without an attempt-count cutoff, with bounde
 jittered backoff. Valid Retry-After is a floor subject to the backoff cap.
 Flush does not bypass cooldown. Multi-frame HTTP 413 responses split; singleton
 413 and other permanent/quota rejections release affected frames and report
-through `on_error`. Diagnostics omit pixels, payloads, tokens and attribution.
+through `on_error`. Retry scheduling is logged at debug level, and shutdown
+reports abandoned screenshots once per drain. Diagnostics omit pixels, payloads, tokens and attribution.
 
 Stop requests flush and allows valid outstanding host-held frames to submit.
 Client flush includes previously submitted encoding and an eligible replay

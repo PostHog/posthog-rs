@@ -1,3 +1,6 @@
+#[path = "replay_delivery_tests.rs"]
+mod delivery;
+
 use super::super::{Persistence, SessionMode};
 use super::*;
 use crate::client::transport::{Clock, TransportHandle};
@@ -17,6 +20,7 @@ struct Reply {
 struct Backend {
     server: MockServer,
     bodies: Arc<Mutex<Vec<Value>>>,
+    uploads: Mutex<mpsc::Receiver<Value>>,
     config: Arc<Mutex<Value>>,
     reply: Arc<Mutex<Reply>>,
 }
@@ -43,6 +47,7 @@ impl Backend {
         });
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let seen = bodies.clone();
+        let (uploaded_tx, uploaded_rx) = mpsc::channel();
         let reply = Arc::new(Mutex::new(Reply {
             status: 200,
             split: false,
@@ -67,7 +72,8 @@ impl Backend {
                 } else {
                     reply.status
                 };
-                seen.lock().unwrap().push(body);
+                seen.lock().unwrap().push(body.clone());
+                let _ = uploaded_tx.send(body);
                 let mut builder = http::Response::builder().status(status);
                 if let Some(value) = reply.retry_after {
                     builder = builder.header("retry-after", value);
@@ -78,6 +84,7 @@ impl Backend {
         Self {
             server,
             bodies,
+            uploads: Mutex::new(uploaded_rx),
             config,
             reply,
         }
@@ -505,7 +512,7 @@ fn encoding_and_hook_are_off_caller_flush_waits_and_stop_allows_late_frames() {
 
 #[test]
 fn hooks_redact_drop_fail_closed_and_cannot_reattribute_frames() {
-    for mode in 0..4 {
+    for mode in 0..13 {
         let backend = Backend::new();
         let client = backend.client(|config| {
             config.before_send(move |mut event| {
@@ -519,8 +526,55 @@ fn hooks_redact_drop_fail_closed_and_cannot_reattribute_frames() {
                     }
                     1 => None,
                     2 => panic!("synthetic hook failure"),
-                    _ => {
-                        event.insert_prop("$session_id", "wrong-session").unwrap();
+                    mode => {
+                        match mode {
+                            3 => {
+                                event.insert_prop("$session_id", "wrong-session").unwrap();
+                            }
+                            4 | 5 => {
+                                event = crate::Event::from_parts(
+                                    if mode == 4 {
+                                        "renamed"
+                                    } else {
+                                        event.event_name()
+                                    }
+                                    .to_owned(),
+                                    if mode == 5 {
+                                        "other-person"
+                                    } else {
+                                        event.distinct_id()
+                                    }
+                                    .to_owned(),
+                                    event.properties().clone(),
+                                    event.options().clone(),
+                                    event.groups().clone(),
+                                    event.timestamp(),
+                                    event.uuid(),
+                                );
+                            }
+                            6 => event.set_uuid(Uuid::now_v7()),
+                            7 => {
+                                event
+                                    .set_timestamp(Utc::now() + chrono::Duration::seconds(1))
+                                    .unwrap();
+                            }
+                            8 => {
+                                event.insert_prop("$window_id", "wrong-window").unwrap();
+                            }
+                            9 => {
+                                event.remove_prop("$snapshot_data");
+                            }
+                            10 => {
+                                event.insert_prop("$snapshot_data", json!([])).unwrap();
+                            }
+                            11 => {
+                                event.insert_prop("$snapshot_data", json!({})).unwrap();
+                            }
+                            12 => {
+                                event.insert_prop("$snapshot_data", Value::Null).unwrap();
+                            }
+                            _ => unreachable!(),
+                        }
                         Some(event)
                     }
                 }
@@ -788,6 +842,14 @@ fn shutdown_budget_covers_waiting_images_and_encoding_that_finishes_late() {
     rx.recv_timeout(Duration::from_secs(5)).unwrap();
     replay.submit_frame(frame(&replay));
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Drive the delivery deadline on its injected clock. Client shutdown uses
+    // the system clock, independently covered by the public timer regression.
+    client
+        .transport
+        .as_ref()
+        .unwrap()
+        .send_control(Control::DeliveryClosing(clock.now()));
+    client.transport.as_ref().unwrap().tick();
     let closing = client.clone();
     let shutdown = std::thread::spawn(move || closing.shutdown_blocking(Some(Duration::ZERO)));
     let gate = replay.0.upgrade().unwrap().gate.clone();

@@ -163,7 +163,6 @@ pub(super) struct Controller {
     gate: Arc<encoder::Gate>,
     session_clock: Arc<dyn SessionClock>,
     default_opt_out: bool,
-    window_id: Uuid,
     capture_key: usize,
 }
 impl Controller {
@@ -194,7 +193,6 @@ impl Controller {
             gate,
             session_clock: producer.session_clock.clone(),
             default_opt_out: config.opt_out,
-            window_id: Uuid::now_v7(),
             capture_key: producer.capture_key(),
         }))
     }
@@ -211,7 +209,7 @@ impl Controller {
         !snapshot.opt_out.unwrap_or(self.default_opt_out)
             && policy::eligible(
                 snapshot
-                    .project_config
+                    .remote_config
                     .as_ref()
                     .and_then(|c| c.session_recording.as_ref()),
             )
@@ -314,7 +312,7 @@ impl SessionReplay {
         let attribution = Attribution {
             distinct_id: snapshot.distinct_id.clone(),
             session_id,
-            window_id: c.window_id,
+            window_id: session_id,
             timestamp: Utc::now(),
             uuid: Uuid::now_v7(),
             sequence,

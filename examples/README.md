@@ -37,7 +37,7 @@ Delivery flush does not wait for flag requests.
 ## Synthetic screenshot replay
 
 ```bash
-POSTHOG_HOST=http://localhost:9999 POSTHOG_PROJECT_TOKEN=phc_MOCK \\
+POSTHOG_HOST=http://localhost:9999 POSTHOG_PROJECT_TOKEN=phc_MOCK \
   cargo run --features session-replay --example stateful_replay
 ```
 

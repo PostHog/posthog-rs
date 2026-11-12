@@ -15,6 +15,12 @@ use super::{FrameLayout, ReplayConfig, ReplayFrame};
 use crate::client::event_store::RecordBuffer;
 use crate::client::transport::replay::MAX_BODY_BYTES;
 use crate::client::transport::{Completion, Control};
+use crate::constants::{
+    COOKIELESS_MODE_OPT, COOKIELESS_MODE_PROP, DISABLE_SKEW_CORRECTION_OPT, IGNORE_SENT_AT_PROP,
+};
+
+// The native playback transformer reserves lower IDs for its synthetic document.
+const SCREENSHOT_ID: u64 = 10_000_000;
 
 pub(crate) trait ImageEncoder: Send + 'static {
     fn encode(
@@ -53,6 +59,55 @@ mod tests {
             Jpeg.encode(packed, &pixels, 65).unwrap(),
             Jpeg.encode(padded, &rows, 65).unwrap()
         );
+    }
+
+    #[test]
+    fn jpeg_decodes_dimensions_colors_rows_and_masked_pixels() {
+        let layout = FrameLayout {
+            width: 35,
+            height: 27,
+            row_stride_bytes: 35 * 4 + 12,
+            format: super::super::PixelFormat::Bgra8888,
+        };
+        let mut pixels = vec![255; layout.row_stride_bytes * layout.height as usize];
+        for y in 0..layout.height as usize {
+            for x in 0..layout.width as usize {
+                let color = match (x < 16, y < 16) {
+                    (true, true) => [255, 0, 0, 7],
+                    (false, true) => [0, 0, 255, 31],
+                    (true, false) => [0, 255, 0, 77],
+                    (false, false) => [0, 0, 0, 255],
+                };
+                let start = y * layout.row_stride_bytes + x * 4;
+                pixels[start..start + 4].copy_from_slice(&color);
+            }
+        }
+        let jpeg = Jpeg.encode(layout, &pixels, 65).unwrap();
+        let mut decoder = jpeg_decoder::Decoder::new(jpeg.as_slice());
+        let rgb = decoder.decode().unwrap();
+        let info = decoder.info().unwrap();
+        assert_eq!((info.width, info.height), (35, 27));
+        assert_eq!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24);
+        for (x, y, expected) in [
+            (4, 4, [0u8, 0, 255]),
+            (28, 4, [255, 0, 0]),
+            (4, 22, [0, 255, 0]),
+            (28, 22, [0, 0, 0]),
+        ] {
+            let start = (y * 35 + x) * 3;
+            let actual = &rgb[start..start + 3];
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| a.abs_diff(b) <= 25),
+                "pixel ({}, {}): {:?}, expected {:?}",
+                x,
+                y,
+                actual,
+                expected
+            );
+        }
     }
 
     #[test]
@@ -240,20 +295,21 @@ impl Worker {
                                 .unwrap_or_else(|p| p.into_inner())
                                 .is_some_and(|end| Instant::now() >= end)
                             {
+                                let _ = delivery.send(Control::ReplayShutdownAbandoned);
                                 continue;
                             }
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     encode(*frame, &producer, &token, quality, codec.as_ref())
                                 }));
-                            if deadline
+                            let expired = deadline
                                 .lock()
                                 .unwrap_or_else(|p| p.into_inner())
-                                .is_some_and(|end| Instant::now() >= end)
-                            {
-                                continue;
-                            }
+                                .is_some_and(|end| Instant::now() >= end);
                             let control = match result {
+                                Ok(Ok(Some(_))) if expired => {
+                                    Some(Control::ReplayShutdownAbandoned)
+                                }
                                 Ok(Ok(Some(encoded))) => {
                                     Some(Control::ReplayFrame(Box::new(encoded)))
                                 }
@@ -268,7 +324,7 @@ impl Worker {
                                     break;
                                 }
                             }
-                            if flush {
+                            if flush && !expired {
                                 let (tx, _) = mpsc::channel();
                                 if delivery
                                     .send(Control::Flush(Completion::Blocking(tx)))
@@ -334,14 +390,14 @@ fn encode(
         ("$snapshot_data".into(), json!([
             {"type":4,"timestamp":timestamp.timestamp_millis(),"data":{"width":frame.layout.width,"height":frame.layout.height}},
             {"type":2,"timestamp":timestamp.timestamp_millis(),"data":{"initialOffset":{"top":0,"left":0},"wireframes":[{
-                "id":1,"x":0,"y":0,"width":frame.layout.width,"height":frame.layout.height,"type":"screenshot",
+                "id":SCREENSHOT_ID,"x":0,"y":0,"width":frame.layout.width,"height":frame.layout.height,"type":"screenshot",
                 "base64":format!("data:image/jpeg;base64,{}", STANDARD.encode(jpeg))
             }]}}
         ])),
     ]);
     let _guard = CaptureGuard::enter_key(producer.capture_key())
         .map_err(|_| "Screenshot hook recursion guard unavailable")?;
-    let event = match producer.assemble(
+    let mut event = match producer.assemble(
         input,
         &frame.snapshot,
         timestamp,
@@ -371,6 +427,19 @@ fn encode(
             .is_some_and(|v| v.as_array().is_some_and(|v| !v.is_empty()))
     {
         return Err("Screenshot hook changed required attribution or snapshot fields");
+    }
+    for (property, option) in [
+        (COOKIELESS_MODE_PROP, COOKIELESS_MODE_OPT),
+        (IGNORE_SENT_AT_PROP, DISABLE_SKEW_CORRECTION_OPT),
+    ] {
+        if let Some(value) = event
+            .options()
+            .get(option)
+            .filter(|value| !value.is_null())
+            .cloned()
+        {
+            event.set_prop(property.to_owned(), value);
+        }
     }
     let mut body = RecordBuffer {
         bytes: Vec::new(),
