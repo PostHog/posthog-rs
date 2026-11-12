@@ -2,7 +2,9 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
-    versioning-strategy: "increase-if-necessary"
+    # Cargo accepts only "auto" or "lockfile-only". "auto" already leaves an in-range
+    # bump in Cargo.lock and edits Cargo.toml only for a semver-incompatible release.
+    versioning-strategy: "auto"
     schedule:
       interval: "weekly"
     cooldown:
