@@ -276,11 +276,11 @@ impl Client {
             let generation = state.generation.wrapping_add(1);
             let context_revision = state.context_revision.wrapping_add(1);
             let sessions = state.sessions.cleared();
-            let project_config = state.project_config.clone();
-            let project_config_loading = state.project_config_loading;
+            let remote_config = state.remote_config.clone();
+            let remote_config_loading = state.remote_config_loading;
             *state = Snapshot::anonymous(id);
-            state.project_config = project_config;
-            state.project_config_loading = project_config_loading;
+            state.remote_config = remote_config;
+            state.remote_config_loading = remote_config_loading;
             state.sessions = sessions;
             state.generation = generation;
             state.context_revision = context_revision;

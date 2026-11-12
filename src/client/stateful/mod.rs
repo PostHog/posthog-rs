@@ -52,9 +52,9 @@ struct Snapshot {
     groups: HashMap<String, String>,
     flags: flag_state::FlagState,
     #[serde(with = "remote_config::cache_serde")]
-    project_config: Option<std::sync::Arc<crate::client::transport::remote_config::ProjectConfig>>,
+    remote_config: Option<std::sync::Arc<crate::client::transport::remote_config::RemoteConfig>>,
     #[serde(skip)]
-    project_config_loading: bool,
+    remote_config_loading: bool,
     #[serde(skip)]
     flag_load: flag_state::FlagLoadState,
     #[serde(deserialize_with = "Option::<sessions::StoredSession>::deserialize")]
@@ -81,8 +81,8 @@ impl Snapshot {
             registered: HashMap::new(),
             groups: HashMap::new(),
             flags: flag_state::FlagState::default(),
-            project_config: None,
-            project_config_loading: false,
+            remote_config: None,
+            remote_config_loading: false,
             flag_load: flag_state::FlagLoadState::default(),
             session: None,
             sessions: sessions::Sessions::default(),
@@ -101,14 +101,14 @@ impl Snapshot {
             && self.registered == other.registered
             && self.groups == other.groups
             && self.flags == other.flags
-            && self.project_config == other.project_config
+            && self.remote_config == other.remote_config
             && self.session == other.session
     }
 
     fn is_valid(&self) -> bool {
         self.flags.is_valid()
             && self
-                .project_config
+                .remote_config
                 .as_ref()
                 .map_or(true, |config| config.valid())
             && self

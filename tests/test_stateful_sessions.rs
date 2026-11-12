@@ -286,7 +286,7 @@ fn legacy_v4_migrates_lazily_and_invalid_session_files_are_preserved() {
     legacy["state"]
         .as_object_mut()
         .unwrap()
-        .remove("project_config");
+        .remove("remote_config");
     directory.replace(&legacy);
     let bytes = std::fs::read(directory.path()).unwrap();
     let client = Client::init_blocking(directory.config());

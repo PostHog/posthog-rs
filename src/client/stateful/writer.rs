@@ -600,12 +600,12 @@ fn run_worker(
             shared.notify();
             match result {
                 Err(error) => report_storage_error(hooks, StorageOperation::Write, &error),
-                Ok(outcome) if outcome.project_config_omitted => report_storage_error(
+                Ok(outcome) if outcome.remote_config_omitted => report_storage_error(
                     hooks,
                     StorageOperation::Write,
                     &io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "Project configuration cache exceeds state storage bounds; live settings retained",
+                        "Remote configuration cache exceeds state storage bounds; live settings retained",
                     ),
                 ),
                 Ok(_) => {}
