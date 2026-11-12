@@ -12,7 +12,10 @@ pub(crate) struct SendOptions {
 /// One email from an email template made transactional in PostHog, sent by
 /// the template's ID.
 ///
-/// The template sets its own sender, subject and content.
+/// The template sets its own sender, subject and content. PostHog refuses a
+/// send of a template in a marketing category with `unsubscribe_link_required`
+/// when the template has no `{{ unsubscribe_url }}` placeholder, and
+/// `copies_not_allowed` when it has cc or bcc.
 ///
 /// ```
 /// use posthog_rs::TemplateEmail;
@@ -231,8 +234,9 @@ impl From<MessageCategory> for EmailCategory {
 
 /// A message category, defined in code by its key.
 ///
-/// PostHog creates the category on the first send with its key, and updates
-/// its name and description when they change. A key that exists with another
+/// PostHog creates the category with its name and description on the first
+/// send with its key. Later sends with that key keep the category's name and
+/// description, so change them in PostHog. A key that exists with another
 /// type refuses the send with `category_mismatch`.
 ///
 /// A marketing send honors the recipient's opt-outs, and its `html` (or
@@ -274,8 +278,8 @@ impl MessageCategory {
         }
     }
 
-    /// What the category's emails are about. Without it, the category keeps
-    /// its description, and `""` clears it.
+    /// What the category's emails are about. PostHog uses it only when the
+    /// send creates the category.
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self

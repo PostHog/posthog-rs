@@ -3,6 +3,7 @@
 mod common;
 mod email_support;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,21 +86,10 @@ fn code_send_posts_the_rendered_content() {
 }
 
 #[test]
-fn a_send_updates_its_category_description() {
-    let cases = [
-        (None, "Old news"),
-        (Some(""), ""),
-        (Some("Monthly product news"), "Monthly product news"),
-    ];
-    for (description, stored) in cases {
-        let api = SendApi::start().with_category("newsletter", "marketing", "News", "Old news");
-        let client = posthog_rs::client(options(&api.url).build().unwrap());
-        let mut category =
-            MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter");
-        if let Some(description) = description {
-            category = category.description(description);
-        }
-
+fn a_send_leaves_an_existing_category_as_it_is() {
+    let api = SendApi::start();
+    let client = posthog_rs::client(options(&api.url).build().unwrap());
+    let send = |category: MessageCategory| {
         client
             .emails()
             .send(
@@ -108,17 +98,29 @@ fn a_send_updates_its_category_description() {
                     .category(category),
             )
             .unwrap();
+    };
 
-        assert_eq!(
-            api.category("newsletter"),
-            Some(StoredCategory {
+    send(
+        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
+            .description("Monthly product news"),
+    );
+    send(
+        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Product news")
+            .description(""),
+    );
+
+    assert_eq!(
+        api.categories(),
+        HashMap::from([(
+            "newsletter".to_string(),
+            StoredCategory {
                 category_type: "marketing".into(),
                 name: "Newsletter".into(),
-                description: stored.into(),
-            }),
-            "description {description:?}"
-        );
-    }
+                description: "Monthly product news".into(),
+            }
+        )])
+    );
+    assert_eq!(api.sent().len(), 2);
 }
 
 #[test]

@@ -127,8 +127,9 @@ retries too, and set `max_retries(0)` on the send. A failed send returns an
 `EmailError`: branch on `code()`, such as `quota_limited`, or on `kind()`.
 
 A code send is transactional unless you set its `category`. A
-`MessageCategory` defines the category in code: PostHog creates it by its key
-on the first send, and updates its name and description when they change.
+`MessageCategory` defines the category in code: PostHog creates it with its
+name and description on the first send with its key. Later sends keep the
+category's name and description, so change them in PostHog.
 
 ```rust
 use posthog_rs::{CodeEmail, MessageCategory, MessageCategoryType};

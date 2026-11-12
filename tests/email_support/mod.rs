@@ -174,7 +174,8 @@ struct Project {
 }
 
 /// A fake of PostHog's code send that keeps a project's categories and
-/// templates. A category object upserts the category by key. A `template_key`
+/// templates. A category object creates the category when its key is new and
+/// leaves an existing one as it is. A `template_key`
 /// that names one of the project's templates follows that template's category
 /// when the send leaves `category` out; any other category, `"transactional"`
 /// included, is refused with `category_mismatch`.
@@ -328,18 +329,18 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
     if category_type == "marketing" && !unsubscribe.is_match(content) {
         return Err((400, "unsubscribe_link_required"));
     }
-    let stored = project
+    project
         .categories
         .entry(key.to_string())
         .or_insert_with(|| StoredCategory {
             category_type: category_type.to_string(),
-            name: String::new(),
-            description: String::new(),
+            name: text_of(defined, "name").to_string(),
+            description: defined
+                .get("description")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
         });
-    stored.name = text_of(defined, "name").to_string();
-    if let Some(description) = defined.get("description").and_then(|value| value.as_str()) {
-        stored.description = description.to_string();
-    }
     Ok((to, Some(key.to_string())))
 }
 

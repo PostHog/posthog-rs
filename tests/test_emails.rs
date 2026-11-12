@@ -351,6 +351,7 @@ async fn refusals_keep_posthogs_code_and_are_not_retried() {
             "unsubscribe_link_required",
             EmailErrorKind::ValidationError,
         ),
+        (400, "copies_not_allowed", EmailErrorKind::ValidationError),
         (422, "recipient_opted_out", EmailErrorKind::ValidationError),
     ];
     for (status, code, kind) in cases {
