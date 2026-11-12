@@ -2,4 +2,4 @@
 cargo/posthog: minor
 ---
 
-Add persisted stateful consent with synchronous opt-in/out, prospective capture gating and reset to the configured consent default.
+Add persistent opt-in and opt-out controls for new events on stateful clients.
