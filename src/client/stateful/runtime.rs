@@ -127,6 +127,8 @@ pub struct Client {
     pub(super) state: Option<StateWriter>,
     pub(super) transport: Option<TransportHandle>,
     pub(super) closed: AtomicBool,
+    #[cfg(feature = "session-replay")]
+    pub(super) replay: Option<Arc<super::replay::Controller>>,
 }
 
 impl Client {
@@ -280,7 +282,19 @@ impl Client {
                 return Self::disabled(&config, Some("Invalid mandatory state configuration"));
             }
         };
+        #[cfg(feature = "session-replay")]
+        let replay = super::replay::Controller::new(&state, &transport, &producer, &config);
+        #[cfg(feature = "session-replay")]
+        if replay.is_none() {
+            crate::client::transport::replay::report(
+                &config.transport_options(),
+                "Screenshot encoder could not start; analytics remains enabled",
+                None,
+            );
+        }
         let client = Self {
+            #[cfg(feature = "session-replay")]
+            replay,
             disabled: false,
             shutdown: Some(shutdown),
             shutdown_timeout: config.shutdown_timeout,
@@ -325,6 +339,8 @@ impl Client {
             shutdown: None,
             shutdown_timeout: config.shutdown_timeout,
             producer: None,
+            #[cfg(feature = "session-replay")]
+            replay: None,
             flag_loader: None,
             state: None,
             transport: None,
@@ -445,6 +461,10 @@ impl Client {
                 .as_ref()
                 .unwrap()
                 .request_close_before(deadline);
+            #[cfg(feature = "session-replay")]
+            if let Some(replay) = &self.replay {
+                replay.close();
+            }
             let callbacks = self.flag_loader.as_ref().unwrap().listeners.close();
             drop(callbacks);
         }

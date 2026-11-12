@@ -120,6 +120,8 @@ fn client_with_store(
     let shutdown = super::shutdown::Shutdown::new_with_deadline(deadline.clone()).unwrap();
     Client {
         disabled: false,
+        #[cfg(feature = "session-replay")]
+        replay: None,
         shutdown_timeout: config.shutdown_timeout,
         shutdown: Some(shutdown),
         producer: Some(Producer::new(config)),

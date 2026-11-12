@@ -70,6 +70,13 @@ cache with successful records; partial responses merge successes and retain prio
 records. Accepted exposure reports deduplicate by key and typed value until an
 identity change, reset or shutdown, including across reloads and targeting updates.
 
+## Screenshot replay
+
+The optional `session-replay` feature adds manual screenshot recording to the
+stateful client. Hosts supply already-masked, downscaled BGRA pixels; Rust owns
+encoding, attribution, bounded admission and memory-only delivery.
+See [manual screenshot replay](docs/session-replay.md).
+
 ## Request context
 
 With the optional `tower` feature, `tower::PostHogLayer` reads

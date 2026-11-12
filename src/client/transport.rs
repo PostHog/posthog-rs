@@ -52,6 +52,9 @@ mod queue;
 #[cfg(feature = "stateful")]
 #[path = "transport_remote_config.rs"]
 pub(super) mod remote_config;
+#[cfg(feature = "session-replay")]
+#[path = "transport_replay.rs"]
+pub(super) mod replay;
 #[cfg(feature = "stateful")]
 #[path = "transport_requests.rs"]
 mod requests;
@@ -132,6 +135,12 @@ pub(crate) enum Control {
     RequestBarrier(mpsc::Sender<()>),
     #[cfg(feature = "stateful")]
     RemoteConfig(remote_config::Task),
+    #[cfg(feature = "session-replay")]
+    ReplayFrame(Box<super::stateful::replay::EncodedFrame>),
+    #[cfg(feature = "session-replay")]
+    ReplayFailure(&'static str),
+    #[cfg(feature = "session-replay")]
+    ReplayClosing(Instant),
     /// Like [`Control::Flush`], but sends the freshly captured live buffer
     /// *before* older held retries. Used by the panic hook so a retry backlog
     /// behind a slow endpoint can't starve the just-enqueued `$exception` within
@@ -245,6 +254,8 @@ impl Clock for SystemClock {
 /// client can stay a plain field while `capture`/`flush`/`shutdown` take `&self`.
 pub(crate) struct TransportHandle {
     tx: mpsc::Sender<Control>,
+    #[cfg(feature = "session-replay")]
+    encoder: Mutex<Option<Arc<super::stateful::replay::encoder::Worker>>>,
     /// Pending `Capture` events not yet pulled by the worker. Gates the bounded queue.
     len: Arc<AtomicUsize>,
     /// Set once `shutdown`/`Drop` begins; blocks further enqueue and control sends.
@@ -380,7 +391,7 @@ impl TransportHandle {
 
     /// Test seam: the analytics lane on an injected clock.
     #[cfg(test)]
-    fn spawn_with_clock(options: ClientOptions, clock: Arc<dyn Clock>) -> Self {
+    pub(super) fn spawn_with_clock(options: ClientOptions, clock: Arc<dyn Clock>) -> Self {
         Self::spawn_lane_with_clock(options, LaneConfig::analytics(), clock)
     }
 
@@ -559,6 +570,8 @@ impl TransportHandle {
         let worker_id = worker.as_ref().map(|handle| handle.thread().id());
         Self {
             tx,
+            #[cfg(feature = "session-replay")]
+            encoder: Mutex::new(None),
             len,
             closed: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(worker),
@@ -615,6 +628,26 @@ impl TransportHandle {
                 .requests
                 .as_ref()
                 .is_some_and(|worker| worker.sender().send(Control::RemoteConfig(task)).is_ok())
+    }
+
+    #[cfg(feature = "session-replay")]
+    pub(super) fn install_replay(
+        &self,
+        producer: super::stateful::producer::Producer,
+        config: &super::stateful::ReplayConfig,
+        token: String,
+        shutdown_timeout: Duration,
+    ) -> std::io::Result<Arc<super::stateful::replay::encoder::Gate>> {
+        let worker = Arc::new(super::stateful::replay::encoder::Worker::spawn(
+            producer,
+            config,
+            token,
+            self.tx.clone(),
+            shutdown_timeout,
+        )?);
+        let gate = worker.gate.clone();
+        *self.encoder.lock().unwrap_or_else(|p| p.into_inner()) = Some(worker);
+        Ok(gate)
     }
 
     fn try_reserve(&self) -> bool {
@@ -793,6 +826,32 @@ impl TransportHandle {
             }
             (control, _) => control,
         };
+        #[cfg(feature = "session-replay")]
+        if matches!(
+            control,
+            Control::Flush(_)
+                | Control::FlushCaptures(_)
+                | Control::QueueFlush { .. }
+                | Control::Shutdown { .. }
+        ) {
+            let encoder = self
+                .encoder
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            if let Some(encoder) = encoder {
+                let mut control = control;
+                if let Control::Shutdown { deadline, .. } = &mut control {
+                    let end = encoder.gate.close_deadline(*deadline);
+                    *deadline = Some(end);
+                    let _ = self.tx.send(Control::ReplayClosing(end));
+                }
+                return match encoder.gate.control(control) {
+                    Ok(()) => true,
+                    Err(control) => self.tx.send(control).is_ok(),
+                };
+            }
+        }
         self.tx.send(control).is_ok()
     }
 
@@ -945,6 +1004,17 @@ impl TransportHandle {
         if let Some(worker) = &self.requests {
             worker.join();
         }
+        #[cfg(feature = "session-replay")]
+        {
+            let encoder = self
+                .encoder
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            if let Some(encoder) = encoder {
+                encoder.join();
+            }
+        }
         if let Some(handle) = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = handle.join();
         }
@@ -952,7 +1022,7 @@ impl TransportHandle {
 
     /// Test helper: drive one worker cycle against the current (virtual) clock.
     #[cfg(test)]
-    fn tick(&self) {
+    pub(super) fn tick(&self) {
         let (tx, rx) = mpsc::channel();
         if self.send_control(Control::Tick(Completion::Blocking(tx))) {
             let _ = rx.recv();
@@ -1004,7 +1074,19 @@ impl TransportHandle {
         {
             return true;
         }
-        self.worker_id == Some(id)
+        if self.worker_id == Some(id) {
+            return true;
+        }
+        #[cfg(feature = "session-replay")]
+        {
+            self.encoder
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .is_some_and(|encoder| encoder.on_worker_thread())
+        }
+        #[cfg(not(feature = "session-replay"))]
+        false
     }
 
     /// Test helper: flush + stop + join, mirroring the client's shutdown.
@@ -1357,6 +1439,14 @@ fn run_worker(
                 None => base,
             }
         };
+        #[cfg(feature = "session-replay")]
+        let wait = match pipeline.replay.next_due() {
+            Some(due) => Some(wait.map_or_else(
+                || due.saturating_duration_since(clock.now()),
+                |w| w.min(due.saturating_duration_since(clock.now())),
+            )),
+            None => wait,
+        };
         let wake = match wait {
             None => match rx.recv() {
                 Ok(msg) => Wake::Msg(msg),
@@ -1380,6 +1470,14 @@ fn run_worker(
             Wake::Msg(Control::RequestBarrier(_)) => unreachable!("request-worker-only barrier"),
             #[cfg(feature = "stateful")]
             Wake::Msg(Control::RemoteConfig(_)) => unreachable!("request-worker-only config"),
+            #[cfg(feature = "session-replay")]
+            Wake::Msg(Control::ReplayFrame(frame)) => pipeline.admit_replay(*frame),
+            #[cfg(feature = "session-replay")]
+            Wake::Msg(Control::ReplayClosing(end)) => pipeline.close_replay(end),
+            #[cfg(feature = "session-replay")]
+            Wake::Msg(Control::ReplayFailure(message)) => {
+                replay::report(&pipeline.options, message, None)
+            }
             Wake::Msg(Control::Capture { event }) => {
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
@@ -1433,7 +1531,8 @@ fn run_worker(
                 historical_since = None;
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                 buffer_since = None;
-
+                #[cfg(feature = "session-replay")]
+                pipeline.service_replay(true, None);
                 completion.signal();
             }
             Wake::Msg(Control::FlushCaptures(completion)) => {
@@ -1446,7 +1545,8 @@ fn run_worker(
                 pipeline.flush_retries(None);
                 drain_historical(&mut pipeline, &mut historical, None);
                 historical_since = None;
-
+                #[cfg(feature = "session-replay")]
+                pipeline.service_replay(true, None);
                 completion.signal();
             }
             Wake::Msg(Control::Shutdown {
@@ -1464,7 +1564,8 @@ fn run_worker(
                 pipeline.flush_retries(Some(deadline));
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
-
+                #[cfg(feature = "session-replay")]
+                pipeline.service_replay(true, Some(deadline));
                 completion.signal();
                 // A flush/shutdown that raced in behind this Shutdown is still queued;
                 // signal those completions so their callers don't block forever.
@@ -1487,7 +1588,8 @@ fn run_worker(
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
                 pipeline.flush_retries(Some(deadline));
-
+                #[cfg(feature = "session-replay")]
+                pipeline.service_replay(true, Some(deadline));
                 return;
             }
         }
@@ -1507,7 +1609,8 @@ fn run_worker(
             historical_since = None;
         }
         pipeline.attempt_due();
-
+        #[cfg(feature = "session-replay")]
+        pipeline.service_replay(false, None);
         #[cfg(test)]
         if let Some(completion) = tick_completion {
             completion.signal();
@@ -1532,6 +1635,8 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             Control::RequestBarrier(_) => {}
             #[cfg(feature = "stateful")]
             Control::RemoteConfig(_) => {}
+            #[cfg(feature = "session-replay")]
+            Control::ReplayFrame(_) | Control::ReplayFailure(_) | Control::ReplayClosing(_) => {}
             Control::Flush(c)
             | Control::FlushCaptures(c)
             | Control::Shutdown { completion: c, .. } => c.signal(),
@@ -1656,6 +1761,8 @@ struct Pipeline {
     clock: Arc<dyn Clock>,
     len: Arc<AtomicUsize>,
     retries: VecDeque<RetryBatch>,
+    #[cfg(feature = "session-replay")]
+    replay: replay::Queue,
     #[cfg(feature = "stateful")]
     persistent_retention: bool,
     #[cfg(feature = "stateful")]
@@ -1679,6 +1786,8 @@ impl Pipeline {
             clock,
             len,
             retries: VecDeque::new(),
+            #[cfg(feature = "session-replay")]
+            replay: replay::Queue::default(),
             #[cfg(feature = "stateful")]
             persistent_retention: false,
             #[cfg(feature = "stateful")]
