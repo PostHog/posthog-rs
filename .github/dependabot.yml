@@ -2,7 +2,6 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
-    # Dependabot allows only auto or lockfile-only for cargo; auto keeps in-range bumps lockfile-only.
     versioning-strategy: "auto"
     schedule:
       interval: "weekly"
