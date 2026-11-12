@@ -58,10 +58,10 @@ static KNOWN_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
         r"NR(?:AK|JS|II|MA|RA)-[A-Za-z0-9]{27}",
         r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}",
     ];
-    // A format starts a word or follows a non-alphanumeric character or a JSON
-    // escape, so the `sk-` in `task-create-recurring-reminder` is not a key
-    // but the one after `\n` in JSON text is.
-    let start = r"(?:^|[^A-Za-z0-9]|\\[bfnrt]|\\u[0-9A-Fa-f]{4})";
+    // A format starts a word or follows a non-alphanumeric character, a JSON
+    // escape, or a percent escape, so the `sk-` in `task-create-recurring-reminder`
+    // is not a key but the one after `\n` in JSON text or `%3D` in a URL is.
+    let start = r"(?:^|[^A-Za-z0-9]|\\[bfnrt]|\\u[0-9A-Fa-f]{4}|%(?:25)*[0-9A-Fa-f]{2})";
     let pattern = format!("{start}(?:{})", formats.join("|"));
     Regex::new(&pattern).expect("known secret pattern")
 });
@@ -236,6 +236,19 @@ mod tests {
                 "risk-assessment-quarterly-report",
             ),
             ("key=sk-abcdefghijklmnopqrstuvwx", "[redacted]"),
+            (
+                "https://x.test/cb?state=a%3Dghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                "[redacted]",
+            ),
+            ("/charges%2Fsk_live_abcdefghijklmnop1234", "[redacted]"),
+            (
+                "q=token%253Dghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                "[redacted]",
+            ),
+            (
+                "/tools%2Ftask-create-recurring-reminder",
+                "/tools%2Ftask-create-recurring-reminder",
+            ),
             (
                 r#"{"message":"failed\nghp_abcdefghijklmnopqrstuvwxyz0123456789"}"#,
                 "[redacted]",
