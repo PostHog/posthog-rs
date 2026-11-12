@@ -1332,7 +1332,12 @@ pub fn option(self, key: impl Into<String>, value: impl Serialize) -> Result<Sel
 ```
 
 Sets a capture option on every event in this context. An option the event sets wins,
-and a `null` value sets nothing.
+and a `null` value sets nothing. A `process_person_profile` option does not set
+`process_person_profile` on an identify-style event, such as `$identify` or
+`$create_alias`, whose distinct ID the SDK did not generate; see
+[`RequestContext::apply_to_event`].
+
+[`RequestContext::apply_to_event`]: #requestcontextapply_to_event
 
 #### `RequestContext::get_distinct_id`
 

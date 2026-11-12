@@ -195,13 +195,14 @@ The blocking client has no scoped context, and `RequestContext::current()` retur
 
 ### Identify-style events
 
-`$identify`, `$create_alias`, `$merge_dangerously`, `$groupidentify`, `$set` and `$set_once` events default to `process_person_profile: true`. These events merge persons or update person or group properties, which PostHog skips when person processing is off. It drops `$create_alias` and `$groupidentify` events that have person processing off and records an `invalid_event_when_process_person_profile_is_false` ingestion warning in your project. Capture accepts these events before the drop, so `on_error` does not see it. The SDK therefore keeps the request context from turning person processing off for them. This covers `alias`, `group_identify`, and any event with one of these names that you build and capture yourself.
+`$identify`, `$create_alias`, `$merge_dangerously`, `$groupidentify`, `$set` and `$set_once` events default to `process_person_profile: true`. These events merge persons or update person or group properties, which PostHog skips when person processing is off. It drops `$create_alias` and `$groupidentify` events that have person processing off and records an `invalid_event_when_process_person_profile_is_false` ingestion warning in your project. Capture accepts these events before the drop, so `on_error` does not see it. The SDK therefore keeps the request context from turning person processing off for them, except on an event whose distinct ID the SDK generated. This covers `alias`, `group_identify`, and any event with one of these names that you build and capture yourself.
 
 - The event's own value wins over every layer. An event that sets the `process_person_profile` option keeps it. An event that sets only the legacy `$process_person_profile` property sends that value as the option. A `null` value counts as unset.
-- Otherwise the SDK sets the option to `true` before it applies the request context, so a context option or property of `false` does not reach these events.
+- Otherwise, when the SDK did not generate the event's distinct ID, the SDK sets the option to `true` before it applies the request context, so a context option or property of `false` does not reach the event.
 - An event whose distinct ID the SDK generated gets no default and stays personless. That is an event from `Event::new_anon`, from `Event::new` with a blank ID, or from `RequestContext::event` without a context distinct ID. A `$process_person_profile` property you set on such an event wins over the personless `false`.
-- `before_send` sees the resolved value and can change it, and the SDK sends what the hook returns.
+- `before_send` sees the resolved value as the option, without a `$process_person_profile` property next to it. The hook can change the option, and the SDK sends what the hook returns. A hook that removes the option sends the event without one.
 - The SDK checks the event name when you capture the event. A `before_send` hook that builds an event with one of these names, or renames an event to one, must set the option itself.
+- When you apply a request context yourself with `RequestContext::event` or `RequestContext::apply_to_event`, set the `process_person_profile` option on an identify-style event afterwards, not the legacy `$process_person_profile` property. The SDK ignores a legacy property set after that, because the default option already won.
 
 To set options on the events that `alias` and `group_identify` send, build them with `Event::alias` and `Event::group_identify`, then capture them:
 
