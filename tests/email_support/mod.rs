@@ -175,10 +175,12 @@ struct Project {
 
 /// A fake of PostHog's code send that keeps a project's categories and
 /// templates. A category object creates the category when its key is new and
-/// leaves an existing one as it is. A `template_key`
-/// that names one of the project's templates follows that template's category
-/// when the send leaves `category` out; any other category, `"transactional"`
-/// included, is refused with `category_mismatch`.
+/// leaves an existing one as it is. A `template_key` that names a template in
+/// a marketing category is refused with `marketing_template`. One that names
+/// another of the project's templates follows that template's category when
+/// the send leaves `category` out. A category other than the template's, or
+/// `"transactional"` for a template in a category, is refused with
+/// `category_mismatch`.
 pub struct SendApi {
     pub url: String,
     project: Arc<Mutex<Project>>,
@@ -300,6 +302,12 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
     let category = fields.get("category").unwrap_or(&serde_json::Value::Null);
     let defined = defined_category(category)?;
     if let Some(template_category) = project.templates.get(template_key).cloned() {
+        if template_category
+            .as_ref()
+            .is_some_and(|key| project.categories[key].category_type == "marketing")
+        {
+            return Err((400, "marketing_template"));
+        }
         let follows = match (&template_category, category, &defined) {
             (_, serde_json::Value::Null, _) => true,
             (None, serde_json::Value::String(_), _) => true,

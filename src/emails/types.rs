@@ -12,10 +12,9 @@ pub(crate) struct SendOptions {
 /// One email from an email template made transactional in PostHog, sent by
 /// the template's ID.
 ///
-/// The template sets its own sender, subject and content. PostHog refuses a
-/// send of a template in a marketing category with `unsubscribe_link_required`
-/// when the template has no `{{ unsubscribe_url }}` placeholder, and
-/// `copies_not_allowed` when it has cc or bcc.
+/// The template sets its own sender, subject and content. A template made in
+/// PostHog sends transactional email only: PostHog refuses a send of a
+/// template in a marketing category with `marketing_template`.
 ///
 /// ```
 /// use posthog_rs::TemplateEmail;
@@ -79,7 +78,9 @@ impl TemplateEmail {
 ///
 /// It needs [`html`](Self::html), [`text`](Self::text) or both. Without
 /// `text`, PostHog derives it from the `html`. To send a React email, render
-/// it to HTML in your app and pass the HTML.
+/// it to HTML in your app and pass the HTML. PostHog refuses a send whose
+/// `template_key` names a template in a marketing category with
+/// `marketing_template`.
 ///
 /// ```
 /// use posthog_rs::CodeEmail;
@@ -165,8 +166,8 @@ impl CodeEmail {
 
     /// The email's message category: [`EmailCategory::Transactional`], or a
     /// [`MessageCategory`] that the send defines. Without it, the send follows
-    /// the category of the template that `template_key` names, or is
-    /// transactional with no category.
+    /// the transactional category of the template that `template_key` names,
+    /// or is transactional with no category.
     ///
     /// [`EmailCategory::Transactional`] asks for transactional email with no
     /// category. PostHog refuses the send with:

@@ -147,10 +147,12 @@ without `html`) needs the `{{ unsubscribe_url }}` placeholder, which PostHog
 fills with the recipient's preferences link.
 
 Leave `category` out for transactional email with no category, or for the
-category of the template that `template_key` names.
+transactional category of the template that `template_key` names.
 `EmailCategory::Transactional` asks for transactional email with no category,
 so PostHog refuses it with `category_mismatch` when `template_key` names a
-template in a category.
+template in a category. A template made in PostHog sends transactional email
+only: PostHog refuses a `TemplateEmail` of a template in a marketing category,
+or a `CodeEmail` whose `template_key` names one, with `marketing_template`.
 
 ## Contributing
 
