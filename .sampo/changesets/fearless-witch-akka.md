@@ -2,4 +2,4 @@
 cargo/posthog: minor
 ---
 
-Add stateful identity, person profiles, identified bootstrap and reset, with persistent identity transitions and admission-aware property deduplication.
+Add user identification, person profile updates, and identity reset to stateful clients.
