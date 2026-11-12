@@ -46,7 +46,7 @@ fn limits() -> StoreLimits {
 
 fn record(snapshot: &Snapshot) -> Vec<u8> {
     serde_json::to_vec(&StateRecord {
-        version: 2,
+        version: 1,
         state: snapshot,
     })
     .unwrap()

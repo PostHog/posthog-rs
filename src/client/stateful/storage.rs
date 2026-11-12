@@ -143,7 +143,7 @@ struct StateRecord<T> {
 
 pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     crate::client::capture::json_len(&StateRecord {
-        version: 2,
+        version: 1,
         state: snapshot,
     })
 }
@@ -156,7 +156,7 @@ pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result
     serde_json::to_writer(
         &mut buffer,
         &StateRecord {
-            version: 2,
+            version: 1,
             state: snapshot,
         },
     )
@@ -291,7 +291,7 @@ impl FileStateStore {
             .get("version")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| RestoreFailure::Corrupt(invalid_state()))?;
-        if version != 1 && version != 2 {
+        if version != 1 {
             return Err(RestoreFailure::Unavailable(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Unsupported state store version",
@@ -304,11 +304,6 @@ impl FileStateStore {
             .state
             .as_object_mut()
             .ok_or_else(|| RestoreFailure::Corrupt(invalid_state()))?;
-        if version == 1 {
-            state.insert("identified".into(), false.into());
-            state.insert("person_processing".into(), false.into());
-            rewrite_required = true;
-        }
         if !state.contains_key("device_id") {
             let anonymous = state
                 .get("anonymous_id")
@@ -329,11 +324,20 @@ impl FileStateStore {
     }
 
     fn decode(encoded: &[u8]) -> io::Result<Snapshot> {
-        Self::decode_restored(encoded)
-            .map(|decoded| decoded.snapshot)
-            .map_err(|error| match error {
-                RestoreFailure::Corrupt(error) | RestoreFailure::Unavailable(error) => error,
-            })
+        let record: StateRecord<serde_json::Value> =
+            serde_json::from_slice(encoded).map_err(|_| invalid_state())?;
+        if record.version != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unsupported state store version",
+            ));
+        }
+        let snapshot: Snapshot =
+            serde_json::from_value(record.state).map_err(|_| invalid_state())?;
+        if !snapshot.is_valid() {
+            return Err(invalid_state());
+        }
+        Ok(snapshot)
     }
 
     /// Only the state writer calls this. A completed replacement is not a
