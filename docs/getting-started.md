@@ -35,8 +35,6 @@ async fn main() -> Result<(), posthog::Error> {
 
 `capture` queues the event and returns at once. Call `shutdown` before the process exits.
 
-In a web server, put the call after the server future resolves, such as after `run().await` in an actix or axum `main`.
-
 ## Read SDK logs
 
 The SDK logs through [`tracing`](https://docs.rs/tracing) under the `posthog` target. Add a subscriber to your application to see the logs.
