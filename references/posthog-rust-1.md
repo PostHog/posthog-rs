@@ -107,6 +107,28 @@ async fn main() -> Result<(), posthog::Error> {
 
 `capture` queues the event and returns at once. Call `shutdown` before the process exits.
 
+### Read SDK logs
+
+The SDK logs through [`tracing`](https://docs.rs/tracing) under the `posthog` target. Add a subscriber to your application to see the logs.
+
+This example needs the `env-filter` feature of `tracing-subscriber`. Add `tracing-subscriber = { version = "0.3", features = ["env-filter"] }` to your dependencies.
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+```
+
+Set `RUST_LOG` to choose the level.
+
+```bash
+RUST_LOG=posthog=debug cargo run
+```
+
+Use `posthog=warn` for warnings and errors only. Use `posthog=trace` for detailed local evaluation and cache logs.
+
 ## Setup
 
 ### `posthog::client`
@@ -796,6 +818,10 @@ requests already in flight, retries included, get until
 `shutdown_timeout_ms` from the start of shutdown to finish. When called
 from a transport callback, queues shutdown without waiting for email
 requests or joining the current worker thread.
+
+In a web server, call this after the server future resolves, such as
+after `HttpServer::run().await` (actix) or `axum::serve(..).await`
+(axum) returns.
 
 [Self::emails]: #selfemails
 
