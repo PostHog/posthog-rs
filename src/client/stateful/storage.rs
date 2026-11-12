@@ -281,7 +281,7 @@ impl FileStateStore {
             return Err(RestoreFailure::Unavailable(invalid_state()));
         }
         let decoded = Self::decode_restored(&encoded)?;
-        // Mandatory identity, device, and consent state still obey the current write bound.
+        // Mandatory targeting and device state still obey the current write bound.
         if snapshot_capacity(&decoded.snapshot) as u64 > self.max_bytes {
             return Err(RestoreFailure::Corrupt(invalid_state()));
         }
