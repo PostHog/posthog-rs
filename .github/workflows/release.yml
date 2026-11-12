@@ -53,6 +53,26 @@ jobs:
       slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
       posthog_project_api_key: ${{ secrets.POSTHOG_PROJECT_API_KEY }}
 
+  preserve-slack-thread:
+    name: Preserve Slack thread
+    needs: notify-approval-needed
+    if: needs.notify-approval-needed.outputs.slack_ts != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Save approval thread timestamp
+        env:
+          THREAD_TS: ${{ needs.notify-approval-needed.outputs.slack_ts }}
+        run: printf '%s' "$THREAD_TS" > thread-ts.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-slack-thread-${{ github.run_attempt }}
+          path: thread-ts.txt
+          retention-days: 30
+          if-no-files-found: error
+
   release:
     name: Release and publish
     needs: [check-changesets, notify-approval-needed]
@@ -114,10 +134,25 @@ jobs:
           new_version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
+      - name: Generate SDK reference
+        id: reference
+        # Best-effort: a failure never blocks the release. Run generate-references.yml to retry.
+        continue-on-error: true
+        run: |
+          rustup toolchain install nightly-2026-06-12 --profile minimal
+          git clone --depth 1 https://github.com/PostHog/sdk-specs "$RUNNER_TEMP/sdk-specs"
+          python3 scripts/generate_markdown.py --sdk-specs "$RUNNER_TEMP/sdk-specs"
+          # Stage the pages, so a new page shows in git status as a file, not as an untracked folder.
+          git add references
+
+      - name: Warn if the SDK reference didn't regenerate
+        if: steps.reference.outcome == 'failure'
+        run: echo "::warning::The SDK reference didn't regenerate. Run generate-references.yml to retry."
+
       - name: Check for changes
         id: check-changes
         run: |
-          if git diff --quiet; then
+          if git diff --quiet HEAD; then
             echo "No changes to commit"
             echo "committed=false" >> "$GITHUB_OUTPUT"
           else
@@ -136,12 +171,12 @@ jobs:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
 
       # ghcommit-action commits via the GitHub API, so the local working
-      # tree still has dirty files. Discard them (already committed remotely)
+      # tree still has dirty and staged files. Discard them (already committed remotely)
       # and pull, otherwise cargo publish fails with "files contain changes
       # not yet committed".
       - name: Sync local repository
         if: steps.check-changes.outputs.committed == 'true'
-        run: git checkout -- . && git pull origin main
+        run: git reset --hard && git pull origin main
 
       - name: Publish dry-run
         if: steps.check-changes.outputs.committed == 'true'
@@ -212,16 +247,6 @@ jobs:
               "alertText": ":rotating_light: Failed to release posthog-rs@${{ steps.sampo-release.outputs.new_version }} :rotating_light:",
               "alertContext": "The release workflow failed before completion."
             }
-
-      - name: Notify Slack - Failed
-        if: ${{ failure() && needs.notify-approval-needed.outputs.slack_ts != '' }}
-        uses: posthog/.github/.github/actions/slack-thread-reply@cb0979b67dcd585828b61ac45927eef4da8f6287 # main
-        with:
-          slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
-          slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
-          thread_ts: ${{ needs.notify-approval-needed.outputs.slack_ts }}
-          message: "❌ Failed to release `posthog-rs@${{ steps.sampo-release.outputs.new_version }}`! <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>"
-          emoji_reaction: "x"
 
   notify-released:
     name: Notify Slack - Released
