@@ -190,7 +190,7 @@ fn persisted_explicit_choice_wins_over_opposite_startup_default() {
             PersistenceOutcome::Persisted
         );
         drop(client);
-        assert_eq!(directory.state()["version"], 7);
+        assert_eq!(directory.state()["version"], 1);
         assert_eq!(directory.state()["state"]["opt_out"], choice);
         let mut conf = directory.config();
         conf.opt_out = !choice;
@@ -318,62 +318,30 @@ fn permitted_hook_can_finish_after_opt_out_and_nested_capture_checks_new_consent
 }
 
 #[test]
-fn legacy_records_use_startup_default_without_eager_rewrite() {
-    for version in [1, 2] {
+fn invalid_or_oversized_state_preserves_bytes_and_uses_configured_default() {
+    for oversized in [false, true] {
         let directory = Directory::new();
         let client = Client::init_blocking(directory.config());
+        assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
         client.shutdown_blocking(None);
         drop(client);
-        let mut state = json!({"anonymous_id":"legacy", "distinct_id":"legacy"});
-        if version == 2 {
-            state["identified"] = json!(true);
-            state["person_processing"] = json!(true);
-        }
-        let bytes = serde_json::to_vec(&json!({"version": version, "state": state})).unwrap();
-        std::fs::write(directory.state_path(), &bytes).unwrap();
-        let mut conf = directory.config();
-        conf.opt_out = true;
-        let client = Client::init_blocking(conf);
-        assert_eq!(client.get_distinct_id(), "legacy");
-        assert_eq!(client.is_identified(), version == 2);
-        assert!(client.is_opt_out());
-        assert_eq!(client.capture("early"), CaptureOutcome::OptedOut);
-        assert_eq!(std::fs::read(directory.state_path()).unwrap(), bytes);
-        client.opt_in();
-        assert_eq!(
-            client.shutdown_blocking(None).state,
-            PersistenceOutcome::Persisted
-        );
-        drop(client);
-        assert_eq!(directory.state()["version"], 7);
-        assert_eq!(directory.state()["state"]["opt_out"], false);
-    }
-}
-
-#[test]
-fn unreadable_or_expanded_legacy_state_preserves_bytes_and_uses_safe_configured_default() {
-    for legacy in [false, true] {
-        let directory = Directory::new();
-        let client = Client::init_blocking(directory.config());
-        client.shutdown_blocking(None);
-        drop(client);
-        let bytes = if legacy {
-            serde_json::to_vec(&json!({"version":2, "state":{
-                "anonymous_id":"a".repeat(200), "distinct_id":"b".repeat(200),
-                "identified":true, "person_processing":true
-            }}))
-            .unwrap()
+        let mut state = directory.state();
+        if oversized {
+            state["state"]["anonymous_id"] = json!("a".repeat(200));
+            state["state"]["distinct_id"] = json!("b".repeat(200));
+            state["state"]["identified"] = json!(true);
+            state["state"]["person_processing"] = json!(true);
         } else {
-            // A version-3 record missing consent must not silently opt in.
-            br#"{"version":3,"state":{"anonymous_id":"old","distinct_id":"old","identified":false,"person_processing":false}}"#.to_vec()
-        };
+            state["state"].as_object_mut().unwrap().remove("opt_out");
+        }
+        let bytes = serde_json::to_vec(&state).unwrap();
         std::fs::write(directory.state_path(), &bytes).unwrap();
         let errors = Arc::new(Mutex::new(0));
         let seen_errors = errors.clone();
         let mut conf = directory.config();
         conf.opt_out = true;
-        if legacy {
-            conf.max_state_bytes = bytes.len();
+        if oversized {
+            conf.max_state_bytes = bytes.len() - 1;
         }
         conf.on_error(move |error| {
             if matches!(error, posthog::PostHogError::Storage(_)) {

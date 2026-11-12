@@ -141,7 +141,7 @@ struct StateRecord<T> {
 
 pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     crate::client::capture::json_len(&StateRecord {
-        version: 7,
+        version: 1,
         state: snapshot,
     })
 }
@@ -210,7 +210,7 @@ fn encode_record(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
     serde_json::to_writer(
         &mut buffer,
         &StateRecord {
-            version: 7,
+            version: 1,
             state: snapshot,
         },
     )
@@ -294,7 +294,7 @@ impl FileStateStore {
             return Err(invalid_state());
         }
         let snapshot = Self::decode(&encoded)?;
-        // A migrated record must also fit the current in-memory/write bound.
+        // Restored state must also fit the current in-memory/write bound.
         if snapshot_capacity(&snapshot) as u64 > self.max_bytes {
             return Err(invalid_state());
         }
@@ -304,102 +304,14 @@ impl FileStateStore {
     fn decode(encoded: &[u8]) -> io::Result<Snapshot> {
         let record: StateRecord<serde_json::Value> =
             serde_json::from_slice(encoded).map_err(|_| invalid_state())?;
-        let snapshot: Snapshot = match record.version {
-            1 => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct AnonymousState {
-                    anonymous_id: String,
-                    distinct_id: String,
-                }
-                let old: AnonymousState =
-                    serde_json::from_value(record.state).map_err(|_| invalid_state())?;
-                let mut snapshot = Snapshot::anonymous(old.anonymous_id);
-                snapshot.distinct_id = old.distinct_id;
-                snapshot
-            }
-            2 => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct PersonState {
-                    anonymous_id: String,
-                    distinct_id: String,
-                    identified: bool,
-                    person_processing: bool,
-                }
-                let old: PersonState =
-                    serde_json::from_value(record.state).map_err(|_| invalid_state())?;
-                let mut snapshot = Snapshot::anonymous(old.anonymous_id);
-                snapshot.distinct_id = old.distinct_id;
-                snapshot.identified = old.identified;
-                snapshot.person_processing = old.person_processing;
-                snapshot
-            }
-            3 => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct ConsentState {
-                    anonymous_id: String,
-                    distinct_id: String,
-                    identified: bool,
-                    person_processing: bool,
-                    #[serde(deserialize_with = "Option::<bool>::deserialize")]
-                    opt_out: Option<bool>,
-                }
-                let old: ConsentState =
-                    serde_json::from_value(record.state).map_err(|_| invalid_state())?;
-                let mut snapshot = Snapshot::anonymous(old.anonymous_id);
-                snapshot.distinct_id = old.distinct_id;
-                snapshot.identified = old.identified;
-                snapshot.person_processing = old.person_processing;
-                snapshot.opt_out = old.opt_out;
-                snapshot
-            }
-            4 | 5 => {
-                let mut state = record
-                    .state
-                    .as_object()
-                    .cloned()
-                    .ok_or_else(invalid_state)?;
-                if state.contains_key("flags") || state.contains_key("remote_config") {
-                    return Err(invalid_state());
-                }
-                if record.version == 4 {
-                    if state.contains_key("session") {
-                        return Err(invalid_state());
-                    }
-                    state.insert("session".into(), serde_json::Value::Null);
-                }
-                state.insert("remote_config".into(), serde_json::Value::Null);
-                state.insert(
-                    "flags".into(),
-                    serde_json::to_value(super::flag_state::FlagState::default())
-                        .map_err(|_| invalid_state())?,
-                );
-                serde_json::from_value(serde_json::Value::Object(state))
-                    .map_err(|_| invalid_state())?
-            }
-            6 => {
-                let mut state = record
-                    .state
-                    .as_object()
-                    .cloned()
-                    .ok_or_else(invalid_state)?;
-                if state.contains_key("remote_config") {
-                    return Err(invalid_state());
-                }
-                state.insert("remote_config".into(), serde_json::Value::Null);
-                serde_json::from_value(serde_json::Value::Object(state))
-                    .map_err(|_| invalid_state())?
-            }
-            7 => serde_json::from_value(record.state).map_err(|_| invalid_state())?,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Unsupported state store version",
-                ))
-            }
-        };
+        if record.version != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unsupported state store version",
+            ));
+        }
+        let snapshot: Snapshot =
+            serde_json::from_value(record.state).map_err(|_| invalid_state())?;
         if !snapshot.is_valid() {
             return Err(invalid_state());
         }
