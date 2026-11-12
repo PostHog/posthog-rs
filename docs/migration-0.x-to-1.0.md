@@ -65,8 +65,12 @@ Read the checklist first, then the sections that apply to you.
 
 | Events | Endpoint |
 | --- | --- |
-| Every event except those from the `capture_ai` methods, including error tracking, `$feature_flag_called` events, historical migration, `before_send`, and terminal failures reported through `on_error` | `/i/v1/analytics/events` |
-| `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog::capture_ai` | `/i/v1/ai/events` |
+| Every event except those from the `capture_ai` methods | `/i/v1/analytics/events` |
+| Events from the `capture_ai` methods | `/i/v1/ai/events` |
+
+The analytics endpoint includes error tracking, `$feature_flag_called` events, historical migration, `before_send`, and terminal failures reported through `on_error`.
+
+The `capture_ai` methods are `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog::capture_ai`.
 
 If you send events through your own reverse proxy, update it before you upgrade:
 
@@ -137,13 +141,15 @@ The `posthog-rs` package takes the same features in 1.x.x (see [Rename the crate
 | Removed | Use instead |
 | --- | --- |
 | The V0 capture implementation, with its `/i/v0/e/` and batch plumbing | Nothing |
-| `Endpoint::Batch` | Nothing. `Endpoint::Capture` now resolves to `/i/v1/analytics/events`. |
+| `Endpoint::Batch` | Nothing |
 | `V1ErrorResponse` | `CaptureErrorResponse` |
-| `is_feature_enabled`, `get_feature_flag`, `get_feature_flag_payload`, `get_feature_flags` | `evaluate_flags` (see [Replace flag methods](#replace-flag-methods)) |
+| `is_feature_enabled`, `get_feature_flag`, `get_feature_flag_payload`, `get_feature_flags` | `evaluate_flags` |
 | The builder's `personal_api_key` alias | `secret_key` |
 | `LocalEvaluationConfig::personal_api_key` | `LocalEvaluationConfig::secret_key` |
 
-The single-flag methods and the builder's `personal_api_key` alias were already deprecated in 0.x.x.
+`Endpoint::Capture` now resolves to `/i/v1/analytics/events`.
+
+For `evaluate_flags`, see [Replace flag methods](#replace-flag-methods). The single-flag methods and the builder's `personal_api_key` alias were already deprecated in 0.x.x.
 
 Rename `V1ErrorResponse` to `CaptureErrorResponse`:
 
@@ -159,11 +165,17 @@ These types are now non-exhaustive:
 
 | Type | What to change |
 | --- | --- |
-| `Endpoint` | It has a new `CaptureAi` variant, so a `match` on it needs a wildcard arm. |
-| `CaptureResponse`, `EventResult` | You can't build them with a struct literal. |
-| `EvaluateFlagsOptions` | Construct it with `Default` (see [Replace flag methods](#replace-flag-methods)). |
-| `FeatureFlagsResponse` | A `match` on this enum needs a wildcard arm. |
-| `FlagDetail`, `FlagMetadata`, `FlagReason`, `LocalEvaluationResponse` | The structs no longer accept struct literals. Build a `LocalEvaluationResponse` with `LocalEvaluationResponse::new` and assign its public fields. |
+| `Endpoint` | Add a wildcard arm |
+| `CaptureResponse`, `EventResult` | Remove struct literals |
+| `EvaluateFlagsOptions` | Construct with `Default` |
+| `FeatureFlagsResponse` | Add a wildcard arm |
+| `FlagDetail`, `FlagMetadata`, `FlagReason`, `LocalEvaluationResponse` | Remove struct literals |
+
+`Endpoint` has a new `CaptureAi` variant, so a `match` on it needs a wildcard arm. A `match` on the `FeatureFlagsResponse` enum needs a wildcard arm.
+
+You can't build `CaptureResponse` or `EventResult` with a struct literal. Construct `EvaluateFlagsOptions` with `Default` (see [Replace flag methods](#replace-flag-methods)).
+
+The `FlagDetail`, `FlagMetadata`, `FlagReason`, and `LocalEvaluationResponse` structs no longer accept struct literals. Build a `LocalEvaluationResponse` with `LocalEvaluationResponse::new` and assign its public fields.
 
 Use `secret_key` terminology throughout configuration:
 
@@ -244,8 +256,10 @@ The AI lane has its own options:
 
 | Option | Default |
 | --- | --- |
-| `capture_ai_compression` | Unset, which sends AI bodies uncompressed. Set `CaptureCompression::Zstd`, the best fit for large JSON. |
+| `capture_ai_compression` | Unset |
 | `capture_ai_max_queue_size` | 1000 |
+
+An unset `capture_ai_compression` sends AI bodies uncompressed. Set `CaptureCompression::Zstd`, the best fit for large JSON.
 
 ### Check event IDs
 
@@ -363,9 +377,13 @@ A `$lib` counts as set only when it's a non-empty string, so a missing, `null`, 
 
 | The event has | The SDK sends |
 | --- | --- |
-| No `$lib` | `$lib` as `posthog-rs` and `$lib_version` as the crate version. A `$lib_version` set without `$lib` is replaced. |
+| No `$lib` | `$lib` as `posthog-rs` and `$lib_version` as the crate version |
 | A `$lib` of `posthog-rs` and no `$lib_version` | The crate version in `$lib_version` |
-| A `$lib` that names another library | Both properties as they are, even if `$lib_version` is missing. Set both when you name another library. |
+| A `$lib` that names another library | Both properties as they are |
+
+A `$lib_version` set without `$lib` is replaced.
+
+The SDK sends another library's `$lib` and `$lib_version` as they are, even if `$lib_version` is missing. Set both when you name another library.
 
 `before_send` sees the result and can change either property. The SDK doesn't fill them again after the hook.
 
@@ -454,8 +472,12 @@ The SDK retries transient request failures. From a partial response, it retries 
 | --- | --- | --- |
 | Capture attempts (`max_capture_attempts`) | 3 by default | 4 by default |
 | First retry wait (`retry_initial_backoff_ms`) | 200 ms | 100 ms |
-| Statuses retried | The V0 path retried a `429` only when it had a `Retry-After` header, and never retried a `404`. | Network errors and HTTP `404`, `408`, `429`, `500`, `502`, `503`, and `504`. Every other status is terminal. |
-| Remote `/flags` retries | Used the capture retry options, with a first wait of 200 ms by default | Wait 300 ms before the first retry and double up to 30 s. They no longer use the capture retry options. |
+| Statuses retried | `429` only with `Retry-After`, never `404` | Network errors and HTTP `404`, `408`, `429`, `500`, `502`, `503`, and `504` |
+| First remote `/flags` retry wait | 200 ms by default | 300 ms |
+
+In 0.x.x, the V0 path retried a `429` only when it had a `Retry-After` header, and never retried a `404`. In 1.x.x, every other status is terminal.
+
+In 0.x.x, remote `/flags` retries used the capture retry options, with a first wait of 200 ms by default. In 1.x.x, they wait 300 ms before the first retry and double up to 30 s. They no longer use the capture retry options.
 
 In 1.x.x each later wait doubles up to `retry_max_backoff_ms`, 30 s by default. Each capture retry wait varies at random by up to 25% either way, so clients that fail together don't retry together.
 
