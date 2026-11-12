@@ -193,7 +193,11 @@ fn encode_snapshot_with_outcome(
         return Ok((encoded, SaveOutcome::default()));
     }
     mandatory.remote_config = None;
-    let bytes = encode_record(&mandatory, max_bytes)?;
+    mandatory.flags.cache = snapshot.flags.cache.clone();
+    let bytes = encode_record(&mandatory, max_bytes).or_else(|_| {
+        mandatory.flags.cache = None;
+        encode_record(&mandatory, max_bytes)
+    })?;
     Ok((
         bytes,
         SaveOutcome {
