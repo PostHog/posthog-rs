@@ -536,27 +536,24 @@ fn matching_bootstrap_upgrades_without_an_event_and_never_gates_reconciliation()
 }
 
 #[test]
-fn version_one_state_migrates_on_mutation_and_future_state_is_preserved() {
+fn current_state_restores_and_future_state_is_preserved() {
     let directory = Directory::new();
     let client = Client::init_blocking(directory.config());
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
     client.shutdown_blocking(None);
     drop(client);
     let path = directory.state_path();
-    std::fs::write(
-        &path,
-        br#"{"version":1,"state":{"anonymous_id":"legacy","distinct_id":"legacy"}}"#,
-    )
-    .unwrap();
     let client = Client::init_blocking(directory.config());
-    assert_eq!(client.get_distinct_id(), "legacy");
+    assert_eq!(client.get_distinct_id(), "anonymous");
     assert!(!client.is_identified());
     client.identify("A");
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
     client.shutdown_blocking(None);
     drop(client);
     let state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(state["version"], 7);
+    assert_eq!(state["version"], 1);
     assert_eq!(state["state"]["identified"], true);
-    assert_eq!(state["state"]["anonymous_id"], "legacy");
+    assert_eq!(state["state"]["anonymous_id"], "anonymous");
     assert!(state["state"].get("person_properties").is_none());
     let bytes = br#"{"version":99,"state":{}}"#;
     std::fs::write(&path, bytes).unwrap();
