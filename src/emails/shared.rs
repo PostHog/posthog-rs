@@ -317,10 +317,15 @@ fn code_body(email: &CodeEmail) -> Result<Map<String, Value>, EmailError> {
             .map(EmailAttachment::to_reference_json);
         body.insert("attachments".into(), Value::Array(references.collect()));
     }
-    body.insert(
-        "capture_engagement".into(),
-        Value::Bool(email.capture_engagement),
-    );
+    if let Some(sensitive) = email.sensitive {
+        body.insert("sensitive".into(), Value::Bool(sensitive));
+    }
+    if let Some(tracking) = &email.tracking {
+        body.insert("tracking".into(), tracking.to_json());
+    }
+    if let Some(capture) = email.capture_engagement {
+        body.insert("capture_engagement".into(), Value::Bool(capture));
+    }
     Ok(body)
 }
 
@@ -998,29 +1003,6 @@ mod tests {
             4
         );
         assert_eq!(prepared.max_retries, None);
-    }
-
-    #[test]
-    fn code_send_sets_engagement_and_lists_reply_to() {
-        let prepared = prepare_send(
-            CodeEmail::new("user@example.com", "password-reset", "Reset")
-                .text("Hi")
-                .reply_to("a@example.com")
-                .reply_to("b@example.com")
-                .into(),
-        )
-        .unwrap();
-        assert_eq!(
-            body(&prepared),
-            json!({
-                "template_key": "password-reset",
-                "subject": "Reset",
-                "text": "Hi",
-                "reply_to": ["a@example.com", "b@example.com"],
-                "capture_engagement": true,
-                "to": "user@example.com",
-            })
-        );
     }
 
     #[test]

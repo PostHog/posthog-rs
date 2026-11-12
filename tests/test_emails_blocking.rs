@@ -76,7 +76,6 @@ fn code_send_posts_the_rendered_content() {
             "subject": "Reset your password",
             "html": "<p>Reset</p>",
             "from": "Acme <security@example.com>",
-            "capture_engagement": true,
             "to": "user@example.com",
         })
     );
@@ -114,7 +113,6 @@ fn code_send_uploads_the_file_then_sends_its_hash() {
             "cc": ["finance@example.com"],
             "bcc": ["audit@example.com"],
             "attachments": [{"sha256": PDF_SHA256, "filename": "invoice.pdf"}],
-            "capture_engagement": true,
             "to": "user@example.com",
         })]
     );

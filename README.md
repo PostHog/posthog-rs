@@ -128,6 +128,13 @@ pass an `idempotency_key` that names the email when your own job runner
 retries too, and set `max_retries(0)` on the send. A failed send returns an
 `EmailError`: branch on `code()`, such as `quota_limited`, or on `kind()`.
 
+A code send is sensitive, unless a saved template with the same key isn't.
+PostHog keeps a sensitive email's links unchanged, leaves its subject off
+engagement events and keeps its content out of logs. Call
+`.sensitive(false)` on an email with no login link, reset token or code, and
+PostHog counts its clicks too. `.tracking()` sets what PostHog tracks, whatever
+the email's sensitivity.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and test instructions.
