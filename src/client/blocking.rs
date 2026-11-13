@@ -280,7 +280,7 @@ impl Client {
     /// client.alias("anon-abc123", "user-42");
     /// ```
     pub fn alias<P: Into<String>, D: Into<String>>(&self, previous_id: P, distinct_id: D) {
-        if let Some(event) = Event::alias(previous_id.into(), distinct_id.into()) {
+        if let Some(event) = Event::alias(previous_id, distinct_id) {
             self.capture(event);
         }
     }
@@ -334,8 +334,7 @@ impl Client {
         group_key: K,
         properties: P,
     ) -> Result<(), Error> {
-        if let Some(event) = Event::group_identify(group_type.into(), group_key.into(), properties)?
-        {
+        if let Some(event) = Event::group_identify(group_type, group_key, properties)? {
             self.capture(event);
         }
         Ok(())

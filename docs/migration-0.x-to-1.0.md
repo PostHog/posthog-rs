@@ -202,7 +202,7 @@ The blocking client has no scoped context, and `RequestContext::current()` retur
 To set options on the events that `alias` and `group_identify` send, build them with `Event::alias` and `Event::group_identify`, then capture them:
 
 ```rust
-if let Some(mut event) = posthog::Event::alias("anon-abc123".into(), "user-42".into()) {
+if let Some(mut event) = posthog::Event::alias("anon-abc123", "user-42") {
     event.insert_option("disable_skew_correction", true)?;
     client.capture(event);
 }

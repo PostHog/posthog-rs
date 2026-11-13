@@ -3228,7 +3228,7 @@ The `Result` stays so existing callers keep compiling.
 #### `Event::alias`
 
 ```rust
-pub fn alias(previous_id: String, distinct_id: String) -> Option<Self>
+pub fn alias<P: Into<String>, D: Into<String>>(previous_id: P, distinct_id: D) -> Option<Self>
 ```
 
 Build the `$create_alias` event that [`crate::Client::alias`] sends, so you
@@ -3254,7 +3254,7 @@ the option, so a request context cannot turn person processing off for it.
 ##### Examples
 
 ```rust
-if let Some(mut event) = posthog::Event::alias("anon-abc123".into(), "user-42".into()) {
+if let Some(mut event) = posthog::Event::alias("anon-abc123", "user-42") {
     event.insert_option("disable_skew_correction", true)?;
     posthog.capture(event);
 }
@@ -3265,7 +3265,7 @@ if let Some(mut event) = posthog::Event::alias("anon-abc123".into(), "user-42".i
 #### `Event::group_identify`
 
 ```rust
-pub fn group_identify<P: Serialize>(group_type: String, group_key: String, properties: P) -> Result<Option<Self>, Error>
+pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(group_type: T, group_key: K, properties: P) -> Result<Option<Self>, Error>
 ```
 
 Build the `$groupidentify` event that [`crate::Client::group_identify`]
@@ -3300,7 +3300,7 @@ the option, so a request context cannot turn person processing off for it.
 ```rust
 let properties = serde_json::json!({ "name": "Awesome Inc." });
 if let Some(mut event) =
-    posthog::Event::group_identify("company".into(), "acme_123".into(), properties)?
+    posthog::Event::group_identify("company", "acme_123", properties)?
 {
     event.insert_option("disable_skew_correction", true)?;
     posthog.capture(event);

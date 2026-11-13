@@ -359,14 +359,15 @@ impl Event {
     ///
     /// ```no_run
     /// # fn send(posthog: &posthog::Client) -> Result<(), posthog::Error> {
-    /// if let Some(mut event) = posthog::Event::alias("anon-abc123".into(), "user-42".into()) {
+    /// if let Some(mut event) = posthog::Event::alias("anon-abc123", "user-42") {
     ///     event.insert_option("disable_skew_correction", true)?;
     ///     posthog.capture(event);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub fn alias(previous_id: String, distinct_id: String) -> Option<Self> {
+    pub fn alias<P: Into<String>, D: Into<String>>(previous_id: P, distinct_id: D) -> Option<Self> {
+        let (previous_id, distinct_id) = (previous_id.into(), distinct_id.into());
         if previous_id.trim().is_empty() || distinct_id.trim().is_empty() {
             warn!("alias() called with a blank id, dropping the $create_alias event");
             return None;
@@ -428,7 +429,7 @@ impl Event {
     /// # fn send(posthog: &posthog::Client) -> Result<(), posthog::Error> {
     /// let properties = serde_json::json!({ "name": "Awesome Inc." });
     /// if let Some(mut event) =
-    ///     posthog::Event::group_identify("company".into(), "acme_123".into(), properties)?
+    ///     posthog::Event::group_identify("company", "acme_123", properties)?
     /// {
     ///     event.insert_option("disable_skew_correction", true)?;
     ///     posthog.capture(event);
@@ -436,11 +437,12 @@ impl Event {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn group_identify<P: Serialize>(
-        group_type: String,
-        group_key: String,
+    pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(
+        group_type: T,
+        group_key: K,
         properties: P,
     ) -> Result<Option<Self>, Error> {
+        let (group_type, group_key) = (group_type.into(), group_key.into());
         if group_type.trim().is_empty() {
             warn!("group_identify() called with a blank group_type, dropping the $groupidentify event");
             return Ok(None);
@@ -833,13 +835,11 @@ mod test {
     fn group_identify_rejects_blank_keys() {
         for (group_type, group_key) in [("", "key"), ("   ", "key"), ("type", ""), ("type", "   ")]
         {
-            assert!(Event::group_identify(
-                group_type.to_string(),
-                group_key.to_string(),
-                serde_json::json!({}),
-            )
-            .unwrap()
-            .is_none());
+            assert!(
+                Event::group_identify(group_type, group_key, serde_json::json!({}))
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 
@@ -850,9 +850,8 @@ mod test {
             serde_json::json!(["a", "b"]),
             serde_json::Value::Null,
         ] {
-            let err =
-                Event::group_identify("company".to_string(), "acme_123".to_string(), properties)
-                    .expect_err("non-object properties should be rejected");
+            let err = Event::group_identify("company", "acme_123", properties)
+                .expect_err("non-object properties should be rejected");
             assert!(matches!(err, Error::Serialization(_)));
         }
     }

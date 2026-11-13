@@ -375,9 +375,9 @@ client_test!(event_alias_and_group_identify_take_a_call_option, {
     let server = MockServer::start();
     let events = record_wire_events(&server, ANALYTICS_PATH);
     let client = call!(posthog::client(options(&server).build().unwrap()));
-    let alias = || Event::alias("anon-1".into(), "user-1".into()).unwrap();
+    let alias = || Event::alias("anon-1", "user-1").unwrap();
     let group = || {
-        Event::group_identify("company".into(), "acme".into(), json!({"name": "Acme"}))
+        Event::group_identify("company", "acme", json!({"name": "Acme"}))
             .unwrap()
             .unwrap()
     };
