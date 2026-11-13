@@ -24,7 +24,6 @@ Read the checklist first, then the sections that apply to you.
 - [ ] A proxy redirects capture or `/flags` requests → [Prepare your proxy](#prepare-your-proxy)
 - [ ] You pass a personal API key (`phx_...`) as the project `api_key` → [Use a project token](#use-a-project-token)
 - [ ] Your build environment has no C compiler → [Check your C compiler](#check-your-c-compiler)
-- [ ] You run a self-hosted PostHog → [Prepare your proxy](#prepare-your-proxy)
 
 **During your upgrade**
 
@@ -86,8 +85,6 @@ If you send events through your own reverse proxy, update it before you upgrade:
 - **Pass the capture response through.** Return PostHog's status code and response body unchanged. A proxy that answers the capture path with its own `200` fails the batch.
 
 PostHog's managed reverse proxy already does this. See the [proxy guides](https://posthog.com/docs/advanced/proxy).
-
-A self-hosted PostHog must serve both `/i/v1/analytics/events` and `/i/v1/ai/events`. On self-hosted PostHog, a separate capture service serves the AI route.
 
 The capture and `/flags` HTTP clients the SDK builds follow a redirect only when it's a `307` or `308` to the same scheme, host, and port. They follow at most 5 redirects in a row.
 
@@ -494,8 +491,6 @@ The SDK retries transient request failures. From a partial response, it retries 
 | First remote `/flags` retry wait | 200 ms by default | 300 ms |
 
 In 0.x.x, the V0 path retried a `429` only when it had a `Retry-After` header, and never retried a `404`. In 1.x.x, every other status is terminal.
-
-A `404` that lasts through every attempt can mean the PostHog deployment has no capture v1 route, for example an older self-hosted install (see [Prepare your proxy](#prepare-your-proxy)).
 
 In 0.x.x, remote `/flags` retries used the capture retry options, with a first wait of 200 ms by default. In 1.x.x, they wait 300 ms before the first retry and double up to 30 s. They no longer use the capture retry options.
 
