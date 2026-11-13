@@ -84,6 +84,14 @@ impl CaptureEvent {
                 .unwrap_or(serde_json::Value::Object(Default::default())),
         }
     }
+
+    /// Convert a producer-prepared stateful event after enrichment and hooks.
+    /// Capture-time SDK properties stay with the event through storage/retry;
+    /// missing or hook-removed attribution is not filled again here.
+    #[cfg(feature = "stateful")]
+    pub(crate) fn from_stateful_event_at(event: &Event, now: DateTime<Utc>) -> Self {
+        Self::from_event_at(event, now)
+    }
 }
 
 /// Capture rejects the whole request when one of these fields is not a string,
@@ -202,6 +210,10 @@ pub struct CaptureErrorResponse {
     #[serde(default)]
     pub error_uri: Option<String>,
 }
+
+#[cfg(all(test, feature = "stateful"))]
+#[path = "capture_event_stateful_tests.rs"]
+mod stateful_tests;
 
 /// Wire-shape tests for the capture event builder.
 #[cfg(test)]

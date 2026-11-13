@@ -136,6 +136,100 @@ pub fn posthog::mcp::instrument<H: rmcp::handler::server::ServerHandler>(H, allo
 pub type posthog::mcp::EventOptionsCallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<serde_json::map::Map<alloc::string::String, serde_json::value::Value>> + core::marker::Send + core::marker::Sync)>
 pub type posthog::mcp::IdentifyCallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<posthog::mcp::Identity> + core::marker::Send + core::marker::Sync)>
 pub type posthog::mcp::IntentFallback = alloc::sync::Arc<(dyn core::ops::function::Fn(&posthog::mcp::RequestInfo<'_>) -> core::option::Option<alloc::string::String> + core::marker::Send + core::marker::Sync)>
+pub mod posthog::stateful
+#[non_exhaustive] pub enum posthog::stateful::CaptureOutcome
+pub posthog::stateful::CaptureOutcome::Accepted
+pub posthog::stateful::CaptureOutcome::Accepted::uuid: uuid::Uuid
+pub posthog::stateful::CaptureOutcome::Closed
+pub posthog::stateful::CaptureOutcome::Disabled
+pub posthog::stateful::CaptureOutcome::Dropped
+pub posthog::stateful::CaptureOutcome::Full
+pub posthog::stateful::CaptureOutcome::Invalid
+pub posthog::stateful::CaptureOutcome::Reentrant
+#[non_exhaustive] pub enum posthog::stateful::DeliveryOutcome
+pub posthog::stateful::DeliveryOutcome::Attempted
+pub posthog::stateful::DeliveryOutcome::Closed
+pub posthog::stateful::DeliveryOutcome::Deferred
+pub posthog::stateful::DeliveryOutcome::Disabled
+pub posthog::stateful::DeliveryOutcome::Stopped
+pub posthog::stateful::DeliveryOutcome::Unavailable
+#[non_exhaustive] pub enum posthog::stateful::Persistence
+pub posthog::stateful::Persistence::Automatic
+pub posthog::stateful::Persistence::Directory(std::path::PathBuf)
+pub posthog::stateful::Persistence::Memory
+#[non_exhaustive] pub enum posthog::stateful::PersistenceOutcome
+pub posthog::stateful::PersistenceOutcome::Deferred
+pub posthog::stateful::PersistenceOutcome::Disabled
+pub posthog::stateful::PersistenceOutcome::MemoryOnly
+pub posthog::stateful::PersistenceOutcome::NotRequested
+pub posthog::stateful::PersistenceOutcome::Persisted
+pub posthog::stateful::PersistenceOutcome::TimedOut
+pub posthog::stateful::PersistenceOutcome::Unavailable
+pub posthog::stateful::PersistenceOutcome::WriteFailed
+#[non_exhaustive] pub struct posthog::stateful::Capture
+pub posthog::stateful::Capture::event: alloc::string::String
+pub posthog::stateful::Capture::groups: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
+pub posthog::stateful::Capture::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub posthog::stateful::Capture::properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub posthog::stateful::Capture::timestamp: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub posthog::stateful::Capture::uuid: core::option::Option<uuid::Uuid>
+impl posthog::stateful::Capture
+pub fn posthog::stateful::Capture::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::convert::From<&str> for posthog::stateful::Capture
+pub fn posthog::stateful::Capture::from(&str) -> Self
+impl core::convert::From<alloc::string::String> for posthog::stateful::Capture
+pub fn posthog::stateful::Capture::from(alloc::string::String) -> Self
+pub struct posthog::stateful::Client
+impl posthog::stateful::Client
+pub fn posthog::stateful::Client::capture(&self, impl core::convert::Into<posthog::stateful::Capture>) -> posthog::stateful::CaptureOutcome
+pub fn posthog::stateful::Client::screen(&self, impl core::convert::Into<alloc::string::String>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>) -> posthog::stateful::CaptureOutcome
+impl posthog::stateful::Client
+pub async fn posthog::stateful::Client::flush(&self) -> posthog::stateful::DrainReport
+pub fn posthog::stateful::Client::flush_blocking(&self) -> posthog::stateful::DrainReport
+pub fn posthog::stateful::Client::get_anonymous_id(&self) -> alloc::string::String
+pub fn posthog::stateful::Client::get_distinct_id(&self) -> alloc::string::String
+pub async fn posthog::stateful::Client::init(posthog::stateful::Config) -> Self
+pub fn posthog::stateful::Client::init_blocking(posthog::stateful::Config) -> Self
+pub fn posthog::stateful::Client::is_disabled(&self) -> bool
+pub async fn posthog::stateful::Client::shutdown(&self, core::option::Option<core::time::Duration>) -> posthog::stateful::DrainReport
+pub fn posthog::stateful::Client::shutdown_blocking(&self, core::option::Option<core::time::Duration>) -> posthog::stateful::DrainReport
+impl core::ops::drop::Drop for posthog::stateful::Client
+pub fn posthog::stateful::Client::drop(&mut self)
+pub struct posthog::stateful::Config
+pub posthog::stateful::Config::bootstrap_anonymous_id: core::option::Option<alloc::string::String>
+pub posthog::stateful::Config::capture_compression: core::option::Option<posthog::CaptureCompression>
+pub posthog::stateful::Config::disable_geoip: bool
+pub posthog::stateful::Config::disabled: bool
+pub posthog::stateful::Config::flush_at: usize
+pub posthog::stateful::Config::flush_interval: core::time::Duration
+pub posthog::stateful::Config::host: alloc::string::String
+pub posthog::stateful::Config::instance_name: alloc::string::String
+pub posthog::stateful::Config::max_batch_size: usize
+pub posthog::stateful::Config::max_capture_attempts: u32
+pub posthog::stateful::Config::max_queue_bytes: usize
+pub posthog::stateful::Config::max_queue_size: usize
+pub posthog::stateful::Config::max_record_bytes: u64
+pub posthog::stateful::Config::max_state_bytes: usize
+pub posthog::stateful::Config::max_stored_bytes: u64
+pub posthog::stateful::Config::max_stored_events: usize
+pub posthog::stateful::Config::persistence: posthog::stateful::Persistence
+pub posthog::stateful::Config::platform_context: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub posthog::stateful::Config::project_token: alloc::string::String
+pub posthog::stateful::Config::request_timeout_seconds: u64
+pub posthog::stateful::Config::sdk_name: alloc::string::String
+pub posthog::stateful::Config::sdk_version: alloc::string::String
+pub posthog::stateful::Config::shutdown_timeout: core::time::Duration
+pub posthog::stateful::Config::state_coalesce: core::time::Duration
+impl posthog::stateful::Config
+pub fn posthog::stateful::Config::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog::Event) -> core::option::Option<posthog::Event> + core::marker::Send + 'static
+pub fn posthog::stateful::Config::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::stateful::Config::on_error<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::PostHogError<'_>) + core::marker::Send + core::marker::Sync + 'static
+#[non_exhaustive] pub struct posthog::stateful::DrainReport
+pub posthog::stateful::DrainReport::delivery: posthog::stateful::DeliveryOutcome
+pub posthog::stateful::DrainReport::state: posthog::stateful::PersistenceOutcome
+#[non_exhaustive] pub struct posthog::stateful::InitializationFailure
+impl posthog::stateful::InitializationFailure
+pub fn posthog::stateful::InitializationFailure::message(&self) -> &str
 pub mod posthog::tower
 pub struct posthog::tower::PostHogLayer
 impl posthog::tower::PostHogLayer
@@ -259,6 +353,7 @@ pub fn posthog::FlagValue::default() -> Self
 #[non_exhaustive] pub enum posthog::PostHogError<'a>
 pub posthog::PostHogError::Capture(posthog::CaptureFailure<'a>)
 pub posthog::PostHogError::FeatureFlags(posthog::FlagsFailure<'a>)
+pub posthog::PostHogError::Initialization(posthog::stateful::InitializationFailure)
 pub posthog::PostHogError::LocalEvaluation(posthog::LocalEvaluationFailure<'a>)
 pub posthog::PostHogError::Storage(posthog::StorageFailure<'a>)
 #[non_exhaustive] pub enum posthog::SendEmail

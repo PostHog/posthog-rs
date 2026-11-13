@@ -42,12 +42,24 @@ use crate::Event;
 #[cfg(feature = "stateful")]
 #[path = "transport_memory.rs"]
 mod memory;
+#[cfg(all(test, feature = "stateful"))]
+#[path = "transport_startup_tests.rs"]
+mod startup_tests;
 #[cfg(feature = "stateful")]
 #[path = "transport_storage.rs"]
 mod storage_support;
 #[cfg(all(test, feature = "stateful"))]
 #[path = "transport_storage_tests.rs"]
 mod storage_tests;
+
+/// Local startup failures, not delivery failures such as an offline network.
+#[cfg(feature = "stateful")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StartupFailure {
+    Spawn,
+    Http,
+    WorkerStopped,
+}
 
 #[derive(Default)]
 struct StorageState {
@@ -102,7 +114,10 @@ pub(crate) enum Control {
     /// the hook's short bounded wait.
     #[cfg_attr(not(feature = "error-tracking"), allow(dead_code))]
     FlushCaptures(Completion),
-    Shutdown(Completion),
+    Shutdown {
+        completion: Completion,
+        deadline: Option<Instant>,
+    },
     /// Test-only: re-evaluate the (virtual) clock and flush/retry whatever is now
     /// due, so interval and backoff timing can be driven without real sleeps.
     #[cfg(test)]
@@ -150,7 +165,7 @@ pub(crate) trait Clock: Send + Sync + 'static {
     fn now_utc(&self) -> DateTime<Utc>;
 }
 
-struct SystemClock;
+pub(super) struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
@@ -170,6 +185,8 @@ pub(crate) struct TransportHandle {
     /// Set once `shutdown`/`Drop` begins; blocks further enqueue and control sends.
     closed: AtomicBool,
     worker: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(all(feature = "stateful", feature = "async-client"))]
+    stopped: Option<tokio::sync::watch::Receiver<()>>,
     /// Latches the single "queue full" warning so a full queue doesn't spam logs.
     full_warned: AtomicBool,
     max_queue_size: usize,
@@ -273,7 +290,7 @@ impl LaneConfig {
 /// Upper bound on a blocking-flush / shutdown timeout, so an absurd value can't
 /// overflow the `now + timeout` deadlines (worker drain) or the `recv_timeout`
 /// bound on `flush_blocking_timeout`.
-const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(86_400);
+pub(super) const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(86_400);
 
 impl TransportHandle {
     /// Spawn the analytics worker with the real system clock.
@@ -300,22 +317,46 @@ impl TransportHandle {
         Self::spawn_configured(options, lane, clock, StorageState::default())
     }
 
-    /// The initialization worker opens the namespace/store first. Ordinary
-    /// captures enter through `enqueue_prepared`; all subsequent storage I/O
-    /// belongs to the transport worker.
+    /// Wait for local HTTP initialization on the existing worker, not network
+    /// reachability or backlog recovery. The stateful initializer maps failure
+    /// to its disabled client and reports the diagnostic. Both persistent and
+    /// memory-only clients use the same bounded admission path.
+    ///
+    /// Call only from blocking initialization or its helper thread. The caller
+    /// has already opened the namespace; subsequent store I/O belongs here.
     #[cfg(feature = "stateful")]
-    #[allow(dead_code)] // Composed by the stateful client.
-    pub(crate) fn spawn_persistent(
+    pub(super) fn spawn_stateful(
         options: ClientOptions,
-        store: Box<dyn super::event_store::EventStore>,
+        store: Option<Box<dyn super::event_store::EventStore>>,
         max_queue_bytes: usize,
-    ) -> Self {
-        Self::spawn_configured(
+    ) -> Result<Self, StartupFailure> {
+        let storage = match store {
+            Some(store) => StorageState::new(store, max_queue_bytes),
+            None => StorageState::memory(max_queue_bytes),
+        };
+        let (tx, rx) = mpsc::channel();
+        Self::spawn_configured_with_startup(
             options,
             LaneConfig::analytics(),
             Arc::new(SystemClock),
-            StorageState::new(store, max_queue_bytes),
+            storage,
+            Some(tx),
         )
+        .finish_startup(rx)
+    }
+
+    #[cfg(feature = "stateful")]
+    fn finish_startup(self, ready: mpsc::Receiver<bool>) -> Result<Self, StartupFailure> {
+        let failure = match ready.recv() {
+            Ok(true) => return Ok(self),
+            Ok(false) => StartupFailure::Http,
+            Err(_) if self.worker_id.is_none() => StartupFailure::Spawn,
+            Err(_) => StartupFailure::WorkerStopped,
+        };
+        // Do not leave a partially initialized worker or namespace lease behind.
+        self.request_close();
+        self.join();
+        Err(failure)
     }
 
     fn spawn_configured(
@@ -323,6 +364,16 @@ impl TransportHandle {
         lane: LaneConfig,
         clock: Arc<dyn Clock>,
         storage: StorageState,
+    ) -> Self {
+        Self::spawn_configured_with_startup(options, lane, clock, storage, None)
+    }
+
+    fn spawn_configured_with_startup(
+        options: ClientOptions,
+        lane: LaneConfig,
+        clock: Arc<dyn Clock>,
+        storage: StorageState,
+        ready: Option<mpsc::Sender<bool>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Control>();
         let len = Arc::new(AtomicUsize::new(0));
@@ -332,9 +383,22 @@ impl TransportHandle {
         let worker_clock = Arc::clone(&clock);
         #[cfg(feature = "stateful")]
         let byte_budget = storage.byte_budget.clone();
+        #[cfg(all(feature = "stateful", feature = "async-client"))]
+        let (worker_done, stopped) = if ready.is_some() {
+            let (tx, rx) = tokio::sync::watch::channel(());
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let worker = thread::Builder::new()
             .name(lane.thread_name.to_string())
-            .spawn(move || run_worker(options, lane, rx, worker_len, worker_clock, storage))
+            .spawn(move || {
+                // Closing this sender wakes every stateful shutdown waiter,
+                // including after cancellation, a concurrent close, or a panic.
+                #[cfg(all(feature = "stateful", feature = "async-client"))]
+                let _done = worker_done;
+                run_worker(options, lane, rx, worker_len, worker_clock, storage, ready);
+            })
             .ok();
         let worker_id = worker.as_ref().map(|handle| handle.thread().id());
         Self {
@@ -342,6 +406,8 @@ impl TransportHandle {
             len,
             closed: AtomicBool::new(false),
             worker: Mutex::new(worker),
+            #[cfg(all(feature = "stateful", feature = "async-client"))]
+            stopped,
             full_warned: AtomicBool::new(false),
             max_queue_size,
             endpoint,
@@ -374,7 +440,7 @@ impl TransportHandle {
 
     /// Admit an already assembled event without request-context enrichment,
     /// defaults, hooks, or wire conversion. The producer owns those steps.
-    #[allow(dead_code)] // Used by the stateful producer layered above this transport.
+    #[cfg_attr(not(feature = "stateful"), allow(dead_code))]
     pub(crate) fn enqueue_prepared(&self, event: CaptureEvent) -> Admission {
         if self.closed.load(Ordering::Acquire) {
             return Admission::Closed;
@@ -531,10 +597,36 @@ impl TransportHandle {
     /// Marking happens before the send, so `is_closed()` is observable as soon
     /// as this returns.
     pub(crate) fn request_shutdown(&self, completion: Completion) -> bool {
+        self.request_shutdown_with_deadline(completion, None)
+    }
+
+    fn request_shutdown_with_deadline(
+        &self,
+        completion: Completion,
+        deadline: Option<Instant>,
+    ) -> bool {
         if self.begin_close() {
-            self.send_control(Control::Shutdown(completion))
+            self.send_control(Control::Shutdown {
+                completion,
+                deadline,
+            })
         } else {
             false
+        }
+    }
+
+    #[cfg(feature = "stateful")]
+    pub(super) fn request_close_before(&self, deadline: Instant) {
+        let (tx, _rx) = mpsc::channel();
+        self.request_shutdown_with_deadline(Completion::Blocking(tx), Some(deadline));
+    }
+
+    /// Await the stateful worker body, not OS thread-local destruction. The
+    /// final join remains necessary and may exceed the shutdown budget.
+    #[cfg(all(feature = "stateful", feature = "async-client"))]
+    pub(super) async fn wait_stopped(&self) {
+        if let Some(mut stopped) = self.stopped.clone() {
+            let _ = stopped.changed().await;
         }
     }
 
@@ -929,6 +1021,7 @@ fn run_worker(
     len: Arc<AtomicUsize>,
     clock: Arc<dyn Clock>,
     _storage: StorageState,
+    ready: Option<mpsc::Sender<bool>>,
 ) {
     let flush_at = options.flush_at.max(1);
     let max_batch_size = options.max_batch_size.max(1);
@@ -941,6 +1034,9 @@ fn run_worker(
     let mut buffer = LiveBuffer::for_lane(&lane);
     let Some(mut pipeline) = Pipeline::new(&options, lane, Arc::clone(&clock), Arc::clone(&len))
     else {
+        if let Some(ready) = ready {
+            let _ = ready.send(false);
+        }
         drain_pending_completions(&rx, &len);
         return;
     };
@@ -949,6 +1045,12 @@ fn run_worker(
     {
         pipeline.storage = _storage;
         pipeline.storage.next_recovery = Some(clock.now());
+    }
+
+    if let Some(ready) = ready {
+        // No store read or network request is part of local transport readiness.
+        // The receiver is the blocking initialization path, not ordinary capture.
+        let _ = ready.send(true);
     }
 
     let mut buffer_since: Option<Instant> = None;
@@ -1060,7 +1162,10 @@ fn run_worker(
                 pipeline.recover_due(None, true);
                 completion.signal();
             }
-            Wake::Msg(Control::Shutdown(completion)) => {
+            Wake::Msg(Control::Shutdown {
+                completion,
+                deadline,
+            }) => {
                 // Drain held retries, queued historical batches, then buffered
                 // events — one final attempt each, bounded by `shutdown_timeout`:
                 // once the deadline passes the rest is dropped so the drain can't
@@ -1068,7 +1173,7 @@ fn run_worker(
                 // when this Shutdown arrives runs to completion first — up to
                 // `request_timeout_seconds` per in-flight batch — since the single
                 // worker can't preempt it; see `shutdown_timeout_ms`.)
-                let deadline = clock.now() + shutdown_timeout;
+                let deadline = deadline.unwrap_or_else(|| clock.now() + shutdown_timeout);
                 pipeline.flush_retries(Some(deadline));
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
@@ -1130,7 +1235,9 @@ fn run_worker(
 fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
     while let Ok(control) = rx.try_recv() {
         match control {
-            Control::Flush(c) | Control::FlushCaptures(c) | Control::Shutdown(c) => c.signal(),
+            Control::Flush(c)
+            | Control::FlushCaptures(c)
+            | Control::Shutdown { completion: c, .. } => c.signal(),
             #[cfg(test)]
             Control::Tick(c) => c.signal(),
             Control::Capture { .. } | Control::Prepared { .. } => dec_len(len, 1),
@@ -2189,8 +2296,11 @@ mod tests {
         let (stx, srx) = mpsc::channel::<()>();
         let len = AtomicUsize::new(3); // 1 capture + 2 historical events reserved
         tx.send(Control::Flush(Completion::Blocking(ftx))).unwrap();
-        tx.send(Control::Shutdown(Completion::Blocking(stx)))
-            .unwrap();
+        tx.send(Control::Shutdown {
+            completion: Completion::Blocking(stx),
+            deadline: None,
+        })
+        .unwrap();
         tx.send(Control::Capture {
             event: Box::new(Event::new("dropped", "user-1")),
         })

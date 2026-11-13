@@ -53,9 +53,10 @@ impl CaptureCompression {
 mod blocking;
 mod capture;
 #[cfg(feature = "stateful")]
-#[allow(dead_code)] // The stateful delivery composition owns this storage layer.
 mod event_store;
 mod retry;
+#[cfg(feature = "stateful")]
+pub mod stateful;
 pub(crate) use retry::parse_retry_after;
 mod transport;
 #[cfg(not(feature = "async-client"))]

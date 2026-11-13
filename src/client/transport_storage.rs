@@ -8,25 +8,13 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::{dec_len, reserve_slot, DeliveryEvent, Pipeline, QueuedEvent};
-use crate::client::common::apply_on_error_hooks;
+use crate::client::common::report_storage_error;
 use crate::client::event_store::StoreKey;
-use crate::client::{PostHogError, StorageError, StorageFailure, StorageOperation};
+use crate::client::StorageOperation;
 
 impl Pipeline {
     pub(super) fn report_storage_error(&self, operation: StorageOperation, error: &io::Error) {
-        if self.options.on_error.is_empty() {
-            // Error messages supplied by backends can contain paths or payloads.
-            tracing::warn!(?operation, kind = ?error.kind(), "posthog-rs: storage operation failed");
-        } else {
-            let error = StorageError::from_io(error);
-            apply_on_error_hooks(
-                &self.options.on_error,
-                &PostHogError::Storage(StorageFailure {
-                    operation,
-                    error: &error,
-                }),
-            );
-        }
+        report_storage_error(&self.options.on_error, operation, error);
     }
 
     pub(super) fn persist(&mut self, event: &mut DeliveryEvent) {

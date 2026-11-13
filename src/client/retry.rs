@@ -171,7 +171,7 @@ pub(crate) fn backoff_duration(
 }
 
 /// `base_ms` doubled for each attempt after the first, clamped to `max_ms`.
-fn exponential_backoff(base_ms: u64, max_ms: u64, attempt: u32) -> Duration {
+pub(super) fn exponential_backoff(base_ms: u64, max_ms: u64, attempt: u32) -> Duration {
     let backoff_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
     Duration::from_millis(backoff_ms.min(max_ms))
 }

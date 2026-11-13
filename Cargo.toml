@@ -35,6 +35,7 @@ tokio = { version = "1", features = [
     "macros",
 ], optional = true }
 fs2 = { version = "0.4.3", optional = true }
+dirs = { version = "5", optional = true }
 flate2 = "1.0"
 brotli = "9.0"
 zstd = "0.14"
@@ -80,7 +81,7 @@ default = ["async-client", "error-tracking", "tls"]
 e2e-test = []
 async-client = ["tokio"]
 test-harness = []
-stateful = ["dep:fs2", "serde_json/float_roundtrip"]
+stateful = ["dep:fs2", "dep:dirs", "serde_json/float_roundtrip"]
 error-tracking = ["dep:backtrace", "dep:findshlibs"]
 tls = ["reqwest/rustls"]
 tls-no-provider = ["reqwest/rustls-no-provider"]
@@ -94,6 +95,10 @@ mcp = [
     "dep:base64",
     "dep:futures-util",
 ]
+
+[[example]]
+name = "stateful"
+required-features = ["stateful"]
 
 [workspace]
 members = [".", "compliance/adapter", "crates/posthog-rs"]
