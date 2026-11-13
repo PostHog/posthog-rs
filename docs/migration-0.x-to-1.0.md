@@ -304,11 +304,12 @@ The SDK therefore keeps the request context from turning person processing off f
 To set options on the events that `alias` and `group_identify` send, build them with `Event::alias` and `Event::group_identify`, then capture them:
 
 ```rust
-if let Some(mut event) = posthog::Event::alias("anon-abc123".into(), "user-42".into()) {
-    event.insert_option("disable_skew_correction", true)?;
-    client.capture(event);
-}
+let mut event = posthog::Event::alias("anon-abc123", "user-42")?;
+event.insert_option("disable_skew_correction", true)?;
+client.capture(event);
 ```
+
+Both constructors return `Error::InvalidArgument` for a blank ID, group type, or group key. `client.alias` and `client.group_identify` still log a warning and drop the event.
 
 In 0.x.x, a context that turned person processing off reached `alias` and `group_identify`, and PostHog dropped their events.
 
