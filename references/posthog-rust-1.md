@@ -137,16 +137,16 @@ Use `posthog=warn` for warnings and errors only. Use `posthog=trace` for detaile
 pub async fn client<C: Into<super::ClientOptions>>(options: C) -> Client
 ```
 
-Construct an async PostHog client from an API key or [`ClientOptions`].
+Construct an async PostHog client from an API key or [`ClientOptions`](#clientoptions).
 
 #### Parameters
 
 - `options`: Either a project API key (for example `"phc_..."`) or a
-  configured [`ClientOptions`] value.
+  configured [`ClientOptions`](#clientoptions) value.
 
 #### Returns
 
-A [`Client`] that performs capture and feature flag requests asynchronously.
+A `Client` that performs capture and feature flag requests asynchronously.
 
 #### Remarks
 
@@ -154,9 +154,6 @@ This constructor is available with the default `async-client` feature and
 must be awaited. Passing a blank API key creates a disabled client.
 If the HTTP client cannot be built, logs a warning and creates a disabled
 client instead.
-
-[`ClientOptions`]: #clientoptions
-[`Client`]: #client
 
 ### `posthog::init_global`
 
@@ -176,15 +173,12 @@ this also installs a process-wide panic hook that captures panics as
 
 #### Parameters
 
-- `options`: Project API key or [`ClientOptions`] used to construct the
+- `options`: Project API key or [`ClientOptions`](#clientoptions) used to construct the
   global client.
 
 #### Errors
 
-Returns [`Error::AlreadyInitialized`] if called more than once.
-
-[`ClientOptions`]: #clientoptions
-[`Error::AlreadyInitialized`]: #erroralreadyinitialized
+Returns [`Error::AlreadyInitialized`](#error) if called more than once.
 
 ## Capture
 
@@ -209,11 +203,9 @@ once it is delivered, and delivery failures are not surfaced to the
 caller. Disabled clients and a full queue drop the event (the latter
 with a single warning).
 
-Use [`Client::capture_ai`] for LLM analytics events (`$ai_generation`,
+Use [`Client::capture_ai`](#clientcapture_ai) for LLM analytics events (`$ai_generation`,
 `$ai_span`, …): `capture` never reroutes by event name. The analytics
 endpoint still accepts AI events for now, but large ones need `capture_ai`.
-
-[`Client::capture_ai`]: #clientcapture_ai
 
 ### `Client::capture_batch`
 
@@ -231,11 +223,9 @@ Capture a collection of events.
 
 #### Remarks
 
-Fire-and-forget, like [`Client::capture`]. The batch is enqueued per event
+Fire-and-forget, like [`Client::capture`](#clientcapture). The batch is enqueued per event
 rather than atomically, so if the bounded queue fills partway through, the
 remaining events are dropped (with the usual single full-queue warning).
-
-[`Client::capture`]: #clientcapture
 
 ### `Client::capture_immediate`
 
@@ -245,12 +235,9 @@ pub async fn capture_immediate(&self, event: Event) -> Result<CaptureSummary, Er
 
 Capture a single event and await confirmation that the request completed.
 
-The immediate-delivery counterpart to [`Client::capture`]. This is a
-convenience wrapper over [`Client::capture_batch_immediate`] with a
+The immediate-delivery counterpart to [`Client::capture`](#clientcapture). This is a
+convenience wrapper over [`Client::capture_batch_immediate`](#clientcapture_batch_immediate) with a
 one-event batch; see it for full semantics.
-
-[`Client::capture_batch_immediate`]: #clientcapture_batch_immediate
-[`Client::capture`]: #clientcapture
 
 ### `Client::capture_batch_immediate`
 
@@ -259,10 +246,10 @@ pub async fn capture_batch_immediate(&self, events: Vec<Event>, historical_migra
 ```
 
 Capture a batch of events and await confirmation that the request
-completed, returning a [`CaptureSummary`] describing the outcome.
+completed, returning a [`CaptureSummary`](#capturesummary) describing the outcome.
 
-The immediate-delivery counterpart to [`Client::capture_batch`]. Prefer
-the fire-and-forget [`Client::capture`]/[`Client::capture_batch`] for
+The immediate-delivery counterpart to [`Client::capture_batch`](#clientcapture_batch). Prefer
+the fire-and-forget [`Client::capture`](#clientcapture)/[`Client::capture_batch`](#clientcapture_batch) for
 normal analytics; reach for this only when the caller must know the batch
 persisted before advancing its own durable state.
 
@@ -276,20 +263,14 @@ persisted before advancing its own durable state.
 Sends inline (bypassing the background worker) and retries transient
 failures per the client's retry configuration. A returned `Ok` can still
 report unpersisted events — inspect
-[`CaptureSummary::all_persisted`]. Does NOT fire `on_error` hooks: the
+[`CaptureSummary::all_persisted`](#capturesummaryall_persisted). Does NOT fire `on_error` hooks: the
 returned `Result` is the delivery signal. Disabled clients and an empty
 (or fully `before_send`-filtered) batch return a default `CaptureSummary`.
 
 #### Errors
 
-Returns [`Error`] when the request is rejected with a terminal status or
+Returns [`Error`](#error) when the request is rejected with a terminal status or
 the retry budget is exhausted without a successful response.
-
-[`Client::capture`]: #clientcapture
-[`CaptureSummary`]: #capturesummary
-[`Client::capture_batch`]: #clientcapture_batch
-[`CaptureSummary::all_persisted`]: #capturesummaryall_persisted
-[`Error`]: #error
 
 ### `Event::new`
 
@@ -297,8 +278,8 @@ the retry budget is exhausted without a successful response.
 pub fn new<S: Into<String>>(event: S, distinct_id: S) -> Self
 ```
 
-Create a new identified [`Event`]. Unless you have a distinct ID you can
-associate with a user, you probably want to use [`Event::new_anon`]
+Create a new identified [`Event`](#event). Unless you have a distinct ID you can
+associate with a user, you probably want to use [`Event::new_anon`](#eventnew_anon)
 instead.
 
 #### Parameters
@@ -307,10 +288,7 @@ instead.
 - `distinct_id`: Stable user or account identifier. For backend events,
   use the same distinct ID your frontend passes to `posthog.identify()`.
   An empty or whitespace-only ID counts as missing: the event becomes
-  anonymous, as from [`Event::new_anon`].
-
-[`Event::new_anon`]: #eventnew_anon
-[`Event`]: #event
+  anonymous, as from [`Event::new_anon`](#eventnew_anon).
 
 ### `Event::new_anon`
 
@@ -331,10 +309,8 @@ See <https://posthog.com/docs/data/anonymous-vs-identified-events#how-to-capture
 Generates a random distinct ID and sets the `process_person_profile`
 option to `false` so PostHog does not create a person profile for the
 event. To process one anyway, set the option to `true` with
-[`Event::insert_option`]. A `null` or removed option counts as unset,
+[`Event::insert_option`](#eventinsert_option). A `null` or removed option counts as unset,
 so the SDK sets `false` again before `before_send`.
-
-[`Event::insert_option`]: #eventinsert_option
 
 ### `posthog::capture`
 
@@ -346,10 +322,8 @@ Capture the provided event using the global client.
 
 #### Remarks
 
-Fire-and-forget, like [`Client::capture`]. No-op if `init_global` has not
+Fire-and-forget, like [`Client::capture`](#clientcapture). No-op if `init_global` has not
 run.
-
-[`Client::capture`]: #clientcapture
 
 ## Alias
 
@@ -371,13 +345,13 @@ See <https://posthog.com/docs/product-analytics/identify#alias-assigning-multipl
 
 #### Remarks
 
-Fire-and-forget, like [`Client::capture`]. A blank ID on either side
+Fire-and-forget, like [`Client::capture`](#clientcapture). A blank ID on either side
 cannot describe a merge, so the event is dropped with a warning rather
 than sent.
 
 The event sends `process_person_profile: true`, so a request context
 cannot turn person processing off for it. To set options on it, build it
-with [`Event::alias`] and capture it.
+with [`Event::alias`](#eventalias) and capture it.
 
 #### Examples
 
@@ -387,9 +361,6 @@ let client = posthog::client("phc_project_api_key").await;
 // The visitor browsed anonymously, then logged in.
 client.alias("anon-abc123", "user-42");
 ```
-
-[`Client::capture`]: #clientcapture
-[`Event::alias`]: #eventalias
 
 ## Capture AI
 
@@ -409,7 +380,7 @@ ingestion endpoint.
 
 #### Remarks
 
-Fire-and-forget, like [`Client::capture`], on a separate lane: its own
+Fire-and-forget, like [`Client::capture`](#clientcapture), on a separate lane: its own
 background worker, queue (`capture_ai_max_queue_size`), retry state, and
 endpoint, so a multi-MB AI event can never delay or displace analytics
 events. The lane batches by size (about 5 MiB per request), compresses
@@ -422,11 +393,8 @@ call.
 The SDK does not inspect the event name. The backend accepts only its
 AI event names on this endpoint and reports anything else as a per-event
 `drop`, which reaches an `on_error` hook (see
-[`CaptureFailure::endpoint`](crate::CaptureFailure::endpoint)) or, with no
+[`CaptureFailure::endpoint`](#capturefailureendpoint)) or, with no
 hook, one aggregate warning per batch.
-
-[`Client::capture`]: #clientcapture
-[crate::CaptureFailure::endpoint]: #cratecapturefailureendpoint
 
 ### `Client::capture_ai_batch`
 
@@ -439,19 +407,16 @@ Capture a batch of AI events on the AI lane.
 #### Parameters
 
 - `events`: AI events to send.
-- `historical_migration`: Kept for parity with [`Client::capture_batch`]
+- `historical_migration`: Kept for parity with [`Client::capture_batch`](#clientcapture_batch)
   and passed through to the backend, which currently ignores it for AI
   events.
 
 #### Remarks
 
-Fire-and-forget, like [`Client::capture_ai`]. Events are enqueued per
+Fire-and-forget, like [`Client::capture_ai`](#clientcapture_ai). Events are enqueued per
 event, so if the bounded queue fills partway through, the remaining
 events are dropped (with the usual single full-queue warning). The lane
 splits the batch into requests of about 5 MiB each.
-
-[`Client::capture_ai`]: #clientcapture_ai
-[`Client::capture_batch`]: #clientcapture_batch
 
 ### `Client::capture_ai_immediate`
 
@@ -462,12 +427,9 @@ pub async fn capture_ai_immediate(&self, event: Event) -> Result<CaptureSummary,
 Capture a single AI event and await confirmation that the request
 completed.
 
-The immediate-delivery counterpart to [`Client::capture_ai`]. This is a
-convenience wrapper over [`Client::capture_ai_batch_immediate`] with a
+The immediate-delivery counterpart to [`Client::capture_ai`](#clientcapture_ai). This is a
+convenience wrapper over [`Client::capture_ai_batch_immediate`](#clientcapture_ai_batch_immediate) with a
 one-event batch; see it for full semantics.
-
-[`Client::capture_ai`]: #clientcapture_ai
-[`Client::capture_ai_batch_immediate`]: #clientcapture_ai_batch_immediate
 
 ### `Client::capture_ai_batch_immediate`
 
@@ -476,42 +438,35 @@ pub async fn capture_ai_batch_immediate(&self, events: Vec<Event>, historical_mi
 ```
 
 Capture a batch of AI events and await confirmation that every request
-completed, returning a [`CaptureSummary`] describing the outcome.
+completed, returning a [`CaptureSummary`](#capturesummary) describing the outcome.
 
-The immediate-delivery counterpart to [`Client::capture_ai_batch`].
+The immediate-delivery counterpart to [`Client::capture_ai_batch`](#clientcapture_ai_batch).
 
 #### Parameters
 
 - `events`: AI events to send.
 - `historical_migration`: Kept for parity with
-  [`Client::capture_batch_immediate`] and passed through to the backend,
+  [`Client::capture_batch_immediate`](#clientcapture_batch_immediate) and passed through to the backend,
   which currently ignores it for AI events.
 
 #### Behavior
 
-Like [`Client::capture_batch_immediate`], but on the AI endpoint with
+Like [`Client::capture_batch_immediate`](#clientcapture_batch_immediate), but on the AI endpoint with
 `capture_ai_compression`, and the batch is split into requests of about 5 MiB
 each, sent in order. Each request retries transient failures and
 per-event `retry` verdicts per the client's retry configuration; the
 summary merges every request's verdicts. An event whose serialized
 `properties` are over 8 MiB is not sent, as the backend would refuse it.
 It gets a local `drop` verdict with `details` `ai_event_too_big` in the
-summary, and counts in [`CaptureSummary::submitted`] and
-[`CaptureSummary::not_persisted`].
+summary, and counts in [`CaptureSummary::submitted`](#capturesummarysubmitted) and
+[`CaptureSummary::not_persisted`](#capturesummarynot_persisted).
 
 #### Errors
 
-Returns [`Error`] as soon as one request is rejected with a terminal
+Returns [`Error`](#error) as soon as one request is rejected with a terminal
 status or exhausts its retry budget; requests sent before it may already
 have persisted. An `Err` therefore means "not confirmed", not "nothing
 was stored".
-
-[`Client::capture_batch_immediate`]: #clientcapture_batch_immediate
-[`CaptureSummary::submitted`]: #capturesummarysubmitted
-[`CaptureSummary`]: #capturesummary
-[`Error`]: #error
-[`CaptureSummary::not_persisted`]: #capturesummarynot_persisted
-[`Client::capture_ai_batch`]: #clientcapture_ai_batch
 
 ### `posthog::capture_ai`
 
@@ -523,10 +478,8 @@ Capture the provided AI event using the global client.
 
 #### Remarks
 
-Fire-and-forget, like [`Client::capture_ai`]. No-op if `init_global` has
+Fire-and-forget, like [`Client::capture_ai`](#clientcapture_ai). No-op if `init_global` has
 not run.
-
-[`Client::capture_ai`]: #clientcapture_ai
 
 ## Capture exception
 
@@ -544,13 +497,13 @@ The error's type, message, and full `source()` chain are sent as
 `$exception_list`, with a stacktrace of the capture site attached to
 the first entry (see `ErrorTrackingOptions::capture_stacktrace`).
 
-Accepts any [`std::error::Error`], including `&dyn Error`. A
+Accepts any `std::error::Error`, including `&dyn Error`. A
 `Box<dyn Error>` does not implement `Error` itself, so pass the
 dereferenced trait object: `capture_exception(&*boxed)`.
 
 To associate the exception with a person or attach custom properties,
 groups, a fingerprint, or a severity level, use
-[`Client::capture_exception_with`].
+[`Client::capture_exception_with`](#clientcapture_exception_with).
 
 #### Examples
 
@@ -560,9 +513,6 @@ let error = std::io::Error::other("checkout failed");
 
 client.capture_exception(&error).await?;
 ```
-
-[`std::error::Error`]: #stderrorerror
-[`Client::capture_exception_with`]: #clientcapture_exception_with
 
 ### `Client::capture_exception_with`
 
@@ -575,7 +525,7 @@ where
 Capture a Rust error with optional context, sending it to PostHog
 Error Tracking.
 
-Set [`CaptureExceptionOptions::distinct_id`] to associate the exception
+Set [`CaptureExceptionOptions::distinct_id`](#captureexceptionoptionsdistinct_id) to associate the exception
 with a person; without it the exception is captured personlessly.
 
 #### Examples
@@ -595,8 +545,6 @@ client
     )
     .await?;
 ```
-
-[`CaptureExceptionOptions::distinct_id`]: #captureexceptionoptionsdistinct_id
 
 ### `posthog::capture_exception`
 
@@ -630,9 +578,7 @@ Transactional email: send email from templates made in PostHog or from
 content your code rendered, and read the status of each email sent.
 
 Needs `secret_key` set to a Project Secret API Key with the
-`transactional_email:write` scope. See [`Emails`] for setup.
-
-[`Emails`]: #emails
+`transactional_email:write` scope. See [`Emails`](#emails) for setup.
 
 ## Flush
 
@@ -656,10 +602,8 @@ Flush the global client's queued events, awaiting the worker's next delivery
 attempt. No-op if `init_global` has not run.
 
 `capture` only enqueues, and the global client lives in a `static` whose
-`Drop` never runs at process exit, so call this (or [`shutdown`]) before
+`Drop` never runs at process exit, so call this (or [`shutdown`](#posthogshutdown)) before
 exiting to avoid losing buffered events.
-
-[`shutdown`]: #shutdown
 
 ## Get feature flag payload
 
@@ -712,12 +656,12 @@ pub async fn evaluate_flags<S: Into<String>>(&self, distinct_id: S, options: Eva
 ```
 
 Evaluate feature flags for `distinct_id`, returning a
-[`FeatureFlagEvaluations`] snapshot.
+[`FeatureFlagEvaluations`](#featureflagevaluations) snapshot.
 
 Each `is_enabled` / `get_flag` call on the returned snapshot fires a
 dedup-aware `$feature_flag_called` event with full metadata, and the
 snapshot can be passed to [`Event::with_flags`] so a downstream
-[`Client::capture`] inherits `$feature/<key>` and `$active_feature_flags`
+[`Client::capture`](#clientcapture) inherits `$feature/<key>` and `$active_feature_flags`
 without an extra `/flags` request.
 
 #### Parameters
@@ -728,16 +672,9 @@ without an extra `/flags` request.
 
 #### Errors
 
-Returns [`Error::Connection`] or [`Error::Serialization`] when remote
+Returns [`Error::Connection`](#error) or [`Error::Serialization`](#error) when remote
 evaluation is required and the `/flags` request fails before any local
 results are available.
-
-
-[crate::Event::with_flags]: #crateeventwith_flags
-[`Client::capture`]: #clientcapture
-[`Error::Connection`]: #errorconnection
-[`FeatureFlagEvaluations`]: #featureflagevaluations
-[`Error::Serialization`]: #errorserialization
 
 ## Group identify
 
@@ -760,19 +697,19 @@ See <https://posthog.com/docs/product-analytics/group-analytics#setting-group-pr
 
 #### Remarks
 
-Fire-and-forget, like [`Client::capture`], for a blank `group_type` or
+Fire-and-forget, like [`Client::capture`](#clientcapture), for a blank `group_type` or
 `group_key`: the event is dropped with a warning rather than sent.
 
 The event sends `process_person_profile: true`, so a request context
 cannot turn person processing off for it. To set options on it, build it
-with [`Event::group_identify`] and capture it.
+with [`Event::group_identify`](#eventgroup_identify) and capture it.
 
 The event's distinct id is the request context's distinct id when one is
 set, else `$<group_type>_<group_key>`. The context session id is never added.
 
 #### Errors
 
-Returns [`Error::Serialization`] if `properties` fails to serialize to
+Returns [`Error::Serialization`](#error) if `properties` fails to serialize to
 JSON, or if it does not serialize to a JSON object (PostHog requires
 `$group_set` to be an object).
 
@@ -792,10 +729,6 @@ client.group_identify(
     }),
 )?;
 ```
-
-[`Error::Serialization`]: #errorserialization
-[`Client::capture`]: #clientcapture
-[`Event::group_identify`]: #eventgroup_identify
 
 ## Is feature enabled
 
@@ -823,7 +756,7 @@ pub async fn shutdown(&self)
 
 Flush, stop the background worker, and join it. Idempotent: subsequent
 calls are no-ops. After shutdown, `capture` drops events and
-[`emails`](Self::emails) refuses requests with `client_closed`. Email
+[`emails`](#clientemails) refuses requests with `client_closed`. Email
 requests already in flight, retries included, get until
 `shutdown_timeout_ms` from the start of shutdown to finish. When called
 from a transport callback, queues shutdown without waiting for email
@@ -832,8 +765,6 @@ requests or joining the current worker thread.
 In a web server, call this after the server future resolves, such as
 after `HttpServer::run().await` (actix) or `axum::serve(..).await`
 (axum) returns.
-
-[Self::emails]: #selfemails
 
 ### `posthog::shutdown`
 
@@ -869,10 +800,8 @@ of its conditions) targets a group; pass empty maps for person flags.
 
 #### Errors
 
-Returns [`Error::InconclusiveMatch`] when the flag cannot be evaluated
+Returns [`Error::InconclusiveMatch`](#error) when the flag cannot be evaluated
 locally with the supplied context.
-
-[`Error::InconclusiveMatch`]: #errorinconclusivematch
 
 ## SDK utils
 
@@ -927,10 +856,8 @@ multivariate flags.
 
 #### Errors
 
-Returns [`InconclusiveMatchError`] when required properties are missing or an
+Returns [`InconclusiveMatchError`](#inconclusivematcherror) when required properties are missing or an
 operator cannot be evaluated locally.
-
-[`InconclusiveMatchError`]: #inconclusivematcherror
 
 ### `posthog::match_feature_flag_with_context`
 
@@ -947,10 +874,8 @@ the flag itself) targets a group via `aggregation_group_type_index`.
 
 #### Errors
 
-Returns [`InconclusiveMatchError`] when local evaluation cannot determine a
+Returns [`InconclusiveMatchError`](#inconclusivematcherror) when local evaluation cannot determine a
 result with the provided context.
-
-[`InconclusiveMatchError`]: #inconclusivematcherror
 
 ### `posthog::match_property_with_context`
 
@@ -966,10 +891,8 @@ cohort membership (`type = "cohort"`) or another feature flag via
 
 #### Errors
 
-Returns [`InconclusiveMatchError`] when the property, cohort, or dependent
+Returns [`InconclusiveMatchError`](#inconclusivematcherror) when the property, cohort, or dependent
 flag cannot be evaluated from the supplied context.
-
-[`InconclusiveMatchError`]: #inconclusivematcherror
 
 ### `posthog::disable_global`
 
@@ -1008,9 +931,7 @@ Manages PostHog API endpoints and host configuration.
 
 This low-level helper normalizes app hosts such as
 `https://us.posthog.com` to ingestion hosts such as
-[`US_INGESTION_ENDPOINT`].
-
-[`US_INGESTION_ENDPOINT`]: #us_ingestion_endpoint
+[`US_INGESTION_ENDPOINT`](#posthogus_ingestion_endpoint).
 
 ### `EndpointManager::new`
 
@@ -1098,16 +1019,10 @@ pub struct FeatureFlagEvaluations
 
 A snapshot of evaluated feature flags for one `distinct_id`.
 
-Returned by [`Client::evaluate_flags`](crate::Client::evaluate_flags). Reading
+Returned by [`Client::evaluate_flags`](#clientevaluate_flags). Reading
 flags via [`is_enabled`] or [`get_flag`] both records the access (so it can be
 later attached to a capture event) and emits a deduplicated
 `$feature_flag_called` event. [`get_flag_payload`] is intentionally event-free.
-
-
-[FeatureFlagEvaluations::get_flag_payload]: #featureflagevaluationsget_flag_payload
-[FeatureFlagEvaluations::get_flag]: #featureflagevaluationsget_flag
-[crate::Client::evaluate_flags]: #crateclientevaluate_flags
-[FeatureFlagEvaluations::is_enabled]: #featureflagevaluationsis_enabled
 
 ### `FeatureFlagEvaluations::keys`
 
@@ -1124,14 +1039,11 @@ pub fn only_accessed(&self) -> Self
 ```
 
 A clone of the snapshot containing only flags whose values were read via
-[`is_enabled`](Self::is_enabled) or [`get_flag`](Self::get_flag) before
+[`is_enabled`](#featureflagevaluationsis_enabled) or [`get_flag`](#featureflagevaluationsget_flag) before
 this call.
 
 Order-dependent: if nothing has been accessed yet, the returned snapshot
 is empty. Pre-access the flags you want to attach before calling this.
-
-[Self::get_flag]: #selfget_flag
-[Self::is_enabled]: #selfis_enabled
 
 ### `FeatureFlagEvaluations::only`
 
@@ -1142,10 +1054,8 @@ pub fn only(&self, keys: &[&str]) -> Self
 A clone of the snapshot containing only the listed `keys` (preserving
 records). Unknown keys are dropped and surfaced via a single warning.
 
-Use this before [`Event::with_flags`](crate::Event::with_flags) to limit
+Use this before [`Event::with_flags`](#eventwith_flags) to limit
 the `$feature/<key>` properties attached to a captured event.
-
-[crate::Event::with_flags]: #crateeventwith_flags
 
 ## FlagPoller
 
@@ -1160,9 +1070,7 @@ Synchronous poller for feature flag definitions.
 Runs a background thread that periodically fetches flag definitions from
 the PostHog API and updates the shared cache. Use this for blocking/sync
 applications. With the `async-client` feature enabled, use
-[`AsyncFlagPoller`] for async applications instead.
-
-[`AsyncFlagPoller`]: #asyncflagpoller
+[`AsyncFlagPoller`](#asyncflagpoller) for async applications instead.
 
 ### `FlagPoller::new`
 
@@ -1173,15 +1081,12 @@ pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self
 Create a synchronous flag definition poller.
 
 If the HTTP client cannot be built, logs a warning and leaves polling
-disabled. [`Self::load_flags`] then returns [`Error::Connection`].
+disabled. [`Self::load_flags`](#flagpollerload_flags) then returns [`Error::Connection`](#error).
 
 #### Parameters
 
 - `config`: Credentials, host, polling interval, and request timeout.
 - `cache`: Shared cache updated by the poller.
-
-[`Self::load_flags`]: #selfload_flags
-[`Error::Connection`]: #errorconnection
 
 ### `FlagPoller::start`
 
@@ -1192,9 +1097,7 @@ pub fn start(&mut self)
 Start the polling thread.
 
 Performs an initial synchronous load, then refreshes definitions in the
-background until [`FlagPoller::stop`] is called or the poller is dropped.
-
-[`FlagPoller::stop`]: #flagpollerstop
+background until [`FlagPoller::stop`](#flagpollerstop) is called or the poller is dropped.
 
 ### `FlagPoller::load_flags`
 
@@ -1206,12 +1109,9 @@ Load flags synchronously and update the cache once.
 
 #### Errors
 
-Returns [`Error::Connection`] for request failures or non-success HTTP
-statuses, and [`Error::Serialization`] when the response cannot be
+Returns [`Error::Connection`](#error) for request failures or non-success HTTP
+statuses, and [`Error::Serialization`](#error) when the response cannot be
 parsed.
-
-[`Error::Serialization`]: #errorserialization
-[`Error::Connection`]: #errorconnection
 
 ### `FlagPoller::stop`
 
@@ -1231,11 +1131,9 @@ pub struct LocalEvaluator
 
 Evaluates feature flags using locally cached definitions.
 
-The evaluator reads from a [`FlagCache`] to determine flag values without
+The evaluator reads from a [`FlagCache`](#flagcache) to determine flag values without
 making network requests. Supports cohort membership checks and flag
 dependencies through the evaluation context.
-
-[`FlagCache`]: #flagcache
 
 ### `LocalEvaluator::new`
 
@@ -1243,9 +1141,7 @@ dependencies through the evaluation context.
 pub fn new(cache: FlagCache) -> Self
 ```
 
-Create an evaluator backed by a shared [`FlagCache`].
-
-[`FlagCache`]: #flagcache
+Create an evaluator backed by a shared [`FlagCache`](#flagcache).
 
 ### `LocalEvaluator::cache`
 
@@ -1276,10 +1172,8 @@ person-targeted flags.
 
 #### Errors
 
-Returns [`InconclusiveMatchError`] when required properties, cohorts, or
+Returns [`InconclusiveMatchError`](#inconclusivematcherror) when required properties, cohorts, or
 dependent flags are unavailable locally.
-
-[`InconclusiveMatchError`]: #inconclusivematcherror
 
 ### `LocalEvaluator::evaluate_flag_simple`
 
@@ -1300,10 +1194,8 @@ conditions.
 
 #### Errors
 
-Returns [`InconclusiveMatchError`] when required properties are
+Returns [`InconclusiveMatchError`](#inconclusivematcherror) when required properties are
 unavailable locally.
-
-[`InconclusiveMatchError`]: #inconclusivematcherror
 
 ### `LocalEvaluator::evaluate_all_flags`
 
@@ -1361,9 +1253,7 @@ Sets a capture option on every event in this context. An option the event sets w
 and a `null` value sets nothing. A `process_person_profile` option does not set
 `process_person_profile` on an identify-style event, such as `$identify` or
 `$create_alias`, whose distinct ID the SDK did not generate; see
-[`RequestContext::apply_to_event`].
-
-[`RequestContext::apply_to_event`]: #requestcontextapply_to_event
+[`RequestContext::apply_to_event`](#requestcontextapply_to_event).
 
 #### `RequestContext::get_distinct_id`
 
@@ -1460,12 +1350,10 @@ pub enum CaptureCompression
 
 Request-body compression algorithm for the capture pipelines.
 
-When set on [`ClientOptions`], capture requests are compressed and the
+When set on [`ClientOptions`](#clientoptions), capture requests are compressed and the
 matching `Content-Encoding` header is sent. The variant string matches the
 HTTP `Content-Encoding` token the server expects. All four variants are
 accepted by the capture endpoint.
-
-[`ClientOptions`]: #clientoptions
 
 ### `CaptureSummary`
 
@@ -1476,23 +1364,16 @@ pub struct CaptureSummary
 The outcome of an immediate capture ([`Client::capture_immediate`] /
 [`Client::capture_batch_immediate`]), returned once the SDK has a terminal
 result for the batch — the request succeeded, or the retry budget was spent
-(which is an [`Err`] instead).
+(which is an `Err` instead).
 
 A returned `CaptureSummary` means the capture request itself succeeded (HTTP
 `2xx`). The backend reports a per-event verdict, so a `2xx` can still leave
 some events unpersisted (`drop`/`retry`) — check
-[`all_persisted`](Self::all_persisted) / [`not_persisted`](Self::not_persisted)
+[`all_persisted`](#capturesummaryall_persisted) / [`not_persisted`](#capturesummarynot_persisted)
 before treating the batch as fully durable.
 
 `#[non_exhaustive]`: fields are read through accessors so more can be added
 without breaking callers.
-
-
-[crate::Client::capture_batch_immediate]: #crateclientcapture_batch_immediate
-[Self::not_persisted]: #selfnot_persisted
-[crate::Client::capture_immediate]: #crateclientcapture_immediate
-[`Err`]: #err
-[Self::all_persisted]: #selfall_persisted
 
 #### `CaptureSummary::submitted`
 
@@ -1503,9 +1384,7 @@ pub fn submitted(&self) -> usize
 Number of events that reached a verdict (after `before_send` filtering):
 the events sent on the wire, plus any AI event the SDK did not send
 because it was over the size limit. Such an event has a local `drop`
-verdict in [`event_results`](Self::event_results).
-
-[Self::event_results]: #selfevent_results
+verdict in [`event_results`](#capturesummaryevent_results).
 
 #### `CaptureSummary::not_persisted`
 
@@ -1542,15 +1421,11 @@ pub fn event_results(&self) -> &HashMap<Uuid, EventResult>
 
 Per-event server verdicts. Includes persisted
 (`ok`/`warning`) and unpersisted (`drop`/`retry`) verdicts; filter by
-[`EventStatus`](crate::EventStatus) to isolate failures. May omit events
-the backend did not report on — see [`not_persisted`](Self::not_persisted).
+[`EventStatus`](#eventstatus) to isolate failures. May omit events
+the backend did not report on — see [`not_persisted`](#capturesummarynot_persisted).
 
-An entry's [`duplicates_dropped`](EventResult::duplicates_dropped) counts
+An entry's [`duplicates_dropped`](#eventresult) counts
 lost copies that shared its uuid; they have no entry of their own.
-
-[crate::EventStatus]: #crateeventstatus
-[EventResult::duplicates_dropped]: #eventresultduplicates_dropped
-[Self::not_persisted]: #selfnot_persisted
 
 ### `ClientOptions`
 
@@ -1560,7 +1435,7 @@ pub struct ClientOptions
 
 Configuration options for the PostHog client.
 
-Use [`ClientOptionsBuilder`] to construct options with custom settings, or
+Use [`ClientOptionsBuilder`](#clientoptionsbuilder) to construct options with custom settings, or
 create options directly from a project API key with
 `ClientOptions::from("your-api-key")`.
 
@@ -1575,8 +1450,6 @@ let options = ClientOptionsBuilder::default()
     .build()
     .unwrap();
 ```
-
-[`ClientOptionsBuilder`]: #clientoptionsbuilder
 
 #### `ClientOptions::is_disabled`
 
@@ -1690,11 +1563,9 @@ Secret key used for local feature flag evaluation and remote config.
 Accepts either a Personal API Key (`phx_...`) or a Project Secret API
 Key (`phs_...`). Required when `enable_local_evaluation` is `true`.
 
-[`Client::emails`] needs a Project Secret API Key with the
+[`Client::emails`](#clientemails) needs a Project Secret API Key with the
 `transactional_email:write` scope to send email, or
 `transactional_email:read` to read an email's status.
-
-[`Client::emails`]: #clientemails
 
 #### `ClientOptionsBuilder::app_host`
 
@@ -1703,12 +1574,10 @@ pub fn app_host<VALUE: ::derive_builder::export::core::convert::Into<String>>(&m
 ```
 
 Your PostHog app host, such as `https://posthog.example.com`, for
-[`Client::emails`]. Needed only when `host` is not PostHog Cloud, such
+[`Client::emails`](#clientemails). Needed only when `host` is not PostHog Cloud, such
 as a reverse proxy: email requests carry the secret key, so they never
 go to a custom `host`. Without it, a PostHog Cloud `host` such as
 `https://eu.i.posthog.com` sends email to its region's app host.
-
-[`Client::emails`]: #clientemails
 
 #### `ClientOptionsBuilder::email_request_timeout_seconds`
 
@@ -1716,10 +1585,8 @@ go to a custom `host`. Without it, a PostHog Cloud `host` such as
 pub fn email_request_timeout_seconds(&mut self, value: u64) -> &mut Self
 ```
 
-Per-request timeout in seconds for [`Client::emails`]. Defaults to `15`.
+Per-request timeout in seconds for [`Client::emails`](#clientemails). Defaults to `15`.
 Also applies to custom HTTP clients, replacing their request timeout.
-
-[`Client::emails`]: #clientemails
 
 #### `ClientOptionsBuilder::email_request_max_retries`
 
@@ -1956,7 +1823,7 @@ where
 
 Add a hook invoked once per terminal failure on an SDK network surface.
 
-The hook receives a [`PostHogError`] for a capture batch the SDK gave up
+The hook receives a [`PostHogError`](#posthogerror) for a capture batch the SDK gave up
 delivering, a failed remote `/flags` request, or a failed
 local-evaluation poll. Multiple hooks fire in registration order.
 
@@ -1978,15 +1845,13 @@ WARN logs and do **not** fire the hook. A batch that has used all
 `max_capture_attempts` still fires it.
 The existing `/flags` and poller WARN logs are unaffected.
 
-[`PostHogError`]: #posthogerror
-
 #### `ClientOptionsBuilder::build`
 
 ```rust
 pub fn build(&self) -> Result<ClientOptions, ClientOptionsBuilderError>
 ```
 
-Build sanitized [`ClientOptions`].
+Build sanitized [`ClientOptions`](#clientoptions).
 
 Missing, whitespace-only and personal (`phx_...`) API keys are allowed and
 disable the client with one error log, so SDK initialization remains
@@ -1994,11 +1859,8 @@ infallible and never sends a key PostHog would reject.
 
 ##### Errors
 
-Returns [`ClientOptionsBuilderError`] if a required builder value is
+Returns [`ClientOptionsBuilderError`](#clientoptionsbuildererror) if a required builder value is
 invalid according to the generated builder.
-
-[`ClientOptionsBuilderError`]: #clientoptionsbuildererror
-[`ClientOptions`]: #clientoptions
 
 ### `ClientOptionsBuilderError`
 
@@ -2032,12 +1894,9 @@ oversize-AI-event drops — those are not delivery failures.
 pub fn endpoint(&self) -> Endpoint
 ```
 
-The capture endpoint the failed batch targeted: [`Endpoint::Capture`]
-for `capture`/`capture_batch`, [`Endpoint::CaptureAi`] for
+The capture endpoint the failed batch targeted: [`Endpoint::Capture`](#endpoint)
+for `capture`/`capture_batch`, [`Endpoint::CaptureAi`](#endpoint) for
 `capture_ai`/`capture_ai_batch`. Lets one hook tell the lanes apart.
-
-[`Endpoint::Capture`]: #endpointcapture
-[`Endpoint::CaptureAi`]: #endpointcaptureai
 
 #### `CaptureFailure::error`
 
@@ -2048,9 +1907,7 @@ pub fn error(&self) -> Option<&Error>
 The batch-level cause: a permanent reject, exhausted transport/HTTP
 retries, or a serialization failure.
 `None` only when the request itself succeeded (`2xx`) but some events were not
-persisted after the retry budget — inspect [`event_results`](Self::event_results).
-
-[Self::event_results]: #selfevent_results
+persisted after the retry budget — inspect [`event_results`](#capturefailureevent_results).
 
 #### `CaptureFailure::status`
 
@@ -2077,16 +1934,13 @@ pub fn event_count(&self) -> usize
 
 Number of events this failure dropped (lost).
 Counts only undelivered events (`retry`/`drop`), including any finalized on
-earlier attempts. This can be smaller than [`event_results`](Self::event_results)`.len()`,
+earlier attempts. This can be smaller than [`event_results`](#capturefailureevent_results)`.len()`,
 which also reports persisted `ok`/`warning` verdicts — filter by status before
 treating an entry as lost.
 
 It also counts each copy capture dropped because an earlier event in the
 same request had its uuid, as reported by an entry's
-[`duplicates_dropped`](EventResult::duplicates_dropped).
-
-[Self::event_results]: #selfevent_results
-[EventResult::duplicates_dropped]: #eventresultduplicates_dropped
+[`duplicates_dropped`](#eventresult).
 
 #### `CaptureFailure::historical_migration`
 
@@ -2114,23 +1968,17 @@ pub fn event_results(&self) -> &HashMap<Uuid, EventResult>
 
 Per-event server verdicts for the capture batch.
 
-Maps event UUID to its [`EventResult`]. Includes **all** verdicts the
+Maps event UUID to its [`EventResult`](#eventresult). Includes **all** verdicts the
 batch collected — persisted (`ok`/`warning`) as well as lost
 (`retry`/`drop`) — so this map can be larger than
-[`event_count`](Self::event_count); filter by
-[`EventStatus`](crate::EventStatus) to isolate the failures. Complete
-when [`error`](Self::error) is `None` (a `2xx` where events weren't
+[`event_count`](#capturefailureevent_count); filter by
+[`EventStatus`](#eventstatus) to isolate the failures. Complete
+when [`error`](#capturefailureerror) is `None` (a `2xx` where events weren't
 persisted after retries); possibly partial on a batch-level failure
 (only verdicts collected from earlier attempts).
 
-An entry's [`duplicates_dropped`](EventResult::duplicates_dropped) counts
+An entry's [`duplicates_dropped`](#eventresult) counts
 lost copies that shared its uuid; they have no entry of their own.
-
-[Self::event_count]: #selfevent_count
-[crate::EventStatus]: #crateeventstatus
-[EventResult::duplicates_dropped]: #eventresultduplicates_dropped
-[Self::error]: #selferror
-[`EventResult`]: #eventresult
 
 #### `CaptureFailure::verdict_summary`
 
@@ -2174,9 +2022,7 @@ The structured error body returned by the capture backend on a
 non-`2xx` response (`error`, `error_description`, `error_uri`), when the
 body parsed as one. `None` for a transport error, a `2xx`, or an
 unrecognizable body — the raw body remains available via
-[`error`](Self::error).
-
-[Self::error]: #selferror
+[`error`](#capturefailureerror).
 
 ### `FlagsFailure`
 
@@ -2194,11 +2040,8 @@ Fields are read through accessors; the struct is `#[non_exhaustive]`.
 pub fn error(&self) -> &Error
 ```
 
-The cause of the failure ([`Error::Connection`] for transport or
-non-success status, [`Error::Serialization`] for an unparseable body).
-
-[`Error::Serialization`]: #errorserialization
-[`Error::Connection`]: #errorconnection
+The cause of the failure ([`Error::Connection`](#error) for transport or
+non-success status, [`Error::Serialization`](#error) for an unparseable body).
 
 #### `FlagsFailure::endpoint`
 
@@ -2250,11 +2093,8 @@ Credentials (the personal API key) are never surfaced here.
 pub fn error(&self) -> &Error
 ```
 
-The cause of the failure ([`Error::Connection`] for transport or
-non-success status, [`Error::Serialization`] for an unparseable body).
-
-[`Error::Serialization`]: #errorserialization
-[`Error::Connection`]: #errorconnection
+The cause of the failure ([`Error::Connection`](#error) for transport or
+non-success status, [`Error::Serialization`](#error) for an unparseable body).
 
 #### `LocalEvaluationFailure::status`
 
@@ -2317,7 +2157,7 @@ pub struct CodeEmail
 One email whose content your code rendered, such as React Email output,
 named by a key. PostHog sends it as is.
 
-It needs [`html`](Self::html), [`text`](Self::text) or both. Without
+It needs [`html`](#codeemailhtml), [`text`](#codeemailtext) or both. Without
 `text`, PostHog derives it from the `html`. To send a React email, render
 it to HTML in your app and pass the HTML.
 
@@ -2329,9 +2169,6 @@ let email = CodeEmail::new("jane@example.com", "password-reset", "Reset your pas
     .from("Acme <security@example.com>")
     .distinct_id("user_123");
 ```
-
-[Self::text]: #selftext
-[Self::html]: #selfhtml
 
 #### `CodeEmail::new`
 
@@ -2440,9 +2277,7 @@ pub enum EmailDeliveryStatus
 - `Other(String)` - A status this SDK version doesn't know, as PostHog sent it.
 
 What happened to an email. Later SDK versions can know statuses that this
-one passes through as [`Other`](Self::Other).
-
-[Self::Other]: #selfother
+one passes through as [`Other`](#emaildeliverystatus).
 
 #### `EmailDeliveryStatus::as_str`
 
@@ -2461,12 +2296,9 @@ pub struct EmailError
 PostHog did not queue the email or read its status, or the client could not
 tell whether it did.
 
-Branch on [`code`](Self::code), PostHog's stable error code such as
-`quota_limited`, or on [`kind`](Self::kind), a coarse category. The message
+Branch on [`code`](#emailerrorcode), PostHog's stable error code such as
+`quota_limited`, or on [`kind`](#emailerrorkind), a coarse category. The message
 never holds the secret key or the request body.
-
-[Self::kind]: #selfkind
-[Self::code]: #selfcode
 
 #### `EmailError::kind`
 
@@ -2562,11 +2394,8 @@ pub enum EmailErrorKind
 - `ServiceUnavailable` - PostHog answered `503`, or the request failed on the network.
 - `ApplicationError` - Anything else.
 
-A coarse category of an [`EmailError`], for code that branches on the kind
-of failure rather than on the exact [`code`](EmailError::code).
-
-[`EmailError`]: #emailerror
-[EmailError::code]: #emailerrorcode
+A coarse category of an [`EmailError`](#emailerror), for code that branches on the kind
+of failure rather than on the exact [`code`](#emailerrorcode).
 
 #### `EmailErrorKind::as_str`
 
@@ -2591,9 +2420,7 @@ pub struct EmailStatus
 - `status_at: chrono::DateTime<chrono::Utc>` - When the email reached its current status.
 - `reason: Option<String>` - Why a failed email was not sent, such as `provider_error` or `recipient_suppressed`, or the bounce type of a bounced email: `hard`, `soft` or `unknown`. `None` otherwise.
 
-The status of an email that [`Emails::send`](crate::Emails::send) queued.
-
-[crate::Emails::send]: #crateemailssend
+The status of an email that [`Emails::send`](#emailssend) queued.
 
 ### `EmailWarning`
 
@@ -2615,10 +2442,10 @@ A warning PostHog returned with a queued email.
 pub struct Emails<'a>
 ```
 
-Transactional email on a [`Client`](crate::Client): sends email from
+Transactional email on a `Client`: sends email from
 templates made in PostHog or from content your code rendered, and reads the
 status of each email it sent. Get it with
-[`Client::emails`](crate::Client::emails).
+[`Client::emails`](#clientemails).
 
 #### Setup
 
@@ -2636,7 +2463,7 @@ status of each email it sent. Get it with
    transactional and copy its ID.
 
 A result means PostHog queued the email. Delivery happens later: read it
-with [`Emails::get`].
+with [`Emails::get`](#emailsget).
 
 #### Timeouts and retries
 
@@ -2654,10 +2481,6 @@ never sends twice. When a job runner already retries the send, set
 Set `migrated_from`, such as `"resend"`, on the client, so PostHog knows
 where your sends came from.
 
-[crate::Client]: #crateclient
-[`Emails::get`]: #emailsget
-[crate::Client::emails]: #crateclientemails
-
 #### `Emails::send`
 
 ```rust
@@ -2674,7 +2497,7 @@ key.
 
 ##### Errors
 
-Returns an [`EmailError`] when an argument check fails, the client is
+Returns an [`EmailError`](#emailerror) when an argument check fails, the client is
 disabled, shut down or has no `secret_key`, or PostHog did not queue the
 email.
 
@@ -2715,27 +2538,22 @@ posthog
     .await?;
 ```
 
-[`EmailError`]: #emailerror
-
 #### `Emails::get`
 
 ```rust
 pub async fn get(&self, message_id: &str) -> Result<EmailStatus, EmailError>
 ```
 
-Reads the status of an email that [`send`](Self::send) queued, for 30
+Reads the status of an email that [`send`](#emailssend) queued, for 30
 days after the send. A key with only `transactional_email:read` can read
 statuses but not send.
 
 ##### Errors
 
-Returns an [`EmailError`] when `message_id` is not a message ID, the
+Returns an [`EmailError`](#emailerror) when `message_id` is not a message ID, the
 client can't reach PostHog, or PostHog answered with an error. The code
 is `not_found` when no email of this project has the ID, when the email
 is older than 30 days, or for a few seconds after the send.
-
-[Self::send]: #selfsend
-[`EmailError`]: #emailerror
 
 ### `SendEmail`
 
@@ -2748,10 +2566,8 @@ pub enum SendEmail
 - `Template(TemplateEmail)` - A template made transactional in PostHog.
 - `Code(CodeEmail)` - Content your code rendered.
 
-An email for [`Emails::send`](crate::Emails::send): a template made in
+An email for [`Emails::send`](#emailssend): a template made in
 PostHog, or content your code rendered.
-
-[crate::Emails::send]: #crateemailssend
 
 ### `SendEmailResult`
 
@@ -2768,9 +2584,7 @@ pub struct SendEmailResult
 The queued email.
 
 A result means PostHog queued the email, not that it was delivered. Read
-its delivery status with [`Emails::get`](crate::Emails::get).
-
-[crate::Emails::get]: #crateemailsget
+its delivery status with [`Emails::get`](#emailsget).
 
 ### `TemplateEmail`
 
@@ -2826,9 +2640,7 @@ email address.
 pub fn idempotency_key(self, key: impl Into<String>) -> Self
 ```
 
-1 to 255 visible ASCII characters. See [`CodeEmail::idempotency_key`].
-
-[`CodeEmail::idempotency_key`]: #codeemailidempotency_key
+1 to 255 visible ASCII characters. See [`CodeEmail::idempotency_key`](#codeemailidempotency_key).
 
 #### `TemplateEmail::max_retries`
 
@@ -2860,7 +2672,7 @@ pub enum Error
 - `ServerError { .. }` - HTTP 5xx — the server encountered an error
 - `Unauthorized` - HTTP 401 — invalid or missing Bearer token
 - `BillingLimitExceeded(String)` - HTTP 402 — billing quota exceeded (non-retryable)
-- `Email(emails::EmailError)` - A transactional email request failed; see [`EmailError`].
+- `Email(emails::EmailError)` - A transactional email request failed; see [`EmailError`](#emailerror).
 
 Errors that can occur when using the PostHog client.
 
@@ -2876,9 +2688,9 @@ fingerprint/level.
 
 All fields are optional. An empty options set (`new()` / `Default`)
 captures the exception personlessly with no extra context. With the
-trace-context provider configured on [`ErrorTrackingOptions`], its trace
+trace-context provider configured on [`ErrorTrackingOptions`](#errortrackingoptions), its trace
 and span IDs are attached automatically; values set here take precedence.
-A `$trace_id` or `$span_id` set with [`CaptureExceptionOptions::property`]
+A `$trace_id` or `$span_id` set with [`CaptureExceptionOptions::property`](#captureexceptionoptionsproperty)
 also wins: the provider's IDs are then not added at all.
 
 #### Examples
@@ -2897,9 +2709,6 @@ let options = CaptureExceptionOptions::new()
     .fingerprint("checkout-error")
     .level("warning");
 ```
-
-[`ErrorTrackingOptions`]: #errortrackingoptions
-[`CaptureExceptionOptions::property`]: #captureexceptionoptionsproperty
 
 #### `CaptureExceptionOptions::new`
 
@@ -2931,9 +2740,7 @@ Add a custom property to the exception event.
 pub fn option<K: Into<String>, V: Serialize>(self, key: K, value: V) -> Result<Self, Error>
 ```
 
-Set a capture option on the exception event; see [`Event::insert_option`].
-
-[`Event::insert_option`]: #eventinsert_option
+Set a capture option on the exception event; see [`Event::insert_option`](#eventinsert_option).
 
 #### `CaptureExceptionOptions::group`
 
@@ -2959,9 +2766,7 @@ Associate the exception with a span in a distributed trace.
 The IDs are accepted together so an exception can never combine a trace
 ID and span ID from different contexts. This pair overrides any context
 returned by the client's trace-context provider, and any `$trace_id` or
-`$span_id` set with [`CaptureExceptionOptions::property`].
-
-[`CaptureExceptionOptions::property`]: #captureexceptionoptionsproperty
+`$span_id` set with [`CaptureExceptionOptions::property`](#captureexceptionoptionsproperty).
 
 #### `CaptureExceptionOptions::fingerprint`
 
@@ -2986,7 +2791,7 @@ pub struct ErrorTrackingOptions
 ```
 
 Client-level Error Tracking configuration, applied to every exception the
-client captures. Set it via [`ErrorTrackingOptionsBuilder`] on
+client captures. Set it via [`ErrorTrackingOptionsBuilder`](#errortrackingoptionsbuilder) on
 `ClientOptions::error_tracking`.
 
 #### Examples
@@ -3006,8 +2811,6 @@ let options = ErrorTrackingOptionsBuilder::default()
     .build()
     .unwrap();
 ```
-
-[`ErrorTrackingOptionsBuilder`]: #errortrackingoptionsbuilder
 
 ### `ErrorTrackingOptionsBuilder`
 
@@ -3062,15 +2865,13 @@ includes and defaults. Same matching rules as `in_app_include_paths`
 pub fn capture_panics(&mut self, value: bool) -> &mut Self
 ```
 
-When `true`, [`crate::init_global`] installs a process-wide panic hook
+When `true`, [`crate::init_global`](#posthoginit_global) installs a process-wide panic hook
 that captures panics as `$exception` events through the global client.
 Defaults to `false` — panic autocapture is opt-in.
 
 Only the global client installs a hook: a panic hook is process-global
 (`std::panic::set_hook`), so it pairs with the process-global client, and
 there is intentionally no per-`Client` panic API for now.
-
-[`crate::init_global`]: #crateinit_global
 
 #### `ErrorTrackingOptionsBuilder::build`
 
@@ -3100,9 +2901,7 @@ fast, non-blocking, and must not call back into the PostHog SDK. Panics
 are caught and cause trace context to be omitted from that exception.
 The callback is skipped for an exception that sets a `$trace_id` or
 `$span_id` property or an explicit
-[`CaptureExceptionOptions::trace_context`].
-
-[`CaptureExceptionOptions::trace_context`]: #captureexceptionoptionstrace_context
+[`CaptureExceptionOptions::trace_context`](#captureexceptionoptionstrace_context).
 
 ### `ErrorTrackingOptionsBuilderError`
 
@@ -3140,12 +2939,10 @@ Create a trace context from its trace and span identifiers.
 pub struct Event
 ```
 
-An [`Event`] represents an interaction a user has with your app or
+An [`Event`](#event) represents an interaction a user has with your app or
 website. Examples include button clicks, pageviews, query completions, and signups.
 See the [PostHog documentation](https://posthog.com/docs/data/events)
 for a detailed explanation of PostHog Events.
-
-[`Event`]: #event
 
 #### `Event::insert_prop`
 
@@ -3162,9 +2959,7 @@ Add a property to the event.
 
 ##### Errors
 
-Returns [`Error::Serialization`] if `prop` cannot be serialized.
-
-[`Error::Serialization`]: #errorserialization
+Returns [`Error::Serialization`](#error) if `prop` cannot be serialized.
 
 #### `Event::remove_prop`
 
@@ -3190,15 +2985,13 @@ as `"process_person_profile"`.
 
 ##### Errors
 
-Returns [`Error::Serialization`] if `value` cannot be serialized.
+Returns [`Error::Serialization`](#error) if `value` cannot be serialized.
 
 ##### Remarks
 
 Sent unchecked: PostHog ignores unknown keys and drops the event if a
 known key has an unusable value. Legacy option properties still work,
 but an option overrides its legacy property. Use options.
-
-[`Error::Serialization`]: #errorserialization
 
 #### `Event::remove_option`
 
@@ -3227,10 +3020,8 @@ See <https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-g
 
 Adding a group does not change person processing. PostHog attaches
 groups for group analytics only to events that process person profiles,
-so an event from [`Event::new_anon`] needs
+so an event from [`Event::new_anon`](#eventnew_anon) needs
 `insert_option("process_person_profile", true)` to count for its groups.
-
-[`Event::new_anon`]: #eventnew_anon
 
 #### `Event::set_timestamp`
 
@@ -3258,7 +3049,7 @@ The `Result` stays so existing callers keep compiling.
 pub fn alias<P: Into<String>, D: Into<String>>(previous_id: P, distinct_id: D) -> Result<Self, Error>
 ```
 
-Build the `$create_alias` event that [`crate::Client::alias`] sends, so you
+Build the `$create_alias` event that [`crate::Client::alias`](#clientalias) sends, so you
 can set options on it before you capture it.
 
 ##### Parameters
@@ -3273,7 +3064,7 @@ The event, attributed to `previous_id`, which is also mirrored into
 
 ##### Errors
 
-Returns [`Error::InvalidArgument`] when either ID is blank, because a merge
+Returns [`Error::InvalidArgument`](#error) when either ID is blank, because a merge
 needs both sides.
 
 ##### Remarks
@@ -3289,16 +3080,13 @@ event.insert_option("disable_skew_correction", true)?;
 posthog.capture(event);
 ```
 
-[`Error::InvalidArgument`]: #errorinvalidargument
-[`crate::Client::alias`]: #crateclientalias
-
 #### `Event::group_identify`
 
 ```rust
 pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(group_type: T, group_key: K, properties: P) -> Result<Self, Error>
 ```
 
-Build the `$groupidentify` event that [`crate::Client::group_identify`]
+Build the `$groupidentify` event that [`crate::Client::group_identify`](#clientgroup_identify)
 sends, so you can set options on it before you capture it.
 
 ##### Parameters
@@ -3315,8 +3103,8 @@ is set, else `$<group_type>_<group_key>`.
 
 ##### Errors
 
-Returns [`Error::InvalidArgument`] when `group_type` or `group_key` is
-blank. Returns [`Error::Serialization`] if `properties` fails to serialize
+Returns [`Error::InvalidArgument`](#error) when `group_type` or `group_key` is
+blank. Returns [`Error::Serialization`](#error) if `properties` fails to serialize
 to JSON, or if it does not serialize to a JSON object. PostHog requires
 `$group_set` to be an object and silently drops the event otherwise.
 
@@ -3333,10 +3121,6 @@ let mut event = posthog::Event::group_identify("company", "acme_123", properties
 event.insert_option("disable_skew_correction", true)?;
 posthog.capture(event);
 ```
-
-[`crate::Client::group_identify`]: #crateclientgroup_identify
-[`Error::InvalidArgument`]: #errorinvalidargument
-[`Error::Serialization`]: #errorserialization
 
 #### `Event::set_uuid`
 
@@ -3357,7 +3141,7 @@ copies, which the SDK reports with the reason `duplicate_event_uuid`.
 pub fn with_flags(&mut self, flags: &FeatureFlagEvaluations) -> &mut Self
 ```
 
-Attach the flag state captured by a [`FeatureFlagEvaluations`] snapshot
+Attach the flag state captured by a [`FeatureFlagEvaluations`](#featureflagevaluations) snapshot
 to this event.
 
 Adds `$feature/<key>` for every evaluated flag plus a sorted
@@ -3372,8 +3156,6 @@ is set before or after this call.
 ##### Returns
 
 Returns `self` so calls can be chained before capture.
-
-[`FeatureFlagEvaluations`]: #featureflagevaluations
 
 #### `Event::event_name`
 
@@ -3405,9 +3187,7 @@ Return the event properties.
 pub fn options(&self) -> &HashMap<String, serde_json::Value>
 ```
 
-Return the event's capture options, as set by [`Event::insert_option`].
-
-[`Event::insert_option`]: #eventinsert_option
+Return the event's capture options, as set by [`Event::insert_option`](#eventinsert_option).
 
 ### `CaptureErrorResponse`
 
@@ -3476,13 +3256,10 @@ pub struct EvaluateFlagsOptions
 - `disable_geoip: Option<bool>` - Per-call override for GeoIP behavior on `/flags` and `$feature_flag_called` requests. `None` uses the client-level setting.
 - `flag_keys: Option<Vec<String>>` - Optional list of flag keys. When provided, only these flags are evaluated — the underlying `/flags` request asks the server for just this subset, which makes the response smaller and the request cheaper. An explicitly empty list returns an empty snapshot without local or remote evaluation; `None` evaluates all flags.
 
-Optional inputs for [`Client::evaluate_flags`](crate::Client::evaluate_flags).
+Optional inputs for [`Client::evaluate_flags`](#clientevaluate_flags).
 
 This struct is non-exhaustive so more options can be added in minor releases.
-Create it with [`Default`] and then set the fields you need.
-
-[crate::Client::evaluate_flags]: #crateclientevaluate_flags
-[`Default`]: #default
+Create it with `Default` and then set the fields you need.
 
 ### `CohortDefinition`
 
@@ -3778,14 +3555,12 @@ The `/flags/definitions/?send_cohorts` endpoint maps each cohort ID
 straight to its property group, `{"type": "AND"|"OR", "values": [...]}`,
 with no wrapping `id`/`name` fields — so this type is transparent over the
 raw property group and the owning ID is the map key in
-[`LocalEvaluationResponse::cohorts`].
+[`LocalEvaluationResponse::cohorts`](#localevaluationresponse).
 
 The backend dependency loader can serialize cohort references that form a
 cycle across map entries. Serde preserves those references as-is; cohort
 evaluation must track active IDs before following them recursively to avoid
 a stack overflow.
-
-[`LocalEvaluationResponse::cohorts`]: #localevaluationresponsecohorts
 
 ### `FlagCache`
 
@@ -3949,9 +3724,7 @@ Asynchronous poller for feature flag definitions.
 
 Runs a tokio task that periodically fetches flag definitions from the
 PostHog API and updates the shared cache. Use this for async applications.
-For blocking/sync applications, use [`FlagPoller`] instead.
-
-[`FlagPoller`]: #flagpoller
+For blocking/sync applications, use [`FlagPoller`](#flagpoller) instead.
 
 #### `AsyncFlagPoller::new`
 
@@ -3962,15 +3735,12 @@ pub fn new(config: LocalEvaluationConfig, cache: FlagCache) -> Self
 Create an asynchronous flag definition poller.
 
 If the HTTP client cannot be built, logs a warning and leaves polling
-disabled. [`Self::load_flags`] then returns [`Error::Connection`].
+disabled. [`Self::load_flags`](#asyncflagpollerload_flags) then returns [`Error::Connection`](#error).
 
 ##### Parameters
 
 - `config`: Credentials, host, polling interval, and request timeout.
 - `cache`: Shared cache updated by the poller.
-
-[`Self::load_flags`]: #selfload_flags
-[`Error::Connection`]: #errorconnection
 
 #### `AsyncFlagPoller::start`
 
@@ -3981,10 +3751,8 @@ pub async fn start(&mut self)
 Start the polling task.
 
 Performs an initial async load, then refreshes definitions in the
-background until [`AsyncFlagPoller::stop`] is called or the poller is
+background until [`AsyncFlagPoller::stop`](#asyncflagpollerstop) is called or the poller is
 dropped.
-
-[`AsyncFlagPoller::stop`]: #asyncflagpollerstop
 
 #### `AsyncFlagPoller::load_flags`
 
@@ -3996,12 +3764,9 @@ Load flags asynchronously and update the cache once.
 
 ##### Errors
 
-Returns [`Error::Connection`] for request failures or non-success HTTP
-statuses, and [`Error::Serialization`] when the response cannot be
+Returns [`Error::Connection`](#error) for request failures or non-success HTTP
+statuses, and [`Error::Serialization`](#error) when the response cannot be
 parsed.
-
-[`Error::Serialization`]: #errorserialization
-[`Error::Connection`]: #errorconnection
 
 #### `AsyncFlagPoller::stop`
 
@@ -4055,10 +3820,8 @@ without a scheme, port, path, or wildcard. An empty list disables header injecti
 pub fn client(&self) -> &Client
 ```
 
-Use this client to build requests, then pass them to [`Self::execute`].
+Use this client to build requests, then pass them to [`Self::execute`](#posthogreqwestclientexecute).
 Calling reqwest's `send` or `execute` directly does not inject context.
-
-[`Self::execute`]: #selfexecute
 
 #### `PostHogReqwestClient::execute`
 
@@ -4068,10 +3831,7 @@ pub async fn execute(&self, request: Request) -> Result<Response, reqwest::Error
 
 Sends a request with the context active when this future is first polled.
 
-Build the request with [`Self::client`] to retain its client configuration.
+Build the request with [`Self::client`](#posthogreqwestclientclient) to retain its client configuration.
 On allowed hosts, current values replace stale tracing headers. Missing values and
 values that cannot form valid HTTP headers are omitted. Other hosts are unchanged.
-Spawned tasks can use an explicit [`RequestContext::scope`] to carry context.
-
-[`Self::client`]: #selfclient
-[`RequestContext::scope`]: #requestcontextscope
+Spawned tasks can use an explicit [`RequestContext::scope`](#requestcontextscope) to carry context.
