@@ -146,6 +146,12 @@ pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     })
 }
 
+/// Reserve the longest consent representation (`false`), so every valid state
+/// can opt in/out or clear the override without exceeding its configured bound.
+pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
+    snapshot_size(snapshot).saturating_add(usize::from(snapshot.opt_out != Some(false)))
+}
+
 /// Blocking backend calls belong exclusively to the state-persistence worker.
 pub(super) trait StateStore: Send + 'static {
     fn save(&mut self, snapshot: &Snapshot) -> io::Result<()>;
@@ -206,7 +212,7 @@ impl FileStateStore {
         }
         let snapshot = Self::decode(&encoded)?;
         // Restored state must also fit the current in-memory/write bound.
-        if snapshot_size(&snapshot) as u64 > self.max_bytes {
+        if snapshot_capacity(&snapshot) as u64 > self.max_bytes {
             return Err(invalid_state());
         }
         Ok(Some(snapshot))
@@ -232,6 +238,12 @@ impl FileStateStore {
     /// Only the state writer calls this. A completed replacement is not a
     /// multi-file transaction with event storage or a universal power-loss guarantee.
     pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
+        if snapshot_capacity(snapshot) as u64 > self.max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "State snapshot exceeds store limit",
+            ));
+        }
         let mut buffer = RecordBuffer {
             bytes: Vec::new(),
             limit: self.max_bytes,

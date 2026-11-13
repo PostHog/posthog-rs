@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use super::storage::{snapshot_size, StateStore};
+use super::storage::{snapshot_capacity, StateStore};
 use super::Snapshot;
 use crate::client::common::report_storage_error;
 use crate::client::retry::exponential_backoff;
@@ -493,7 +493,7 @@ fn validate(snapshot: &Snapshot, max_bytes: usize) -> Result<(), UpdateError> {
     if !snapshot.is_valid() {
         return Err(UpdateError::Invalid);
     }
-    if snapshot_size(snapshot) > max_bytes {
+    if snapshot_capacity(snapshot) > max_bytes {
         return Err(UpdateError::Full);
     }
     Ok(())

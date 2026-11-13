@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::storage::snapshot_size;
+use super::storage::snapshot_capacity;
 use super::{Persistence, PersonProfiles, Snapshot};
 use crate::client::event_store::StoreLimits;
 use crate::client::transport::MAX_SHUTDOWN_TIMEOUT;
@@ -19,6 +19,11 @@ pub struct Config {
     pub host: String,
     /// Explicitly disable this client. Defaults to false.
     pub disabled: bool,
+    /// Default collection choice when no explicit consent can be restored,
+    /// including after reset or state-storage open/read failure. False by default.
+    /// Set true when unavailable consent must require opt-in. A successfully
+    /// restored explicit opt-in/out choice takes precedence.
+    pub opt_out: bool,
     /// Storage selection. Defaults to the OS local application-data directory.
     pub persistence: Persistence,
     /// Isolates storage for instances using the same host and project. Default: "default".
@@ -82,6 +87,7 @@ impl Config {
             project_token: project_token.into(),
             host: DEFAULT_HOST.into(),
             disabled: false,
+            opt_out: false,
             persistence: Persistence::Automatic,
             instance_name: "default".into(),
             bootstrap_anonymous_id: None,
@@ -204,7 +210,7 @@ impl Config {
             );
         }
         let generated = Snapshot::anonymous(uuid::Uuid::nil().to_string());
-        if self.max_state_bytes < snapshot_size(&generated) {
+        if self.max_state_bytes < snapshot_capacity(&generated) {
             return Some("max_state_bytes must hold a generated anonymous identity record");
         }
         if self.bootstrap_anonymous_id.is_some() && self.bootstrap_identified_id.is_some() {
@@ -215,13 +221,13 @@ impl Config {
             snapshot.distinct_id = id.clone();
             snapshot.identified = true;
             snapshot.person_processing = true;
-            if !snapshot.is_valid() || snapshot_size(&snapshot) > self.max_state_bytes {
+            if !snapshot.is_valid() || snapshot_capacity(&snapshot) > self.max_state_bytes {
                 return Some("bootstrap_identified_id must be nonblank and fit max_state_bytes");
             }
         }
         if let Some(id) = &self.bootstrap_anonymous_id {
             let snapshot = Snapshot::anonymous(id.clone());
-            if !snapshot.is_valid() || snapshot_size(&snapshot) > self.max_state_bytes {
+            if !snapshot.is_valid() || snapshot_capacity(&snapshot) > self.max_state_bytes {
                 return Some("bootstrap_anonymous_id must be nonblank and fit max_state_bytes");
             }
         }

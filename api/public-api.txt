@@ -145,6 +145,7 @@ pub posthog::stateful::CaptureOutcome::Disabled
 pub posthog::stateful::CaptureOutcome::Dropped
 pub posthog::stateful::CaptureOutcome::Full
 pub posthog::stateful::CaptureOutcome::Invalid
+pub posthog::stateful::CaptureOutcome::OptedOut
 pub posthog::stateful::CaptureOutcome::Reentrant
 #[non_exhaustive] pub enum posthog::stateful::DeliveryOutcome
 pub posthog::stateful::DeliveryOutcome::Attempted
@@ -204,6 +205,10 @@ pub fn posthog::stateful::Client::init_blocking(posthog::stateful::Config) -> Se
 pub fn posthog::stateful::Client::is_disabled(&self) -> bool
 pub async fn posthog::stateful::Client::shutdown(&self, core::option::Option<core::time::Duration>) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::shutdown_blocking(&self, core::option::Option<core::time::Duration>) -> posthog::stateful::DrainReport
+impl posthog::stateful::Client
+pub fn posthog::stateful::Client::is_opt_out(&self) -> bool
+pub fn posthog::stateful::Client::opt_in(&self)
+pub fn posthog::stateful::Client::opt_out(&self)
 impl core::ops::drop::Drop for posthog::stateful::Client
 pub fn posthog::stateful::Client::drop(&mut self)
 pub struct posthog::stateful::Config
@@ -224,6 +229,7 @@ pub posthog::stateful::Config::max_record_bytes: u64
 pub posthog::stateful::Config::max_state_bytes: usize
 pub posthog::stateful::Config::max_stored_bytes: u64
 pub posthog::stateful::Config::max_stored_events: usize
+pub posthog::stateful::Config::opt_out: bool
 pub posthog::stateful::Config::persistence: posthog::stateful::Persistence
 pub posthog::stateful::Config::person_profiles: posthog::stateful::PersonProfiles
 pub posthog::stateful::Config::platform_context: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>

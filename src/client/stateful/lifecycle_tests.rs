@@ -260,6 +260,53 @@ fn capture_screen_and_getters_complete_while_state_io_is_gated() {
 }
 
 #[test]
+fn consent_is_immediate_while_io_is_gated_and_old_completion_cannot_revert_it() {
+    use crate::stateful::CaptureOutcome;
+    let directory = Directory::new();
+    let (state, gate) = gated_writer(&directory);
+    gate.entered.recv_timeout(WAIT).unwrap();
+    let client = Arc::new(client_with_writer(&config(), state));
+    let caller_client = client.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let caller = thread::spawn(move || {
+        caller_client.opt_out();
+        let out = caller_client.is_opt_out();
+        let blocked = caller_client.capture("blocked");
+        caller_client.opt_in();
+        let opted_in = !caller_client.is_opt_out();
+        let admitted = caller_client.capture("permitted");
+        caller_client.opt_out();
+        done_tx.send((out, blocked, opted_in, admitted)).unwrap();
+    });
+    let result = done_rx.recv_timeout(WAIT);
+    // Stop future scheduling while the original, pre-consent write is in flight.
+    // This leaves the last durable snapshot older than the current memory choice.
+    client.state.as_ref().unwrap().request_close();
+    gate.release.send(()).unwrap();
+    caller.join().unwrap();
+    client.state.as_ref().unwrap().join_blocking();
+    let (out, blocked, opted_in, admitted) =
+        result.expect("consent/capture waited for filesystem I/O");
+    assert!(out && opted_in);
+    assert_eq!(blocked, CaptureOutcome::OptedOut);
+    assert!(matches!(admitted, CaptureOutcome::Accepted { .. }));
+    assert!(
+        client.is_opt_out(),
+        "old write completion changed live consent"
+    );
+    client.shutdown_blocking(None);
+    drop(client);
+    gate.dropped.recv_timeout(WAIT).unwrap();
+    let (_, restored) =
+        FileStateStore::open(StorageDirectory::open(&directory.0).unwrap(), 4096).unwrap();
+    assert_eq!(
+        restored.unwrap().opt_out,
+        None,
+        "pending consent was not durable"
+    );
+}
+
+#[test]
 fn identity_mutations_complete_while_state_io_is_gated() {
     let directory = Directory::new();
     let (state, gate) = gated_writer(&directory);
