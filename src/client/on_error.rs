@@ -1,9 +1,8 @@
 //! The `on_error` observability hook and the failure types it surfaces.
 //!
 //! Registering a hook via [`ClientOptionsBuilder::on_error`] lets a caller
-//! observe terminal failures across the SDK's network surfaces — capture batch
-//! delivery, remote `/flags` requests, and the local-evaluation definitions
-//! poller — without reverting to a blocking API. The hook receives a
+//! observe capture delivery, remote `/flags`, local-evaluation polling, and
+//! storage failures without reverting to a blocking API. The hook receives a
 //! [`PostHogError`], a `#[non_exhaustive]` enum with one variant per surface so
 //! more can be added without breaking callers.
 //!
@@ -60,8 +59,9 @@ impl OnErrorHook {
     }
 }
 
-/// A terminal failure on one of the SDK's network surfaces, passed by reference
-/// to each registered `on_error` hook.
+/// A delivery, network, or storage failure, passed by reference to each
+/// registered `on_error` hook. A storage failure does not necessarily prevent
+/// delivery: events may still be sent from memory.
 ///
 /// `#[non_exhaustive]`: new variants may be added as more surfaces gain hook
 /// coverage, so a `match` must include a wildcard arm.
@@ -79,6 +79,89 @@ pub enum PostHogError<'a> {
     /// error, non-success status, or an unparseable response body). The SDK
     /// keeps serving the previously cached definitions.
     LocalEvaluation(LocalEvaluationFailure<'a>),
+    /// A persistence operation failed. Live in-memory state remains usable;
+    /// data that could not be persisted may be lost when the process exits.
+    Storage(StorageFailure<'a>),
+}
+
+/// The persistence operation that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StorageOperation {
+    /// Opening or acquiring exclusive ownership of a store.
+    Open,
+    /// Reading or decoding persisted data.
+    Read,
+    /// Writing or replacing persisted data.
+    Write,
+    /// Removing a persisted record.
+    Remove,
+}
+
+/// Details of a storage failure. The callback runs on the thread performing
+/// storage I/O, not on an ordinary capture caller.
+///
+/// Failure to write does not roll back in-memory state. A write can fail after
+/// creating a record, so the error does not guarantee that no disk copy exists.
+/// Such a record, or an acknowledged record whose removal failed, can cause
+/// duplicate delivery after restart.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct StorageFailure<'a> {
+    pub(crate) operation: StorageOperation,
+    pub(crate) error: &'a StorageError,
+}
+
+/// An immutable snapshot of an I/O or decoding error. It preserves the error
+/// kind, OS code and display message without retaining a backend's mutable source.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct StorageError {
+    kind: std::io::ErrorKind,
+    raw_os_error: Option<i32>,
+    message: String,
+}
+
+impl StorageError {
+    #[cfg(any(feature = "stateful", test))]
+    pub(crate) fn from_io(error: &std::io::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+            message: error.to_string(),
+        }
+    }
+
+    /// The classification of the original I/O error.
+    pub fn kind(&self) -> std::io::ErrorKind {
+        self.kind
+    }
+
+    /// The OS error code, when the original error supplied one.
+    pub fn raw_os_error(&self) -> Option<i32> {
+        self.raw_os_error
+    }
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StorageError {}
+
+impl StorageFailure<'_> {
+    /// The operation that failed.
+    pub fn operation(&self) -> StorageOperation {
+        self.operation
+    }
+
+    /// An immutable diagnostic for the I/O or decoding error. The message may
+    /// contain paths or other application context supplied by the backend.
+    pub fn error(&self) -> &StorageError {
+        self.error
+    }
 }
 
 /// Details of a terminal capture batch failure.
@@ -111,7 +194,12 @@ impl<'a> CaptureFailure<'a> {
 
     /// The batch-level cause: a permanent reject, exhausted transport/HTTP
     /// retries, or a serialization failure.
-    #[doc = "\n`None` only when the request itself succeeded (`2xx`) but some events were not\npersisted after the retry budget — inspect [`event_results`](Self::event_results)."]
+    ///
+    /// `None` when the request succeeded (`2xx`) but individual events were
+    /// rejected or exhausted finite retries. With persistent delivery, permanent
+    /// failures can be reported while retryable events remain queued; `None`
+    /// does not mean the original batch has finished. Inspect
+    /// [`event_results`](Self::event_results).
     pub fn error(&self) -> Option<&Error> {
         self.error
     }
@@ -128,7 +216,13 @@ impl<'a> CaptureFailure<'a> {
     }
 
     /// Number of events this failure dropped (lost).
-    #[doc = "\nCounts only undelivered events (`retry`/`drop`), including any finalized on\nearlier attempts. This can be smaller than [`event_results`](Self::event_results)`.len()`,\nwhich also reports persisted `ok`/`warning` verdicts — filter by status before\ntreating an entry as lost."]
+    ///
+    /// Counts only undelivered events (`retry`/`drop`). With finite retries this
+    /// includes losses finalized on earlier attempts. Persistent delivery counts
+    /// only permanent losses in this callback, not retained retryable events or
+    /// losses reported by earlier callbacks. This can be smaller than
+    /// [`event_results`](Self::event_results)`.len()`, which also reports persisted
+    /// `ok`/`warning` verdicts; filter by status before treating an entry as lost.
     ///
     /// It also counts each copy capture dropped because an earlier event in the
     /// same request had its uuid, as reported by an entry's
@@ -151,14 +245,16 @@ impl<'a> CaptureFailure<'a> {
 
     /// Per-event server verdicts for the capture batch.
     ///
-    /// Maps event UUID to its [`EventResult`]. Includes **all** verdicts the
-    /// batch collected — persisted (`ok`/`warning`) as well as lost
-    /// (`retry`/`drop`) — so this map can be larger than
+    /// Maps event UUID to its [`EventResult`]. Includes persisted (`ok`/`warning`)
+    /// as well as lost (`retry`/`drop`) verdicts, so this map can be larger than
     /// [`event_count`](Self::event_count); filter by
-    /// [`EventStatus`](crate::EventStatus) to isolate the failures. Complete
-    /// when [`error`](Self::error) is `None` (a `2xx` where events weren't
-    /// persisted after retries); possibly partial on a batch-level failure
-    /// (only verdicts collected from earlier attempts).
+    /// [`EventStatus`](crate::EventStatus) to isolate the failures.
+    ///
+    /// With finite retries, includes all verdicts the batch collected: complete
+    /// when [`error`](Self::error) is `None`, or possibly partial on a batch-level
+    /// failure. With persistent delivery, a callback can report permanent failures
+    /// before the batch finishes. Retained retryable events are absent from this
+    /// map, and later callbacks can omit verdicts reported by earlier callbacks.
     ///
     /// An entry's [`duplicates_dropped`](EventResult::duplicates_dropped) counts
     /// lost copies that shared its uuid; they have no entry of their own.
@@ -348,6 +444,62 @@ pub(crate) fn duplicate_verdict(result: EventStatus, dropped: u32) -> (Uuid, Eve
 mod tests {
     use super::*;
     use EventStatus::{Drop, Ok, Retry, Warning};
+
+    #[test]
+    fn storage_failure_uses_the_shared_error_hook() {
+        use std::sync::{Arc, Mutex};
+
+        let observed = Arc::new(Mutex::new(None));
+        let output = Arc::clone(&observed);
+        let opts = crate::ClientOptionsBuilder::default()
+            .api_key("phc_test".to_string())
+            .on_error(move |failure| {
+                if let PostHogError::Storage(failure) = failure {
+                    *output.lock().unwrap() = Some((failure.operation(), failure.error().kind()));
+                }
+            })
+            .build()
+            .unwrap();
+        let error = StorageError::from_io(&std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "write failed",
+        ));
+        super::super::common::apply_on_error_hooks(
+            &opts.on_error,
+            &PostHogError::Storage(StorageFailure {
+                operation: StorageOperation::Write,
+                error: &error,
+            }),
+        );
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some((
+                StorageOperation::Write,
+                std::io::ErrorKind::PermissionDenied
+            ))
+        );
+    }
+
+    #[test]
+    fn storage_diagnostics_preserve_error_details_and_unwind_safety() {
+        fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        unwind_safe::<crate::PostHogError<'static>>();
+        unwind_safe::<StorageFailure<'static>>();
+        unwind_safe::<StorageError>();
+
+        let source = std::io::Error::from_raw_os_error(2);
+        let diagnostic = StorageError::from_io(&source);
+        assert_eq!(diagnostic.kind(), source.kind());
+        assert_eq!(diagnostic.raw_os_error(), source.raw_os_error());
+        assert_eq!(diagnostic.to_string(), source.to_string());
+        let custom = StorageError::from_io(&std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid record",
+        ));
+        assert_eq!(custom.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(custom.raw_os_error(), None);
+        assert_eq!(custom.to_string(), "invalid record");
+    }
 
     #[test]
     fn verdict_summary_lists_every_lost_reason_in_order() {

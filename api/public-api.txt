@@ -260,6 +260,7 @@ pub fn posthog::FlagValue::default() -> Self
 pub posthog::PostHogError::Capture(posthog::CaptureFailure<'a>)
 pub posthog::PostHogError::FeatureFlags(posthog::FlagsFailure<'a>)
 pub posthog::PostHogError::LocalEvaluation(posthog::LocalEvaluationFailure<'a>)
+pub posthog::PostHogError::Storage(posthog::StorageFailure<'a>)
 #[non_exhaustive] pub enum posthog::SendEmail
 pub posthog::SendEmail::Code(posthog::CodeEmail)
 pub posthog::SendEmail::Template(posthog::TemplateEmail)
@@ -267,6 +268,11 @@ impl core::convert::From<posthog::CodeEmail> for posthog::SendEmail
 pub fn posthog::SendEmail::from(posthog::CodeEmail) -> Self
 impl core::convert::From<posthog::TemplateEmail> for posthog::SendEmail
 pub fn posthog::SendEmail::from(posthog::TemplateEmail) -> Self
+#[non_exhaustive] pub enum posthog::StorageOperation
+pub posthog::StorageOperation::Open
+pub posthog::StorageOperation::Read
+pub posthog::StorageOperation::Remove
+pub posthog::StorageOperation::Write
 pub struct posthog::AsyncFlagPoller
 impl posthog::AsyncFlagPoller
 pub async fn posthog::AsyncFlagPoller::is_running(&self) -> bool
@@ -630,6 +636,17 @@ pub fn posthog::RequestContext::session_id(self, impl core::convert::Into<alloc:
 pub posthog::SendEmailResult::id: alloc::string::String
 pub posthog::SendEmailResult::replayed: bool
 pub posthog::SendEmailResult::warnings: alloc::vec::Vec<posthog::EmailWarning>
+#[non_exhaustive] pub struct posthog::StorageError
+impl posthog::StorageError
+pub fn posthog::StorageError::kind(&self) -> core::io::error::ErrorKind
+pub fn posthog::StorageError::raw_os_error(&self) -> core::option::Option<i32>
+impl core::error::Error for posthog::StorageError
+impl core::fmt::Display for posthog::StorageError
+pub fn posthog::StorageError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct posthog::StorageFailure<'a>
+impl posthog::StorageFailure<'_>
+pub fn posthog::StorageFailure<'_>::error(&self) -> &posthog::StorageError
+pub fn posthog::StorageFailure<'_>::operation(&self) -> posthog::StorageOperation
 pub struct posthog::TemplateEmail
 impl posthog::TemplateEmail
 pub fn posthog::TemplateEmail::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self

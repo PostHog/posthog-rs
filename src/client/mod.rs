@@ -17,7 +17,10 @@ mod summary;
 
 pub(crate) use common::apply_on_error_hooks;
 pub(crate) use on_error::OnErrorHook;
-pub use on_error::{CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError};
+pub use on_error::{
+    CaptureFailure, FlagsFailure, LocalEvaluationFailure, PostHogError, StorageError,
+    StorageFailure, StorageOperation,
+};
 pub use summary::CaptureSummary;
 
 /// Request-body compression algorithm for the capture pipelines.
@@ -49,6 +52,9 @@ impl CaptureCompression {
 #[cfg(not(feature = "async-client"))]
 mod blocking;
 mod capture;
+#[cfg(feature = "stateful")]
+#[allow(dead_code)] // The stateful delivery composition owns this storage layer.
+mod event_store;
 mod retry;
 pub(crate) use retry::parse_retry_after;
 mod transport;
@@ -492,11 +498,15 @@ impl ClientOptionsBuilder {
         self
     }
 
-    /// Add a hook invoked once per terminal failure on an SDK network surface.
+    /// Add a hook for terminal network failures and recoverable storage errors.
     ///
-    /// The hook receives a [`PostHogError`] for a capture batch the SDK gave up
-    /// delivering, a failed remote `/flags` request, or a failed
-    /// local-evaluation poll. Multiple hooks fire in registration order.
+    /// The hook receives a [`PostHogError`] once per terminal capture failure,
+    /// failed remote `/flags` request, or failed local-evaluation poll. With
+    /// persistent delivery, it also receives recoverable storage read, write,
+    /// and removal errors. A storage error does not imply delivery failed: a
+    /// failed write still permits bounded memory-backed delivery. A partial write
+    /// can leave a record on disk and cause duplicate delivery after restart.
+    /// Multiple hooks fire in registration order.
     ///
     /// # Observability only — never emit from the hook
     ///
@@ -505,15 +515,17 @@ impl ClientOptionsBuilder {
     /// handling a capture failure forms an amplification loop. The hook is
     /// `Fn + Send + Sync` and invoked without holding any SDK lock, so it may
     /// run concurrently on multiple threads and must be internally thread-safe.
-    /// Keep it cheap and non-blocking; the capture hook runs on the background
-    /// transport thread. Panics are caught and ignored.
+    /// Keep it cheap and non-blocking; capture and storage callbacks run on the
+    /// background transport thread. Panics are caught and ignored.
     ///
     /// Registering a hook silences the default WARN for terminal capture
-    /// reject/exhaustion and serialization failures (the caller now owns that
-    /// signal). Shutdown-timeout, queue-full, and `before_send` drops, and
-    /// retryable failures that shutdown stops from being retried, keep their
-    /// WARN logs and do **not** fire the hook. A batch that has used all
-    /// `max_capture_attempts` still fires it.
+    /// reject/exhaustion, serialization failures, and worker storage errors (the
+    /// caller now owns those signals). Shutdown-timeout, queue-full, and
+    /// `before_send` drops, and retryable failures that shutdown stops from being
+    /// retried, keep their WARN logs and do **not** fire the hook. With finite
+    /// server retries, a batch that has used all `max_capture_attempts` still
+    /// fires it. Persistent delivery instead retains retryable work for another
+    /// attempt sequence; exhausting a sequence does not fire a terminal failure.
     /// The existing `/flags` and poller WARN logs are unaffected.
     pub fn on_error<F>(&mut self, hook: F) -> &mut Self
     where
