@@ -375,6 +375,10 @@ Fire-and-forget, like [`Client::capture`]. A blank ID on either side
 cannot describe a merge, so the event is dropped with a warning rather
 than sent.
 
+The event sends `process_person_profile: true`, so a request context
+cannot turn person processing off for it. To set options on it, build it
+with [`Event::alias`] and capture it.
+
 #### Examples
 
 ```rust
@@ -385,6 +389,7 @@ client.alias("anon-abc123", "user-42");
 ```
 
 [`Client::capture`]: #clientcapture
+[`Event::alias`]: #eventalias
 
 ## Capture AI
 
@@ -758,6 +763,10 @@ See <https://posthog.com/docs/product-analytics/group-analytics#setting-group-pr
 Fire-and-forget, like [`Client::capture`], for a blank `group_type` or
 `group_key`: the event is dropped with a warning rather than sent.
 
+The event sends `process_person_profile: true`, so a request context
+cannot turn person processing off for it. To set options on it, build it
+with [`Event::group_identify`] and capture it.
+
 The event's distinct id is the request context's distinct id when one is
 set, else `$<group_type>_<group_key>`. The context session id is never added.
 
@@ -784,8 +793,9 @@ client.group_identify(
 )?;
 ```
 
-[`Client::capture`]: #clientcapture
 [`Error::Serialization`]: #errorserialization
+[`Client::capture`]: #clientcapture
+[`Event::group_identify`]: #eventgroup_identify
 
 ## Is feature enabled
 
@@ -1348,7 +1358,12 @@ pub fn option(self, key: impl Into<String>, value: impl Serialize) -> Result<Sel
 ```
 
 Sets a capture option on every event in this context. An option the event sets wins,
-and a `null` value sets nothing.
+and a `null` value sets nothing. A `process_person_profile` option does not set
+`process_person_profile` on an identify-style event, such as `$identify` or
+`$create_alias`, whose distinct ID the SDK did not generate; see
+[`RequestContext::apply_to_event`].
+
+[`RequestContext::apply_to_event`]: #requestcontextapply_to_event
 
 #### `RequestContext::get_distinct_id`
 
@@ -1393,6 +1408,11 @@ pub fn apply_to_event(&self, event: &mut Event)
 ```
 
 Pins these defaults before delivery. Explicit event identity, properties and options win.
+
+An identify-style event, such as `$identify` or `$create_alias`, first gets
+`process_person_profile` from its own option or `$process_person_profile` property,
+else `true` unless the SDK generated its distinct ID, so the context cannot turn
+person processing off for it.
 
 #### `RequestContext::exception_options`
 
@@ -2833,6 +2853,7 @@ pub enum Error
 - `NotInitialized` - Global client was not initialized before use
 - `PanicHookAlreadyInstalled` - Panic autocapture hook was already installed
 - `InvalidTimestamp(String)` - Timestamp could not be parsed or is invalid
+- `InvalidArgument(String)` - An argument was invalid, such as a blank ID
 - `InconclusiveMatch(String)` - Flag evaluation was inconclusive (e.g., missing required properties, unknown operator)
 - `RateLimit` - HTTP 429 — the server is rate limiting requests
 - `BadRequest(String)` - HTTP 400 or 413 — the request was malformed or too large
@@ -3230,6 +3251,92 @@ Set the event timestamp, for events that happened in the past.
 
 Never returns an error; PostHog clamps timestamps far in the future.
 The `Result` stays so existing callers keep compiling.
+
+#### `Event::alias`
+
+```rust
+pub fn alias<P: Into<String>, D: Into<String>>(previous_id: P, distinct_id: D) -> Result<Self, Error>
+```
+
+Build the `$create_alias` event that [`crate::Client::alias`] sends, so you
+can set options on it before you capture it.
+
+##### Parameters
+
+- `previous_id`: ID already known to PostHog, such as an anonymous ID.
+- `distinct_id`: ID it should be merged into, such as a logged-in user ID.
+
+##### Returns
+
+The event, attributed to `previous_id`, which is also mirrored into
+`properties.distinct_id` alongside the merge target in `properties.alias`.
+
+##### Errors
+
+Returns [`Error::InvalidArgument`] when either ID is blank, because a merge
+needs both sides.
+
+##### Remarks
+
+The SDK sends `process_person_profile: true` on this event unless you set
+the option, so a request context cannot turn person processing off for it.
+
+##### Examples
+
+```rust
+let mut event = posthog::Event::alias("anon-abc123", "user-42")?;
+event.insert_option("disable_skew_correction", true)?;
+posthog.capture(event);
+```
+
+[`Error::InvalidArgument`]: #errorinvalidargument
+[`crate::Client::alias`]: #crateclientalias
+
+#### `Event::group_identify`
+
+```rust
+pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(group_type: T, group_key: K, properties: P) -> Result<Self, Error>
+```
+
+Build the `$groupidentify` event that [`crate::Client::group_identify`]
+sends, so you can set options on it before you capture it.
+
+##### Parameters
+
+- `group_type`: Group type, such as `"company"`.
+- `group_key`: Unique identifier for the group, such as an ID in your database.
+- `properties`: Any serializable object or JSON map of group properties.
+
+##### Returns
+
+The event, with `$group_type`, `$group_key`, and `$group_set` in its
+properties. Its distinct ID is the request context's distinct ID when one
+is set, else `$<group_type>_<group_key>`.
+
+##### Errors
+
+Returns [`Error::InvalidArgument`] when `group_type` or `group_key` is
+blank. Returns [`Error::Serialization`] if `properties` fails to serialize
+to JSON, or if it does not serialize to a JSON object. PostHog requires
+`$group_set` to be an object and silently drops the event otherwise.
+
+##### Remarks
+
+The SDK sends `process_person_profile: true` on this event unless you set
+the option, so a request context cannot turn person processing off for it.
+
+##### Examples
+
+```rust
+let properties = serde_json::json!({ "name": "Awesome Inc." });
+let mut event = posthog::Event::group_identify("company", "acme_123", properties)?;
+event.insert_option("disable_skew_correction", true)?;
+posthog.capture(event);
+```
+
+[`crate::Client::group_identify`]: #crateclientgroup_identify
+[`Error::InvalidArgument`]: #errorinvalidargument
+[`Error::Serialization`]: #errorserialization
 
 #### `Event::set_uuid`
 

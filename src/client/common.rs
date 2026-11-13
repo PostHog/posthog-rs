@@ -171,6 +171,7 @@ pub(super) fn preprocess_capture_event(
     // Trims after every SDK fill and before the hooks, so properties a hook
     // adds to a minimized `$feature_flag_called` event are sent.
     event.apply_minimal_flag_called_allowlist();
+    event.remove_shadowed_legacy_person_property();
     apply_before_send_hooks(hooks, event)
 }
 

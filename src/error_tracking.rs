@@ -1618,7 +1618,7 @@ fn default_in_app_path(filename: &str) -> bool {
     // registry-src and git-checkout checks match cargo's own on-disk layouts
     // under any home; the `/.cargo/` rules stay as the original home-based
     // fallback.
-    if normalized.contains("/.cargo/registry/")
+    !(normalized.contains("/.cargo/registry/")
         || normalized.contains("/.cargo/git/")
         || is_cargo_registry_src(&normalized)
         || is_cargo_git_checkout(&normalized)
@@ -1631,12 +1631,7 @@ fn default_in_app_path(filename: &str) -> bool {
         || normalized.contains("/library/test/src/")
         || normalized.contains("/toolchains/")
         || normalized.contains("/target/")
-        || normalized.contains("/vendor/")
-    {
-        return false;
-    }
-
-    true
+        || normalized.contains("/vendor/"))
 }
 
 /// Strip trailing generic arguments from a function name so the crate-segment

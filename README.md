@@ -43,7 +43,12 @@ capture behavior when no identity exists. Existing events keep their explicit
 identity and properties. The context adds defaults, including `$session_id`,
 `$request_method`, and `$request_path`. Query strings are not captured.
 `RequestContext::option` adds a capture option to every event in the context,
-unless the event sets that option itself.
+unless the event sets that option itself. A context `process_person_profile`
+does not set `process_person_profile` on identify-style events (`$identify`,
+`$create_alias`, `$merge_dangerously`, `$groupidentify`, `$set` and
+`$set_once`, including the events `alias` and `group_identify` send) whose
+distinct ID the SDK did not generate. Those default to `true` unless the event
+sets the option.
 
 Tracing headers are client-controlled analytics context. Never use them for
 authentication, authorization, or account lookup. Place an application-owned

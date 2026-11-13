@@ -20,6 +20,7 @@ impl Display for Error {
             Error::NotInitialized => write!(f, "Client not initialized"),
             Error::PanicHookAlreadyInstalled => write!(f, "Panic hook already installed"),
             Error::InvalidTimestamp(msg) => write!(f, "Invalid Timestamp: {msg}"),
+            Error::InvalidArgument(msg) => write!(f, "Invalid Argument: {msg}"),
             Error::InconclusiveMatch(msg) => write!(f, "Inconclusive Match: {msg}"),
             Error::RateLimit => write!(f, "Rate limited"),
             Error::BadRequest(msg) => write!(f, "Bad Request: {msg}"),
@@ -51,6 +52,8 @@ pub enum Error {
     PanicHookAlreadyInstalled,
     /// Timestamp could not be parsed or is invalid
     InvalidTimestamp(String),
+    /// An argument was invalid, such as a blank ID
+    InvalidArgument(String),
     /// Flag evaluation was inconclusive (e.g., missing required properties, unknown operator)
     InconclusiveMatch(String),
     /// HTTP 429 — the server is rate limiting requests
