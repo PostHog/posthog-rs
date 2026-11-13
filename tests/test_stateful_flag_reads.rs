@@ -41,7 +41,8 @@ fn bootstrap(config: &mut Config) {
 fn bootstrap_rich_reads_are_owned_memory_only_and_silent_in_all_consent_modes() {
     for opted_out in [false, true] {
         let server = MockServer::start();
-        let requests = server.mock(|_, then| {
+        let requests = server.mock(|when, then| {
+            when.path_not("/array/phc_test/config");
             then.status(500);
         });
         let mut config = config(&server);
@@ -338,7 +339,8 @@ fn remote_empty_variants_are_known_disabled_results() {
 #[test]
 fn unavailable_empty_disabled_invalid_and_closed_have_explicit_results() {
     let server = MockServer::start();
-    let requests = server.mock(|_, then| {
+    let requests = server.mock(|when, then| {
+        when.path_not("/array/phc_test/config");
         then.status(500);
     });
     let client = Client::init_blocking(config(&server));
@@ -401,7 +403,8 @@ fn partial_and_complete_results_update_rich_exports_as_one_cache() {
 #[test]
 fn restored_cache_exports_match_and_suppressed_targeting_retains_only_live_results() {
     let server = MockServer::start();
-    let requests = server.mock(|_, then| {
+    let requests = server.mock(|when, then| {
+        when.path_not("/array/phc_test/config");
         then.status(500);
     });
     let directory =
@@ -448,7 +451,8 @@ fn restored_cache_exports_match_and_suppressed_targeting_retains_only_live_resul
 #[test]
 fn runtime_free_async_initialization_exposes_synchronous_rich_reads() {
     let server = MockServer::start();
-    let requests = server.mock(|_, then| {
+    let requests = server.mock(|when, then| {
+        when.path_not("/array/phc_test/config");
         then.status(500);
     });
     let mut config = config(&server);

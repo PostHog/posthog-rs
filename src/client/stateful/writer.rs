@@ -579,7 +579,7 @@ fn run_worker(
                 state.in_flight = None;
             }
             match &result {
-                Ok(()) => {
+                Ok(_) => {
                     state.persisted = revision;
                     state.failure = None;
                     state.failures = 0;
@@ -598,8 +598,17 @@ fn run_worker(
             }
             drop(state);
             shared.notify();
-            if let Err(error) = result {
-                report_storage_error(hooks, StorageOperation::Write, &error);
+            match result {
+                Err(error) => report_storage_error(hooks, StorageOperation::Write, &error),
+                Ok(outcome) if outcome.remote_config_omitted => report_storage_error(
+                    hooks,
+                    StorageOperation::Write,
+                    &io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Remote configuration cache exceeds state storage bounds; live settings retained",
+                    ),
+                ),
+                Ok(_) => {}
             }
             state = shared.lock();
             continue;

@@ -298,8 +298,13 @@ fn bootstrap_limits_are_atomic_and_ignore_unserved_payloads() {
             json!("x".repeat(crate::client::stateful::flag_state::MAX_CACHE_BYTES)),
         );
     let (tx, rx) = mpsc::channel();
-    config.on_error(move |_| tx.send(()).unwrap());
+    config.on_error(move |error| {
+        if matches!(error, crate::PostHogError::FeatureFlags(_)) {
+            tx.send(()).unwrap();
+        }
+    });
     let client = Client::init_blocking(config);
+    client.flush_blocking();
     assert_eq!(
         client
             .state

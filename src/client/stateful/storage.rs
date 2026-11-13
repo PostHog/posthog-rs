@@ -146,12 +146,15 @@ pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     })
 }
 
-/// Reserve mandatory state first, excluding optional cached flag results. The
+/// Reserve mandatory state first, excluding optional flag and project caches. The
 /// longest consent and session representations must always remain writable.
 pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
     snapshot_size(snapshot)
         .saturating_sub(
             crate::client::capture::json_len(&snapshot.flags.cache.as_deref()).saturating_sub(4),
+        )
+        .saturating_sub(
+            crate::client::capture::json_len(&snapshot.remote_config.as_deref()).saturating_sub(4),
         )
         .saturating_add(usize::from(snapshot.opt_out != Some(false)))
         .saturating_add(
@@ -163,23 +166,44 @@ pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
 /// Encode and validate the same bounded representation for both memory admission
 /// and persistence. This function performs no filesystem operations.
 pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
+    encode_snapshot_with_outcome(snapshot, max_bytes).map(|(bytes, _)| bytes)
+}
+
+fn encode_snapshot_with_outcome(
+    snapshot: &Snapshot,
+    max_bytes: u64,
+) -> io::Result<(Vec<u8>, SaveOutcome)> {
     if snapshot_capacity(snapshot) as u64 > max_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "State snapshot exceeds store limit",
         ));
     }
-    if snapshot.flags.cache.is_none() {
-        return encode_record(snapshot, max_bytes);
+    if snapshot.flags.cache.is_none() && snapshot.remote_config.is_none() {
+        return encode_record(snapshot, max_bytes).map(|bytes| (bytes, SaveOutcome::default()));
     }
     // A cache may fit the memory bound but not the remaining disk capacity or
     // the whole-record decoder depth. It must not poison unrelated state writes.
     if let Ok(encoded) = encode_record(snapshot, max_bytes) {
-        return Ok(encoded);
+        return Ok((encoded, SaveOutcome::default()));
     }
     let mut mandatory = snapshot.clone();
     mandatory.flags.cache = None;
-    encode_record(&mandatory, max_bytes)
+    if let Ok(encoded) = encode_record(&mandatory, max_bytes) {
+        return Ok((encoded, SaveOutcome::default()));
+    }
+    mandatory.remote_config = None;
+    mandatory.flags.cache = snapshot.flags.cache.clone();
+    let bytes = encode_record(&mandatory, max_bytes).or_else(|_| {
+        mandatory.flags.cache = None;
+        encode_record(&mandatory, max_bytes)
+    })?;
+    Ok((
+        bytes,
+        SaveOutcome {
+            remote_config_omitted: snapshot.remote_config.is_some(),
+        },
+    ))
 }
 
 fn encode_record(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
@@ -209,13 +233,19 @@ fn encode_record(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
     Ok(buffer.bytes)
 }
 
+/// A successful mandatory-state write may omit optional remote configuration.
+#[derive(Debug, Default)]
+pub(super) struct SaveOutcome {
+    pub(super) remote_config_omitted: bool,
+}
+
 /// Blocking backend calls belong exclusively to the state-persistence worker.
 pub(super) trait StateStore: Send + 'static {
-    fn save(&mut self, snapshot: &Snapshot) -> io::Result<()>;
+    fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome>;
 }
 
 impl StateStore for FileStateStore {
-    fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
+    fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome> {
         FileStateStore::save(self, snapshot)
     }
 }
@@ -294,8 +324,8 @@ impl FileStateStore {
 
     /// Only the state writer calls this. A completed replacement is not a
     /// multi-file transaction with event storage or a universal power-loss guarantee.
-    pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
-        let encoded = encode_snapshot(snapshot, self.max_bytes)?;
+    pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome> {
+        let (encoded, outcome) = encode_snapshot_with_outcome(snapshot, self.max_bytes)?;
         let temporary = self.directory.path().join("state.json.tmp");
         // The lease and single writer exclude live concurrent writes. A stale
         // temporary is an uncommitted write from a previous process/attempt.
@@ -313,7 +343,7 @@ impl FileStateStore {
         if result.is_err() {
             let _ = fs::remove_file(temporary);
         }
-        result
+        result.map(|()| outcome)
     }
 }
 

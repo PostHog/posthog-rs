@@ -244,13 +244,13 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
         blocked: bool,
     }
     impl StateStore for BlockedStore {
-        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<()> {
+        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<SaveOutcome> {
             if !self.blocked {
                 self.blocked = true;
                 self.entered.send(()).unwrap();
                 self.release.recv().unwrap();
             }
-            Ok(())
+            Ok(SaveOutcome::default())
         }
     }
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -309,6 +309,7 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
 fn current_flag_fields_are_required_and_invalid_records_are_preserved() {
     let valid: Value = serde_json::from_slice(&record(&with_cache(Some(json!(false))))).unwrap();
     for path in [
+        vec!["remote_config"],
         vec!["flags"],
         vec!["flags", "person_properties"],
         vec!["flags", "group_properties"],

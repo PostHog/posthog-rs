@@ -70,7 +70,7 @@ impl Task {
         })
     }
 
-    fn run(self, http: &reqwest::blocking::Client, options: &ClientOptions) {
+    pub(crate) fn run(self, http: &reqwest::blocking::Client, options: &ClientOptions) {
         let endpoint = options.endpoints().build_url(Endpoint::Flags);
         let result = fetch(http, options, &endpoint, &self.body);
         if let Err(error) = &result {
