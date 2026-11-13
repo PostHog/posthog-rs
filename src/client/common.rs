@@ -329,7 +329,7 @@ pub(super) fn remote_record_from_detail(
 /// (e.g. `"{\"color\":\"blue\"}"`) rather than already-parsed JSON. Try to
 /// parse a `String` payload as JSON and fall back to the raw string on
 /// failure so users can branch on a uniform [`serde_json::Value`].
-fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
+pub(super) fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
     match payload {
         serde_json::Value::String(raw) => {
             serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))

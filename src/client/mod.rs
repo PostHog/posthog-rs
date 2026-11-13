@@ -13,6 +13,7 @@ mod local_payload_test_support;
 #[cfg(test)]
 mod minimal_gate_test_support;
 mod on_error;
+mod remote_config_payload;
 mod summary;
 
 pub(crate) use common::apply_on_error_hooks;
