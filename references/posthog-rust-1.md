@@ -1,5 +1,5 @@
 ---
-title: "PostHog Rust SDK 1.x (experimental)"
+title: "PostHog Rust SDK 1.x"
 sidebar: Docs
 showTitle: true
 contentMaxWidthClass: max-w-full
@@ -22,6 +22,9 @@ tableOfContents:
     depth: 0
   - value: "Capture exception"
     url: capture-exception
+    depth: 0
+  - value: "Emails"
+    url: emails
     depth: 0
   - value: "Flush"
     url: flush
@@ -71,14 +74,14 @@ tableOfContents:
 
 The Rust SDK runs on your server.
 
-To send your first event, add `posthog-rs` and `tokio`, create a client with your project token from your [project settings](https://app.posthog.com/project/settings), and call `capture`.
+To send your first event, add `posthog` and `tokio`, create a client with your project token from your [project settings](https://app.posthog.com/project/settings), and call `capture`.
 
 A background worker sends queued events, so call `shutdown` before your process exits, or the last events are lost.
 
 ### Install
 
 ```bash
-cargo add posthog
+cargo add posthog@1
 cargo add tokio --features rt-multi-thread,macros
 ```
 
@@ -103,6 +106,28 @@ async fn main() -> Result<(), posthog::Error> {
 ```
 
 `capture` queues the event and returns at once. Call `shutdown` before the process exits.
+
+### Read SDK logs
+
+The SDK logs through [`tracing`](https://docs.rs/tracing) under the `posthog` target. Add a subscriber to your application to see the logs.
+
+This example needs the `env-filter` feature of `tracing-subscriber`. Add `tracing-subscriber = { version = "0.3", features = ["env-filter"] }` to your dependencies.
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+```
+
+Set `RUST_LOG` to choose the level.
+
+```bash
+RUST_LOG=posthog=debug cargo run
+```
+
+Use `posthog=warn` for warnings and errors only. Use `posthog=trace` for detailed local evaluation and cache logs.
 
 ## Setup
 
@@ -306,8 +331,7 @@ See <https://posthog.com/docs/data/anonymous-vs-identified-events#how-to-capture
 Generates a random distinct ID and sets the `process_person_profile`
 option to `false` so PostHog does not create a person profile for the
 event. To process one anyway, set the option to `true` with
-[`Event::insert_option`]; a legacy `$process_person_profile` property
-does not override an option. A `null` or removed option counts as unset,
+[`Event::insert_option`]. A `null` or removed option counts as unset,
 so the SDK sets `false` again before `before_send`.
 
 [`Event::insert_option`]: #eventinsert_option
@@ -351,6 +375,10 @@ Fire-and-forget, like [`Client::capture`]. A blank ID on either side
 cannot describe a merge, so the event is dropped with a warning rather
 than sent.
 
+The event sends `process_person_profile: true`, so a request context
+cannot turn person processing off for it. To set options on it, build it
+with [`Event::alias`] and capture it.
+
 #### Examples
 
 ```rust
@@ -361,6 +389,7 @@ client.alias("anon-abc123", "user-42");
 ```
 
 [`Client::capture`]: #clientcapture
+[`Event::alias`]: #eventalias
 
 ## Capture AI
 
@@ -589,6 +618,22 @@ where
 
 Capture a Rust error with optional context using the global client.
 
+## Emails
+
+### `Client::emails`
+
+```rust
+pub fn emails(&self) -> Emails<'_>
+```
+
+Transactional email: send email from templates made in PostHog or from
+content your code rendered, and read the status of each email sent.
+
+Needs `secret_key` set to a Project Secret API Key with the
+`transactional_email:write` scope. See [`Emails`] for setup.
+
+[`Emails`]: #emails
+
 ## Flush
 
 ### `Client::flush`
@@ -718,6 +763,10 @@ See <https://posthog.com/docs/product-analytics/group-analytics#setting-group-pr
 Fire-and-forget, like [`Client::capture`], for a blank `group_type` or
 `group_key`: the event is dropped with a warning rather than sent.
 
+The event sends `process_person_profile: true`, so a request context
+cannot turn person processing off for it. To set options on it, build it
+with [`Event::group_identify`] and capture it.
+
 The event's distinct id is the request context's distinct id when one is
 set, else `$<group_type>_<group_key>`. The context session id is never added.
 
@@ -744,8 +793,9 @@ client.group_identify(
 )?;
 ```
 
-[`Client::capture`]: #clientcapture
 [`Error::Serialization`]: #errorserialization
+[`Client::capture`]: #clientcapture
+[`Event::group_identify`]: #eventgroup_identify
 
 ## Is feature enabled
 
@@ -772,9 +822,18 @@ pub async fn shutdown(&self)
 ```
 
 Flush, stop the background worker, and join it. Idempotent: subsequent
-calls are no-ops. After shutdown, `capture` drops events. A no-op for
-disabled clients. When called from a transport callback, queues shutdown
-without waiting for or joining the current worker thread.
+calls are no-ops. After shutdown, `capture` drops events and
+[`emails`](Self::emails) refuses requests with `client_closed`. Email
+requests already in flight, retries included, get until
+`shutdown_timeout_ms` from the start of shutdown to finish. When called
+from a transport callback, queues shutdown without waiting for email
+requests or joining the current worker thread.
+
+In a web server, call this after the server future resolves, such as
+after `HttpServer::run().await` (actix) or `axum::serve(..).await`
+(axum) returns.
+
+[Self::emails]: #selfemails
 
 ### `posthog::shutdown`
 
@@ -1299,7 +1358,12 @@ pub fn option(self, key: impl Into<String>, value: impl Serialize) -> Result<Sel
 ```
 
 Sets a capture option on every event in this context. An option the event sets wins,
-and a `null` value sets nothing.
+and a `null` value sets nothing. A `process_person_profile` option does not set
+`process_person_profile` on an identify-style event, such as `$identify` or
+`$create_alias`, whose distinct ID the SDK did not generate; see
+[`RequestContext::apply_to_event`].
+
+[`RequestContext::apply_to_event`]: #requestcontextapply_to_event
 
 #### `RequestContext::get_distinct_id`
 
@@ -1344,6 +1408,11 @@ pub fn apply_to_event(&self, event: &mut Event)
 ```
 
 Pins these defaults before delivery. Explicit event identity, properties and options win.
+
+An identify-style event, such as `$identify` or `$create_alias`, first gets
+`process_person_profile` from its own option or `$process_person_profile` property,
+else `true` unless the SDK generated its distinct ID, so the context cannot turn
+person processing off for it.
 
 #### `RequestContext::exception_options`
 
@@ -1620,6 +1689,57 @@ Secret key used for local feature flag evaluation and remote config.
 
 Accepts either a Personal API Key (`phx_...`) or a Project Secret API
 Key (`phs_...`). Required when `enable_local_evaluation` is `true`.
+
+[`Client::emails`] needs a Project Secret API Key with the
+`transactional_email:write` scope to send email, or
+`transactional_email:read` to read an email's status.
+
+[`Client::emails`]: #clientemails
+
+#### `ClientOptionsBuilder::app_host`
+
+```rust
+pub fn app_host<VALUE: ::derive_builder::export::core::convert::Into<String>>(&mut self, value: VALUE) -> &mut Self
+```
+
+Your PostHog app host, such as `https://posthog.example.com`, for
+[`Client::emails`]. Needed only when `host` is not PostHog Cloud, such
+as a reverse proxy: email requests carry the secret key, so they never
+go to a custom `host`. Without it, a PostHog Cloud `host` such as
+`https://eu.i.posthog.com` sends email to its region's app host.
+
+[`Client::emails`]: #clientemails
+
+#### `ClientOptionsBuilder::email_request_timeout_seconds`
+
+```rust
+pub fn email_request_timeout_seconds(&mut self, value: u64) -> &mut Self
+```
+
+Per-request timeout in seconds for [`Client::emails`]. Defaults to `15`.
+Also applies to custom HTTP clients, replacing their request timeout.
+
+[`Client::emails`]: #clientemails
+
+#### `ClientOptionsBuilder::email_request_max_retries`
+
+```rust
+pub fn email_request_max_retries(&mut self, value: u32) -> &mut Self
+```
+
+Maximum number of retries of an email request after a network error,
+a rate limit, a send with the same idempotency key in flight, or an
+unavailable service. Defaults to `2`. Set to `0` when a job runner
+already retries the send. A send can override it.
+
+#### `ClientOptionsBuilder::migrated_from`
+
+```rust
+pub fn migrated_from<VALUE: ::derive_builder::export::core::convert::Into<String>>(&mut self, value: VALUE) -> &mut Self
+```
+
+The email provider your sends moved from, such as `"resend"`, sent with
+each email request so PostHog knows where your sends came from.
 
 #### `ClientOptionsBuilder::enable_local_evaluation`
 
@@ -2188,6 +2308,537 @@ pub fn path(&self) -> &str
 
 Get the URL path for this endpoint.
 
+### `CodeEmail`
+
+```rust
+pub struct CodeEmail
+```
+
+One email whose content your code rendered, such as React Email output,
+named by a key. PostHog sends it as is.
+
+It needs [`html`](Self::html), [`text`](Self::text) or both. Without
+`text`, PostHog derives it from the `html`. To send a React email, render
+it to HTML in your app and pass the HTML.
+
+```rust
+use posthog::CodeEmail;
+
+let email = CodeEmail::new("jane@example.com", "password-reset", "Reset your password")
+    .html(rendered_html)
+    .from("Acme <security@example.com>")
+    .distinct_id("user_123");
+```
+
+[Self::text]: #selftext
+[Self::html]: #selfhtml
+
+#### `CodeEmail::new`
+
+```rust
+pub fn new(to: impl Into<String>, template_key: impl Into<String>, subject: impl Into<String>) -> Self
+```
+
+An email to one recipient address, with a subject.
+
+`template_key` names the email, such as `"password-reset"`, so its
+metrics, logs and status group under it in PostHog. It takes letters,
+digits, hyphens and underscores, at most 400.
+
+#### `CodeEmail::html`
+
+```rust
+pub fn html(self, html: impl Into<String>) -> Self
+```
+
+The HTML body.
+
+#### `CodeEmail::text`
+
+```rust
+pub fn text(self, text: impl Into<String>) -> Self
+```
+
+The plain-text body.
+
+#### `CodeEmail::from`
+
+```rust
+pub fn from(self, from: impl Into<String>) -> Self
+```
+
+A verified sender, such as `"Acme <security@example.com>"`. Without
+it, PostHog uses the project's default sender.
+
+#### `CodeEmail::reply_to`
+
+```rust
+pub fn reply_to(self, address: impl Into<String>) -> Self
+```
+
+Adds a reply-to address. Call it again to add more.
+
+#### `CodeEmail::capture_engagement`
+
+```rust
+pub fn capture_engagement(self, capture: bool) -> Self
+```
+
+Whether PostHog captures the email's engagement events (sent,
+delivered, opened, clicked, bounced) as events of the recipient.
+Defaults to `true`. A project whose admin turned engagement capture off
+captures nothing, whatever the send asks.
+
+#### `CodeEmail::distinct_id`
+
+```rust
+pub fn distinct_id(self, distinct_id: impl Into<String>) -> Self
+```
+
+The recipient's distinct ID in your product. The email's events go to
+this person. Without it, they go to a person whose distinct ID is the
+email address.
+
+#### `CodeEmail::idempotency_key`
+
+```rust
+pub fn idempotency_key(self, key: impl Into<String>) -> Self
+```
+
+1 to 255 visible ASCII characters.
+
+A send with a key that PostHog already accepted queues nothing and
+returns the first send's result. The same key for another email returns
+`idempotency_key_reused`. Without a key, the client makes a UUID that
+covers its own retries of this call. Pass a key derived from what the
+email is for, such as `password-reset:user_123:<request id>`, to cover
+retries outside this call too.
+
+#### `CodeEmail::max_retries`
+
+```rust
+pub fn max_retries(self, max_retries: u32) -> Self
+```
+
+Overrides the client's `email_request_max_retries` for this send. `0`
+turns retries off.
+
+### `EmailDeliveryStatus`
+
+```rust
+pub enum EmailDeliveryStatus
+```
+
+**Variants**
+
+- `Queued` - The email waits to go out.
+- `Sent` - PostHog handed the email to the email provider.
+- `Failed` - The email was not sent, and the status's `reason` says why.
+- `Delivered` - The recipient's mail server accepted the email.
+- `Bounced` - The recipient's mail provider reported a bounce after delivery.
+- `Complained` - The recipient marked the email as spam.
+- `Other(String)` - A status this SDK version doesn't know, as PostHog sent it.
+
+What happened to an email. Later SDK versions can know statuses that this
+one passes through as [`Other`](Self::Other).
+
+[Self::Other]: #selfother
+
+#### `EmailDeliveryStatus::as_str`
+
+```rust
+pub fn as_str(&self) -> &str
+```
+
+The status as PostHog sends it, such as `"delivered"`.
+
+### `EmailError`
+
+```rust
+pub struct EmailError
+```
+
+PostHog did not queue the email or read its status, or the client could not
+tell whether it did.
+
+Branch on [`code`](Self::code), PostHog's stable error code such as
+`quota_limited`, or on [`kind`](Self::kind), a coarse category. The message
+never holds the secret key or the request body.
+
+[Self::kind]: #selfkind
+[Self::code]: #selfcode
+
+#### `EmailError::kind`
+
+```rust
+pub fn kind(&self) -> EmailErrorKind
+```
+
+The coarse category of the failure.
+
+#### `EmailError::code`
+
+```rust
+pub fn code(&self) -> &str
+```
+
+PostHog's error code, such as `quota_limited` or `recipient_suppressed`,
+or an SDK code, such as `network_error`, `missing_secret_key` or
+`invalid_template_id`.
+
+#### `EmailError::message`
+
+```rust
+pub fn message(&self) -> &str
+```
+
+What went wrong, in words.
+
+#### `EmailError::status`
+
+```rust
+pub fn status(&self) -> Option<u16>
+```
+
+The HTTP status, when PostHog answered.
+
+#### `EmailError::why`
+
+```rust
+pub fn why(&self) -> Option<&str>
+```
+
+Why PostHog refused the request, when it said.
+
+#### `EmailError::fix`
+
+```rust
+pub fn fix(&self) -> Option<&str>
+```
+
+How to fix the request, when PostHog or the SDK said.
+
+#### `EmailError::docs_url`
+
+```rust
+pub fn docs_url(&self) -> Option<&str>
+```
+
+A link to the docs for this error, when PostHog gave one.
+
+#### `EmailError::field`
+
+```rust
+pub fn field(&self) -> Option<&str>
+```
+
+The request field the error is about, such as `to`, when one is known.
+
+#### `EmailError::retry_after`
+
+```rust
+pub fn retry_after(&self) -> Option<Duration>
+```
+
+How long PostHog asked the client to wait before it sends again, from
+the `Retry-After` header of a `429` or `503`.
+
+### `EmailErrorKind`
+
+```rust
+pub enum EmailErrorKind
+```
+
+**Variants**
+
+- `ValidationError` - The send was malformed: a local argument check failed, or PostHog answered `400`, a `409` with `template_outdated`, or a `422` other than a reused idempotency key.
+- `MissingApiKey` - The client has no secret key, or PostHog answered `401`.
+- `InvalidPermission` - PostHog answered `403`: the secret key lacks the scope.
+- `NotFound` - PostHog answered `404`: no such template or email in this project.
+- `ConcurrentIdempotentRequests` - PostHog answered `409`: a send with the same idempotency key is still in flight.
+- `InvalidIdempotentRequest` - PostHog answered `422` with `idempotency_key_reused`: the key was already used for a different email.
+- `RateLimitExceeded` - PostHog answered `429`: too many requests.
+- `MonthlyQuotaExceeded` - PostHog answered `429` with `quota_limited`: the monthly quota is spent.
+- `ServiceUnavailable` - PostHog answered `503`, or the request failed on the network.
+- `ApplicationError` - Anything else.
+
+A coarse category of an [`EmailError`], for code that branches on the kind
+of failure rather than on the exact [`code`](EmailError::code).
+
+[`EmailError`]: #emailerror
+[EmailError::code]: #emailerrorcode
+
+#### `EmailErrorKind::as_str`
+
+```rust
+pub fn as_str(self) -> &'static str
+```
+
+The kind's name, such as `"validation_error"`, as every PostHog SDK
+spells it.
+
+### `EmailStatus`
+
+```rust
+pub struct EmailStatus
+```
+
+**Fields**
+
+- `id: String` - The message ID that `send` returned.
+- `status: EmailDeliveryStatus` - What happened to the email.
+- `created_at: chrono::DateTime<chrono::Utc>` - When PostHog queued the email.
+- `status_at: chrono::DateTime<chrono::Utc>` - When the email reached its current status.
+- `reason: Option<String>` - Why a failed email was not sent, such as `provider_error` or `recipient_suppressed`, or the bounce type of a bounced email: `hard`, `soft` or `unknown`. `None` otherwise.
+
+The status of an email that [`Emails::send`](crate::Emails::send) queued.
+
+[crate::Emails::send]: #crateemailssend
+
+### `EmailWarning`
+
+```rust
+pub struct EmailWarning
+```
+
+**Fields**
+
+- `code: String` - The warning's stable code.
+- `message: String` - What the warning is about, in words.
+- `fix: Option<String>` - How to fix it, when PostHog said.
+
+A warning PostHog returned with a queued email.
+
+### `Emails`
+
+```rust
+pub struct Emails<'a>
+```
+
+Transactional email on a [`Client`](crate::Client): sends email from
+templates made in PostHog or from content your code rendered, and reads the
+status of each email it sent. Get it with
+[`Client::emails`](crate::Client::emails).
+
+#### Setup
+
+1. Create a project secret API key (`phs_...`) with the "Send transactional
+   email" preset (`transactional_email:write`) in your project settings, and
+   set it as the client's `secret_key`. Add `transactional_email:read` too if
+   you read email statuses with a key that can't send. Keys made with
+   `hog_flow:write` still work. The project API key (`phc_...`) captures
+   events but can't send email.
+2. On PostHog Cloud, set `host` to your region, such as
+   `https://eu.i.posthog.com`, and the client sends email to that region's
+   app host. For any other `host`, such as a reverse proxy, set `app_host`
+   to your PostHog app host: the proxy must not receive the secret key.
+3. To send a template made in PostHog, open it under Workflows, make it
+   transactional and copy its ID.
+
+A result means PostHog queued the email. Delivery happens later: read it
+with [`Emails::get`].
+
+#### Timeouts and retries
+
+Each request times out after `email_request_timeout_seconds`, 15 by
+default. A request retries network errors, rate limits, a send still in
+flight and an unavailable service `email_request_max_retries` times, 2 by
+default, after about 1 and then 2 seconds, or after the server's
+`Retry-After` when that is longer. A `Retry-After` over 30 seconds fails at
+once. Every attempt of a send carries the same idempotency key, so a retry
+never sends twice. When a job runner already retries the send, set
+`max_retries(0)` on it and pass an idempotency key that names the email.
+
+#### Moving from another email provider
+
+Set `migrated_from`, such as `"resend"`, on the client, so PostHog knows
+where your sends came from.
+
+[crate::Client]: #crateclient
+[`Emails::get`]: #emailsget
+[crate::Client::emails]: #crateclientemails
+
+#### `Emails::send`
+
+```rust
+pub async fn send(&self, email: impl Into<SendEmail>) -> Result<SendEmailResult, EmailError>
+```
+
+Queues one email, from a template made in PostHog or from content your
+code rendered.
+
+`Ok` means PostHog queued the email, not that it was delivered. Network
+errors, rate limits, a send with the same idempotency key still in
+flight and an unavailable service are retried with the same idempotency
+key.
+
+##### Errors
+
+Returns an [`EmailError`] when an argument check fails, the client is
+disabled, shut down or has no `secret_key`, or PostHog did not queue the
+email.
+
+##### Examples
+
+```rust
+use posthog::{ClientOptionsBuilder, CodeEmail, TemplateEmail};
+use serde_json::json;
+
+let options = ClientOptionsBuilder::default()
+    .api_key("phc_...".to_string())
+    .secret_key("phs_...")
+    .host("https://eu.i.posthog.com")
+    .build()
+    .unwrap();
+let posthog = posthog::client(options).await;
+
+// A template made in PostHog.
+let sent = posthog
+    .emails()
+    .send(
+        TemplateEmail::new("jane@example.com", "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b")
+            .template_data(json!({ "name": "Jane" }))
+            .distinct_id("user_123")
+            .idempotency_key("welcome:user_123"),
+    )
+    .await?;
+println!("queued {}", sent.id);
+
+// Content your code rendered, such as React Email output.
+posthog
+    .emails()
+    .send(
+        CodeEmail::new("jane@example.com", "password-reset", "Reset your password")
+            .html(rendered_html)
+            .distinct_id("user_123"),
+    )
+    .await?;
+```
+
+[`EmailError`]: #emailerror
+
+#### `Emails::get`
+
+```rust
+pub async fn get(&self, message_id: &str) -> Result<EmailStatus, EmailError>
+```
+
+Reads the status of an email that [`send`](Self::send) queued, for 30
+days after the send. A key with only `transactional_email:read` can read
+statuses but not send.
+
+##### Errors
+
+Returns an [`EmailError`] when `message_id` is not a message ID, the
+client can't reach PostHog, or PostHog answered with an error. The code
+is `not_found` when no email of this project has the ID, when the email
+is older than 30 days, or for a few seconds after the send.
+
+[Self::send]: #selfsend
+[`EmailError`]: #emailerror
+
+### `SendEmail`
+
+```rust
+pub enum SendEmail
+```
+
+**Variants**
+
+- `Template(TemplateEmail)` - A template made transactional in PostHog.
+- `Code(CodeEmail)` - Content your code rendered.
+
+An email for [`Emails::send`](crate::Emails::send): a template made in
+PostHog, or content your code rendered.
+
+[crate::Emails::send]: #crateemailssend
+
+### `SendEmailResult`
+
+```rust
+pub struct SendEmailResult
+```
+
+**Fields**
+
+- `id: String` - The queued email's message ID.
+- `replayed: bool` - True when PostHog had already accepted this idempotency key and returned the first send's result.
+- `warnings: Vec<EmailWarning>` - Warnings PostHog returned with the email. The client also logs each one.
+
+The queued email.
+
+A result means PostHog queued the email, not that it was delivered. Read
+its delivery status with [`Emails::get`](crate::Emails::get).
+
+[crate::Emails::get]: #crateemailsget
+
+### `TemplateEmail`
+
+```rust
+pub struct TemplateEmail
+```
+
+One email from an email template made transactional in PostHog, sent by
+the template's ID.
+
+The template sets its own sender, subject and content.
+
+```rust
+use posthog::TemplateEmail;
+use serde_json::json;
+
+let email = TemplateEmail::new("jane@example.com", "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b")
+    .template_data(json!({ "name": "Jane" }))
+    .distinct_id("user_123")
+    .idempotency_key("welcome:user_123");
+```
+
+#### `TemplateEmail::new`
+
+```rust
+pub fn new(to: impl Into<String>, template_id: impl Into<String>) -> Self
+```
+
+An email to one recipient address from the template with this UUID.
+
+#### `TemplateEmail::template_data`
+
+```rust
+pub fn template_data(self, data: Value) -> Self
+```
+
+Values for the template's `{{ variables.* }}` placeholders, as a JSON
+object. Sent as `message_data`.
+
+#### `TemplateEmail::distinct_id`
+
+```rust
+pub fn distinct_id(self, distinct_id: impl Into<String>) -> Self
+```
+
+The recipient's distinct ID in your product. The email's events go to
+this person. Without it, they go to a person whose distinct ID is the
+email address.
+
+#### `TemplateEmail::idempotency_key`
+
+```rust
+pub fn idempotency_key(self, key: impl Into<String>) -> Self
+```
+
+1 to 255 visible ASCII characters. See [`CodeEmail::idempotency_key`].
+
+[`CodeEmail::idempotency_key`]: #codeemailidempotency_key
+
+#### `TemplateEmail::max_retries`
+
+```rust
+pub fn max_retries(self, max_retries: u32) -> Self
+```
+
+Overrides the client's `email_request_max_retries` for this send. `0`
+turns retries off.
+
 ### `Error`
 
 ```rust
@@ -2202,12 +2853,14 @@ pub enum Error
 - `NotInitialized` - Global client was not initialized before use
 - `PanicHookAlreadyInstalled` - Panic autocapture hook was already installed
 - `InvalidTimestamp(String)` - Timestamp could not be parsed or is invalid
+- `InvalidArgument(String)` - An argument was invalid, such as a blank ID
 - `InconclusiveMatch(String)` - Flag evaluation was inconclusive (e.g., missing required properties, unknown operator)
 - `RateLimit` - HTTP 429 — the server is rate limiting requests
 - `BadRequest(String)` - HTTP 400 or 413 — the request was malformed or too large
 - `ServerError { .. }` - HTTP 5xx — the server encountered an error
 - `Unauthorized` - HTTP 401 — invalid or missing Bearer token
 - `BillingLimitExceeded(String)` - HTTP 402 — billing quota exceeded (non-retryable)
+- `Email(emails::EmailError)` - A transactional email request failed; see [`EmailError`].
 
 Errors that can occur when using the PostHog client.
 
@@ -2542,8 +3195,8 @@ Returns [`Error::Serialization`] if `value` cannot be serialized.
 ##### Remarks
 
 Sent unchecked: PostHog ignores unknown keys and drops the event if a
-known key has an unusable value. A non-`null` option wins over its legacy
-`$` property, such as `$process_person_profile`.
+known key has an unusable value. Legacy option properties still work,
+but an option overrides its legacy property. Use options.
 
 [`Error::Serialization`]: #errorserialization
 
@@ -2598,6 +3251,92 @@ Set the event timestamp, for events that happened in the past.
 
 Never returns an error; PostHog clamps timestamps far in the future.
 The `Result` stays so existing callers keep compiling.
+
+#### `Event::alias`
+
+```rust
+pub fn alias<P: Into<String>, D: Into<String>>(previous_id: P, distinct_id: D) -> Result<Self, Error>
+```
+
+Build the `$create_alias` event that [`crate::Client::alias`] sends, so you
+can set options on it before you capture it.
+
+##### Parameters
+
+- `previous_id`: ID already known to PostHog, such as an anonymous ID.
+- `distinct_id`: ID it should be merged into, such as a logged-in user ID.
+
+##### Returns
+
+The event, attributed to `previous_id`, which is also mirrored into
+`properties.distinct_id` alongside the merge target in `properties.alias`.
+
+##### Errors
+
+Returns [`Error::InvalidArgument`] when either ID is blank, because a merge
+needs both sides.
+
+##### Remarks
+
+The SDK sends `process_person_profile: true` on this event unless you set
+the option, so a request context cannot turn person processing off for it.
+
+##### Examples
+
+```rust
+let mut event = posthog::Event::alias("anon-abc123", "user-42")?;
+event.insert_option("disable_skew_correction", true)?;
+posthog.capture(event);
+```
+
+[`Error::InvalidArgument`]: #errorinvalidargument
+[`crate::Client::alias`]: #crateclientalias
+
+#### `Event::group_identify`
+
+```rust
+pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(group_type: T, group_key: K, properties: P) -> Result<Self, Error>
+```
+
+Build the `$groupidentify` event that [`crate::Client::group_identify`]
+sends, so you can set options on it before you capture it.
+
+##### Parameters
+
+- `group_type`: Group type, such as `"company"`.
+- `group_key`: Unique identifier for the group, such as an ID in your database.
+- `properties`: Any serializable object or JSON map of group properties.
+
+##### Returns
+
+The event, with `$group_type`, `$group_key`, and `$group_set` in its
+properties. Its distinct ID is the request context's distinct ID when one
+is set, else `$<group_type>_<group_key>`.
+
+##### Errors
+
+Returns [`Error::InvalidArgument`] when `group_type` or `group_key` is
+blank. Returns [`Error::Serialization`] if `properties` fails to serialize
+to JSON, or if it does not serialize to a JSON object. PostHog requires
+`$group_set` to be an object and silently drops the event otherwise.
+
+##### Remarks
+
+The SDK sends `process_person_profile: true` on this event unless you set
+the option, so a request context cannot turn person processing off for it.
+
+##### Examples
+
+```rust
+let properties = serde_json::json!({ "name": "Awesome Inc." });
+let mut event = posthog::Event::group_identify("company", "acme_123", properties)?;
+event.insert_option("disable_skew_correction", true)?;
+posthog.capture(event);
+```
+
+[`crate::Client::group_identify`]: #crateclientgroup_identify
+[`Error::InvalidArgument`]: #errorinvalidargument
+[`Error::Serialization`]: #errorserialization
 
 #### `Event::set_uuid`
 
