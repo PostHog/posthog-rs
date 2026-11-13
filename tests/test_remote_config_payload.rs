@@ -159,6 +159,32 @@ mod blocking {
     }
 
     #[test]
+    fn empty_or_whitespace_body_is_none() {
+        for body in ["", " \n\t "] {
+            let server = MockServer::start();
+            let mock = status_mock(&server, 200, body);
+            let client = create_client(builder(server.base_url()).build().unwrap());
+
+            let payload = client.get_remote_config_payload("test-flag").unwrap();
+
+            assert_eq!(payload, None, "body {:?}", body);
+            mock.assert_calls(1);
+        }
+    }
+
+    #[test]
+    fn status_404_with_empty_body_is_an_error() {
+        let server = MockServer::start();
+        let mock = status_mock(&server, 404, "");
+        let client = create_client(builder(server.base_url()).build().unwrap());
+
+        let err = client.get_remote_config_payload("test-flag").unwrap_err();
+
+        assert!(matches!(err, Error::Connection(_)), "{:?}", err);
+        mock.assert_calls(1);
+    }
+
+    #[test]
     fn invalid_json_body_is_serialization_error() {
         let server = MockServer::start();
         let mock = payload_mock(&server, "not json at all");
@@ -593,6 +619,35 @@ mod async_tests {
         let payload = client.get_remote_config_payload("test-flag").await.unwrap();
 
         assert_eq!(payload, Some(Value::Null));
+        mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn empty_or_whitespace_body_is_none() {
+        for body in ["", " \n\t "] {
+            let server = MockServer::start();
+            let mock = status_mock(&server, 200, body);
+            let client = create_client(builder(server.base_url()).build().unwrap()).await;
+
+            let payload = client.get_remote_config_payload("test-flag").await.unwrap();
+
+            assert_eq!(payload, None, "body {:?}", body);
+            mock.assert_calls(1);
+        }
+    }
+
+    #[tokio::test]
+    async fn status_404_with_empty_body_is_an_error() {
+        let server = MockServer::start();
+        let mock = status_mock(&server, 404, "");
+        let client = create_client(builder(server.base_url()).build().unwrap()).await;
+
+        let err = client
+            .get_remote_config_payload("test-flag")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Connection(_)), "{:?}", err);
         mock.assert_calls(1);
     }
 

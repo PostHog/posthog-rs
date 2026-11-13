@@ -1156,8 +1156,9 @@ impl Client {
     ///
     /// The payload as JSON. PostHog stores the payload as a JSON string, so the
     /// SDK parses a string value a second time. A string that is not JSON is
-    /// returned as `Value::String`. Returns `Ok(None)` without a request when the
-    /// client is disabled.
+    /// returned as `Value::String`. Returns `Ok(None)` when PostHog answers with an
+    /// empty body, which means the flag has no payload. Returns `Ok(None)` without
+    /// a request when the client is disabled.
     ///
     /// # Errors
     ///
@@ -1167,7 +1168,7 @@ impl Client {
     /// specific error for, such as 404. Returns [`Error::RateLimit`],
     /// [`Error::BadRequest`] or [`Error::ServerError`] for 429, 400 or 413, and 5xx.
     /// Returns [`Error::BadRequest`] for an empty, `.` or `..` flag key. Returns
-    /// [`Error::Serialization`] when the body is not JSON. The request is not
+    /// [`Error::Serialization`] when the body is not empty and is not JSON. The request is not
     /// retried and does not call the `on_error` hooks.
     #[must_use = "remote config payload result should be used"]
     pub async fn get_remote_config_payload<K: Into<String>>(
@@ -1213,7 +1214,7 @@ impl Client {
             .bytes()
             .await
             .map_err(|e| Error::Connection(e.without_url().to_string()))?;
-        decode_remote_config_payload(&body).map(Some)
+        decode_remote_config_payload(&body)
     }
 
     /// Evaluate a supplied feature flag definition locally.

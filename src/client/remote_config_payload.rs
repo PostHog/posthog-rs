@@ -46,9 +46,15 @@ pub(super) fn reject_unsendable_key(flag_key: &str) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn decode_remote_config_payload(body: &[u8]) -> Result<serde_json::Value, Error> {
+/// PostHog answers a flag that has no payload with an empty 2xx body.
+pub(super) fn decode_remote_config_payload(
+    body: &[u8],
+) -> Result<Option<serde_json::Value>, Error> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
     serde_json::from_slice(body)
-        .map(normalize_payload)
+        .map(|value| Some(normalize_payload(value)))
         .map_err(|e| Error::Serialization(format!("Failed to parse response: {e}")))
 }
 
@@ -138,42 +144,47 @@ mod tests {
     #[test]
     fn decode_object() {
         let value = decode_remote_config_payload(br#"{"foo":["bar","baz"]}"#).unwrap();
-        assert_eq!(value, json!({"foo": ["bar", "baz"]}));
+        assert_eq!(value, Some(json!({"foo": ["bar", "baz"]})));
     }
 
     #[test]
     fn decode_parses_a_string_holding_json_a_second_time() {
         let value = decode_remote_config_payload(br#""{\"foo\":[\"bar\"]}""#).unwrap();
-        assert_eq!(value, json!({"foo": ["bar"]}));
+        assert_eq!(value, Some(json!({"foo": ["bar"]})));
     }
 
     #[test]
     fn decode_keeps_a_string_that_is_not_json() {
         let value = decode_remote_config_payload(br#""not json""#).unwrap();
-        assert_eq!(value, json!("not json"));
+        assert_eq!(value, Some(json!("not json")));
     }
 
     #[test]
     fn decode_turns_a_numeric_string_into_a_number() {
         let value = decode_remote_config_payload(br#""123""#).unwrap();
-        assert_eq!(value, json!(123));
+        assert_eq!(value, Some(json!(123)));
     }
 
     #[test]
     fn decode_null_is_null() {
         assert_eq!(
             decode_remote_config_payload(b"null").unwrap(),
-            serde_json::Value::Null
+            Some(serde_json::Value::Null)
         );
     }
 
     #[test]
     fn decode_invalid_body_is_a_serialization_error() {
-        for body in [&b"not json at all"[..], b""] {
-            assert!(matches!(
-                decode_remote_config_payload(body),
-                Err(Error::Serialization(_))
-            ));
+        assert!(matches!(
+            decode_remote_config_payload(b"not json at all"),
+            Err(Error::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn decode_empty_or_whitespace_body_is_none() {
+        for body in [&b""[..], b" \n\t\r "] {
+            assert_eq!(decode_remote_config_payload(body).unwrap(), None);
         }
     }
 
