@@ -13,6 +13,7 @@
   "Client::get_feature_flag": "get-feature-flag",
   "Client::get_feature_flag_payload": "get-feature-flag-payload",
   "Client::get_feature_flags": "get-feature-flags",
+  "Client::get_remote_config_payload": "get-remote-config-payload",
   "Client::group_identify": "group-identify",
   "Client::is_feature_enabled": "is-feature-enabled",
   "Client::shutdown": "shutdown",

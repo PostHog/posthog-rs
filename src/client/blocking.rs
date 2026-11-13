@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use reqwest::{
     blocking::Client as HttpClient,
-    header::{CONTENT_TYPE, USER_AGENT},
+    header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT},
 };
 use serde::Serialize;
 use serde_json::json;
@@ -52,6 +52,10 @@ use super::common::{
     already_reported, build_dedup_key, extract_flag_details, flag_called_event,
     flag_event_dedup_cache, http_client_or_disable, local_record, remote_record_from_detail,
     report_flags_error, DetailedFlagsResponse, FlagEventDedupCache,
+};
+use super::remote_config_payload::{
+    authorization_header, decode_remote_config_payload, reject_unsendable_key,
+    remote_config_payload_url,
 };
 use super::transport::{Completion, Control, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
@@ -1070,6 +1074,83 @@ impl Client {
 
         let (_flags, payloads) = flags_response.normalize();
         Ok(payloads.get(&key_str).cloned())
+    }
+
+    /// Fetch the remote config payload of a feature flag.
+    ///
+    /// Remote config flags serve one payload to everyone. This method reads it
+    /// from the PostHog API with `secret_key`, so it works without local evaluation
+    /// and sends no `$feature_flag_called` event.
+    ///
+    /// A `secret_key` that is a project secret API key (`phs_...`) gets an
+    /// encrypted payload back redacted. Use a personal API key (`phx_...`) to get
+    /// the decrypted payload.
+    ///
+    /// # Parameters
+    ///
+    /// - `flag_key`: Key of the remote config flag. The SDK percent-encodes it as
+    ///   one URL path segment.
+    ///
+    /// # Returns
+    ///
+    /// The payload as JSON. PostHog stores the payload as a JSON string, so the
+    /// SDK parses a string value a second time. A string that is not JSON is
+    /// returned as `Value::String`. Returns `Ok(None)` without a request when the
+    /// client is disabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unauthorized`] when `secret_key` is missing, or PostHog
+    /// answers 401. Returns [`Error::Connection`] for a request failure, a timeout
+    /// (`feature_flags_request_timeout_seconds`), or a status the SDK has no
+    /// specific error for, such as 404. Returns [`Error::RateLimit`],
+    /// [`Error::BadRequest`] or [`Error::ServerError`] for 429, 400 or 413, and 5xx.
+    /// Returns [`Error::BadRequest`] for an empty, `.` or `..` flag key. Returns
+    /// [`Error::Serialization`] when the body is not JSON. The request is not
+    /// retried and does not call the `on_error` hooks.
+    #[must_use = "remote config payload result should be used"]
+    pub fn get_remote_config_payload<K: Into<String>>(
+        &self,
+        flag_key: K,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        if self.options.is_disabled() {
+            trace!("Client is disabled, skipping remote config payload request");
+            return Ok(None);
+        }
+
+        let Some(secret_key) = self.options.secret_key.as_deref() else {
+            warn!("get_remote_config_payload requires secret_key to be set");
+            return Err(Error::Unauthorized);
+        };
+        let flag_key = flag_key.into();
+        reject_unsendable_key(&flag_key)?;
+
+        let url = remote_config_payload_url(&self.options, &flag_key)?;
+        let request = self
+            .http()?
+            .get(url)
+            .header(AUTHORIZATION, authorization_header(secret_key)?)
+            .header(USER_AGENT, get_default_user_agent());
+        let response = self
+            .flags_request_timeout(request)
+            .send()
+            .map_err(|e| Error::Connection(e.without_url().to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            if let Some(err) = Error::from_http_response(status.as_u16(), body) {
+                return Err(err);
+            }
+            return Err(Error::Connection(format!(
+                "Unexpected HTTP status {status}"
+            )));
+        }
+
+        let body = response
+            .bytes()
+            .map_err(|e| Error::Connection(e.without_url().to_string()))?;
+        decode_remote_config_payload(&body).map(Some)
     }
 
     /// Evaluate a supplied feature flag definition locally.
