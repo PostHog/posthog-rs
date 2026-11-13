@@ -146,10 +146,13 @@ pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     })
 }
 
-/// Reserve the longest consent and session representations so every valid state
-/// can change consent or session timing without exceeding its configured bound.
+/// Reserve mandatory state first, excluding optional cached flag results. The
+/// longest consent and session representations must always remain writable.
 pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
     snapshot_size(snapshot)
+        .saturating_sub(
+            crate::client::capture::json_len(&snapshot.flags.cache.as_deref()).saturating_sub(4),
+        )
         .saturating_add(usize::from(snapshot.opt_out != Some(false)))
         .saturating_add(
             super::sessions::StoredSession::reserved_bytes()
@@ -166,6 +169,20 @@ pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result
             "State snapshot exceeds store limit",
         ));
     }
+    if snapshot.flags.cache.is_none() {
+        return encode_record(snapshot, max_bytes);
+    }
+    // A cache may fit the memory bound but not the remaining disk capacity or
+    // the whole-record decoder depth. It must not poison unrelated state writes.
+    if let Ok(encoded) = encode_record(snapshot, max_bytes) {
+        return Ok(encoded);
+    }
+    let mut mandatory = snapshot.clone();
+    mandatory.flags.cache = None;
+    encode_record(&mandatory, max_bytes)
+}
+
+fn encode_record(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
     let mut buffer = RecordBuffer {
         bytes: Vec::new(),
         limit: max_bytes,

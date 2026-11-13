@@ -111,6 +111,10 @@ fn client_with_writer(config: &Config, state: StateWriter) -> Client {
         disabled: false,
         shutdown_timeout: config.shutdown_timeout,
         producer: Some(Producer::new(config)),
+        flag_loader: Some(super::super::flags::FlagLoader::new(
+            config.transport_options(),
+            config.on_feature_flags.clone(),
+        )),
         state: Some(state),
         transport: Some(
             TransportHandle::spawn_stateful(
@@ -340,7 +344,9 @@ fn property_and_group_mutations_complete_while_state_io_is_gated() {
     assert!(after.registered.is_empty() && after.groups.is_empty());
     assert!(after.context_revision > before.context_revision);
     let live = client.state.as_ref().unwrap().snapshot();
-    assert_eq!(live, after);
+    // Flag-load completion can advance independently of the gated state write.
+    assert!(live.same_persisted_state(&after));
+    assert_eq!(live.context_revision, after.context_revision);
     client.shutdown_blocking(None);
     drop(client);
     gate.dropped.recv_timeout(WAIT).unwrap();

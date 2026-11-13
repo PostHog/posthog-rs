@@ -512,3 +512,6 @@ fn state_files_are_private_and_symlink_state_is_not_followed() {
         record(&snapshot)
     );
 }
+
+#[path = "flag_storage_tests.rs"]
+mod flag_tests;

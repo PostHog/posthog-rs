@@ -22,6 +22,16 @@ in the same scope can share an unexpired session; the SDK default keeps sessions
 in memory. Optionally set `POSTHOG_GROUP_KEY` to associate an organization
 (enabling person processing). Identity persists between runs. Call `client.reset()`
 before identifying a different user in the same storage scope.
+Set `POSTHOG_OPT_OUT=true` or `false` to explicitly change consent; leaving it unset
+preserves the stored choice. Opt-out suppresses new analytics, not delivery of
+previously admitted events or flag loading.
+
+The example observes flag-load notifications, sets explicit person targeting, and
+requests a refresh after identity/group changes. `POSTHOG_FLAG_KEY` optionally reads
+a cached flag and payload. A known flag read reports access when consent allows;
+`None` means unavailable, not disabled. Initialization and successful drains do not
+promise remote flag success. The listener reports load errors and is explicitly
+unsubscribed before shutdown. Notifications can run on the caller or shared worker.
 
 ## Running the Examples
 

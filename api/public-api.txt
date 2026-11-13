@@ -154,6 +154,15 @@ pub posthog::stateful::DeliveryOutcome::Deferred
 pub posthog::stateful::DeliveryOutcome::Disabled
 pub posthog::stateful::DeliveryOutcome::Stopped
 pub posthog::stateful::DeliveryOutcome::Unavailable
+#[non_exhaustive] pub enum posthog::stateful::FeatureFlagLoadError
+pub posthog::stateful::FeatureFlagLoadError::CacheTooLarge
+pub posthog::stateful::FeatureFlagLoadError::Http(u16)
+pub posthog::stateful::FeatureFlagLoadError::InvalidResponse
+pub posthog::stateful::FeatureFlagLoadError::Network
+pub posthog::stateful::FeatureFlagLoadError::QuotaLimited
+pub posthog::stateful::FeatureFlagLoadError::RequestTooLarge
+pub posthog::stateful::FeatureFlagLoadError::ResponseTooLarge
+pub posthog::stateful::FeatureFlagLoadError::TooManyFlags
 #[non_exhaustive] pub enum posthog::stateful::Persistence
 pub posthog::stateful::Persistence::Automatic
 pub posthog::stateful::Persistence::Directory(std::path::PathBuf)
@@ -210,6 +219,9 @@ pub fn posthog::stateful::Client::session_id(&self) -> core::option::Option<uuid
 pub fn posthog::stateful::Client::set_app_in_background(&self, bool)
 pub fn posthog::stateful::Client::start_session(&self)
 impl posthog::stateful::Client
+pub fn posthog::stateful::Client::feature_flag<'a>(&'a self, &'a str) -> posthog::stateful::FeatureFlagLookup<'a>
+pub fn posthog::stateful::Client::get_feature_flags(&self) -> core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, posthog::stateful::FeatureFlagResult>>
+impl posthog::stateful::Client
 pub async fn posthog::stateful::Client::flush(&self) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::flush_blocking(&self) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::get_anonymous_id(&self) -> alloc::string::String
@@ -229,10 +241,21 @@ impl posthog::stateful::Client
 pub fn posthog::stateful::Client::is_opt_out(&self) -> bool
 pub fn posthog::stateful::Client::opt_in(&self)
 pub fn posthog::stateful::Client::opt_out(&self)
+impl posthog::stateful::Client
+pub fn posthog::stateful::Client::on_feature_flags<F>(&self, F) -> posthog::stateful::FeatureFlagsSubscription where F: core::ops::function::Fn(&posthog::stateful::FeatureFlagsUpdate) + core::marker::Send + core::marker::Sync + 'static
+impl posthog::stateful::Client
+pub fn posthog::stateful::Client::reload_feature_flags(&self)
+impl posthog::stateful::Client
+pub fn posthog::stateful::Client::reset_group_properties_for_flags(&self, core::option::Option<&str>, core::option::Option<bool>)
+pub fn posthog::stateful::Client::reset_person_properties_for_flags(&self, core::option::Option<bool>)
+pub fn posthog::stateful::Client::set_group_properties_for_flags(&self, impl core::convert::Into<alloc::string::String>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, core::option::Option<bool>)
+pub fn posthog::stateful::Client::set_person_properties_for_flags(&self, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, core::option::Option<bool>)
 impl core::ops::drop::Drop for posthog::stateful::Client
 pub fn posthog::stateful::Client::drop(&mut self)
 pub struct posthog::stateful::Config
 pub posthog::stateful::Config::bootstrap_anonymous_id: core::option::Option<alloc::string::String>
+pub posthog::stateful::Config::bootstrap_feature_flag_payloads: core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>
+pub posthog::stateful::Config::bootstrap_feature_flags: core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, posthog::FlagValue>>
 pub posthog::stateful::Config::bootstrap_identified_id: core::option::Option<alloc::string::String>
 pub posthog::stateful::Config::capture_compression: core::option::Option<posthog::CaptureCompression>
 pub posthog::stateful::Config::disable_geoip: bool
@@ -253,10 +276,12 @@ pub posthog::stateful::Config::opt_out: bool
 pub posthog::stateful::Config::persistence: posthog::stateful::Persistence
 pub posthog::stateful::Config::person_profiles: posthog::stateful::PersonProfiles
 pub posthog::stateful::Config::platform_context: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub posthog::stateful::Config::preload_feature_flags: bool
 pub posthog::stateful::Config::project_token: alloc::string::String
 pub posthog::stateful::Config::request_timeout_seconds: u64
 pub posthog::stateful::Config::sdk_name: alloc::string::String
 pub posthog::stateful::Config::sdk_version: alloc::string::String
+pub posthog::stateful::Config::send_feature_flag_event: bool
 pub posthog::stateful::Config::session_mode: posthog::stateful::SessionMode
 pub posthog::stateful::Config::session_persistence: posthog::stateful::SessionPersistence
 pub posthog::stateful::Config::shutdown_timeout: core::time::Duration
@@ -265,9 +290,44 @@ impl posthog::stateful::Config
 pub fn posthog::stateful::Config::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog::Event) -> core::option::Option<posthog::Event> + core::marker::Send + 'static
 pub fn posthog::stateful::Config::new(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::stateful::Config::on_error<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::PostHogError<'_>) + core::marker::Send + core::marker::Sync + 'static
+pub fn posthog::stateful::Config::on_feature_flags<F>(&mut self, F) -> &mut Self where F: core::ops::function::Fn(&posthog::stateful::FeatureFlagsUpdate) + core::marker::Send + core::marker::Sync + 'static
 #[non_exhaustive] pub struct posthog::stateful::DrainReport
 pub posthog::stateful::DrainReport::delivery: posthog::stateful::DeliveryOutcome
 pub posthog::stateful::DrainReport::state: posthog::stateful::PersistenceOutcome
+#[non_exhaustive] pub struct posthog::stateful::FeatureFlagContext
+pub posthog::stateful::FeatureFlagContext::anonymous_id: alloc::string::String
+pub posthog::stateful::FeatureFlagContext::disable_geoip: bool
+pub posthog::stateful::FeatureFlagContext::distinct_id: alloc::string::String
+pub posthog::stateful::FeatureFlagContext::group_properties: std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>
+pub posthog::stateful::FeatureFlagContext::groups: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
+pub posthog::stateful::FeatureFlagContext::person_properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub struct posthog::stateful::FeatureFlagLookup<'a>
+impl posthog::stateful::FeatureFlagLookup<'_>
+pub fn posthog::stateful::FeatureFlagLookup<'_>::get(self) -> core::option::Option<posthog::stateful::FeatureFlagResult>
+pub fn posthog::stateful::FeatureFlagLookup<'_>::send_event(self, bool) -> Self
+#[non_exhaustive] pub struct posthog::stateful::FeatureFlagResult
+pub posthog::stateful::FeatureFlagResult::context: posthog::stateful::FeatureFlagContext
+pub posthog::stateful::FeatureFlagResult::enabled: bool
+pub posthog::stateful::FeatureFlagResult::evaluated_at: core::option::Option<i64>
+pub posthog::stateful::FeatureFlagResult::evaluation_revision: u64
+pub posthog::stateful::FeatureFlagResult::id: core::option::Option<u64>
+pub posthog::stateful::FeatureFlagResult::key: alloc::string::String
+pub posthog::stateful::FeatureFlagResult::partial: bool
+pub posthog::stateful::FeatureFlagResult::payload: core::option::Option<serde_json::value::Value>
+pub posthog::stateful::FeatureFlagResult::reason: core::option::Option<alloc::string::String>
+pub posthog::stateful::FeatureFlagResult::request_id: core::option::Option<alloc::string::String>
+pub posthog::stateful::FeatureFlagResult::variant: core::option::Option<alloc::string::String>
+pub posthog::stateful::FeatureFlagResult::version: core::option::Option<u32>
+pub struct posthog::stateful::FeatureFlagsSubscription
+impl posthog::stateful::FeatureFlagsSubscription
+pub fn posthog::stateful::FeatureFlagsSubscription::unsubscribe(&self)
+#[non_exhaustive] pub struct posthog::stateful::FeatureFlagsUpdate
+pub posthog::stateful::FeatureFlagsUpdate::context: posthog::stateful::FeatureFlagContext
+pub posthog::stateful::FeatureFlagsUpdate::error: core::option::Option<posthog::stateful::FeatureFlagLoadError>
+pub posthog::stateful::FeatureFlagsUpdate::errors_loading: bool
+pub posthog::stateful::FeatureFlagsUpdate::flags: core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, posthog::stateful::FeatureFlagResult>>
+pub posthog::stateful::FeatureFlagsUpdate::invalid_payloads: bool
+pub posthog::stateful::FeatureFlagsUpdate::partial: bool
 #[non_exhaustive] pub struct posthog::stateful::Identify
 pub posthog::stateful::Identify::distinct_id: alloc::string::String
 pub posthog::stateful::Identify::set: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>

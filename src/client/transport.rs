@@ -40,6 +40,9 @@ use crate::error::Error;
 use crate::Event;
 
 #[cfg(feature = "stateful")]
+#[path = "transport_flags.rs"]
+pub(super) mod flags;
+#[cfg(feature = "stateful")]
 #[path = "transport_memory.rs"]
 mod memory;
 #[cfg(all(test, feature = "stateful"))]
@@ -108,6 +111,8 @@ pub(crate) enum Control {
         events: Vec<Event>,
     },
     Flush(Completion),
+    #[cfg(feature = "stateful")]
+    Flags(Arc<flags::Slot>),
     /// Like [`Control::Flush`], but sends the freshly captured live buffer
     /// *before* older held retries. Used by the panic hook so a retry backlog
     /// behind a slow endpoint can't starve the just-enqueued `$exception` within
@@ -240,6 +245,8 @@ pub(crate) struct TransportHandle {
     worker_id: Option<std::thread::ThreadId>,
     #[cfg(feature = "stateful")]
     byte_budget: Option<Arc<memory::ByteBudget>>,
+    #[cfg(feature = "stateful")]
+    flags: Option<Arc<flags::Slot>>,
 }
 
 /// Name of the analytics worker thread (aids debugging). The panic hook detects
@@ -431,6 +438,8 @@ impl TransportHandle {
         } else {
             (None, None)
         };
+        #[cfg(feature = "stateful")]
+        let flags = ready.as_ref().map(|_| Arc::new(flags::Slot::default()));
         let worker = thread::Builder::new()
             .name(lane.thread_name.to_string())
             .spawn(move || {
@@ -456,7 +465,18 @@ impl TransportHandle {
             worker_id,
             #[cfg(feature = "stateful")]
             byte_budget,
+            #[cfg(feature = "stateful")]
+            flags,
         }
+    }
+
+    /// One active worker request plus one replaceable pending request. The
+    /// completion must use non-owning state access, not retain this transport.
+    #[cfg(feature = "stateful")]
+    pub(super) fn schedule_flags(&self, task: flags::Task) -> bool {
+        self.flags
+            .as_ref()
+            .is_some_and(|slot| slot.enqueue(task, &self.tx, &self.closed))
     }
 
     fn try_reserve(&self) -> bool {
@@ -635,7 +655,12 @@ impl TransportHandle {
     /// Mark closed. Returns `true` for the caller that won the transition (so
     /// shutdown is idempotent and only one caller drives teardown).
     pub(crate) fn begin_close(&self) -> bool {
-        !self.closed.swap(true, Ordering::AcqRel)
+        let first = !self.closed.swap(true, Ordering::AcqRel);
+        #[cfg(feature = "stateful")]
+        if let Some(slot) = &self.flags {
+            slot.close();
+        }
+        first
     }
 
     /// Synchronously close and join the worker for external callers. When called
@@ -1148,6 +1173,8 @@ fn run_worker(
         };
 
         match wake {
+            #[cfg(feature = "stateful")]
+            Wake::Msg(Control::Flags(slot)) => slot.run(&pipeline.http, &pipeline.options),
             Wake::Msg(Control::Capture { event }) => {
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
@@ -1291,6 +1318,8 @@ fn run_worker(
 fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
     while let Ok(control) = rx.try_recv() {
         match control {
+            #[cfg(feature = "stateful")]
+            Control::Flags(slot) => slot.close(),
             Control::Flush(c)
             | Control::FlushCaptures(c)
             | Control::Shutdown { completion: c, .. } => c.signal(),

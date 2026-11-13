@@ -109,6 +109,7 @@ pub struct Client {
     disabled: bool,
     shutdown_timeout: Duration,
     pub(super) producer: Option<Producer>,
+    pub(super) flag_loader: Option<super::flags::FlagLoader>,
     pub(super) state: Option<StateWriter>,
     pub(super) transport: Option<TransportHandle>,
     pub(super) closed: AtomicBool,
@@ -195,6 +196,7 @@ impl Client {
             }
             snapshot
         });
+        let flags_changed = snapshot.reconcile_flag_cache(config.disable_geoip);
         let stored_session = snapshot.session.clone();
         snapshot.sessions = super::sessions::Sessions::restored(
             stored_session.as_ref(),
@@ -207,7 +209,7 @@ impl Client {
         let backend = match restored.state_store {
             Some(store) => Backend::Persistent {
                 store: Box::new(store),
-                restored: was_restored && !session_changed,
+                restored: was_restored && !session_changed && !flags_changed,
             },
             None if matches!(config.persistence, Persistence::Memory) => Backend::Memory,
             None => Backend::Unavailable,
@@ -258,6 +260,10 @@ impl Client {
             disabled: false,
             shutdown_timeout: config.shutdown_timeout,
             producer: Some(producer),
+            flag_loader: Some(super::flags::FlagLoader::new(
+                config.transport_options(),
+                config.on_feature_flags.clone(),
+            )),
             state: Some(state),
             transport: Some(transport),
             closed: AtomicBool::new(false),
@@ -266,6 +272,16 @@ impl Client {
             if let Some(id) = &config.bootstrap_identified_id {
                 client.reconcile_identified_bootstrap(id);
             }
+        }
+        client.apply_flag_bootstrap(&config);
+        client
+            .flag_loader
+            .as_ref()
+            .unwrap()
+            .listeners
+            .notify_ready(&client.state.as_ref().unwrap().access());
+        if config.preload_feature_flags {
+            client.reload_feature_flags();
         }
         client
     }
@@ -285,6 +301,7 @@ impl Client {
             disabled: true,
             shutdown_timeout: config.shutdown_timeout,
             producer: None,
+            flag_loader: None,
             state: None,
             transport: None,
             closed: AtomicBool::new(false),
@@ -341,7 +358,7 @@ impl Client {
         let revision = state.checkpoint();
         let (tx, rx) = mpsc::channel();
         let sent = transport.send_control(Control::Flush(Completion::Blocking(tx)));
-        if self.on_worker_thread() || self.in_capture() {
+        if self.on_worker_thread() || self.in_capture() || self.in_flag_callback() {
             return DrainReport::deferred();
         }
         DrainReport {
@@ -373,7 +390,7 @@ impl Client {
         let revision = state.checkpoint();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let sent = transport.send_control(Control::Flush(Completion::Async(tx)));
-        if self.on_worker_thread() || self.in_capture() {
+        if self.on_worker_thread() || self.in_capture() || self.in_flag_callback() {
             return DrainReport::deferred();
         }
         DrainReport {
@@ -394,11 +411,13 @@ impl Client {
         // The first caller selects one deadline for both workers. Later calls,
         // including Drop, cannot restart or extend that drain budget.
         if !self.closed.swap(true, Ordering::AcqRel) {
+            let callbacks = self.flag_loader.as_ref().unwrap().listeners.close();
             self.transport
                 .as_ref()
                 .unwrap()
                 .request_close_before(deadline);
             self.state.as_ref().unwrap().request_close_before(deadline);
+            drop(callbacks);
         }
     }
 
@@ -418,7 +437,7 @@ impl Client {
         self.request_shutdown(timeout);
         let transport = self.transport.as_ref().unwrap();
         let state = self.state.as_ref().unwrap();
-        if self.on_worker_thread() || self.in_capture() {
+        if self.on_worker_thread() || self.in_capture() || self.in_flag_callback() {
             return DrainReport::deferred();
         }
         transport.join();
@@ -440,7 +459,7 @@ impl Client {
             return DrainReport::disabled();
         }
         self.request_shutdown(timeout);
-        if self.on_worker_thread() || self.in_capture() {
+        if self.on_worker_thread() || self.in_capture() || self.in_flag_callback() {
             return DrainReport::deferred();
         }
         let transport = self.transport.as_ref().unwrap();

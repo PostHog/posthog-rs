@@ -43,6 +43,21 @@ pub struct Config {
     /// Default person processing and identity/group-operation policy. Default: IdentifiedOnly.
     /// Explicit capture options and hooks retain their normal precedence.
     pub person_profiles: PersonProfiles,
+    /// Request current-user flags asynchronously after local setup. Default: true.
+    /// Readiness does not wait for a response. False suppresses only startup preload,
+    /// not manual reloads or identity/group/targeting-triggered refreshes.
+    pub preload_feature_flags: bool,
+    /// Report completed single-flag lookups through `$feature_flag_called` by
+    /// default. Individual lookups can override this; consent still applies.
+    pub send_feature_flag_event: bool,
+    /// Optional initial flags snapshot, replacing restored values before preload.
+    /// Only true and nonempty variants are served. None preserves restored values;
+    /// Some(empty) installs an empty snapshot. Reset does not reapply this seed.
+    /// Oversized snapshots are ignored and reported through `on_error`.
+    pub bootstrap_feature_flags: Option<HashMap<String, crate::FlagValue>>,
+    /// Already-decoded JSON payloads for enabled bootstrap flags only. Strings
+    /// are not parsed again; JSON null is a present payload. Ignored without flags.
+    pub bootstrap_feature_flag_payloads: Option<HashMap<String, serde_json::Value>>,
     /// Events that trigger an automatic flush. Default: 20.
     pub flush_at: usize,
     /// Maximum events per batch. Default: 100.
@@ -83,6 +98,7 @@ pub struct Config {
     pub sdk_version: String,
     pub(super) before_send: Vec<BeforeSendHook>,
     pub(super) on_error: Vec<OnErrorHook>,
+    pub(super) on_feature_flags: Vec<super::flag_listeners::FlagsHook>,
 }
 
 impl Config {
@@ -100,6 +116,10 @@ impl Config {
             bootstrap_anonymous_id: None,
             bootstrap_identified_id: None,
             person_profiles: PersonProfiles::IdentifiedOnly,
+            preload_feature_flags: true,
+            send_feature_flag_event: true,
+            bootstrap_feature_flags: None,
+            bootstrap_feature_flag_payloads: None,
             flush_at: 20,
             max_batch_size: 100,
             flush_interval: Duration::from_secs(10),
@@ -120,7 +140,20 @@ impl Config {
             sdk_version: crate::client::CRATE_VERSION.into(),
             before_send: Vec::new(),
             on_error: Vec::new(),
+            on_feature_flags: Vec::new(),
         }
+    }
+
+    /// Observe bootstrap/restored flags before initialization returns, and later
+    /// remote completions. Runs in registration order outside SDK locks; panics
+    /// are isolated. Remote calls run on the delivery worker, not a UI thread.
+    /// The callback remains registered until this client's terminal shutdown.
+    pub fn on_feature_flags<F>(&mut self, callback: F) -> &mut Self
+    where
+        F: Fn(&super::FeatureFlagsUpdate) + Send + Sync + 'static,
+    {
+        self.on_feature_flags.push(std::sync::Arc::new(callback));
+        self
     }
 
     /// Observe initialization, storage, and delivery failures. Hooks run in

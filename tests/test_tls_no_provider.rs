@@ -16,6 +16,7 @@ fn install_ring_provider() {
 #[cfg(feature = "stateful")]
 fn stateful_config() -> posthog::stateful::Config {
     let mut config = posthog::stateful::Config::new("phc_test_token");
+    config.preload_feature_flags = false;
     config.host = "https://127.0.0.1:1".into();
     config.persistence = posthog::stateful::Persistence::Memory;
     config

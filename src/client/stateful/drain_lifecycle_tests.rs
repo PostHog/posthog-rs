@@ -77,6 +77,7 @@ fn async_shutdown_resumed_inline_on_transport_worker_defers() {
     let mut config = config();
     config.host = server.base_url();
     config.flush_at = 1;
+    config.preload_feature_flags = false;
     config.on_error(move |_| {
         entered_tx.send(thread::current().id()).unwrap();
         release_rx.lock().unwrap().recv_timeout(GATE_WAIT).unwrap();
