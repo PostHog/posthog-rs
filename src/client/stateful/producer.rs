@@ -24,7 +24,8 @@ mod tests;
 pub struct Capture {
     /// Nonblank event name.
     pub event: String,
-    /// Per-event properties. These take precedence over platform and SDK defaults.
+    /// Per-event properties. These take precedence over registered context,
+    /// remembered groups, platform context and SDK defaults using Rust's fill rules.
     pub properties: HashMap<String, Value>,
     /// Explicit wire options, with the same precedence as the server Event API.
     /// With the default configuration, a fresh anonymous client sends
@@ -138,6 +139,21 @@ impl Producer {
         );
         event.ensure_timestamp(now);
         event.ensure_uuid();
+        for (key, value) in &snapshot.registered {
+            event.insert_prop_default(key.clone(), value.clone());
+        }
+        if !snapshot.groups.is_empty() {
+            event.insert_prop_default(
+                "$groups",
+                Value::Object(
+                    snapshot
+                        .groups
+                        .iter()
+                        .map(|(kind, key)| (kind.clone(), key.clone().into()))
+                        .collect(),
+                ),
+            );
+        }
         for (key, value) in &self.context {
             event.insert_prop_default(key.clone(), value.clone());
         }

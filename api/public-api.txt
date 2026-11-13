@@ -206,6 +206,12 @@ pub fn posthog::stateful::Client::is_disabled(&self) -> bool
 pub async fn posthog::stateful::Client::shutdown(&self, core::option::Option<core::time::Duration>) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::shutdown_blocking(&self, core::option::Option<core::time::Duration>) -> posthog::stateful::DrainReport
 impl posthog::stateful::Client
+pub fn posthog::stateful::Client::group(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>)
+pub fn posthog::stateful::Client::group_identify(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>)
+pub fn posthog::stateful::Client::register(&self, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>)
+pub fn posthog::stateful::Client::remove_group(&self, &str)
+pub fn posthog::stateful::Client::unregister(&self, &str)
+impl posthog::stateful::Client
 pub fn posthog::stateful::Client::is_opt_out(&self) -> bool
 pub fn posthog::stateful::Client::opt_in(&self)
 pub fn posthog::stateful::Client::opt_out(&self)

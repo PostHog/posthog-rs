@@ -307,6 +307,49 @@ fn consent_is_immediate_while_io_is_gated_and_old_completion_cannot_revert_it() 
 }
 
 #[test]
+fn property_and_group_mutations_complete_while_state_io_is_gated() {
+    let directory = Directory::new();
+    let (state, gate) = gated_writer(&directory);
+    gate.entered.recv_timeout(WAIT).unwrap();
+    let client = Arc::new(client_with_writer(&config(), state));
+    let caller_client = client.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let caller = thread::spawn(move || {
+        caller_client.register(std::collections::HashMap::from([(
+            "plan".into(),
+            serde_json::json!("pro"),
+        )]));
+        caller_client.group("company", "old", None);
+        caller_client.group_identify("company", "metadata-only", std::collections::HashMap::new());
+        let before = caller_client.state.as_ref().unwrap().snapshot();
+        caller_client.group("company", "new", None);
+        caller_client.unregister("plan");
+        caller_client.remove_group("company");
+        let after = caller_client.state.as_ref().unwrap().snapshot();
+        done_tx.send((before, after)).unwrap();
+    });
+    let result = done_rx.recv_timeout(WAIT);
+    client.state.as_ref().unwrap().request_close();
+    gate.release.send(()).unwrap();
+    caller.join().unwrap();
+    client.state.as_ref().unwrap().join_blocking();
+    let (before, after) = result.expect("context mutation waited for state I/O");
+    assert_eq!(before.registered["plan"], "pro");
+    assert_eq!(before.groups["company"], "old");
+    assert!(before.person_processing);
+    assert!(after.registered.is_empty() && after.groups.is_empty());
+    assert!(after.context_revision > before.context_revision);
+    let live = client.state.as_ref().unwrap().snapshot();
+    assert_eq!(live, after);
+    client.shutdown_blocking(None);
+    drop(client);
+    gate.dropped.recv_timeout(WAIT).unwrap();
+    let (_, restored) =
+        FileStateStore::open(StorageDirectory::open(&directory.0).unwrap(), 4096).unwrap();
+    assert!(restored.unwrap().groups.is_empty());
+}
+
+#[test]
 fn identity_mutations_complete_while_state_io_is_gated() {
     let directory = Directory::new();
     let (state, gate) = gated_writer(&directory);

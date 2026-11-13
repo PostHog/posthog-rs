@@ -16,9 +16,10 @@ cargo run --no-default-features --features stateful,tls --example stateful
 ```
 
 This blocking example uses automatic local persistence, anonymous or identified
-identity, explicit capture/screen, a native privacy hook, and separate drain reports.
-Identity persists between runs. Call `client.reset()` before identifying a different
-user in the same storage scope.
+identity, registered context, explicit capture/screen, a native privacy hook, and
+separate drain reports. Optionally set `POSTHOG_GROUP_KEY` to associate an
+organization (enabling person processing). Identity persists between runs. Call
+`client.reset()` before identifying a different user in the same storage scope.
 
 ## Running the Examples
 

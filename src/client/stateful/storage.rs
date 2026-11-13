@@ -152,6 +152,41 @@ pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
     snapshot_size(snapshot).saturating_add(usize::from(snapshot.opt_out != Some(false)))
 }
 
+/// Encode and validate the same bounded representation for both memory admission
+/// and persistence. This function performs no filesystem operations.
+pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
+    if snapshot_capacity(snapshot) as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "State snapshot exceeds store limit",
+        ));
+    }
+    let mut buffer = RecordBuffer {
+        bytes: Vec::new(),
+        limit: max_bytes,
+    };
+    serde_json::to_writer(
+        &mut buffer,
+        &StateRecord {
+            version: 1,
+            state: snapshot,
+        },
+    )
+    .map_err(|error| {
+        if error.is_io() {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "State snapshot exceeds store limit",
+            )
+        } else {
+            invalid_state()
+        }
+    })?;
+    // Check the same bounded decoder used at startup before touching files.
+    FileStateStore::decode(&buffer.bytes)?;
+    Ok(buffer.bytes)
+}
+
 /// Blocking backend calls belong exclusively to the state-persistence worker.
 pub(super) trait StateStore: Send + 'static {
     fn save(&mut self, snapshot: &Snapshot) -> io::Result<()>;
@@ -238,42 +273,14 @@ impl FileStateStore {
     /// Only the state writer calls this. A completed replacement is not a
     /// multi-file transaction with event storage or a universal power-loss guarantee.
     pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
-        if snapshot_capacity(snapshot) as u64 > self.max_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "State snapshot exceeds store limit",
-            ));
-        }
-        let mut buffer = RecordBuffer {
-            bytes: Vec::new(),
-            limit: self.max_bytes,
-        };
-        serde_json::to_writer(
-            &mut buffer,
-            &StateRecord {
-                version: 1,
-                state: snapshot,
-            },
-        )
-        .map_err(|error| {
-            if error.is_io() {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "State snapshot exceeds store limit",
-                )
-            } else {
-                invalid_state()
-            }
-        })?;
-        // Check the same bounded decoder used at startup before touching files.
-        Self::decode(&buffer.bytes)?;
+        let encoded = encode_snapshot(snapshot, self.max_bytes)?;
         let temporary = self.directory.path().join("state.json.tmp");
         // The lease and single writer exclude live concurrent writes. A stale
         // temporary is an uncommitted write from a previous process/attempt.
         remove_temporary(&temporary)?;
         let result = (|| -> io::Result<()> {
             let mut file = open_private(&temporary, true)?;
-            file.write_all(&buffer.bytes)?;
+            file.write_all(&encoded)?;
             file.sync_all()?;
             drop(file);
             fs::rename(&temporary, self.path())?;

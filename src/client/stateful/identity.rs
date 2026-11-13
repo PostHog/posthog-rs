@@ -18,9 +18,9 @@ mod tests;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PersonProfiles {
-    /// Do not process profiles by default; ignore identify/alias/profile operations.
+    /// Do not process profiles by default; ignore identity/profile/group operations.
     Never,
-    /// Process after identification or explicit alias/profile creation/property updates.
+    /// Process after identification or explicit alias/profile/group operations.
     #[default]
     IdentifiedOnly,
     /// Process all events by default, including anonymous events.
@@ -237,8 +237,9 @@ impl Client {
     }
 
     /// Start a fresh anonymous identity, including a fresh device ID. Emits no event
-    /// and preserves queued events. Clears explicit consent and restores Config::opt_out;
-    /// with the normal default, reset re-enables collection. Setup bootstrap is not
+    /// and preserves queued events. Clears registered properties, groups and explicit
+    /// consent, restoring Config::opt_out; with the normal default, reset re-enables
+    /// collection. Setup bootstrap is not
     /// reapplied. A hook may reset:
     /// its already-snapshotted outer event retains the old identity.
     pub fn reset(&self) {
@@ -248,8 +249,10 @@ impl Client {
         let id = uuid::Uuid::now_v7().to_string();
         let _ = self.state.as_ref().unwrap().mutate(|state| {
             let generation = state.generation.wrapping_add(1);
+            let context_revision = state.context_revision.wrapping_add(1);
             *state = Snapshot::anonymous(id);
             state.generation = generation;
+            state.context_revision = context_revision;
         });
     }
 

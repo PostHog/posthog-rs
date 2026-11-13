@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use super::storage::{snapshot_capacity, StateStore};
+use super::storage::{encode_snapshot, StateStore};
 use super::Snapshot;
 use crate::client::common::report_storage_error;
 use crate::client::retry::exponential_backoff;
@@ -276,13 +276,13 @@ impl StateWriter {
             }
             let mut candidate = (*state.snapshot).clone();
             let result = change(&mut candidate);
-            validate(&candidate, self.options.max_bytes)?;
             if candidate.same_persisted_state(&state.snapshot) {
                 if candidate != *state.snapshot {
                     state.snapshot = Arc::new(candidate);
                 }
                 return Ok((state.revision, result));
             }
+            validate(&candidate, self.options.max_bytes)?;
             let revision = state.revision.checked_add(1).ok_or(UpdateError::Full)?;
             state.snapshot = Arc::new(candidate);
             state.revision = revision;
@@ -493,9 +493,15 @@ fn validate(snapshot: &Snapshot, max_bytes: usize) -> Result<(), UpdateError> {
     if !snapshot.is_valid() {
         return Err(UpdateError::Invalid);
     }
-    if snapshot_capacity(snapshot) > max_bytes {
-        return Err(UpdateError::Full);
-    }
+    // No candidate may make unrelated future state changes unpersistable.
+    // Use the persistence codec itself, including its byte and decoder bounds.
+    encode_snapshot(snapshot, max_bytes as u64).map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidInput {
+            UpdateError::Full
+        } else {
+            UpdateError::Invalid
+        }
+    })?;
     Ok(())
 }
 

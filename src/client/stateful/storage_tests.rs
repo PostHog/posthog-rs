@@ -233,6 +233,43 @@ fn serialization_limit_is_exact_and_failed_write_preserves_previous_state() {
 }
 
 #[test]
+fn context_record_roundtrips_at_exact_bound_and_rejects_invalid_schema() {
+    let mut snapshot = Snapshot::anonymous("anonymous".into());
+    snapshot.registered = serde_json::from_value(serde_json::json!({
+        "number": 1.0_f64 / 3.0, "null": null, "array": [null, {"nested":false}]
+    }))
+    .unwrap();
+    snapshot.groups.insert("company".into(), "a".into());
+    let limit = snapshot_capacity(&snapshot);
+    let directory = TestDirectory::new();
+    let (mut store, _) = FileStateStore::open(directory.lease(), limit as u64).unwrap();
+    store.save(&snapshot).unwrap();
+    assert_eq!(store.load().unwrap(), Some(snapshot.clone()));
+    let bytes = fs::read(directory.path().join("state.json")).unwrap();
+    snapshot.registered.insert("too-much".into(), true.into());
+    assert!(store.save(&snapshot).is_err());
+    assert_eq!(
+        fs::read(directory.path().join("state.json")).unwrap(),
+        bytes
+    );
+    for field in ["registered", "groups"] {
+        for malformed in [
+            None,
+            Some(serde_json::json!([])),
+            Some(serde_json::Value::Null),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if let Some(malformed) = malformed {
+                value["state"][field] = malformed;
+            } else {
+                value["state"].as_object_mut().unwrap().remove(field);
+            }
+            assert!(FileStateStore::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+    }
+}
+
+#[test]
 fn invalid_identity_cannot_replace_persisted_state() {
     let directory = TestDirectory::new();
     let original = Snapshot::anonymous("original".into());

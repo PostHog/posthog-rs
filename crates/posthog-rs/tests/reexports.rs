@@ -53,6 +53,11 @@ fn reexports_stateful_client_and_its_public_entry_points() {
     client.alias("alias");
     client.set_person_properties(Default::default(), Default::default());
     client.create_person_profile();
+    client.register(Default::default());
+    client.unregister("key");
+    client.group("company", "example", None);
+    client.group_identify("company", "example", Default::default());
+    client.remove_group("company");
     client.reset();
     client.opt_out();
     assert!(client.is_opt_out());
