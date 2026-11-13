@@ -83,7 +83,7 @@ PostHog Cloud `host`. Set `app_host` when `host` is a reverse proxy: the proxy
 must not receive the secret key.
 
 ```rust
-use posthog_rs::{ClientOptionsBuilder, CodeEmail, TemplateEmail};
+use posthog_rs::{ClientOptionsBuilder, CodeEmail, EmailAttachment, TemplateEmail};
 use serde_json::json;
 
 let options = ClientOptionsBuilder::default()
@@ -111,6 +111,8 @@ posthog
     .send(
         CodeEmail::new("jane@example.com", "password-reset", "Reset your password")
             .html(rendered_html)
+            .cc("security@example.com")
+            .attachment(EmailAttachment::new("report.pdf", report_pdf))
             .distinct_id("user_123"),
     )
     .await?;

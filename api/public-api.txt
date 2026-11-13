@@ -378,7 +378,10 @@ impl core::default::Default for posthog_rs::ClientOptionsBuilder
 pub fn posthog_rs::ClientOptionsBuilder::default() -> Self
 pub struct posthog_rs::CodeEmail
 impl posthog_rs::CodeEmail
+pub fn posthog_rs::CodeEmail::attachment(self, posthog_rs::EmailAttachment) -> Self
+pub fn posthog_rs::CodeEmail::bcc(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::CodeEmail::capture_engagement(self, bool) -> Self
+pub fn posthog_rs::CodeEmail::cc(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::CodeEmail::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::CodeEmail::from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog_rs::CodeEmail::html(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -399,6 +402,13 @@ pub posthog_rs::CohortDefinition::properties: serde_json::value::Value
 impl posthog_rs::CohortDefinition
 pub fn posthog_rs::CohortDefinition::new(alloc::string::String, alloc::vec::Vec<posthog_rs::Property>) -> Self
 pub fn posthog_rs::CohortDefinition::parse_properties(&self) -> alloc::vec::Vec<posthog_rs::Property>
+pub struct posthog_rs::EmailAttachment
+impl posthog_rs::EmailAttachment
+pub fn posthog_rs::EmailAttachment::content_id(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::EmailAttachment::content_type(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog_rs::EmailAttachment::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::vec::Vec<u8>>) -> Self
+impl core::fmt::Debug for posthog_rs::EmailAttachment
+pub fn posthog_rs::EmailAttachment::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct posthog_rs::EmailError(_)
 impl posthog_rs::EmailError
 pub fn posthog_rs::EmailError::code(&self) -> &str

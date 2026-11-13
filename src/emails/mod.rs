@@ -18,6 +18,6 @@ pub use blocking_emails::Emails;
 pub use error::{EmailError, EmailErrorKind};
 pub(crate) use shared::EmailTracker;
 pub use types::{
-    CodeEmail, EmailDeliveryStatus, EmailStatus, EmailTracking, EmailTrackingOptions, EmailWarning,
-    SendEmail, SendEmailResult, TemplateEmail,
+    CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailStatus, EmailTracking,
+    EmailTrackingOptions, EmailWarning, SendEmail, SendEmailResult, TemplateEmail,
 };

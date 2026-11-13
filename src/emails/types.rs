@@ -1,5 +1,9 @@
+use std::fmt;
+
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 /// What every send takes, whatever its form.
 #[derive(Debug, Clone, Default)]
@@ -96,6 +100,9 @@ pub struct CodeEmail {
     pub(crate) text: Option<String>,
     pub(crate) from: Option<String>,
     pub(crate) reply_to: Vec<String>,
+    pub(crate) cc: Vec<String>,
+    pub(crate) bcc: Vec<String>,
+    pub(crate) attachments: Vec<EmailAttachment>,
     pub(crate) sensitive: Option<bool>,
     pub(crate) tracking: Option<EmailTracking>,
     pub(crate) capture_engagement: Option<bool>,
@@ -121,6 +128,9 @@ impl CodeEmail {
             text: None,
             from: None,
             reply_to: Vec::new(),
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            attachments: Vec::new(),
             sensitive: None,
             tracking: None,
             capture_engagement: None,
@@ -150,6 +160,31 @@ impl CodeEmail {
     /// Adds a reply-to address. Call it again to add more.
     pub fn reply_to(mut self, address: impl Into<String>) -> Self {
         self.reply_to.push(address.into());
+        self
+    }
+
+    /// Adds an address that gets a visible copy. Call it again to add more,
+    /// at most 10. Each is a bare address, such as `"finance@example.com"`,
+    /// with no name.
+    pub fn cc(mut self, address: impl Into<String>) -> Self {
+        self.cc.push(address.into());
+        self
+    }
+
+    /// Adds an address that gets a copy the other recipients never see. Call
+    /// it again to add more, at most 10. Each is a bare address, with no name.
+    pub fn bcc(mut self, address: impl Into<String>) -> Self {
+        self.bcc.push(address.into());
+        self
+    }
+
+    /// Adds a file to the email. Call it again to add more, at most 10 files
+    /// and 40 MB for the whole email after Base64 encoding, which leaves about
+    /// 29 MB for the files. The 40 MB counts the bodies too, and the HTML twice
+    /// without text, because PostHog derives the text from it. PostHog refuses a file type that mailbox providers
+    /// block, such as `.exe`.
+    pub fn attachment(mut self, attachment: EmailAttachment) -> Self {
+        self.attachments.push(attachment);
         self
     }
 
@@ -233,6 +268,91 @@ impl CodeEmail {
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.options.max_retries = Some(max_retries);
         self
+    }
+}
+
+/// A file sent with a [`CodeEmail`].
+///
+/// PostHog can't fetch a file from a path or URL: read the file and pass its
+/// bytes. Before the send, the client uploads each file PostHog doesn't have
+/// yet straight to PostHog's file store, then sends the email naming each file
+/// by its SHA-256. Its `Debug` output never shows the content.
+///
+/// ```
+/// use posthog_rs::{CodeEmail, EmailAttachment};
+///
+/// # let invoice_pdf: Vec<u8> = Vec::new();
+/// # let logo_png: Vec<u8> = Vec::new();
+/// let email = CodeEmail::new("jane@example.com", "invoice", "Your invoice")
+///     .html(r#"<img src="cid:logo"><p>Your invoice is attached.</p>"#)
+///     .attachment(EmailAttachment::new("invoice.pdf", invoice_pdf))
+///     .attachment(EmailAttachment::new("logo.png", logo_png).content_id("logo"));
+/// ```
+#[derive(Clone)]
+pub struct EmailAttachment {
+    pub(crate) filename: String,
+    pub(crate) content: Bytes,
+    pub(crate) sha256: String,
+    content_type: Option<String>,
+    content_id: Option<String>,
+}
+
+impl EmailAttachment {
+    /// A file from its bytes, with the name the recipient sees, such as
+    /// `"invoice.pdf"`. The client hashes the bytes here, once.
+    pub fn new(filename: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
+        let content = Bytes::from(content.into());
+        let sha256 = format!("{:x}", Sha256::digest(&content));
+        Self {
+            filename: filename.into(),
+            content,
+            sha256,
+            content_type: None,
+            content_id: None,
+        }
+    }
+
+    /// The MIME type, such as `"application/pdf"`. Without it, the type
+    /// follows from the file name.
+    pub fn content_type(mut self, content_type: impl Into<String>) -> Self {
+        self.content_type = Some(content_type.into());
+        self
+    }
+
+    /// Shows the file inline: the HTML references it as `cid:<content_id>`,
+    /// such as `<img src="cid:logo">` for `"logo"`.
+    pub fn content_id(mut self, content_id: impl Into<String>) -> Self {
+        self.content_id = Some(content_id.into());
+        self
+    }
+
+    /// The file as the upload request names it.
+    pub(crate) fn to_upload_json(&self) -> Value {
+        json!({"sha256": self.sha256, "size": self.content.len()})
+    }
+
+    /// The file as the send request references it.
+    pub(crate) fn to_reference_json(&self) -> Value {
+        let mut reference = json!({"sha256": self.sha256, "filename": self.filename});
+        if let Some(content_type) = &self.content_type {
+            reference["content_type"] = json!(content_type);
+        }
+        if let Some(content_id) = &self.content_id {
+            reference["content_id"] = json!(content_id);
+        }
+        reference
+    }
+}
+
+impl fmt::Debug for EmailAttachment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmailAttachment")
+            .field("filename", &self.filename)
+            .field("content", &format_args!("<{} bytes>", self.content.len()))
+            .field("sha256", &self.sha256)
+            .field("content_type", &self.content_type)
+            .field("content_id", &self.content_id)
+            .finish()
     }
 }
 
