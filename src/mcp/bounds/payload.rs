@@ -15,6 +15,7 @@ use crate::mcp::contract::limits::{
     MAX_PAYLOAD_STRING_LENGTH, REDACTION_SCAN_MARGIN,
 };
 use crate::mcp::contract::REDACTED;
+use crate::mcp::number::Decimal;
 use crate::mcp::privacy::{is_credential_key, TextPass};
 
 const OVERFLOW_MARKER: &str = "[MaxProperties ~]";
@@ -87,10 +88,15 @@ fn bound(value: &Value, remaining_depth: usize, pass: TextPass, budget: &mut usi
     }
 }
 
-/// `[redacted]` as a string, so JSON text stays valid.
+/// `[redacted]` as a string, so JSON text stays valid. Read as written and in
+/// plain digits, since an exponent form such as `4.111111111111111e15` hides
+/// the digits redaction looks for.
 fn bound_number(number: &Number, pass: TextPass) -> Value {
-    let text = number.to_string();
-    match pass.apply(&text) == text {
+    let plain = Decimal::of(number).and_then(|decimal| decimal.plain());
+    let clean = std::iter::once(number.to_string())
+        .chain(plain)
+        .all(|text| pass.apply(&text) == text);
+    match clean {
         true => Value::Number(number.clone()),
         false => Value::from(REDACTED),
     }
@@ -206,6 +212,62 @@ mod tests {
                 bounded_payload(&value, TextPass::Captured),
                 bounded,
                 "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_card_number_is_redacted_however_it_is_written() {
+        for written in [
+            "4111111111111111",
+            "4.111111111111111e15",
+            "4111111111111111e0",
+            "0.04111111111111111e17",
+            "41111111111111.11e2",
+        ] {
+            let number: Value = serde_json::from_str(written).unwrap();
+            assert_eq!(
+                bounded_payload(&number, TextPass::FreeText),
+                json!("[redacted]"),
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_numbers_stay_numbers() {
+        for written in [
+            "100000000009",
+            "1731500000006",
+            "123456789012346",
+            "3.5",
+            "-7",
+        ] {
+            let number: Value = serde_json::from_str(written).unwrap();
+            assert_eq!(
+                bounded_payload(&number, TextPass::FreeText),
+                number,
+                "{written}"
+            );
+        }
+    }
+
+    /// Runs only when a crate in the build turns on serde_json's
+    /// `arbitrary_precision`, the one way a number keeps more digits than an
+    /// `f64` holds.
+    #[test]
+    fn a_long_card_number_is_redacted_in_exponent_form() {
+        let written = "0.6212345678901234569e19";
+        let number: Value = serde_json::from_str(written).unwrap();
+        if !number.to_string().contains("6212345678901234569") {
+            return;
+        }
+        for written in [written, "6212345678901234569e0", "62123456789012345690e-1"] {
+            let number: Value = serde_json::from_str(written).unwrap();
+            assert_eq!(
+                bounded_payload(&number, TextPass::FreeText),
+                json!("[redacted]"),
+                "{written}"
             );
         }
     }

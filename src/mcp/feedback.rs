@@ -8,6 +8,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 
 use super::contract::arguments::{CONTEXT, CONVERSATION_ID, LLM_MODEL};
+use super::number::Decimal;
 use super::tools::virtual_tools::{FEEDBACK_TYPES, SENTIMENTS};
 
 pub type FeedbackHandler = Arc<
@@ -146,14 +147,12 @@ impl FeedbackReport {
 }
 
 /// JSON Schema equality: numbers by value at any depth, so `[3]` matches
-/// `[3.0]`, and integers exactly, since an `f64` cannot tell large ones
-/// apart.
+/// `[3.0]`, and exactly, since an `f64` cannot tell large ones apart.
 fn same_value(left: &Value, right: &Value) -> bool {
     match (left, right) {
-        (Value::Number(a), Value::Number(b)) => match (integer(a), integer(b)) {
+        (Value::Number(a), Value::Number(b)) => match (Decimal::of(a), Decimal::of(b)) {
             (Some(a), Some(b)) => a == b,
-            (None, None) => a.as_f64() == b.as_f64(),
-            _ => false,
+            _ => a.to_string() == b.to_string(),
         },
         (Value::Array(a), Value::Array(b)) => {
             a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_value(a, b))
@@ -165,23 +164,6 @@ fn same_value(left: &Value, right: &Value) -> bool {
         }
         _ => left == right,
     }
-}
-
-/// The number's exact value when it is whole, wider than any JSON integer.
-fn integer(number: &serde_json::Number) -> Option<i128> {
-    if let Some(whole) = number.as_i64() {
-        return Some(whole.into());
-    }
-    if let Some(whole) = number.as_u64() {
-        return Some(whole.into());
-    }
-    // With serde_json's `arbitrary_precision`, a larger integer keeps its digits.
-    if let Ok(whole) = number.to_string().parse::<i128>() {
-        return Some(whole);
-    }
-    let float = number.as_f64()?;
-    let in_range = float.abs() < i128::MAX as f64;
-    (float.fract() == 0.0 && in_range).then_some(float as i128)
 }
 
 /// A string argument that is not blank.
@@ -215,13 +197,44 @@ mod tests {
         if serde_json::to_string(&beyond).unwrap() != "18446744073709551617" {
             return;
         }
-        let field = FeedbackField {
-            name: "f".to_string(),
-            schema: json!({ "type": "integer", "enum": [parse("18446744073709551616")] }),
-            required: false,
-        };
-        assert!(!field.admits(&beyond));
-        assert!(field.admits(&parse("18446744073709551616")));
+        let cases = [
+            ("18446744073709551616", "18446744073709551617", false),
+            ("18446744073709551616", "18446744073709551616", true),
+            (
+                "340282366920938463463374607431768211454",
+                "340282366920938463463374607431768211455",
+                false,
+            ),
+            (
+                "340282366920938463463374607431768211455",
+                "340282366920938463463374607431768211455",
+                true,
+            ),
+            ("1e40", "10000000000000000000000000000000000000001", false),
+            ("1e40", "10000000000000000000000000000000000000000", true),
+            (
+                "170141183460469231731687303715884105728.0",
+                "170141183460469231731687303715884105729",
+                false,
+            ),
+            (
+                "170141183460469231731687303715884105727",
+                "170141183460469231731687303715884105727.0",
+                true,
+            ),
+            ("100000000000000000000000000000000000000", "1e38", true),
+            ("-1e40", "-10000000000000000000000000000000000000001", false),
+            ("1e40", "1.0000000000000000000001e40", false),
+            ("100000000000000000000", "100000000000000000001.0", false),
+        ];
+        for (allowed, sent, admitted) in cases {
+            let field = FeedbackField {
+                name: "f".to_string(),
+                schema: json!({ "type": "integer", "enum": [parse(allowed)] }),
+                required: false,
+            };
+            assert_eq!(field.admits(&parse(sent)), admitted, "{allowed} {sent}");
+        }
     }
 
     #[test]

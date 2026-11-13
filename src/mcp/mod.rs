@@ -25,6 +25,7 @@ mod contract;
 mod feedback;
 mod identity;
 mod manual;
+mod number;
 mod options;
 mod privacy;
 mod request_info;

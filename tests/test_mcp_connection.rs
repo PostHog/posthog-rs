@@ -747,6 +747,11 @@ async fn declared_feedback_fields_are_captured_when_well_formed() {
             vec!["$mcp_feedback_invented"],
         ),
         (
+            json!({ "product_area": "flags", "attempts": 4111111111111111u64 }),
+            json!({ "$mcp_feedback_attempts": "[redacted]" }),
+            vec![],
+        ),
+        (
             json!({ "product_area": "billing", "note": 7, "attempts": 3.5 }),
             json!({}),
             vec![

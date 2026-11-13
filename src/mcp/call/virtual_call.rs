@@ -124,7 +124,7 @@ fn free_text(text: &str, limit: usize) -> Option<String> {
     bounded_non_empty(text, limit, TextPass::FreeText)
 }
 
-/// A string as free text, a number or boolean as is, and any other JSON as
+/// A string or number as free text, a boolean as is, and any other JSON as
 /// text within the same limit, its keys, strings and numbers redacted as free
 /// text before it is written. A field named like a credential is redacted
 /// whole, as any such key is.
@@ -134,7 +134,8 @@ fn captured_extra(name: &str, value: &Value) -> Option<Value> {
     }
     match value {
         Value::String(text) => free_text(text, MAX_TEXT_LENGTH).map(Value::from),
-        Value::Number(_) | Value::Bool(_) => Some(value.clone()),
+        Value::Number(_) => Some(bounded_payload(value, TextPass::FreeText)),
+        Value::Bool(_) => Some(value.clone()),
         Value::Null | Value::Array(_) | Value::Object(_) => {
             let redacted = bounded_payload(value, TextPass::FreeText).to_string();
             Some(Value::from(truncate(&redacted, MAX_TEXT_LENGTH)))
