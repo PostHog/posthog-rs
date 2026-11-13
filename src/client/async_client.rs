@@ -311,8 +311,9 @@ impl Client {
     /// # }
     /// ```
     pub fn alias<P: Into<String>, D: Into<String>>(&self, previous_id: P, distinct_id: D) {
-        if let Some(event) = Event::alias(previous_id, distinct_id) {
-            self.capture(event);
+        match Event::alias(previous_id, distinct_id) {
+            Ok(event) => self.capture(event),
+            Err(error) => warn!("alias() dropped the $create_alias event: {error}"),
         }
     }
 
@@ -370,8 +371,12 @@ impl Client {
         group_key: K,
         properties: P,
     ) -> Result<(), Error> {
-        if let Some(event) = Event::group_identify(group_type, group_key, properties)? {
-            self.capture(event);
+        match Event::group_identify(group_type, group_key, properties) {
+            Ok(event) => self.capture(event),
+            Err(Error::InvalidArgument(reason)) => {
+                warn!("group_identify() dropped the $groupidentify event: {reason}")
+            }
+            Err(error) => return Err(error),
         }
         Ok(())
     }

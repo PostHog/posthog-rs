@@ -3,7 +3,6 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use serde::Serialize;
-use tracing::warn;
 use uuid::Uuid;
 
 use crate::constants::{PROCESS_PERSON_PROFILE_OPT, PROCESS_PERSON_PROFILE_PROP};
@@ -347,7 +346,10 @@ impl Event {
     ///
     /// The event, attributed to `previous_id`, which is also mirrored into
     /// `properties.distinct_id` alongside the merge target in `properties.alias`.
-    /// Returns `None` and logs a warning when either ID is blank, because a merge
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] when either ID is blank, because a merge
     /// needs both sides.
     ///
     /// # Remarks
@@ -359,18 +361,21 @@ impl Event {
     ///
     /// ```no_run
     /// # fn send(posthog: &posthog::Client) -> Result<(), posthog::Error> {
-    /// if let Some(mut event) = posthog::Event::alias("anon-abc123", "user-42") {
-    ///     event.insert_option("disable_skew_correction", true)?;
-    ///     posthog.capture(event);
-    /// }
+    /// let mut event = posthog::Event::alias("anon-abc123", "user-42")?;
+    /// event.insert_option("disable_skew_correction", true)?;
+    /// posthog.capture(event);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn alias<P: Into<String>, D: Into<String>>(previous_id: P, distinct_id: D) -> Option<Self> {
+    pub fn alias<P: Into<String>, D: Into<String>>(
+        previous_id: P,
+        distinct_id: D,
+    ) -> Result<Self, Error> {
         let (previous_id, distinct_id) = (previous_id.into(), distinct_id.into());
         if previous_id.trim().is_empty() || distinct_id.trim().is_empty() {
-            warn!("alias() called with a blank id, dropping the $create_alias event");
-            return None;
+            return Err(Error::InvalidArgument(
+                "alias needs a previous_id and a distinct_id that are not blank".to_string(),
+            ));
         }
 
         // Built directly rather than through `insert_prop`, so construction cannot fail.
@@ -381,7 +386,7 @@ impl Event {
         );
         properties.insert("alias".to_string(), serde_json::Value::String(distinct_id));
 
-        Some(Self {
+        Ok(Self {
             event: "$create_alias".to_string(),
             distinct_id: previous_id,
             properties,
@@ -409,13 +414,13 @@ impl Event {
     ///
     /// The event, with `$group_type`, `$group_key`, and `$group_set` in its
     /// properties. Its distinct ID is the request context's distinct ID when one
-    /// is set, else `$<group_type>_<group_key>`. Returns `Ok(None)` and logs a
-    /// warning when `group_type` or `group_key` is blank.
+    /// is set, else `$<group_type>_<group_key>`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Serialization`] if `properties` fails to serialize to
-    /// JSON, or if it does not serialize to a JSON object. PostHog requires
+    /// Returns [`Error::InvalidArgument`] when `group_type` or `group_key` is
+    /// blank. Returns [`Error::Serialization`] if `properties` fails to serialize
+    /// to JSON, or if it does not serialize to a JSON object. PostHog requires
     /// `$group_set` to be an object and silently drops the event otherwise.
     ///
     /// # Remarks
@@ -428,12 +433,9 @@ impl Event {
     /// ```no_run
     /// # fn send(posthog: &posthog::Client) -> Result<(), posthog::Error> {
     /// let properties = serde_json::json!({ "name": "Awesome Inc." });
-    /// if let Some(mut event) =
-    ///     posthog::Event::group_identify("company", "acme_123", properties)?
-    /// {
-    ///     event.insert_option("disable_skew_correction", true)?;
-    ///     posthog.capture(event);
-    /// }
+    /// let mut event = posthog::Event::group_identify("company", "acme_123", properties)?;
+    /// event.insert_option("disable_skew_correction", true)?;
+    /// posthog.capture(event);
     /// # Ok(())
     /// # }
     /// ```
@@ -441,17 +443,12 @@ impl Event {
         group_type: T,
         group_key: K,
         properties: P,
-    ) -> Result<Option<Self>, Error> {
+    ) -> Result<Self, Error> {
         let (group_type, group_key) = (group_type.into(), group_key.into());
-        if group_type.trim().is_empty() {
-            warn!("group_identify() called with a blank group_type, dropping the $groupidentify event");
-            return Ok(None);
-        }
-        if group_key.trim().is_empty() {
-            warn!(
-                "group_identify() called with a blank group_key, dropping the $groupidentify event"
-            );
-            return Ok(None);
+        if group_type.trim().is_empty() || group_key.trim().is_empty() {
+            return Err(Error::InvalidArgument(
+                "group_identify needs a group_type and a group_key that are not blank".to_string(),
+            ));
         }
 
         let group_set =
@@ -475,7 +472,7 @@ impl Event {
         );
         props.insert("$group_set".to_string(), group_set);
 
-        Ok(Some(Self {
+        Ok(Self {
             event: "$groupidentify".to_string(),
             distinct_id,
             properties: props,
@@ -487,7 +484,7 @@ impl Event {
             request_context_applied: false,
             personless_default: false,
             personless: false,
-        }))
+        })
     }
 
     /// Stamp the capture (enqueue) time when the caller hasn't set an explicit
@@ -832,14 +829,23 @@ mod test {
     }
 
     #[test]
+    fn alias_rejects_blank_ids() {
+        for (previous_id, distinct_id) in
+            [("", "user"), ("   ", "user"), ("anon", ""), ("anon", "   ")]
+        {
+            let err =
+                Event::alias(previous_id, distinct_id).expect_err("a blank ID should be rejected");
+            assert!(matches!(err, Error::InvalidArgument(_)));
+        }
+    }
+
+    #[test]
     fn group_identify_rejects_blank_keys() {
         for (group_type, group_key) in [("", "key"), ("   ", "key"), ("type", ""), ("type", "   ")]
         {
-            assert!(
-                Event::group_identify(group_type, group_key, serde_json::json!({}))
-                    .unwrap()
-                    .is_none()
-            );
+            let err = Event::group_identify(group_type, group_key, serde_json::json!({}))
+                .expect_err("a blank group_type or group_key should be rejected");
+            assert!(matches!(err, Error::InvalidArgument(_)));
         }
     }
 

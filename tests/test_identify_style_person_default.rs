@@ -376,11 +376,7 @@ client_test!(event_alias_and_group_identify_take_a_call_option, {
     let events = record_wire_events(&server, ANALYTICS_PATH);
     let client = call!(posthog::client(options(&server).build().unwrap()));
     let alias = || Event::alias("anon-1", "user-1").unwrap();
-    let group = || {
-        Event::group_identify("company", "acme", json!({"name": "Acme"}))
-            .unwrap()
-            .unwrap()
-    };
+    let group = || Event::group_identify("company", "acme", json!({"name": "Acme"})).unwrap();
     let context_false = RequestContext::new().option(OPTION, false).unwrap();
     for (tag, mut event) in [("alias", alias()), ("group_identify", group())] {
         let mut defaulted = event.clone();

@@ -2827,6 +2827,7 @@ pub enum Error
 - `NotInitialized` - Global client was not initialized before use
 - `PanicHookAlreadyInstalled` - Panic autocapture hook was already installed
 - `InvalidTimestamp(String)` - Timestamp could not be parsed or is invalid
+- `InvalidArgument(String)` - An argument was invalid, such as a blank ID
 - `InconclusiveMatch(String)` - Flag evaluation was inconclusive (e.g., missing required properties, unknown operator)
 - `RateLimit` - HTTP 429 — the server is rate limiting requests
 - `BadRequest(String)` - HTTP 400 or 413 — the request was malformed or too large
@@ -3228,7 +3229,7 @@ The `Result` stays so existing callers keep compiling.
 #### `Event::alias`
 
 ```rust
-pub fn alias<P: Into<String>, D: Into<String>>(previous_id: P, distinct_id: D) -> Option<Self>
+pub fn alias<P: Into<String>, D: Into<String>>(previous_id: P, distinct_id: D) -> Result<Self, Error>
 ```
 
 Build the `$create_alias` event that [`crate::Client::alias`] sends, so you
@@ -3243,7 +3244,10 @@ can set options on it before you capture it.
 
 The event, attributed to `previous_id`, which is also mirrored into
 `properties.distinct_id` alongside the merge target in `properties.alias`.
-Returns `None` and logs a warning when either ID is blank, because a merge
+
+##### Errors
+
+Returns [`Error::InvalidArgument`] when either ID is blank, because a merge
 needs both sides.
 
 ##### Remarks
@@ -3254,18 +3258,18 @@ the option, so a request context cannot turn person processing off for it.
 ##### Examples
 
 ```rust
-if let Some(mut event) = posthog::Event::alias("anon-abc123", "user-42") {
-    event.insert_option("disable_skew_correction", true)?;
-    posthog.capture(event);
-}
+let mut event = posthog::Event::alias("anon-abc123", "user-42")?;
+event.insert_option("disable_skew_correction", true)?;
+posthog.capture(event);
 ```
 
+[`Error::InvalidArgument`]: #errorinvalidargument
 [`crate::Client::alias`]: #crateclientalias
 
 #### `Event::group_identify`
 
 ```rust
-pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(group_type: T, group_key: K, properties: P) -> Result<Option<Self>, Error>
+pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(group_type: T, group_key: K, properties: P) -> Result<Self, Error>
 ```
 
 Build the `$groupidentify` event that [`crate::Client::group_identify`]
@@ -3281,13 +3285,13 @@ sends, so you can set options on it before you capture it.
 
 The event, with `$group_type`, `$group_key`, and `$group_set` in its
 properties. Its distinct ID is the request context's distinct ID when one
-is set, else `$<group_type>_<group_key>`. Returns `Ok(None)` and logs a
-warning when `group_type` or `group_key` is blank.
+is set, else `$<group_type>_<group_key>`.
 
 ##### Errors
 
-Returns [`Error::Serialization`] if `properties` fails to serialize to
-JSON, or if it does not serialize to a JSON object. PostHog requires
+Returns [`Error::InvalidArgument`] when `group_type` or `group_key` is
+blank. Returns [`Error::Serialization`] if `properties` fails to serialize
+to JSON, or if it does not serialize to a JSON object. PostHog requires
 `$group_set` to be an object and silently drops the event otherwise.
 
 ##### Remarks
@@ -3299,15 +3303,13 @@ the option, so a request context cannot turn person processing off for it.
 
 ```rust
 let properties = serde_json::json!({ "name": "Awesome Inc." });
-if let Some(mut event) =
-    posthog::Event::group_identify("company", "acme_123", properties)?
-{
-    event.insert_option("disable_skew_correction", true)?;
-    posthog.capture(event);
-}
+let mut event = posthog::Event::group_identify("company", "acme_123", properties)?;
+event.insert_option("disable_skew_correction", true)?;
+posthog.capture(event);
 ```
 
 [`crate::Client::group_identify`]: #crateclientgroup_identify
+[`Error::InvalidArgument`]: #errorinvalidargument
 [`Error::Serialization`]: #errorserialization
 
 #### `Event::set_uuid`
