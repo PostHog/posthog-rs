@@ -22,8 +22,10 @@ mod bounds;
 mod call;
 mod capture;
 mod contract;
+mod feedback;
 mod identity;
 mod manual;
+mod number;
 mod options;
 mod privacy;
 mod request_info;
@@ -32,6 +34,7 @@ mod session;
 mod tools;
 
 pub use analytics::McpAnalytics;
+pub use feedback::{FeedbackHandler, FeedbackReport};
 pub use identity::Identity;
 pub use manual::{StartedToolCall, ToolCallError, ToolCallRequest, ToolRegistration};
 pub use options::{

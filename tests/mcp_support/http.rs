@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use http_body_util::BodyExt;
 use posthog_rs::mcp::Instrumented;
+use posthog_rs::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use serde_json::{json, Value};
@@ -56,6 +57,19 @@ impl HttpServer {
         params: Value,
         headers: &[(&str, &str)],
     ) -> HttpResponse {
+        self.request_with_context(method, params, headers, None)
+            .await
+    }
+
+    /// As `posthog_rs::tower::PostHogLayer` serves it: the host's context in
+    /// the request's extensions, and in scope while the request runs.
+    pub async fn request_with_context(
+        &self,
+        method: &str,
+        params: Value,
+        headers: &[(&str, &str)],
+        context: Option<RequestContext>,
+    ) -> HttpResponse {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let name = params["name"].as_str().unwrap_or_default().to_string();
         let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
@@ -66,15 +80,31 @@ impl HttpServer {
                 all_headers.push(("mcp-name", name.as_str()));
             }
         }
-        self.post(message, &all_headers).await
+        match context {
+            Some(context) => {
+                let scope = context.clone();
+                scope
+                    .scope(self.post(message, &all_headers, Some(context)))
+                    .await
+            }
+            None => self.post(message, &all_headers, None).await,
+        }
     }
 
-    pub async fn notify(&self, method: &str, headers: &[(&str, &str)]) {
-        let message = json!({ "jsonrpc": "2.0", "method": method });
-        self.post(message, headers).await;
-    }
+    /// Through `posthog_rs::tower::PostHogLayer`, with `context` attached
+    /// the way an outer host middleware would.
+    #[cfg(feature = "tower")]
+    pub async fn request_through_posthog_layer(
+        &self,
+        params: Value,
+        headers: &[(&str, &str)],
+        context: RequestContext,
+    ) -> HttpResponse {
+        use tower::{Layer, ServiceExt};
 
-    async fn post(&self, message: Value, headers: &[(&str, &str)]) -> HttpResponse {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let message =
+            json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params });
         let mut request = http::Request::builder()
             .method("POST")
             .uri("http://localhost/mcp")
@@ -84,7 +114,41 @@ impl HttpServer {
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
-        let request = request.body(message.to_string()).unwrap();
+        let mut request = request.body(message.to_string()).unwrap();
+        request.extensions_mut().insert(context);
+        let layered = posthog_rs::tower::PostHogLayer::new().layer(self.service.clone());
+        let response = layered.oneshot(request).await.unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        HttpResponse {
+            session_id: None,
+            body: parse_body(&String::from_utf8_lossy(&bytes)),
+        }
+    }
+
+    pub async fn notify(&self, method: &str, headers: &[(&str, &str)]) {
+        let message = json!({ "jsonrpc": "2.0", "method": method });
+        self.post(message, headers, None).await;
+    }
+
+    async fn post(
+        &self,
+        message: Value,
+        headers: &[(&str, &str)],
+        context: Option<RequestContext>,
+    ) -> HttpResponse {
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri("http://localhost/mcp")
+            .header("host", "localhost")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let mut request = request.body(message.to_string()).unwrap();
+        if let Some(context) = context {
+            request.extensions_mut().insert(context);
+        }
         let response = self.service.handle(request).await;
         let session_id = response
             .headers()
