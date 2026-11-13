@@ -267,6 +267,10 @@ impl Client {
     /// cannot describe a merge, so the event is dropped with a warning rather
     /// than sent.
     ///
+    /// The event sends `process_person_profile: true`, so a request context
+    /// cannot turn person processing off for it. To set options on it, build it
+    /// with [`Event::alias`] and capture it.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -276,8 +280,9 @@ impl Client {
     /// client.alias("anon-abc123", "user-42");
     /// ```
     pub fn alias<P: Into<String>, D: Into<String>>(&self, previous_id: P, distinct_id: D) {
-        if let Some(event) = Event::alias(previous_id.into(), distinct_id.into()) {
-            self.capture(event);
+        match Event::alias(previous_id, distinct_id) {
+            Ok(event) => self.capture(event),
+            Err(error) => warn!("alias() dropped the $create_alias event: {error}"),
         }
     }
 
@@ -296,6 +301,10 @@ impl Client {
     ///
     /// Fire-and-forget, like [`Client::capture`], for a blank `group_type` or
     /// `group_key`: the event is dropped with a warning rather than sent.
+    ///
+    /// The event sends `process_person_profile: true`, so a request context
+    /// cannot turn person processing off for it. To set options on it, build it
+    /// with [`Event::group_identify`] and capture it.
     ///
     /// # Errors
     ///
@@ -326,9 +335,12 @@ impl Client {
         group_key: K,
         properties: P,
     ) -> Result<(), Error> {
-        if let Some(event) = Event::group_identify(group_type.into(), group_key.into(), properties)?
-        {
-            self.capture(event);
+        match Event::group_identify(group_type, group_key, properties) {
+            Ok(event) => self.capture(event),
+            Err(Error::InvalidArgument(reason)) => {
+                warn!("group_identify() dropped the $groupidentify event: {reason}")
+            }
+            Err(error) => return Err(error),
         }
         Ok(())
     }

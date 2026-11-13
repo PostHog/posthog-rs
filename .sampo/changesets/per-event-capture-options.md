@@ -2,7 +2,7 @@
 cargo/posthog: major
 ---
 
-Set per-event capture options with `Event::insert_option`, or `CaptureExceptionOptions::option` for exceptions. The SDK sends them in an `options` map next to `properties`, unchanged, and PostHog validates them.
+Set per-event capture options with `Event::insert_option`, or `CaptureExceptionOptions::option` for exceptions. The SDK sends them in an `options` map next to `properties`, unchanged, and PostHog validates them. `Event::alias` and `Event::group_identify` are now public, so you can set options on the events that `alias` and `group_identify` send. They return the new `Error::InvalidArgument` for a blank ID, group type or group key.
 
 Breaking changes:
 
