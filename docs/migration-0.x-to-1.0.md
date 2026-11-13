@@ -79,6 +79,7 @@ If you send events through your own reverse proxy, update it before you upgrade:
 - **Pass the headers through unchanged.** Pass `Authorization`, every `PostHog-*` header, `Content-Type`, `Content-Encoding`, and `User-Agent`. `Authorization` holds the project token, sent as `Bearer <token>`. PostHog answers `401` without `Authorization` and `400` without the others, and the batch fails.
 - **Keep PostHog credentials.** If the proxy strips other credentials, keep `Authorization` values that start with `Bearer phc_`, `Bearer phs_`, or `Bearer phx_`. Also keep the exact `Bearer <token>` of an older project token without a prefix.
 - **Accept request bodies up to 20 MB.** AI requests are often larger than 1 MB, the default limit in nginx and ingress-nginx. A `413` from the proxy fails the batch.
+- **Pass the capture response through.** Return PostHog's status code and response body unchanged. A proxy that answers the capture path with its own `200` fails the batch.
 
 PostHog's managed reverse proxy already does this. See the [proxy guides](https://posthog.com/docs/advanced/proxy).
 
@@ -86,7 +87,7 @@ A self-hosted PostHog must serve both `/i/v1/analytics/events` and `/i/v1/ai/eve
 
 The capture and `/flags` HTTP clients the SDK builds follow a redirect only when it's a `307` or `308` to the same scheme, host, and port. They follow at most 5 redirects in a row.
 
-Any other redirect fails the request, so the SDK never sends the request body to another host. 0.x.x followed up to 10 redirects of any kind to any host, and local evaluation polling still does.
+Any other redirect fails the request, so the SDK never sends the request body to another host. 0.x.x followed up to 10 redirects of any kind to any host, and local evaluation polling still does. If a proxy redirects capture requests to another host, set `host` to the final host.
 
 A client you pass with `http_client` or `blocking_http_client` keeps its own redirect policy.
 
@@ -252,6 +253,7 @@ That includes the `process_person_profile` option that `Event::new_anon` sets to
 - **Event names.** PostHog drops an event sent with `capture_ai` whose name doesn't start with `$ai_`. It reports it as a per-event `drop` with the detail `misrouted_event` inside a `200`.
 - **Where the drop is reported.** That verdict reaches an `on_error` hook, where `CaptureFailure::endpoint()` says which lane, or the returned `CaptureSummary` for the immediate variants.
 - **The `$ai_` prefix.** PostHog owns the `$ai_` prefix, so don't use it for your own events.
+- **Flush and shutdown.** `flush` and `shutdown` drain both lanes.
 - **Events over 8 MiB.** The SDK drops an event over the backend's 8 MiB per-event limit locally, on the background lane and in the immediate variants. On the background lane, that drop logs a warning with the event name and size, and it doesn't reach `on_error`. The immediate variants return that drop in the `CaptureSummary` with the detail `ai_event_too_big`.
 - **Events over the request limit.** An event too large for the AI endpoint's request size limit gets HTTP `413` instead. `capture_ai_batch_immediate` returns `Error::BadRequest` and doesn't send the rest of the batch.
 
@@ -342,13 +344,15 @@ An event's properties and options come from three layers. For the same key, a la
 
 `before_send` runs after all three and can change any value. The SDK has no client-wide layer for properties or options.
 
+A property set to `null` counts as set, so the request context doesn't fill it. A `null` option counts as unset.
+
 - **System properties.** The SDK adds `$os`, `$os_version`, `$is_server`, and `$geoip_disable` only when the event doesn't already have the key, and it adds them before `before_send` runs. The hook sees them and can change or remove them, and the SDK doesn't add them again after the hook.
 - **System properties in 0.x.x.** The default 0.x.x path (V0) also added them before the hook. The 0.x.x `capture-v1` path added them while building the request, after the hook, so a hook couldn't see `$os` or remove any of them.
 - **`$lib` and `$lib_version`.** The SDK adds them before `before_send` runs, as a pair, as described in [Check SDK identity](#check-sdk-identity). The 0.x.x `capture-v1` path never added them.
 - **Feature flag properties.** `Event::with_flags` keeps a `$feature/<key>` or `$active_feature_flags` property that the event already has. In 0.x.x, the flag values replaced it.
 - **Groups.** Groups from `Event::add_group` merge into a `$groups` property key by key, and the added group wins for the same group type. In 0.x.x, they replaced the whole `$groups` property.
 - **Groups in `before_send`.** The SDK merges those groups into `$groups` before `before_send` runs, so the hook sees them and can change or remove them. The default 0.x.x path (V0) also merged them before the hook. The 0.x.x `capture-v1` path merged them while building the request, after the hook. A group the hook adds with `add_group` is still sent.
-- **Merged maps.** A `$set`, `$set_once`, `$groups`, or `$group_set` from the request context fills in only the keys the event's own value lacks. For example, a context `$set` of `{"plan": "free", "source": "web"}` and an event `$set` of `{"plan": "pro"}` send `{"plan": "pro", "source": "web"}`. In 0.x.x, the context value was used only when the event had none of that property.
+- **Merged maps.** A `$set`, `$set_once`, `$groups`, or `$group_set` from the request context fills in only the keys the event's own value lacks. For example, a context `$set` of `{"plan": "free", "source": "web"}` and an event `$set` of `{"plan": "pro"}` send `{"plan": "pro", "source": "web"}`. In 0.x.x, the context value was used only when the event had none of that property. A `$set` in the request context sets those person properties on every event it reaches.
 - **Minimized flag events.** For a minimized `$feature_flag_called` event, the SDK trims the properties to its allowlist before `before_send` runs, so a property the hook adds is sent. In 0.x.x the trim ran after the hook and removed it.
 - **Flag events.** `$feature_flag_called` events now take a request context value over the client's `$is_server` and `$geoip_disable` defaults, as other events do. A per-call `disable_geoip` wins over both, and `Some(false)` sends `$geoip_disable: false`. In 0.x.x, `Some(false)` sent nothing, so a request context `$geoip_disable` applied.
 - **The `disable_geoip` default.** `disable_geoip` defaults to `false`, as in 0.x.x and unlike PostHog's other server SDKs, so PostHog adds GeoIP properties based on the IP address of your server. To turn this off, call `.disable_geoip(true)` on `ClientOptionsBuilder`.
@@ -535,7 +539,7 @@ Each option replaces a legacy option property:
 
 Legacy option properties still work, but an option overrides its legacy property. Use options.
 
-For the changes every capture v1 SDK shares, such as event options, limits, and per-event results, see [Upgrading to capture v1 SDKs](https://posthog.com/docs/libraries/capture-v1).
+For the changes every capture v1 SDK shares, such as event options, limits, and per-event results, see the [capture v1 API reference](https://posthog.com/docs/api/capture-v1).
 
 ### Add MCP event options
 
