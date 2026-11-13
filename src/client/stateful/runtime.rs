@@ -182,12 +182,18 @@ impl Client {
         );
         let was_restored = restored.snapshot.is_some();
         let snapshot = restored.snapshot.unwrap_or_else(|| {
-            Snapshot::anonymous(
+            let mut snapshot = Snapshot::anonymous(
                 config
                     .bootstrap_anonymous_id
                     .clone()
                     .unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
-            )
+            );
+            if let Some(id) = &config.bootstrap_identified_id {
+                snapshot.distinct_id = id.clone();
+                snapshot.identified = true;
+                snapshot.person_processing = true;
+            }
+            snapshot
         });
         let backend = match restored.state_store {
             Some(store) => Backend::Persistent {
@@ -239,14 +245,20 @@ impl Client {
                 return Self::disabled(&config, Some("Invalid mandatory state configuration"));
             }
         };
-        Self {
+        let client = Self {
             disabled: false,
             shutdown_timeout: config.shutdown_timeout,
             producer: Some(producer),
             state: Some(state),
             transport: Some(transport),
             closed: AtomicBool::new(false),
+        };
+        if was_restored {
+            if let Some(id) = &config.bootstrap_identified_id {
+                client.reconcile_identified_bootstrap(id);
+            }
         }
+        client
     }
 
     fn disabled(config: &Config, reason: Option<&'static str>) -> Self {

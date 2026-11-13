@@ -204,11 +204,16 @@ impl FileStateStore {
         if encoded.len() as u64 > self.max_bytes {
             return Err(invalid_state());
         }
-        Self::decode(&encoded).map(Some)
+        let snapshot = Self::decode(&encoded)?;
+        // Restored state must also fit the current in-memory/write bound.
+        if snapshot_size(&snapshot) as u64 > self.max_bytes {
+            return Err(invalid_state());
+        }
+        Ok(Some(snapshot))
     }
 
     fn decode(encoded: &[u8]) -> io::Result<Snapshot> {
-        let record: StateRecord<Snapshot> =
+        let record: StateRecord<serde_json::Value> =
             serde_json::from_slice(encoded).map_err(|_| invalid_state())?;
         if record.version != 1 {
             return Err(io::Error::new(
@@ -216,10 +221,12 @@ impl FileStateStore {
                 "Unsupported state store version",
             ));
         }
-        if !record.state.is_valid() {
+        let snapshot: Snapshot =
+            serde_json::from_value(record.state).map_err(|_| invalid_state())?;
+        if !snapshot.is_valid() {
             return Err(invalid_state());
         }
-        Ok(record.state)
+        Ok(snapshot)
     }
 
     /// Only the state writer calls this. A completed replacement is not a

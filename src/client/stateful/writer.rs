@@ -260,18 +260,28 @@ impl StateWriter {
 
     /// Domain-internal mutation only; do not call application code in `change`.
     /// Candidate validation happens before the authoritative state is replaced.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn update(&self, change: impl FnOnce(&mut Snapshot)) -> Result<u64, UpdateError> {
-        let revision = {
+        self.mutate(change).map(|(revision, ())| revision)
+    }
+
+    pub(super) fn mutate<T>(
+        &self,
+        change: impl FnOnce(&mut Snapshot) -> T,
+    ) -> Result<(u64, T), UpdateError> {
+        let result = {
             let mut state = self.shared.lock();
             if state.closing.is_some() {
                 return Err(UpdateError::Closed);
             }
             let mut candidate = (*state.snapshot).clone();
-            change(&mut candidate);
+            let result = change(&mut candidate);
             validate(&candidate, self.options.max_bytes)?;
-            if candidate == *state.snapshot {
-                return Ok(state.revision);
+            if candidate.same_persisted_state(&state.snapshot) {
+                if candidate != *state.snapshot {
+                    state.snapshot = Arc::new(candidate);
+                }
+                return Ok((state.revision, result));
             }
             let revision = state.revision.checked_add(1).ok_or(UpdateError::Full)?;
             state.snapshot = Arc::new(candidate);
@@ -280,10 +290,30 @@ impl StateWriter {
                 state.due =
                     Some(self.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
             }
-            revision
+            (revision, result)
         };
         self.shared.notify();
-        Ok(revision)
+        Ok(result)
+    }
+
+    /// Compare, admit, and commit process-local person bookkeeping in queue order.
+    /// `admit` must not run hooks, tracing subscribers, or application wakers.
+    /// Fingerprints are not persisted, so this cannot schedule a writer notification.
+    pub(super) fn admit_person(
+        &self,
+        generation: u64,
+        fingerprint: [u8; 20],
+        deduplicate: bool,
+        admit: impl FnOnce() -> bool,
+    ) {
+        let mut state = self.shared.lock();
+        let same_generation = state.snapshot.generation == generation;
+        if same_generation && deduplicate && state.snapshot.person_properties == Some(fingerprint) {
+            return;
+        }
+        if admit() && same_generation && state.closing.is_none() {
+            Arc::make_mut(&mut state.snapshot).person_properties = Some(fingerprint);
+        }
     }
 
     /// Capture one revision to drain, expediting coalescing but not retry cooldown.

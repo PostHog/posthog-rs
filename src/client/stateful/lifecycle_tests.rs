@@ -260,6 +260,36 @@ fn capture_screen_and_getters_complete_while_state_io_is_gated() {
 }
 
 #[test]
+fn identity_mutations_complete_while_state_io_is_gated() {
+    let directory = Directory::new();
+    let (state, gate) = gated_writer(&directory);
+    gate.entered.recv_timeout(WAIT).unwrap();
+    let client = Arc::new(client_with_writer(&config(), state));
+    let caller_client = client.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let caller = thread::spawn(move || {
+        caller_client.identify("identified");
+        let identified = caller_client.is_identified();
+        let id = caller_client.get_distinct_id();
+        caller_client.alias("alias");
+        caller_client.reset();
+        caller_client.create_person_profile();
+        done_tx
+            .send((identified, id, caller_client.is_identified()))
+            .unwrap();
+    });
+    let result = done_rx.recv_timeout(WAIT);
+    gate.release.send(()).unwrap();
+    caller.join().unwrap();
+    client.shutdown_blocking(None);
+    gate.dropped.recv_timeout(WAIT).unwrap();
+    assert_eq!(
+        result.expect("identity mutation waited for filesystem I/O"),
+        (true, "identified".into(), false)
+    );
+}
+
+#[test]
 fn closing_from_capture_hook_does_not_wait_for_gated_state_io() {
     use crate::stateful::CaptureOutcome;
     let directory = Directory::new();

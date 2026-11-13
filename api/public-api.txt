@@ -166,6 +166,10 @@ pub posthog::stateful::PersistenceOutcome::Persisted
 pub posthog::stateful::PersistenceOutcome::TimedOut
 pub posthog::stateful::PersistenceOutcome::Unavailable
 pub posthog::stateful::PersistenceOutcome::WriteFailed
+#[non_exhaustive] pub enum posthog::stateful::PersonProfiles
+pub posthog::stateful::PersonProfiles::Always
+pub posthog::stateful::PersonProfiles::IdentifiedOnly
+pub posthog::stateful::PersonProfiles::Never
 #[non_exhaustive] pub struct posthog::stateful::Capture
 pub posthog::stateful::Capture::event: alloc::string::String
 pub posthog::stateful::Capture::groups: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
@@ -180,6 +184,13 @@ pub fn posthog::stateful::Capture::from(&str) -> Self
 impl core::convert::From<alloc::string::String> for posthog::stateful::Capture
 pub fn posthog::stateful::Capture::from(alloc::string::String) -> Self
 pub struct posthog::stateful::Client
+impl posthog::stateful::Client
+pub fn posthog::stateful::Client::alias(&self, impl core::convert::Into<alloc::string::String>)
+pub fn posthog::stateful::Client::create_person_profile(&self)
+pub fn posthog::stateful::Client::identify(&self, impl core::convert::Into<posthog::stateful::Identify>)
+pub fn posthog::stateful::Client::is_identified(&self) -> bool
+pub fn posthog::stateful::Client::reset(&self)
+pub fn posthog::stateful::Client::set_person_properties(&self, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>)
 impl posthog::stateful::Client
 pub fn posthog::stateful::Client::capture(&self, impl core::convert::Into<posthog::stateful::Capture>) -> posthog::stateful::CaptureOutcome
 pub fn posthog::stateful::Client::screen(&self, impl core::convert::Into<alloc::string::String>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>) -> posthog::stateful::CaptureOutcome
@@ -197,6 +208,7 @@ impl core::ops::drop::Drop for posthog::stateful::Client
 pub fn posthog::stateful::Client::drop(&mut self)
 pub struct posthog::stateful::Config
 pub posthog::stateful::Config::bootstrap_anonymous_id: core::option::Option<alloc::string::String>
+pub posthog::stateful::Config::bootstrap_identified_id: core::option::Option<alloc::string::String>
 pub posthog::stateful::Config::capture_compression: core::option::Option<posthog::CaptureCompression>
 pub posthog::stateful::Config::disable_geoip: bool
 pub posthog::stateful::Config::disabled: bool
@@ -213,6 +225,7 @@ pub posthog::stateful::Config::max_state_bytes: usize
 pub posthog::stateful::Config::max_stored_bytes: u64
 pub posthog::stateful::Config::max_stored_events: usize
 pub posthog::stateful::Config::persistence: posthog::stateful::Persistence
+pub posthog::stateful::Config::person_profiles: posthog::stateful::PersonProfiles
 pub posthog::stateful::Config::platform_context: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub posthog::stateful::Config::project_token: alloc::string::String
 pub posthog::stateful::Config::request_timeout_seconds: u64
@@ -227,6 +240,16 @@ pub fn posthog::stateful::Config::on_error<F>(&mut self, F) -> &mut Self where F
 #[non_exhaustive] pub struct posthog::stateful::DrainReport
 pub posthog::stateful::DrainReport::delivery: posthog::stateful::DeliveryOutcome
 pub posthog::stateful::DrainReport::state: posthog::stateful::PersistenceOutcome
+#[non_exhaustive] pub struct posthog::stateful::Identify
+pub posthog::stateful::Identify::distinct_id: alloc::string::String
+pub posthog::stateful::Identify::set: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub posthog::stateful::Identify::set_once: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+impl posthog::stateful::Identify
+pub fn posthog::stateful::Identify::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::convert::From<&str> for posthog::stateful::Identify
+pub fn posthog::stateful::Identify::from(&str) -> Self
+impl core::convert::From<alloc::string::String> for posthog::stateful::Identify
+pub fn posthog::stateful::Identify::from(alloc::string::String) -> Self
 #[non_exhaustive] pub struct posthog::stateful::InitializationFailure
 impl posthog::stateful::InitializationFailure
 pub fn posthog::stateful::InitializationFailure::message(&self) -> &str

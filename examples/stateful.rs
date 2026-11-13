@@ -1,9 +1,10 @@
 //! Run with `cargo run --features stateful --example stateful`.
-//! Set POSTHOG_PROJECT_TOKEN; POSTHOG_HOST and POSTHOG_DATA_DIR are optional.
+//! Set POSTHOG_PROJECT_TOKEN; POSTHOG_HOST, POSTHOG_DATA_DIR and
+//! POSTHOG_DISTINCT_ID are optional.
 use std::collections::HashMap;
 use std::time::Duration;
 
-use posthog::stateful::{Capture, Client, Config, Persistence};
+use posthog::stateful::{Capture, Client, Config, Identify, Persistence};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,6 +22,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::init_blocking(config);
     // Attempt previously queued work before the example records new events.
     println!("startup drain: {:?}", client.flush_blocking());
+    if let Ok(id) = std::env::var("POSTHOG_DISTINCT_ID") {
+        // Call client.reset() on logout before identifying a different user.
+        let mut identity = Identify::new(id);
+        identity.set.insert("example".into(), json!("rust"));
+        client.identify(identity);
+    }
     let mut event = Capture::new("example opened");
     event
         .properties

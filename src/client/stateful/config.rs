@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::storage::snapshot_size;
-use super::{Persistence, Snapshot};
+use super::{Persistence, PersonProfiles, Snapshot};
 use crate::client::event_store::StoreLimits;
 use crate::client::transport::MAX_SHUTDOWN_TIMEOUT;
 use crate::client::{ClientOptions, OnErrorHook, PostHogError};
@@ -27,6 +27,12 @@ pub struct Config {
     pub instance_name: String,
     /// Seed a fresh scope's anonymous identity. Persisted identity takes precedence.
     pub bootstrap_anonymous_id: Option<String>,
+    /// Identified setup seed. Mutually exclusive with bootstrap_anonymous_id.
+    /// Reconciles restored anonymous state; never replaces a different identified user.
+    pub bootstrap_identified_id: Option<String>,
+    /// Default person processing and identity-operation policy. Default: IdentifiedOnly.
+    /// Explicit capture options and hooks retain their normal precedence.
+    pub person_profiles: PersonProfiles,
     /// Events that trigger an automatic flush. Default: 20.
     pub flush_at: usize,
     /// Maximum events per batch. Default: 100.
@@ -79,6 +85,8 @@ impl Config {
             persistence: Persistence::Automatic,
             instance_name: "default".into(),
             bootstrap_anonymous_id: None,
+            bootstrap_identified_id: None,
+            person_profiles: PersonProfiles::IdentifiedOnly,
             flush_at: 20,
             max_batch_size: 100,
             flush_interval: Duration::from_secs(10),
@@ -198,6 +206,18 @@ impl Config {
         let generated = Snapshot::anonymous(uuid::Uuid::nil().to_string());
         if self.max_state_bytes < snapshot_size(&generated) {
             return Some("max_state_bytes must hold a generated anonymous identity record");
+        }
+        if self.bootstrap_anonymous_id.is_some() && self.bootstrap_identified_id.is_some() {
+            return Some("configure only one bootstrap identity");
+        }
+        if let Some(id) = &self.bootstrap_identified_id {
+            let mut snapshot = generated;
+            snapshot.distinct_id = id.clone();
+            snapshot.identified = true;
+            snapshot.person_processing = true;
+            if !snapshot.is_valid() || snapshot_size(&snapshot) > self.max_state_bytes {
+                return Some("bootstrap_identified_id must be nonblank and fit max_state_bytes");
+            }
         }
         if let Some(id) = &self.bootstrap_anonymous_id {
             let snapshot = Snapshot::anonymous(id.clone());
