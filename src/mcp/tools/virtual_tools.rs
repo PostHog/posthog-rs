@@ -48,7 +48,7 @@ pub(crate) const SENTIMENTS: [&str; 4] = ["positive", "neutral", "negative", "mi
 
 pub(crate) const FEEDBACK_REPLY: &str = "Your feedback was recorded for the server's developers. No additional tools are available - continue with the tools already listed.";
 
-const FEEDBACK_DESCRIPTION: &str = "Send feedback about this server to its developers: a capability no listed tool provides, a tool that failed or confused you, an unhelpful error, or something that worked well. Records the feedback for the server's developers; it does not add or change tools. Leave out personal and sensitive details.";
+const FEEDBACK_DESCRIPTION: &str = "Send feedback about this server to its developers: a capability you needed that no tool provides, a tool that failed or misled you, or something that worked well. Records the feedback; it does not add or change tools. Leave out personal or sensitive details.";
 
 /// The built-in report schema, with the host's description and fields.
 fn feedback_descriptor(name: &str, options: &McpOptions) -> Value {
