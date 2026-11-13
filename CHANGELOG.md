@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 0.33.1 — 2026-11-13
+
+### Patch changes
+
+- [2b664da](https://github.com/posthog/posthog-rs/commit/2b664dada02437d7a0896a6858854f3b7cce2abd) Ignore failed detailed feature flag records and their payloads in direct reads, bulk results, and snapshot enrichment. — Thanks @marandaneto!
+
 ## 0.33.0 — 2026-11-13
 
 ### Minor changes
