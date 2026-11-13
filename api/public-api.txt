@@ -171,6 +171,12 @@ pub posthog::stateful::PersistenceOutcome::WriteFailed
 pub posthog::stateful::PersonProfiles::Always
 pub posthog::stateful::PersonProfiles::IdentifiedOnly
 pub posthog::stateful::PersonProfiles::Never
+#[non_exhaustive] pub enum posthog::stateful::SessionMode
+pub posthog::stateful::SessionMode::Automatic
+pub posthog::stateful::SessionMode::Manual
+#[non_exhaustive] pub enum posthog::stateful::SessionPersistence
+pub posthog::stateful::SessionPersistence::Memory
+pub posthog::stateful::SessionPersistence::Persistent
 #[non_exhaustive] pub struct posthog::stateful::Capture
 pub posthog::stateful::Capture::event: alloc::string::String
 pub posthog::stateful::Capture::groups: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
@@ -195,6 +201,14 @@ pub fn posthog::stateful::Client::set_person_properties(&self, std::collections:
 impl posthog::stateful::Client
 pub fn posthog::stateful::Client::capture(&self, impl core::convert::Into<posthog::stateful::Capture>) -> posthog::stateful::CaptureOutcome
 pub fn posthog::stateful::Client::screen(&self, impl core::convert::Into<alloc::string::String>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>) -> posthog::stateful::CaptureOutcome
+impl posthog::stateful::Client
+pub fn posthog::stateful::Client::end_session(&self)
+pub fn posthog::stateful::Client::peek_session_id(&self) -> core::option::Option<uuid::Uuid>
+pub fn posthog::stateful::Client::reset_session(&self)
+pub fn posthog::stateful::Client::session_activity(&self)
+pub fn posthog::stateful::Client::session_id(&self) -> core::option::Option<uuid::Uuid>
+pub fn posthog::stateful::Client::set_app_in_background(&self, bool)
+pub fn posthog::stateful::Client::start_session(&self)
 impl posthog::stateful::Client
 pub async fn posthog::stateful::Client::flush(&self) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::flush_blocking(&self) -> posthog::stateful::DrainReport
@@ -243,6 +257,8 @@ pub posthog::stateful::Config::project_token: alloc::string::String
 pub posthog::stateful::Config::request_timeout_seconds: u64
 pub posthog::stateful::Config::sdk_name: alloc::string::String
 pub posthog::stateful::Config::sdk_version: alloc::string::String
+pub posthog::stateful::Config::session_mode: posthog::stateful::SessionMode
+pub posthog::stateful::Config::session_persistence: posthog::stateful::SessionPersistence
 pub posthog::stateful::Config::shutdown_timeout: core::time::Duration
 pub posthog::stateful::Config::state_coalesce: core::time::Duration
 impl posthog::stateful::Config

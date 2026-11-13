@@ -276,6 +276,8 @@ impl StateWriter {
             }
             let mut candidate = (*state.snapshot).clone();
             let result = change(&mut candidate);
+            // Process-local session activity does not change the already-validated
+            // persistence representation. Only changed persisted fields need encoding.
             if candidate.same_persisted_state(&state.snapshot) {
                 if candidate != *state.snapshot {
                     state.snapshot = Arc::new(candidate);

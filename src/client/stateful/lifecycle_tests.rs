@@ -350,6 +350,40 @@ fn property_and_group_mutations_complete_while_state_io_is_gated() {
 }
 
 #[test]
+fn session_operations_complete_while_state_io_is_gated() {
+    let directory = Directory::new();
+    let (state, gate) = gated_writer(&directory);
+    gate.entered.recv_timeout(WAIT).unwrap();
+    state
+        .mutate(|snapshot| {
+            snapshot.sessions.persistence = super::super::SessionPersistence::Persistent;
+        })
+        .unwrap();
+    let client = Arc::new(client_with_writer(&config(), state));
+    let caller_client = client.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let caller = thread::spawn(move || {
+        let first = caller_client.session_id().unwrap();
+        caller_client.session_activity();
+        caller_client.set_app_in_background(true);
+        caller_client.set_app_in_background(false);
+        caller_client.end_session();
+        caller_client.start_session();
+        caller_client.reset_session();
+        let next = caller_client.peek_session_id().unwrap();
+        done_tx.send((first, next)).unwrap();
+    });
+    let result = done_rx.recv_timeout(WAIT);
+    client.state.as_ref().unwrap().request_close();
+    gate.release.send(()).unwrap();
+    caller.join().unwrap();
+    client.shutdown_blocking(None);
+    gate.dropped.recv_timeout(WAIT).unwrap();
+    let (first, next) = result.expect("session operations waited for state I/O");
+    assert_ne!(first, next);
+}
+
+#[test]
 fn identity_mutations_complete_while_state_io_is_gated() {
     let directory = Directory::new();
     let (state, gate) = gated_writer(&directory);

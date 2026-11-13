@@ -326,7 +326,7 @@ fn rejected_identity_updates_report_sanitized_reasons() {
         }
     }
     let mut conf = config();
-    conf.max_state_bytes = 256;
+    conf.max_state_bytes = 512;
     let (client, events) = observed(conf);
     let original = client.get_distinct_id();
     let output = Arc::new(Mutex::new(Vec::new()));
@@ -363,7 +363,7 @@ fn rejected_identity_updates_report_sanitized_reasons() {
 #[test]
 fn invalid_state_size_disabled_and_closed_mutations_do_nothing() {
     let mut conf = config();
-    conf.max_state_bytes = 256;
+    conf.max_state_bytes = 512;
     let (client, events) = observed(conf);
     client.identify("x".repeat(1000));
     assert_eq!(client.get_distinct_id(), "anonymous");

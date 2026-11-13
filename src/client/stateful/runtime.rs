@@ -181,7 +181,7 @@ impl Client {
             &config.on_error,
         );
         let was_restored = restored.snapshot.is_some();
-        let snapshot = restored.snapshot.unwrap_or_else(|| {
+        let mut snapshot = restored.snapshot.unwrap_or_else(|| {
             let mut snapshot = Snapshot::anonymous(
                 config
                     .bootstrap_anonymous_id
@@ -195,10 +195,19 @@ impl Client {
             }
             snapshot
         });
+        let stored_session = snapshot.session.clone();
+        snapshot.sessions = super::sessions::Sessions::restored(
+            stored_session.as_ref(),
+            config.session_mode,
+            config.session_persistence,
+            producer.session_clock.now(),
+        );
+        snapshot.session = snapshot.sessions.stored();
+        let session_changed = snapshot.session != stored_session;
         let backend = match restored.state_store {
             Some(store) => Backend::Persistent {
                 store: Box::new(store),
-                restored: was_restored,
+                restored: was_restored && !session_changed,
             },
             None if matches!(config.persistence, Persistence::Memory) => Backend::Memory,
             None => Backend::Unavailable,

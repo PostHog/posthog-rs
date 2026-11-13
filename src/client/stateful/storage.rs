@@ -146,10 +146,15 @@ pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
     })
 }
 
-/// Reserve the longest consent representation (`false`), so every valid state
-/// can opt in/out or clear the override without exceeding its configured bound.
+/// Reserve the longest consent and session representations so every valid state
+/// can change consent or session timing without exceeding its configured bound.
 pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
-    snapshot_size(snapshot).saturating_add(usize::from(snapshot.opt_out != Some(false)))
+    snapshot_size(snapshot)
+        .saturating_add(usize::from(snapshot.opt_out != Some(false)))
+        .saturating_add(
+            super::sessions::StoredSession::reserved_bytes()
+                .saturating_sub(crate::client::capture::json_len(&snapshot.session)),
+        )
 }
 
 /// Encode and validate the same bounded representation for both memory admission

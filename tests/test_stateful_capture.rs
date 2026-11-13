@@ -256,7 +256,9 @@ fn ambient_server_request_context_does_not_override_client_state_or_options() {
     config.before_send(|event| {
         assert_eq!(event.distinct_id(), "client-anonymous");
         assert!(event.properties().get("request_property").is_none());
-        assert!(event.properties().get("$session_id").is_none());
+        let session = event.properties()["$session_id"].as_str().unwrap();
+        assert_ne!(session, "server-request-session");
+        assert_eq!(Uuid::parse_str(session).unwrap().get_version_num(), 7);
         assert_eq!(event.options()["process_person_profile"], false);
         Some(event)
     });
