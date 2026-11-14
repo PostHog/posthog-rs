@@ -27,6 +27,11 @@ pub struct Capture {
     /// Per-event properties. These take precedence over registered context,
     /// remembered groups, platform context and SDK defaults using Rust's fill rules.
     pub properties: HashMap<String, Value>,
+    /// Per-capture fallback properties, filled after registered properties,
+    /// platform context and SDK metadata using the ordinary Rust fill rules.
+    /// Hooks see the assembled result and can change or remove these values.
+    /// These properties apply only to this capture; they are not registered.
+    pub fallback_properties: HashMap<String, Value>,
     /// Explicit wire options, with the same precedence as the server Event API.
     /// With the default configuration, a fresh anonymous client sends
     /// process_person_profile=false. Set this option to true to enable processing
@@ -223,6 +228,9 @@ impl Producer {
             event.insert_prop_default("$geoip_disable", true.into());
         }
         event.merge_groups_into_properties();
+        for (key, value) in input.fallback_properties {
+            event.insert_prop_default(key, value);
+        }
         let event = apply_before_send_hooks(&self.hooks, event).ok_or(CaptureOutcome::Dropped)?;
         if event.event_name().trim().is_empty() || event.distinct_id().trim().is_empty() {
             return Err(CaptureOutcome::Invalid);

@@ -196,6 +196,7 @@ pub posthog::stateful::SubmitOutcome::Stale
 pub posthog::stateful::SubmitOutcome::WrongRecorder
 #[non_exhaustive] pub struct posthog::stateful::Capture
 pub posthog::stateful::Capture::event: alloc::string::String
+pub posthog::stateful::Capture::fallback_properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub posthog::stateful::Capture::groups: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub posthog::stateful::Capture::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub posthog::stateful::Capture::properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
