@@ -79,6 +79,78 @@ fn assembly_preserves_rust_precedence_and_captures_identity_time_and_sdk() {
 }
 
 #[test]
+fn fallback_properties_fill_after_context_and_metadata_before_hooks() {
+    let mut config = Config::new("phc_test");
+    config.platform_context = serde_json::from_value(json!({
+        "platform": "platform", "registered": "platform"
+    }))
+    .unwrap();
+    config.before_send(|mut event| {
+        assert_eq!(event.properties()["only_fallback"], true);
+        assert_eq!(event.properties()["explicit"], "event");
+        assert_eq!(event.properties()["registered"], "registered");
+        assert_eq!(event.properties()["platform"], "platform");
+        assert_eq!(event.properties()["$lib"], "posthog-rs");
+        assert_eq!(event.properties()["$device_id"], "anonymous-id");
+        event.remove_prop("only_fallback");
+        Some(event)
+    });
+    let mut state = snapshot();
+    state
+        .registered
+        .insert("registered".into(), "registered".into());
+    let mut input = Capture::new("fallbacks");
+    input.properties.insert("explicit".into(), "event".into());
+    input.fallback_properties = serde_json::from_value(json!({
+        "only_fallback": true, "explicit": "fallback", "registered": "fallback",
+        "platform": "fallback", "$lib": "fallback", "$device_id": "fallback"
+    }))
+    .unwrap();
+    let wire = Producer::new(&config)
+        .prepare(input, &state, now(), None)
+        .unwrap();
+    assert!(wire.properties.get("only_fallback").is_none());
+    assert_eq!(wire.properties["explicit"], "event");
+}
+
+#[test]
+fn fallback_properties_keep_null_array_and_nested_fill_semantics() {
+    let mut state = snapshot();
+    state.registered = serde_json::from_value(json!({
+        "null": null, "array": [1], "$set": {"registered": 1},
+        "$groups": {"company": "registered"}
+    }))
+    .unwrap();
+    let mut input = Capture::new("fallbacks");
+    input
+        .properties
+        .insert("object".into(), json!({"event": 1}));
+    input.groups.insert("company".into(), "typed".into());
+    input.fallback_properties = serde_json::from_value(json!({
+        "null": "fallback", "array": [2], "object": {"fallback": 2},
+        "clean": {"drop": null, "items": [null, {"drop": null}]},
+        "$set": {"registered": 2, "fallback": null},
+        "$groups": {"company": "fallback", "fallback": "f"}
+    }))
+    .unwrap();
+    let wire = Producer::new(&Config::new("phc_test"))
+        .prepare(input, &state, now(), None)
+        .unwrap();
+    assert!(wire.properties.get("null").is_none());
+    assert_eq!(wire.properties["array"], json!([1]));
+    assert_eq!(wire.properties["object"], json!({"event": 1}));
+    assert_eq!(wire.properties["clean"], json!({"items": [null, {}]}));
+    assert_eq!(
+        wire.properties["$set"],
+        json!({"registered": 1, "fallback": null})
+    );
+    assert_eq!(
+        wire.properties["$groups"],
+        json!({"company": "typed", "fallback": "f"})
+    );
+}
+
+#[test]
 fn normalization_omits_custom_null_members_but_preserves_slots_and_protocol_payloads() {
     let config = Config::new("phc_test");
     let producer = Producer::new(&config);
