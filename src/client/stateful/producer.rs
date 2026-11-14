@@ -27,6 +27,11 @@ pub struct Capture {
     /// Per-event properties. These take precedence over registered context,
     /// remembered groups, platform context and SDK defaults using Rust's fill rules.
     pub properties: HashMap<String, Value>,
+    /// Per-capture fallback properties, filled after registered properties,
+    /// platform context and SDK metadata using the ordinary Rust fill rules.
+    /// Hooks see the assembled result and can change or remove these values.
+    /// These properties apply only to this capture; they are not registered.
+    pub fallback_properties: HashMap<String, Value>,
     /// Explicit wire options, with the same precedence as the server Event API.
     /// With the default configuration, a fresh anonymous client sends
     /// process_person_profile=false. Set this option to true to enable processing
@@ -93,7 +98,9 @@ enum CapturePolicy {
     FlagCalled { minimal: bool },
 }
 
-pub(super) struct Producer {
+#[derive(Clone)]
+pub(crate) struct Producer {
+    capture_key: std::sync::Arc<()>,
     context: HashMap<String, Value>,
     sdk_name: String,
     sdk_version: String,
@@ -117,6 +124,7 @@ impl Producer {
             .entry("$os_version".into())
             .or_insert_with(|| info.version().to_string().into());
         Self {
+            capture_key: std::sync::Arc::new(()),
             context,
             sdk_name: config.sdk_name.clone(),
             sdk_version: config.sdk_version.clone(),
@@ -148,6 +156,31 @@ impl Producer {
         session_id: Option<Uuid>,
         policy: CapturePolicy,
     ) -> Result<CaptureEvent, CaptureOutcome> {
+        let mut event = self.assemble(input, snapshot, now, session_id)?;
+        if matches!(policy, CapturePolicy::FlagCalled { minimal: true }) {
+            event.mark_minimal_flag_called();
+            event.apply_minimal_flag_called_allowlist();
+        }
+        let mut wire = CaptureEvent::from_stateful_event_at(&event, now);
+        normalize_custom_properties(
+            &mut wire.properties,
+            matches!(policy, CapturePolicy::FlagCalled { .. }),
+        );
+        Ok(wire)
+    }
+
+    pub(super) fn capture_key(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.capture_key) as usize
+    }
+
+    /// Assemble a native event before selecting its wire protocol.
+    pub(super) fn assemble(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+        now: DateTime<Utc>,
+        session_id: Option<Uuid>,
+    ) -> Result<Event, CaptureOutcome> {
         if input.event.trim().is_empty() {
             return Err(CaptureOutcome::Invalid);
         }
@@ -195,21 +228,14 @@ impl Producer {
             event.insert_prop_default("$geoip_disable", true.into());
         }
         event.merge_groups_into_properties();
-        let mut event =
-            apply_before_send_hooks(&self.hooks, event).ok_or(CaptureOutcome::Dropped)?;
+        for (key, value) in input.fallback_properties {
+            event.insert_prop_default(key, value);
+        }
+        let event = apply_before_send_hooks(&self.hooks, event).ok_or(CaptureOutcome::Dropped)?;
         if event.event_name().trim().is_empty() || event.distinct_id().trim().is_empty() {
             return Err(CaptureOutcome::Invalid);
         }
-        if matches!(policy, CapturePolicy::FlagCalled { minimal: true }) {
-            event.mark_minimal_flag_called();
-            event.apply_minimal_flag_called_allowlist();
-        }
-        let mut wire = CaptureEvent::from_stateful_event_at(&event, now);
-        normalize_custom_properties(
-            &mut wire.properties,
-            matches!(policy, CapturePolicy::FlagCalled { .. }),
-        );
-        Ok(wire)
+        Ok(event)
     }
 }
 
@@ -251,8 +277,18 @@ thread_local! {
 pub(super) struct CaptureGuard(usize);
 
 impl CaptureGuard {
+    #[cfg(feature = "session-replay")]
+    pub(super) fn active(key: usize) -> bool {
+        CAPTURING
+            .try_with(|active| active.borrow().contains(&key))
+            .unwrap_or(true)
+    }
+
     pub(super) fn enter(client: &Client) -> Result<Self, CaptureOutcome> {
-        let key = client as *const Client as usize;
+        Self::enter_key(client.producer.as_ref().unwrap().capture_key())
+    }
+
+    pub(super) fn enter_key(key: usize) -> Result<Self, CaptureOutcome> {
         CAPTURING
             .try_with(|active| {
                 let mut active = active.borrow_mut();
@@ -274,7 +310,10 @@ impl Drop for CaptureGuard {
 
 impl Client {
     pub(super) fn in_capture(&self) -> bool {
-        let key = self as *const Client as usize;
+        let Some(producer) = &self.producer else {
+            return false;
+        };
+        let key = producer.capture_key();
         CAPTURING
             .try_with(|active| active.borrow().contains(&key))
             .unwrap_or(false)

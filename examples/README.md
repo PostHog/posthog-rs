@@ -33,6 +33,19 @@ a cached flag and payload. A known flag read reports access when consent allows;
 promise remote flag success. The listener reports load errors and is explicitly
 unsubscribed before shutdown. Notifications can run on the caller or shared worker.
 
+## Synthetic screenshot replay
+
+```bash
+POSTHOG_HOST=http://localhost:9999 POSTHOG_PROJECT_TOKEN=phc_MOCK \
+  cargo run --features session-replay --example stateful_replay
+```
+
+Point this at the SDK mock server. It sends already-masked synthetic BGRA pixels,
+checks remote permission, runs the native hook after encoding, and drains both
+screenshots and ordinary analytics. `REPLAY_WIDTH`, `REPLAY_HEIGHT` and
+`REPLAY_FRAMES` configure the synthetic workload; `REPLAY_DROP=true` demonstrates
+hook filtering. It does not capture a real screen or validate renderer privacy.
+
 ## Running the Examples
 
 ### 1. Feature Flags Example

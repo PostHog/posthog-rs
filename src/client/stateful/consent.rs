@@ -29,6 +29,10 @@ impl Client {
             return;
         }
         let _ = self.state.as_ref().unwrap().mutate(|state| {
+            #[cfg(feature = "session-replay")]
+            if self.snapshot_opted_out(state) != opt_out {
+                state.replay_consent_generation = state.replay_consent_generation.wrapping_add(1);
+            }
             state.opt_out = Some(opt_out);
         });
     }

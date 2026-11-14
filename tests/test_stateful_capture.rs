@@ -38,6 +38,8 @@ fn public_capture_and_screen_share_enrichment_hooks_and_wire_delivery() {
             .body_includes("\"distinct_id\":\"seeded-anonymous\"")
             .body_includes("\"process_person_profile\":false")
             .body_includes("\"items\":[null,{}]")
+            .body_includes("\"fallback\":\"capture\"")
+            .body_excludes("removed_fallback")
             .body_excludes("hook_null")
             .body_excludes("$is_server");
         then.status(200).json_body(json!({"results": {
@@ -54,6 +56,12 @@ fn public_capture_and_screen_share_enrichment_hooks_and_wire_delivery() {
     config.sdk_version = "1.2.3".into();
     config.before_send(move |mut event| {
         observed.fetch_add(1, Ordering::SeqCst);
+        if event.event_name() == "clicked" {
+            assert_eq!(event.properties()["fallback"], "capture");
+            event.remove_prop("removed_fallback");
+        } else {
+            assert!(!event.properties().contains_key("fallback"));
+        }
         if event.event_name() == "$screen" {
             assert_eq!(event.properties()["$screen_name"], "Settings");
             event.set_uuid(screen_id);
@@ -69,6 +77,10 @@ fn public_capture_and_screen_share_enrichment_hooks_and_wire_delivery() {
     let client = Client::init_blocking(config);
     let mut input = Capture::new("clicked");
     input.uuid = Some(id);
+    input.fallback_properties = HashMap::from([
+        ("fallback".into(), "capture".into()),
+        ("removed_fallback".into(), true.into()),
+    ]);
     assert_eq!(client.capture(input), CaptureOutcome::Accepted { uuid: id });
     assert_eq!(
         client.screen(
@@ -148,6 +160,25 @@ fn bounded_admission_rejects_new_work_and_recovers_a_failed_byte_reservation() {
         CaptureOutcome::Accepted { .. }
     ));
     assert_eq!(client.capture("new"), CaptureOutcome::Full);
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn fallback_properties_obey_record_byte_admission_limits() {
+    let mut config = config();
+    config.max_queue_size = 1;
+    config.max_queue_bytes = 1024;
+    config.max_record_bytes = 1024;
+    let client = Client::init_blocking(config);
+    let mut oversized = Capture::new("too-big");
+    oversized
+        .fallback_properties
+        .insert("data".into(), "x".repeat(2048).into());
+    assert_eq!(client.capture(oversized), CaptureOutcome::Full);
+    assert!(matches!(
+        client.capture("accepted"),
+        CaptureOutcome::Accepted { .. }
+    ));
     client.shutdown_blocking(None);
 }
 

@@ -109,6 +109,8 @@ fn config() -> Config {
 fn client_with_writer(config: &Config, state: StateWriter) -> Client {
     Client {
         disabled: false,
+        #[cfg(feature = "session-replay")]
+        replay: None,
         shutdown_timeout: config.shutdown_timeout,
         producer: Some(Producer::new(config)),
         flag_loader: Some(Arc::new(super::super::flags::FlagLoader::new(

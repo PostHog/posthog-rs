@@ -89,6 +89,7 @@ impl Pipeline {
     /// Normal timer servicing reads one page; explicit flush/shutdown may drain
     /// more until recovery ends, memory capacity fills, or its deadline expires.
     pub(super) fn recover_due(&mut self, deadline: Option<Instant>, force: bool) {
+        let deadline = self.delivery_deadline(deadline);
         loop {
             if !self.storage.recovery_pending
                 || deadline.is_some_and(|deadline| self.clock.now() >= deadline)

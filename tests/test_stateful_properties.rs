@@ -91,6 +91,30 @@ fn registration_owns_values_replaces_top_level_and_unregister_is_local() {
 }
 
 #[test]
+fn per_capture_fallbacks_reappear_after_unregister_without_becoming_registered() {
+    let (client, events) = observed(config());
+    let mut input = Capture::new("adapter");
+    input.fallback_properties = properties(json!({"plan": "free", "source": "adapter"}));
+    client.register(properties(json!({"plan": "paid"})));
+    client.capture(input.clone());
+    client.unregister("plan");
+    client.capture(input.clone());
+    input.properties.insert("plan".into(), "event".into());
+    client.capture(input);
+    client.capture("direct");
+    let seen = events.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+    assert_eq!(seen[0].properties()["plan"], "paid");
+    assert_eq!(seen[1].properties()["plan"], "free");
+    assert_eq!(seen[2].properties()["plan"], "event");
+    for event in &seen[..3] {
+        assert_eq!(event.properties()["source"], "adapter");
+    }
+    assert!(!seen[3].properties().contains_key("plan"));
+    assert!(!seen[3].properties().contains_key("source"));
+}
+
+#[test]
 fn direct_group_identify_enables_processing_without_membership_or_identification() {
     let (client, events) = observed(config());
     client.group_identify("company", "a", HashMap::new());
