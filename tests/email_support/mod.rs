@@ -504,7 +504,7 @@ fn store_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer {
     let Some(sha256) = path.strip_prefix("/bucket/team/2/") else {
         return s3_error(404, "NoSuchKey", "The specified key does not exist.");
     };
-    let query = request.query_params_map();
+    let query: HashMap<String, String> = request.query_params().into_iter().collect();
     if request.method_str() != "PUT" || !query.contains_key("X-Amz-Signature") {
         return s3_error(403, "AccessDenied", "Access Denied");
     }
