@@ -141,6 +141,7 @@ async fn queued_batch_and_exception_context_survives_scope_end() {
             .api_key("phc_test".into())
             .host(server.base_url())
             .flush_at(100usize)
+            .flush_interval_ms(600_000)
             .build()
             .unwrap(),
     )
