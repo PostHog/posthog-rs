@@ -25,7 +25,6 @@ Read the checklist first, then the sections that apply to you.
 
 - [ ] You enable the `capture-v1` feature → [Update Cargo features](#update-cargo-features)
 - [ ] You set `default-features = false` → [Update Cargo features](#update-cargo-features)
-- [ ] You call `Uuid::new_v4` → [Update Cargo features](#update-cargo-features)
 - [ ] You use `Endpoint::Batch`, `V1ErrorResponse`, or `personal_api_key` → [Fix removed APIs](#fix-removed-apis)
 - [ ] You `match` on `Endpoint` or `FeatureFlagsResponse`, or build an SDK response type with a struct literal → [Fix removed APIs](#fix-removed-apis)
 - [ ] You call `is_feature_enabled`, `get_feature_flag`, `get_feature_flag_payload`, or `get_feature_flags` → [Replace flag methods](#replace-flag-methods)
@@ -130,8 +129,6 @@ posthog = { version = "1", default-features = false, features = ["tls"] }
 - **`tls-no-provider`.** Choose it when the application installs a process-level Rustls `CryptoProvider`. It avoids pulling in `aws-lc-rs` from this SDK, but constructing a client before installing a provider panics.
 
 Cargo features are additive, so `tls-no-provider` only avoids the built-in provider when no dependency enables `tls`.
-
-1.x.x no longer enables the `v4` feature of the `uuid` crate. If your application calls `Uuid::new_v4`, enable `v4` on its own `uuid` dependency.
 
 The `posthog-rs` package takes the same features in 1.x.x (see [Rename the crate](#rename-the-crate)).
 

@@ -38,6 +38,10 @@ pub struct CaptureEvent {
     /// Always serialized, as `{}` when empty.
     pub(crate) options: serde_json::Map<String, Value>,
     pub properties: serde_json::Value,
+    /// Copies of this uuid that capture dropped in an earlier attempt, added to
+    /// its final result's `duplicates_dropped`. Never sent.
+    #[serde(skip)]
+    pub(crate) dropped_copies: u32,
 }
 
 impl CaptureEvent {
@@ -76,6 +80,7 @@ impl CaptureEvent {
             options,
             properties: serde_json::to_value(properties)
                 .unwrap_or(serde_json::Value::Object(Default::default())),
+            dropped_copies: 0,
         }
     }
 }

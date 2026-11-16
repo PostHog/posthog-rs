@@ -453,13 +453,11 @@ impl Client {
         }
     }
 
-    /// True when the calling thread is this client's transport worker thread —
-    /// the panic hook skips capturing there.
+    /// True when the calling thread is the worker thread of one of this
+    /// client's lanes (analytics or AI) — the panic hook skips capturing there.
     #[cfg(feature = "error-tracking")]
     pub(crate) fn on_transport_worker(&self) -> bool {
-        self.transport
-            .as_ref()
-            .is_some_and(|t| t.on_worker_thread())
+        self.lanes().any(|t| t.on_worker_thread())
     }
 
     /// Enqueue a panic `$exception` without the tracing `capture` performs:

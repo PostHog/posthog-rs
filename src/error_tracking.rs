@@ -2053,6 +2053,53 @@ mod tests {
     }
 
     #[test]
+    fn panic_in_before_send_on_the_ai_worker_is_not_captured() {
+        // The AI lane runs `before_send` on its own worker thread. A panic there
+        // is caught and logged like one on the analytics worker, so the panic
+        // hook must skip it too, instead of sending the panic as a `$exception`.
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_hook = panic::take_hook();
+        let mut reset = PanicHookReset::new(original_hook);
+        panic::set_hook(Box::new(|_| {}));
+
+        let server = MockServer::start();
+        let exception_mock = server.mock(|when, then| {
+            when.method(POST).body_includes(r#""event":"$exception""#);
+            then.status(200);
+        });
+        let options = ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .error_tracking(
+                ErrorTrackingOptionsBuilder::default()
+                    .capture_panics(true)
+                    .build()
+                    .unwrap(),
+            )
+            .before_send(|event| {
+                if event.event_name() == "$ai_generation" {
+                    panic!("ai before_send boom");
+                }
+                Some(event)
+            })
+            .build()
+            .unwrap();
+        let client = build_test_client(options);
+        install_panic_hook(Arc::clone(&client)).unwrap();
+
+        client.capture_ai(Event::new("$ai_generation", "user-1"));
+        // The AI flush runs the panicking hook; the second flush delivers
+        // anything the panic hook queued on the analytics lane.
+        client.flush_blocking();
+        client.flush_blocking();
+        reset.restore();
+
+        exception_mock.assert_calls(0);
+    }
+
+    #[test]
     fn panic_hook_flush_is_bounded_when_before_send_needs_a_panic_held_lock() {
         // The panic hook flushes on the *panicking* thread, before unwinding
         // releases locks held at the panic site. If a `before_send` hook needs
