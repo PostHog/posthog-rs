@@ -266,7 +266,7 @@ mod tests {
         let event = OutgoingEvent::new(TOOL_CALL, &context(None)).bounded(&[]);
         let kept = event.kept.as_ref().unwrap();
         for prop in legacy_option_properties() {
-            assert!(kept.contains(&prop), "{prop} not kept");
+            assert!(kept.contains(&prop), "{} not kept", prop);
         }
     }
 
