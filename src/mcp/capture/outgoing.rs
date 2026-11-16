@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 
 use super::context::EventContext;
 use crate::client::CRATE_VERSION;
-use crate::constants::PROCESS_PERSON_PROFILE_OPT;
+use crate::constants::{LEGACY_OPTION_PROPERTIES, PROCESS_PERSON_PROFILE_OPT};
 use crate::mcp::bounds::fit_event_size;
 use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
@@ -72,6 +72,10 @@ impl OutgoingEvent {
     pub(crate) fn bounded(mut self, required: &[&'static str]) -> Self {
         let mut kept: Vec<&'static str> = ALWAYS_REQUIRED.to_vec();
         kept.extend_from_slice(required);
+        // A legacy option property, such as a `$process_person_profile: false`
+        // from the request context, becomes an option only when the event is
+        // sent, so dropping it to fit would lose the caller's choice.
+        kept.extend(legacy_option_properties());
         fit_event_size(&mut self.properties, &kept);
         self.kept = Some(kept);
         self
@@ -98,6 +102,11 @@ impl OutgoingEvent {
         }
         event
     }
+}
+
+/// The legacy properties that set an event option.
+fn legacy_option_properties() -> impl Iterator<Item = &'static str> {
+    LEGACY_OPTION_PROPERTIES.iter().map(|&(prop, _)| prop)
 }
 
 /// Fits an event whose request context added properties after
@@ -220,6 +229,45 @@ mod tests {
         assert!(bytes <= MAX_EVENT_BYTES, "{} bytes", bytes);
         assert_eq!(event.properties()[key::INTERFACE], INTERFACE);
         assert_eq!(event.properties()[key::LIB], LIB_NAME);
+    }
+
+    #[test]
+    fn fitting_drops_an_optional_legacy_opt_out_unless_it_is_kept() {
+        // Over the bound with a required list and a legacy opt-out as the only
+        // optional property: unkept, the opt-out is dropped first; kept, the
+        // list is trimmed instead.
+        let over_bound = || {
+            let names: Vec<String> = (0..3_000).map(|index| format!("{index:058}")).collect();
+            let mut event = Event::new("$mcp_tools_list", "user-1");
+            event.insert_prop(LISTED_TOOL_NAMES, names).unwrap();
+            event.insert_prop("$process_person_profile", false).unwrap();
+            event
+        };
+        let mut required: Vec<&'static str> = ALWAYS_REQUIRED.to_vec();
+        required.push(LISTED_TOOL_NAMES);
+
+        let mut unkept = over_bound();
+        fit_to_bound(&mut unkept, &required);
+        assert!(!unkept.properties().contains_key("$process_person_profile"));
+
+        let mut kept = over_bound();
+        required.extend(legacy_option_properties());
+        fit_to_bound(&mut kept, &required);
+        assert_eq!(
+            kept.properties().get("$process_person_profile"),
+            Some(&json!(false))
+        );
+        let bytes = serde_json::to_vec(kept.properties()).unwrap().len();
+        assert!(bytes <= MAX_EVENT_BYTES, "{} bytes", bytes);
+    }
+
+    #[test]
+    fn bounded_treats_legacy_option_properties_as_required() {
+        let event = OutgoingEvent::new(TOOL_CALL, &context(None)).bounded(&[]);
+        let kept = event.kept.as_ref().unwrap();
+        for prop in legacy_option_properties() {
+            assert!(kept.contains(&prop), "{prop} not kept");
+        }
     }
 
     #[test]
