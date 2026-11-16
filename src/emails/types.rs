@@ -1,5 +1,9 @@
+use std::fmt;
+
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 /// What every send takes, whatever its form.
 #[derive(Debug, Clone, Default)]
@@ -96,7 +100,12 @@ pub struct CodeEmail {
     pub(crate) text: Option<String>,
     pub(crate) from: Option<String>,
     pub(crate) reply_to: Vec<String>,
-    pub(crate) capture_engagement: bool,
+    pub(crate) cc: Vec<String>,
+    pub(crate) bcc: Vec<String>,
+    pub(crate) attachments: Vec<EmailAttachment>,
+    pub(crate) sensitive: Option<bool>,
+    pub(crate) tracking: Option<EmailTracking>,
+    pub(crate) capture_engagement: Option<bool>,
     pub(crate) options: SendOptions,
 }
 
@@ -119,7 +128,12 @@ impl CodeEmail {
             text: None,
             from: None,
             reply_to: Vec::new(),
-            capture_engagement: true,
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            attachments: Vec::new(),
+            sensitive: None,
+            tracking: None,
+            capture_engagement: None,
             options: SendOptions::default(),
         }
     }
@@ -149,12 +163,82 @@ impl CodeEmail {
         self
     }
 
+    /// Adds an address that gets a visible copy. Call it again to add more,
+    /// at most 10. Each is a bare address, such as `"finance@example.com"`,
+    /// with no name.
+    pub fn cc(mut self, address: impl Into<String>) -> Self {
+        self.cc.push(address.into());
+        self
+    }
+
+    /// Adds an address that gets a copy the other recipients never see. Call
+    /// it again to add more, at most 10. Each is a bare address, with no name.
+    pub fn bcc(mut self, address: impl Into<String>) -> Self {
+        self.bcc.push(address.into());
+        self
+    }
+
+    /// Adds a file to the email. Call it again to add more, at most 10 files
+    /// and 40 MB for the whole email after Base64 encoding, which leaves about
+    /// 29 MB for the files. The 40 MB counts the bodies too, and the HTML twice
+    /// without text, because PostHog derives the text from it. PostHog refuses a file type that mailbox providers
+    /// block, such as `.exe`.
+    pub fn attachment(mut self, attachment: EmailAttachment) -> Self {
+        self.attachments.push(attachment);
+        self
+    }
+
+    /// Whether the email carries a login link, a reset token or a code.
+    /// PostHog keeps a sensitive email's links unchanged, leaves its subject
+    /// off engagement events and keeps its content out of logs.
+    ///
+    /// Without it, the email takes the setting of the saved template whose
+    /// key is the email's `template_key`, or is sensitive when no template has
+    /// that key.
+    ///
+    /// ```
+    /// use posthog_rs::CodeEmail;
+    ///
+    /// // The digest carries no login link, reset token or code, so PostHog
+    /// // counts its clicks too.
+    /// let email = CodeEmail::new("jane@example.com", "weekly-digest", "Your weekly digest")
+    ///     .html(r#"<p><a href="https://example.com/blog">Read this week's posts</a></p>"#)
+    ///     .sensitive(false);
+    /// ```
+    pub fn sensitive(mut self, sensitive: bool) -> Self {
+        self.sensitive = Some(sensitive);
+        self
+    }
+
+    /// What PostHog tracks for this email: [`EmailTracking::On`],
+    /// [`EmailTracking::Off`], or [`EmailTrackingOptions`] to set each kind on
+    /// its own. Takes a `bool` too.
+    ///
+    /// Without it, PostHog counts opens, captures engagement events, and
+    /// rewrites links to count clicks only when the email isn't
+    /// [`sensitive`](Self::sensitive).
+    ///
+    /// ```
+    /// use posthog_rs::{CodeEmail, EmailTrackingOptions};
+    ///
+    /// // Count the digest's clicks, but capture no engagement events.
+    /// let email = CodeEmail::new("jane@example.com", "weekly-digest", "Your weekly digest")
+    ///     .html(r#"<p><a href="https://example.com/blog">Read this week's posts</a></p>"#)
+    ///     .tracking(EmailTrackingOptions::new().clicks(true).engagement(false));
+    /// ```
+    pub fn tracking(mut self, tracking: impl Into<EmailTracking>) -> Self {
+        self.tracking = Some(tracking.into());
+        self
+    }
+
     /// Whether PostHog captures the email's engagement events (sent,
     /// delivered, opened, clicked, bounced) as events of the recipient.
     /// Defaults to `true`. A project whose admin turned engagement capture off
-    /// captures nothing, whatever the send asks.
+    /// captures nothing, whatever the send asks. PostHog refuses a send that
+    /// sets both this and [`tracking`](Self::tracking).
+    #[deprecated(note = "use `tracking` with `EmailTrackingOptions::engagement` instead")]
     pub fn capture_engagement(mut self, capture: bool) -> Self {
-        self.capture_engagement = capture;
+        self.capture_engagement = Some(capture);
         self
     }
 
@@ -184,6 +268,186 @@ impl CodeEmail {
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.options.max_retries = Some(max_retries);
         self
+    }
+}
+
+/// A file sent with a [`CodeEmail`].
+///
+/// PostHog can't fetch a file from a path or URL: read the file and pass its
+/// bytes. Before the send, the client uploads each file PostHog doesn't have
+/// yet straight to PostHog's file store, then sends the email naming each file
+/// by its SHA-256. Its `Debug` output never shows the content.
+///
+/// ```
+/// use posthog_rs::{CodeEmail, EmailAttachment};
+///
+/// # let invoice_pdf: Vec<u8> = Vec::new();
+/// # let logo_png: Vec<u8> = Vec::new();
+/// let email = CodeEmail::new("jane@example.com", "invoice", "Your invoice")
+///     .html(r#"<img src="cid:logo"><p>Your invoice is attached.</p>"#)
+///     .attachment(EmailAttachment::new("invoice.pdf", invoice_pdf))
+///     .attachment(EmailAttachment::new("logo.png", logo_png).content_id("logo"));
+/// ```
+#[derive(Clone)]
+pub struct EmailAttachment {
+    pub(crate) filename: String,
+    pub(crate) content: Bytes,
+    pub(crate) sha256: String,
+    content_type: Option<String>,
+    content_id: Option<String>,
+}
+
+impl EmailAttachment {
+    /// A file from its bytes, with the name the recipient sees, such as
+    /// `"invoice.pdf"`. The client hashes the bytes here, once.
+    pub fn new(filename: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
+        let content = Bytes::from(content.into());
+        let sha256 = format!("{:x}", Sha256::digest(&content));
+        Self {
+            filename: filename.into(),
+            content,
+            sha256,
+            content_type: None,
+            content_id: None,
+        }
+    }
+
+    /// The MIME type, such as `"application/pdf"`. Without it, the type
+    /// follows from the file name.
+    pub fn content_type(mut self, content_type: impl Into<String>) -> Self {
+        self.content_type = Some(content_type.into());
+        self
+    }
+
+    /// Shows the file inline: the HTML references it as `cid:<content_id>`,
+    /// such as `<img src="cid:logo">` for `"logo"`.
+    pub fn content_id(mut self, content_id: impl Into<String>) -> Self {
+        self.content_id = Some(content_id.into());
+        self
+    }
+
+    /// The file as the upload request names it.
+    pub(crate) fn to_upload_json(&self) -> Value {
+        json!({"sha256": self.sha256, "size": self.content.len()})
+    }
+
+    /// The file as the send request references it.
+    pub(crate) fn to_reference_json(&self) -> Value {
+        let mut reference = json!({"sha256": self.sha256, "filename": self.filename});
+        if let Some(content_type) = &self.content_type {
+            reference["content_type"] = json!(content_type);
+        }
+        if let Some(content_id) = &self.content_id {
+            reference["content_id"] = json!(content_id);
+        }
+        reference
+    }
+}
+
+impl fmt::Debug for EmailAttachment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmailAttachment")
+            .field("filename", &self.filename)
+            .field("content", &format_args!("<{} bytes>", self.content.len()))
+            .field("sha256", &self.sha256)
+            .field("content_type", &self.content_type)
+            .field("content_id", &self.content_id)
+            .finish()
+    }
+}
+
+/// What PostHog tracks for a [`CodeEmail`]. A `bool` or an
+/// [`EmailTrackingOptions`] converts into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmailTracking {
+    /// Tracks opens and clicks and captures engagement events. Use it only
+    /// when the email's links are safe to send through a redirect.
+    On,
+    /// Turns off every kind of tracking, including kinds PostHog adds later.
+    /// PostHog then can't count the email's opens and clicks, and captures no
+    /// engagement events.
+    Off,
+    /// Sets each kind of tracking on its own.
+    Custom(EmailTrackingOptions),
+}
+
+impl EmailTracking {
+    pub(crate) fn to_json(self) -> Value {
+        match self {
+            EmailTracking::On => Value::Bool(true),
+            EmailTracking::Off => Value::Bool(false),
+            EmailTracking::Custom(options) => options.to_json(),
+        }
+    }
+}
+
+impl From<bool> for EmailTracking {
+    fn from(track: bool) -> Self {
+        if track {
+            EmailTracking::On
+        } else {
+            EmailTracking::Off
+        }
+    }
+}
+
+impl From<EmailTrackingOptions> for EmailTracking {
+    fn from(options: EmailTrackingOptions) -> Self {
+        EmailTracking::Custom(options)
+    }
+}
+
+/// Each kind of tracking of a [`CodeEmail`], on or off. A kind you don't set
+/// keeps its default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmailTrackingOptions {
+    opens: Option<bool>,
+    clicks: Option<bool>,
+    engagement: Option<bool>,
+}
+
+impl EmailTrackingOptions {
+    /// Every kind at its default.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether PostHog adds its open pixel to count opens. Defaults to `true`.
+    /// With opens off, PostHog counts no clicks, and refuses clicks on.
+    pub fn opens(mut self, track: bool) -> Self {
+        self.opens = Some(track);
+        self
+    }
+
+    /// Whether PostHog rewrites the email's links to count clicks. Defaults to
+    /// `true` when the email isn't [`sensitive`](CodeEmail::sensitive) and
+    /// `false` when it is. Turn it on only when the links are safe to send
+    /// through a redirect, so not for a login or password reset link. A link with a
+    /// `data-ph-no-track` attribute is never rewritten.
+    pub fn clicks(mut self, track: bool) -> Self {
+        self.clicks = Some(track);
+        self
+    }
+
+    /// Whether PostHog captures the email's engagement events, such as opens
+    /// and clicks, as events of the recipient. Defaults to `true`.
+    pub fn engagement(mut self, capture: bool) -> Self {
+        self.engagement = Some(capture);
+        self
+    }
+
+    fn to_json(self) -> Value {
+        let mut object = Map::new();
+        for (key, value) in [
+            ("opens", self.opens),
+            ("clicks", self.clicks),
+            ("engagement", self.engagement),
+        ] {
+            if let Some(value) = value {
+                object.insert(key.into(), Value::Bool(value));
+            }
+        }
+        Value::Object(object)
     }
 }
 

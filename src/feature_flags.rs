@@ -488,7 +488,8 @@ pub struct MultivariateVariant {
 pub enum FeatureFlagsResponse {
     /// v2 API format from `/flags/?v=2` endpoint
     V2 {
-        /// Map of flag keys to their detailed evaluation results
+        /// Map of flag keys to their successful detailed evaluation results
+        #[serde(deserialize_with = "deserialize_evaluated_flags")]
         flags: HashMap<String, FlagDetail>,
         /// Whether any errors occurred during flag computation
         #[serde(rename = "errorsWhileComputingFlags")]
@@ -525,6 +526,30 @@ pub enum FeatureFlagsResponse {
         #[serde(default)]
         errors: Option<Vec<String>>,
     },
+}
+
+// Filter at the shared wire boundary so normalization and snapshots cannot
+// interpret a failed placeholder as a decision, without changing FlagDetail's API.
+fn deserialize_evaluated_flags<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, FlagDetail>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct WireFlagDetail {
+        #[serde(default)]
+        failed: bool,
+        #[serde(flatten)]
+        detail: FlagDetail,
+    }
+
+    let flags = HashMap::<String, WireFlagDetail>::deserialize(deserializer)?;
+    Ok(flags
+        .into_iter()
+        .filter(|(_, flag)| !flag.failed)
+        .map(|(key, flag)| (key, flag.detail))
+        .collect())
 }
 
 impl FeatureFlagsResponse {

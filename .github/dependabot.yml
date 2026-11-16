@@ -11,6 +11,21 @@ updates:
       cargo-dependencies:
         patterns:
           - "*"
+    # These versions need a newer Rust than `rust-version` in Cargo.toml.
+    # Remove a rule when the MSRV reaches the version it names.
+    ignore:
+      - dependency-name: "backtrace" # 1.82
+        versions: [">=0.3.75"]
+      - dependency-name: "reqwest" # 1.85
+        versions: [">=0.13.4"]
+      - dependency-name: "sha1" # 1.85
+        versions: [">=0.11.0"]
+      - dependency-name: "sha2" # 1.85
+        versions: [">=0.11.0"]
+      - dependency-name: "tokio" # 1.85
+        versions: [">=1.54.0"]
+      - dependency-name: "uuid" # 1.85
+        versions: [">=1.21.0"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
