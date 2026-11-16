@@ -31,6 +31,9 @@ pub(crate) struct OutgoingEvent {
     pub(crate) properties: Map<String, Value>,
     options: Map<String, Value>,
     request_context: Option<RequestContext>,
+    /// The properties [`Self::bounded`] kept, so the event can be fitted again
+    /// once the request context adds its own.
+    kept: Option<Vec<&'static str>>,
 }
 
 impl OutgoingEvent {
@@ -46,6 +49,7 @@ impl OutgoingEvent {
             properties,
             options: context.options.clone(),
             request_context: context.request_context.clone(),
+            kept: None,
         }
     }
 
@@ -65,10 +69,11 @@ impl OutgoingEvent {
 
     /// Fits the event within the byte bound, keeping `required` and the
     /// properties every MCP event needs.
-    pub(crate) fn bounded(mut self, required: &[&str]) -> Self {
-        let mut kept: Vec<&str> = ALWAYS_REQUIRED.to_vec();
+    pub(crate) fn bounded(mut self, required: &[&'static str]) -> Self {
+        let mut kept: Vec<&'static str> = ALWAYS_REQUIRED.to_vec();
         kept.extend_from_slice(required);
         fit_event_size(&mut self.properties, &kept);
+        self.kept = Some(kept);
         self
     }
 
@@ -87,8 +92,36 @@ impl OutgoingEvent {
         // Applied before the MCP `before_send` rather than at enqueue, so what the hook returns is sent.
         if let Some(context) = RequestContext::current().or(self.request_context) {
             context.apply_to_event(&mut event);
+            if let Some(kept) = &self.kept {
+                fit_to_bound(&mut event, kept);
+            }
         }
         event
+    }
+}
+
+/// Fits an event whose request context added properties after
+/// [`OutgoingEvent::bounded`], keeping the same required properties.
+fn fit_to_bound(event: &mut Event, kept: &[&str]) {
+    let mut properties: Map<String, Value> = event
+        .properties()
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    fit_event_size(&mut properties, kept);
+    let removed: Vec<String> = event
+        .properties()
+        .keys()
+        .filter(|name| !properties.contains_key(*name))
+        .cloned()
+        .collect();
+    for name in removed {
+        event.remove_prop(&name);
+    }
+    for (name, value) in properties {
+        if event.properties().get(&name) != Some(&value) {
+            let _ = event.insert_prop(name, value);
+        }
     }
 }
 
@@ -108,6 +141,7 @@ mod tests {
     use super::*;
     use crate::constants::PROCESS_PERSON_PROFILE_OPT;
     use crate::mcp::contract::events::{TOOLS_LIST, TOOL_CALL};
+    use crate::mcp::contract::limits::MAX_EVENT_BYTES;
     use crate::mcp::contract::properties::LISTED_TOOL_NAMES;
     use crate::mcp::Identity;
     use crate::RequestContext;
@@ -169,6 +203,23 @@ mod tests {
             .await;
         assert_eq!(event.properties()["route"], "/scoped");
         assert_eq!(person_processing(&event), Some(&json!(false)));
+    }
+
+    #[test]
+    fn a_large_request_context_property_stays_within_the_bound() {
+        let mut context = context(None);
+        context.request_context = Some(
+            RequestContext::new()
+                .property("request_note", "x".repeat(200 * 1024))
+                .unwrap(),
+        );
+        let event = OutgoingEvent::new(TOOL_CALL, &context)
+            .bounded(&[])
+            .into_posthog_event();
+        let bytes = serde_json::to_vec(event.properties()).unwrap().len();
+        assert!(bytes <= MAX_EVENT_BYTES, "{} bytes", bytes);
+        assert_eq!(event.properties()[key::INTERFACE], INTERFACE);
+        assert_eq!(event.properties()[key::LIB], LIB_NAME);
     }
 
     #[test]

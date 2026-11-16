@@ -292,7 +292,7 @@ client_test!(every_capture_method_applies_the_identify_style_default, {
     };
     client.capture_batch(pair("capture_batch"), false);
     client.capture_batch(pair("capture_batch_historical"), true);
-    client.capture_ai_batch(pair("capture_ai_batch"), false);
+    client.capture_ai_batch(pair("capture_ai_batch"));
     for event in pair("capture") {
         client.capture(event);
     }
@@ -306,7 +306,7 @@ client_test!(every_capture_method_applies_the_identify_style_default, {
         call!(client.capture_ai_immediate(event)).unwrap();
     }
     call!(client.capture_batch_immediate(pair("capture_batch_immediate"), false)).unwrap();
-    call!(client.capture_ai_batch_immediate(pair("capture_ai_batch_immediate"), false)).unwrap();
+    call!(client.capture_ai_batch_immediate(pair("capture_ai_batch_immediate"))).unwrap();
     call!(client.flush());
 
     for (recorded, methods) in [

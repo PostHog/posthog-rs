@@ -552,10 +552,10 @@ async fn enqueue(
     // Before the enqueue, so a drop reported for the uuid always finds its event name.
     ledger.record_capture(uuid, event.event_name());
 
-    // The batch methods carry historical_migration; a one-event vec is still a non-blocking enqueue.
+    // The analytics batch method carries historical_migration; a one-event vec is still a non-blocking enqueue.
     match lane {
         Lane::Analytics => client.capture_batch(vec![event], historical_migration),
-        Lane::Ai => client.capture_ai_batch(vec![event], historical_migration),
+        Lane::Ai => client.capture_ai_batch(vec![event]),
     }
 
     Json(serde_json::json!({ "success": true, "uuid": uuid.to_string() })).into_response()

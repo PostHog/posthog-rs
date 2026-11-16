@@ -233,7 +233,7 @@ impl Client {
     /// The SDK does not inspect the event name. The backend accepts only its
     /// AI event names on this endpoint and reports anything else as a per-event
     /// `drop`, which reaches an `on_error` hook (see
-    /// [`CaptureFailure::endpoint`](crate::CaptureFailure::endpoint)) or, with no
+    /// [`CaptureFailure::endpoint_kind`](crate::CaptureFailure::endpoint_kind)) or, with no
     /// hook, one aggregate warning per batch.
     #[instrument(skip(self, event), level = "debug")]
     pub fn capture_ai(&self, event: Event) {
@@ -682,9 +682,6 @@ impl Client {
     /// # Parameters
     ///
     /// - `events`: AI events to send.
-    /// - `historical_migration`: Kept for parity with [`Client::capture_batch`]
-    ///   and passed through to the backend, which currently ignores it for AI
-    ///   events.
     ///
     /// # Remarks
     ///
@@ -694,12 +691,12 @@ impl Client {
     /// splits the batch into requests of about 5 MiB each.
     #[instrument(
         skip(self, events),
-        fields(event_count = events.len(), historical_migration),
+        fields(event_count = events.len()),
         level = "debug"
     )]
-    pub fn capture_ai_batch(&self, events: Vec<Event>, historical_migration: bool) {
+    pub fn capture_ai_batch(&self, events: Vec<Event>) {
         if let Some(transport) = self.ai_transport() {
-            transport.enqueue_batch(events, historical_migration);
+            transport.enqueue_batch(events, false);
         }
     }
 
@@ -730,7 +727,7 @@ impl Client {
     /// one-event batch; see it for full semantics.
     #[must_use = "the delivery outcome should be inspected"]
     pub async fn capture_ai_immediate(&self, event: Event) -> Result<CaptureSummary, Error> {
-        self.capture_ai_batch_immediate(vec![event], false).await
+        self.capture_ai_batch_immediate(vec![event]).await
     }
 
     /// Capture a batch of AI events and await confirmation that every request
@@ -741,9 +738,6 @@ impl Client {
     /// # Parameters
     ///
     /// - `events`: AI events to send.
-    /// - `historical_migration`: Kept for parity with
-    ///   [`Client::capture_batch_immediate`] and passed through to the backend,
-    ///   which currently ignores it for AI events.
     ///
     /// # Behavior
     ///
@@ -766,13 +760,12 @@ impl Client {
     #[must_use = "the delivery outcome should be inspected"]
     #[instrument(
         skip(self, events),
-        fields(event_count = events.len(), historical_migration),
+        fields(event_count = events.len()),
         level = "debug"
     )]
     pub async fn capture_ai_batch_immediate(
         &self,
         events: Vec<Event>,
-        historical_migration: bool,
     ) -> Result<CaptureSummary, Error> {
         let mut events = events;
         for event in &mut events {
@@ -781,7 +774,7 @@ impl Client {
         if self.options.is_disabled() || events.is_empty() {
             return Ok(CaptureSummary::default());
         }
-        self.send_immediate(ImmediateLane::ai(), events, historical_migration)
+        self.send_immediate(ImmediateLane::ai(), events, false)
             .await
     }
 
@@ -1306,7 +1299,7 @@ mod teardown_tests {
         .await;
         assert!(client.transport.is_none());
         client.capture_ai(Event::new("$ai_generation", "user-1"));
-        client.capture_ai_batch(vec![Event::new("$ai_generation", "user-1")], false);
+        client.capture_ai_batch(vec![Event::new("$ai_generation", "user-1")]);
         assert!(client.ai_transport.get().is_none());
         let summary = client
             .capture_ai_immediate(Event::new("$ai_generation", "user-1"))

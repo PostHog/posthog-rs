@@ -245,7 +245,7 @@ That includes the `process_person_profile` option that `Event::new_anon` sets to
 - **The endpoint.** `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog::capture_ai` mirror their analytics counterparts. They post to `/i/v1/ai/events` on their own background lane, batched by size.
 - **Routing.** `capture` never reroutes by event name. Large AI events always need `capture_ai`.
 - **Event names.** PostHog drops an event sent with `capture_ai` whose name doesn't start with `$ai_`. It reports it as a per-event `drop` with the detail `misrouted_event` inside a `200`.
-- **Where the drop is reported.** That verdict reaches an `on_error` hook, where `CaptureFailure::endpoint()` says which lane, or the returned `CaptureSummary` for the immediate variants.
+- **Where the drop is reported.** That verdict reaches an `on_error` hook, where `CaptureFailure::endpoint_kind()` says which lane, or the returned `CaptureSummary` for the immediate variants.
 - **The `$ai_` prefix.** PostHog owns the `$ai_` prefix, so don't use it for your own events.
 - **Flush and shutdown.** `flush` and `shutdown` drain both lanes.
 - **Events over 8 MiB.** The SDK drops an event over the backend's 8 MiB per-event limit locally, on the background lane and in the immediate variants. On the background lane, that drop logs a warning with the event name and size, and it doesn't reach `on_error`. The immediate variants return that drop in the `CaptureSummary` with the detail `ai_event_too_big`.

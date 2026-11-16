@@ -3037,7 +3037,7 @@ mod tests {
             let mut builder = options(server.base_url());
             builder.max_capture_attempts(1u32).on_error(move |failure| {
                 if let PostHogError::Capture(c) = failure {
-                    sink.lock().unwrap().push(c.endpoint());
+                    sink.lock().unwrap().push(c.endpoint_kind());
                 }
             });
             let analytics = spawn(&mut builder, LaneConfig::analytics());
@@ -3088,7 +3088,7 @@ mod tests {
                     drops.sort();
                     sink.lock()
                         .unwrap()
-                        .push((c.endpoint(), c.event_count(), drops));
+                        .push((c.endpoint_kind(), c.event_count(), drops));
                 }
             });
             let handle = spawn(&mut builder, LaneConfig::ai());
