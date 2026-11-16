@@ -176,6 +176,10 @@ pub struct ClientOptions {
     /// the SDK cannot inspect or filter those defaults. The SDK keeps the
     /// supplied client's redirect policy; the capture and `/flags` clients it
     /// builds follow only 307 and 308 redirects to the same scheme, host and port.
+    /// Email attachments upload to PostHog's file store through a client the SDK
+    /// builds, so these defaults never reach it. Nor do the supplied client's root
+    /// certificates, TLS options or proxy: that client trusts the system's roots
+    /// and takes its proxy from the environment, such as `HTTPS_PROXY`.
     #[cfg(feature = "async-client")]
     #[builder(default, setter(strip_option))]
     http_client: Option<reqwest::Client>,
@@ -199,6 +203,10 @@ pub struct ClientOptions {
     /// the SDK cannot inspect or filter those defaults. The SDK keeps the
     /// supplied client's redirect policy; the capture and `/flags` clients it
     /// builds follow only 307 and 308 redirects to the same scheme, host and port.
+    /// Email attachments upload to PostHog's file store through a client the SDK
+    /// builds, so these defaults never reach it. Nor do the supplied client's root
+    /// certificates, TLS options or proxy: that client trusts the system's roots
+    /// and takes its proxy from the environment, such as `HTTPS_PROXY`.
     ///
     /// Create and finally drop application-owned blocking clients, including handles
     /// held in options and builders, outside async runtimes. SDK shutdown does not

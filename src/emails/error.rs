@@ -8,7 +8,8 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EmailErrorKind {
-    /// The send was malformed: a local argument check failed, or PostHog
+    /// The send was malformed: a local argument check failed, such as
+    /// `too_many_attachments` or `message_too_large`, or PostHog
     /// answered `400`, a `409` with `template_outdated`, or a `422` other than
     /// a reused idempotency key.
     ValidationError,
@@ -16,7 +17,8 @@ pub enum EmailErrorKind {
     MissingApiKey,
     /// PostHog answered `403`: the secret key lacks the scope.
     InvalidPermission,
-    /// PostHog answered `404`: no such template or email in this project.
+    /// PostHog answered `404`: no such template or email in this project, or,
+    /// for a send with files, no upload route.
     NotFound,
     /// PostHog answered `409`: a send with the same idempotency key is still
     /// in flight.
@@ -28,7 +30,8 @@ pub enum EmailErrorKind {
     RateLimitExceeded,
     /// PostHog answered `429` with `quota_limited`: the monthly quota is spent.
     MonthlyQuotaExceeded,
-    /// PostHog answered `503`, or the request failed on the network.
+    /// PostHog answered `503`, the file store answered `500`, `502`, `503` or
+    /// `504` to an upload, or the request failed on the network.
     ServiceUnavailable,
     /// Anything else.
     ApplicationError,
@@ -53,6 +56,12 @@ impl EmailErrorKind {
     }
 
     pub(crate) fn of(status: Option<u16>, code: &str) -> Self {
+        if code == "attachment_upload_failed" {
+            return match status {
+                Some(500 | 502 | 503 | 504) => EmailErrorKind::ServiceUnavailable,
+                _ => EmailErrorKind::ApplicationError,
+            };
+        }
         if code == "missing_secret_key" || status == Some(401) {
             return EmailErrorKind::MissingApiKey;
         }
@@ -141,7 +150,9 @@ impl EmailError {
 
     /// A local argument error about one field of the send.
     pub(crate) fn invalid(code: &str, message: impl Into<String>, field: &str) -> Self {
-        Self::new(code, message).with_field(Some(field.to_string()))
+        let mut error = Self::new(code, message).with_field(Some(field.to_string()));
+        error.0.kind = EmailErrorKind::ValidationError;
+        error
     }
 
     pub(crate) fn from_response(
@@ -204,7 +215,8 @@ impl EmailError {
         &self.0.message
     }
 
-    /// The HTTP status, when PostHog answered.
+    /// The HTTP status, when PostHog answered, or the file store's status for
+    /// `attachment_upload_failed`.
     pub fn status(&self) -> Option<u16> {
         self.0.status
     }

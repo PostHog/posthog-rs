@@ -48,6 +48,8 @@ pub struct Client {
     ai_transport: OnceLock<Arc<TransportHandle>>,
     /// Email requests in flight, which `shutdown` waits for.
     email_tracker: EmailTracker,
+    /// The client that uploads email attachments, built on the first upload.
+    email_upload_client: OnceLock<HttpClient>,
 }
 
 /// Construct a blocking PostHog client from an API key or [`ClientOptions`].
@@ -132,6 +134,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
         transport,
         ai_transport: OnceLock::new(),
         email_tracker: EmailTracker::default(),
+        email_upload_client: OnceLock::new(),
     }
 }
 
@@ -476,7 +479,12 @@ impl Client {
     /// Needs `secret_key` set to a Project Secret API Key with the
     /// `transactional_email:write` scope. See [`Emails`] for setup.
     pub fn emails(&self) -> Emails<'_> {
-        Emails::new(&self.options, self.client.as_ref(), &self.email_tracker)
+        Emails::new(
+            &self.options,
+            self.client.as_ref(),
+            &self.email_upload_client,
+            &self.email_tracker,
+        )
     }
 
     /// Capture a Rust error personlessly, sending it to PostHog Error Tracking.
@@ -1265,6 +1273,7 @@ mod minimal_gate_tests {
             transport: None,
             ai_transport: OnceLock::new(),
             email_tracker: EmailTracker::default(),
+            email_upload_client: OnceLock::new(),
         };
         client
             .flag_event_host
@@ -1345,6 +1354,7 @@ mod local_payload_tests {
             transport: None,
             ai_transport: OnceLock::new(),
             email_tracker: EmailTracker::default(),
+            email_upload_client: OnceLock::new(),
         };
         client
             .flag_event_host

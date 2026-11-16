@@ -1,5 +1,31 @@
 # posthog-rs
 
+## 0.33.1 — 2026-11-13
+
+### Patch changes
+
+- [2b664da](https://github.com/posthog/posthog-rs/commit/2b664dada02437d7a0896a6858854f3b7cce2abd) Ignore failed detailed feature flag records and their payloads in direct reads, bulk results, and snapshot enrichment. — Thanks @marandaneto!
+
+## 0.33.0 — 2026-11-13
+
+### Minor changes
+
+- [90cb06a](https://github.com/posthog/posthog-rs/commit/90cb06a594835f455dc39ce6ee77547d10ca33bf) A `CodeEmail` takes copies and files: `cc` and `bcc` each add one address, and `attachment` adds an `EmailAttachment` made from the file's bytes. An email carries at most 10 files and 40 MB after Base64 encoding, counting the bodies (the HTML twice without text, since PostHog derives the text from it) and the subject, about 29 MB of files; the client checks both before it sends anything. The client hashes each file, uploads the files PostHog doesn't have yet straight to PostHog's file store over https, and then sends the email naming each file by its SHA-256. A file store URL that isn't https fails the send before any upload, unless `app_host` is plain http itself, as a PostHog on your own machine is. A refused upload fails the send with `attachment_upload_failed` and sends no email. Add `content_type` and `content_id`, and reference a `content_id` as `cid:<id>` in the HTML to show the file inline. PostHog can't fetch a file from a path or URL, and an attachment's `Debug` output never shows its content. A `TemplateEmail` takes none of these, because the template sets its own recipients and content. — Thanks @Silthus!
+
+## 0.32.0 — 2026-11-12
+
+### Minor changes
+
+- [8b0fb8b](https://github.com/posthog/posthog-rs/commit/8b0fb8be20fd6d20aaf6b3656d0a66beab5340d0) A `CodeEmail` now takes `.sensitive()` and `.tracking()`.
+  
+  `.sensitive()` marks an email that carries a login link, a reset token or a code. PostHog keeps a sensitive email's links unchanged, leaves its subject off engagement events and keeps its content out of logs. Without it, a code send takes the setting of the saved template whose key matches its `template_key`, or is sensitive when no template has that key, as before.
+  
+  `.tracking()` says what PostHog tracks for the email: `true` or `EmailTracking::On`, `false` or `EmailTracking::Off`, or `EmailTrackingOptions::new()` with `.opens()`, `.clicks()` and `.engagement()` to set each kind on its own. Without it, PostHog counts opens, captures engagement events, and counts clicks only when the email isn't sensitive. Turn clicks on only when the email's links are safe to send through a redirect. Click tracking needs open tracking.
+  
+  `.capture_engagement()` is deprecated. Use `.tracking(EmailTrackingOptions::new().engagement(...))` instead. It still works, but PostHog refuses a send that sets both. The SDK now leaves `capture_engagement` out of the request unless you set it, which PostHog reads the same way.
+  
+  `.sensitive()` and `.tracking()` need PostHog's API support, which is rolling out. Until it reaches your PostHog region or self-hosted version, PostHog refuses a send that sets either. — Thanks @Silthus!
+
 ## 0.31.3 — 2026-11-11
 
 ### Patch changes

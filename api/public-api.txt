@@ -190,6 +190,14 @@ impl posthog::EmailErrorKind
 pub fn posthog::EmailErrorKind::as_str(self) -> &'static str
 impl core::fmt::Display for posthog::EmailErrorKind
 pub fn posthog::EmailErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum posthog::EmailTracking
+pub posthog::EmailTracking::Custom(posthog::EmailTrackingOptions)
+pub posthog::EmailTracking::Off
+pub posthog::EmailTracking::On
+impl core::convert::From<bool> for posthog::EmailTracking
+pub fn posthog::EmailTracking::from(bool) -> Self
+impl core::convert::From<posthog::EmailTrackingOptions> for posthog::EmailTracking
+pub fn posthog::EmailTracking::from(posthog::EmailTrackingOptions) -> Self
 #[non_exhaustive] pub enum posthog::Endpoint
 pub posthog::Endpoint::Capture
 pub posthog::Endpoint::CaptureAi
@@ -382,7 +390,10 @@ impl core::default::Default for posthog::ClientOptionsBuilder
 pub fn posthog::ClientOptionsBuilder::default() -> Self
 pub struct posthog::CodeEmail
 impl posthog::CodeEmail
+pub fn posthog::CodeEmail::attachment(self, posthog::EmailAttachment) -> Self
+pub fn posthog::CodeEmail::bcc(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::capture_engagement(self, bool) -> Self
+pub fn posthog::CodeEmail::cc(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::html(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -390,7 +401,9 @@ pub fn posthog::CodeEmail::idempotency_key(self, impl core::convert::Into<alloc:
 pub fn posthog::CodeEmail::max_retries(self, u32) -> Self
 pub fn posthog::CodeEmail::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::reply_to(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::CodeEmail::sensitive(self, bool) -> Self
 pub fn posthog::CodeEmail::text(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::CodeEmail::tracking(self, impl core::convert::Into<posthog::EmailTracking>) -> Self
 impl core::convert::From<posthog::CodeEmail> for posthog::SendEmail
 pub fn posthog::SendEmail::from(posthog::CodeEmail) -> Self
 pub struct posthog::Cohort
@@ -401,6 +414,13 @@ pub posthog::CohortDefinition::properties: serde_json::value::Value
 impl posthog::CohortDefinition
 pub fn posthog::CohortDefinition::new(alloc::string::String, alloc::vec::Vec<posthog::Property>) -> Self
 pub fn posthog::CohortDefinition::parse_properties(&self) -> alloc::vec::Vec<posthog::Property>
+pub struct posthog::EmailAttachment
+impl posthog::EmailAttachment
+pub fn posthog::EmailAttachment::content_id(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::EmailAttachment::content_type(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::EmailAttachment::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::vec::Vec<u8>>) -> Self
+impl core::fmt::Debug for posthog::EmailAttachment
+pub fn posthog::EmailAttachment::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct posthog::EmailError(_)
 impl posthog::EmailError
 pub fn posthog::EmailError::code(&self) -> &str
@@ -424,6 +444,14 @@ pub posthog::EmailStatus::id: alloc::string::String
 pub posthog::EmailStatus::reason: core::option::Option<alloc::string::String>
 pub posthog::EmailStatus::status: posthog::EmailDeliveryStatus
 pub posthog::EmailStatus::status_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub struct posthog::EmailTrackingOptions
+impl posthog::EmailTrackingOptions
+pub fn posthog::EmailTrackingOptions::clicks(self, bool) -> Self
+pub fn posthog::EmailTrackingOptions::engagement(self, bool) -> Self
+pub fn posthog::EmailTrackingOptions::new() -> Self
+pub fn posthog::EmailTrackingOptions::opens(self, bool) -> Self
+impl core::convert::From<posthog::EmailTrackingOptions> for posthog::EmailTracking
+pub fn posthog::EmailTracking::from(posthog::EmailTrackingOptions) -> Self
 #[non_exhaustive] pub struct posthog::EmailWarning
 pub posthog::EmailWarning::code: alloc::string::String
 pub posthog::EmailWarning::fix: core::option::Option<alloc::string::String>
