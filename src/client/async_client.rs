@@ -1053,6 +1053,9 @@ impl Client {
     /// The JSON payload for the flag, if one was returned. This method does not
     /// emit `$feature_flag_called` events.
     ///
+    /// Flag evaluation through `/flags` does not return a remote config flag that
+    /// has an encrypted payload. Read it with [`Client::get_remote_config_payload`].
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Connection`] for request failures and
@@ -1137,15 +1140,19 @@ impl Client {
         Ok(payloads.get(&key_str).cloned())
     }
 
-    /// Fetch the remote config payload of a feature flag.
+    /// Fetch the payload of a remote config flag by key, with no distinct ID.
+    ///
+    /// Use this method, not [`Client::evaluate_flags`] with
+    /// [`FeatureFlagEvaluations::get_flag_payload`], for a remote config flag, and
+    /// always when the payload is encrypted: flag evaluation through `/flags` does
+    /// not return a remote config flag that has an encrypted payload. The method
+    /// needs `secret_key`. A personal API key (`phx_...`) returns an encrypted
+    /// payload decrypted, and a project secret API key (`phs_...`) returns it
+    /// redacted.
     ///
     /// Remote config flags serve one payload to everyone. This method reads it
-    /// from the PostHog API with `secret_key`, so it works without local evaluation
-    /// and sends no `$feature_flag_called` event.
-    ///
-    /// A `secret_key` that is a project secret API key (`phs_...`) gets an
-    /// encrypted payload back redacted. Use a personal API key (`phx_...`) to get
-    /// the decrypted payload.
+    /// from the PostHog API, so it works without local evaluation and sends no
+    /// `$feature_flag_called` event.
     ///
     /// # Parameters
     ///

@@ -206,6 +206,10 @@ impl FeatureFlagEvaluations {
     ///
     /// This call does **not** count as an access and does **not** fire any
     /// event, matching the behavior documented for server-side SDKs.
+    ///
+    /// Flag evaluation through `/flags` does not return a remote config flag that
+    /// has an encrypted payload. Read it with
+    /// [`Client::get_remote_config_payload`](crate::Client::get_remote_config_payload).
     #[must_use]
     pub fn get_flag_payload(&self, key: &str) -> Option<Value> {
         self.flags.get(key).and_then(|f| f.payload.clone())
