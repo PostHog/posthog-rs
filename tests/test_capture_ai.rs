@@ -52,7 +52,7 @@ fn failure_sink() -> (Failures, impl Fn(&PostHogError<'_>) + Send + Sync + 'stat
                 .map(|(u, r)| (*u, r.details.clone().unwrap_or_default()))
                 .collect();
             drops.sort();
-            recorder.lock().unwrap().push((c.endpoint(), drops));
+            recorder.lock().unwrap().push((c.endpoint_kind(), drops));
         }
     };
     (sink, hook)
@@ -327,17 +327,17 @@ mod async_client {
     }
 
     #[tokio::test]
-    async fn capture_ai_batch_splits_at_the_byte_target_and_passes_the_flag() {
+    async fn capture_ai_batch_splits_at_the_byte_target_and_never_marks_historical() {
         let server = MockServer::start();
         let ai = server.mock(|when, then| {
             when.method(POST)
                 .path(AI_PATH)
-                .is_true(|req| zstd_body(req).contains("\"historical_migration\":true"));
+                .is_true(|req| !zstd_body(req).contains("\"historical_migration\":true"));
             then.status(200).json_body(json!({ "results": {} }));
         });
         let client = client(&mut options(server.base_url())).await;
         let (_, events) = three_two_mib_events();
-        client.capture_ai_batch(events, true);
+        client.capture_ai_batch(events);
         client.flush().await;
         ai.assert_calls(2);
     }
@@ -377,10 +377,7 @@ mod async_client {
         let (too_big, normal, events) = oversize_and_normal_events();
         let ai = ai_mock_without(&server, too_big, normal);
         let client = client(&mut options(server.base_url())).await;
-        let summary = client
-            .capture_ai_batch_immediate(events, false)
-            .await
-            .unwrap();
+        let summary = client.capture_ai_batch_immediate(events).await.unwrap();
         ai.assert_calls(1);
         assert_local_too_big_drop(&summary, too_big, normal);
     }
@@ -391,10 +388,7 @@ mod async_client {
         let (uuids, events) = three_two_mib_events();
         let ai = ai_verdict_mock(&server, all_ok(&uuids));
         let client = client(&mut options(server.base_url())).await;
-        let summary = client
-            .capture_ai_batch_immediate(events, false)
-            .await
-            .unwrap();
+        let summary = client.capture_ai_batch_immediate(events).await.unwrap();
         ai.assert_calls(2);
         assert_eq!(summary.submitted(), 3);
         assert!(summary.all_persisted());
@@ -411,7 +405,7 @@ mod async_client {
         });
         let client = client(&mut options(server.base_url())).await;
         let result = client
-            .capture_ai_batch_immediate(vec![ai_event("$ai_generation")], false)
+            .capture_ai_batch_immediate(vec![ai_event("$ai_generation")])
             .await;
         ai.assert_calls(1);
         assert!(result.is_err());
@@ -541,17 +535,17 @@ mod blocking {
     }
 
     #[test]
-    fn capture_ai_batch_splits_at_the_byte_target_and_passes_the_flag() {
+    fn capture_ai_batch_splits_at_the_byte_target_and_never_marks_historical() {
         let server = MockServer::start();
         let ai = server.mock(|when, then| {
             when.method(POST)
                 .path(AI_PATH)
-                .is_true(|req| zstd_body(req).contains("\"historical_migration\":true"));
+                .is_true(|req| !zstd_body(req).contains("\"historical_migration\":true"));
             then.status(200).json_body(json!({ "results": {} }));
         });
         let client = client(&mut options(server.base_url()));
         let (_, events) = three_two_mib_events();
-        client.capture_ai_batch(events, true);
+        client.capture_ai_batch(events);
         client.flush();
         ai.assert_calls(2);
     }
@@ -591,7 +585,7 @@ mod blocking {
         let (too_big, normal, events) = oversize_and_normal_events();
         let ai = ai_mock_without(&server, too_big, normal);
         let client = client(&mut options(server.base_url()));
-        let summary = client.capture_ai_batch_immediate(events, false).unwrap();
+        let summary = client.capture_ai_batch_immediate(events).unwrap();
         ai.assert_calls(1);
         assert_local_too_big_drop(&summary, too_big, normal);
     }
@@ -602,7 +596,7 @@ mod blocking {
         let (uuids, events) = three_two_mib_events();
         let ai = ai_verdict_mock(&server, all_ok(&uuids));
         let client = client(&mut options(server.base_url()));
-        let summary = client.capture_ai_batch_immediate(events, false).unwrap();
+        let summary = client.capture_ai_batch_immediate(events).unwrap();
         ai.assert_calls(2);
         assert_eq!(summary.submitted(), 3);
         assert!(summary.all_persisted());
@@ -618,7 +612,7 @@ mod blocking {
                 .json_body(json!({ "error": "invalid_api_token" }));
         });
         let client = client(&mut options(server.base_url()));
-        let result = client.capture_ai_batch_immediate(vec![ai_event("$ai_generation")], false);
+        let result = client.capture_ai_batch_immediate(vec![ai_event("$ai_generation")]);
         ai.assert_calls(1);
         assert!(result.is_err());
     }

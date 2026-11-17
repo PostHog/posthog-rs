@@ -400,7 +400,8 @@ pub(crate) fn count_results(resp: &CaptureResponse) -> HashMap<(String, Option<S
 ///
 /// When a result carries `duplicates_dropped: n`, the first event with that
 /// uuid takes the result and the next `n` copies are terminal drops: neither
-/// resent nor recorded, and counted through the first copy's entry.
+/// resent nor recorded, and counted through the first copy's entry. A kept copy
+/// that is retried carries the count to its final result.
 pub(crate) fn process_batch_response(
     pending: Vec<CaptureEvent>,
     results: &HashMap<Uuid, EventResult>,
@@ -410,7 +411,7 @@ pub(crate) fn process_batch_response(
     let mut next = Vec::new();
     // `HashMap::new` does not allocate, so batches without duplicates pay nothing.
     let mut copies_seen: HashMap<Uuid, u32> = HashMap::new();
-    for v1 in pending {
+    for mut v1 in pending {
         let Some(r) = results.get(&v1.uuid) else {
             continue;
         };
@@ -422,9 +423,19 @@ pub(crate) fn process_batch_response(
             }
         }
         if r.result == EventStatus::Retry && !is_final_attempt {
+            v1.dropped_copies = v1
+                .dropped_copies
+                .saturating_add(r.duplicates_dropped.unwrap_or(0));
             next.push(v1);
         } else {
-            final_results.insert(v1.uuid, r.clone());
+            let mut result = r.clone();
+            if v1.dropped_copies > 0 {
+                result.duplicates_dropped = Some(
+                    v1.dropped_copies
+                        .saturating_add(result.duplicates_dropped.unwrap_or(0)),
+                );
+            }
+            final_results.insert(v1.uuid, result);
         }
     }
     next
@@ -902,6 +913,7 @@ mod tests {
             window_id: None,
             options: Default::default(),
             properties: serde_json::json!({}),
+            dropped_copies: 0,
         }
     }
 
@@ -1065,6 +1077,35 @@ mod tests {
             }
             assert_eq!(final_results[&other.uuid].result, Ok, "{case}");
         }
+    }
+
+    /// Copies dropped in an attempt whose kept copy came back `retry` still count
+    /// on the uuid's final result.
+    #[test]
+    fn process_batch_duplicate_count_survives_a_retry() {
+        let first = dummy_event();
+        let copy = first.clone();
+        let mut retry = event_result(EventStatus::Retry, None);
+        retry.duplicates_dropped = Some(1);
+        let mut final_results = HashMap::new();
+        let next = process_batch_response(
+            vec![first.clone(), copy],
+            &HashMap::from([(first.uuid, retry)]),
+            &mut final_results,
+            false,
+        );
+        assert_eq!(next.len(), 1);
+        assert!(final_results.is_empty());
+
+        let next = process_batch_response(
+            next,
+            &HashMap::from([(first.uuid, event_result(EventStatus::Ok, None))]),
+            &mut final_results,
+            false,
+        );
+        assert!(next.is_empty());
+        assert_eq!(final_results[&first.uuid].result, EventStatus::Ok);
+        assert_eq!(final_results[&first.uuid].duplicates_dropped, Some(1));
     }
 
     // -- backoff schedule ----------------------------------------------------

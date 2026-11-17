@@ -25,7 +25,6 @@ Read the checklist first, then the sections that apply to you.
 
 - [ ] You enable the `capture-v1` feature → [Update Cargo features](#update-cargo-features)
 - [ ] You set `default-features = false` → [Update Cargo features](#update-cargo-features)
-- [ ] You call `Uuid::new_v4` → [Update Cargo features](#update-cargo-features)
 - [ ] You use `Endpoint::Batch`, `V1ErrorResponse`, or `personal_api_key` → [Fix removed APIs](#fix-removed-apis)
 - [ ] You `match` on `Endpoint` or `FeatureFlagsResponse`, or build an SDK response type with a struct literal → [Fix removed APIs](#fix-removed-apis)
 - [ ] You call `is_feature_enabled`, `get_feature_flag`, `get_feature_flag_payload`, or `get_feature_flags` → [Replace flag methods](#replace-flag-methods)
@@ -130,8 +129,6 @@ posthog = { version = "1", default-features = false, features = ["tls"] }
 - **`tls-no-provider`.** Choose it when the application installs a process-level Rustls `CryptoProvider`. It avoids pulling in `aws-lc-rs` from this SDK, but constructing a client before installing a provider panics.
 
 Cargo features are additive, so `tls-no-provider` only avoids the built-in provider when no dependency enables `tls`.
-
-1.x.x no longer enables the `v4` feature of the `uuid` crate. If your application calls `Uuid::new_v4`, enable `v4` on its own `uuid` dependency.
 
 The `posthog-rs` package takes the same features in 1.x.x (see [Rename the crate](#rename-the-crate)).
 
@@ -248,7 +245,7 @@ That includes the `process_person_profile` option that `Event::new_anon` sets to
 - **The endpoint.** `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate`, and the global `posthog::capture_ai` mirror their analytics counterparts. They post to `/i/v1/ai/events` on their own background lane, batched by size.
 - **Routing.** `capture` never reroutes by event name. Large AI events always need `capture_ai`.
 - **Event names.** PostHog drops an event sent with `capture_ai` whose name doesn't start with `$ai_`. It reports it as a per-event `drop` with the detail `misrouted_event` inside a `200`.
-- **Where the drop is reported.** That verdict reaches an `on_error` hook, where `CaptureFailure::endpoint()` says which lane, or the returned `CaptureSummary` for the immediate variants.
+- **Where the drop is reported.** That verdict reaches an `on_error` hook, where `CaptureFailure::endpoint_kind()` says which lane, or the returned `CaptureSummary` for the immediate variants.
 - **The `$ai_` prefix.** PostHog owns the `$ai_` prefix, so don't use it for your own events.
 - **Flush and shutdown.** `flush` and `shutdown` drain both lanes.
 - **Events over 8 MiB.** The SDK drops an event over the backend's 8 MiB per-event limit locally, on the background lane and in the immediate variants. On the background lane, that drop logs a warning with the event name and size, and it doesn't reach `on_error`. The immediate variants return that drop in the `CaptureSummary` with the detail `ai_event_too_big`.
@@ -269,7 +266,6 @@ An unset `capture_ai_compression` sends AI bodies uncompressed. Set `CaptureComp
 - **When the SDK assigns a uuid.** The SDK assigns an event's uuid when you hand the event to `capture` or `capture_immediate`, not in `Event::new`. Capturing a cloned or reused `Event` twice now sends two uuids. In 0.x.x both copies shared one uuid, so PostHog kept only one of them.
 - **Your own uuids.** A uuid set with `Event::set_uuid` is still sent as given on every capture. If you set your own, keep it unique.
 - **Duplicates.** When two events in one request share a `uuid`, PostHog keeps the first and drops the later copies. The SDK reports each dropped copy through `on_error` and `CaptureSummary` with the reason `duplicate_event_uuid`. An entry's `EventResult::duplicates_dropped` counts the copies dropped with it. Older PostHog versions reject the whole request with HTTP `400` `duplicate_event_uuid` instead.
-- **Duplicates of a retried event.** If the kept copy comes back `retry` in the background worker, those dropped copies aren't reported. PostHog still raises a `duplicate_event_uuid` ingestion warning in your project.
 
 ### Check timestamps
 
@@ -352,7 +348,7 @@ A property set to `null` counts as set, so the request context doesn't fill it. 
 - **Merged maps.** A `$set`, `$set_once`, `$groups`, or `$group_set` from the request context fills in only the keys the event's own value lacks. For example, a context `$set` of `{"plan": "free", "source": "web"}` and an event `$set` of `{"plan": "pro"}` send `{"plan": "pro", "source": "web"}`. In 0.x.x, the context value was used only when the event had none of that property. A `$set` in the request context sets those person properties on every event it reaches.
 - **Minimized flag events.** For a minimized `$feature_flag_called` event, the SDK trims the properties to its allowlist before `before_send` runs, so a property the hook adds is sent. In 0.x.x the trim ran after the hook and removed it.
 - **Flag events.** `$feature_flag_called` events now take a request context value over the client's `$is_server` and `$geoip_disable` defaults, as other events do. A per-call `disable_geoip` wins over both, and `Some(false)` sends `$geoip_disable: false`. In 0.x.x, `Some(false)` sent nothing, so a request context `$geoip_disable` applied.
-- **The `disable_geoip` default.** `disable_geoip` defaults to `false`, as in 0.x.x and unlike PostHog's other server SDKs, so PostHog adds GeoIP properties based on the IP address of your server. To turn this off, call `.disable_geoip(true)` on `ClientOptionsBuilder`.
+- **The `disable_geoip` default.** `disable_geoip` defaults to `false`, as in 0.x.x and unlike PostHog's other server SDKs, so PostHog adds GeoIP properties based on the IP address of your server. To turn this off, call `.disable_geoip(true)` on `ClientOptionsBuilder`. A `$geoip_disable` you set on the event or in the request context wins over that setting, `false` and `null` included: a `null` property counts as set, so the SDK adds no `true`.
 
 ### Check request context
 

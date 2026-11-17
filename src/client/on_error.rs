@@ -105,7 +105,8 @@ impl<'a> CaptureFailure<'a> {
     /// The capture endpoint the failed batch targeted: [`Endpoint::Capture`]
     /// for `capture`/`capture_batch`, [`Endpoint::CaptureAi`] for
     /// `capture_ai`/`capture_ai_batch`. Lets one hook tell the lanes apart.
-    pub fn endpoint(&self) -> Endpoint {
+    /// [`FlagsFailure::endpoint`] is the request URL instead.
+    pub fn endpoint_kind(&self) -> Endpoint {
         self.endpoint
     }
 

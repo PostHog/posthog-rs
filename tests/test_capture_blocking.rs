@@ -804,14 +804,14 @@ impl SendPath {
             SendPath::Ai => events
                 .into_iter()
                 .for_each(|event| client.capture_ai(event)),
-            SendPath::AiBatch => client.capture_ai_batch(events, false),
+            SendPath::AiBatch => client.capture_ai_batch(events),
             SendPath::AiImmediate => {
                 for event in events {
                     client.capture_ai_immediate(event).unwrap();
                 }
             }
             SendPath::AiBatchImmediate => {
-                client.capture_ai_batch_immediate(events, false).unwrap();
+                client.capture_ai_batch_immediate(events).unwrap();
             }
             SendPath::Alias => client.alias("old-id", "user-1"),
             SendPath::GroupIdentify => client

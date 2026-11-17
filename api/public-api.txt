@@ -304,7 +304,7 @@ pub fn posthog::CaptureExceptionOptions::trace_context<T: core::convert::Into<al
 #[non_exhaustive] pub struct posthog::CaptureFailure<'a>
 impl<'a> posthog::CaptureFailure<'a>
 pub fn posthog::CaptureFailure<'a>::attempt(&self) -> u32
-pub fn posthog::CaptureFailure<'a>::endpoint(&self) -> posthog::Endpoint
+pub fn posthog::CaptureFailure<'a>::endpoint_kind(&self) -> posthog::Endpoint
 pub fn posthog::CaptureFailure<'a>::error(&self) -> core::option::Option<&posthog::Error>
 pub fn posthog::CaptureFailure<'a>::error_response(&self) -> core::option::Option<&posthog::CaptureErrorResponse>
 pub fn posthog::CaptureFailure<'a>::event_count(&self) -> usize
@@ -326,8 +326,8 @@ impl posthog::Client
 pub fn posthog::Client::alias<P: core::convert::Into<alloc::string::String>, D: core::convert::Into<alloc::string::String>>(&self, P, D)
 pub fn posthog::Client::capture(&self, posthog::Event)
 pub fn posthog::Client::capture_ai(&self, posthog::Event)
-pub fn posthog::Client::capture_ai_batch(&self, alloc::vec::Vec<posthog::Event>, bool)
-pub async fn posthog::Client::capture_ai_batch_immediate(&self, alloc::vec::Vec<posthog::Event>, bool) -> core::result::Result<posthog::CaptureSummary, posthog::Error>
+pub fn posthog::Client::capture_ai_batch(&self, alloc::vec::Vec<posthog::Event>)
+pub async fn posthog::Client::capture_ai_batch_immediate(&self, alloc::vec::Vec<posthog::Event>) -> core::result::Result<posthog::CaptureSummary, posthog::Error>
 pub async fn posthog::Client::capture_ai_immediate(&self, posthog::Event) -> core::result::Result<posthog::CaptureSummary, posthog::Error>
 pub fn posthog::Client::capture_batch(&self, alloc::vec::Vec<posthog::Event>, bool)
 pub async fn posthog::Client::capture_batch_immediate(&self, alloc::vec::Vec<posthog::Event>, bool) -> core::result::Result<posthog::CaptureSummary, posthog::Error>
