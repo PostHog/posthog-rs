@@ -161,6 +161,149 @@ fn test_local_evaluation_with_cohorts_payload() {
     assert_eq!(result.unwrap(), Some(FlagValue::Boolean(false)));
 }
 
+fn evaluate(
+    evaluator: &LocalEvaluator,
+    key: &str,
+    properties: &HashMap<String, serde_json::Value>,
+) -> Result<Option<FlagValue>, posthog::InconclusiveMatchError> {
+    evaluator.evaluate_flag(
+        key,
+        "user-123",
+        properties,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+}
+
+/// The payload from the report: one flag with a value-less `is_not_set` filter
+/// next to a healthy flag. Both load.
+#[test]
+fn test_valueless_is_not_set_filter_does_not_fail_definitions() {
+    let response: LocalEvaluationResponse = serde_json::from_str(
+        r#"{
+          "flags": [
+            {
+              "key": "healthy-flag",
+              "active": true,
+              "filters": { "groups": [ { "properties": [], "rollout_percentage": 100 } ] }
+            },
+            {
+              "key": "flag-with-valueless-is-not-set",
+              "active": true,
+              "filters": {
+                "groups": [
+                  {
+                    "properties": [ { "key": "plan", "type": "person", "operator": "is_not_set" } ],
+                    "rollout_percentage": 100
+                  }
+                ]
+              }
+            }
+          ],
+          "group_type_mapping": {},
+          "cohorts": {}
+        }"#,
+    )
+    .expect("a value-less is_not_set filter should deserialize");
+    assert_eq!(response.flags.len(), 2);
+
+    let cache = FlagCache::new();
+    let evaluator = LocalEvaluator::new(cache.clone());
+    cache.update(response);
+
+    let with_plan = HashMap::from([("plan".to_string(), json!("pro"))]);
+    assert_eq!(
+        evaluate(&evaluator, "healthy-flag", &with_plan).unwrap(),
+        Some(FlagValue::Boolean(true))
+    );
+    assert_eq!(
+        evaluate(&evaluator, "flag-with-valueless-is-not-set", &with_plan).unwrap(),
+        Some(FlagValue::Boolean(false))
+    );
+}
+
+/// Regression test: the API accepts `is_set` / `is_not_set` filters without a
+/// `value`, on flags and on cohort leaves alike. Before the fix one such filter
+/// failed to deserialize and took down the entire `LocalEvaluationResponse`,
+/// so no flag in the project could be evaluated locally.
+#[test]
+fn test_local_evaluation_with_valueless_presence_operators() {
+    let presence_flag = |key: &str, operator: &str| {
+        json!({
+            "key": key,
+            "active": true,
+            "filters": {
+                "groups": [
+                    {
+                        "properties": [{"key": "plan", "type": "person", "operator": operator}],
+                        "rollout_percentage": 100.0
+                    }
+                ]
+            }
+        })
+    };
+    let payload = json!({
+        "flags": [
+            {
+                "key": "plain-flag",
+                "active": true,
+                "filters": {"groups": [{"properties": [], "rollout_percentage": 100.0}]}
+            },
+            presence_flag("plan-set", "is_set"),
+            presence_flag("plan-not-set", "is_not_set"),
+            {
+                "key": "cohort-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        {
+                            "properties": [{"key": "id", "value": 7, "type": "cohort"}],
+                            "rollout_percentage": 100.0
+                        }
+                    ]
+                }
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {
+            "7": {
+                "type": "AND",
+                "values": [{"key": "plan", "type": "person", "operator": "is_set"}]
+            }
+        }
+    });
+
+    let response: LocalEvaluationResponse =
+        serde_json::from_value(payload).expect("value-less presence filters should deserialize");
+    assert_eq!(response.flags.len(), 4);
+
+    let cache = FlagCache::new();
+    let evaluator = LocalEvaluator::new(cache.clone());
+    cache.update(response);
+
+    let with_plan = HashMap::from([("plan".to_string(), json!("pro"))]);
+    let without_plan = HashMap::new();
+
+    for (key, expected) in [
+        ("plain-flag", true),
+        ("plan-set", true),
+        ("plan-not-set", false),
+        ("cohort-flag", true),
+    ] {
+        assert_eq!(
+            evaluate(&evaluator, key, &with_plan).unwrap(),
+            Some(FlagValue::Boolean(expected)),
+            "{}",
+            key
+        );
+    }
+
+    // A property missing from the caller's context stays inconclusive.
+    for key in ["plan-set", "plan-not-set", "cohort-flag"] {
+        assert!(evaluate(&evaluator, key, &without_plan).is_err(), "{}", key);
+    }
+}
+
 /// A cyclic cohort definition must leave local evaluation inconclusive so the
 /// flag falls back to `/flags`. Before the cycle guard this recursed until the
 /// stack was exhausted, which aborts the process rather than panicking, taking

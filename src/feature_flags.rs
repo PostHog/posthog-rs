@@ -324,10 +324,13 @@ pub struct FeatureFlagCondition {
 ///
 /// Supports various operators for matching user properties against expected values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "RawProperty")]
 pub struct Property {
     /// The property key to match (e.g., "email", "country", "$feature/other-flag")
     pub key: String,
-    /// The value to compare against
+    /// The value to compare against. The presence operators (`"is_set"` and
+    /// `"is_not_set"`) never read it, and the API may omit it for them; it
+    /// then deserializes as JSON null.
     pub value: serde_json::Value,
     /// Comparison operator. Supported property operators include `"exact"`,
     /// `"is_not"`, `"icontains"`, `"not_icontains"`, `"starts_with"`,
@@ -335,15 +338,49 @@ pub struct Property {
     /// `"not_regex"`, `"gt"`, `"gte"`, `"lt"`, `"lte"`, `"is_set"`,
     /// `"is_not_set"`, `"is_date_before"`, `"is_date_after"`, and the
     /// `"semver_*"` operators used by PostHog version targeting.
-    #[serde(
-        default = "default_operator",
-        deserialize_with = "deserialize_operator"
-    )]
     pub operator: String,
     /// Property type. Use `Some("cohort")` for cohort membership checks; flag
     /// dependency checks use a property key that starts with `$feature/`.
     #[serde(rename = "type")]
     pub property_type: Option<String>,
+}
+
+/// Wire shape of [`Property`], keeping an omitted `value` distinct from an
+/// explicit JSON null.
+#[derive(Deserialize)]
+struct RawProperty {
+    key: String,
+    #[serde(default, deserialize_with = "deserialize_present_value")]
+    value: Option<serde_json::Value>,
+    #[serde(
+        default = "default_operator",
+        deserialize_with = "deserialize_operator"
+    )]
+    operator: String,
+    #[serde(rename = "type")]
+    property_type: Option<String>,
+}
+
+impl std::convert::TryFrom<RawProperty> for Property {
+    type Error = &'static str;
+
+    fn try_from(raw: RawProperty) -> Result<Self, Self::Error> {
+        let value = match raw.value {
+            Some(value) => value,
+            None if matches!(raw.operator.as_str(), "is_set" | "is_not_set") => {
+                serde_json::Value::Null
+            }
+            // Any other operator compares against the value, so a filter
+            // without one must not be read as a comparison against null.
+            None => return Err("missing field `value`"),
+        };
+        Ok(Property {
+            key: raw.key,
+            value,
+            operator: raw.operator,
+            property_type: raw.property_type,
+        })
+    }
 }
 
 fn default_operator() -> String {
@@ -355,6 +392,15 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_else(default_operator))
+}
+
+/// Unlike `Option`'s own impl, maps an explicit JSON null to `Some(Null)`, so
+/// that `None` only ever means the field was omitted.
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -2406,6 +2452,33 @@ mod tests {
             match_property(&prop, &properties),
             Err(InconclusiveMatchError { .. })
         ));
+    }
+
+    #[test]
+    fn test_property_value_may_be_omitted_only_for_presence_operators() {
+        for operator in ["is_set", "is_not_set"] {
+            let prop: Property = serde_json::from_value(
+                json!({"key": "plan", "type": "person", "operator": operator}),
+            )
+            .unwrap();
+            assert!(prop.value.is_null(), "{}", operator);
+        }
+
+        // An omitted operator defaults to `exact`, which needs a value too.
+        for operator in [Some("exact"), Some("is_not"), Some("regex"), None] {
+            let mut raw = json!({"key": "plan", "type": "person"});
+            if let Some(operator) = operator {
+                raw["operator"] = json!(operator);
+            }
+            let error = serde_json::from_value::<Property>(raw).unwrap_err();
+            assert!(error.to_string().contains("missing field `value`"));
+        }
+
+        // An explicit null is a value, not an omission.
+        let prop: Property =
+            serde_json::from_value(json!({"key": "plan", "value": null, "operator": "exact"}))
+                .unwrap();
+        assert!(prop.value.is_null());
     }
 
     #[test]
