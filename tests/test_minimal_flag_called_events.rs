@@ -18,12 +18,9 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-use posthog_rs::EvaluateFlagsOptions;
+use posthog::EvaluateFlagsOptions;
 
-#[cfg(feature = "capture-v1")]
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
-#[cfg(not(feature = "capture-v1"))]
-const CAPTURE_PATH: &str = "/batch/";
 
 /// The full minimal-event allowlist, mirrored from the crate-internal constant
 /// so this black-box test can assert nothing outside it survives.
@@ -194,8 +191,8 @@ async fn captured_flag_called_properties(
 ) -> serde_json::Map<String, Value> {
     let server = start_recording_server(gate);
 
-    let options: posthog_rs::ClientOptions = ("phc_test", server.base_url.as_str()).into();
-    let client = posthog_rs::client(options).await;
+    let options: posthog::ClientOptions = ("phc_test", server.base_url.as_str()).into();
+    let client = posthog::client(options).await;
     let snapshot = client
         .evaluate_flags("user-1", EvaluateFlagsOptions::default())
         .await

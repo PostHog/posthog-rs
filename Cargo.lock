@@ -1683,7 +1683,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
-name = "posthog-rs"
+name = "posthog"
 version = "0.33.1"
 dependencies = [
  "axum",
@@ -1708,7 +1708,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rmcp",
- "semver",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",
@@ -1723,6 +1723,13 @@ dependencies = [
  "url",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "posthog-rs"
+version = "0.33.1"
+dependencies = [
+ "posthog",
 ]
 
 [[package]]
@@ -2044,6 +2051,7 @@ checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -2179,10 +2187,12 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
- "posthog-rs",
+ "posthog",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -2208,12 +2218,6 @@ dependencies = [
  "core-foundation-sys",
  "libc",
 ]
-
-[[package]]
-name = "semver"
-version = "1.0.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"

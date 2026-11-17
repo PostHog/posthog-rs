@@ -1,12 +1,10 @@
-// These tests assert the V0 wire shape; their capture-v1 twins live in
-// `test_error_tracking_v1.rs`.
-//
-// Capture is now a non-blocking enqueue drained by the background worker, which
-// always sends through the `/batch/` endpoint, so exceptions arrive nested under
-// the batch array (`/batch/0/...`) and tests `flush()` before asserting.
-#![cfg(all(feature = "error-tracking", not(feature = "capture-v1")))]
+// Error Tracking integration tests over the capture transport.
+// The mock responds with an empty results map and the client runs a single
+// attempt, so each test asserts exactly one well-formed request.
+#![cfg(feature = "error-tracking")]
 
 use httpmock::prelude::*;
+use serde_json::json;
 use std::error::Error as StdError;
 use std::fmt;
 
@@ -32,6 +30,21 @@ impl fmt::Display for PanicDisplayError {
 
 impl StdError for PanicDisplayError {}
 
+const CAPTURE_PATH: &str = "/i/v1/analytics/events";
+
+fn ok_response() -> serde_json::Value {
+    json!({ "results": {} })
+}
+
+fn last_exception_stack_function(body: &serde_json::Value) -> &str {
+    body.pointer("/batch/0/properties/$exception_list/0/stacktrace/frames")
+        .and_then(|value| value.as_array())
+        .and_then(|frames| frames.last())
+        .and_then(|frame| frame.get("function"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+}
+
 fn request_has_capture_exception_user_frame_last(req: &HttpMockRequest) -> bool {
     let Ok(body) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
         return false;
@@ -56,6 +69,8 @@ fn request_has_capture_exception_with_user_frame_last(req: &HttpMockRequest) -> 
         && !crash_function.contains("build_exception_event")
 }
 
+/// Ported from the removed V0 suite: an `$exception_list` entry is present but
+/// carries no `stacktrace`, i.e. `capture_stacktrace(false)` was honored.
 fn request_has_no_stacktrace(req: &HttpMockRequest) -> bool {
     let Ok(body) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
         return false;
@@ -68,23 +83,19 @@ fn request_has_no_stacktrace(req: &HttpMockRequest) -> bool {
             .is_none()
 }
 
-fn last_exception_stack_function(body: &serde_json::Value) -> &str {
-    body.pointer("/batch/0/properties/$exception_list/0/stacktrace/frames")
-        .and_then(|value| value.as_array())
-        .and_then(|frames| frames.last())
-        .and_then(|frame| frame.get("function"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-}
-
 #[cfg(not(feature = "async-client"))]
 mod blocking {
     use super::*;
-    use posthog_rs::CaptureExceptionOptions;
+    use posthog::CaptureExceptionOptions;
 
-    fn create_test_client(base_url: String) -> posthog_rs::Client {
-        let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
-        posthog_rs::client(options)
+    fn create_test_client(base_url: String) -> posthog::Client {
+        let options = posthog::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(base_url)
+            .max_capture_attempts(1u32)
+            .build()
+            .unwrap();
+        posthog::client(options)
     }
 
     #[test]
@@ -92,15 +103,16 @@ mod blocking {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/batch/")
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
-                .body_includes(r#""$process_person_profile":false"#)
+                .body_includes(r#""process_person_profile":false"#)
                 .body_includes(r#""$exception_level":"error""#)
                 .body_includes(r#""value":"payment failed""#)
                 .body_includes(r#""platform":"native""#)
-                .body_includes(r#""lang":"rust""#)
                 .is_true(request_has_capture_exception_user_frame_last);
-            then.status(200);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(ok_response());
         });
 
         let client = create_test_client(server.base_url());
@@ -115,7 +127,7 @@ mod blocking {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/batch/")
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""distinct_id":"user-1""#)
                 .body_includes(r#""route":"/checkout""#)
@@ -123,7 +135,9 @@ mod blocking {
                 .body_includes(r#""$exception_fingerprint":"checkout-error""#)
                 .body_includes(r#""$exception_level":"warning""#)
                 .is_true(request_has_capture_exception_with_user_frame_last);
-            then.status(200);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(ok_response());
         });
 
         let client = create_test_client(server.base_url());
@@ -146,13 +160,13 @@ mod blocking {
 
     #[test]
     fn disabled_capture_exception_does_not_build_exception_payload() {
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host("http://127.0.0.1:1")
             .disabled(true)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
 
         client.capture_exception(&PanicDisplayError).unwrap();
         client
@@ -163,30 +177,35 @@ mod blocking {
             .unwrap();
     }
 
+    /// Ported from the removed V0 suite: client-level `ErrorTrackingOptions`
+    /// (here `capture_stacktrace(false)`) apply to `capture_exception`.
     #[test]
     fn capture_exception_uses_client_error_tracking_options() {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/batch/")
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""value":"payment failed""#)
                 .is_true(request_has_no_stacktrace);
-            then.status(200);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(ok_response());
         });
 
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
+            .max_capture_attempts(1u32)
             .error_tracking(
-                posthog_rs::ErrorTrackingOptionsBuilder::default()
+                posthog::ErrorTrackingOptionsBuilder::default()
                     .capture_stacktrace(false)
                     .build()
                     .unwrap(),
             )
             .build()
             .unwrap();
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
 
         client.capture_exception(&TestError).unwrap();
         client.flush();
@@ -198,11 +217,17 @@ mod blocking {
 #[cfg(feature = "async-client")]
 mod async_client {
     use super::*;
-    use posthog_rs::CaptureExceptionOptions;
+    use posthog::CaptureExceptionOptions;
+    use std::sync::{Arc, Mutex};
 
-    async fn create_test_client(base_url: String) -> posthog_rs::Client {
-        let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
-        posthog_rs::client(options).await
+    async fn create_test_client(base_url: String) -> posthog::Client {
+        let options = posthog::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(base_url)
+            .max_capture_attempts(1u32)
+            .build()
+            .unwrap();
+        posthog::client(options).await
     }
 
     #[tokio::test]
@@ -210,15 +235,16 @@ mod async_client {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/batch/")
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
-                .body_includes(r#""$process_person_profile":false"#)
+                .body_includes(r#""process_person_profile":false"#)
                 .body_includes(r#""$exception_level":"error""#)
                 .body_includes(r#""value":"payment failed""#)
                 .body_includes(r#""platform":"native""#)
-                .body_includes(r#""lang":"rust""#)
                 .is_true(request_has_capture_exception_user_frame_last);
-            then.status(200);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(ok_response());
         });
 
         let client = create_test_client(server.base_url()).await;
@@ -233,7 +259,7 @@ mod async_client {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/batch/")
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""distinct_id":"user-1""#)
                 .body_includes(r#""route":"/checkout""#)
@@ -241,7 +267,9 @@ mod async_client {
                 .body_includes(r#""$exception_fingerprint":"checkout-error""#)
                 .body_includes(r#""$exception_level":"warning""#)
                 .is_true(request_has_capture_exception_with_user_frame_last);
-            then.status(200);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(ok_response());
         });
 
         let client = create_test_client(server.base_url()).await;
@@ -265,13 +293,13 @@ mod async_client {
 
     #[tokio::test]
     async fn disabled_capture_exception_does_not_build_exception_payload() {
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host("http://127.0.0.1:1")
             .disabled(true)
             .build()
             .unwrap();
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
 
         client.capture_exception(&PanicDisplayError).await.unwrap();
         client
@@ -283,34 +311,99 @@ mod async_client {
             .unwrap();
     }
 
+    /// Ported from the removed V0 suite: client-level `ErrorTrackingOptions`
+    /// (here `capture_stacktrace(false)`) apply to `capture_exception`.
     #[tokio::test]
     async fn capture_exception_uses_client_error_tracking_options() {
         let server = MockServer::start();
         let capture_mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/batch/")
+                .path(CAPTURE_PATH)
                 .body_includes(r#""event":"$exception""#)
                 .body_includes(r#""value":"payment failed""#)
                 .is_true(request_has_no_stacktrace);
-            then.status(200);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(ok_response());
         });
 
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .api_key("test_api_key".to_string())
             .host(server.base_url())
+            .max_capture_attempts(1u32)
             .error_tracking(
-                posthog_rs::ErrorTrackingOptionsBuilder::default()
+                posthog::ErrorTrackingOptionsBuilder::default()
                     .capture_stacktrace(false)
                     .build()
                     .unwrap(),
             )
             .build()
             .unwrap();
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
 
         client.capture_exception(&TestError).await.unwrap();
         client.flush().await;
 
+        capture_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn before_send_sees_trace_id_property_without_provider_ids() {
+        let server = MockServer::start();
+        let capture_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path(CAPTURE_PATH)
+                .body_includes(r#""$trace_id":"caller-trace-id""#)
+                .body_excludes(r#""$span_id""#);
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(ok_response());
+        });
+
+        let seen = Arc::new(Mutex::new(None));
+        let seen_in_hook = Arc::clone(&seen);
+        let options = posthog::ClientOptionsBuilder::default()
+            .api_key("test_api_key".to_string())
+            .host(server.base_url())
+            .max_capture_attempts(1u32)
+            .error_tracking(
+                posthog::ErrorTrackingOptionsBuilder::default()
+                    .trace_context_provider(|| {
+                        Some(posthog::TraceContext::new(
+                            "provider-trace-id",
+                            "provider-span-id",
+                        ))
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .before_send(move |event| {
+                let properties = event.properties();
+                *seen_in_hook.lock().unwrap() = Some((
+                    properties.get("$trace_id").cloned(),
+                    properties.get("$span_id").cloned(),
+                ));
+                Some(event)
+            })
+            .build()
+            .unwrap();
+        let client = posthog::client(options).await;
+
+        client
+            .capture_exception_with(
+                &TestError,
+                CaptureExceptionOptions::new()
+                    .property("$trace_id", "caller-trace-id")
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        client.flush().await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some((Some(json!("caller-trace-id")), None))
+        );
         capture_mock.assert_calls(1);
     }
 }

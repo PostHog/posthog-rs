@@ -11,7 +11,7 @@ use serde_json::json;
 use std::time::Duration;
 
 use httpmock::prelude::*;
-use posthog_rs::{Client, ClientOptionsBuilder, Event};
+use posthog::{Client, ClientOptionsBuilder, Event};
 
 fn options(host: String, flush_at: usize, max_attempts: u32) -> ClientOptionsBuilder {
     let mut options = ClientOptionsBuilder::default();
@@ -33,7 +33,7 @@ fn options(host: String, flush_at: usize, max_attempts: u32) -> ClientOptionsBui
 }
 
 async fn client_with(host: String, flush_at: usize, max_attempts: u32) -> Client {
-    posthog_rs::client(options(host, flush_at, max_attempts).build().unwrap()).await
+    posthog::client(options(host, flush_at, max_attempts).build().unwrap()).await
 }
 
 /// Poll a mock until it has been hit `want` times (for worker-timed paths such
@@ -96,7 +96,7 @@ async fn flush_keeps_events_retryable_then_delivers_after_success() {
     });
 
     let (errors, hook) = common::capture_error_sink();
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(server.base_url(), 100, 5)
             .on_error(hook)
             .build()
@@ -235,7 +235,7 @@ async fn panicking_error_hook_does_not_stop_worker_or_later_hooks() {
         then.status(400).body("invalid event");
     });
     let (errors, hook) = common::capture_error_sink();
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(server.base_url(), 100, 3)
             .on_error(|_| panic!("broken observer"))
             .on_error(hook)
@@ -264,7 +264,7 @@ async fn successful_status_drains_the_queue() {
     });
 
     let (errors, hook) = common::capture_error_sink();
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(server.base_url(), 100, 3)
             .on_error(hook)
             .build()

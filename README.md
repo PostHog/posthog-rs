@@ -1,9 +1,11 @@
 # PostHog Rust
 
-[![Crates.io](https://img.shields.io/crates/v/posthog-rs.svg)](https://crates.io/crates/posthog-rs)
-[![Documentation](https://docs.rs/posthog-rs/badge.svg)](https://docs.rs/posthog-rs)
+[![Crates.io](https://img.shields.io/crates/v/posthog.svg)](https://crates.io/crates/posthog)
+[![Documentation](https://docs.rs/posthog/badge.svg)](https://docs.rs/posthog)
 
-The official Rust SDK for [PostHog](https://posthog.com). See the main [PostHog docs](https://posthog.com/docs) for more information.
+The official Rust SDK for [PostHog](https://posthog.com), published as [`posthog`](https://crates.io/crates/posthog) starting with 1.0. The [`posthog-rs`](https://crates.io/crates/posthog-rs) package remains available as a compatibility crate that re-exports `posthog`. See the main [PostHog docs](https://posthog.com/docs) for more information.
+
+Upgrading from a 0.x release? Read the [1.0 migration guide](docs/migration-0.x-to-1.0.md).
 
 SDK usage examples and code snippets live in the official documentation so they stay up to date.
 
@@ -20,9 +22,9 @@ characters. Missing or invalid values are omitted. No session ID is generated.
 
 ```rust
 use axum::{routing::get, Router};
-use posthog_rs::{tower::PostHogLayer, RequestContext};
+use posthog::{tower::PostHogLayer, RequestContext};
 
-let posthog = std::sync::Arc::new(posthog_rs::client("phc_project_key").await);
+let posthog = std::sync::Arc::new(posthog::client("phc_project_key").await);
 let app: Router = Router::new()
     .route("/work", get(move || {
         let posthog = posthog.clone();
@@ -40,6 +42,13 @@ In an application handler, pass `context.event("work_completed")` to
 capture behavior when no identity exists. Existing events keep their explicit
 identity and properties. The context adds defaults, including `$session_id`,
 `$request_method`, and `$request_path`. Query strings are not captured.
+`RequestContext::option` adds a capture option to every event in the context,
+unless the event sets that option itself. A context `process_person_profile`
+does not set `process_person_profile` on identify-style events (`$identify`,
+`$create_alias`, `$merge_dangerously`, `$groupidentify`, `$set` and
+`$set_once`, including the events `alias` and `group_identify` send) whose
+distinct ID the SDK did not generate. Those default to `true` unless the event
+sets the option.
 
 Tracing headers are client-controlled analytics context. Never use them for
 authentication, authorization, or account lookup. Place an application-owned
@@ -54,6 +63,18 @@ before background delivery. `client.evaluate_flags_with_context(&context,
 options)` uses the context identity. An absent identity returns an empty flag
 result without a network request. Flag access events retain the context from
 evaluation, including when the result is read after the request ends.
+
+MCP analytics (the `mcp` feature) applies the context to every MCP event over
+HTTP, although `rmcp` runs each request handler in a task of its own. It reads
+the `RequestContext` that `PostHogLayer` or your middleware placed in the
+request extensions. A context scoped around the code that sends the event takes
+priority. The MCP identity from the `identify` callback stays the distinct ID
+and wins over the context identity. An anonymous request keeps its MCP session
+ID as the distinct ID and the `process_person_profile: false` option. Context
+properties and options fill only keys the event leaves unset, before the MCP
+`before_send` hook runs. Options from `McpOptionsBuilder::event_options` and
+`ToolCallRequest::event_option` win over context options, and the call's own
+option wins over the callback's.
 
 Spawned tasks and streaming response bodies do not inherit context. Pass a
 context clone and use `.scope(...)` explicitly for work that must retain it.
@@ -83,7 +104,7 @@ PostHog Cloud `host`. Set `app_host` when `host` is a reverse proxy: the proxy
 must not receive the secret key.
 
 ```rust
-use posthog_rs::{ClientOptionsBuilder, CodeEmail, EmailAttachment, TemplateEmail};
+use posthog::{ClientOptionsBuilder, CodeEmail, EmailAttachment, TemplateEmail};
 use serde_json::json;
 
 let options = ClientOptionsBuilder::default()
@@ -91,7 +112,7 @@ let options = ClientOptionsBuilder::default()
     .secret_key("phs_project_secret_key")
     .host("https://eu.i.posthog.com")
     .build()?;
-let posthog = posthog_rs::client(options).await;
+let posthog = posthog::client(options).await;
 
 // A template made in PostHog, by its ID.
 let sent = posthog
@@ -149,7 +170,7 @@ With the `async-client` feature, use `PostHogReqwestClient` to pass the current 
 analytics IDs to selected application hosts. This is separate from event ingestion.
 
 ```rust
-use posthog_rs::{PostHogReqwestClient, RequestContext};
+use posthog::{PostHogReqwestClient, RequestContext};
 
 async fn example() -> Result<(), reqwest::Error> {
     let http = PostHogReqwestClient::new(

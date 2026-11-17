@@ -9,6 +9,7 @@ use crate::mcp::contract::limits::MAX_NAME_LENGTH;
 use crate::mcp::contract::properties as key;
 use crate::mcp::identity::Identity;
 use crate::mcp::privacy::TextPass;
+use crate::RequestContext;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClientIdentity {
@@ -33,6 +34,11 @@ pub(crate) struct EventContext {
     pub(crate) identity: Option<Identity>,
     pub(crate) client: ClientIdentity,
     pub(crate) server: ServerIdentity,
+    /// Capture options the host set for the request's events.
+    pub(crate) options: Map<String, Value>,
+    /// The HTTP request's [`RequestContext`] extension, since `rmcp` runs each handler in a
+    /// task the scoped context does not reach.
+    pub(crate) request_context: Option<RequestContext>,
 }
 
 impl EventContext {
@@ -83,10 +89,8 @@ impl EventContext {
         insert_name(properties, key::SERVER_VERSION, server.version.as_deref());
     }
 
-    /// Anonymous calls create no person profiles.
     fn insert_person(&self, properties: &mut Map<String, Value>) {
         let Some(identity) = &self.identity else {
-            properties.insert(key::PROCESS_PERSON_PROFILE.to_string(), Value::Bool(false));
             return;
         };
         if !identity.properties.is_empty() {

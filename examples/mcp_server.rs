@@ -85,12 +85,12 @@ mod notes {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::Arc;
 
-    use posthog_rs::mcp::{McpAnalytics, McpOptionsBuilder};
+    use posthog::mcp::{McpAnalytics, McpOptionsBuilder};
     use rmcp::ServiceExt;
 
     let api_key = std::env::var("POSTHOG_API_KEY")?;
-    let host = std::env::var("POSTHOG_HOST").unwrap_or_else(|_| posthog_rs::DEFAULT_HOST.into());
-    let posthog = Arc::new(posthog_rs::client((api_key.as_str(), host.as_str())).await);
+    let host = std::env::var("POSTHOG_HOST").unwrap_or_else(|_| posthog::DEFAULT_HOST.into());
+    let posthog = Arc::new(posthog::client((api_key.as_str(), host.as_str())).await);
 
     let options = McpOptionsBuilder::default()
         .missing_capability_tool("get_more_tools")
