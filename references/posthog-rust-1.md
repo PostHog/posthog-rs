@@ -393,13 +393,13 @@ call.
 The SDK does not inspect the event name. The backend accepts only its
 AI event names on this endpoint and reports anything else as a per-event
 `drop`, which reaches an `on_error` hook (see
-[`CaptureFailure::endpoint`](#capturefailureendpoint)) or, with no
+[`CaptureFailure::endpoint_kind`](#capturefailureendpoint_kind)) or, with no
 hook, one aggregate warning per batch.
 
 ### `Client::capture_ai_batch`
 
 ```rust
-pub fn capture_ai_batch(&self, events: Vec<Event>, historical_migration: bool)
+pub fn capture_ai_batch(&self, events: Vec<Event>)
 ```
 
 Capture a batch of AI events on the AI lane.
@@ -407,9 +407,6 @@ Capture a batch of AI events on the AI lane.
 #### Parameters
 
 - `events`: AI events to send.
-- `historical_migration`: Kept for parity with [`Client::capture_batch`](#clientcapture_batch)
-  and passed through to the backend, which currently ignores it for AI
-  events.
 
 #### Remarks
 
@@ -434,7 +431,7 @@ one-event batch; see it for full semantics.
 ### `Client::capture_ai_batch_immediate`
 
 ```rust
-pub async fn capture_ai_batch_immediate(&self, events: Vec<Event>, historical_migration: bool) -> Result<CaptureSummary, Error>
+pub async fn capture_ai_batch_immediate(&self, events: Vec<Event>) -> Result<CaptureSummary, Error>
 ```
 
 Capture a batch of AI events and await confirmation that every request
@@ -445,9 +442,6 @@ The immediate-delivery counterpart to [`Client::capture_ai_batch`](#clientcaptur
 #### Parameters
 
 - `events`: AI events to send.
-- `historical_migration`: Kept for parity with
-  [`Client::capture_batch_immediate`](#clientcapture_batch_immediate) and passed through to the backend,
-  which currently ignores it for AI events.
 
 #### Behavior
 
@@ -1896,15 +1890,16 @@ Fields are read through accessors; the struct is `#[non_exhaustive]`.
 Does not fire for shutdown-timeout, queue-full, `before_send`, or local
 oversize-AI-event drops — those are not delivery failures.
 
-#### `CaptureFailure::endpoint`
+#### `CaptureFailure::endpoint_kind`
 
 ```rust
-pub fn endpoint(&self) -> Endpoint
+pub fn endpoint_kind(&self) -> Endpoint
 ```
 
 The capture endpoint the failed batch targeted: [`Endpoint::Capture`](#endpoint)
 for `capture`/`capture_batch`, [`Endpoint::CaptureAi`](#endpoint) for
 `capture_ai`/`capture_ai_batch`. Lets one hook tell the lanes apart.
+[`FlagsFailure::endpoint`](#flagsfailureendpoint) is the request URL instead.
 
 #### `CaptureFailure::error`
 
