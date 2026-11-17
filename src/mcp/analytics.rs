@@ -1,6 +1,8 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
+use serde_json::{Map, Value};
+
 use super::call::RequestScope;
 use super::capture::{self, Delivery, EventContext, OutgoingEvent};
 use super::contract::arguments::{CONTEXT_DESCRIPTION, LLM_MODEL_DESCRIPTION};
@@ -98,15 +100,21 @@ impl Core {
             Some(handle) => derive_session_id(handle),
             None => session.session_id.unwrap_or_else(new_session_id),
         };
+        let (host_properties, host_options) = host_context(scope);
+        let mut options = self.event_options(scope, request);
+        for (name, value) in host_options {
+            options.entry(name).or_insert(value);
+        }
         EventContext {
             timestamp: scope.timestamp,
             session_id,
             conversation_id,
             identity: self.identify(request),
+            options,
             client: scope.client_identity(session.token_client.as_ref()),
             server: scope.server.clone(),
             server_build: self.options.server_build.clone(),
-            host_properties: host_properties(request),
+            host_properties,
         }
     }
 
@@ -119,6 +127,33 @@ impl Core {
     pub(crate) fn virtual_tool(&self, name: &str) -> Option<VirtualTool> {
         IntoIterator::into_iter(VirtualTool::ALL)
             .find(|tool| self.virtual_tool_name(*tool) == Some(name))
+    }
+
+    /// Options set on the call win over the callback's, and a `null` sets nothing.
+    fn event_options(
+        &self,
+        scope: &RequestScope<'_>,
+        request: &RequestInfo<'_>,
+    ) -> Map<String, Value> {
+        let from_callback = self.options.event_options.as_ref().and_then(|callback| {
+            catch_unwind(AssertUnwindSafe(|| callback(request))).unwrap_or_else(|_| {
+                tracing::warn!(
+                    "MCP analytics event_options callback panicked; the request sets no options"
+                );
+                None
+            })
+        });
+        let mut options: Map<String, Value> = from_callback
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, value)| !value.is_null())
+            .collect();
+        for (key, value) in scope.event_options.into_iter().flatten() {
+            if !value.is_null() {
+                options.insert(key.clone(), value.clone());
+            }
+        }
+        options
     }
 
     fn identify(&self, request: &RequestInfo<'_>) -> Option<Identity> {
@@ -136,15 +171,15 @@ impl Core {
     }
 }
 
-/// The host's request context: the one its HTTP layer attached to the
-/// request, since `rmcp` serves each request on a task of its own, else the
-/// one in scope, for a manual API call made inside the host's handler.
-fn host_properties(request: &RequestInfo<'_>) -> serde_json::Map<String, serde_json::Value> {
-    let attached = request
-        .http
-        .and_then(|parts| parts.extensions.get::<RequestContext>());
-    match attached {
-        Some(host) => capture::host_properties(host),
-        None => RequestContext::with_current(capture::host_properties).unwrap_or_default(),
-    }
+/// What the host's request context adds to the call's events: its
+/// properties, and its capture options, which the call's own options override.
+/// The context in scope wins, for a manual API call made inside the host's
+/// handler; else the one its HTTP layer attached to the request, since `rmcp`
+/// serves each request on a task of its own.
+fn host_context(scope: &RequestScope<'_>) -> (Map<String, Value>, Map<String, Value>) {
+    let read =
+        |host: &RequestContext| (capture::host_properties(host), capture::host_options(host));
+    RequestContext::with_current(read)
+        .or_else(|| scope.request_context().as_ref().map(read))
+        .unwrap_or_default()
 }

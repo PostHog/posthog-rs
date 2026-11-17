@@ -10,10 +10,7 @@
 use httpmock::prelude::*;
 use serde_json::{json, Value};
 
-#[cfg(feature = "capture-v1")]
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
-#[cfg(not(feature = "capture-v1"))]
-const CAPTURE_PATH: &str = "/batch/";
 
 const PREVIOUS_ID: &str = "anon-abc123";
 const DISTINCT_ID: &str = "user-42";
@@ -52,9 +49,9 @@ fn request_has_well_formed_alias_event(req: &HttpMockRequest) -> bool {
         && event.pointer("/properties/alias").and_then(Value::as_str) == Some(DISTINCT_ID)
 }
 
-/// A merge cannot be personless, so the helper must not stamp the opt-out that
-/// `Event::new_anon` sets.
-fn request_does_not_disable_person_processing(req: &HttpMockRequest) -> bool {
+/// PostHog drops a `$create_alias` event with person processing off, so the SDK
+/// turns it on.
+fn request_processes_person_profile(req: &HttpMockRequest) -> bool {
     let Ok(body) = serde_json::from_slice::<Value>(req.body_ref()) else {
         return false;
     };
@@ -62,16 +59,14 @@ fn request_does_not_disable_person_processing(req: &HttpMockRequest) -> bool {
         return false;
     };
 
-    let path = if cfg!(feature = "capture-v1") {
-        "/options/process_person_profile"
-    } else {
-        "/properties/$process_person_profile"
-    };
-    event.pointer(path).and_then(Value::as_bool) != Some(false)
+    event
+        .pointer("/options/process_person_profile")
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 /// PostHog deduplicates on event UUID, so a constructor that reused one would
-/// have every alias after the first silently dropped server-side.
+/// have every alias after the first dropped server-side.
 fn request_has_two_distinct_event_uuids(req: &HttpMockRequest) -> bool {
     let Ok(body) = serde_json::from_slice::<Value>(req.body_ref()) else {
         return false;
@@ -102,9 +97,9 @@ const BLANK_IDS: [&str; 2] = ["", "   "];
 mod blocking {
     use super::*;
 
-    fn create_test_client(base_url: String) -> posthog_rs::Client {
-        let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
-        posthog_rs::client(options)
+    fn create_test_client(base_url: String) -> posthog::Client {
+        let options: posthog::ClientOptions = ("test_api_key", base_url.as_str()).into();
+        posthog::client(options)
     }
 
     #[test]
@@ -114,7 +109,7 @@ mod blocking {
             when.method(POST)
                 .path(CAPTURE_PATH)
                 .is_true(request_has_well_formed_alias_event)
-                .is_true(request_does_not_disable_person_processing);
+                .is_true(request_processes_person_profile);
             then.status(200).json_body(ok_response());
         });
 
@@ -203,13 +198,13 @@ mod blocking {
             then.status(200).json_body(ok_response());
         });
 
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .host(server.base_url())
             .build()
             .unwrap();
         assert!(options.is_disabled());
 
-        let client = posthog_rs::client(options);
+        let client = posthog::client(options);
         client.alias(PREVIOUS_ID, DISTINCT_ID);
         client.flush();
 
@@ -221,9 +216,9 @@ mod blocking {
 mod async_client {
     use super::*;
 
-    async fn create_test_client(base_url: String) -> posthog_rs::Client {
-        let options: posthog_rs::ClientOptions = ("test_api_key", base_url.as_str()).into();
-        posthog_rs::client(options).await
+    async fn create_test_client(base_url: String) -> posthog::Client {
+        let options: posthog::ClientOptions = ("test_api_key", base_url.as_str()).into();
+        posthog::client(options).await
     }
 
     #[tokio::test]
@@ -233,7 +228,7 @@ mod async_client {
             when.method(POST)
                 .path(CAPTURE_PATH)
                 .is_true(request_has_well_formed_alias_event)
-                .is_true(request_does_not_disable_person_processing);
+                .is_true(request_processes_person_profile);
             then.status(200).json_body(ok_response());
         });
 
@@ -322,13 +317,13 @@ mod async_client {
             then.status(200).json_body(ok_response());
         });
 
-        let options = posthog_rs::ClientOptionsBuilder::default()
+        let options = posthog::ClientOptionsBuilder::default()
             .host(server.base_url())
             .build()
             .unwrap();
         assert!(options.is_disabled());
 
-        let client = posthog_rs::client(options).await;
+        let client = posthog::client(options).await;
         client.alias(PREVIOUS_ID, DISTINCT_ID);
         client.flush().await;
 

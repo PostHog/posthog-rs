@@ -5,7 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use derive_builder::Builder;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::contract::limits::MAX_NAME_LENGTH;
 use super::feedback::{FeedbackField, FeedbackHandler, FeedbackReport};
@@ -17,11 +17,13 @@ use crate::Event;
 
 pub type IdentifyCallback = Arc<dyn Fn(&RequestInfo<'_>) -> Option<Identity> + Send + Sync>;
 pub type IntentFallback = Arc<dyn Fn(&RequestInfo<'_>) -> Option<String> + Send + Sync>;
+pub type EventOptionsCallback =
+    Arc<dyn Fn(&RequestInfo<'_>) -> Option<Map<String, Value>> + Send + Sync>;
 
 /// Configures MCP analytics. Build it with [`McpOptionsBuilder`].
 ///
 /// ```
-/// use posthog_rs::mcp::{Identity, McpOptionsBuilder};
+/// use posthog::mcp::{Identity, McpOptionsBuilder};
 ///
 /// let options = McpOptionsBuilder::default()
 ///     .identify(|request| {
@@ -66,8 +68,8 @@ pub struct McpOptions {
     /// call only when this callback trusts it:
     ///
     /// ```
-    /// # use posthog_rs::mcp::{Identity, McpOptionsBuilder};
-    /// # use posthog_rs::RequestContext;
+    /// # use posthog::mcp::{Identity, McpOptionsBuilder};
+    /// # use posthog::RequestContext;
     /// let options = McpOptionsBuilder::default()
     ///     .identify(|request| {
     ///         let host = request.http?.extensions.get::<RequestContext>()?;
@@ -79,6 +81,9 @@ pub struct McpOptions {
     /// ```
     #[builder(setter(custom))]
     pub(crate) identify: Option<IdentifyCallback>,
+    /// Supplies the capture options of each request's events.
+    #[builder(setter(custom))]
+    pub(crate) event_options: Option<EventOptionsCallback>,
     /// Send a `$exception` next to each failed call (default: `true`).
     pub(crate) exception_autocapture: bool,
     /// Send the call's arguments as `$mcp_parameters` (default: `true`).
@@ -143,6 +148,7 @@ impl Default for McpOptions {
             intent_fallback: None,
             conversation_id: true,
             identify: None,
+            event_options: None,
             exception_autocapture: true,
             capture_parameters: true,
             capture_responses: true,
@@ -288,6 +294,20 @@ impl McpOptionsBuilder {
         F: Fn(&RequestInfo<'_>) -> Option<Identity> + Send + Sync + 'static,
     {
         self.identify = Some(Some(Arc::new(resolve)));
+        self
+    }
+
+    /// Sets capture options, such as `disable_skew_correction`, on every
+    /// event of a request: its tool call, its `$exception`, and its listing
+    /// or handshake. Options set on a [`ToolCallRequest`](super::ToolCallRequest)
+    /// win over these, and these win over the request context. An anonymous
+    /// request keeps `process_person_profile: false`. A `null` value sets
+    /// nothing. A panic sets no options.
+    pub fn event_options<F>(&mut self, options: F) -> &mut Self
+    where
+        F: Fn(&RequestInfo<'_>) -> Option<Map<String, Value>> + Send + Sync + 'static,
+    {
+        self.event_options = Some(Some(Arc::new(options)));
         self
     }
 

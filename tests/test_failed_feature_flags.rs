@@ -1,7 +1,7 @@
 #![allow(deprecated)]
 
 use httpmock::prelude::*;
-use posthog_rs::{
+use posthog::{
     ClientOptions, ClientOptionsBuilder, EvaluateFlagsOptions, Event, FeatureFlagEvaluations,
     FeatureFlagsResponse, FlagValue,
 };
@@ -99,10 +99,7 @@ fn setup_server(error_bit: Option<bool>, local: bool) -> (MockServer, ClientOpti
         }));
     });
     server.mock(|when, then| {
-        #[cfg(feature = "capture-v1")]
         let path = "/i/v1/analytics/events";
-        #[cfg(not(feature = "capture-v1"))]
-        let path = "/batch/";
         when.method(POST).path(path);
         then.status(200).json_body(json!({"results": {}}));
     });
@@ -157,35 +154,11 @@ fn assert_snapshot(snapshot: &FeatureFlagEvaluations, local: bool) {
 
 #[cfg(not(feature = "async-client"))]
 #[test]
-fn blocking_failed_direct_reads_and_snapshots() {
+fn blocking_failed_snapshots() {
     for local in [false, true] {
         for error_bit in [None, Some(false), Some(true)] {
             let (_server, options) = setup_server(error_bit, local);
-            let client = posthog_rs::client(options);
-            assert_eq!(
-                client
-                    .get_feature_flag("failed", "user", None, None, None)
-                    .unwrap(),
-                None
-            );
-            assert_eq!(
-                client
-                    .get_feature_flag("failed-variant", "user", None, None, None)
-                    .unwrap(),
-                None
-            );
-            assert!(!client
-                .is_feature_enabled("failed", "user", None, None, None)
-                .unwrap());
-            assert_eq!(
-                client
-                    .get_feature_flag_payload("failed-variant", "user")
-                    .unwrap(),
-                None
-            );
-            let (flags, payloads) = client.get_feature_flags("user", None, None, None).unwrap();
-            assert_eq!(flags.len(), 3);
-            assert_eq!(payloads.len(), 1);
+            let client = posthog::client(options);
             let snapshot = client
                 .evaluate_flags("user", EvaluateFlagsOptions::default())
                 .unwrap();
@@ -197,42 +170,11 @@ fn blocking_failed_direct_reads_and_snapshots() {
 
 #[cfg(feature = "async-client")]
 #[tokio::test]
-async fn async_failed_direct_reads_and_snapshots() {
+async fn async_failed_snapshots() {
     for local in [false, true] {
         for error_bit in [None, Some(false), Some(true)] {
             let (_server, options) = setup_server(error_bit, local);
-            let client = posthog_rs::client(options).await;
-            assert_eq!(
-                client
-                    .get_feature_flag("failed", "user", None, None, None)
-                    .await
-                    .unwrap(),
-                None
-            );
-            assert_eq!(
-                client
-                    .get_feature_flag("failed-variant", "user", None, None, None)
-                    .await
-                    .unwrap(),
-                None
-            );
-            assert!(!client
-                .is_feature_enabled("failed", "user", None, None, None)
-                .await
-                .unwrap());
-            assert_eq!(
-                client
-                    .get_feature_flag_payload("failed-variant", "user")
-                    .await
-                    .unwrap(),
-                None
-            );
-            let (flags, payloads) = client
-                .get_feature_flags("user", None, None, None)
-                .await
-                .unwrap();
-            assert_eq!(flags.len(), 3);
-            assert_eq!(payloads.len(), 1);
+            let client = posthog::client(options).await;
             let snapshot = client
                 .evaluate_flags("user", EvaluateFlagsOptions::default())
                 .await

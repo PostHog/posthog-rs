@@ -1,9 +1,8 @@
-//! Request-body compression for the capture pipelines.
+//! Request-body compression for the capture pipeline.
 //!
-//! `compress` is the single entry point shared by V0 and V1. `gzip` is always
-//! available (V0 supports gzip only); `deflate`/`br`/`zstd` ship behind the
-//! `capture-v1` feature, so in a V0 build those codecs aren't compiled in and
-//! the enum's non-gzip variants fall back to uncompressed.
+//! `compress` is the single entry point. All four codecs the capture endpoint
+//! accepts — `gzip`, `deflate`, `br`, `zstd` — are always available; see
+//! `SUPPORTED_ENCODINGS` in `rust/capture/src/v1/constants.rs`.
 
 use crate::client::CaptureCompression;
 
@@ -22,7 +21,6 @@ pub(crate) fn gzip(data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-#[cfg(feature = "capture-v1")]
 fn deflate(data: &[u8]) -> Option<Vec<u8>> {
     use std::io::Write;
 
@@ -33,7 +31,6 @@ fn deflate(data: &[u8]) -> Option<Vec<u8>> {
     )
 }
 
-#[cfg(feature = "capture-v1")]
 fn brotli(data: &[u8]) -> Option<Vec<u8>> {
     use std::io::Write;
 
@@ -45,12 +42,10 @@ fn brotli(data: &[u8]) -> Option<Vec<u8>> {
     encode_or_warn("br", result.map(|_| out))
 }
 
-#[cfg(feature = "capture-v1")]
 fn zstd(data: &[u8]) -> Option<Vec<u8>> {
     encode_or_warn("zstd", zstd::stream::encode_all(data, 0))
 }
 
-#[cfg(feature = "capture-v1")]
 fn encode_or_warn(encoding: &'static str, result: std::io::Result<Vec<u8>>) -> Option<Vec<u8>> {
     match result {
         Ok(bytes) => Some(bytes),
@@ -63,31 +58,15 @@ fn encode_or_warn(encoding: &'static str, result: std::io::Result<Vec<u8>>) -> O
 
 /// Compress `data` with `algo`, returning the compressed bytes alongside the
 /// HTTP `Content-Encoding` token to advertise. Returns `None` when compression
-/// fails (or the algorithm isn't supported by this build), signalling the
-/// caller to send the payload uncompressed without a `Content-Encoding` header.
-///
-/// The `gzip` arm is always compiled; the deflate/br/zstd arms exist only with
-/// the `capture-v1` feature, so a V0 build is gzip-only by construction.
+/// fails, signalling the caller to send the payload uncompressed without a
+/// `Content-Encoding` header.
 pub(crate) fn compress(algo: CaptureCompression, data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
     let encoding = algo.content_encoding();
     let bytes = match algo {
         CaptureCompression::Gzip => gzip(data)?,
-        #[cfg(feature = "capture-v1")]
         CaptureCompression::Deflate => deflate(data)?,
-        #[cfg(feature = "capture-v1")]
         CaptureCompression::Br => brotli(data)?,
-        #[cfg(feature = "capture-v1")]
         CaptureCompression::Zstd => zstd(data)?,
-        // V0 build: the enum still has these variants, but their codecs aren't
-        // compiled in, so we can't honor them — send uncompressed instead.
-        #[cfg(not(feature = "capture-v1"))]
-        other => {
-            tracing::warn!(
-                ?other,
-                "v0 capture supports gzip only; sending uncompressed"
-            );
-            return None;
-        }
     };
     Some((bytes, encoding))
 }
@@ -122,18 +101,6 @@ mod tests {
         assert_eq!(out, data);
     }
 
-    /// In a V0 build the non-gzip codecs aren't compiled in, so `compress`
-    /// falls back to uncompressed (`None`) — this is the gzip-only gate.
-    #[cfg(not(feature = "capture-v1"))]
-    #[test]
-    fn compress_non_gzip_falls_back_to_uncompressed_in_v0() {
-        let data = br#"{"hello":"world"}"#;
-        assert!(compress(CaptureCompression::Deflate, data).is_none());
-        assert!(compress(CaptureCompression::Br, data).is_none());
-        assert!(compress(CaptureCompression::Zstd, data).is_none());
-    }
-
-    #[cfg(feature = "capture-v1")]
     #[test]
     fn deflate_roundtrips() {
         let data = br#"{"hello":"world"}"#;
@@ -146,7 +113,6 @@ mod tests {
         assert_eq!(out, data);
     }
 
-    #[cfg(feature = "capture-v1")]
     #[test]
     fn zstd_roundtrips() {
         let data = br#"{"hello":"world"}"#;
@@ -156,7 +122,6 @@ mod tests {
         assert_eq!(out, data);
     }
 
-    #[cfg(feature = "capture-v1")]
     #[test]
     fn brotli_produces_output() {
         let data = br#"{"hello":"world"}"#;

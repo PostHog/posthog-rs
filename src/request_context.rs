@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 
+#[cfg(feature = "error-tracking")]
+use crate::event::fill_property;
 use crate::{Error, Event};
 
 #[cfg(feature = "async-client")]
@@ -15,6 +17,7 @@ tokio::task_local! {
 pub struct RequestContext {
     pub(crate) distinct_id: Option<String>,
     pub(crate) properties: HashMap<String, Value>,
+    pub(crate) options: HashMap<String, Value>,
 }
 
 impl RequestContext {
@@ -41,6 +44,18 @@ impl RequestContext {
         let value =
             serde_json::to_value(value).map_err(|error| Error::Serialization(error.to_string()))?;
         self.properties.insert(key.into(), value);
+        Ok(self)
+    }
+
+    /// Sets a capture option on every event in this context. An option the event sets wins,
+    /// and a `null` value sets nothing. A `process_person_profile` option does not set
+    /// `process_person_profile` on an identify-style event, such as `$identify` or
+    /// `$create_alias`, whose distinct ID the SDK did not generate; see
+    /// [`RequestContext::apply_to_event`].
+    pub fn option(mut self, key: impl Into<String>, value: impl Serialize) -> Result<Self, Error> {
+        let value =
+            serde_json::to_value(value).map_err(|error| Error::Serialization(error.to_string()))?;
+        self.options.insert(key.into(), value);
         Ok(self)
     }
 
@@ -103,10 +118,27 @@ impl RequestContext {
         event
     }
 
-    /// Pins these defaults before delivery. Explicit event identity and properties win.
+    /// Pins these defaults before delivery. Explicit event identity, properties and options win.
+    ///
+    /// An identify-style event, such as `$identify` or `$create_alias`, first gets
+    /// `process_person_profile` from its own option or `$process_person_profile` property,
+    /// else `true` unless the SDK generated its distinct ID, so the context cannot turn
+    /// person processing off for it.
     pub fn apply_to_event(&self, event: &mut Event) {
+        // Only before the first context fill, so a context value never counts as the caller's.
+        if !event.request_context_applied {
+            event.apply_identify_style_person_default();
+        }
+        let skip_session = event.event_name() == "$groupidentify";
         for (key, value) in &self.properties {
+            // A session on `$groupidentify` would reassign the session to the group's distinct id.
+            if skip_session && key == "$session_id" {
+                continue;
+            }
             event.insert_prop_default(key.clone(), value.clone());
+        }
+        for (key, value) in &self.options {
+            event.insert_option_default(key.clone(), value.clone());
         }
         event.request_context_applied = true;
     }
@@ -119,16 +151,116 @@ impl RequestContext {
         if options.distinct_id.is_none() {
             options.distinct_id = self.get_distinct_id().map(str::to_string);
         }
-        let mut properties: HashMap<_, _> = self.properties.clone();
-        properties.extend(options.properties);
+        let mut properties: HashMap<_, _> = options.properties.into_iter().collect();
+        for (key, value) in &self.properties {
+            fill_property(&mut properties, key.clone(), value.clone());
+        }
         options.properties = properties.into_iter().collect();
+        for (key, value) in self.options.iter().filter(|(_, value)| !value.is_null()) {
+            // The last entry for a key wins; a missing or null last value counts as unset, as on events.
+            let unset = options
+                .options
+                .iter()
+                .rev()
+                .find(|(set_key, _)| set_key == key)
+                .map_or(true, |(_, set_value)| set_value.is_null());
+            if unset {
+                options.options.retain(|(set_key, _)| set_key != key);
+                options.options.push((key.clone(), value.clone()));
+            }
+        }
         options
+    }
+}
+
+/// The current context's distinct id, if it has one that is not blank.
+pub(crate) fn current_distinct_id() -> Option<String> {
+    #[cfg(feature = "async-client")]
+    {
+        CURRENT
+            .try_with(|context| {
+                context
+                    .get_distinct_id()
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_string)
+            })
+            .ok()
+            .flatten()
+    }
+    #[cfg(not(feature = "async-client"))]
+    {
+        None
     }
 }
 
 pub(crate) fn apply_current_context(event: &mut Event) {
     if !event.request_context_applied {
+        // Also reached with no scoped context, such as from the blocking client.
+        event.apply_identify_style_person_default();
         #[cfg(feature = "async-client")]
         let _ = CURRENT.try_with(|context| context.apply_to_event(event));
+    }
+}
+
+#[cfg(all(test, feature = "error-tracking"))]
+mod test {
+    use serde_json::{json, Value};
+
+    use super::RequestContext;
+    use crate::CaptureExceptionOptions;
+
+    #[test]
+    fn exception_options_fill_only_unset_set_keys() {
+        let context = RequestContext::new()
+            .property("$set", json!({"plan": "free", "source": "web"}))
+            .unwrap()
+            .property("route", "/work")
+            .unwrap();
+        let options = CaptureExceptionOptions::new()
+            .property("$set", json!({"plan": "pro"}))
+            .unwrap()
+            .property("route", "/explicit")
+            .unwrap();
+        let mut merged = context.exception_options(options).properties;
+        merged.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            merged,
+            vec![
+                ("$set".to_string(), json!({"plan": "pro", "source": "web"})),
+                ("route".to_string(), json!("/explicit")),
+            ]
+        );
+    }
+
+    #[test]
+    fn exception_options_fill_only_unset_options() {
+        let context = RequestContext::new()
+            .option("cookieless_mode", true)
+            .unwrap()
+            .option("disable_skew_correction", true)
+            .unwrap()
+            .option("product_tour_id", "tour")
+            .unwrap()
+            .option("process_person_profile", Value::Null)
+            .unwrap();
+        let options = CaptureExceptionOptions::new()
+            .option("cookieless_mode", false)
+            .unwrap()
+            .option("disable_skew_correction", Value::Null)
+            .unwrap()
+            .option("product_tour_id", "caller-tour")
+            .unwrap()
+            .option("product_tour_id", Value::Null)
+            .unwrap();
+        let mut merged = context.exception_options(options).options;
+        merged.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            merged,
+            vec![
+                ("cookieless_mode".to_string(), json!(false)),
+                ("disable_skew_correction".to_string(), json!(true)),
+                ("product_tour_id".to_string(), json!("tour")),
+            ]
+        );
     }
 }

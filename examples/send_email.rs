@@ -12,7 +12,7 @@
 #[cfg(feature = "async-client")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use posthog_rs::{ClientOptionsBuilder, CodeEmail, SendEmail, TemplateEmail};
+    use posthog::{ClientOptionsBuilder, CodeEmail, SendEmail, TemplateEmail};
     use serde_json::json;
 
     let to = std::env::var("EMAIL_TO")?;
@@ -20,11 +20,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     options
         .api_key(std::env::var("POSTHOG_API_KEY")?)
         .secret_key(std::env::var("POSTHOG_SECRET_KEY")?)
-        .host(std::env::var("POSTHOG_HOST").unwrap_or_else(|_| posthog_rs::DEFAULT_HOST.into()));
+        .host(std::env::var("POSTHOG_HOST").unwrap_or_else(|_| posthog::DEFAULT_HOST.into()));
     if let Ok(app_host) = std::env::var("POSTHOG_APP_HOST") {
         options.app_host(app_host);
     }
-    let posthog = posthog_rs::client(options.build()?).await;
+    let posthog = posthog::client(options.build()?).await;
 
     let email: SendEmail = match std::env::var("POSTHOG_EMAIL_TEMPLATE_ID") {
         Ok(template_id) => TemplateEmail::new(&to, template_id)

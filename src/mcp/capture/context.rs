@@ -4,6 +4,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
+use crate::constants::LEGACY_OPTION_PROPERTIES;
 use crate::mcp::bounds::{bounded_entries, bounded_payload, bounded_text, truncate};
 use crate::mcp::contract::limits::MAX_NAME_LENGTH;
 use crate::mcp::contract::properties as key;
@@ -12,26 +13,52 @@ use crate::mcp::privacy::TextPass;
 use crate::RequestContext;
 
 const MCP_PREFIX: &str = "$mcp_";
-const PERSON_CONTROLS: [&str; 5] = [
-    key::PROCESS_PERSON_PROFILE,
-    key::SET,
-    "$set_once",
-    "$unset",
-    key::GROUPS,
-];
+const PERSON_CONTROLS: [&str; 4] = [key::SET, "$set_once", "$unset", key::GROUPS];
 
-/// The host's properties an MCP event may carry: none MCP or identity sets,
-/// each value redacted and bounded as a payload's, in name order.
+/// The host's properties an MCP event may carry: none MCP, identity or a
+/// capture option sets, each value redacted and bounded as a payload's, in
+/// name order.
 pub(crate) fn host_properties(host: &RequestContext) -> Map<String, Value> {
     let mut kept: Vec<(&String, &Value)> = host
         .properties
         .iter()
         .filter(|(name, _)| {
-            !name.starts_with(MCP_PREFIX) && !PERSON_CONTROLS.contains(&name.as_str())
+            !name.starts_with(MCP_PREFIX)
+                && !PERSON_CONTROLS.contains(&name.as_str())
+                && !is_legacy_option(name)
         })
         .collect();
     kept.sort_unstable_by_key(|(name, _)| *name);
     bounded_entries(kept.into_iter(), TextPass::Name)
+}
+
+/// The host's capture options, a legacy option property such as
+/// `$process_person_profile` read as its option; one set as an option wins.
+pub(crate) fn host_options(host: &RequestContext) -> Map<String, Value> {
+    let mut options: Map<String, Value> = host
+        .options
+        .iter()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    for (property, option) in LEGACY_OPTION_PROPERTIES {
+        if let Some(value) = host
+            .properties
+            .get(*property)
+            .filter(|value| !value.is_null())
+        {
+            options
+                .entry(option.to_string())
+                .or_insert_with(|| value.clone());
+        }
+    }
+    options
+}
+
+fn is_legacy_option(name: &str) -> bool {
+    LEGACY_OPTION_PROPERTIES
+        .iter()
+        .any(|(property, _)| *property == name)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -61,6 +88,8 @@ pub(crate) struct EventContext {
     /// The host's request context, which events carry where MCP sets nothing.
     /// Built by `host_properties`, so a call holds only what capture keeps.
     pub(crate) host_properties: Map<String, Value>,
+    /// Capture options the host set for the request's events.
+    pub(crate) options: Map<String, Value>,
 }
 
 impl EventContext {
@@ -112,10 +141,8 @@ impl EventContext {
         insert_text(properties, key::SERVER_BUILD, self.server_build.as_deref());
     }
 
-    /// Anonymous calls create no person profiles.
     fn insert_person(&self, properties: &mut Map<String, Value>) {
         let Some(identity) = &self.identity else {
-            properties.insert(key::PROCESS_PERSON_PROFILE.to_string(), Value::Bool(false));
             return;
         };
         if !identity.properties.is_empty() {

@@ -12,11 +12,11 @@ use email_support::{
     accepted, connection_counting_store, options, unavailable, Answer, FakePostHog, ScriptedServer,
     MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
-use posthog_rs::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
+use posthog::{CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, TemplateEmail};
 use serde_json::json;
 
-fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
-    posthog_rs::client(options(&server.url).build().unwrap())
+fn client_for(server: &ScriptedServer) -> posthog::Client {
+    posthog::client(options(&server.url).build().unwrap())
 }
 
 #[test]
@@ -84,8 +84,8 @@ fn code_send_posts_the_rendered_content() {
 const PDF_SHA256: &str = "ccac55e87ec85819f85630feb88522f771cf4d4fc3a40b7f97fd124a128dfcb7";
 const PDF: [u8; 7] = [0x25, 0x50, 0x44, 0x46, 0x00, 0x9f, 0xff];
 
-fn client_of(posthog: &FakePostHog) -> posthog_rs::Client {
-    posthog_rs::client(options(&posthog.url).build().unwrap())
+fn client_of(posthog: &FakePostHog) -> posthog::Client {
+    posthog::client(options(&posthog.url).build().unwrap())
 }
 
 fn invoice() -> CodeEmail {
@@ -169,7 +169,7 @@ fn a_custom_clients_default_credentials_never_reach_the_file_store() {
         .default_headers(defaults)
         .build()
         .unwrap();
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&posthog.url)
             .blocking_http_client(http)
             .build()
@@ -198,7 +198,7 @@ fn a_custom_clients_uploads_reuse_one_connection_across_sends() {
     );
     let server = ScriptedServer::start(vec![slot.clone(), accepted(), slot, accepted()]);
     let http = reqwest::blocking::Client::builder().build().unwrap();
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&server.url)
             .blocking_http_client(http)
             .build()
@@ -307,7 +307,7 @@ fn shutdown_waits_for_a_send_on_another_thread_then_refuses() {
 #[test]
 fn shutdown_keeps_to_its_timeout() {
     let server = ScriptedServer::start(vec![unavailable(), accepted()]);
-    let client = Arc::new(posthog_rs::client(
+    let client = Arc::new(posthog::client(
         options(&server.url)
             .shutdown_timeout_ms(100u64)
             .build()
@@ -343,7 +343,7 @@ fn the_email_timeout_replaces_a_custom_clients_timeout() {
         .timeout(Duration::from_secs(60))
         .build()
         .unwrap();
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&server.base_url())
             .blocking_http_client(patient)
             .email_request_timeout_seconds(1)
@@ -394,7 +394,7 @@ fn a_reply_over_one_mebibyte_is_not_read() {
 
 #[test]
 fn reading_stops_at_the_cap_on_an_endless_reply() {
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&email_support::endless_body_server())
             .email_request_timeout_seconds(10)
             .email_request_max_retries(0)

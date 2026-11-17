@@ -1509,6 +1509,10 @@ PostHog. Do not share clients carrying credentials for unrelated services;
 the SDK cannot inspect or filter those defaults. The SDK keeps the
 supplied client's redirect policy; the capture and `/flags` clients it
 builds follow only 307 and 308 redirects to the same scheme, host and port.
+Email attachments upload to PostHog's file store through a client the SDK
+builds, so these defaults never reach it. Nor do the supplied client's root
+certificates, TLS options or proxy: that client trusts the system's roots
+and takes its proxy from the environment, such as `HTTPS_PROXY`.
 
 #### `ClientOptionsBuilder::blocking_http_client`
 
@@ -1535,6 +1539,10 @@ PostHog. Do not share clients carrying credentials for unrelated services;
 the SDK cannot inspect or filter those defaults. The SDK keeps the
 supplied client's redirect policy; the capture and `/flags` clients it
 builds follow only 307 and 308 redirects to the same scheme, host and port.
+Email attachments upload to PostHog's file store through a client the SDK
+builds, so these defaults never reach it. Nor do the supplied client's root
+certificates, TLS options or proxy: that client trusts the system's roots
+and takes its proxy from the environment, such as `HTTPS_PROXY`.
 
 Create and finally drop application-owned blocking clients, including handles
 held in options and builders, outside async runtimes. SDK shutdown does not
@@ -2215,6 +2223,84 @@ pub fn reply_to(self, address: impl Into<String>) -> Self
 
 Adds a reply-to address. Call it again to add more.
 
+#### `CodeEmail::cc`
+
+```rust
+pub fn cc(self, address: impl Into<String>) -> Self
+```
+
+Adds an address that gets a visible copy. Call it again to add more,
+at most 10. Each is a bare address, such as `"finance@example.com"`,
+with no name.
+
+#### `CodeEmail::bcc`
+
+```rust
+pub fn bcc(self, address: impl Into<String>) -> Self
+```
+
+Adds an address that gets a copy the other recipients never see. Call
+it again to add more, at most 10. Each is a bare address, with no name.
+
+#### `CodeEmail::attachment`
+
+```rust
+pub fn attachment(self, attachment: EmailAttachment) -> Self
+```
+
+Adds a file to the email. Call it again to add more, at most 10 files
+and 40 MB for the whole email after Base64 encoding, which leaves about
+29 MB for the files. The 40 MB counts the bodies too, and the HTML twice
+without text, because PostHog derives the text from it. PostHog refuses a file type that mailbox providers
+block, such as `.exe`.
+
+#### `CodeEmail::sensitive`
+
+```rust
+pub fn sensitive(self, sensitive: bool) -> Self
+```
+
+Whether the email carries a login link, a reset token or a code.
+PostHog keeps a sensitive email's links unchanged, leaves its subject
+off engagement events and keeps its content out of logs.
+
+Without it, the email takes the setting of the saved template whose
+key is the email's `template_key`, or is sensitive when no template has
+that key.
+
+```rust
+use posthog::CodeEmail;
+
+// The digest carries no login link, reset token or code, so PostHog
+// counts its clicks too.
+let email = CodeEmail::new("jane@example.com", "weekly-digest", "Your weekly digest")
+    .html(r#"<p><a href="https://example.com/blog">Read this week's posts</a></p>"#)
+    .sensitive(false);
+```
+
+#### `CodeEmail::tracking`
+
+```rust
+pub fn tracking(self, tracking: impl Into<EmailTracking>) -> Self
+```
+
+What PostHog tracks for this email: [`EmailTracking::On`](#emailtracking),
+[`EmailTracking::Off`](#emailtracking), or [`EmailTrackingOptions`](#emailtrackingoptions) to set each kind on
+its own. Takes a `bool` too.
+
+Without it, PostHog counts opens, captures engagement events, and
+rewrites links to count clicks only when the email isn't
+[`sensitive`](#codeemailsensitive).
+
+```rust
+use posthog::{CodeEmail, EmailTrackingOptions};
+
+// Count the digest's clicks, but capture no engagement events.
+let email = CodeEmail::new("jane@example.com", "weekly-digest", "Your weekly digest")
+    .html(r#"<p><a href="https://example.com/blog">Read this week's posts</a></p>"#)
+    .tracking(EmailTrackingOptions::new().clicks(true).engagement(false));
+```
+
 #### `CodeEmail::capture_engagement`
 
 ```rust
@@ -2224,7 +2310,8 @@ pub fn capture_engagement(self, capture: bool) -> Self
 Whether PostHog captures the email's engagement events (sent,
 delivered, opened, clicked, bounced) as events of the recipient.
 Defaults to `true`. A project whose admin turned engagement capture off
-captures nothing, whatever the send asks.
+captures nothing, whatever the send asks. PostHog refuses a send that
+sets both this and [`tracking`](#codeemailtracking).
 
 #### `CodeEmail::distinct_id`
 
@@ -2259,6 +2346,55 @@ pub fn max_retries(self, max_retries: u32) -> Self
 
 Overrides the client's `email_request_max_retries` for this send. `0`
 turns retries off.
+
+### `EmailAttachment`
+
+```rust
+pub struct EmailAttachment
+```
+
+A file sent with a [`CodeEmail`](#codeemail).
+
+PostHog can't fetch a file from a path or URL: read the file and pass its
+bytes. Before the send, the client uploads each file PostHog doesn't have
+yet straight to PostHog's file store, then sends the email naming each file
+by its SHA-256. Its `Debug` output never shows the content.
+
+```rust
+use posthog::{CodeEmail, EmailAttachment};
+
+let email = CodeEmail::new("jane@example.com", "invoice", "Your invoice")
+    .html(r#"<img src="cid:logo"><p>Your invoice is attached.</p>"#)
+    .attachment(EmailAttachment::new("invoice.pdf", invoice_pdf))
+    .attachment(EmailAttachment::new("logo.png", logo_png).content_id("logo"));
+```
+
+#### `EmailAttachment::new`
+
+```rust
+pub fn new(filename: impl Into<String>, content: impl Into<Vec<u8>>) -> Self
+```
+
+A file from its bytes, with the name the recipient sees, such as
+`"invoice.pdf"`. The client hashes the bytes here, once.
+
+#### `EmailAttachment::content_type`
+
+```rust
+pub fn content_type(self, content_type: impl Into<String>) -> Self
+```
+
+The MIME type, such as `"application/pdf"`. Without it, the type
+follows from the file name.
+
+#### `EmailAttachment::content_id`
+
+```rust
+pub fn content_id(self, content_id: impl Into<String>) -> Self
+```
+
+Shows the file inline: the HTML references it as `cid:<content_id>`,
+such as `<img src="cid:logo">` for `"logo"`.
 
 ### `EmailDeliveryStatus`
 
@@ -2332,7 +2468,8 @@ What went wrong, in words.
 pub fn status(&self) -> Option<u16>
 ```
 
-The HTTP status, when PostHog answered.
+The HTTP status, when PostHog answered, or the file store's status for
+`attachment_upload_failed`.
 
 #### `EmailError::why`
 
@@ -2383,15 +2520,15 @@ pub enum EmailErrorKind
 
 **Variants**
 
-- `ValidationError` - The send was malformed: a local argument check failed, or PostHog answered `400`, a `409` with `template_outdated`, or a `422` other than a reused idempotency key.
+- `ValidationError` - The send was malformed: a local argument check failed, such as `too_many_attachments` or `message_too_large`, or PostHog answered `400`, a `409` with `template_outdated`, or a `422` other than a reused idempotency key.
 - `MissingApiKey` - The client has no secret key, or PostHog answered `401`.
 - `InvalidPermission` - PostHog answered `403`: the secret key lacks the scope.
-- `NotFound` - PostHog answered `404`: no such template or email in this project.
+- `NotFound` - PostHog answered `404`: no such template or email in this project, or, for a send with files, no upload route.
 - `ConcurrentIdempotentRequests` - PostHog answered `409`: a send with the same idempotency key is still in flight.
 - `InvalidIdempotentRequest` - PostHog answered `422` with `idempotency_key_reused`: the key was already used for a different email.
 - `RateLimitExceeded` - PostHog answered `429`: too many requests.
 - `MonthlyQuotaExceeded` - PostHog answered `429` with `quota_limited`: the monthly quota is spent.
-- `ServiceUnavailable` - PostHog answered `503`, or the request failed on the network.
+- `ServiceUnavailable` - PostHog answered `503`, the file store answered `500`, `502`, `503` or `504` to an upload, or the request failed on the network.
 - `ApplicationError` - Anything else.
 
 A coarse category of an [`EmailError`](#emailerror), for code that branches on the kind
@@ -2421,6 +2558,68 @@ pub struct EmailStatus
 - `reason: Option<String>` - Why a failed email was not sent, such as `provider_error` or `recipient_suppressed`, or the bounce type of a bounced email: `hard`, `soft` or `unknown`. `None` otherwise.
 
 The status of an email that [`Emails::send`](#emailssend) queued.
+
+### `EmailTracking`
+
+```rust
+pub enum EmailTracking
+```
+
+**Variants**
+
+- `On` - Tracks opens and clicks and captures engagement events. Use it only when the email's links are safe to send through a redirect.
+- `Off` - Turns off every kind of tracking, including kinds PostHog adds later. PostHog then can't count the email's opens and clicks, and captures no engagement events.
+- `Custom(EmailTrackingOptions)` - Sets each kind of tracking on its own.
+
+What PostHog tracks for a [`CodeEmail`](#codeemail). A `bool` or an
+[`EmailTrackingOptions`](#emailtrackingoptions) converts into it.
+
+### `EmailTrackingOptions`
+
+```rust
+pub struct EmailTrackingOptions
+```
+
+Each kind of tracking of a [`CodeEmail`](#codeemail), on or off. A kind you don't set
+keeps its default.
+
+#### `EmailTrackingOptions::new`
+
+```rust
+pub fn new() -> Self
+```
+
+Every kind at its default.
+
+#### `EmailTrackingOptions::opens`
+
+```rust
+pub fn opens(self, track: bool) -> Self
+```
+
+Whether PostHog adds its open pixel to count opens. Defaults to `true`.
+With opens off, PostHog counts no clicks, and refuses clicks on.
+
+#### `EmailTrackingOptions::clicks`
+
+```rust
+pub fn clicks(self, track: bool) -> Self
+```
+
+Whether PostHog rewrites the email's links to count clicks. Defaults to
+`true` when the email isn't [`sensitive`](#codeemailsensitive) and
+`false` when it is. Turn it on only when the links are safe to send
+through a redirect, so not for a login or password reset link. A link with a
+`data-ph-no-track` attribute is never rewritten.
+
+#### `EmailTrackingOptions::engagement`
+
+```rust
+pub fn engagement(self, capture: bool) -> Self
+```
+
+Whether PostHog captures the email's engagement events, such as opens
+and clicks, as events of the recipient. Defaults to `true`.
 
 ### `EmailWarning`
 
@@ -2465,6 +2664,45 @@ status of each email it sent. Get it with
 A result means PostHog queued the email. Delivery happens later: read it
 with [`Emails::get`](#emailsget).
 
+#### Copies and attachments
+
+A [`CodeEmail`](#codeemail) takes `cc`, `bcc` and files: add each
+with [`cc`](#codeemailcc), [`bcc`](#codeemailbcc) and
+[`attachment`](#codeemailattachment). PostHog takes at most 10
+addresses in each of `cc` and `bcc`. An email carries at most 10 files and
+40 MB after Base64 encoding, which leaves about 29 MB for the files. The
+40 MB counts the bodies and the subject too, and the HTML twice when the
+email has no text, because PostHog then sends text it derives from the HTML.
+The client checks both before it sends anything, and refuses the send with
+`too_many_attachments` or `message_too_large`.
+A template made in PostHog sets its own recipients and content, so a
+[`TemplateEmail`](#templateemail) takes none of them.
+
+The client sends files in two steps. It asks PostHog which files it lacks,
+naming each by its SHA-256 and size, and uploads those straight to
+PostHog's file store, without your secret key. A file this project sent
+before isn't uploaded again. Once every upload succeeded, it sends the email
+naming each file by its SHA-256. If the file store refuses an upload, the
+send fails with `attachment_upload_failed` and the store's answer in
+[`why`](#emailerrorwhy), and no email is sent. A PostHog without
+the upload route, a project with sending email from code off, or an
+`app_host` that isn't PostHog's answers the upload request with `404`: the
+send fails with PostHog's answer, such as `not_found`, on `attachments`,
+and no email is sent. Allow your app to reach the file store's host as
+well as your PostHog app host.
+
+Uploads go only over https: when PostHog names a file store URL that isn't
+https, the send fails with `api_error` on that attachment before any
+upload, and no email is sent. Fix the file store's URL. Only an `app_host` that is itself plain
+`http`, such as a PostHog on your own machine, lets files upload over plain
+`http`. Uploads go through a client the SDK builds, even when you supply
+your own HTTP client, so your client's default headers never reach the
+file store. That client follows no redirect, so a file never moves to
+another host, trusts the system's root certificates, and takes its proxy
+from the environment, such as `HTTPS_PROXY`. None of your client's own
+settings apply to uploads: a root certificate, TLS option or proxy set in
+code doesn't reach them.
+
 #### Timeouts and retries
 
 Each request times out after `email_request_timeout_seconds`, 15 by
@@ -2472,8 +2710,10 @@ default. A request retries network errors, rate limits, a send still in
 flight and an unavailable service `email_request_max_retries` times, 2 by
 default, after about 1 and then 2 seconds, or after the server's
 `Retry-After` when that is longer. A `Retry-After` over 30 seconds fails at
-once. Every attempt of a send carries the same idempotency key, so a retry
-never sends twice. When a job runner already retries the send, set
+once. An upload also retries the file store's `500`, `502` and `504`. An
+upload gets one more second for each 128 KiB of its file, so a
+29 MB file has about 4 minutes. Every attempt of a send carries the same
+idempotency key, so a retry never sends twice. When a job runner already retries the send, set
 `max_retries(0)` on it and pass an idempotency key that names the email.
 
 #### Moving from another email provider
@@ -2495,10 +2735,15 @@ errors, rate limits, a send with the same idempotency key still in
 flight and an unavailable service are retried with the same idempotency
 key.
 
+A [`CodeEmail`](#codeemail) with attachments first asks PostHog
+which files it lacks, uploads those straight to PostHog's file store,
+then sends the email naming each file by its SHA-256.
+
 ##### Errors
 
 Returns an [`EmailError`](#emailerror) when an argument check fails, the client is
-disabled, shut down or has no `secret_key`, or PostHog did not queue the
+disabled, shut down or has no `secret_key`, the file store refused an
+upload (`attachment_upload_failed`), or PostHog did not queue the
 email.
 
 ##### Examples
