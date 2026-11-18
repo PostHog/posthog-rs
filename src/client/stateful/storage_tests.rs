@@ -23,7 +23,6 @@ impl TestDirectory {
         RestoredStorage::open(
             &Persistence::Directory(self.0.clone()),
             "scope",
-            4096,
             limits(),
             hooks,
         )
@@ -53,16 +52,12 @@ fn record(snapshot: &Snapshot) -> Vec<u8> {
 }
 
 #[test]
-fn consent_encoding_reserves_space_for_every_choice_and_requires_a_valid_field() {
+fn consent_choices_round_trip_and_require_a_valid_field() {
     let mut snapshot = Snapshot::anonymous("anonymous".into());
-    let capacity = snapshot_capacity(&snapshot);
     for choice in [None, Some(true), Some(false)] {
         snapshot.opt_out = choice;
-        assert_eq!(snapshot_capacity(&snapshot), capacity);
         let directory = TestDirectory::new();
-        let mut store = FileStateStore::open(directory.lease(), capacity as u64)
-            .unwrap()
-            .store;
+        let mut store = FileStateStore::open(directory.lease()).unwrap().store;
         store.save(&snapshot).unwrap();
         assert_eq!(store.load().unwrap(), Some(snapshot.clone()));
     }
@@ -87,7 +82,7 @@ fn consent_encoding_reserves_space_for_every_choice_and_requires_a_valid_field()
         let lease = directory.lease();
         let path = directory.path().join("state.json");
         fs::write(&path, &bytes).unwrap();
-        let opened = FileStateStore::open(lease, 4096).unwrap();
+        let opened = FileStateStore::open(lease).unwrap();
         assert!(opened.snapshot.is_none());
         assert!(opened.read_error.is_some());
         assert_eq!(fs::read(path).unwrap(), bytes);
@@ -178,7 +173,7 @@ fn fresh_state_roundtrips_and_atomic_replacement_keeps_latest_snapshot() {
     let first = Snapshot::anonymous("anonymous-用户".into());
     let second = Snapshot::anonymous("replacement".into());
     {
-        let opened = FileStateStore::open(directory.lease(), 4096).unwrap();
+        let opened = FileStateStore::open(directory.lease()).unwrap();
         assert!(opened.snapshot.is_none());
         let mut store = opened.store;
         store.save(&first).unwrap();
@@ -186,70 +181,23 @@ fn fresh_state_roundtrips_and_atomic_replacement_keeps_latest_snapshot() {
         store.save(&second).unwrap();
         assert!(!directory.path().join("state.json.tmp").exists());
     }
-    let opened = FileStateStore::open(directory.lease(), 4096).unwrap();
+    let opened = FileStateStore::open(directory.lease()).unwrap();
     assert_eq!(opened.snapshot, Some(second));
 }
 
 #[test]
-fn serialization_limit_is_exact_and_failed_write_preserves_previous_state() {
-    let directory = TestDirectory::new();
-    let mut first = Snapshot::anonymous("用户".into());
-    first.opt_out = Some(false);
-    let exact_bytes = snapshot_capacity(&first) as u64;
-    {
-        let mut store = FileStateStore::open(directory.lease(), exact_bytes - 1)
-            .unwrap()
-            .store;
-        assert_eq!(
-            store.save(&first).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert!(!store.path().exists());
-    }
-    {
-        let mut store = FileStateStore::open(directory.lease(), exact_bytes)
-            .unwrap()
-            .store;
-        store.save(&first).unwrap();
-        assert_eq!(
-            fs::metadata(store.path()).unwrap().len(),
-            record(&first).len() as u64
-        );
-        assert_eq!(snapshot_capacity(&first) as u64, exact_bytes);
-        assert!(store.save(&Snapshot::anonymous("x".repeat(4096))).is_err());
-        assert_eq!(store.load().unwrap(), Some(first.clone()));
-    }
-    let opened = FileStateStore::open(directory.lease(), exact_bytes - 1).unwrap();
-    assert!(opened.snapshot.is_none());
-    assert!(opened.read_error.is_some());
-    assert_eq!(
-        fs::read(directory.path().join("state.json")).unwrap(),
-        record(&first)
-    );
-}
-
-#[test]
-fn context_record_roundtrips_at_exact_bound_and_rejects_invalid_schema() {
+fn context_record_roundtrips_and_rejects_invalid_schema() {
     let mut snapshot = Snapshot::anonymous("anonymous".into());
     snapshot.registered = serde_json::from_value(serde_json::json!({
         "number": 1.0_f64 / 3.0, "null": null, "array": [null, {"nested":false}]
     }))
     .unwrap();
     snapshot.groups.insert("company".into(), "a".into());
-    let limit = snapshot_capacity(&snapshot);
     let directory = TestDirectory::new();
-    let mut store = FileStateStore::open(directory.lease(), limit as u64)
-        .unwrap()
-        .store;
+    let mut store = FileStateStore::open(directory.lease()).unwrap().store;
     store.save(&snapshot).unwrap();
     assert_eq!(store.load().unwrap(), Some(snapshot.clone()));
     let bytes = fs::read(directory.path().join("state.json")).unwrap();
-    snapshot.registered.insert("too-much".into(), true.into());
-    assert!(store.save(&snapshot).is_err());
-    assert_eq!(
-        fs::read(directory.path().join("state.json")).unwrap(),
-        bytes
-    );
     for field in ["registered", "groups"] {
         for malformed in [
             None,
@@ -271,7 +219,7 @@ fn context_record_roundtrips_at_exact_bound_and_rejects_invalid_schema() {
 fn invalid_identity_cannot_replace_persisted_state() {
     let directory = TestDirectory::new();
     let original = Snapshot::anonymous("original".into());
-    let mut store = FileStateStore::open(directory.lease(), 4096).unwrap().store;
+    let mut store = FileStateStore::open(directory.lease()).unwrap().store;
     store.save(&original).unwrap();
     for invalid in [
         Snapshot::anonymous(" \t".into()),
@@ -294,7 +242,7 @@ fn uncommitted_temporary_is_replaced_without_displacing_last_committed_state() {
     let directory = TestDirectory::new();
     let original = Snapshot::anonymous("original".into());
     {
-        let mut store = FileStateStore::open(directory.lease(), 4096).unwrap().store;
+        let mut store = FileStateStore::open(directory.lease()).unwrap().store;
         store.save(&original).unwrap();
         fs::write(
             directory.path().join("state.json.tmp"),
@@ -302,7 +250,7 @@ fn uncommitted_temporary_is_replaced_without_displacing_last_committed_state() {
         )
         .unwrap();
     }
-    let opened = FileStateStore::open(directory.lease(), 4096).unwrap();
+    let opened = FileStateStore::open(directory.lease()).unwrap();
     assert_eq!(opened.snapshot, Some(original));
     let mut store = opened.store;
     let next = Snapshot::anonymous("next".into());
@@ -316,7 +264,7 @@ fn failed_replacement_can_retry_and_does_not_destroy_previous_state() {
     let directory = TestDirectory::new();
     let original = Snapshot::anonymous("original".into());
     let next = Snapshot::anonymous("next".into());
-    let mut store = FileStateStore::open(directory.lease(), 4096).unwrap().store;
+    let mut store = FileStateStore::open(directory.lease()).unwrap().store;
     store.save(&original).unwrap();
     let temporary = directory.path().join("state.json.tmp");
     fs::create_dir(&temporary).unwrap();
@@ -328,9 +276,8 @@ fn failed_replacement_can_retry_and_does_not_destroy_previous_state() {
 }
 
 #[test]
-fn oversized_and_future_records_are_preserved_and_never_writable() {
+fn future_records_are_preserved_and_never_writable() {
     for bytes in [
-        vec![b' '; 4097],
         br#"{"version":99,"state":{"anonymous_id":"private","distinct_id":"private"}}"#.to_vec(),
         br#"{"version":99}"#.to_vec(),
         br#"{"version":4294967296,"state":false}"#.to_vec(),
@@ -339,7 +286,7 @@ fn oversized_and_future_records_are_preserved_and_never_writable() {
         let lease = directory.lease();
         let path = directory.path().join("state.json");
         fs::write(&path, &bytes).unwrap();
-        let error = FileStateStore::open(lease, 4096).err().unwrap();
+        let error = FileStateStore::open(lease).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(!error.to_string().contains("private"));
         assert_eq!(fs::read(path).unwrap(), bytes);
@@ -365,7 +312,6 @@ fn memory_mode_has_no_stores_and_never_reports_a_storage_error() {
     let restored = RestoredStorage::open(
         &Persistence::Memory,
         "scope",
-        4096,
         limits(),
         &[OnErrorHook::new(|_| {
             panic!("memory mode has no storage operation")
@@ -390,13 +336,7 @@ fn lock_failure_degrades_to_memory_and_reports_on_the_initialization_thread() {
     });
     let root = directory.0.clone();
     let worker = std::thread::spawn(move || {
-        RestoredStorage::open(
-            &Persistence::Directory(root),
-            "scope",
-            4096,
-            limits(),
-            &[hook],
-        )
+        RestoredStorage::open(&Persistence::Directory(root), "scope", limits(), &[hook])
     });
     let id = worker.thread().id();
     let restored = worker.join().unwrap();
@@ -463,7 +403,7 @@ fn event_store_open_failure_does_not_discard_restored_identity_or_state_writer()
     let directory = TestDirectory::new();
     let original = Snapshot::anonymous("original".into());
     {
-        let mut store = FileStateStore::open(directory.lease(), 4096).unwrap().store;
+        let mut store = FileStateStore::open(directory.lease()).unwrap().store;
         store.save(&original).unwrap();
     }
     fs::write(directory.path().join("events"), b"not a directory").unwrap();
@@ -502,7 +442,7 @@ fn state_files_are_private_and_symlink_state_is_not_followed() {
     let directory = TestDirectory::new();
     let snapshot = Snapshot::anonymous("private-id".into());
     {
-        let mut store = FileStateStore::open(directory.lease(), 4096).unwrap().store;
+        let mut store = FileStateStore::open(directory.lease()).unwrap().store;
         store.save(&snapshot).unwrap();
         assert_eq!(
             fs::metadata(store.path()).unwrap().permissions().mode() & 0o777,
@@ -511,7 +451,7 @@ fn state_files_are_private_and_symlink_state_is_not_followed() {
         fs::rename(store.path(), directory.path().join("other.json")).unwrap();
         symlink("other.json", store.path()).unwrap();
     }
-    assert!(FileStateStore::open(directory.lease(), 4096).is_err());
+    assert!(FileStateStore::open(directory.lease()).is_err());
     assert_eq!(
         fs::read(directory.path().join("other.json")).unwrap(),
         record(&snapshot)
@@ -572,7 +512,7 @@ fn final_v1_fixture_restores_identity_consent_and_flag_and_session_caches() {
         Some("request")
     );
     assert!(snapshot.session.is_some());
-    let encoded = encode_snapshot(&snapshot, 4096).unwrap();
+    let encoded = encode_snapshot(&snapshot).unwrap();
     assert_eq!(FileStateStore::decode(&encoded).unwrap(), snapshot);
 }
 
@@ -703,41 +643,6 @@ fn additive_fields_still_obey_whole_json_depth_bounds() {
         FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()),
         Err(RestoreFailure::Corrupt(_))
     ));
-}
-
-#[test]
-fn oversized_optional_flag_cache_is_discarded_without_losing_targeting() {
-    let mut value = fixture();
-    let flag = value["state"]["flags"]["cache"]["flags"]["checkout"].clone();
-    let flags = value["state"]["flags"]["cache"]["flags"]
-        .as_object_mut()
-        .unwrap();
-    for index in 0..=crate::client::transport::flags::MAX_FLAGS {
-        flags.insert(format!("flag-{index}"), flag.clone());
-    }
-    let decoded = FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()).unwrap();
-    assert!(decoded.rewrite_required);
-    assert!(decoded.snapshot.flags.cache.is_none());
-    assert_eq!(decoded.snapshot.flags.person_properties["plan"], "pro");
-    assert_eq!(decoded.snapshot.opt_out, Some(true));
-}
-
-#[test]
-fn device_bytes_are_mandatory_and_failed_updates_preserve_identity_and_consent() {
-    let directory = TestDirectory::new();
-    let mut snapshot = Snapshot::anonymous("anonymous".into());
-    snapshot.device_id = "用户\\\"\n".into();
-    snapshot.opt_out = Some(false);
-    let exact = snapshot_capacity(&snapshot) as u64;
-    assert!(encode_snapshot(&snapshot, exact - 1).is_err());
-    let mut store = FileStateStore::open(directory.lease(), exact)
-        .unwrap()
-        .store;
-    store.save(&snapshot).unwrap();
-    let mut too_large = snapshot.clone();
-    too_large.device_id = "x".repeat(exact as usize);
-    assert!(store.save(&too_large).is_err());
-    assert_eq!(store.load().unwrap(), Some(snapshot));
 }
 
 #[path = "flag_storage_tests.rs"]

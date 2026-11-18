@@ -8,9 +8,7 @@ use std::sync::{
 use std::time::Duration;
 
 use httpmock::{Method::POST, MockServer};
-use posthog::stateful::{
-    Client, Config, Identify, Persistence, PersistenceOutcome, PersonProfiles,
-};
+use posthog::stateful::{Client, Config, Identify, Persistence, PersonProfiles};
 use serde_json::{json, Value};
 
 fn properties(value: Value) -> HashMap<String, Value> {
@@ -384,78 +382,6 @@ fn group_mirroring_is_scoped_to_membership_and_only_membership_changes_refresh()
 }
 
 #[test]
-fn mandatory_targeting_bounds_reject_whole_mutations_and_survive_restart() {
-    let server = MockServer::start();
-    let directory =
-        std::env::temp_dir().join(format!("posthog-targeting-{}", uuid::Uuid::now_v7()));
-    let mut unexpected = server.mock(|when, then| {
-        when.method(POST).path("/flags/");
-        then.status(200).json_body(json!({"featureFlags":{}}));
-    });
-    let conf = || {
-        let mut conf = config(&server);
-        conf.persistence = Persistence::Directory(directory.clone());
-        conf.max_state_bytes = 2048;
-        conf.before_send(|_| None);
-        conf
-    };
-    let client = Client::init_blocking(conf());
-    client.set_person_properties_for_flags(properties(json!({"plan":"pro"})), Some(false));
-    client.set_group_properties_for_flags("company", properties(json!({"tier":1})), Some(false));
-    client.set_person_properties_for_flags(
-        properties(json!({"plan":"bad", "large":"x".repeat(4096)})),
-        None,
-    );
-    let mut deep = json!(1);
-    for _ in 0..150 {
-        deep = json!({"child":deep});
-    }
-    client.set_group_properties_for_flags("company", HashMap::from([("deep".into(), deep)]), None);
-    let mut rejected_identity = Identify::new("person");
-    rejected_identity.set = properties(json!({"large":"x".repeat(4096)}));
-    client.identify(rejected_identity);
-    assert_eq!(client.get_distinct_id(), "device");
-    client.flush_blocking();
-    unexpected.assert_calls(0);
-    unexpected.delete();
-    assert_eq!(
-        client.shutdown_blocking(None).state,
-        PersistenceOutcome::Persisted
-    );
-    drop(client);
-    let client = Client::init_blocking(conf());
-    reload(
-        &server,
-        &client,
-        "device",
-        json!({"plan":"pro"}),
-        json!({}),
-        json!({"company":{"tier":1}}),
-        || client.reload_feature_flags(),
-    );
-    client.reset_person_properties_for_flags(Some(false));
-    client.reset_group_properties_for_flags(None, Some(false));
-    assert_eq!(
-        client.shutdown_blocking(None).state,
-        PersistenceOutcome::Persisted
-    );
-    drop(client);
-    let client = Client::init_blocking(conf());
-    reload(
-        &server,
-        &client,
-        "device",
-        json!({}),
-        json!({}),
-        json!({}),
-        || client.reload_feature_flags(),
-    );
-    client.shutdown_blocking(None);
-    drop(client);
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn mirrored_targeting_is_visible_to_reentrant_hooks_and_survives_event_drop() {
     let server = MockServer::start();
     let mut conf = config(&server);
@@ -491,7 +417,6 @@ fn mirrored_targeting_survives_rejected_analytics_without_reloading_automaticall
     let server = MockServer::start();
     let mut conf = config(&server);
     conf.max_queue_bytes = 2048;
-    conf.max_record_bytes = 2048;
     conf.before_send(|mut event| {
         if event.event_name() != "occupy" {
             event.insert_prop("oversized", "x".repeat(4096)).unwrap();

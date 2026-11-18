@@ -357,7 +357,7 @@ impl Client {
     ) -> CaptureOutcome {
         let session_id = snapshot
             .sessions
-            .active_id(self.producer.as_ref().unwrap().session_clock.now().elapsed);
+            .active_id(self.producer.as_ref().unwrap().session_clock.now());
         let wire = match self.prepare_with_session(input, snapshot, session_id, policy) {
             Ok(wire) => wire,
             Err(outcome) => return outcome,

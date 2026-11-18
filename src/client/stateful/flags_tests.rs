@@ -637,63 +637,6 @@ fn live_cache_bound_rejects_partial_expansion_atomically_and_preserves_mandatory
 }
 
 #[test]
-fn request_size_error_hooks_can_mutate_and_reload_without_a_lock_cycle() {
-    let server = Server::new(vec![(200, json!({"featureFlags":{"after-error":true}}))]);
-    let weak = Arc::new(Mutex::new(std::sync::Weak::<Client>::new()));
-    let on_error = weak.clone();
-    let mut config = config(&server.host);
-    config.max_state_bytes = 4 * 1024 * 1024;
-    config.on_error(move |_| {
-        let client = on_error.lock().unwrap().upgrade().unwrap();
-        client
-            .state
-            .as_ref()
-            .unwrap()
-            .mutate(|state| state.flags.person_properties.clear())
-            .unwrap();
-        client.reload_feature_flags();
-    });
-    let client = Arc::new(Client::init_blocking(config));
-    *weak.lock().unwrap() = Arc::downgrade(&client);
-    client
-        .state
-        .as_ref()
-        .unwrap()
-        .mutate(|state| {
-            state.flags.person_properties.insert(
-                "oversized".into(),
-                json!("x".repeat(flags::MAX_REQUEST_BYTES)),
-            );
-        })
-        .unwrap();
-    let (done_tx, done_rx) = mpsc::channel();
-    let reloading = client.clone();
-    let reload_thread = thread::spawn(move || {
-        reloading.reload_feature_flags();
-        done_tx.send(()).unwrap();
-    });
-    let completed = done_rx.recv_timeout(WAIT);
-    let request = server.request();
-    server.respond();
-    assert!(completed.is_ok());
-    reload_thread.join().unwrap();
-    client.transport.as_ref().unwrap().request_barrier();
-    server.finish();
-    assert_eq!(request["person_properties"], json!({}));
-    assert!(client
-        .state
-        .as_ref()
-        .unwrap()
-        .snapshot()
-        .flags
-        .cache
-        .as_ref()
-        .unwrap()
-        .flags
-        .contains_key("after-error"));
-}
-
-#[test]
 fn evaluation_revision_changes_only_with_effective_context_and_rejected_mutations_are_atomic() {
     let client = Client::init_blocking(config("http://127.0.0.1:1"));
     client.flush_blocking();
@@ -718,10 +661,7 @@ fn evaluation_revision_changes_only_with_effective_context_and_rejected_mutation
     assert!(writer
         .mutate(|state| {
             state.distinct_id = "rejected".into();
-            state
-                .flags
-                .person_properties
-                .insert("oversized".into(), json!("x".repeat(2 * 1024 * 1024)));
+            state.anonymous_id.clear();
         })
         .is_err());
     assert_eq!(writer.snapshot(), before);

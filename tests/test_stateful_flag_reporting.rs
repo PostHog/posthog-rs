@@ -391,7 +391,6 @@ fn rejected_admission_does_not_commit_a_report() {
     accept(&server);
     let mut c = config(&server);
     c.max_queue_bytes = 2048;
-    c.max_record_bytes = 2048;
     let events = observe(&mut c);
     let attempts = AtomicUsize::new(0);
     c.before_send(move |mut event| {

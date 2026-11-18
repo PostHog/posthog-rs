@@ -234,45 +234,6 @@ fn failures_partial_provenance_malformed_payloads_and_known_empty_are_not_confla
 }
 
 #[test]
-fn cache_and_request_capacity_failures_notify_without_losing_usable_flags() {
-    let server = MockServer::start();
-    let mut c = config(&server);
-    c.max_state_bytes = 4 * 1024 * 1024;
-    let client = Client::init_blocking(c);
-    let (tx, rx) = mpsc::channel();
-    client.on_feature_flags(move |data| {
-        tx.send(data.clone()).unwrap();
-    });
-    let seed = update(&rx);
-    let rejected = load(
-        &client,
-        &server,
-        &rx,
-        200,
-        json!({
-            "featureFlags":{"a":true,"b":true,"c":true}, "requestId":"x".repeat(750 * 1024)
-        }),
-    );
-    assert_eq!(rejected.error, Some(FeatureFlagLoadError::CacheTooLarge));
-    assert!(rejected.errors_loading);
-    assert_eq!(rejected.flags, seed.flags);
-    let unexpected = server.mock(|when, then| {
-        when.path("/flags/");
-        then.status(503);
-    });
-    client.set_person_properties_for_flags(
-        HashMap::from([("large".into(), json!("x".repeat(2 * 1024 * 1024)))]),
-        Some(false),
-    );
-    client.reload_feature_flags();
-    let rejected = update(&rx);
-    assert_eq!(rejected.error, Some(FeatureFlagLoadError::RequestTooLarge));
-    assert_eq!(rejected.flags, seed.flags);
-    unexpected.assert_calls(0);
-    client.shutdown_blocking(None);
-}
-
-#[test]
 fn unavailable_failure_is_replayed_but_disabled_and_closed_clients_are_silent() {
     let server = MockServer::start();
     let mut c = config(&server);

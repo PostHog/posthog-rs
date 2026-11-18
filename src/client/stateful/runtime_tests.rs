@@ -60,9 +60,8 @@ fn client_defaults_map_to_shared_delivery_without_changing_server_defaults() {
     assert_eq!(config.max_queue_bytes, 8 * 1024 * 1024);
     assert_eq!(config.max_stored_bytes, 64 * 1024 * 1024);
     assert_eq!(config.max_stored_events, 10_000);
-    assert_eq!(config.max_record_bytes, 1024 * 1024);
-    assert_eq!(config.max_state_bytes, 1024 * 1024);
-    assert_eq!(config.state_coalesce, Duration::from_millis(250));
+    assert_eq!(config.event_limits().max_record_bytes, 1024 * 1024);
+    assert_eq!(config.state_write_delay, Duration::from_millis(250));
     let options = config.transport_options();
     assert_eq!(
         (
@@ -142,17 +141,14 @@ fn incoherent_limits_disable_before_creating_storage() {
         |c| c.flush_at = 0,
         |c| c.max_batch_size = 0,
         |c| c.max_queue_bytes = 0,
-        |c| c.max_record_bytes = c.max_queue_bytes as u64 + 1,
-        |c| c.max_stored_bytes = c.max_record_bytes - 1,
+        |c| c.max_stored_bytes = 0,
         |c| c.max_stored_events = 0,
-        |c| c.max_state_bytes = 1,
         |c| c.flush_interval = Duration::ZERO,
         |c| c.shutdown_timeout = Duration::MAX,
-        |c| c.state_coalesce = Duration::MAX,
-        |c| c.request_timeout_seconds = 0,
+        |c| c.state_write_delay = Duration::MAX,
+        |c| c.request_timeout = Duration::ZERO,
         |c| c.max_capture_attempts = 0,
         |c| c.bootstrap_anonymous_id = Some(" ".into()),
-        |c| c.bootstrap_anonymous_id = Some("x".repeat(c.max_state_bytes)),
         |c| c.host = "file:///tmp/events".into(),
         |c| c.host = "https://name:password@example.test".into(),
     ];
@@ -254,13 +250,8 @@ fn host_changes_share_identity_queue_and_single_owner_scope() {
     {
         use crate::client::event_store::EventStore;
         let scope = super::namespace(&next.project_token, &next.instance_name);
-        let mut storage = super::RestoredStorage::open(
-            &next.persistence,
-            &scope,
-            next.max_state_bytes as u64,
-            next.event_limits(),
-            &[],
-        );
+        let mut storage =
+            super::RestoredStorage::open(&next.persistence, &scope, next.event_limits(), &[]);
         let recovered = storage
             .event_store
             .as_mut()

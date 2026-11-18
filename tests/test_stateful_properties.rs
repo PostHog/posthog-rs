@@ -253,25 +253,18 @@ fn removal_while_out_or_never_and_reset_clear_context_without_events() {
 }
 
 #[test]
-fn invalid_groups_and_oversized_context_reject_whole_candidate() {
-    let mut conf = config();
-    conf.max_state_bytes = 512;
-    let (client, events) = observed(conf);
+fn invalid_groups_reject_whole_candidate() {
+    let (client, events) = observed(config());
     assert!(!client.is_disabled());
     client.register(properties(json!({"plan":"old"})));
-    client.register(properties(
-        json!({"plan":"changed", "large":"x".repeat(512)}),
-    ));
     for (kind, key) in [(" ", "a"), ("company", "\t")] {
         client.group(kind, key, None);
         client.group_identify(kind, key, HashMap::new());
     }
-    client.group("company", "x".repeat(512), None);
     assert!(events.lock().unwrap().is_empty());
     client.capture("after");
     let seen = events.lock().unwrap();
     assert_eq!(seen[0].properties()["plan"], "old");
-    assert!(!seen[0].properties().contains_key("large"));
     assert!(!seen[0].properties().contains_key("$groups"));
     assert_eq!(seen[0].options()["process_person_profile"], false);
 }
@@ -419,7 +412,6 @@ fn oversized_group_event_keeps_context_without_replay() {
     conf.host = server.base_url();
     conf.max_queue_size = 1;
     conf.max_queue_bytes = 4096;
-    conf.max_record_bytes = 4096;
     conf.flush_at = 1000;
     let seen = Arc::new(Mutex::new(Vec::new()));
     let events = seen.clone();
@@ -640,9 +632,8 @@ fn failed_write_preserves_live_context_then_persists_latest_revision() {
 
 #[test]
 fn registered_depth_boundary_rejects_whole_update_and_preserves_other_durable_state() {
-    // The state envelope, state object and registered map consume three levels
-    // of serde_json's bounded decoder. Exercise both sides of the actual boundary.
-    for depth in [124, 125, 150] {
+    // Saved values must stay well inside serde_json's 128-level decoder limit.
+    for depth in [100, 101, 150] {
         let directory = Directory::new();
         let (client, events) = observed(directory.config());
         client.register(properties(json!({"plan":"old"})));
@@ -651,11 +642,7 @@ fn registered_depth_boundary_rejects_whole_update_and_preserves_other_durable_st
         for _ in 0..depth {
             nested = Value::Array(vec![nested]);
         }
-        let mut candidate = directory.state();
-        candidate["state"]["registered"] = json!({"plan":"new", "nested":nested.clone()});
-        let decodable =
-            serde_json::from_slice::<Value>(&serde_json::to_vec(&candidate).unwrap()).is_ok();
-        assert_eq!(decodable, depth == 124);
+        let decodable = depth <= 100;
         client.register(HashMap::from([
             ("plan".into(), json!("new")),
             ("nested".into(), nested),

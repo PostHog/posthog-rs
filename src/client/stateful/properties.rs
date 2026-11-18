@@ -10,8 +10,8 @@ impl Client {
     /// Register owned context for future events without emitting an event. Each
     /// supplied top-level value replaces the stored value; null is not removal.
     /// Per-event properties win using the ordinary Rust property-fill rules.
-    /// Available while opted out. Updates exceeding state byte or codec limits
-    /// are rejected as a whole.
+    /// Available while opted out. An update containing a value nested more than
+    /// 100 levels deep is rejected as a whole.
     /// Memory changes immediately; persistence is asynchronous.
     pub fn register(&self, properties: HashMap<String, Value>) {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
