@@ -63,11 +63,12 @@ done
 run_case c3_flags
 expect c3_flags "$CASE_OUTPUT" "step=evaluate_flags status=0 "
 if ! grep -q "step=skipped" <<<"$CASE_OUTPUT"; then
-    for step in evaluate_flags is_enabled get_flag get_payload set_flags capture flush; do
+    for step in evaluate_flags is_enabled get_flag get_payload get_missing_flag set_flags capture flush; do
         expect c3_flags "$CASE_OUTPUT" "step=$step status=0 "
     done
     expect c3_flags "$CASE_OUTPUT" "step=boolean_flag enabled=1"
     expect c3_flags "$CASE_OUTPUT" "step=multivariate_flag state=3 variant=[^-]"
+    expect c3_flags "$CASE_OUTPUT" "step=multivariate_flag has_payload=1 "
     expect c3_flags "$CASE_OUTPUT" "step=missing state=0"
 fi
 

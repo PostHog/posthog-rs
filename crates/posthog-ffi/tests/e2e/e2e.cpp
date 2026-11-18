@@ -133,10 +133,11 @@ int case_flags() {
   char *payload = nullptr;
   report("get_payload", posthog_flags_get_payload(flags.get(), multivariate_flag.c_str(), &payload));
   StringPtr owned_payload(payload);
-  std::printf("RESULT step=multivariate_flag payload=%s\n", payload ? payload : "-");
+  std::printf("RESULT step=multivariate_flag has_payload=%d payload=%s\n", payload != nullptr,
+              payload ? payload : "-");
 
   state = POSTHOG_FLAG_STATE_ENABLED;
-  posthog_flags_get_flag(flags.get(), "posthoge2e-missing-flag", &state, nullptr);
+  report("get_missing_flag", posthog_flags_get_flag(flags.get(), "posthoge2e-missing-flag", &state, nullptr));
   std::printf("RESULT step=missing state=%d\n", static_cast<int>(state));
 
   FlagsPtr accessed(posthog_flags_only_accessed(flags.get()));
