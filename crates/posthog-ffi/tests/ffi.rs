@@ -21,6 +21,7 @@ fn last_error() -> Option<String> {
 }
 
 unsafe fn take_string(value: *mut c_char) -> String {
+    assert!(!value.is_null(), "expected a string, got NULL");
     let text = CStr::from_ptr(value).to_str().unwrap().to_owned();
     posthog_string_free(value);
     text

@@ -224,7 +224,8 @@ pub extern "C" fn posthog_version() -> *const c_char {
 /// Returns a description of the last error on the calling thread, or `NULL`
 /// if the last call that returns a status or creates a handle succeeded.
 /// `posthog_version`, `posthog_last_error` and the free functions leave it
-/// unchanged. The string is valid until the next call that updates it.
+/// unchanged. The string belongs to the calling thread: copy it before the
+/// next call that updates it, and before the thread exits.
 #[no_mangle]
 pub extern "C" fn posthog_last_error() -> *const c_char {
     LAST_ERROR

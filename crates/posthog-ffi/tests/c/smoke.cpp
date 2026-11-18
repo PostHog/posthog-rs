@@ -20,7 +20,8 @@ int main() {
   if (!client || !event) return 1;
 
   if (posthog_event_set_property_json(event.get(), "k", "{") != POSTHOG_STATUS_INVALID_JSON) return 2;
-  if (std::strstr(posthog_last_error(), "value_json") == nullptr) return 3;
+  const char *error = posthog_last_error();
+  if (error == nullptr || std::strstr(error, "value_json") == nullptr) return 3;
   if (posthog_capture(client.get(), event.get()) != POSTHOG_STATUS_OK) return 4;
 
   PostHogFlags *flags = nullptr;
