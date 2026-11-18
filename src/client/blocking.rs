@@ -296,7 +296,7 @@ impl Client {
     /// Create or update a group and set its properties by sending a `$groupidentify`
     /// event.
     ///
-    /// See <https://posthog.com/docs/product-analytics/group-analytics#setting-group-properties>.
+    /// See <https://posthog.com/docs/product-analytics/group-analytics#set-group-properties>.
     ///
     /// # Parameters
     ///
