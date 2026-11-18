@@ -139,7 +139,7 @@ impl Producer {
         }
         event.insert_prop_default("$lib", self.sdk_name.clone().into());
         event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
-        event.insert_prop_default("$device_id", snapshot.anonymous_id.clone().into());
+        event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
         event.insert_prop_default("$is_identified", snapshot.identified.into());
         event.insert_option_default(
             PROCESS_PERSON_PROFILE_OPT,

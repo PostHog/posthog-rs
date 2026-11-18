@@ -233,7 +233,7 @@ impl Client {
         }
     }
 
-    /// Start a fresh anonymous identity, including a fresh device ID. Emits no event
+    /// Start a fresh anonymous identity, preserving the device ID. Emits no event
     /// and preserves queued events. Setup bootstrap is not reapplied. A hook may reset:
     /// its already-snapshotted outer event retains the old identity.
     pub fn reset(&self) {
@@ -243,7 +243,9 @@ impl Client {
         let id = uuid::Uuid::now_v7().to_string();
         let _ = self.state.as_ref().unwrap().mutate(|state| {
             let generation = state.generation.wrapping_add(1);
+            let device_id = state.device_id.clone();
             *state = Snapshot::anonymous(id);
+            state.device_id = device_id;
             state.generation = generation;
         });
     }

@@ -46,7 +46,7 @@ fn properties(value: Value) -> HashMap<String, Value> {
 }
 
 #[test]
-fn identity_table_and_reset_preserve_device_until_reset() {
+fn identity_table_and_reset_preserve_device_across_reset() {
     let (client, events) = observed(config());
     assert!(!client.is_identified());
     client.identify("  ");
@@ -87,6 +87,18 @@ fn identity_table_and_reset_preserve_device_until_reset() {
     assert_eq!(
         events.lock().unwrap()[2].properties()["$anon_distinct_id"],
         fresh
+    );
+    assert!(events
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|event| event.properties()["$device_id"] == "anonymous"));
+    client.reset();
+    assert_ne!(client.get_anonymous_id(), fresh);
+    client.capture("second-reset");
+    assert_eq!(
+        events.lock().unwrap().last().unwrap().properties()["$device_id"],
+        "anonymous"
     );
 }
 
@@ -202,15 +214,23 @@ fn rejected_identify_keeps_identity_without_replaying_link_and_properties_remain
 }
 
 #[test]
-fn a_full_queue_keeps_identity_and_does_not_cache_a_rejected_property_update() {
+fn oversized_identity_event_keeps_identity_and_rejected_properties_remain_retryable() {
     let server = MockServer::start();
     let request = server.mock(|when, then| {
-        when.method(POST);
+        when.method(POST).path("/i/v1/analytics/events");
         then.status(200);
     });
     let mut conf = config();
     conf.host = server.base_url();
     conf.max_queue_size = 1;
+    conf.max_queue_bytes = 4096;
+    conf.max_record_bytes = 4096;
+    conf.before_send(|mut event| {
+        if event.event_name() == "$identify" {
+            event.insert_prop("padding", "x".repeat(8192)).unwrap();
+        }
+        Some(event)
+    });
     let (client, events) = observed(conf);
     assert!(matches!(
         client.capture("occupy"),
@@ -443,11 +463,43 @@ fn identified_state_and_profile_enablement_survive_restart_reset_does_not_reboot
     assert_eq!(client.get_distinct_id(), fresh);
     assert!(!client.is_identified());
     client.capture("restored-profile");
+    assert_eq!(events.lock().unwrap()[0].properties()["$device_id"], device);
     assert_eq!(
         events.lock().unwrap()[0].options()["process_person_profile"],
         true
     );
     client.shutdown_blocking(None);
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_reset_and_restart_keep_device_separate_from_anonymous_getter() {
+    let directory = Directory::new();
+    let client = Client::init(directory.config()).await;
+    client.identify("person");
+    client.reset();
+    let anonymous = client.get_anonymous_id();
+    assert_ne!(anonymous, "anonymous");
+    assert_eq!(
+        client.shutdown(None).await.state,
+        PersistenceOutcome::Persisted
+    );
+    drop(client);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = events.clone();
+    let mut conf = directory.config();
+    conf.before_send(move |event| {
+        seen.lock().unwrap().push(event.clone());
+        Some(event)
+    });
+    let client = Client::init(conf).await;
+    assert_eq!(client.get_anonymous_id(), anonymous);
+    client.capture("after-restart");
+    assert_eq!(
+        events.lock().unwrap()[0].properties()["$device_id"],
+        "anonymous"
+    );
+    client.shutdown(None).await;
 }
 
 #[test]
@@ -639,7 +691,7 @@ fn async_initialization_exposes_the_same_synchronous_identity_api() {
 }
 
 #[test]
-fn person_admission_full_warnings_can_read_and_reset_client_state() {
+fn person_admission_size_warnings_can_read_and_reset_client_state() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tracing_subscriber::prelude::*;
 
@@ -662,13 +714,24 @@ fn person_admission_full_warnings_can_read_and_reset_client_state() {
         }
     }
 
+    // Keep a second dispatch alive: tracing-core's single-dispatch fast path
+    // registers new callsites against the registering thread's default. Other
+    // producer threads may first reach the shared warning without our observer.
+    let _registration = tracing::Dispatch::new(tracing_subscriber::registry());
     for byte_limit in [false, true] {
         let mut conf = config();
         if byte_limit {
             conf.max_queue_bytes = 1;
             conf.max_record_bytes = 1;
         } else {
-            conf.max_queue_size = 1;
+            conf.max_queue_bytes = 4096;
+            conf.max_record_bytes = 4096;
+            conf.before_send(|mut event| {
+                if event.event_name() == "$set" {
+                    event.insert_prop("padding", "x".repeat(8192)).unwrap();
+                }
+                Some(event)
+            });
         }
         let client = Arc::new(Client::init_blocking(conf));
         assert!(!client.is_disabled());
@@ -693,7 +756,7 @@ fn person_admission_full_warnings_can_read_and_reset_client_state() {
         });
         done_rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("full-queue tracing held the person admission lock");
+            .expect("admission rejection tracing held the person admission lock");
         worker.join().unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_ne!(client.get_distinct_id(), "anonymous");
