@@ -664,25 +664,25 @@ mod tests {
         let a_attempted = attempted.clone();
         server.mock(|when, then| {
             when.method(POST).body_includes("\"event\":\"A\"");
-            then.respond_with(move |_| {
+            then.respond_with(move |request: &httpmock::HttpMockRequest| {
                 a_attempted.send("A").unwrap();
                 if let Some(gate) = a_gate.lock().unwrap().take() {
                     gate.recv_timeout(Duration::from_secs(5)).unwrap();
                 }
                 http::Response::builder()
                     .status(200)
-                    .body(r#"{"results":{}}"#.to_string())
+                    .body(super::super::tests::accept_all(request))
                     .unwrap()
                     .into()
             });
         });
         server.mock(|when, then| {
             when.method(POST).body_includes("\"event\":\"B\"");
-            then.respond_with(move |_| {
+            then.respond_with(move |request: &httpmock::HttpMockRequest| {
                 attempted.send("B").unwrap();
                 http::Response::builder()
                     .status(200)
-                    .body(r#"{"results":{}}"#.to_string())
+                    .body(super::super::tests::accept_all(request))
                     .unwrap()
                     .into()
             });
@@ -752,7 +752,7 @@ mod tests {
             server.mock(|when, then| {
                 when.method(POST)
                     .body_includes(format!("\"event\":\"{name}\""));
-                then.respond_with(move |_| {
+                then.respond_with(move |request: &httpmock::HttpMockRequest| {
                     entered.send(name).unwrap();
                     gate.lock()
                         .unwrap()
@@ -761,7 +761,7 @@ mod tests {
                     returned.send(name).unwrap();
                     http::Response::builder()
                         .status(200)
-                        .body("{}".to_string())
+                        .body(super::super::tests::accept_all(request))
                         .unwrap()
                         .into()
                 });
@@ -943,7 +943,7 @@ mod tests {
             server.mock(|when, then| {
                 when.method(POST)
                     .body_includes(format!("\"event\":\"{name}\""));
-                then.respond_with(move |_| {
+                then.respond_with(move |request: &httpmock::HttpMockRequest| {
                     entered.send(name).unwrap();
                     gate.lock()
                         .unwrap()
@@ -952,7 +952,7 @@ mod tests {
                     returned.send(name).unwrap();
                     http::Response::builder()
                         .status(200)
-                        .body("{}".to_string())
+                        .body(super::super::tests::accept_all(request))
                         .unwrap()
                         .into()
                 });
@@ -1049,11 +1049,11 @@ mod tests {
         let (attempted, attempts) = mpsc::channel();
         server.mock(|when, then| {
             when.method(POST).body_includes("before-checkpoint");
-            then.respond_with(move |_| {
+            then.respond_with(move |request: &httpmock::HttpMockRequest| {
                 attempted.send(()).unwrap();
                 http::Response::builder()
                     .status(200)
-                    .body("{}".to_string())
+                    .body(super::super::tests::accept_all(request))
                     .unwrap()
                     .into()
             });
@@ -1064,7 +1064,7 @@ mod tests {
         let (later_entered, later_started) = mpsc::channel();
         server.mock(|when, then| {
             when.method(POST).body_includes("after-checkpoint");
-            then.respond_with(move |_| {
+            then.respond_with(move |request: &httpmock::HttpMockRequest| {
                 later_entered.send(()).unwrap();
                 later_gate
                     .lock()
@@ -1074,7 +1074,7 @@ mod tests {
                 later_returned.send(()).unwrap();
                 http::Response::builder()
                     .status(200)
-                    .body("{}".to_string())
+                    .body(super::super::tests::accept_all(request))
                     .unwrap()
                     .into()
             });
@@ -1233,23 +1233,35 @@ mod tests {
             let (finish_second, second_gate) = mpsc::channel();
             let server = thread::spawn(move || {
                 let (mut first, _) = listener.accept().unwrap();
-                entered.send(request(&mut first)).unwrap();
+                let body = request(&mut first);
+                let reply = if status == 200 {
+                    super::super::tests::accept_all_body(body.as_bytes())
+                } else {
+                    "{}".to_owned()
+                };
+                entered.send(body).unwrap();
                 gate.recv_timeout(Duration::from_secs(3)).unwrap();
                 write!(
                     first,
-                    "HTTP/1.1 {} Result\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
-                    status
+                    "HTTP/1.1 {} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    reply.len(),
+                    reply
                 )
                 .unwrap();
                 drop(first);
                 let (mut second, _) = listener.accept().unwrap();
-                entered.send(request(&mut second)).unwrap();
+                let body = request(&mut second);
+                let reply = super::super::tests::accept_all_body(body.as_bytes());
+                entered.send(body).unwrap();
                 second_gate.recv_timeout(Duration::from_secs(3)).unwrap();
-                second
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-                    )
-                    .unwrap();
+                write!(
+                    second,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    reply.len(),
+                    reply
+                )
+                .unwrap();
             });
             let options = super::super::tests::options(host)
                 .flush_at(1usize)
