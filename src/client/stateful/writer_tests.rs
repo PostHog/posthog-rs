@@ -108,8 +108,24 @@ fn shared_access_validates_candidates_without_owning_writer_lifetime() {
         access.mutate(|state| state.distinct_id = "late".into()),
         Err(UpdateError::Closed)
     );
-    let lease =
-        StorageDirectory::open(&path).expect("shared access must not own the store or its lease");
+    // Dropping the writer requests closure without joining, so the worker
+    // releases the lease asynchronously. Shared access must not extend it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let lease = loop {
+        match StorageDirectory::open(&path) {
+            Ok(lease) => break lease,
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!(
+                "shared access must not own the store or its lease: {:?}",
+                error
+            ),
+        }
+    };
     drop(lease);
     std::fs::remove_dir_all(path).unwrap();
 }
