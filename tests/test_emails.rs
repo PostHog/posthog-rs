@@ -485,6 +485,20 @@ async fn an_upload_grant_with_too_many_headers_sends_nothing() {
     let posthog = FakePostHog::start_async()
         .await
         .with_too_many_grant_headers();
+    assert_the_grant_is_refused(posthog).await;
+}
+
+#[tokio::test]
+async fn an_upload_grant_that_fills_a_header_map_sends_nothing() {
+    // The HTTP client adds headers of its own to an upload and panics when the
+    // map has no room for them: the send fails before any upload instead.
+    let posthog = FakePostHog::start_async()
+        .await
+        .with_grant_headers_that_fill_a_header_map();
+    assert_the_grant_is_refused(posthog).await;
+}
+
+async fn assert_the_grant_is_refused(posthog: FakePostHog) {
     posthog.store(&PNG);
     let client = client_of(&posthog).await;
 

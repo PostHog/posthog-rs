@@ -35,6 +35,7 @@ pub(crate) const MAX_REPLY_BYTES: usize = 1 << 20;
 const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
 const MAX_TEMPLATE_KEY_LEN: usize = 400;
 const MAX_ATTACHMENTS: usize = 10;
+const MAX_UPLOAD_HEADERS: usize = 128;
 const MAX_MESSAGE_BYTES: u64 = 40_000_000;
 const HEADERS_AND_MIME_BOUNDARIES_BYTES: u64 = 64 * 1024;
 /// A subject travels as encoded words of up to 42 bytes, each 75 bytes once
@@ -525,10 +526,15 @@ fn upload(
     timeout: Duration,
 ) -> Option<Upload> {
     let method = Method::from_bytes(text(slot, "method")?.as_bytes()).ok()?;
+    let signed = slot.get("headers")?.as_object()?;
+    // The HTTP client adds headers of its own to the upload and panics when the
+    // header map has no room for them, so a grant with more headers than any
+    // upload needs reads as malformed.
+    if signed.len() > MAX_UPLOAD_HEADERS {
+        return None;
+    }
     let mut headers = HeaderMap::new();
-    for (name, value) in slot.get("headers")?.as_object()? {
-        // `insert` panics past the map's size limit, which a malformed reply
-        // can reach, so a reply that would overflow it reads as malformed.
+    for (name, value) in signed {
         headers
             .try_insert(
                 HeaderName::from_bytes(name.as_bytes()).ok()?,
