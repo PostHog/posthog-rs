@@ -43,6 +43,9 @@ use crate::Event;
 #[path = "transport_memory.rs"]
 mod memory;
 #[cfg(feature = "stateful")]
+#[path = "transport_queue.rs"]
+mod queue;
+#[cfg(feature = "stateful")]
 #[path = "transport_storage.rs"]
 mod storage_support;
 #[cfg(all(test, feature = "stateful"))]
@@ -55,10 +58,6 @@ struct StorageState {
     store: Option<Box<dyn super::event_store::EventStore>>,
     #[cfg(feature = "stateful")]
     byte_budget: Option<Arc<memory::ByteBudget>>,
-    #[cfg(feature = "stateful")]
-    recovery_pending: bool,
-    #[cfg(feature = "stateful")]
-    next_recovery: Option<Instant>,
 }
 
 #[cfg(feature = "stateful")]
@@ -66,7 +65,6 @@ impl StorageState {
     fn new(store: Box<dyn super::event_store::EventStore>, max_queue_bytes: usize) -> Self {
         Self {
             store: Some(store),
-            recovery_pending: true,
             ..Self::memory(max_queue_bytes)
         }
     }
@@ -96,6 +94,16 @@ pub(crate) enum Control {
         events: Vec<Event>,
     },
     Flush(Completion),
+    #[cfg(feature = "stateful")]
+    QueueWake,
+    #[cfg(feature = "stateful")]
+    QueueFlush {
+        completion: Completion,
+        disk: u64,
+        memory: u64,
+    },
+    #[cfg(feature = "stateful")]
+    UploadComplete(Box<queue::AttemptResult>),
     /// Like [`Control::Flush`], but sends the freshly captured live buffer
     /// *before* older held retries. Used by the panic hook so a retry backlog
     /// behind a slow endpoint can't starve the just-enqueued `$exception` within
@@ -180,8 +188,16 @@ pub(crate) struct TransportHandle {
     /// The worker thread's id, so teardown and the panic hook can avoid waiting
     /// for or joining this client's own worker.
     worker_id: Option<std::thread::ThreadId>,
-    #[cfg(feature = "stateful")]
+    #[cfg(all(test, feature = "stateful"))]
     byte_budget: Option<Arc<memory::ByteBudget>>,
+    #[cfg(feature = "stateful")]
+    queue: Option<Arc<memory::Queue>>,
+    #[cfg(feature = "stateful")]
+    closing_deadline: Arc<Mutex<Option<Instant>>>,
+    #[cfg(feature = "stateful")]
+    owned_workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    #[cfg(feature = "stateful")]
+    drain_timeout: Duration,
 }
 
 /// Name of the analytics worker thread (aids debugging). The panic hook detects
@@ -324,6 +340,44 @@ impl TransportHandle {
         clock: Arc<dyn Clock>,
         storage: StorageState,
     ) -> Self {
+        Self::spawn_configured_with_startup(options, lane, clock, storage, None)
+    }
+
+    #[cfg(feature = "stateful")]
+    #[allow(dead_code)] // Composed by the stateful client.
+    fn spawn_stateful(
+        options: ClientOptions,
+        store: Option<Box<dyn super::event_store::EventStore>>,
+        max_queue_bytes: usize,
+    ) -> Result<Self, ()> {
+        let storage = store.map_or_else(
+            || StorageState::memory(max_queue_bytes),
+            |store| StorageState::new(store, max_queue_bytes),
+        );
+        let (ready, started) = mpsc::channel();
+        let handle = Self::spawn_configured_with_startup(
+            options,
+            LaneConfig::analytics(),
+            Arc::new(SystemClock),
+            storage,
+            Some(ready),
+        );
+        if matches!(started.recv(), Ok(true)) {
+            Ok(handle)
+        } else {
+            handle.request_close();
+            handle.join();
+            Err(())
+        }
+    }
+
+    fn spawn_configured_with_startup(
+        options: ClientOptions,
+        lane: LaneConfig,
+        clock: Arc<dyn Clock>,
+        _storage: StorageState,
+        _ready: Option<mpsc::Sender<bool>>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<Control>();
         let len = Arc::new(AtomicUsize::new(0));
         let max_queue_size = lane.max_queue_size(&options);
@@ -331,10 +385,57 @@ impl TransportHandle {
         let worker_len = len.clone();
         let worker_clock = Arc::clone(&clock);
         #[cfg(feature = "stateful")]
-        let byte_budget = storage.byte_budget.clone();
+        let byte_budget = _storage.byte_budget.clone();
+        #[cfg(feature = "stateful")]
+        let queue = byte_budget.as_ref().map(|budget| {
+            memory::Queue::new(
+                budget.clone(),
+                len.clone(),
+                max_queue_size,
+                _storage
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.end_key())
+                    .map(|key| key.0),
+            )
+        });
+        #[cfg(feature = "stateful")]
+        let worker_queue = queue.clone();
+        #[cfg(feature = "stateful")]
+        let closing_deadline = Arc::new(Mutex::new(None));
+        #[cfg(feature = "stateful")]
+        let worker_deadline = closing_deadline.clone();
+        #[cfg(feature = "stateful")]
+        let owned_workers = Arc::new(Mutex::new(Vec::new()));
+        #[cfg(feature = "stateful")]
+        let worker_owners = owned_workers.clone();
+        #[cfg(feature = "stateful")]
+        let worker_tx = tx.clone();
+        #[cfg(feature = "stateful")]
+        let drain_timeout =
+            Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT);
         let worker = thread::Builder::new()
             .name(lane.thread_name.to_string())
-            .spawn(move || run_worker(options, lane, rx, worker_len, worker_clock, storage))
+            .spawn(move || {
+                #[cfg(feature = "stateful")]
+                if let Some(queue) = worker_queue {
+                    queue::run(
+                        options,
+                        lane,
+                        rx,
+                        worker_len,
+                        worker_clock,
+                        _storage,
+                        queue,
+                        worker_deadline,
+                        worker_owners,
+                        worker_tx,
+                        _ready,
+                    );
+                    return;
+                }
+                run_worker(options, lane, rx, worker_len, worker_clock);
+            })
             .ok();
         let worker_id = worker.as_ref().map(|handle| handle.thread().id());
         Self {
@@ -347,8 +448,16 @@ impl TransportHandle {
             endpoint,
             clock,
             worker_id,
-            #[cfg(feature = "stateful")]
+            #[cfg(all(test, feature = "stateful"))]
             byte_budget,
+            #[cfg(feature = "stateful")]
+            queue,
+            #[cfg(feature = "stateful")]
+            closing_deadline,
+            #[cfg(feature = "stateful")]
+            owned_workers,
+            #[cfg(feature = "stateful")]
+            drain_timeout,
         }
     }
 
@@ -379,14 +488,29 @@ impl TransportHandle {
         if self.closed.load(Ordering::Acquire) {
             return Admission::Closed;
         }
+        #[cfg(feature = "stateful")]
+        if let Some(queue) = &self.queue {
+            let admission = queue.admit(event);
+            if admission == Admission::Accepted
+                && queue.arm()
+                && self.tx.send(Control::QueueWake).is_err()
+            {
+                self.closed.store(true, Ordering::Release);
+                queue.clear();
+                return Admission::Closed;
+            }
+            if admission == Admission::Accepted && queue.len() == 1 {
+                self.full_warned.store(false, Ordering::Release);
+            }
+            if admission == Admission::Full && !self.full_warned.swap(true, Ordering::AcqRel) {
+                warn!("posthog-rs: event queue byte limit reached; rejecting new event");
+            }
+            return admission;
+        }
         if !self.try_reserve() {
             return Admission::Full;
         }
-        let mut event = DeliveryEvent::from(event);
-        if !self.reserve_prepared_bytes(&mut event) {
-            dec_len(&self.len, 1);
-            return Admission::Full;
-        }
+        let event = DeliveryEvent::from(event);
         if self
             .tx
             .send(Control::Prepared {
@@ -399,21 +523,6 @@ impl TransportHandle {
         } else {
             Admission::Accepted
         }
-    }
-
-    fn reserve_prepared_bytes(&self, _event: &mut DeliveryEvent) -> bool {
-        #[cfg(feature = "stateful")]
-        if let Some(budget) = &self.byte_budget {
-            let bytes = super::event_store::record_size(&_event.wire);
-            let Some(reservation) = budget.reserve(bytes) else {
-                if !self.full_warned.swap(true, Ordering::Relaxed) {
-                    warn!("posthog-rs: event queue byte limit reached; rejecting new event");
-                }
-                return false;
-            };
-            _event.reservation = Some(reservation);
-        }
-        true
     }
 
     /// Like `enqueue`, but never logs — no full-queue `warn!`. The panic hook
@@ -495,6 +604,18 @@ impl TransportHandle {
     /// `drain_pending_completions`), and any it doesn't reach are dropped with the
     /// channel — which wakes the caller's wait with a recv error.
     pub(crate) fn send_control(&self, control: Control) -> bool {
+        #[cfg(feature = "stateful")]
+        let control = match (control, &self.queue) {
+            (Control::Flush(completion) | Control::FlushCaptures(completion), Some(queue)) => {
+                let (disk, memory) = queue.checkpoint();
+                Control::QueueFlush {
+                    completion,
+                    disk,
+                    memory,
+                }
+            }
+            (control, _) => control,
+        };
         self.tx.send(control).is_ok()
     }
 
@@ -532,10 +653,46 @@ impl TransportHandle {
     /// as this returns.
     pub(crate) fn request_shutdown(&self, completion: Completion) -> bool {
         if self.begin_close() {
+            #[cfg(feature = "stateful")]
+            if self.queue.is_some() {
+                *self
+                    .closing_deadline
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) =
+                    Some(self.clock.now() + self.drain_timeout);
+            }
             self.send_control(Control::Shutdown(completion))
         } else {
             false
         }
+    }
+
+    #[cfg(all(test, feature = "stateful"))]
+    fn request_close_before(&self, deadline: Instant) {
+        if self.begin_close() {
+            *self
+                .closing_deadline
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(deadline);
+            let _ = self.tx.send(Control::QueueWake);
+            let (tx, _) = mpsc::channel();
+            self.send_control(Control::Shutdown(Completion::Blocking(tx)));
+        }
+    }
+
+    #[cfg(all(test, feature = "stateful"))]
+    fn all_stopped(&self) -> bool {
+        self.worker
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(true, JoinHandle::is_finished)
+            && self
+                .owned_workers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .all(JoinHandle::is_finished)
     }
 
     /// Request shutdown without waiting: used when a lane is spawned by a call
@@ -618,7 +775,18 @@ impl TransportHandle {
     /// must not synchronously wait there; the panic hook also skips capturing to
     /// avoid a self-flush deadlock or recursive `before_send` panic.
     pub(crate) fn on_worker_thread(&self) -> bool {
-        self.worker_id == Some(std::thread::current().id())
+        let id = thread::current().id();
+        #[cfg(feature = "stateful")]
+        if self
+            .owned_workers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|worker| worker.thread().id() == id)
+        {
+            return true;
+        }
+        self.worker_id == Some(id)
     }
 
     /// Test helper: flush + stop + join, mirroring the client's shutdown.
@@ -745,9 +913,6 @@ pub(crate) struct DeliveryEvent {
     #[cfg(feature = "stateful")]
     #[serde(skip)]
     store_key: Option<super::event_store::StoreKey>,
-    #[cfg(feature = "stateful")]
-    #[serde(skip)]
-    reservation: Option<memory::ByteReservation>,
 }
 
 impl From<CaptureEvent> for DeliveryEvent {
@@ -756,8 +921,6 @@ impl From<CaptureEvent> for DeliveryEvent {
             wire,
             #[cfg(feature = "stateful")]
             store_key: None,
-            #[cfg(feature = "stateful")]
-            reservation: None,
         }
     }
 }
@@ -934,7 +1097,6 @@ fn run_worker(
     rx: mpsc::Receiver<Control>,
     len: Arc<AtomicUsize>,
     clock: Arc<dyn Clock>,
-    _storage: StorageState,
 ) {
     let flush_at = options.flush_at.max(1);
     let max_batch_size = options.max_batch_size.max(1);
@@ -950,12 +1112,6 @@ fn run_worker(
         drain_pending_completions(&rx, &len);
         return;
     };
-
-    #[cfg(feature = "stateful")]
-    {
-        pipeline.storage = _storage;
-        pipeline.storage.next_recovery = Some(clock.now());
-    }
 
     let mut buffer_since: Option<Instant> = None;
     // Caller-formed historical batches awaiting their own (chunked) send. Queued
@@ -973,7 +1129,7 @@ fn run_worker(
                 clock.now(),
                 buffer_since,
                 flush_interval,
-                pipeline.next_delivery_work(),
+                pipeline.earliest_retry(),
             );
             match historical_since {
                 Some(since) => {
@@ -996,6 +1152,10 @@ fn run_worker(
         };
 
         match wake {
+            #[cfg(feature = "stateful")]
+            Wake::Msg(Control::QueueWake | Control::UploadComplete(_)) => {}
+            #[cfg(feature = "stateful")]
+            Wake::Msg(Control::QueueFlush { completion, .. }) => completion.signal(),
             Wake::Msg(Control::Capture { event }) => {
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
@@ -1009,8 +1169,7 @@ fn run_worker(
                     max_batch_size,
                 );
             }
-            Wake::Msg(Control::Prepared { mut event }) => {
-                pipeline.persist(&mut event);
+            Wake::Msg(Control::Prepared { event }) => {
                 admit_live(
                     &mut pipeline,
                     &mut buffer,
@@ -1050,7 +1209,7 @@ fn run_worker(
                 historical_since = None;
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                 buffer_since = None;
-                pipeline.recover_due(None, true);
+
                 completion.signal();
             }
             Wake::Msg(Control::FlushCaptures(completion)) => {
@@ -1063,7 +1222,7 @@ fn run_worker(
                 pipeline.flush_retries(None);
                 drain_historical(&mut pipeline, &mut historical, None);
                 historical_since = None;
-                pipeline.recover_due(None, true);
+
                 completion.signal();
             }
             Wake::Msg(Control::Shutdown(completion)) => {
@@ -1078,7 +1237,7 @@ fn run_worker(
                 pipeline.flush_retries(Some(deadline));
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
-                pipeline.recover_due(Some(deadline), true);
+
                 completion.signal();
                 // A flush/shutdown that raced in behind this Shutdown is still queued;
                 // signal those completions so their callers don't block forever.
@@ -1101,7 +1260,7 @@ fn run_worker(
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
                 pipeline.flush_retries(Some(deadline));
-                pipeline.recover_due(Some(deadline), true);
+
                 return;
             }
         }
@@ -1121,7 +1280,7 @@ fn run_worker(
             historical_since = None;
         }
         pipeline.attempt_due();
-        pipeline.recover_due(None, false);
+
         #[cfg(test)]
         if let Some(completion) = tick_completion {
             completion.signal();
@@ -1136,6 +1295,10 @@ fn run_worker(
 fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
     while let Ok(control) = rx.try_recv() {
         match control {
+            #[cfg(feature = "stateful")]
+            Control::QueueWake | Control::UploadComplete(_) => {}
+            #[cfg(feature = "stateful")]
+            Control::QueueFlush { completion, .. } => completion.signal(),
             Control::Flush(c) | Control::FlushCaptures(c) | Control::Shutdown(c) => c.signal(),
             #[cfg(test)]
             Control::Tick(c) => c.signal(),
@@ -1259,7 +1422,9 @@ struct Pipeline {
     len: Arc<AtomicUsize>,
     retries: VecDeque<RetryBatch>,
     #[cfg(feature = "stateful")]
-    storage: StorageState,
+    persistent_retention: bool,
+    #[cfg(feature = "stateful")]
+    coordinated: bool,
 }
 
 impl Pipeline {
@@ -1280,27 +1445,18 @@ impl Pipeline {
             len,
             retries: VecDeque::new(),
             #[cfg(feature = "stateful")]
-            storage: StorageState::default(),
+            persistent_retention: false,
+            #[cfg(feature = "stateful")]
+            coordinated: false,
         })
     }
 
     fn retry_retention(&self) -> super::capture::RetryRetention {
         #[cfg(feature = "stateful")]
-        if self.storage.store.is_some() {
+        if self.persistent_retention {
             return super::capture::RetryRetention::Retain;
         }
         super::capture::RetryRetention::Discard
-    }
-
-    #[cfg(not(feature = "stateful"))]
-    fn persist(&mut self, _event: &mut DeliveryEvent) {}
-
-    #[cfg(not(feature = "stateful"))]
-    fn recover_due(&mut self, _deadline: Option<Instant>, _force: bool) {}
-
-    #[cfg(not(feature = "stateful"))]
-    fn next_delivery_work(&self) -> Option<Instant> {
-        self.earliest_retry()
     }
 
     /// The codec for this lane's request bodies, from the lane's client option.
@@ -1461,8 +1617,6 @@ impl Pipeline {
 
         let retention = self.retry_retention();
         let retaining = retention != super::capture::RetryRetention::Discard;
-        #[cfg(feature = "stateful")]
-        let stored_before = self.stored_keys(&batch.pending);
 
         let req = BatchRequestRef {
             created_at: &batch.created_at,
@@ -1483,8 +1637,6 @@ impl Pipeline {
                     let lost = count + undelivered_results(&batch.final_results);
                     self.fire_capture(&batch, None, Some(&err), None, None, lost);
                 }
-                #[cfg(feature = "stateful")]
-                self.forget_keys(&stored_before);
                 dec_len(&self.len, count);
                 return;
             }
@@ -1553,11 +1705,6 @@ impl Pipeline {
             }
         };
 
-        // Queue identity, not event UUID or queue position, selects the records
-        // acknowledged by this attempt, including duplicate-UUID responses.
-        #[cfg(feature = "stateful")]
-        self.forget_finished(&stored_before, &batch.pending);
-
         // Events that left `pending` (the ok/drop/warning subset) are terminal.
         dec_len(&self.len, count - batch.pending.len());
 
@@ -1612,8 +1759,6 @@ impl Pipeline {
                         lost,
                     );
                 }
-                #[cfg(feature = "stateful")]
-                self.forget_keys(&self.stored_keys(&batch.pending));
                 dec_len(&self.len, batch.pending.len());
             }
             Step::Backoff(mut delay) => {
@@ -1640,7 +1785,11 @@ impl Pipeline {
                     }
                     batch.final_results.clear();
                 }
-                if deadline.is_some() {
+                #[cfg(feature = "stateful")]
+                let stop_retries = deadline.is_some() && !self.coordinated;
+                #[cfg(not(feature = "stateful"))]
+                let stop_retries = deadline.is_some();
+                if stop_retries {
                     if retaining {
                         self.warn_retained_shutdown(
                             batch.pending.len(),
@@ -1897,6 +2046,7 @@ mod tests {
             options: std::iter::once(("process_person_profile".into(), serde_json::json!(false)))
                 .collect(),
             properties: serde_json::json!({"captured": true}),
+            dropped_copies: 0,
         };
         let wire_json = serde_json::to_string(&wire).unwrap();
         let mut fail = server.mock(|when, then| {

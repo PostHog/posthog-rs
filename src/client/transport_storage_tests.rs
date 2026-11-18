@@ -14,14 +14,14 @@ use crate::client::event_store::{
 };
 use crate::{Event, PostHogError, StorageOperation};
 
-struct TestDirectory(PathBuf);
+pub(super) struct TestDirectory(pub(super) PathBuf);
 
 impl TestDirectory {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self(std::env::temp_dir().join(format!("posthog-delivery-{}", Uuid::now_v7())))
     }
 
-    fn open(&self) -> FileEventStore {
+    pub(super) fn open(&self) -> FileEventStore {
         FileEventStore::open(
             StorageDirectory::open(&self.0).unwrap(),
             StoreLimits {
@@ -33,7 +33,7 @@ impl TestDirectory {
         .unwrap()
     }
 
-    fn records(&self) -> Vec<PathBuf> {
+    pub(super) fn records(&self) -> Vec<PathBuf> {
         let mut paths: Vec<_> = fs::read_dir(self.0.join("events"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -52,7 +52,7 @@ impl Drop for TestDirectory {
     }
 }
 
-fn wire(name: &str) -> CaptureEvent {
+pub(super) fn wire(name: &str) -> CaptureEvent {
     let mut wire = CaptureEvent::from_event(&Event::new(name, "original-user"));
     wire.timestamp = "2025-01-01T00:00:00.123Z".into();
     wire.session_id = Some("original-session".into());
@@ -161,7 +161,11 @@ fn durable_events_survive_incomplete_success_bodies_but_not_complete_invalid_jso
         server.join().unwrap();
         let retained = mode != "invalid-json";
         assert_eq!(directory.records().len(), usize::from(retained), "{mode}");
-        assert_eq!(handle.pending(), usize::from(retained), "{mode}");
+        assert_eq!(
+            handle.pending(),
+            0,
+            "durable records do not occupy staging: {mode}"
+        );
         assert_eq!(
             failures.load(Ordering::SeqCst),
             usize::from(!retained),
@@ -201,7 +205,7 @@ fn transient_exhaustion_and_shutdown_preserve_records_for_restart() {
     assert_eq!(handle.enqueue_prepared(event.clone()), Admission::Accepted);
     handle.flush_blocking();
     offline.assert_calls(1);
-    assert_eq!(handle.pending(), 1);
+    assert_eq!(handle.pending(), 0);
     assert_eq!(directory.records().len(), 1);
     // Explicit flush does not bypass a retained sequence's cooldown.
     handle.flush_blocking();
@@ -255,11 +259,8 @@ fn partial_acknowledgement_removes_exact_records_including_duplicate_uuids() {
     assert_eq!(handle.enqueue_prepared(accepted), Admission::Accepted);
     handle.flush_blocking();
     partial.assert_calls(1);
-    assert_eq!(handle.pending(), 1);
-    assert_eq!(
-        handle.byte_budget.as_ref().unwrap().available(),
-        64 * 1024 - crate::client::event_store::record_size(&first)
-    );
+    assert_eq!(handle.pending(), 0);
+    assert_eq!(handle.byte_budget.as_ref().unwrap().available(), 64 * 1024);
     let records = directory.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].file_stem().unwrap(), "00000000000000000001");
@@ -429,6 +430,12 @@ fn unsupported_file_record_reports_write_error_and_delivers_from_memory() {
 struct UncertainWrite(FileEventStore, bool);
 
 impl EventStore for UncertainWrite {
+    fn head(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
+        self.0.head(count, bytes)
+    }
+    fn contains(&self, key: StoreKey) -> io::Result<bool> {
+        self.0.contains(key)
+    }
     fn recover(&mut self, events: usize, bytes: u64) -> io::Result<Recovery> {
         self.0.recover(events, bytes)
     }
@@ -501,6 +508,12 @@ fn uncertain_write_keys_are_acknowledged_and_release_spool_capacity() {
 struct RemovalFailure(FileEventStore);
 
 impl EventStore for RemovalFailure {
+    fn head(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
+        self.0.head(count, bytes)
+    }
+    fn contains(&self, key: StoreKey) -> io::Result<bool> {
+        self.0.contains(key)
+    }
     fn recover(&mut self, events: usize, bytes: u64) -> io::Result<Recovery> {
         self.0.recover(events, bytes)
     }
@@ -582,7 +595,7 @@ fn prepared_memory_admission_is_byte_bounded_and_releases_terminal_reservations(
     let budget = handle.byte_budget.as_ref().unwrap();
     assert_eq!(handle.enqueue_prepared(event.clone()), Admission::Accepted);
     assert_eq!(budget.available(), 0);
-    assert_eq!(handle.enqueue_prepared(event.clone()), Admission::Full);
+    assert_eq!(handle.enqueue_prepared(event.clone()), Admission::Accepted);
     assert_eq!(handle.pending(), 1);
     handle.flush_blocking();
     success.assert_calls(1);
@@ -641,7 +654,7 @@ fn write_failure_memory_fallback_remains_byte_bounded_while_offline() {
         StorageOperation::Write
     );
     offline.assert_calls(1);
-    assert_eq!(handle.enqueue_prepared(event), Admission::Full);
+    assert_eq!(handle.enqueue_prepared(event), Admission::Accepted);
     assert_eq!(handle.pending(), 1);
     assert_eq!(handle.byte_budget.as_ref().unwrap().available(), 0);
     handle.shutdown_blocking();
@@ -653,6 +666,12 @@ fn write_failure_memory_fallback_remains_byte_bounded_while_offline() {
 fn shutdown_warnings_distinguish_memory_losses_from_persisted_events() {
     struct FailSecondPut(FileEventStore, usize);
     impl EventStore for FailSecondPut {
+        fn head(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
+            self.0.head(count, bytes)
+        }
+        fn contains(&self, key: StoreKey) -> io::Result<bool> {
+            self.0.contains(key)
+        }
         fn recover(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
             self.0.recover(count, bytes)
         }
@@ -687,14 +706,14 @@ fn shutdown_warnings_distinguish_memory_losses_from_persisted_events() {
             len.clone(),
         )
         .unwrap();
-        pipeline.storage =
-            StorageState::new(Box::new(FailSecondPut(directory.open(), 0)), 64 * 1024);
+        pipeline.persistent_retention = true;
+        let mut store = FailSecondPut(directory.open(), 0);
         let mut events: Vec<_> = vec![wire("durable"), wire("memory-only")]
             .into_iter()
             .map(super::DeliveryEvent::from)
             .collect();
         for event in &mut events {
-            pipeline.persist(event);
+            event.store_key = store.put(&event.wire).ok();
         }
         assert!(events[0].store_key.is_some());
         assert!(events[1].store_key.is_none());
@@ -759,7 +778,7 @@ fn shutdown_warnings_distinguish_memory_losses_from_persisted_events() {
 }
 
 #[test]
-fn recovery_and_retry_share_the_same_byte_budget_across_pages() {
+fn recovery_and_one_retry_view_leave_the_resident_budget_available_for_persistence() {
     let server = MockServer::start();
     let directory = TestDirectory::new();
     let events: Vec<_> = (0..3)
@@ -793,14 +812,18 @@ fn recovery_and_retry_share_the_same_byte_budget_across_pages() {
     );
     handle.flush_blocking();
     offline.assert_calls(1);
-    assert_eq!(handle.pending(), 2);
-    assert_eq!(handle.byte_budget.as_ref().unwrap().available(), 0);
+    assert_eq!(handle.pending(), 0);
+    assert_eq!(handle.byte_budget.as_ref().unwrap().available(), 2 * bytes);
     assert_eq!(directory.records().len(), 3);
-    assert_eq!(handle.enqueue_prepared(wire("new-event")), Admission::Full);
-    assert_eq!(handle.pending(), 2);
+    let fresh = wire("event-3");
+    assert_eq!(handle.enqueue_prepared(fresh.clone()), Admission::Accepted);
+    handle.flush_blocking();
+    assert_eq!(handle.byte_budget.as_ref().unwrap().available(), 2 * bytes);
+    assert_eq!(directory.records().len(), 4);
     offline.delete();
     let results: serde_json::Map<_, _> = events
         .iter()
+        .chain(std::iter::once(&fresh))
         .map(|event| (event.uuid.to_string(), serde_json::json!({"result": "ok"})))
         .collect();
     let success = server.mock(|when, then| {
@@ -824,6 +847,16 @@ struct BlockedRecovery {
 }
 
 impl EventStore for BlockedRecovery {
+    fn head(&mut self, events: usize, bytes: u64) -> io::Result<Recovery> {
+        if let Some(entered) = self.entered.take() {
+            entered.send((events, bytes)).unwrap();
+            self.release.recv().unwrap();
+        }
+        self.inner.head(events, bytes)
+    }
+    fn contains(&self, key: StoreKey) -> io::Result<bool> {
+        self.inner.contains(key)
+    }
     fn recover(&mut self, events: usize, bytes: u64) -> io::Result<Recovery> {
         if let Some(entered) = self.entered.take() {
             entered.send((events, bytes)).unwrap();
@@ -840,9 +873,10 @@ impl EventStore for BlockedRecovery {
 }
 
 #[test]
-fn recovery_reserves_capacity_before_io_and_pages_a_larger_old_backlog() {
+fn recovery_does_not_reserve_staging_capacity_and_retained_records_deliver_fifo() {
     let server = MockServer::start();
     let directory = TestDirectory::new();
+    let fresh = wire("new-event");
     let events: Vec<_> = (0..5)
         .map(|index| wire(&format!("event-{index}")))
         .collect();
@@ -854,6 +888,7 @@ fn recovery_reserves_capacity_before_io_and_pages_a_larger_old_backlog() {
     }
     let results: serde_json::Map<_, _> = events
         .iter()
+        .chain(std::iter::once(&fresh))
         .map(|event| (event.uuid.to_string(), serde_json::json!({"result": "ok"})))
         .collect();
     let success = server.mock(|when, then| {
@@ -881,12 +916,13 @@ fn recovery_reserves_capacity_before_io_and_pages_a_larger_old_backlog() {
         ),
     );
     let requested = entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    let admission = handle.enqueue_prepared(wire("new-event"));
+    let bytes = crate::client::event_store::record_size(&fresh);
+    let admission = handle.enqueue_prepared(fresh);
     let available = handle.byte_budget.as_ref().unwrap().available();
     release_tx.send(()).unwrap();
     assert_eq!(requested, (2, 64 * 1024));
-    assert_eq!(admission, Admission::Full);
-    assert_eq!(available, 0);
+    assert_eq!(admission, Admission::Accepted);
+    assert_eq!(available, 64 * 1024 - bytes);
     handle.flush_blocking();
     success.assert_calls(3);
     assert_eq!(handle.pending(), 0);
@@ -1004,13 +1040,13 @@ fn failed_recovery_reports_read_error_releases_reservations_and_preserves_disk()
     assert_eq!(directory.records().len(), 1);
     assert_eq!(handle.enqueue_prepared(new), Admission::Accepted);
     handle.flush_blocking();
-    success.assert_calls(1);
+    success.assert_calls(0);
     assert_eq!(handle.pending(), 0);
-    assert_eq!(directory.records().len(), 1);
+    assert_eq!(directory.records().len(), 2);
     handle.shutdown_blocking();
     let handle = persistent(&server, &ManualClock::new(), directory.open());
     handle.flush_blocking();
-    success.assert_calls(2);
+    success.assert_calls(1);
     assert!(directory.records().is_empty());
     handle.shutdown_blocking();
 }
@@ -1120,6 +1156,12 @@ fn shutdown_deadline_releases_memory_but_preserves_unacknowledged_chunks() {
     let events: Vec<_> = (0..3)
         .map(|index| wire(&format!("event-{index}")))
         .collect();
+    {
+        let mut store = directory.open();
+        for event in &events {
+            store.put(event).unwrap();
+        }
+    }
     let mut stalled = server.mock(|when, then| {
         when.method(POST);
         then.status(503).delay(Duration::from_millis(200));
@@ -1135,9 +1177,6 @@ fn shutdown_deadline_releases_memory_but_preserves_unacknowledged_chunks() {
         Arc::new(super::SystemClock),
         StorageState::new(Box::new(directory.open()), 64 * 1024),
     );
-    for event in &events {
-        assert_eq!(handle.enqueue_prepared(event.clone()), Admission::Accepted);
-    }
     handle.shutdown_blocking();
     assert!(
         stalled.calls() <= 1,

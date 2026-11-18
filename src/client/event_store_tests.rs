@@ -174,17 +174,19 @@ fn computed_float_snapshot_survives_restart() {
 }
 
 #[test]
-fn count_limit_refuses_new_records_without_evicting_accepted_work() {
+fn count_limit_evicts_oldest_and_late_acknowledgement_preserves_replacement() {
     let directory = TestDirectory::new();
     let mut store = directory.open(StoreLimits {
         max_events: 1,
         ..limits()
     });
     let first = store.put(&event("first")).unwrap();
-    assert!(store.put(&event("second")).is_err());
-    assert!(store.path(first).exists());
+    let second = store.put(&event("second")).unwrap();
+    assert!(!store.contains(first).unwrap());
     store.remove(first).unwrap();
-    assert!(store.put(&event("second")).is_ok());
+    assert!(store.contains(second).unwrap());
+    assert_eq!(store.count, 1);
+    assert_eq!(store.head(1, 4096).unwrap().events[0].key, second);
 }
 
 #[test]
@@ -204,7 +206,7 @@ fn byte_and_record_limits_are_enforced_without_partial_files() {
     });
     let key = store.put(&record).unwrap();
     assert_eq!(store.bytes, size);
-    assert!(store.put(&record).is_err());
+    let replacement = store.put(&record).unwrap();
     store.remove(key).unwrap();
     let mut oversized = record.clone();
     oversized.properties = serde_json::json!({"large": "x".repeat(size as usize)});
@@ -212,7 +214,10 @@ fn byte_and_record_limits_are_enforced_without_partial_files() {
         store.put(&oversized).unwrap_err().error.kind(),
         io::ErrorKind::InvalidInput
     );
-    assert_eq!(store.count, 0);
+    assert_eq!(store.count, 1);
+    assert_eq!(store.bytes, size);
+    assert!(store.contains(replacement).unwrap());
+    store.remove(replacement).unwrap();
     assert_eq!(fs::read_dir(&store.events_path).unwrap().count(), 0);
     assert!(store.put(&record).is_ok());
 }
@@ -232,7 +237,6 @@ fn reduced_limits_recover_oldest_records_in_bounded_pages_without_deleting_overf
         ..limits()
     });
     assert_eq!(store.count, 6);
-    assert!(store.put(&event("new")).is_err());
     for page in 0..3 {
         let recovered = store.recover(100, 64 * 1024).unwrap();
         assert_eq!(recovered.events.len(), 2);
@@ -350,10 +354,10 @@ fn oversized_records_are_not_read_into_memory() {
     assert!(recovered.events.is_empty());
     assert_eq!(recovered.errors.len(), 1);
     assert!(path.exists());
-    assert!(
-        store.put(&event("new")).is_err(),
-        "retained records consume the disk budget"
-    );
+    let replacement = store.put(&event("new")).unwrap();
+    assert!(!path.exists());
+    assert!(store.contains(replacement).unwrap());
+    assert_eq!(store.count, 1);
 }
 
 #[test]
@@ -491,7 +495,6 @@ fn post_rename_sync_failure_retains_key_until_acknowledgement() {
     assert!(store.path(key).is_file());
     assert_eq!(store.count, 1);
     assert!(store.bytes > 0);
-    assert!(store.put(&event("full")).is_err());
     store.remove(key).unwrap();
     assert_eq!((store.count, store.bytes), (0, 0));
     assert!(store.put(&event("next")).is_ok());
@@ -589,4 +592,315 @@ fn files_and_directories_are_private_and_symlinks_are_not_recovered() {
     let recovered = store.recover(10, 64 * 1024).unwrap();
     assert_eq!(recovered.events.len(), 1);
     assert_eq!(store.count, 1);
+}
+
+#[test]
+fn replacement_overage_stops_later_appends_until_eviction_recovers() {
+    let directory = TestDirectory::new();
+    let mut store = directory.open(StoreLimits {
+        max_events: 1,
+        ..limits()
+    });
+    let first = store.put(&event("first")).unwrap();
+    store.fail_eviction.set(true);
+    let failed = store.put(&event("replacement")).unwrap_err();
+    let replacement = failed.key.unwrap();
+    assert_eq!(store.count, 2);
+    let bytes = store.bytes;
+    assert!(bytes <= limits().max_bytes + limits().max_record_bytes);
+    for _ in 0..3 {
+        assert!(store.put(&event("blocked")).unwrap_err().key.is_none());
+        assert_eq!(
+            (store.count, store.bytes, store.last_key),
+            (2, bytes, replacement.0)
+        );
+    }
+    assert!(store.contains(first).unwrap());
+    assert!(store.contains(replacement).unwrap());
+    store.fail_eviction.set(false);
+    let last = store.put(&event("last")).unwrap();
+    assert_eq!(store.count, 1);
+    assert!(!store.contains(first).unwrap());
+    assert!(!store.contains(replacement).unwrap());
+    assert_eq!(store.head(1, 4096).unwrap().events[0].key, last);
+}
+
+#[test]
+fn failed_replacement_append_never_evicts_retained_records() {
+    let directory = TestDirectory::new();
+    let mut store = directory.open(StoreLimits {
+        max_events: 1,
+        ..limits()
+    });
+    let first = store.put(&event("first")).unwrap();
+    let before = fs::read(store.path(first)).unwrap();
+    fs::create_dir(store.path(StoreKey(first.0 + 1)).with_extension("tmp")).unwrap();
+    assert!(store.put(&event("failed")).unwrap_err().key.is_none());
+    assert_eq!(fs::read(store.path(first)).unwrap(), before);
+    assert_eq!((store.count, store.bytes), (1, before.len() as u64));
+}
+
+#[test]
+fn reduced_limits_and_quarantined_records_reclaim_oldest_with_exact_accounting() {
+    let directory = TestDirectory::new();
+    {
+        let mut store = directory.open(limits());
+        for index in 0..5 {
+            store.put(&event(&format!("old-{index}"))).unwrap();
+        }
+        let path = store.path(StoreKey(1));
+        fs::rename(&path, path.with_extension("unsupported")).unwrap();
+    }
+    let mut store = directory.open(StoreLimits {
+        max_events: 2,
+        ..limits()
+    });
+    assert_eq!(store.count, 5);
+    let new = store.put(&event("new")).unwrap();
+    let head = store.head(10, 64 * 1024).unwrap();
+    assert_eq!(
+        head.events
+            .iter()
+            .map(|record| record.key)
+            .collect::<Vec<_>>(),
+        vec![StoreKey(5), new]
+    );
+    assert_eq!(store.count, 2);
+    assert_eq!(
+        store.bytes,
+        fs::metadata(store.path(StoreKey(5))).unwrap().len()
+            + fs::metadata(store.path(new)).unwrap().len()
+    );
+}
+
+#[test]
+fn upload_head_respects_soft_batch_target_and_hard_record_window() {
+    let directory = TestDirectory::new();
+    let mut store = directory.open(limits());
+    let mut large = event("large");
+    large.properties = serde_json::json!({"data": "x".repeat(2048)});
+    let first = store.put(&large).unwrap();
+    let second = store.put(&event("small")).unwrap();
+    let page = store.head_batch(10, 4096, 512).unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].key, first);
+    assert!(page.events[0].bytes > 512 && page.events[0].bytes <= 4096);
+    assert!(store
+        .head_batch(10, page.events[0].bytes - 1, 512)
+        .unwrap()
+        .events
+        .is_empty());
+    store.remove(first).unwrap();
+    assert_eq!(
+        store.head_batch(10, 4096, 512).unwrap().events[0].key,
+        second
+    );
+}
+
+#[test]
+fn admission_key_gaps_and_failed_serialization_preserve_exact_queue_identity() {
+    let directory = TestDirectory::new();
+    let mut store = directory.open(limits());
+    assert_eq!(
+        store.put_at(&event("first"), StoreKey(5)).unwrap(),
+        StoreKey(5)
+    );
+    let before = fs::read(store.path(StoreKey(5))).unwrap();
+    let mut invalid = event("invalid");
+    invalid.properties = serde_json::json!({"data": "x".repeat(8192)});
+    assert!(store
+        .put_at(&invalid, StoreKey(7))
+        .unwrap_err()
+        .key
+        .is_none());
+    assert_eq!(fs::read(store.path(StoreKey(5))).unwrap(), before);
+    assert_eq!(
+        store.put_at(&event("next"), StoreKey(9)).unwrap(),
+        StoreKey(9)
+    );
+    assert!(store.put_at(&event("stale"), StoreKey(5)).is_err());
+    let page = store.head_batch(10, 4096, 4096).unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .map(|record| record.key)
+            .collect::<Vec<_>>(),
+        vec![StoreKey(5), StoreKey(9)]
+    );
+}
+
+#[test]
+fn head_batch_continues_empty_pages_before_reselecting_eligible_fifo() {
+    for window in [1, 3] {
+        let directory = TestDirectory::new();
+        let mut large = event("preserved");
+        large.properties = serde_json::json!({"data": "x".repeat(2048)});
+        let (prefix, healthy) = {
+            let mut store = directory.open(limits());
+            let prefix: Vec<_> = (0..3).map(|_| store.put(&large).unwrap()).collect();
+            let healthy = store.put(&event("healthy")).unwrap();
+            (prefix, healthy)
+        };
+        let small_limit = record_size(&event("healthy"));
+        let mut store = directory.open(StoreLimits {
+            max_record_bytes: small_limit as u64,
+            ..limits()
+        });
+        let original_bytes = store.bytes;
+        for _ in 0..2 {
+            for key in &prefix {
+                let page = store.head_batch(window, 4096, 4096).unwrap();
+                assert!(page.events.is_empty());
+                assert_eq!(page.errors.len(), 1);
+                assert!(page.advanced && page.more);
+                assert_eq!(
+                    store.recovery_cursor, key.0,
+                    "empty head page restarted its scan"
+                );
+            }
+            let page = store.head_batch(window, 4096, 4096).unwrap();
+            assert_eq!(page.events.len(), 1);
+            assert_eq!(page.events[0].key, healthy);
+            assert!(!page.more);
+        }
+        assert_eq!((store.count, store.bytes), (4, original_bytes));
+        store.remove(healthy).unwrap();
+        assert_eq!(store.count, 3);
+        assert_eq!(
+            store.bytes,
+            prefix
+                .iter()
+                .map(|key| fs::metadata(store.path(*key)).unwrap().len())
+                .sum::<u64>()
+        );
+        drop(store);
+        let page = directory.open(limits()).recover(10, 64 * 1024).unwrap();
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.key)
+                .collect::<Vec<_>>(),
+            prefix
+        );
+    }
+}
+
+#[test]
+fn head_batch_finishes_preserved_scan_before_reselecting_an_appended_replacement() {
+    let directory = TestDirectory::new();
+    let mut large = event("preserved");
+    large.properties = serde_json::json!({"data": "x".repeat(2048)});
+    let (first, second) = {
+        let mut store = directory.open(limits());
+        (store.put(&large).unwrap(), store.put(&large).unwrap())
+    };
+    let mut store = directory.open(StoreLimits {
+        max_events: 2,
+        max_record_bytes: record_size(&event("replacement")) as u64,
+        ..limits()
+    });
+    let first_page = store.head_batch(1, 4096, 4096).unwrap();
+    assert!(first_page.events.is_empty() && first_page.more && first_page.advanced);
+    let replacement = store.put(&event("replacement")).unwrap();
+    assert!(!store.contains(first).unwrap());
+    let last_page = store.head_batch(1, 4096, 4096).unwrap();
+    assert!(last_page.events.is_empty() && last_page.advanced);
+    assert!(
+        !last_page.more && !last_page.retry_pending,
+        "completed unreadable scan must yield"
+    );
+    assert_eq!(store.recovery_cursor, second.0);
+    let restarted = store.head_batch(1, 4096, 4096).unwrap();
+    assert!(restarted.events.is_empty() && restarted.more);
+    let page = store.head_batch(1, 4096, 4096).unwrap();
+    assert_eq!(page.events[0].key, replacement);
+    assert_eq!(store.count, 2);
+    assert_eq!(
+        store.bytes,
+        fs::metadata(store.path(second)).unwrap().len() + page.events[0].bytes
+    );
+}
+
+#[test]
+fn head_batch_retains_healthy_fifo_after_skipped_prefix() {
+    let directory = TestDirectory::new();
+    let mut large = event("preserved");
+    large.properties = serde_json::json!({"data": "x".repeat(8192)});
+    let healthy = {
+        let mut store = directory.open(StoreLimits {
+            max_record_bytes: 16 * 1024,
+            ..limits()
+        });
+        store.put(&large).unwrap();
+        store.put(&large).unwrap();
+        ["first", "second", "third"]
+            .iter()
+            .map(|name| store.put(&event(name)).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let mut store = directory.open(limits());
+    for _ in 0..2 {
+        let page = store.head_batch(3, 4096, 4096).unwrap();
+        assert!(page.events.is_empty() && page.advanced && page.more);
+        assert_eq!(page.errors.len(), 1);
+    }
+    let page = store.head_batch(3, 4096, 4096).unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .map(|event| event.key)
+            .collect::<Vec<_>>(),
+        healthy
+    );
+    assert!(!page.more && !page.retry_pending);
+    assert_eq!(store.count, 5);
+}
+
+#[test]
+fn bounded_head_rollover_includes_its_checkpoint_but_not_later_appends() {
+    let directory = TestDirectory::new();
+    let mut large = event("preserved");
+    large.properties = serde_json::json!({"data": "x".repeat(8192)});
+    {
+        let mut store = directory.open(StoreLimits {
+            max_record_bytes: 16 * 1024,
+            ..limits()
+        });
+        for _ in 0..3 {
+            store.put(&large).unwrap();
+        }
+    }
+    let mut store = directory.open(limits());
+    let checkpoint = StoreKey(4);
+    let first = store.head_batch_through(1, 4096, 4096, checkpoint).unwrap();
+    assert!(first.events.is_empty() && first.more);
+    assert_eq!(store.put(&event("checkpoint")).unwrap(), checkpoint);
+    let later = store.put(&event("later")).unwrap();
+    for _ in 0..2 {
+        let page = store.head_batch_through(1, 4096, 4096, checkpoint).unwrap();
+        assert!(page.events.is_empty() && page.advanced && page.more);
+    }
+    let page = store.head_batch_through(1, 4096, 4096, checkpoint).unwrap();
+    assert_eq!(page.events[0].key, checkpoint);
+    assert!(!page.more);
+    store.remove(checkpoint).unwrap();
+    for index in 0..3 {
+        let page = store.head_batch_through(1, 4096, 4096, checkpoint).unwrap();
+        assert!(page.events.is_empty() && page.advanced);
+        assert_eq!(page.more, index < 2);
+    }
+    assert!(store.contains(later).unwrap());
+    for _ in 0..3 {
+        let page = store.head_batch_through(1, 4096, 4096, later).unwrap();
+        assert!(page.events.is_empty() && page.more);
+    }
+    assert_eq!(
+        store
+            .head_batch_through(1, 4096, 4096, later)
+            .unwrap()
+            .events[0]
+            .key,
+        later
+    );
+    assert_eq!(store.count, 4);
 }
