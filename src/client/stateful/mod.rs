@@ -34,7 +34,8 @@ pub use identity::{Identify, PersonProfiles};
 pub use producer::{Capture, CaptureOutcome};
 #[cfg(feature = "session-replay")]
 pub use replay::{
-    FrameLayout, PixelFormat, ReplayConfig, ReplayFrame, SessionReplay, SubmitOutcome,
+    FrameLayout, FrameUnavailable, PixelFormat, ReplayConfig, ReplayFrame, SessionReplay,
+    SubmitOutcome,
 };
 pub use runtime::{Client, DeliveryOutcome, DrainReport, PersistenceOutcome};
 pub use sessions::{SessionMode, SessionPersistence};

@@ -94,7 +94,7 @@ impl Backend {
         config.host = self.server.base_url();
         config.persistence = Persistence::Memory;
         config.preload_feature_flags = false;
-        config.request_timeout = std::time::Duration::from_secs(2);
+        config.request_timeout = Duration::from_secs(2);
         config.shutdown_timeout = Duration::from_secs(2);
         configure(&mut config);
         let client = Client::init_blocking(config);
@@ -193,7 +193,7 @@ fn with_clock_config(
     config.host = backend.server.base_url();
     config.persistence = Persistence::Memory;
     config.preload_feature_flags = false;
-    config.request_timeout = std::time::Duration::from_secs(2);
+    config.request_timeout = Duration::from_secs(2);
     config.shutdown_timeout = Duration::from_secs(2);
     configure(&mut config);
     let client = Client::init_with_transport_clock(config, clock.clone());
@@ -241,7 +241,7 @@ fn manual_permission_session_ownership_remote_updates_and_no_screenshot_activity
     let client = backend.client(|_| {});
     let replay = client.session_replay();
     assert!(!replay.is_active());
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     replay.start();
     let session = client.peek_session_id().unwrap();
     let sessions = client.state.as_ref().unwrap().snapshot().sessions.clone();
@@ -257,7 +257,7 @@ fn manual_permission_session_ownership_remote_updates_and_no_screenshot_activity
         json!(false),
     );
     assert!(!replay.is_active());
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     // Remote disable closes acquisition, not previously acquired valid work.
     assert_eq!(replay.submit_frame(token), SubmitOutcome::Accepted);
     replace_recording_config(&backend, &client, json!({"sessionRecording":{}}), json!({}));
@@ -277,7 +277,7 @@ fn manual_permission_session_ownership_remote_updates_and_no_screenshot_activity
     assert_eq!(client.state.as_ref().unwrap().snapshot().sessions, sessions);
     client.shutdown_blocking(None);
     assert!(!replay.is_active());
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
 }
 
 #[test]
@@ -290,11 +290,11 @@ fn mobile_recordings_quota_blocks_manual_start_and_new_acquisition() {
     replay.start();
     let session = client.peek_session_id().unwrap();
     assert!(!replay.is_active());
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     replace_recording_config(&backend, &client, json!({"sessionRecording":{}}), json!({}));
     assert!(replay.is_active());
     assert_eq!(client.peek_session_id(), Some(session));
-    assert!(replay.begin_frame(layout()).is_some());
+    assert!(replay.begin_frame(layout()).is_ok());
     client.shutdown_blocking(None);
 }
 
@@ -322,7 +322,7 @@ fn cached_quota_denial_survives_offline_restart_until_config_replacement() {
     let replay = restored.session_replay();
     replay.start();
     assert!(!replay.is_active());
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     offline.delete();
     backend.server.mock(|when, then| {
         when.method(GET).path("/array/phc_test/config");
@@ -332,7 +332,7 @@ fn cached_quota_denial_survives_offline_restart_until_config_replacement() {
     restored.load_remote_config(false);
     wait_for_recording_config(&restored, json!({}));
     assert!(replay.is_active());
-    assert!(replay.begin_frame(layout()).is_some());
+    assert!(replay.begin_frame(layout()).is_ok());
     restored.shutdown_blocking(None);
     drop(restored);
     std::fs::remove_dir_all(root).unwrap();
@@ -367,7 +367,7 @@ fn pool_is_lazy_reuses_grows_and_frees_idle_and_outstanding_buffers_on_stop() {
         .unwrap();
     assert!(bigger.pixels.capacity() >= 48 * layout().row_stride_bytes);
     let other = frame(&replay);
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     replay.stop();
     assert!(controller.pool.lock().unwrap().buffers.is_empty());
     drop(bigger);
@@ -406,7 +406,7 @@ fn invalid_layouts_do_not_reserve_or_allocate_and_wrong_recorder_releases() {
             ..layout()
         },
     ] {
-        assert!(replay.begin_frame(bad).is_none());
+        assert!(replay.begin_frame(bad).is_err());
     }
     assert_eq!(
         other.session_replay().submit_frame(frame(&replay)),
@@ -431,7 +431,7 @@ fn identity_session_and_consent_transitions_reject_readbacks_without_time_expiry
     assert_eq!(replay.submit_frame(stale), SubmitOutcome::Stale);
     let stale = frame(&replay);
     client.opt_out();
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     client.opt_in();
     assert_eq!(replay.submit_frame(stale), SubmitOutcome::Stale);
     let stale = frame(&replay);
@@ -462,7 +462,7 @@ fn admission_spans_encoded_retries_and_retry_after_survives_flushes_beyond_four_
     replay.submit_frame(frame(&replay));
     client.flush_blocking();
     assert_eq!(backend.bodies.lock().unwrap().len(), 1);
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     client.flush_blocking();
     assert_eq!(backend.bodies.lock().unwrap().len(), 1);
     clock.advance(Duration::from_secs(1));
@@ -471,7 +471,7 @@ fn admission_spans_encoded_retries_and_retry_after_survives_flushes_beyond_four_
     for _ in 0..6 {
         clock.advance(Duration::from_secs(600));
         client.transport.as_ref().unwrap().tick();
-        assert!(replay.begin_frame(layout()).is_none());
+        assert!(replay.begin_frame(layout()).is_err());
     }
     let bodies = backend.bodies.lock().unwrap();
     assert_eq!(bodies.len(), 7);
@@ -480,7 +480,7 @@ fn admission_spans_encoded_retries_and_retry_after_survives_flushes_beyond_four_
     backend.reply.lock().unwrap().status = 200;
     clock.advance(Duration::from_secs(600));
     client.transport.as_ref().unwrap().tick();
-    assert!(replay.begin_frame(layout()).is_some());
+    assert!(replay.begin_frame(layout()).is_ok());
 }
 
 #[test]
@@ -565,7 +565,7 @@ fn split_413_terminal_rejection_and_quota_release_only_affected_work() {
         replay.submit_frame(frame(&replay));
         client.flush_blocking();
         assert_eq!(backend.bodies.lock().unwrap().len(), expected);
-        assert!(replay.begin_frame(layout()).is_some());
+        assert!(replay.begin_frame(layout()).is_ok());
     }
 }
 
@@ -695,7 +695,7 @@ fn hooks_redact_drop_fail_closed_and_cannot_reattribute_frames() {
                 true
             );
         }
-        assert!(replay.begin_frame(layout()).is_some());
+        assert!(replay.begin_frame(layout()).is_ok());
     }
 }
 
@@ -710,7 +710,7 @@ fn encoder_callbacks_reject_recursive_capture_and_defer_flush_and_shutdown() {
             if event.event_name() == "$snapshot" {
                 let client = callback_slot.lock().unwrap().upgrade().unwrap();
                 let nested = client.capture("recursive");
-                let no_frame = client.session_replay().begin_frame(layout()).is_none();
+                let no_frame = client.session_replay().begin_frame(layout()).is_err();
                 let flush = client.flush_blocking();
                 let shutdown = client.shutdown_blocking(None);
                 tx.send((nested, no_frame, flush, shutdown)).unwrap();
@@ -865,7 +865,7 @@ fn serialization_limits_split_large_pairs_and_reject_oversized_hook_output() {
     replay.submit_frame(frame(&replay));
     client.flush_blocking();
     assert!(backend.bodies.lock().unwrap().is_empty());
-    assert!(replay.begin_frame(layout()).is_some());
+    assert!(replay.begin_frame(layout()).is_ok());
 }
 
 #[test]
@@ -982,4 +982,14 @@ fn replay_handles_do_not_keep_client_operational_or_namespace_owned() {
     drop(client);
     assert!(!replay.is_active());
     assert_eq!(replay.submit_frame(held), SubmitOutcome::Closed);
+}
+
+#[test]
+fn frame_unavailable_is_a_standard_error() {
+    let error: Box<dyn std::error::Error> = Box::new(FrameUnavailable::AtCapacity);
+    assert_eq!(error.to_string(), "all replay frames are still in flight");
+    assert_eq!(
+        FrameUnavailable::InvalidLayout.to_string(),
+        "invalid frame layout"
+    );
 }

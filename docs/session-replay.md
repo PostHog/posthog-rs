@@ -10,7 +10,7 @@ dimensions unchanged as JPEG. Alpha is ignored.
 ## Capture
 
 ```rust,no_run
-use posthog::stateful::{Client, Config, FrameLayout, PixelFormat, Persistence};
+use posthog::stateful::{Client, Config, FrameLayout, FrameUnavailable, PixelFormat, Persistence};
 
 let mut config = Config::new("phc_project_token");
 config.persistence = Persistence::Memory;
@@ -26,17 +26,18 @@ if !replay.is_active() {
 }
 
 // Immediately before host acquisition/readback:
-let layout = FrameLayout {
-    width: 640,
-    height: 360,
-    row_stride_bytes: 640 * 4,
-    format: PixelFormat::Bgra8888,
-};
-if let Some(mut frame) = replay.begin_frame(layout) {
-    // Fill every pixel from already-masked host data. This example uses black.
-    frame.pixels_mut().fill(0);
-    let outcome = replay.submit_frame(frame);
-    // Accepted means queued work, not successful encoding, hooks or ingestion.
+let layout = FrameLayout::new(640, 360, 640 * 4, PixelFormat::Bgra8888);
+match replay.begin_frame(layout) {
+    Ok(mut frame) => {
+        // Fill every pixel from already-masked host data. This example uses black.
+        frame.pixels_mut().fill(0);
+        let outcome = replay.submit_frame(frame);
+        // Accepted means queued work, not successful encoding, hooks or ingestion.
+    }
+    // Earlier frames are still uploading; try again on a later frame.
+    Err(FrameUnavailable::AtCapacity) => {}
+    // Not recording, not permitted, opted out, no session, closed, …
+    Err(_) => {}
 }
 replay.stop();
 client.shutdown_blocking(None);
@@ -47,8 +48,9 @@ move between threads; it cannot be cloned. Dropping it abandons acquisition.
 At capacity, skip that capture instead of prefetching or accumulating handles.
 
 Layouts require nonzero dimensions fitting JPEG's 16-bit width/height, at least
-four bytes per pixel per row, and checked allocation arithmetic. Allocation
-reservation failures return None. Tokens have no time-based expiry.
+four bytes per pixel per row, and checked allocation arithmetic; otherwise
+`begin_frame` returns `FrameUnavailable::InvalidLayout`. Allocation failures
+return `FrameUnavailable::OutOfMemory`. Tokens have no time-based expiry.
 
 ## Eligibility and attribution
 

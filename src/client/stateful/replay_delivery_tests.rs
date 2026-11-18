@@ -41,7 +41,7 @@ fn remote_quota_preserves_retry_backlog_and_permits_until_delivery() {
     install_permission(json!(false));
     let controller = replay.0.upgrade().unwrap();
     assert_eq!(controller.pool.lock().unwrap().in_flight, 2);
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     backend.reply.lock().unwrap().status = 200;
     clock.advance(Duration::from_secs(1));
     client.transport.as_ref().unwrap().tick();
@@ -55,12 +55,12 @@ fn remote_quota_preserves_retry_backlog_and_permits_until_delivery() {
     );
     assert_eq!(controller.pool.lock().unwrap().in_flight, 0);
     assert!(!replay.is_active());
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     install_permission(json!({}));
     assert!(replay.is_active());
     let first = replay.begin_frame(layout()).unwrap();
     let second = replay.begin_frame(layout()).unwrap();
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     drop((first, second));
     client.shutdown_blocking(None);
 }
@@ -96,7 +96,7 @@ fn admitted_encoding_and_retries_upload_while_still_opted_out() {
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     client.opt_out();
     assert!(!replay.is_active());
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     release_tx.send(()).unwrap();
     client.flush_blocking();
     let original = backend.bodies.lock().unwrap()[0].clone();
@@ -119,7 +119,7 @@ fn admitted_encoding_and_retries_upload_while_still_opted_out() {
         0
     );
     assert!(!replay.is_active());
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     client.shutdown_blocking(None);
 }
 
@@ -291,7 +291,7 @@ fn configured_default_opt_out_prevents_replay_until_opt_in() {
     replay.start();
     assert_eq!(client.peek_session_id(), None);
     assert!(!replay.is_active());
-    assert!(replay.begin_frame(layout()).is_none());
+    assert!(replay.begin_frame(layout()).is_err());
     client.flush_blocking();
     assert_eq!(hooks.load(Ordering::SeqCst), 0);
     assert!(backend.bodies.lock().unwrap().is_empty());
@@ -329,7 +329,7 @@ fn idle_worker_sends_single_frames_and_retries_without_external_wakeups() {
     assert_eq!(first, retried);
     // Both uploads were observed before any explicit flush.
     client.flush_blocking();
-    assert!(replay.begin_frame(layout()).is_some());
+    assert!(replay.begin_frame(layout()).is_ok());
 }
 
 #[test]
@@ -406,7 +406,7 @@ fn terminal_and_quota_diagnostics_reach_the_public_hook_without_sensitive_data()
             assert!(!diagnostic.0.contains(marker));
             assert!(!diagnostic.2.contains(marker));
         }
-        assert!(replay.begin_frame(layout()).is_some());
+        assert!(replay.begin_frame(layout()).is_ok());
     }
 }
 
@@ -415,7 +415,7 @@ fn nonzero_shutdown_budget_clamps_replay_http_and_stops_following_batches() {
     let backend = Backend::new();
     let (tx, rx) = mpsc::channel();
     let client = backend.client(|config| {
-        config.request_timeout = std::time::Duration::from_secs(10);
+        config.request_timeout = Duration::from_secs(10);
         config.on_error(move |error| {
             if let crate::client::PostHogError::Replay(failure) = error {
                 tx.send((failure.message().to_owned(), failure.status()))

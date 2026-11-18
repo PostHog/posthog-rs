@@ -45,12 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let height = number("REPLAY_HEIGHT", 720)?;
     let count = number("REPLAY_FRAMES", 2)?;
     let stride = (width as usize).checked_mul(4).ok_or("invalid row size")?;
-    let layout = FrameLayout {
-        width,
-        height,
-        row_stride_bytes: stride,
-        format: PixelFormat::Bgra8888,
-    };
+    let layout = FrameLayout::new(width, height, stride, PixelFormat::Bgra8888);
     let mut accepted = 0;
     let mut acquisition_us = 0;
     let mut fill_us = 0;
@@ -60,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     for index in 0..count {
         let before = Instant::now();
-        let Some(mut frame) = replay.begin_frame(layout) else {
+        let Ok(mut frame) = replay.begin_frame(layout) else {
             break;
         };
         acquisition_us += before.elapsed().as_micros();

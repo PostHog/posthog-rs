@@ -160,6 +160,19 @@ pub posthog::stateful::FeatureFlagLoadError::Http(u16)
 pub posthog::stateful::FeatureFlagLoadError::InvalidResponse
 pub posthog::stateful::FeatureFlagLoadError::Network
 pub posthog::stateful::FeatureFlagLoadError::QuotaLimited
+#[non_exhaustive] pub enum posthog::stateful::FrameUnavailable
+pub posthog::stateful::FrameUnavailable::AtCapacity
+pub posthog::stateful::FrameUnavailable::Closed
+pub posthog::stateful::FrameUnavailable::InvalidLayout
+pub posthog::stateful::FrameUnavailable::NoSession
+pub posthog::stateful::FrameUnavailable::NotPermitted
+pub posthog::stateful::FrameUnavailable::NotRecording
+pub posthog::stateful::FrameUnavailable::OptedOut
+pub posthog::stateful::FrameUnavailable::OutOfMemory
+pub posthog::stateful::FrameUnavailable::Reentrant
+impl core::error::Error for posthog::stateful::FrameUnavailable
+impl core::fmt::Display for posthog::stateful::FrameUnavailable
+pub fn posthog::stateful::FrameUnavailable::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub enum posthog::stateful::Persistence
 pub posthog::stateful::Persistence::Automatic
 pub posthog::stateful::Persistence::Directory(std::path::PathBuf)
@@ -193,7 +206,6 @@ pub posthog::stateful::SubmitOutcome::Stale
 pub posthog::stateful::SubmitOutcome::WrongRecorder
 #[non_exhaustive] pub struct posthog::stateful::Capture
 pub posthog::stateful::Capture::event: alloc::string::String
-pub posthog::stateful::Capture::fallback_properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub posthog::stateful::Capture::groups: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub posthog::stateful::Capture::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub posthog::stateful::Capture::properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
@@ -336,11 +348,13 @@ pub posthog::stateful::FeatureFlagsUpdate::errors_loading: bool
 pub posthog::stateful::FeatureFlagsUpdate::flags: core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, posthog::stateful::FeatureFlagResult>>
 pub posthog::stateful::FeatureFlagsUpdate::invalid_payloads: bool
 pub posthog::stateful::FeatureFlagsUpdate::partial: bool
-pub struct posthog::stateful::FrameLayout
+#[non_exhaustive] pub struct posthog::stateful::FrameLayout
 pub posthog::stateful::FrameLayout::format: posthog::stateful::PixelFormat
 pub posthog::stateful::FrameLayout::height: u32
 pub posthog::stateful::FrameLayout::row_stride_bytes: usize
 pub posthog::stateful::FrameLayout::width: u32
+impl posthog::stateful::FrameLayout
+pub const fn posthog::stateful::FrameLayout::new(u32, u32, usize, posthog::stateful::PixelFormat) -> Self
 #[non_exhaustive] pub struct posthog::stateful::Identify
 pub posthog::stateful::Identify::distinct_id: alloc::string::String
 pub posthog::stateful::Identify::set: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
@@ -374,7 +388,7 @@ impl core::ops::drop::Drop for posthog::stateful::ReplayFrame
 pub fn posthog::stateful::ReplayFrame::drop(&mut self)
 pub struct posthog::stateful::SessionReplay(_)
 impl posthog::stateful::SessionReplay
-pub fn posthog::stateful::SessionReplay::begin_frame(&self, posthog::stateful::FrameLayout) -> core::option::Option<posthog::stateful::ReplayFrame>
+pub fn posthog::stateful::SessionReplay::begin_frame(&self, posthog::stateful::FrameLayout) -> core::result::Result<posthog::stateful::ReplayFrame, posthog::stateful::FrameUnavailable>
 pub fn posthog::stateful::SessionReplay::is_active(&self) -> bool
 pub fn posthog::stateful::SessionReplay::start(&self)
 pub fn posthog::stateful::SessionReplay::stop(&self)

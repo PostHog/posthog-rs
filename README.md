@@ -44,9 +44,10 @@ without discarding valid identity.
 Event persistence continues while HTTP is blocked. Staging, recovery and memory
 fallback share the configured resident count/serialized-byte limits, plus one
 separately bounded upload view of that logical queue. These are not process-memory
-limits. Newest disk retention permits one replacement-record overage, bounded by
-`max_record_bytes` and included in exact accounting; additional appends wait for
-reclamation. Local acceptance does not guarantee disk persistence or ingestion.
+limits. Newest disk retention permits one replacement-event overage, included in
+exact accounting; additional appends wait for reclamation. Events larger than
+about 1 MiB, roughly the capture endpoint's own limit, are rejected at capture.
+Local acceptance does not guarantee disk persistence or ingestion.
 
 Ordinary session activity commits only after local event admission. Hook drops,
 validation/size rejection and passive getters do not refresh idle time. Identity

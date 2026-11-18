@@ -45,6 +45,7 @@ pub enum PixelFormat {
 
 /// Already-masked and already-downscaled pixels; encoding does not resize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FrameLayout {
     pub width: u32,
     pub height: u32,
@@ -53,6 +54,21 @@ pub struct FrameLayout {
     pub format: PixelFormat,
 }
 impl FrameLayout {
+    /// Describe a frame. `begin_frame` validates the dimensions and stride.
+    pub const fn new(
+        width: u32,
+        height: u32,
+        row_stride_bytes: usize,
+        format: PixelFormat,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            row_stride_bytes,
+            format,
+        }
+    }
+
     fn byte_len(self) -> Option<usize> {
         if self.width == 0
             || self.height == 0
@@ -87,6 +103,52 @@ pub enum SubmitOutcome {
     /// The client or encoder has closed.
     Closed,
 }
+
+/// Why [`SessionReplay::begin_frame`] returned no frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FrameUnavailable {
+    /// Recording was never started, or [`SessionReplay::stop`] was called.
+    NotRecording,
+    /// Project settings disallow recording, including remote controls this
+    /// client does not support yet (sampling, linked flags, minimum duration,
+    /// triggers).
+    NotPermitted,
+    /// The user has opted out.
+    OptedOut,
+    /// No active session: manual session mode without a session, or the
+    /// session expired while the app was in the background.
+    NoSession,
+    /// `max_frames_in_flight` frames are still being encoded or uploaded.
+    /// Skip this frame and try again later.
+    AtCapacity,
+    /// Zero or oversized dimensions, or a row stride smaller than the width.
+    InvalidLayout,
+    /// The pixel buffer could not be allocated.
+    OutOfMemory,
+    /// Called from inside a `before_send` hook.
+    Reentrant,
+    /// The client has shut down.
+    Closed,
+}
+
+impl std::fmt::Display for FrameUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NotRecording => "session replay is not recording",
+            Self::NotPermitted => "project settings do not permit session replay",
+            Self::OptedOut => "the user has opted out",
+            Self::NoSession => "no active session",
+            Self::AtCapacity => "all replay frames are still in flight",
+            Self::InvalidLayout => "invalid frame layout",
+            Self::OutOfMemory => "could not allocate the frame buffer",
+            Self::Reentrant => "called from inside a before_send hook",
+            Self::Closed => "the client has shut down",
+        })
+    }
+}
+
+impl std::error::Error for FrameUnavailable {}
 
 /// A cheap non-owning handle. Obtaining/dropping it does not start/stop recording.
 #[derive(Clone)]
@@ -274,34 +336,46 @@ impl SessionReplay {
                 c.allowed(&s) && s.sessions.active_id(c.session_clock.now()).is_some()
             })
     }
-    /// Reserve immediately before acquisition. None means inactive, invalid
-    /// layout, allocation failure, or end-to-end capacity exhausted.
-    pub fn begin_frame(&self, layout: FrameLayout) -> Option<ReplayFrame> {
-        let bytes = layout.byte_len()?;
-        let c = self.0.upgrade()?;
+    /// Reserve immediately before acquisition. The error says why no frame is
+    /// available; `AtCapacity` clears once earlier frames finish uploading.
+    pub fn begin_frame(&self, layout: FrameLayout) -> Result<ReplayFrame, FrameUnavailable> {
+        let bytes = layout.byte_len().ok_or(FrameUnavailable::InvalidLayout)?;
+        let c = self.0.upgrade().ok_or(FrameUnavailable::Closed)?;
         if super::producer::CaptureGuard::active(c.capture_key) {
-            return None;
+            return Err(FrameUnavailable::Reentrant);
         }
         if c.gate.is_closed() {
-            return None;
+            return Err(FrameUnavailable::Closed);
         }
-        let snapshot = c.state.snapshot()?;
+        let snapshot = c.state.snapshot().ok_or(FrameUnavailable::Closed)?;
+        if snapshot.opt_out.unwrap_or(c.default_opt_out) {
+            return Err(FrameUnavailable::OptedOut);
+        }
         if !c.allowed(&snapshot) {
-            return None;
+            return Err(FrameUnavailable::NotPermitted);
         }
-        let session_id = snapshot.sessions.active_id(c.session_clock.now())?;
+        let session_id = snapshot
+            .sessions
+            .active_id(c.session_clock.now())
+            .ok_or(FrameUnavailable::NoSession)?;
         let mut pool = c.pool.lock().unwrap_or_else(|p| p.into_inner());
-        if !pool.active || pool.in_flight >= pool.max_frames {
-            return None;
+        if !pool.active {
+            return Err(FrameUnavailable::NotRecording);
         }
-        let sequence = pool.sequence.checked_add(1)?;
+        if pool.in_flight >= pool.max_frames {
+            return Err(FrameUnavailable::AtCapacity);
+        }
+        let sequence = pool
+            .sequence
+            .checked_add(1)
+            .ok_or(FrameUnavailable::Closed)?;
         let mut pixels = pool.buffers.pop().unwrap_or_default();
         if pixels
             .try_reserve_exact(bytes.saturating_sub(pixels.len()))
             .is_err()
         {
             pool.buffers.push(pixels);
-            return None;
+            return Err(FrameUnavailable::OutOfMemory);
         }
         pixels.resize(bytes, 0);
         pool.sequence = sequence;
@@ -316,7 +390,7 @@ impl SessionReplay {
             generation: snapshot.generation,
             consent_generation: snapshot.replay_consent_generation,
         };
-        Some(ReplayFrame {
+        Ok(ReplayFrame {
             layout,
             pixels,
             snapshot,
