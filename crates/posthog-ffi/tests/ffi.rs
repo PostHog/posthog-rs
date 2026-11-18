@@ -430,3 +430,40 @@ fn disabled_client_sends_nothing() {
 
     any_request.assert_calls(0);
 }
+
+#[test]
+fn only_evaluate_locally_never_calls_flags() {
+    let server = MockServer::start();
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({"flags": {
+            "beta": {
+                "key": "beta", "enabled": true, "variant": null,
+                "reason": {"code": "condition_match"},
+                "metadata": {"id": 1, "version": 1, "payload": null}
+            }
+        }}));
+    });
+
+    unsafe {
+        let client = new_client(&server);
+        let mut flags = ptr::null_mut();
+        let options =
+            c(r#"{"only_evaluate_locally":true,"person_properties":{"email":"a@example.com"}}"#);
+        let status =
+            posthog_evaluate_flags(client, c("user-1").as_ptr(), options.as_ptr(), &mut flags);
+        assert_eq!(
+            status,
+            PostHogStatus::POSTHOG_STATUS_OK,
+            "{:?}",
+            last_error()
+        );
+        let mut keys = ptr::null_mut();
+        posthog_flags_keys(flags, &mut keys);
+        assert_eq!(take_string(keys), "[]");
+        posthog_flags_free(flags);
+        posthog_client_free(client);
+    }
+
+    flags_mock.assert_calls(0);
+}

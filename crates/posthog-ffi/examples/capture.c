@@ -42,6 +42,7 @@ int main(void) {
     if (posthog_capture(client, event) != POSTHOG_STATUS_OK) return fail("posthog_capture");
     posthog_event_free(event);
 
+    int exit_code = 0;
     PostHogFlags *flags = NULL;
     if (posthog_evaluate_flags(client, "user-123", NULL, &flags) == POSTHOG_STATUS_OK) {
         bool enabled = false;
@@ -49,9 +50,9 @@ int main(void) {
         printf("new-onboarding: %s\n", enabled ? "on" : "off");
         posthog_flags_free(flags);
     } else {
-        fail("posthog_evaluate_flags");
+        exit_code = fail("posthog_evaluate_flags");
     }
 
     posthog_client_free(client);
-    return 0;
+    return exit_code;
 }
