@@ -29,6 +29,7 @@ Read the checklist first, then the sections that apply to you.
 - [ ] You `match` on `Endpoint` or `FeatureFlagsResponse`, or build an SDK response type with a struct literal → [Fix removed APIs](#fix-removed-apis)
 - [ ] You call `is_feature_enabled`, `get_feature_flag`, `get_feature_flag_payload`, or `get_feature_flags` → [Replace flag methods](#replace-flag-methods)
 - [ ] You build `EvaluateFlagsOptions` with a struct literal → [Replace flag methods](#replace-flag-methods)
+- [ ] You set `local_evaluation_only` and call `evaluate_flags` → [Replace flag methods](#replace-flag-methods)
 - [ ] You filter logs on the `posthog_rs` target, or match the SDK's log lines → [Update log filters](#update-log-filters)
 - [ ] Your `before_send` hook returns a new `Event` → [Copy options in before_send](#copy-options-in-before_send)
 - [ ] You send large `$ai_` events, or use the `$ai_` prefix for your own events → [Route AI events](#route-ai-events)
@@ -207,6 +208,8 @@ let payload = flags.get_flag_payload("checkout-variant");
 ```
 
 The blocking client uses the same calls without `.await`.
+
+`evaluate_flags` now honors `local_evaluation_only`, like the single-flag methods did in 0.x.x. When it's set, a flag that local evaluation can't resolve is missing from the snapshot instead of being fetched from `/flags`. In 0.x.x, `evaluate_flags` ignored this option and called `/flags`. To keep that behavior, leave `local_evaluation_only` unset and set `only_evaluate_locally` on `EvaluateFlagsOptions` for the calls that must stay local.
 
 `EvaluateFlagsOptions` is now non-exhaustive. Construct it with `Default` and assign the fields you need instead of using a struct literal:
 
