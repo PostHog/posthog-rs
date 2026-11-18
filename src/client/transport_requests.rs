@@ -255,7 +255,7 @@ mod tests {
         let transport =
             TransportHandle::spawn_stateful(options(flags_server.base_url()), None, 4096).unwrap();
         let (url, entered, release, server) = blocked_server();
-        let task = flags::Task::new(&serde_json::json!({"distinct_id": "person"}), |_| {}).unwrap();
+        let task = flags::Task::new(&serde_json::json!({"distinct_id": "person"}), |_| {});
         assert!(
             transport.schedule_remote_config(remote_config::Task::new(url, move |_| Some(task)))
         );

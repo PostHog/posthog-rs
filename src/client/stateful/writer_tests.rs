@@ -76,7 +76,7 @@ fn memory_close_clears_report_tracking_when_contended_mutation_releases_state() 
 #[test]
 fn shared_access_validates_candidates_without_owning_writer_lifetime() {
     let path = std::env::temp_dir().join(format!("posthog-state-access-{}", uuid::Uuid::now_v7()));
-    let store = FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096)
+    let store = FileStateStore::open(StorageDirectory::open(&path).unwrap())
         .unwrap()
         .store;
     let writer = StateWriter::new(
@@ -158,7 +158,6 @@ fn flag_http_uses_shared_worker_without_blocking_state_mutation_or_admission() {
                     .then(|| value.trim().parse().unwrap())
             })
             .unwrap();
-        assert!(length <= crate::client::transport::flags::MAX_REQUEST_BYTES);
         stream.read_exact(&mut vec![0; length]).unwrap();
         entered_tx.send(()).unwrap();
         release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -192,15 +191,15 @@ fn flag_http_uses_shared_worker_without_blocking_state_mutation_or_admission() {
     .unwrap();
     let access = writer.access();
     let (complete_tx, complete_rx) = mpsc::channel();
-    assert!(transport.schedule_flags(
-        Task::new(&json!({"distinct_id":"initial"}), move |result| {
+    assert!(transport.schedule_flags(Task::new(
+        &json!({"distinct_id":"initial"}),
+        move |result| {
             assert!(result.is_ok());
             // A completion uses the original validated lock, not a new state owner.
             let result = access.mutate(|state| state.distinct_id.clone());
             complete_tx.send(result).unwrap();
-        })
-        .unwrap()
-    ));
+        }
+    )));
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     let updated = writer.mutate(|state| state.distinct_id = "while-http-blocked".into());
     let mut event =
@@ -269,7 +268,6 @@ impl StateStore for ControlledStore {
 
 fn options() -> WriterOptions {
     WriterOptions {
-        max_bytes: 4096,
         shutdown_timeout: Duration::ZERO,
         ..WriterOptions::default()
     }
@@ -537,7 +535,7 @@ fn shutdown_does_not_start_a_newer_write_after_its_deadline() {
 }
 
 #[test]
-fn no_op_invalid_and_oversized_mutations_do_not_change_memory_or_revision() {
+fn no_op_and_invalid_mutations_do_not_change_memory_or_revision() {
     let writer = StateWriter::new(
         Snapshot::anonymous("initial".into()),
         Backend::Memory,
@@ -550,10 +548,6 @@ fn no_op_invalid_and_oversized_mutations_do_not_change_memory_or_revision() {
     assert_eq!(
         writer.update(|state| state.anonymous_id.clear()),
         Err(UpdateError::Invalid)
-    );
-    assert_eq!(
-        writer.update(|state| state.distinct_id = "x".repeat(4096)),
-        Err(UpdateError::Full)
     );
     assert_eq!(*writer.snapshot(), Snapshot::anonymous("initial".into()));
     assert_eq!(writer.checkpoint(), 1);
@@ -766,7 +760,7 @@ fn destructor_panic_cannot_leave_shutdown_waiters_asleep() {
 #[test]
 fn new_and_updated_identity_survive_real_file_shutdown_and_restart() {
     let path = std::env::temp_dir().join(format!("posthog-state-writer-{}", uuid::Uuid::now_v7()));
-    let opened = FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096).unwrap();
+    let opened = FileStateStore::open(StorageDirectory::open(&path).unwrap()).unwrap();
     assert!(opened.snapshot.is_none());
     let store = opened.store;
     let writer = StateWriter::new(
@@ -791,7 +785,7 @@ fn new_and_updated_identity_survive_real_file_shutdown_and_restart() {
     writer.request_close();
     assert_eq!(writer.join_blocking(), DrainOutcome::Persisted);
     drop(writer);
-    let loaded = FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096)
+    let loaded = FileStateStore::open(StorageDirectory::open(&path).unwrap())
         .unwrap()
         .snapshot;
     assert_eq!(loaded, Some(Snapshot::anonymous("latest".into())));

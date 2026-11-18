@@ -201,46 +201,31 @@ fn bootstrap_uses_final_reconciled_identity_before_preload() {
 }
 
 #[test]
-fn failed_preload_retains_bootstrap_but_valid_oversized_cache_ends_global_use() {
-    for oversized in [false, true] {
-        let response = if oversized {
-            let flags: HashMap<_, _> = (0..21).map(|i| (format!("key-{i}"), true)).collect();
-            (
-                200,
-                json!({"featureFlags":flags, "requestId":"x".repeat(128*1024)}),
-            )
-        } else {
-            (503, json!({}))
-        };
-        let server = Server::new(vec![response]);
-        let mut config = config(&server.host);
-        config.preload_feature_flags = true;
-        bootstrap(&mut config);
-        let (tx, rx) = mpsc::channel();
-        config.on_error(move |error| {
-            tx.send(matches!(error, crate::PostHogError::FeatureFlags(_)))
-                .unwrap()
-        });
-        let client = Client::init_blocking(config);
-        server.request();
-        server.respond();
-        client.transport.as_ref().unwrap().request_barrier();
-        server.finish();
-        assert!(rx.recv_timeout(WAIT).unwrap());
-        let state = client.state.as_ref().unwrap().snapshot();
-        assert_eq!(state.flag_load.remote_received, oversized);
-        assert_eq!(
-            state.flag_load.completed.as_ref().unwrap().error,
-            Some(if oversized {
-                flags::LoadError::CacheTooLarge
-            } else {
-                flags::LoadError::Http(503)
-            })
-        );
-        assert_eq!(state.flags.cache.as_ref().unwrap().flags.len(), 2);
-        assert!(state.flag_load.bootstrap.is_some());
-        assert!(!client.is_disabled());
-    }
+fn failed_preload_retains_bootstrap() {
+    let server = Server::new(vec![(503, json!({}))]);
+    let mut config = config(&server.host);
+    config.preload_feature_flags = true;
+    bootstrap(&mut config);
+    let (tx, rx) = mpsc::channel();
+    config.on_error(move |error| {
+        tx.send(matches!(error, crate::PostHogError::FeatureFlags(_)))
+            .unwrap()
+    });
+    let client = Client::init_blocking(config);
+    server.request();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    assert!(rx.recv_timeout(WAIT).unwrap());
+    let state = client.state.as_ref().unwrap().snapshot();
+    assert!(!state.flag_load.remote_received);
+    assert_eq!(
+        state.flag_load.completed.as_ref().unwrap().error,
+        Some(flags::LoadError::Http(503))
+    );
+    assert_eq!(state.flags.cache.as_ref().unwrap().flags.len(), 2);
+    assert!(state.flag_load.bootstrap.is_some());
+    assert!(!client.is_disabled());
 }
 
 #[test]
@@ -283,91 +268,6 @@ fn obsolete_response_does_not_mark_bootstrap_remote_and_reset_drops_all_context(
     assert!(state.flag_load.remote_received);
     assert!(state.flag_load.bootstrap.is_none());
     assert!(state.flags.cache.as_ref().unwrap().flags.is_empty());
-}
-
-#[test]
-fn bootstrap_limits_are_atomic_and_ignore_unserved_payloads() {
-    for count_overflow in [false, true] {
-        let directory =
-            std::env::temp_dir().join(format!("posthog-bootstrap-bound-{}", uuid::Uuid::now_v7()));
-        let mut initial = config("http://127.0.0.1:1");
-        initial.persistence = Persistence::Directory(directory.clone());
-        let client = Client::init_blocking(initial);
-        seed(&client);
-        client.shutdown_blocking(None);
-        drop(client);
-        let mut config = config("http://127.0.0.1:1");
-        config.persistence = Persistence::Directory(directory.clone());
-        bootstrap(&mut config);
-        if count_overflow {
-            config.bootstrap_feature_flags = Some(
-                (0..=flags::MAX_FLAGS)
-                    .map(|i| (i.to_string(), FlagValue::Boolean(true)))
-                    .collect(),
-            );
-        } else {
-            config
-                .bootstrap_feature_flag_payloads
-                .as_mut()
-                .unwrap()
-                .insert(
-                    "keep".into(),
-                    json!("x".repeat(crate::client::stateful::flag_state::MAX_CACHE_BYTES)),
-                );
-        }
-        let (tx, rx) = mpsc::channel();
-        config.on_error(move |error| {
-            tx.send(matches!(error, crate::PostHogError::FeatureFlags(_)))
-                .unwrap()
-        });
-        let client = Client::init_blocking(config);
-        assert!(rx.recv_timeout(WAIT).unwrap());
-        assert!(!client.is_disabled());
-        let state = client.state.as_ref().unwrap().snapshot();
-        assert_eq!(
-            state.flags.cache.as_ref().unwrap().flags["old"]
-                .record
-                .payload,
-            Some(json!("old-payload"))
-        );
-        assert!(state.flag_load.bootstrap.is_none());
-        client.shutdown_blocking(None);
-        drop(client);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-    let mut config = config("http://127.0.0.1:1");
-    bootstrap(&mut config);
-    config
-        .bootstrap_feature_flag_payloads
-        .as_mut()
-        .unwrap()
-        .insert(
-            "disabled".into(),
-            json!("x".repeat(crate::client::stateful::flag_state::MAX_CACHE_BYTES)),
-        );
-    let (tx, rx) = mpsc::channel();
-    config.on_error(move |error| {
-        if matches!(error, crate::PostHogError::FeatureFlags(_)) {
-            tx.send(()).unwrap();
-        }
-    });
-    let client = Client::init_blocking(config);
-    client.flush_blocking();
-    assert_eq!(
-        client
-            .state
-            .as_ref()
-            .unwrap()
-            .snapshot()
-            .flags
-            .cache
-            .as_ref()
-            .unwrap()
-            .flags
-            .len(),
-        2
-    );
-    assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
 }
 
 #[test]

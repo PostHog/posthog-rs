@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use super::storage::{encode_snapshot, StateStore};
+use super::storage::StateStore;
 use super::Snapshot;
 use crate::client::common::report_storage_error;
 use crate::client::retry::exponential_backoff;
@@ -24,7 +24,6 @@ pub(super) enum Backend {
 
 #[derive(Clone, Copy)]
 pub(super) struct WriterOptions {
-    pub(super) max_bytes: usize,
     pub(super) coalesce: Duration,
     pub(super) retry_initial_ms: u64,
     pub(super) retry_max_ms: u64,
@@ -34,7 +33,6 @@ pub(super) struct WriterOptions {
 impl Default for WriterOptions {
     fn default() -> Self {
         Self {
-            max_bytes: 1024 * 1024,
             coalesce: Duration::from_millis(250),
             retry_initial_ms: 100,
             retry_max_ms: 30_000,
@@ -299,7 +297,9 @@ impl StateAccess {
                 }
                 return Ok((state.revision, result));
             }
-            validate(&candidate, self.options.max_bytes)?;
+            if !candidate.is_valid() {
+                return Err(UpdateError::Invalid);
+            }
             let revision = state.revision.checked_add(1).ok_or(UpdateError::Full)?;
             state.snapshot = Arc::new(candidate);
             state.revision = revision;
@@ -350,13 +350,12 @@ impl StateWriter {
         clock: Arc<dyn Clock>,
         deadline: Arc<Mutex<Option<Instant>>>,
     ) -> Result<Self, UpdateError> {
-        if options.max_bytes == 0
-            || options.retry_initial_ms == 0
-            || options.retry_initial_ms > options.retry_max_ms
-        {
+        if options.retry_initial_ms == 0 || options.retry_initial_ms > options.retry_max_ms {
             return Err(UpdateError::Invalid);
         }
-        validate(&snapshot, options.max_bytes)?;
+        if !snapshot.is_valid() {
+            return Err(UpdateError::Invalid);
+        }
         let (mode, store, restored) = match backend {
             Backend::Memory => (Mode::Memory, None, false),
             Backend::Unavailable => (Mode::Unavailable, None, false),
@@ -522,10 +521,7 @@ impl StateWriter {
                 candidate.session = candidate.sessions.stored();
             }
             let persisted_changed = !candidate.same_persisted_state(&state.snapshot);
-            if persisted_changed
-                && (validate(&candidate, self.options.max_bytes).is_err()
-                    || state.revision == u64::MAX)
-            {
+            if persisted_changed && state.revision == u64::MAX {
                 return false;
             }
             if !admit() {
@@ -740,22 +736,6 @@ impl Drop for StateWriter {
             self.join();
         }
     }
-}
-
-fn validate(snapshot: &Snapshot, max_bytes: usize) -> Result<(), UpdateError> {
-    if !snapshot.is_valid() {
-        return Err(UpdateError::Invalid);
-    }
-    // No candidate may make unrelated future state changes unpersistable.
-    // Use the persistence codec itself, including its byte and decoder bounds.
-    encode_snapshot(snapshot, max_bytes as u64).map_err(|error| {
-        if error.kind() == io::ErrorKind::InvalidInput {
-            UpdateError::Full
-        } else {
-            UpdateError::Invalid
-        }
-    })?;
-    Ok(())
 }
 
 fn run_worker(

@@ -30,8 +30,8 @@ impl FeatureFlagsUpdate {
         let completion = snapshot.flag_load.completed.as_ref();
         let cache = snapshot.flags.cache.as_ref();
         let context = completion
-            .map(|value| value.context.as_ref())
-            .or_else(|| cache.map(|cache| &cache.context))?;
+            .map(|value| value.context.clone())
+            .or_else(|| cache.map(|cache| Arc::new(cache.context.clone())))?;
         let error = completion.and_then(|value| value.error);
         let partial = completion.is_some_and(|value| value.partial);
         let invalid_payloads = completion.is_some_and(|value| value.invalid_payloads);
@@ -46,7 +46,7 @@ impl FeatureFlagsUpdate {
                     })
                     .collect()
             }),
-            context: FeatureFlagContext::from_context(context),
+            context: FeatureFlagContext::new(context),
             errors_loading: error.is_some() || partial || invalid_payloads,
             error,
             partial,

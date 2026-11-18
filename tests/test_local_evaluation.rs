@@ -161,6 +161,366 @@ fn test_local_evaluation_with_cohorts_payload() {
     assert_eq!(result.unwrap(), Some(FlagValue::Boolean(false)));
 }
 
+fn evaluate(
+    evaluator: &LocalEvaluator,
+    key: &str,
+    properties: &HashMap<String, serde_json::Value>,
+) -> Result<Option<FlagValue>, posthog::InconclusiveMatchError> {
+    evaluator.evaluate_flag(
+        key,
+        "user-123",
+        properties,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+}
+
+/// The payload from the report: one flag with a value-less `is_not_set` filter
+/// next to a healthy flag. Both load.
+#[test]
+fn test_valueless_is_not_set_filter_does_not_fail_definitions() {
+    let response: LocalEvaluationResponse = serde_json::from_str(
+        r#"{
+          "flags": [
+            {
+              "key": "healthy-flag",
+              "active": true,
+              "filters": { "groups": [ { "properties": [], "rollout_percentage": 100 } ] }
+            },
+            {
+              "key": "flag-with-valueless-is-not-set",
+              "active": true,
+              "filters": {
+                "groups": [
+                  {
+                    "properties": [ { "key": "plan", "type": "person", "operator": "is_not_set" } ],
+                    "rollout_percentage": 100
+                  }
+                ]
+              }
+            }
+          ],
+          "group_type_mapping": {},
+          "cohorts": {}
+        }"#,
+    )
+    .expect("a value-less is_not_set filter should deserialize");
+    assert_eq!(response.flags.len(), 2);
+
+    let cache = FlagCache::new();
+    let evaluator = LocalEvaluator::new(cache.clone());
+    cache.update(response);
+
+    let with_plan = HashMap::from([("plan".to_string(), json!("pro"))]);
+    assert_eq!(
+        evaluate(&evaluator, "healthy-flag", &with_plan).unwrap(),
+        Some(FlagValue::Boolean(true))
+    );
+    assert_eq!(
+        evaluate(&evaluator, "flag-with-valueless-is-not-set", &with_plan).unwrap(),
+        Some(FlagValue::Boolean(false))
+    );
+}
+
+/// Regression test: the API accepts `is_set` / `is_not_set` filters without a
+/// `value`, on flags and on cohort leaves alike. Before the fix one such filter
+/// failed to deserialize and took down the entire `LocalEvaluationResponse`,
+/// so no flag in the project could be evaluated locally.
+#[test]
+fn test_local_evaluation_with_valueless_presence_operators() {
+    let presence_flag = |key: &str, operator: &str| {
+        json!({
+            "key": key,
+            "active": true,
+            "filters": {
+                "groups": [
+                    {
+                        "properties": [{"key": "plan", "type": "person", "operator": operator}],
+                        "rollout_percentage": 100.0
+                    }
+                ]
+            }
+        })
+    };
+    let payload = json!({
+        "flags": [
+            {
+                "key": "plain-flag",
+                "active": true,
+                "filters": {"groups": [{"properties": [], "rollout_percentage": 100.0}]}
+            },
+            presence_flag("plan-set", "is_set"),
+            presence_flag("plan-not-set", "is_not_set"),
+            {
+                "key": "cohort-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        {
+                            "properties": [{"key": "id", "value": 7, "type": "cohort"}],
+                            "rollout_percentage": 100.0
+                        }
+                    ]
+                }
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {
+            "7": {
+                "type": "AND",
+                "values": [{"key": "plan", "type": "person", "operator": "is_set"}]
+            }
+        }
+    });
+
+    let response: LocalEvaluationResponse =
+        serde_json::from_value(payload).expect("value-less presence filters should deserialize");
+    assert_eq!(response.flags.len(), 4);
+
+    let cache = FlagCache::new();
+    let evaluator = LocalEvaluator::new(cache.clone());
+    cache.update(response);
+
+    let with_plan = HashMap::from([("plan".to_string(), json!("pro"))]);
+    let without_plan = HashMap::new();
+
+    for (key, expected) in [
+        ("plain-flag", true),
+        ("plan-set", true),
+        ("plan-not-set", false),
+        ("cohort-flag", true),
+    ] {
+        assert_eq!(
+            evaluate(&evaluator, key, &with_plan).unwrap(),
+            Some(FlagValue::Boolean(expected)),
+            "{}",
+            key
+        );
+    }
+
+    // A property missing from the caller's context stays inconclusive.
+    for key in ["plan-set", "plan-not-set", "cohort-flag"] {
+        assert!(evaluate(&evaluator, key, &without_plan).is_err(), "{}", key);
+    }
+}
+
+fn poller_for(server: &MockServer, cache: FlagCache) -> FlagPoller {
+    let config = LocalEvaluationConfig {
+        secret_key: "test_personal_key".to_string(),
+        project_api_key: "test_project_key".to_string(),
+        api_host: server.base_url(),
+        poll_interval: Duration::from_secs(60),
+        request_timeout: Duration::from_secs(5),
+    };
+    FlagPoller::new(config, cache)
+}
+
+/// A definition this SDK cannot read is skipped on its own when definitions
+/// load: the other flags in the response still load, and the skipped flag is
+/// absent from the cache, like any other flag local evaluation cannot resolve.
+#[test]
+fn test_unreadable_flag_definition_does_not_drop_other_flags() {
+    let server = MockServer::start();
+    let definitions = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(
+                r#"{
+                    "flags": [
+                        {
+                            "key": "exact-without-value",
+                            "active": true,
+                            "filters": {"groups": [{
+                                "properties": [{"key": "plan", "type": "person", "operator": "exact"}],
+                                "rollout_percentage": 100
+                            }]}
+                        },
+                        {"key": "active-is-not-a-boolean", "active": "yes"},
+                        {"key": "duplicate-key", "active": false, "active": true},
+                        {
+                            "key": "plain-flag",
+                            "active": true,
+                            "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+                        }
+                    ],
+                    "group_type_mapping": {},
+                    "cohorts": {}
+                }"#,
+            );
+    });
+
+    let cache = FlagCache::new();
+    poller_for(&server, cache.clone())
+        .load_flags()
+        .expect("unreadable flags should not fail the load");
+    definitions.assert();
+
+    let evaluator = LocalEvaluator::new(cache);
+    let properties = HashMap::from([("plan".to_string(), json!("pro"))]);
+    assert_eq!(
+        evaluate(&evaluator, "plain-flag", &properties).unwrap(),
+        Some(FlagValue::Boolean(true))
+    );
+    for skipped in [
+        "exact-without-value",
+        "active-is-not-a-boolean",
+        "duplicate-key",
+    ] {
+        assert_eq!(
+            evaluate(&evaluator, skipped, &properties).unwrap(),
+            None,
+            "{}",
+            skipped
+        );
+    }
+}
+
+/// Skipping is confined to flag definitions that fail on their own. A response
+/// that is unreadable for any other reason is still rejected whole, and the
+/// definitions already cached stay in place.
+#[test]
+fn test_definitions_unreadable_outside_flags_are_still_rejected() {
+    let unreadable_flag = r#"{"key":"active-is-not-a-boolean","active":"yes"}"#;
+    let bodies = [
+        // A field outside `flags` has the wrong type.
+        [
+            r#"{"flags":["#,
+            unreadable_flag,
+            r#"],"group_type_mapping":"not-a-map"}"#,
+        ]
+        .concat(),
+        // A key outside `flags` is repeated.
+        [
+            r#"{"flags":["#,
+            unreadable_flag,
+            r#"],"cohorts":{},"cohorts":{}}"#,
+        ]
+        .concat(),
+    ];
+
+    for body in bodies {
+        let server = MockServer::start();
+        let definitions = server.mock(|when, then| {
+            when.method(GET).path("/flags/definitions/");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(&body);
+        });
+
+        let cache = FlagCache::new();
+        cache.update(
+            serde_json::from_value(json!({
+                "flags": [{"key": "cached-flag", "active": true}]
+            }))
+            .unwrap(),
+        );
+
+        let result = poller_for(&server, cache.clone()).load_flags();
+        definitions.assert();
+        assert!(
+            matches!(result, Err(posthog::Error::Serialization(_))),
+            "{}",
+            body
+        );
+        assert!(cache.get_flag("cached-flag").is_some(), "{}", body);
+    }
+}
+
+/// A filter without a value, on an operator that compares against one, makes
+/// its flag unreadable. That flag alone is deferred: the client has no local
+/// result for it and asks `/flags`, while the other flag still resolves locally.
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_value_requiring_operator_without_value_defers_only_that_flag() {
+    let server = MockServer::start();
+    let definitions = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(
+                r#"{
+                    "flags": [
+                        {
+                            "key": "exact-without-value",
+                            "active": true,
+                            "filters": {"groups": [{
+                                "properties": [{"key": "plan", "type": "person", "operator": "exact"}],
+                                "rollout_percentage": 100
+                            }]}
+                        },
+                        {
+                            "key": "plain-flag",
+                            "active": true,
+                            "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+                        }
+                    ],
+                    "group_type_mapping": {},
+                    "cohorts": {}
+                }"#,
+            );
+    });
+    let remote = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({
+            "flags": {
+                "exact-without-value": {
+                    "key": "exact-without-value",
+                    "enabled": true,
+                    "variant": null,
+                    "reason": {
+                        "code": "condition_match",
+                        "description": null,
+                        "condition_index": 0
+                    },
+                    "metadata": {"id": 1, "version": 1, "description": null, "payload": null}
+                }
+            }
+        }));
+    });
+
+    let options = ClientOptionsBuilder::default()
+        .host(server.base_url())
+        .api_key("test_project_key".to_string())
+        .secret_key("test_personal_key".to_string())
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(60)
+        .build()
+        .unwrap();
+    let client = posthog::client(options).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    definitions.assert();
+
+    let evaluate = |key: &str, only_evaluate_locally: bool| {
+        let mut options = EvaluateFlagsOptions::default();
+        options.flag_keys = Some(vec![key.to_string()]);
+        options.person_properties = Some(HashMap::from([("plan".to_string(), json!("pro"))]));
+        options.only_evaluate_locally = only_evaluate_locally;
+        client.evaluate_flags("user-123", options)
+    };
+
+    // The readable flag resolves locally, with no request to `/flags`.
+    let snapshot = evaluate("plain-flag", false).await.unwrap();
+    assert_eq!(
+        snapshot.get_flag("plain-flag"),
+        Some(FlagValue::Boolean(true))
+    );
+    remote.assert_calls(0);
+
+    // The other one has no local result ...
+    let snapshot = evaluate("exact-without-value", true).await.unwrap();
+    assert_eq!(snapshot.get_flag("exact-without-value"), None);
+    remote.assert_calls(0);
+
+    // ... and `/flags` decides it when remote evaluation is allowed.
+    let snapshot = evaluate("exact-without-value", false).await.unwrap();
+    assert_eq!(
+        snapshot.get_flag("exact-without-value"),
+        Some(FlagValue::Boolean(true))
+    );
+    remote.assert_calls(1);
+}
+
 /// A cyclic cohort definition must leave local evaluation inconclusive so the
 /// flag falls back to `/flags`. Before the cycle guard this recursed until the
 /// stack was exhausted, which aborts the process rather than panicking, taking

@@ -48,6 +48,23 @@ use serde_json::Value;
 
 use crate::client::transport::remote_config::RemoteConfig;
 
+/// Saved JSON must stay readable by serde_json's 128-level decoder, including
+/// the few levels the state record adds around application values.
+const MAX_VALUE_DEPTH: usize = 100;
+
+pub(super) fn within_depth<'a>(values: impl IntoIterator<Item = &'a Value>) -> bool {
+    fn check(value: &Value, remaining: usize) -> bool {
+        match value {
+            Value::Array(items) => remaining > 0 && items.iter().all(|v| check(v, remaining - 1)),
+            Value::Object(map) => remaining > 0 && map.values().all(|v| check(v, remaining - 1)),
+            _ => true,
+        }
+    }
+    values
+        .into_iter()
+        .all(|value| check(value, MAX_VALUE_DEPTH))
+}
+
 /// The complete mandatory state persisted as one versioned snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Snapshot {
@@ -125,6 +142,7 @@ impl Snapshot {
 
     fn is_valid(&self) -> bool {
         self.flags.is_valid()
+            && within_depth(self.registered.values())
             && self
                 .remote_config
                 .as_ref()

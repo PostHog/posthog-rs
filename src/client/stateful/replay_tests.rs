@@ -94,7 +94,7 @@ impl Backend {
         config.host = self.server.base_url();
         config.persistence = Persistence::Memory;
         config.preload_feature_flags = false;
-        config.request_timeout_seconds = 2;
+        config.request_timeout = std::time::Duration::from_secs(2);
         config.shutdown_timeout = Duration::from_secs(2);
         configure(&mut config);
         let client = Client::init_blocking(config);
@@ -193,7 +193,7 @@ fn with_clock_config(
     config.host = backend.server.base_url();
     config.persistence = Persistence::Memory;
     config.preload_feature_flags = false;
-    config.request_timeout_seconds = 2;
+    config.request_timeout = std::time::Duration::from_secs(2);
     config.shutdown_timeout = Duration::from_secs(2);
     configure(&mut config);
     let client = Client::init_with_transport_clock(config, clock.clone());

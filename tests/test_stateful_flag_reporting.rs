@@ -147,7 +147,7 @@ fn defaults_overrides_and_consent_share_accepted_dedup() {
         assert!(result.enabled);
         assert_eq!(result.variant, None);
         assert_eq!(result.payload, Some(Value::Null));
-        assert_eq!(result.context.distinct_id, "device");
+        assert_eq!(result.context.distinct_id(), "device");
         assert_eq!(events.lock().unwrap().len(), usize::from(default));
         assert_eq!(
             client
@@ -391,7 +391,6 @@ fn rejected_admission_does_not_commit_a_report() {
     accept(&server);
     let mut c = config(&server);
     c.max_queue_bytes = 2048;
-    c.max_record_bytes = 2048;
     let events = observe(&mut c);
     let attempts = AtomicUsize::new(0);
     c.before_send(move |mut event| {
@@ -509,9 +508,9 @@ fn partial_reload_preserves_per_record_metadata_and_ends_bootstrap_globally() {
     let retained = client.feature_flag("a").get().unwrap();
     let current = client.feature_flag("b").get().unwrap();
     assert_eq!(retained, before);
-    assert!(retained.context.person_properties.is_empty());
+    assert!(retained.context.person_properties().is_empty());
     assert_eq!(retained.request_id, None);
-    assert_eq!(current.context.person_properties["plan"], "pro");
+    assert_eq!(current.context.person_properties()["plan"], "pro");
     assert_eq!(current.request_id.as_deref(), Some("partial"));
     assert!(current.partial);
     assert!(!current.enabled);
@@ -684,7 +683,7 @@ fn reset_or_shutdown_from_hook_does_not_deadlock_or_replace_returned_result() {
         let client = Arc::new(Client::init_blocking(c));
         *weak.lock().unwrap() = Arc::downgrade(&client);
         let result = client.feature_flag("a").get().unwrap();
-        assert_eq!(result.context.distinct_id, "device");
+        assert_eq!(result.context.distinct_id(), "device");
         assert!(result.enabled);
         assert_eq!(
             client.feature_flag("a").get().map(|flag| flag.enabled),

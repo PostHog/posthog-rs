@@ -51,8 +51,8 @@ reclamation. Local acceptance does not guarantee disk persistence or ingestion.
 Ordinary session activity commits only after local event admission. Hook drops,
 validation/size rejection and passive getters do not refresh idle time. Identity
 and session attribution is frozen before hooks; hooks can still edit wire fields.
-Sleep-inclusive elapsed clocks are used where supported, independently of wall
-clock corrections.
+Session idle and maximum-age limits use wall-clock time, as the other stateful
+PostHog SDKs do, so time spent suspended counts toward them.
 
 Stateful shutdown selects one deadline for SDK-controlled waiting, including Drop;
 concurrent/later calls cannot extend it. `DeliveryOutcome::Stopped` means actual

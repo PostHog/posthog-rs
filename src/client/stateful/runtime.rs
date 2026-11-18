@@ -209,7 +209,6 @@ impl Client {
         let restored = RestoredStorage::open(
             &config.persistence,
             &scope,
-            config.max_state_bytes as u64,
             config.event_limits(),
             &config.on_error,
         );
@@ -276,8 +275,7 @@ impl Client {
             snapshot,
             backend,
             WriterOptions {
-                max_bytes: config.max_state_bytes,
-                coalesce: config.state_coalesce,
+                coalesce: config.state_write_delay,
                 shutdown_timeout: config.shutdown_timeout,
                 ..WriterOptions::default()
             },

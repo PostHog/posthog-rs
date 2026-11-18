@@ -128,7 +128,7 @@ fn setup_runtime_order_panic_isolation_drop_and_silent_opted_out_reads() {
         let (actual, mut data) = rx.recv_timeout(WAIT).unwrap();
         assert_eq!(actual, id);
         assert!(!data.errors_loading);
-        assert_eq!(data.context.distinct_id, "device");
+        assert_eq!(data.context.distinct_id(), "device");
         let a = data.flags.as_mut().unwrap().get_mut("a").unwrap();
         assert_eq!(a.payload, Some(Value::Null));
         a.payload = Some(json!("changed copy"));
@@ -194,14 +194,14 @@ fn failures_partial_provenance_malformed_payloads_and_known_empty_are_not_confla
     );
     assert!(partial.errors_loading && partial.partial && !partial.invalid_payloads);
     assert_eq!(partial.error, None);
-    assert_eq!(partial.context.person_properties["role"], "new");
+    assert_eq!(partial.context.person_properties()["role"], "new");
     let flags = partial.flags.unwrap();
     assert!(!flags.contains_key("a"));
     let all = client.get_feature_flags().unwrap();
     assert!(!all["a"].enabled);
-    assert_eq!(all["a"].context.person_properties["role"], "new");
+    assert_eq!(all["a"].context.person_properties()["role"], "new");
     assert_eq!(all["a"].request_id.as_deref(), Some("partial"));
-    assert!(flags["b"].context.person_properties.is_empty());
+    assert!(flags["b"].context.person_properties().is_empty());
     assert_eq!(flags["b"].request_id, None);
     client.set_person_properties_for_flags(
         HashMap::from([("role".into(), json!("later"))]),
@@ -211,7 +211,7 @@ fn failures_partial_provenance_malformed_payloads_and_known_empty_are_not_confla
     let late = client.on_feature_flags(move |data| {
         late_tx.send(data.clone()).unwrap();
     });
-    assert_eq!(update(&late_rx).context.person_properties["role"], "new");
+    assert_eq!(update(&late_rx).context.person_properties()["role"], "new");
     late.unsubscribe();
     let malformed = load(
         &client,
@@ -223,52 +223,13 @@ fn failures_partial_provenance_malformed_payloads_and_known_empty_are_not_confla
     assert!(malformed.errors_loading && malformed.invalid_payloads && !malformed.partial);
     assert_eq!(malformed.error, None);
     assert_eq!(malformed.flags.as_ref().unwrap()["a"].payload, None);
-    assert_eq!(malformed.context.person_properties["role"], "later");
+    assert_eq!(malformed.context.person_properties()["role"], "later");
     let invalid = load(&client, &server, &rx, 200, json!({}));
     assert_eq!(invalid.error, Some(FeatureFlagLoadError::InvalidResponse));
     assert_eq!(invalid.flags, malformed.flags);
     let empty = load(&client, &server, &rx, 200, json!({"featureFlags":{}}));
     assert!(!empty.errors_loading);
     assert_eq!(empty.flags, Some(HashMap::new()));
-    client.shutdown_blocking(None);
-}
-
-#[test]
-fn cache_and_request_capacity_failures_notify_without_losing_usable_flags() {
-    let server = MockServer::start();
-    let mut c = config(&server);
-    c.max_state_bytes = 4 * 1024 * 1024;
-    let client = Client::init_blocking(c);
-    let (tx, rx) = mpsc::channel();
-    client.on_feature_flags(move |data| {
-        tx.send(data.clone()).unwrap();
-    });
-    let seed = update(&rx);
-    let rejected = load(
-        &client,
-        &server,
-        &rx,
-        200,
-        json!({
-            "featureFlags":{"a":true,"b":true,"c":true}, "requestId":"x".repeat(750 * 1024)
-        }),
-    );
-    assert_eq!(rejected.error, Some(FeatureFlagLoadError::CacheTooLarge));
-    assert!(rejected.errors_loading);
-    assert_eq!(rejected.flags, seed.flags);
-    let unexpected = server.mock(|when, then| {
-        when.path("/flags/");
-        then.status(503);
-    });
-    client.set_person_properties_for_flags(
-        HashMap::from([("large".into(), json!("x".repeat(2 * 1024 * 1024)))]),
-        Some(false),
-    );
-    client.reload_feature_flags();
-    let rejected = update(&rx);
-    assert_eq!(rejected.error, Some(FeatureFlagLoadError::RequestTooLarge));
-    assert_eq!(rejected.flags, seed.flags);
-    unexpected.assert_calls(0);
     client.shutdown_blocking(None);
 }
 

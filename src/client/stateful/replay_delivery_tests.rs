@@ -415,7 +415,7 @@ fn nonzero_shutdown_budget_clamps_replay_http_and_stops_following_batches() {
     let backend = Backend::new();
     let (tx, rx) = mpsc::channel();
     let client = backend.client(|config| {
-        config.request_timeout_seconds = 10;
+        config.request_timeout = std::time::Duration::from_secs(10);
         config.on_error(move |error| {
             if let crate::client::PostHogError::Replay(failure) = error {
                 tx.send((failure.message().to_owned(), failure.status()))

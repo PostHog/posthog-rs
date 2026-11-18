@@ -30,7 +30,7 @@ fn settings(server: &MockServer, root: &Directory, preload: bool) -> Config {
     config.host = server.base_url();
     config.persistence = Persistence::Directory(root.0.clone());
     config.preload_feature_flags = preload;
-    config.request_timeout_seconds = 10;
+    config.request_timeout = std::time::Duration::from_secs(10);
     config.flush_interval = Duration::from_secs(3600);
     config
 }
@@ -50,71 +50,6 @@ fn updates_until(
         if done {
             return updates;
         }
-    }
-}
-
-#[test]
-fn oversized_config_retains_fitting_flags_on_restart() {
-    for oversized in [false, true] {
-        let root = Directory::new();
-        let server = MockServer::start();
-
-        let mut project = server.mock(|when, then| {
-            when.method(GET).path("/array/example-project/config");
-            then.status(200).json_body(json!({
-                "hasFeatureFlags": true,
-                "sessionRecording": {
-                    "futureSetting": "x".repeat(if oversized { 8192 } else { 8 })
-                }
-            }));
-        });
-        let mut flags = server.mock(|when, then| {
-            when.method(POST).path("/flags/");
-            then.status(200).json_body(json!({
-                "featureFlags": {"kept": true}
-            }));
-        });
-
-        let mut config = settings(&server, &root, true);
-        config.max_state_bytes = 4096;
-        let (completed, updates) = mpsc::channel();
-        config.on_feature_flags(move |update| {
-            completed.send(update.clone()).unwrap();
-        });
-        let client = Client::init_blocking(config);
-        updates_until(&updates, |update| {
-            !update.errors_loading
-                && update
-                    .flags
-                    .as_ref()
-                    .is_some_and(|flags| flags.contains_key("kept"))
-        });
-        assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
-        assert!(client.get_feature_flags().unwrap()["kept"].enabled);
-        client.shutdown_blocking(None);
-        drop(client);
-
-        project.delete();
-        flags.delete();
-        let _offline = server.mock(|_, then| {
-            then.status(503);
-        });
-
-        let mut config = settings(&server, &root, false);
-        config.max_state_bytes = 4096;
-        let restored = Client::init_blocking(config);
-        let flags = restored.get_feature_flags();
-        restored.shutdown_blocking(None);
-        drop(restored);
-
-        assert!(
-            flags
-                .as_ref()
-                .is_some_and(|flags| { flags.get("kept").is_some_and(|flag| flag.enabled) }),
-            "oversized={}; restored={:?}",
-            oversized,
-            flags
-        );
     }
 }
 
@@ -239,7 +174,7 @@ fn config_completes_while_durable_recovery_is_blocked_and_shutdown_is_bounded() 
     let (completed, updates) = mpsc::channel();
     let mut config = settings(&server, &root, false);
     config.host = host;
-    config.request_timeout_seconds = 30;
+    config.request_timeout = std::time::Duration::from_secs(30);
     config.on_feature_flags(move |update| {
         completed.send(update.clone()).unwrap();
     });

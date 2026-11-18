@@ -143,7 +143,7 @@ impl Host {
         config.host = self.url.clone();
         config.persistence = Persistence::Memory;
         config.preload_feature_flags = false;
-        config.request_timeout_seconds = 1;
+        config.request_timeout = std::time::Duration::from_secs(1);
         config.shutdown_timeout = Duration::ZERO;
         config.session_replay.max_frames_in_flight = frames;
         if disable_compression {
@@ -209,7 +209,7 @@ fn quota_settings(server: &httpmock::MockServer, recording: Value, limited: bool
     config.host = server.base_url();
     config.persistence = Persistence::Memory;
     config.preload_feature_flags = false;
-    config.request_timeout_seconds = 2;
+    config.request_timeout = std::time::Duration::from_secs(2);
     config
 }
 
@@ -361,7 +361,7 @@ where
     config.host = host.url.clone();
     config.persistence = Persistence::Memory;
     config.preload_feature_flags = false;
-    config.request_timeout_seconds = 1;
+    config.request_timeout = std::time::Duration::from_secs(1);
     config.shutdown_timeout = Duration::ZERO;
     config.before_send(hook);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -550,7 +550,7 @@ fn shutdown_stops_system_clock_analytics_timers_while_a_screenshot_hook_is_block
         config.persistence = Persistence::Memory;
         config.preload_feature_flags = false;
         config.flush_interval = Duration::from_millis(250);
-        config.request_timeout_seconds = 2;
+        config.request_timeout = std::time::Duration::from_secs(2);
         let (ready_tx, ready_rx) = mpsc::channel();
         config.on_feature_flags(move |_| {
             let _retain_until_closed = &closed;

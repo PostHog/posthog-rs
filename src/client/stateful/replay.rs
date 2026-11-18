@@ -237,7 +237,7 @@ impl SessionReplay {
             .state
             .mutate(|snapshot| {
                 let opted_out = snapshot.opt_out.unwrap_or(controller.default_opt_out);
-                if !opted_out && snapshot.sessions.active_id(now.elapsed).is_none() {
+                if !opted_out && snapshot.sessions.active_id(now).is_none() {
                     snapshot.session_operation(Operation::End, now, false);
                     snapshot.session_operation(Operation::Start, now, false);
                 }
@@ -271,10 +271,7 @@ impl SessionReplay {
         !c.gate.is_closed()
             && c.pool.lock().unwrap_or_else(|p| p.into_inner()).active
             && c.state.snapshot().is_some_and(|s| {
-                c.allowed(&s)
-                    && s.sessions
-                        .active_id(c.session_clock.now().elapsed)
-                        .is_some()
+                c.allowed(&s) && s.sessions.active_id(c.session_clock.now()).is_some()
             })
     }
     /// Reserve immediately before acquisition. None means inactive, invalid
@@ -292,7 +289,7 @@ impl SessionReplay {
         if !c.allowed(&snapshot) {
             return None;
         }
-        let session_id = snapshot.sessions.active_id(c.session_clock.now().elapsed)?;
+        let session_id = snapshot.sessions.active_id(c.session_clock.now())?;
         let mut pool = c.pool.lock().unwrap_or_else(|p| p.into_inner());
         if !pool.active || pool.in_flight >= pool.max_frames {
             return None;
@@ -352,7 +349,7 @@ impl SessionReplay {
             || snapshot.generation != frame.attribution.generation
             || snapshot.distinct_id != frame.attribution.distinct_id
             || snapshot.replay_consent_generation != frame.attribution.consent_generation
-            || snapshot.sessions.active_id(c.session_clock.now().elapsed)
+            || snapshot.sessions.active_id(c.session_clock.now())
                 != Some(frame.attribution.session_id)
         {
             return SubmitOutcome::Stale;

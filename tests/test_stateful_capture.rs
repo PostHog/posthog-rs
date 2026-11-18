@@ -148,7 +148,6 @@ fn bounded_admission_replaces_oldest_and_recovers_a_failed_byte_reservation() {
     let mut config = config();
     config.max_queue_size = 1;
     config.max_queue_bytes = 1024;
-    config.max_record_bytes = 1024;
     let client = Client::init_blocking(config);
     let mut oversized = Capture::new("too-big");
     oversized
@@ -171,7 +170,6 @@ fn fallback_properties_obey_record_byte_admission_limits() {
     let mut config = config();
     config.max_queue_size = 1;
     config.max_queue_bytes = 1024;
-    config.max_record_bytes = 1024;
     let client = Client::init_blocking(config);
     let mut oversized = Capture::new("too-big");
     oversized
