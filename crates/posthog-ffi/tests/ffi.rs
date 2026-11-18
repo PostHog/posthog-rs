@@ -267,6 +267,30 @@ fn rejects_malformed_flag_options_without_a_request() {
 }
 
 #[test]
+fn null_only_evaluate_locally_is_rejected_without_a_request() {
+    let server = MockServer::start();
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({"flags": {}}));
+    });
+
+    unsafe {
+        let client = new_client(&server);
+        let mut flags = ptr::null_mut();
+        let options =
+            c(r#"{"only_evaluate_locally":null,"person_properties":{"email":"a@example.com"}}"#);
+        let status =
+            posthog_evaluate_flags(client, c("user-1").as_ptr(), options.as_ptr(), &mut flags);
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_INVALID_JSON);
+        assert!(flags.is_null());
+        assert!(last_error().unwrap().contains("only_evaluate_locally"));
+        posthog_client_free(client);
+    }
+
+    flags_mock.assert_calls(0);
+}
+
+#[test]
 fn surfaces_flag_request_failures() {
     let server = MockServer::start();
     server.mock(|when, then| {

@@ -765,7 +765,11 @@ where
     T: serde::de::DeserializeOwned,
 {
     match object.remove(key) {
-        None | Some(Value::Null) => Ok(None),
+        None => Ok(None),
+        Some(Value::Null) => Err(FfiError::new(
+            PostHogStatus::POSTHOG_STATUS_INVALID_JSON,
+            format!("`options_json.{key}` is null; omit the field instead"),
+        )),
         Some(value) => serde_json::from_value(value).map(Some).map_err(|error| {
             FfiError::new(
                 PostHogStatus::POSTHOG_STATUS_INVALID_JSON,
@@ -809,7 +813,8 @@ fn evaluate_flags_options(options_json: Option<Value>) -> Result<EvaluateFlagsOp
 /// `options_json` may be `NULL` or a JSON object with any of these fields:
 /// `groups` (`{"company": "acme"}`), `person_properties` (`{"plan": "pro"}`),
 /// `group_properties` (`{"company": {"size": 10}}`), `only_evaluate_locally`
-/// (bool), `disable_geoip` (bool) and `flag_keys` (`["beta"]`).
+/// (bool), `disable_geoip` (bool) and `flag_keys` (`["beta"]`). Omit a field
+/// to use its default. `null` and unknown fields are rejected.
 #[no_mangle]
 pub unsafe extern "C" fn posthog_evaluate_flags(
     client: *const PostHogClient,
@@ -985,6 +990,26 @@ mod tests {
     fn version_matches_sdk() {
         let version = unsafe { CStr::from_ptr(posthog_version()) };
         assert_eq!(version.to_str().unwrap(), env!("POSTHOG_SDK_VERSION"));
+    }
+
+    #[test]
+    fn rejects_null_flag_options() {
+        for key in [
+            "groups",
+            "person_properties",
+            "group_properties",
+            "only_evaluate_locally",
+            "disable_geoip",
+            "flag_keys",
+        ] {
+            let error = evaluate_flags_options(Some(serde_json::json!({ key: null }))).unwrap_err();
+            assert_eq!(
+                error.status,
+                PostHogStatus::POSTHOG_STATUS_INVALID_JSON,
+                "{key}"
+            );
+            assert!(error.message.contains(key));
+        }
     }
 
     #[test]

@@ -388,7 +388,8 @@ PostHogStatus posthog_event_set_flags(struct PostHogEvent *event, const struct P
  * `options_json` may be `NULL` or a JSON object with any of these fields:
  * `groups` (`{"company": "acme"}`), `person_properties` (`{"plan": "pro"}`),
  * `group_properties` (`{"company": {"size": 10}}`), `only_evaluate_locally`
- * (bool), `disable_geoip` (bool) and `flag_keys` (`["beta"]`).
+ * (bool), `disable_geoip` (bool) and `flag_keys` (`["beta"]`). Omit a field
+ * to use its default. `null` and unknown fields are rejected.
  */
 PostHogStatus posthog_evaluate_flags(const struct PostHogClient *client,
                                      const char *distinct_id,
