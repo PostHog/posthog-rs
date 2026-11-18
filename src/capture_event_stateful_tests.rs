@@ -50,17 +50,8 @@ fn stateful_conversion_retains_sdk_properties_and_shares_server_wire_rules() {
     assert_eq!(wire.timestamp, "2025-01-01T00:00:00.123456789Z");
     assert_eq!(wire.distinct_id, "identity-at-capture");
     assert_eq!(Some(wire.uuid), event.uuid());
-    let mut stateful = serde_json::to_value(wire).unwrap();
-    stateful["properties"]
-        .as_object_mut()
-        .unwrap()
-        .remove("$lib");
-    stateful["properties"]
-        .as_object_mut()
-        .unwrap()
-        .remove("$lib_version");
     assert_eq!(
-        stateful,
+        serde_json::to_value(wire).unwrap(),
         serde_json::to_value(CaptureEvent::from_event_at(&event, now())).unwrap()
     );
     assert_eq!(
