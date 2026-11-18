@@ -317,63 +317,40 @@ fn permitted_hook_can_finish_after_opt_out_and_nested_capture_checks_new_consent
 }
 
 #[test]
-fn corrupt_state_is_replaced_but_oversized_state_is_preserved_with_configured_default() {
-    for oversized in [false, true] {
-        let directory = Directory::new();
-        let client = Client::init_blocking(directory.config());
-        assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
-        client.shutdown_blocking(None);
-        drop(client);
-        let mut state = directory.state();
-        if oversized {
-            state["state"]["anonymous_id"] = json!("a".repeat(200));
-            state["state"]["distinct_id"] = json!("b".repeat(200));
-            state["state"]["identified"] = json!(true);
-            state["state"]["person_processing"] = json!(true);
-        } else {
-            state["state"].as_object_mut().unwrap().remove("opt_out");
+fn corrupt_state_is_replaced_with_configured_default() {
+    let directory = Directory::new();
+    let client = Client::init_blocking(directory.config());
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
+    client.shutdown_blocking(None);
+    drop(client);
+    let mut state = directory.state();
+    state["state"].as_object_mut().unwrap().remove("opt_out");
+    let bytes = serde_json::to_vec(&state).unwrap();
+    std::fs::write(directory.state_path(), &bytes).unwrap();
+    let errors = Arc::new(Mutex::new(0));
+    let seen_errors = errors.clone();
+    let mut conf = directory.config();
+    conf.opt_out = true;
+    conf.on_error(move |error| {
+        if matches!(error, posthog::PostHogError::Storage(_)) {
+            *seen_errors.lock().unwrap() += 1;
         }
-        let bytes = serde_json::to_vec(&state).unwrap();
-        std::fs::write(directory.state_path(), &bytes).unwrap();
-        let errors = Arc::new(Mutex::new(0));
-        let seen_errors = errors.clone();
-        let mut conf = directory.config();
-        conf.opt_out = true;
-        if oversized {
-            conf.max_state_bytes = bytes.len() - 1;
-        }
-        conf.on_error(move |error| {
-            if matches!(error, posthog::PostHogError::Storage(_)) {
-                *seen_errors.lock().unwrap() += 1;
-            }
-        });
-        let client = Client::init_blocking(conf);
-        assert!(!client.is_disabled());
-        assert!(client.is_opt_out());
-        assert!(!client.is_identified());
-        assert_eq!(client.get_distinct_id(), "anonymous");
-        assert_eq!(client.capture("blocked"), CaptureOutcome::OptedOut);
-        assert_eq!(
-            client.flush_blocking().state,
-            if oversized {
-                PersistenceOutcome::Unavailable
-            } else {
-                PersistenceOutcome::Persisted
-            }
-        );
-        assert!(*errors.lock().unwrap() > 0);
-        client.shutdown_blocking(None);
-        drop(client);
-        if oversized {
-            assert_eq!(std::fs::read(directory.state_path()).unwrap(), bytes);
-        } else {
-            assert_eq!(directory.state()["state"]["opt_out"], Value::Null);
-            let restored = Client::init_blocking(directory.config());
-            assert!(!restored.is_opt_out());
-            assert_eq!(restored.get_anonymous_id(), "anonymous");
-            restored.shutdown_blocking(None);
-        }
-    }
+    });
+    let client = Client::init_blocking(conf);
+    assert!(!client.is_disabled());
+    assert!(client.is_opt_out());
+    assert!(!client.is_identified());
+    assert_eq!(client.get_distinct_id(), "anonymous");
+    assert_eq!(client.capture("blocked"), CaptureOutcome::OptedOut);
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
+    assert!(*errors.lock().unwrap() > 0);
+    client.shutdown_blocking(None);
+    drop(client);
+    assert_eq!(directory.state()["state"]["opt_out"], Value::Null);
+    let restored = Client::init_blocking(directory.config());
+    assert!(!restored.is_opt_out());
+    assert_eq!(restored.get_anonymous_id(), "anonymous");
+    restored.shutdown_blocking(None);
 }
 
 #[test]
@@ -400,46 +377,6 @@ fn failed_write_does_not_revert_live_consent_and_recovery_persists_latest() {
     drop(client);
     let client = Client::init_blocking(directory.config());
     assert!(client.is_opt_out());
-}
-
-#[test]
-fn max_size_state_can_always_toggle_and_persist_consent() {
-    let directory = Directory::new();
-    let mut conf = directory.config();
-    conf.max_state_bytes = 512;
-    conf.before_send(|_| None);
-    let client = Client::init_blocking(conf);
-    // Find the largest admitted identity without coupling to the private schema size.
-    let mut largest = String::new();
-    for length in (1..600).rev() {
-        let id = "x".repeat(length);
-        client.identify(id.clone());
-        if client.is_identified() {
-            largest = id;
-            break;
-        }
-    }
-    assert!(!largest.is_empty());
-    client.opt_out();
-    assert!(client.is_opt_out());
-    client.opt_in();
-    assert!(!client.is_opt_out());
-    client.opt_out();
-    assert!(client.is_opt_out());
-    assert_eq!(client.get_distinct_id(), largest);
-    assert_eq!(
-        client.shutdown_blocking(None).state,
-        PersistenceOutcome::Persisted
-    );
-    drop(client);
-    assert!(std::fs::metadata(directory.state_path()).unwrap().len() <= 512);
-    let mut conf = directory.config();
-    conf.max_state_bytes = 512;
-    let client = Client::init_blocking(conf);
-    assert_eq!(client.get_distinct_id(), largest);
-    assert!(client.is_opt_out());
-    client.opt_in();
-    assert!(!client.is_opt_out());
 }
 
 #[test]

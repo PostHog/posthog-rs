@@ -12,9 +12,7 @@ use sha1::{Digest, Sha1};
 
 use super::Snapshot;
 use crate::client::common::report_storage_error;
-use crate::client::event_store::{
-    open_private, FileEventStore, RecordBuffer, StorageDirectory, StoreLimits,
-};
+use crate::client::event_store::{open_private, FileEventStore, StorageDirectory, StoreLimits};
 use crate::client::{OnErrorHook, StorageOperation};
 
 /// Persistence selection for client state and admitted events.
@@ -96,7 +94,6 @@ impl RestoredStorage {
     pub(super) fn open(
         persistence: &Persistence,
         namespace: &str,
-        max_state_bytes: u64,
         event_limits: StoreLimits,
         hooks: &[OnErrorHook],
     ) -> Self {
@@ -116,7 +113,7 @@ impl RestoredStorage {
             }
         };
         let mut restored = Self::default();
-        match FileStateStore::open(directory.clone(), max_state_bytes) {
+        match FileStateStore::open(directory.clone()) {
             Ok(opened) => {
                 if let Some(error) = opened.read_error {
                     report_storage_error(hooks, StorageOperation::Read, &error);
@@ -141,52 +138,15 @@ struct StateRecord<T> {
     state: T,
 }
 
-pub(super) fn snapshot_size(snapshot: &Snapshot) -> usize {
-    crate::client::capture::json_len(&StateRecord {
+fn encode_record(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(&StateRecord {
         version: 1,
         state: snapshot,
     })
-}
-
-/// Reserve the longest consent representation (`false`), so every valid state
-/// can opt in/out or clear the override without exceeding its configured bound.
-pub(super) fn snapshot_capacity(snapshot: &Snapshot) -> usize {
-    snapshot_size(snapshot).saturating_add(usize::from(snapshot.opt_out != Some(false)))
-}
-
-/// Encode and validate the same bounded representation for both memory admission
-/// and persistence. This function performs no filesystem operations.
-pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result<Vec<u8>> {
-    if snapshot_capacity(snapshot) as u64 > max_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "State snapshot exceeds store limit",
-        ));
-    }
-    let mut buffer = RecordBuffer {
-        bytes: Vec::new(),
-        limit: max_bytes,
-    };
-    serde_json::to_writer(
-        &mut buffer,
-        &StateRecord {
-            version: 1,
-            state: snapshot,
-        },
-    )
-    .map_err(|error| {
-        if error.is_io() {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "State snapshot exceeds store limit",
-            )
-        } else {
-            invalid_state()
-        }
-    })?;
-    // Check the same bounded decoder used at startup before touching files.
-    FileStateStore::decode(&buffer.bytes)?;
-    Ok(buffer.bytes)
+    .map_err(|_| invalid_state())?;
+    // Only write records that restore can read back.
+    FileStateStore::decode(&bytes)?;
+    Ok(bytes)
 }
 
 /// Blocking backend calls belong exclusively to the state-persistence worker.
@@ -202,7 +162,6 @@ impl StateStore for FileStateStore {
 
 pub(super) struct FileStateStore {
     directory: Arc<StorageDirectory>,
-    max_bytes: u64,
 }
 
 pub(super) struct OpenedStateStore {
@@ -226,20 +185,8 @@ enum RestoreFailure {
 }
 
 impl FileStateStore {
-    pub(super) fn open(
-        directory: Arc<StorageDirectory>,
-        max_bytes: u64,
-    ) -> io::Result<OpenedStateStore> {
-        if max_bytes == 0 || max_bytes == u64::MAX {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid state store limit",
-            ));
-        }
-        let store = Self {
-            directory,
-            max_bytes,
-        };
+    pub(super) fn open(directory: Arc<StorageDirectory>) -> io::Result<OpenedStateStore> {
+        let store = Self { directory };
         match store.restore() {
             Ok(decoded) => Ok(OpenedStateStore {
                 store,
@@ -268,24 +215,15 @@ impl FileStateStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(RestoreFailure::Unavailable(error)),
         };
-        if !metadata.is_file() || metadata.len() > self.max_bytes {
+        if !metadata.is_file() {
             return Err(RestoreFailure::Unavailable(invalid_state()));
         }
         let mut encoded = Vec::new();
         File::open(path)
             .map_err(RestoreFailure::Unavailable)?
-            .take(self.max_bytes + 1)
             .read_to_end(&mut encoded)
             .map_err(RestoreFailure::Unavailable)?;
-        if encoded.len() as u64 > self.max_bytes {
-            return Err(RestoreFailure::Unavailable(invalid_state()));
-        }
-        let decoded = Self::decode_restored(&encoded)?;
-        // Mandatory targeting and device state still obey the current write bound.
-        if snapshot_capacity(&decoded.snapshot) as u64 > self.max_bytes {
-            return Err(RestoreFailure::Corrupt(invalid_state()));
-        }
-        Ok(Some(decoded))
+        Self::decode_restored(&encoded).map(Some)
     }
 
     #[cfg(test)]
@@ -357,7 +295,7 @@ impl FileStateStore {
     /// Only the state writer calls this. A completed replacement is not a
     /// multi-file transaction with event storage or a universal power-loss guarantee.
     pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
-        let encoded = encode_snapshot(snapshot, self.max_bytes)?;
+        let encoded = encode_record(snapshot)?;
         let temporary = self.directory.path().join("state.json.tmp");
         // The lease and single writer exclude live concurrent writes. A stale
         // temporary is an uncommitted write from a previous process/attempt.

@@ -23,9 +23,9 @@ use super::types::{
 };
 use crate::client::{get_default_user_agent, ClientOptions};
 
-pub(crate) const SEND_PATH: &str = "/api/projects/@current/messaging/send/email/";
-const UPLOADS_PATH: &str = "/api/projects/@current/messaging/attachments/uploads/";
-const STATUS_PATH: &str = "/api/projects/@current/messaging/emails/";
+pub(crate) const SEND_PATH: &str = "/api/messaging/send/email/";
+const UPLOADS_PATH: &str = "/api/messaging/attachments/uploads/";
+const STATUS_PATH: &str = "/api/messaging/emails/";
 const US_APP_HOST: &str = "https://us.posthog.com";
 const EU_APP_HOST: &str = "https://eu.posthog.com";
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -1256,7 +1256,7 @@ mod tests {
     fn status_path_checks_the_id() {
         assert_eq!(
             status_path("01A18356-C56C-0001-E494-7666BC915188").unwrap(),
-            "/api/projects/@current/messaging/emails/01a18356-c56c-0001-e494-7666bc915188/"
+            "/api/messaging/emails/01a18356-c56c-0001-e494-7666bc915188/"
         );
         let error = status_path("msg_1").unwrap_err();
         assert_eq!(error.code(), "invalid_message_id");
