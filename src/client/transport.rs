@@ -1106,18 +1106,20 @@ impl TransportHandle {
         {
             return true;
         }
-        if self.worker_id == Some(id) {
-            return true;
-        }
-        #[cfg(feature = "session-replay")]
-        {
-            self.encoder
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .as_ref()
-                .is_some_and(|encoder| encoder.on_worker_thread())
-        }
-        #[cfg(not(feature = "session-replay"))]
+        self.worker_id == Some(id) || self.on_encoder_thread()
+    }
+
+    #[cfg(feature = "session-replay")]
+    fn on_encoder_thread(&self) -> bool {
+        self.encoder
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|encoder| encoder.on_worker_thread())
+    }
+
+    #[cfg(not(feature = "session-replay"))]
+    fn on_encoder_thread(&self) -> bool {
         false
     }
 

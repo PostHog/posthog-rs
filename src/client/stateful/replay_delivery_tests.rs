@@ -157,6 +157,10 @@ fn analytics_deadline_applies_while_encoder_is_blocked() {
             client.capture("pending analytics"),
             crate::stateful::CaptureOutcome::Accepted { .. }
         ));
+        if !closing {
+            // Let the worker take the event before the test clock moves.
+            client.transport.as_ref().unwrap().tick();
+        }
         let replay = client.session_replay();
         replay.start();
         assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
@@ -329,6 +333,42 @@ fn idle_worker_sends_single_frames_and_retries_without_external_wakeups() {
     assert_eq!(first, retried);
     // Both uploads were observed before any explicit flush.
     client.flush_blocking();
+    assert!(replay.begin_frame(layout()).is_ok());
+}
+
+#[test]
+fn failed_uploads_stop_after_the_attempt_limit_and_release_frame_capacity() {
+    let backend = Backend::new();
+    backend.reply.lock().unwrap().status = 503;
+    backend.reply.lock().unwrap().retry_after = Some("1");
+    let (tx, rx) = mpsc::channel();
+    let client = backend.client(|config| {
+        config.max_capture_attempts = 2;
+        config.session_replay.max_frames_in_flight = 1;
+        config.on_error(move |error| {
+            if let crate::client::PostHogError::Replay(failure) = error {
+                tx.send((failure.message().to_owned(), failure.status()))
+                    .unwrap();
+            }
+        });
+    });
+    let replay = client.session_replay();
+    replay.start();
+    assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
+    let uploads = backend.uploads.lock().unwrap();
+    let first = uploads.recv_timeout(Duration::from_secs(5)).unwrap();
+    let retried = uploads.recv_timeout(Duration::from_secs(15)).unwrap();
+    assert_eq!(first, retried);
+    let diagnostic = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        diagnostic,
+        (
+            "Screenshot upload failed after the maximum attempts".to_owned(),
+            Some(503)
+        )
+    );
+    assert!(uploads.recv_timeout(Duration::from_secs(3)).is_err());
+    drop(uploads);
     assert!(replay.begin_frame(layout()).is_ok());
 }
 

@@ -451,7 +451,7 @@ fn identity_session_and_consent_transitions_reject_readbacks_without_time_expiry
 }
 
 #[test]
-fn admission_spans_encoded_retries_and_retry_after_survives_flushes_beyond_four_attempts() {
+fn admission_spans_encoded_retries_and_retry_after_survives_flushes_until_the_attempt_limit() {
     let backend = Backend::new();
     backend.reply.lock().unwrap().status = 503;
     backend.reply.lock().unwrap().retry_after = Some("2");
@@ -468,19 +468,22 @@ fn admission_spans_encoded_retries_and_retry_after_survives_flushes_beyond_four_
     clock.advance(Duration::from_secs(1));
     client.transport.as_ref().unwrap().tick();
     assert_eq!(backend.bodies.lock().unwrap().len(), 1);
-    for _ in 0..6 {
+    // The default four attempts: the batch holds its frames until the last one fails.
+    for _ in 0..2 {
         clock.advance(Duration::from_secs(600));
         client.transport.as_ref().unwrap().tick();
         assert!(replay.begin_frame(layout()).is_err());
     }
-    let bodies = backend.bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 7);
-    assert!(bodies.iter().all(|b| b == &bodies[0]));
-    drop(bodies);
-    backend.reply.lock().unwrap().status = 200;
     clock.advance(Duration::from_secs(600));
     client.transport.as_ref().unwrap().tick();
     assert!(replay.begin_frame(layout()).is_ok());
+    for _ in 0..3 {
+        clock.advance(Duration::from_secs(600));
+        client.transport.as_ref().unwrap().tick();
+    }
+    let bodies = backend.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 4);
+    assert!(bodies.iter().all(|b| b == &bodies[0]));
 }
 
 #[test]

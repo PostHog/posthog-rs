@@ -252,6 +252,16 @@ impl Pipeline {
             _ if deadline.is_some() => self.report_replay_shutdown(status),
             _ => {
                 batch.attempt = batch.attempt.saturating_add(1);
+                // Bounded like event delivery and the mobile SDKs, so a failing
+                // upload cannot hold frame capacity and pause recording forever.
+                if batch.attempt >= self.options.max_capture_attempts {
+                    report(
+                        &self.options,
+                        "Screenshot upload failed after the maximum attempts",
+                        status,
+                    );
+                    return;
+                }
                 let delay = capture_backoff_duration(&self.options, batch.attempt, retry_after);
                 batch.due = self.clock.now() + delay;
                 tracing::debug!(
