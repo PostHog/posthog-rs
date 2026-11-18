@@ -401,6 +401,9 @@ fn shutdown_from_delivery_callback_defers_then_external_shutdown_joins_both_work
     use crate::client::event_store::{EventStore, FileEventStore, StorageDirectory};
     let directory = Directory::new();
     let mut config = directory.config();
+    // The deadline only bounds the wait; a loaded runner must not expire it
+    // before the workers release the namespace.
+    config.shutdown_timeout = Duration::from_secs(30);
     let mut store = FileEventStore::open(
         StorageDirectory::open(directory.scope()).unwrap(),
         config.event_limits(),
@@ -516,14 +519,19 @@ fn cancelling_initialization_cleans_up_without_blocking_the_polling_thread() {
 #[test]
 fn async_initialization_works_without_tokio_and_matches_blocking_restoration() {
     let directory = Directory::new();
-    let client = futures::executor::block_on(Client::init(directory.config()));
+    let config = || {
+        let mut config = directory.config();
+        config.shutdown_timeout = Duration::from_secs(30);
+        config
+    };
+    let client = futures::executor::block_on(Client::init(config()));
     let id = client.get_distinct_id();
     assert!(!id.is_empty());
     assert_eq!(
         client.shutdown_blocking(None).state,
         PersistenceOutcome::Persisted
     );
-    let restored = Client::init_blocking(directory.config());
+    let restored = Client::init_blocking(config());
     assert_eq!(restored.get_anonymous_id(), id);
     restored.shutdown_blocking(None);
     let disabled = futures::executor::block_on(Client::init(Config::new("")));
