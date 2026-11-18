@@ -1,6 +1,129 @@
 use super::*;
 
 #[test]
+fn remote_quota_preserves_retry_backlog_and_permits_until_delivery() {
+    let backend = Backend::new();
+    backend.reply.lock().unwrap().status = 503;
+    backend.reply.lock().unwrap().retry_after = Some("2");
+    let (client, clock) = with_clock(&backend);
+    let replay = client.session_replay();
+    replay.start();
+    let first = frame(&replay);
+    let distinct_id = first.attribution.distinct_id.clone();
+    let session = first.attribution.session_id.to_string();
+    assert_eq!(replay.submit_frame(first), SubmitOutcome::Accepted);
+    assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
+    client.flush_blocking();
+    let original = backend.bodies.lock().unwrap()[0].clone();
+    assert_eq!(original.as_array().unwrap().len(), 2);
+    for event in original.as_array().unwrap() {
+        assert_eq!(event["distinct_id"], distinct_id);
+        assert_eq!(event["properties"]["$session_id"], session);
+    }
+    // Install the decoder's normalized permission directly so this test can
+    // isolate retry delivery and permit ownership from request timing.
+    let install_permission = |recording| {
+        client
+            .state
+            .as_ref()
+            .unwrap()
+            .access()
+            .mutate(|state| {
+                state.remote_config = Some(Arc::new(
+                    crate::client::transport::remote_config::RemoteConfig {
+                        has_feature_flags: Some(false),
+                        session_recording: Some(recording),
+                    },
+                ));
+            })
+            .unwrap();
+    };
+    install_permission(json!(false));
+    let controller = replay.0.upgrade().unwrap();
+    assert_eq!(controller.pool.lock().unwrap().in_flight, 2);
+    assert!(replay.begin_frame(layout()).is_none());
+    backend.reply.lock().unwrap().status = 200;
+    clock.advance(Duration::from_secs(1));
+    client.transport.as_ref().unwrap().tick();
+    assert_eq!(backend.bodies.lock().unwrap().len(), 1);
+    assert_eq!(controller.pool.lock().unwrap().in_flight, 2);
+    clock.advance(Duration::from_secs(1));
+    client.transport.as_ref().unwrap().tick();
+    assert_eq!(
+        *backend.bodies.lock().unwrap(),
+        vec![original.clone(), original]
+    );
+    assert_eq!(controller.pool.lock().unwrap().in_flight, 0);
+    assert!(!replay.is_active());
+    assert!(replay.begin_frame(layout()).is_none());
+    install_permission(json!({}));
+    assert!(replay.is_active());
+    let first = replay.begin_frame(layout()).unwrap();
+    let second = replay.begin_frame(layout()).unwrap();
+    assert!(replay.begin_frame(layout()).is_none());
+    drop((first, second));
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn admitted_encoding_and_retries_upload_while_still_opted_out() {
+    let backend = Backend::new();
+    backend.reply.lock().unwrap().status = 503;
+    backend.reply.lock().unwrap().retry_after = Some("2");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let (client, clock) = with_clock_config(&backend, |config| {
+        config.before_send(move |event| {
+            if event.event_name() == "$snapshot" {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+            Some(event)
+        });
+    });
+    let replay = client.session_replay();
+    replay.start();
+    let admitted = frame(&replay);
+    let uuid = admitted.attribution.uuid.to_string();
+    let distinct_id = admitted.attribution.distinct_id.clone();
+    let session = admitted.attribution.session_id.to_string();
+    assert_eq!(replay.submit_frame(admitted), SubmitOutcome::Accepted);
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    client.opt_out();
+    assert!(!replay.is_active());
+    assert!(replay.begin_frame(layout()).is_none());
+    release_tx.send(()).unwrap();
+    client.flush_blocking();
+    let original = backend.bodies.lock().unwrap()[0].clone();
+    assert_eq!(original[0]["uuid"], uuid);
+    assert_eq!(original[0]["distinct_id"], distinct_id);
+    assert_eq!(original[0]["properties"]["$session_id"], session);
+    assert_eq!(
+        replay.0.upgrade().unwrap().pool.lock().unwrap().in_flight,
+        1
+    );
+    backend.reply.lock().unwrap().status = 200;
+    clock.advance(Duration::from_secs(2));
+    client.transport.as_ref().unwrap().tick();
+    assert_eq!(
+        *backend.bodies.lock().unwrap(),
+        vec![original.clone(), original]
+    );
+    assert_eq!(
+        replay.0.upgrade().unwrap().pool.lock().unwrap().in_flight,
+        0
+    );
+    assert!(!replay.is_active());
+    assert!(replay.begin_frame(layout()).is_none());
+    client.shutdown_blocking(None);
+}
+
+#[test]
 fn analytics_deadline_applies_while_encoder_is_blocked() {
     for closing in [false, true] {
         let backend = Backend::new();
@@ -13,6 +136,7 @@ fn analytics_deadline_applies_while_encoder_is_blocked() {
 
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
+        let (returned_tx, returned_rx) = mpsc::channel();
         let release_rx = Mutex::new(release_rx);
         let (client, clock) = with_clock_config(&backend, |config| {
             config.before_send(move |event| {
@@ -23,6 +147,7 @@ fn analytics_deadline_applies_while_encoder_is_blocked() {
                         .unwrap()
                         .recv_timeout(Duration::from_secs(10))
                         .unwrap();
+                    returned_tx.send(()).unwrap();
                 }
                 Some(event)
             });
@@ -37,45 +162,63 @@ fn analytics_deadline_applies_while_encoder_is_blocked() {
         assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
 
-        let shutdown = if closing {
-            let other = client.clone();
-            Some(std::thread::spawn(move || {
-                other.shutdown_blocking(Some(Duration::ZERO))
-            }))
-        } else {
-            None
-        };
-
-        let gate = replay.0.upgrade().unwrap().gate.clone();
         if closing {
-            let limit = Instant::now() + Duration::from_secs(5);
-            while !client.state.as_ref().unwrap().is_closed() && Instant::now() < limit {
-                std::thread::yield_now();
-            }
+            let other = client.clone();
+            let (closed_tx, closed_rx) = mpsc::channel();
+            let shutdown = std::thread::spawn(move || {
+                let started = Instant::now();
+                let report = other.shutdown_blocking(Some(Duration::ZERO));
+                closed_tx.send((report, started.elapsed())).unwrap();
+            });
+            // State closure precedes transport/encoder closure. Observe the
+            // completed shutdown call, not that intermediate publication.
+            let (report, elapsed) = closed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            shutdown.join().unwrap();
+            assert!(elapsed < Duration::from_secs(1));
+            assert_eq!(report.delivery, crate::stateful::DeliveryOutcome::TimedOut);
+            assert!(replay.0.upgrade().unwrap().gate.is_closed());
+            assert!(client.state.as_ref().unwrap().is_closed());
         }
-        let closed_observed =
-            !closing || (gate.is_closed() && client.state.as_ref().unwrap().is_closed());
 
         // No new capture or encoder completion: exercise the existing
         // delivery timer servicing against an already-expired drain.
         clock.advance(Duration::from_secs(60));
-        client.transport.as_ref().unwrap().tick();
+        let (tick_tx, tick_rx) = mpsc::channel();
+        client
+            .transport
+            .as_ref()
+            .unwrap()
+            .send_control(crate::client::transport::Control::Tick(
+                crate::client::transport::Completion::Blocking(tick_tx),
+            ));
+        if !closing {
+            tick_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        // After expiry the relay may retain this completion until the encoder
+        // returns; waiting for it here would release the hook only by watchdog.
         let requests_before_encoder_release = analytics.calls();
 
         release_tx.send(()).unwrap();
-        if let Some(shutdown) = shutdown {
-            shutdown.join().unwrap();
-        } else {
+        returned_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        if !closing {
             client.shutdown_blocking(Some(Duration::ZERO));
         }
-
-        assert!(closed_observed, "shutdown setup failed");
+        wait_for_delivery_stop(&client);
+        assert_eq!(analytics.calls(), requests_before_encoder_release);
         assert_eq!(
             requests_before_encoder_release,
             if closing { 0 } else { 1 },
             "closing={}",
             closing
         );
+    }
+}
+
+fn wait_for_delivery_stop(client: &Client) {
+    let end = Instant::now() + Duration::from_secs(5);
+    while !client.transport.as_ref().unwrap().delivery_stopped() {
+        assert!(Instant::now() < end, "delivery workers did not finish");
+        std::thread::yield_now();
     }
 }
 
@@ -114,16 +257,15 @@ fn replay_only_shutdown_abandonment_reports_once() {
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
 
-    let other = client.clone();
-    let shutdown = std::thread::spawn(move || other.shutdown_blocking(Some(Duration::ZERO)));
-    let gate = replay.0.upgrade().unwrap().gate.clone();
-    let limit = Instant::now() + Duration::from_secs(5);
-    while !gate.is_closed() && Instant::now() < limit {
-        std::thread::yield_now();
-    }
-    let closed = gate.is_closed();
+    let start = Instant::now();
+    assert_eq!(
+        client.shutdown_blocking(Some(Duration::ZERO)).delivery,
+        crate::client::stateful::DeliveryOutcome::TimedOut
+    );
+    assert!(start.elapsed() < Duration::from_secs(1));
+    let closed = replay.0.upgrade().unwrap().gate.is_closed();
     release_tx.send(()).unwrap();
-    shutdown.join().unwrap();
+    wait_for_delivery_stop(&client);
 
     assert!(closed, "shutdown setup failed");
     assert!(backend.bodies.lock().unwrap().is_empty());
@@ -295,6 +437,7 @@ fn nonzero_shutdown_budget_clamps_replay_http_and_stops_following_batches() {
     let start = Instant::now();
     client.shutdown_blocking(Some(Duration::from_millis(250)));
     assert!(start.elapsed() < Duration::from_secs(2));
+    wait_for_delivery_stop(&client);
     stalled.assert_calls(1);
     assert_eq!(
         replay.0.upgrade().unwrap().pool.lock().unwrap().in_flight,
@@ -330,7 +473,12 @@ fn shutdown_reports_cooldown_abandonment_without_bypassing_retry_after() {
     assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
     client.flush_blocking();
     assert_eq!(backend.bodies.lock().unwrap().len(), 1);
+    let host_held = frame(&replay);
+    let start = Instant::now();
     client.shutdown_blocking(Some(Duration::from_secs(1)));
+    assert!(start.elapsed() < Duration::from_secs(2));
+    wait_for_delivery_stop(&client);
+    drop(host_held);
     assert_eq!(backend.bodies.lock().unwrap().len(), 1);
     assert_eq!(
         rx.recv_timeout(Duration::from_secs(5)).unwrap(),

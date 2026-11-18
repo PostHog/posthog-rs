@@ -7,7 +7,9 @@ use super::storage::{namespace, RestoredStorage};
 use super::writer::{Backend, DrainOutcome, StateWriter, WriterOptions};
 use super::{Config, InitializationFailure, Persistence, Snapshot};
 use crate::client::common::apply_on_error_hooks;
-use crate::client::transport::{Completion, Control, StartupFailure, SystemClock, TransportHandle};
+use crate::client::transport::{
+    Clock, Completion, Control, StartupFailure, SystemClock, TransportHandle,
+};
 use crate::client::PostHogError;
 
 #[path = "shutdown.rs"]
@@ -181,7 +183,17 @@ impl Client {
         }
     }
 
+    #[cfg(all(test, feature = "session-replay"))]
+    pub(super) fn init_with_transport_clock(mut config: Config, clock: Arc<dyn Clock>) -> Self {
+        config.normalize();
+        Self::initialize_with_clock(Arc::new(config), clock)
+    }
+
     fn initialize(config: Arc<Config>) -> Self {
+        Self::initialize_with_clock(config, Arc::new(SystemClock))
+    }
+
+    fn initialize_with_clock(config: Arc<Config>, transport_clock: Arc<dyn Clock>) -> Self {
         if config.disabled {
             return Self::disabled(&config, None);
         }
@@ -244,7 +256,7 @@ impl Client {
                 .map(|store| Box::new(store) as Box<dyn crate::client::event_store::EventStore>),
             config.max_queue_bytes,
             shutdown.deadline_handle(),
-            Arc::new(SystemClock),
+            transport_clock,
         ) {
             Ok(transport) => transport,
             Err(failure) => {

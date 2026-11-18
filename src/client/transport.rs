@@ -5,7 +5,7 @@
 //! schedule. Being a plain thread with a blocking client (never a tokio task) it
 //! works for the async client, the blocking client, and a `std::panic` hook
 //! with no runtime present. Stateful clients also own an independent bounded
-//! request worker for feature flags.
+//! request worker for feature flags and remote configuration.
 //!
 //! There are two lanes, described by [`LaneConfig`]: analytics (always
 //! spawned) and AI (spawned on first `capture_ai*`). They share this worker and
@@ -287,6 +287,8 @@ pub(crate) struct TransportHandle {
     flags: Option<Arc<flags::Slot>>,
     #[cfg(feature = "stateful")]
     requests: Option<requests::Worker>,
+    #[cfg(feature = "session-replay")]
+    encoder_running: Arc<AtomicBool>,
 }
 
 /// Name of the analytics worker thread (aids debugging). The panic hook detects
@@ -539,6 +541,10 @@ impl TransportHandle {
         let owned_workers = Arc::new(Mutex::new(Vec::new()));
         #[cfg(feature = "stateful")]
         let worker_owners = owned_workers.clone();
+        #[cfg(feature = "session-replay")]
+        let encoder_running = Arc::new(AtomicBool::new(false));
+        #[cfg(feature = "session-replay")]
+        let worker_encoder = encoder_running.clone();
         #[cfg(feature = "stateful")]
         let worker_tx = tx.clone();
         #[cfg(feature = "stateful")]
@@ -562,6 +568,8 @@ impl TransportHandle {
                         worker_deadline,
                         worker_owners,
                         worker_tx,
+                        #[cfg(feature = "session-replay")]
+                        worker_encoder,
                         _ready,
                     );
                     return;
@@ -592,6 +600,8 @@ impl TransportHandle {
             owned_workers,
             #[cfg(feature = "stateful")]
             drain_timeout,
+            #[cfg(feature = "session-replay")]
+            encoder_running,
             #[cfg(feature = "stateful")]
             flags,
             #[cfg(feature = "stateful")]
@@ -640,13 +650,22 @@ impl TransportHandle {
         token: String,
         shutdown_timeout: Duration,
     ) -> std::io::Result<Arc<super::stateful::replay::encoder::Gate>> {
-        let worker = Arc::new(super::stateful::replay::encoder::Worker::spawn(
+        self.encoder_running.store(true, Ordering::Release);
+        let worker = match super::stateful::replay::encoder::Worker::spawn(
             producer,
             config,
             token,
             self.tx.clone(),
             shutdown_timeout,
-        )?);
+            self.closing_deadline.clone(),
+            self.encoder_running.clone(),
+        ) {
+            Ok(worker) => Arc::new(worker),
+            Err(error) => {
+                self.encoder_running.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
         let gate = worker.gate.clone();
         *self.encoder.lock().unwrap_or_else(|p| p.into_inner()) = Some(worker);
         Ok(gate)
@@ -944,7 +963,8 @@ impl TransportHandle {
 
     #[cfg(feature = "stateful")]
     pub(super) fn delivery_stopped(&self) -> bool {
-        self.worker
+        let stopped = self
+            .worker
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
@@ -954,7 +974,17 @@ impl TransportHandle {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .iter()
-                .all(JoinHandle::is_finished)
+                .all(JoinHandle::is_finished);
+        #[cfg(feature = "session-replay")]
+        let stopped = stopped
+            && !self.encoder_running.load(Ordering::Acquire)
+            && self
+                .encoder
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .map_or(true, |worker| worker.is_stopped());
+        stopped
     }
 
     #[cfg(feature = "stateful")]

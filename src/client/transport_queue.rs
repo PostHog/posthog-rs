@@ -23,6 +23,8 @@ struct Flush {
     completion: Completion,
     disk: u64,
     memory: u64,
+    #[cfg(all(test, feature = "session-replay"))]
+    tick: bool,
 }
 impl Flush {
     fn new(completion: Completion, disk: u64, memory: u64) -> Self {
@@ -30,7 +32,25 @@ impl Flush {
             completion,
             disk,
             memory,
+            #[cfg(all(test, feature = "session-replay"))]
+            tick: false,
         }
+    }
+    #[cfg(test)]
+    fn tick(completion: Completion, disk: u64, memory: u64) -> Self {
+        Self {
+            #[cfg(feature = "session-replay")]
+            tick: true,
+            ..Self::new(completion, disk, memory)
+        }
+    }
+    #[cfg(feature = "session-replay")]
+    fn into_replay_control(self) -> Control {
+        #[cfg(test)]
+        if self.tick {
+            return Control::Tick(self.completion);
+        }
+        Control::Flush(self.completion)
     }
     fn precedes(&self, entry: Entry) -> bool {
         match entry {
@@ -41,6 +61,8 @@ impl Flush {
 }
 enum UploadJob {
     Analytics(View),
+    #[cfg(feature = "session-replay")]
+    Replay(Control),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -55,6 +77,7 @@ pub(super) fn run(
     deadline: Arc<Mutex<Option<Instant>>>,
     owned_workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     results: mpsc::Sender<Control>,
+    #[cfg(feature = "session-replay")] encoder_running: Arc<AtomicBool>,
     ready: Option<mpsc::Sender<bool>>,
 ) {
     queue.persisted(
@@ -89,9 +112,21 @@ pub(super) fn run(
             let _ = startup.send(true);
             loop {
                 let end = *executor_deadline.lock().unwrap_or_else(|p| p.into_inner());
+                #[cfg(not(feature = "session-replay"))]
                 if end.is_some_and(|end| pipeline.clock.now() >= end) {
                     break;
                 }
+                #[cfg(feature = "session-replay")]
+                if let Some(end) = end {
+                    pipeline.close_delivery(end);
+                }
+                #[cfg(feature = "session-replay")]
+                let next = if end.is_some_and(|end| pipeline.clock.now() >= end) {
+                    None
+                } else {
+                    end.into_iter().chain(pipeline.replay.next_due(end)).min()
+                };
+                #[cfg(not(feature = "session-replay"))]
                 let next = end;
                 let wake = match next {
                     Some(at) => {
@@ -105,16 +140,24 @@ pub(super) fn run(
                     Ok(job) => job,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         let end = *executor_deadline.lock().unwrap_or_else(|p| p.into_inner());
+                        #[cfg(not(feature = "session-replay"))]
                         if end.is_some_and(|end| pipeline.clock.now() >= end) {
                             break;
                         }
+                        #[cfg(feature = "session-replay")]
+                        pipeline.service_replay(false, end);
                         continue;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
                 let end = *executor_deadline.lock().unwrap_or_else(|p| p.into_inner());
+                #[cfg(not(feature = "session-replay"))]
                 if end.is_some_and(|end| pipeline.clock.now() >= end) {
                     break;
+                }
+                #[cfg(feature = "session-replay")]
+                if let Some(end) = end {
+                    pipeline.close_delivery(end);
                 }
                 let mut view = match job {
                     UploadJob::Analytics(view) => {
@@ -122,6 +165,39 @@ pub(super) fn run(
                             continue;
                         }
                         view
+                    }
+                    #[cfg(feature = "session-replay")]
+                    UploadJob::Replay(control) => {
+                        match control {
+                            Control::ReplayFrame(frame) => pipeline.admit_replay(*frame),
+                            Control::ReplayFailure(message) => {
+                                replay::report(&pipeline.options, message, None)
+                            }
+                            Control::DeliveryClosing(end) => pipeline.close_delivery(end),
+                            Control::ReplayShutdownAbandoned => {
+                                pipeline.report_replay_shutdown(None)
+                            }
+                            #[cfg(test)]
+                            Control::Tick(completion) => {
+                                pipeline.service_replay(false, end);
+                                completion.signal();
+                            }
+                            Control::Flush(completion) | Control::FlushCaptures(completion) => {
+                                pipeline.service_replay(true, end);
+                                completion.signal();
+                            }
+                            Control::Shutdown { completion, .. } => {
+                                pipeline.service_replay(true, end);
+                                pipeline.abandon_replay();
+                                completion.signal();
+                                break;
+                            }
+                            _ => {}
+                        }
+                        let end = *executor_deadline.lock().unwrap_or_else(|p| p.into_inner());
+                        pipeline.service_replay(false, end);
+                        let _ = results.send(Control::QueueWake);
+                        continue;
                     }
                 };
                 pipeline
@@ -151,6 +227,8 @@ pub(super) fn run(
                     break;
                 }
             }
+            #[cfg(feature = "session-replay")]
+            pipeline.abandon_replay();
         });
     let status = started.recv();
     if !matches!(status, Ok(true)) {
@@ -190,10 +268,27 @@ pub(super) fn run(
     let mut removals = Vec::new();
     let mut cleanup_due: Option<Instant> = None;
     let mut admitted_since_upload = 0usize;
+    #[cfg(feature = "session-replay")]
+    let mut replay_pending = VecDeque::new();
     loop {
         let end = *deadline.lock().unwrap_or_else(|p| p.into_inner());
         if end.is_some_and(|end| clock.now() >= end) {
             break;
+        }
+        #[cfg(feature = "session-replay")]
+        let mut replay_blocked = false;
+        #[cfg(feature = "session-replay")]
+        while let Some(control) = replay_pending.pop_front() {
+            match jobs.try_send(UploadJob::Replay(control)) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(UploadJob::Replay(control))) => {
+                    replay_pending.push_front(control);
+                    replay_blocked = true;
+                    waiting_for_executor = true;
+                    break;
+                }
+                Err(_) => break,
+            }
         }
         if let Some(result) = completed.take() {
             active = false;
@@ -421,6 +516,8 @@ pub(super) fn run(
                     })
                 });
                 if let Some(view) = view {
+                    #[cfg(feature = "session-replay")]
+                    let mut replay_barrier = false;
                     if let Some((_, first)) = view.entries.iter().find(|(token, _)| {
                         view.batch
                             .pending
@@ -431,11 +528,22 @@ pub(super) fn run(
                         while index < flushes.len() {
                             if flushes[index].precedes(*first) {
                                 let flush = flushes.remove(index);
+                                #[cfg(feature = "session-replay")]
+                                {
+                                    replay_pending.push_back(flush.into_replay_control());
+                                    replay_barrier = true;
+                                }
+                                #[cfg(not(feature = "session-replay"))]
                                 flush.completion.signal();
                             } else {
                                 index += 1;
                             }
                         }
+                    }
+                    #[cfg(feature = "session-replay")]
+                    if replay_barrier {
+                        retry = Some(view);
+                        continue;
                     }
                     match jobs.try_send(UploadJob::Analytics(view)) {
                         Ok(()) => {
@@ -464,9 +572,17 @@ pub(super) fn run(
                             continue;
                         }
                         let flush = flushes.remove(index);
+                        #[cfg(feature = "session-replay")]
+                        replay_pending.push_back(flush.into_replay_control());
+                        #[cfg(not(feature = "session-replay"))]
                         flush.completion.signal();
                     }
                     if closing && flushes.is_empty() {
+                        #[cfg(feature = "session-replay")]
+                        if replay_pending.is_empty() {
+                            break;
+                        }
+                        #[cfg(not(feature = "session-replay"))]
                         break;
                     }
                     // Resume the deferred selection against the normal disk
@@ -479,20 +595,40 @@ pub(super) fn run(
                 }
             } else if !eligible {
                 for flush in flushes.drain(..) {
+                    #[cfg(feature = "session-replay")]
+                    replay_pending.push_back(flush.into_replay_control());
+                    #[cfg(not(feature = "session-replay"))]
                     flush.completion.signal();
                 }
                 if closing {
+                    #[cfg(feature = "session-replay")]
+                    if replay_pending.is_empty() {
+                        break;
+                    }
+                    #[cfg(not(feature = "session-replay"))]
                     break;
                 }
             }
         }
         if !active && !removals.is_empty() {
             for flush in flushes.drain(..) {
+                #[cfg(feature = "session-replay")]
+                replay_pending.push_back(flush.into_replay_control());
+                #[cfg(not(feature = "session-replay"))]
                 flush.completion.signal();
             }
             if closing {
+                #[cfg(feature = "session-replay")]
+                if replay_pending.is_empty() {
+                    break;
+                }
+                #[cfg(not(feature = "session-replay"))]
                 break;
             }
+        }
+        #[cfg(feature = "session-replay")]
+        if !replay_pending.is_empty() && !replay_blocked {
+            continue;
         }
         let next = if active || waiting_for_executor {
             end
@@ -543,7 +679,16 @@ pub(super) fn run(
             Ok(Control::Tick(completion)) => {
                 due = clock.now();
                 let (disk, memory) = queue.checkpoint();
-                flushes.push(Flush::new(completion, disk, memory));
+                flushes.push(Flush::tick(completion, disk, memory));
+            }
+            #[cfg(feature = "session-replay")]
+            Ok(
+                control @ (Control::ReplayFrame(_)
+                | Control::ReplayFailure(_)
+                | Control::DeliveryClosing(_)
+                | Control::ReplayShutdownAbandoned),
+            ) => {
+                replay_pending.push_back(control);
             }
             Ok(Control::HistoricalBatch { events }) => dec_len(&len, events.len()),
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -553,11 +698,69 @@ pub(super) fn run(
     queue.clear();
     drop(retry);
     drop(completed);
-    // No further work can access the event store after the coordinator exits.
+    // No disk access remains possible. A late encoder/report relay must not
+    // retain the namespace while already-started work finishes.
     drop(storage);
+    #[cfg(feature = "session-replay")]
+    {
+        for control in replay_pending {
+            let _ = jobs.send(UploadJob::Replay(control));
+        }
+        let end = *deadline.lock().unwrap_or_else(|p| p.into_inner());
+        if !closing && end.is_some_and(|end| clock.now() >= end) {
+            loop {
+                let wake = if encoder_running.load(Ordering::Acquire) {
+                    rx.recv_timeout(Duration::from_millis(2))
+                } else {
+                    rx.try_recv()
+                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                };
+                match wake {
+                    Ok(Control::Shutdown { completion, .. }) => {
+                        flushes.push(Flush::new(completion, u64::MAX, u64::MAX));
+                        break;
+                    }
+                    Ok(Control::QueueFlush {
+                        completion,
+                        disk,
+                        memory,
+                    }) => flushes.push(Flush::new(completion, disk, memory)),
+                    Ok(
+                        control @ (Control::ReplayFrame(_)
+                        | Control::ReplayFailure(_)
+                        | Control::DeliveryClosing(_)
+                        | Control::ReplayShutdownAbandoned
+                        | Control::Flush(_)
+                        | Control::FlushCaptures(_)),
+                    ) => {
+                        let _ = jobs.send(UploadJob::Replay(control));
+                    }
+                    #[cfg(test)]
+                    Ok(control @ Control::Tick(_)) => {
+                        let _ = jobs.send(UploadJob::Replay(control));
+                    }
+                    Ok(Control::Capture { .. } | Control::Prepared { .. }) => dec_len(&len, 1),
+                    Ok(Control::HistoricalBatch { events }) => dec_len(&len, events.len()),
+                    Ok(_) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        }
+        for flush in flushes {
+            let _ = jobs.send(UploadJob::Replay(flush.into_replay_control()));
+        }
+        let (tx, _) = mpsc::channel();
+        let _ = jobs.send(UploadJob::Replay(Control::Shutdown {
+            completion: Completion::Blocking(tx),
+            deadline: end,
+        }));
+    }
+    #[cfg(not(feature = "session-replay"))]
     for flush in flushes {
         flush.completion.signal();
     }
+    // Active HTTP and encoder work own their resources, never a caller join.
     drop(jobs);
     drain_pending_completions(&rx, &len);
 }

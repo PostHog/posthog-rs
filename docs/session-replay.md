@@ -116,7 +116,7 @@ Native screenshot events go to `/s/` on the existing delivery worker, not analyt
 v1 ingestion. Requests use gzip by default; setting `capture_compression = None`
 sends plain JSON without a compression header. Every request contains one session/distinct-ID pair.
 Batches are at most two frames and become eligible at two encoded frames or one
-second after the first is ready. The shared worker and HTTP can delay attempts.
+second after the first is ready. The upload worker and HTTP can delay attempts.
 
 Retryable failures remain in memory without an attempt-count cutoff, with bounded
 jittered backoff. Valid Retry-After is a floor subject to the backoff cap.
@@ -130,10 +130,20 @@ Client flush includes previously submitted encoding and an eligible replay
 delivery attempt, not host-held frames or guaranteed ingestion. Existing
 `DrainReport` semantics remain local progress.
 
-Shutdown closes acquisition/submission and uses the existing shared best-effort
-budget. In-flight work, callbacks and joins can exceed its elapsed duration.
-Queued replay is memory-only: process exit, a crash or shutdown can lose it.
-Replay does not acquire a second network client or persistence queue.
+Shutdown closes acquisition/submission. Stateful SDK-controlled waiting uses the
+first selected deadline, shared with state persistence and delivery; later calls
+and Drop cannot extend it. `DeliveryOutcome::Stopped` means delivery workers
+actually finished, while `TimedOut` means unfinished work remained at expiry.
+Neither guarantees ingestion. Already-started encoding, HTTP or callbacks own
+their resources until completion; work that never returns can retain them
+indefinitely. Arbitrary destructors of application objects captured by callbacks
+may block outside the SDK-controlled waiting bound.
+
+After expiry no new encoding or upload starts. Already-admitted encoding is
+observed and disposed after event storage is released, preserving report and
+permit ownership without waiting for unsubmitted host-held frames. Queued replay
+is memory-only: process exit, a crash or shutdown can lose it. Replay does not
+acquire a second network client or persistence queue.
 
 ## Validation boundaries
 

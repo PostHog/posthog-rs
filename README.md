@@ -57,7 +57,7 @@ clock corrections.
 Stateful shutdown selects one deadline for SDK-controlled waiting, including Drop;
 concurrent/later calls cannot extend it. `DeliveryOutcome::Stopped` means actual
 delivery-worker completion, while `TimedOut` means unfinished work at expiry.
-State persistence has its own outcome. Already-started storage, HTTP or
+State persistence has its own outcome. Already-started storage, HTTP, encoding or
 callback work owns its resources until completion, potentially indefinitely if it
 never returns. Storage work retains its namespace lease while access is possible;
 request-only work does not. Arbitrary destructors of application objects captured

@@ -3,7 +3,7 @@ mod delivery;
 
 use super::super::{Persistence, SessionMode};
 use super::*;
-use crate::client::transport::{Clock, TransportHandle};
+use crate::client::transport::Clock;
 use httpmock::prelude::*;
 use serde_json::{json, Value};
 use std::io::Read;
@@ -98,10 +98,52 @@ impl Backend {
         config.shutdown_timeout = Duration::from_secs(2);
         configure(&mut config);
         let client = Client::init_blocking(config);
+        wait_for_config_completion(&client);
         client.flush_blocking();
         client
     }
 }
+fn wait_for_config_completion(client: &Client) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client
+        .state
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .remote_config_loading
+    {
+        assert!(Instant::now() < deadline, "remote config did not complete");
+        std::thread::yield_now();
+    }
+}
+fn wait_for_recording_config(client: &Client, recording: Value) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = client.state.as_ref().unwrap().snapshot();
+        if !snapshot.remote_config_loading
+            && snapshot
+                .remote_config
+                .as_ref()
+                .and_then(|config| config.session_recording.as_ref())
+                == Some(&recording)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "recording config was not installed: {}",
+            recording
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn replace_recording_config(backend: &Backend, client: &Client, response: Value, recording: Value) {
+    *backend.config.lock().unwrap() = response;
+    client.load_remote_config(false);
+    wait_for_recording_config(client, recording);
+}
+
 fn layout() -> FrameLayout {
     FrameLayout {
         width: 32,
@@ -146,24 +188,18 @@ fn with_clock_config(
     backend: &Backend,
     configure: impl FnOnce(&mut Config),
 ) -> (Client, Arc<ManualClock>) {
-    let mut client = backend.client(configure);
-    let old = client.transport.take().unwrap();
-    old.request_close();
-    old.join();
     let clock = Arc::new(ManualClock(Mutex::new(Instant::now())));
     let mut config = Config::new("phc_test");
     config.host = backend.server.base_url();
     config.persistence = Persistence::Memory;
+    config.preload_feature_flags = false;
     config.request_timeout_seconds = 2;
     config.shutdown_timeout = Duration::from_secs(2);
-    let transport = TransportHandle::spawn_with_clock(config.transport_options(), clock.clone());
-    client.replay = Controller::new(
-        client.state.as_ref().unwrap(),
-        &transport,
-        client.producer.as_ref().unwrap(),
-        &config,
-    );
-    client.transport = Some(transport);
+    configure(&mut config);
+    let client = Client::init_with_transport_clock(config, clock.clone());
+    let recording = backend.config.lock().unwrap()["sessionRecording"].clone();
+    wait_for_recording_config(&client, recording);
+    client.flush_blocking();
     (client, clock)
 }
 
@@ -214,17 +250,27 @@ fn manual_permission_session_ownership_remote_updates_and_no_screenshot_activity
     assert_eq!(client.peek_session_id(), Some(session));
     let token = frame(&replay);
     assert_eq!(client.state.as_ref().unwrap().snapshot().sessions, sessions);
-    backend.config.lock().unwrap()["sessionRecording"] = json!(false);
-    client.load_remote_config(false);
-    client.flush_blocking();
+    replace_recording_config(
+        &backend,
+        &client,
+        json!({"hasFeatureFlags":false,"sessionRecording":{},"quotaLimited":["mobile_recordings"]}),
+        json!(false),
+    );
     assert!(!replay.is_active());
     assert!(replay.begin_frame(layout()).is_none());
     // Remote disable closes acquisition, not previously acquired valid work.
     assert_eq!(replay.submit_frame(token), SubmitOutcome::Accepted);
+    replace_recording_config(&backend, &client, json!({"sessionRecording":{}}), json!({}));
+    assert!(replay.is_active());
+    assert_eq!(client.peek_session_id(), Some(session));
     replay.stop();
-    backend.config.lock().unwrap()["sessionRecording"] = json!({});
-    client.load_remote_config(false);
-    client.flush_blocking();
+    replace_recording_config(
+        &backend,
+        &client,
+        json!({"sessionRecording":true,"quotaLimited":["mobile_recordings"]}),
+        json!(false),
+    );
+    replace_recording_config(&backend, &client, json!({"sessionRecording":{}}), json!({}));
     assert!(!replay.is_active());
     replay.start();
     assert!(replay.is_active());
@@ -232,6 +278,64 @@ fn manual_permission_session_ownership_remote_updates_and_no_screenshot_activity
     client.shutdown_blocking(None);
     assert!(!replay.is_active());
     assert!(replay.begin_frame(layout()).is_none());
+}
+
+#[test]
+fn mobile_recordings_quota_blocks_manual_start_and_new_acquisition() {
+    let backend = Backend::new();
+    *backend.config.lock().unwrap() = json!({"hasFeatureFlags":false,"sessionRecording":true,"quotaLimited":["mobile_recordings"]});
+    let client = backend.client(|_| {});
+    wait_for_recording_config(&client, json!(false));
+    let replay = client.session_replay();
+    replay.start();
+    let session = client.peek_session_id().unwrap();
+    assert!(!replay.is_active());
+    assert!(replay.begin_frame(layout()).is_none());
+    replace_recording_config(&backend, &client, json!({"sessionRecording":{}}), json!({}));
+    assert!(replay.is_active());
+    assert_eq!(client.peek_session_id(), Some(session));
+    assert!(replay.begin_frame(layout()).is_some());
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn cached_quota_denial_survives_offline_restart_until_config_replacement() {
+    let root = std::env::temp_dir().join(format!("posthog-replay-quota-{}", uuid::Uuid::now_v7()));
+    let backend = Backend::new();
+    *backend.config.lock().unwrap() =
+        json!({"hasFeatureFlags":false,"sessionRecording":{},"quotaLimited":["mobile_recordings"]});
+    let client = backend.client(|config| config.persistence = Persistence::Directory(root.clone()));
+    wait_for_recording_config(&client, json!(false));
+    client.flush_blocking();
+    client.shutdown_blocking(None);
+    drop(client);
+
+    backend.server.reset();
+    let mut offline = backend.server.mock(|when, then| {
+        when.method(GET).path("/array/phc_test/config");
+        then.status(503);
+    });
+    let restored =
+        backend.client(|config| config.persistence = Persistence::Directory(root.clone()));
+    wait_for_recording_config(&restored, json!(false));
+    offline.assert_calls(1);
+    let replay = restored.session_replay();
+    replay.start();
+    assert!(!replay.is_active());
+    assert!(replay.begin_frame(layout()).is_none());
+    offline.delete();
+    backend.server.mock(|when, then| {
+        when.method(GET).path("/array/phc_test/config");
+        then.status(200)
+            .json_body(json!({"hasFeatureFlags":false,"sessionRecording":{}}));
+    });
+    restored.load_remote_config(false);
+    wait_for_recording_config(&restored, json!({}));
+    assert!(replay.is_active());
+    assert!(replay.begin_frame(layout()).is_some());
+    restored.shutdown_blocking(None);
+    drop(restored);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

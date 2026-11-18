@@ -31,8 +31,8 @@ requests a refresh after identity/group changes. `POSTHOG_FLAG_KEY` optionally r
 a cached flag and payload. A known flag read reports access when consent allows;
 `None` means unavailable, not disabled. Initialization and successful drains do not
 promise remote flag success. The listener reports load errors and is explicitly
-unsubscribed before shutdown. Notifications can run on the caller or independent request worker.
-Delivery flush does not wait for flag requests.
+unsubscribed before shutdown. Notifications can run on the caller or independent
+configuration/flags request worker. Delivery flush does not wait for those requests.
 
 ## Synthetic screenshot replay
 

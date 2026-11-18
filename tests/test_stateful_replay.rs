@@ -149,8 +149,13 @@ impl Host {
         if disable_compression {
             config.capture_compression = None;
         }
+        let (tx, rx) = std::sync::mpsc::channel();
+        config.on_feature_flags(move |_| {
+            let _ = tx.send(());
+        });
         let client = Client::init_blocking(config);
-        client.flush_blocking();
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("remote config completion");
         client
     }
 
@@ -187,6 +192,85 @@ fn submit(client: &Client, count: usize) {
         assert_eq!(replay.submit_frame(frame), SubmitOutcome::Accepted);
     }
     client.flush_blocking();
+}
+
+fn quota_settings(server: &httpmock::MockServer, recording: Value, limited: bool) -> Config {
+    use httpmock::prelude::*;
+
+    server.mock(|when, then| {
+        when.method(GET).path("/array/phc_test/config");
+        then.status(200).json_body(json!({
+            "hasFeatureFlags": false,
+            "sessionRecording": recording,
+            "quotaLimited": if limited { json!(["mobile_recordings"]) } else { json!([]) }
+        }));
+    });
+    let mut config = Config::new("phc_test");
+    config.host = server.base_url();
+    config.persistence = Persistence::Memory;
+    config.preload_feature_flags = false;
+    config.request_timeout_seconds = 2;
+    config
+}
+
+fn assert_quota_acquisition(client: &Client, limited: bool) {
+    let replay = client.session_replay();
+    replay.start();
+    assert_eq!(replay.is_active(), !limited);
+    assert_eq!(replay.begin_frame(layout()).is_some(), !limited);
+}
+
+#[test]
+fn remote_mobile_recordings_quota_gates_blocking_public_entry() {
+    for recording in [json!(true), json!({})] {
+        for limited in [false, true] {
+            let server = httpmock::MockServer::start();
+            let mut config = quota_settings(&server, recording.clone(), limited);
+            let (tx, rx) = std::sync::mpsc::channel();
+            config.on_feature_flags(move |update| {
+                if update.flags.as_ref().is_some_and(|flags| flags.is_empty())
+                    && !update.errors_loading
+                {
+                    let _ = tx.send(());
+                }
+            });
+            let client = Client::init_blocking(config);
+            rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_quota_acquisition(&client, limited);
+            client.flush_blocking();
+            client.shutdown_blocking(None);
+        }
+    }
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn remote_mobile_recordings_quota_gates_async_public_entry() {
+    for recording in [json!(true), json!({})] {
+        for limited in [false, true] {
+            let server = httpmock::MockServer::start();
+            let mut config = quota_settings(&server, recording.clone(), limited);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let tx = Mutex::new(Some(tx));
+            config.on_feature_flags(move |update| {
+                if update.flags.as_ref().is_some_and(|flags| flags.is_empty())
+                    && !update.errors_loading
+                {
+                    if let Some(tx) = tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                }
+            });
+            let client = Client::init(config).await;
+            tokio::time::timeout(Duration::from_secs(5), rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_quota_acquisition(&client, limited);
+            client.flush().await;
+            client.shutdown(None).await;
+        }
+    }
 }
 
 #[test]
@@ -280,8 +364,13 @@ where
     config.request_timeout_seconds = 1;
     config.shutdown_timeout = Duration::ZERO;
     config.before_send(hook);
+    let (tx, rx) = std::sync::mpsc::channel();
+    config.on_feature_flags(move |_| {
+        let _ = tx.send(());
+    });
     let client = Client::init_blocking(config);
-    client.flush_blocking();
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("remote config completion");
     client
 }
 
@@ -341,7 +430,7 @@ fn window_id_is_session_scoped_after_reset() {
     let before = &requests[0].json[0];
     let after = &requests[1].json[0];
     assert_ne!(before["distinct_id"], after["distinct_id"]);
-    assert_ne!(
+    assert_eq!(
         before["properties"]["$device_id"],
         after["properties"]["$device_id"]
     );
@@ -462,8 +551,10 @@ fn shutdown_stops_system_clock_analytics_timers_while_a_screenshot_hook_is_block
         config.preload_feature_flags = false;
         config.flush_interval = Duration::from_millis(250);
         config.request_timeout_seconds = 2;
+        let (ready_tx, ready_rx) = mpsc::channel();
         config.on_feature_flags(move |_| {
             let _retain_until_closed = &closed;
+            let _ = ready_tx.send(());
         });
         config.before_send(move |event| {
             if event.event_name() == "$snapshot" {
@@ -477,7 +568,9 @@ fn shutdown_stops_system_clock_analytics_timers_while_a_screenshot_hook_is_block
             Some(event)
         });
         let client = Arc::new(Client::init_blocking(config));
-        client.flush_blocking();
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("remote config completion");
         assert!(matches!(
             client.capture("pending analytics"),
             posthog::stateful::CaptureOutcome::Accepted { .. }

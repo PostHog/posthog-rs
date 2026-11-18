@@ -1,6 +1,9 @@
 //! One bounded-by-admission encoder. Controls cross its FIFO before delivery.
 use std::io;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex,
+};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -200,7 +203,9 @@ pub(crate) struct Gate {
 }
 impl Gate {
     pub(crate) fn close_deadline(&self, deadline: Option<Instant>) -> Instant {
-        deadline.unwrap_or_else(|| Instant::now() + self.shutdown_timeout)
+        (*self.deadline.lock().unwrap_or_else(|p| p.into_inner()))
+            .or(deadline)
+            .unwrap_or_else(|| Instant::now() + self.shutdown_timeout)
     }
     pub(crate) fn is_closed(&self) -> bool {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).closed
@@ -227,8 +232,12 @@ impl Gate {
         }
         if let Control::Shutdown { deadline, .. } = &control {
             state.closed = true;
-            *self.deadline.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some(deadline.unwrap_or_else(|| Instant::now() + self.shutdown_timeout));
+            self.deadline
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_or_insert_with(|| {
+                    deadline.unwrap_or_else(|| Instant::now() + self.shutdown_timeout)
+                });
         }
         state.tx.send(Message::Control(control)).map_err(|e| {
             state.closed = true;
@@ -252,16 +261,21 @@ impl Worker {
         token: String,
         delivery: mpsc::Sender<Control>,
         shutdown_timeout: Duration,
+        deadline: Arc<Mutex<Option<Instant>>>,
+        running: Arc<AtomicBool>,
     ) -> io::Result<Self> {
-        Self::spawn_with_encoder(
+        Self::spawn_with_encoder_and_deadline(
             producer,
             config,
             token,
             delivery,
             shutdown_timeout,
             Box::new(Jpeg),
+            deadline,
+            Some(running),
         )
     }
+    #[cfg(test)]
     pub(super) fn spawn_with_encoder(
         producer: Producer,
         config: &ReplayConfig,
@@ -270,8 +284,37 @@ impl Worker {
         shutdown_timeout: Duration,
         codec: Box<dyn ImageEncoder>,
     ) -> io::Result<Self> {
+        Self::spawn_with_encoder_and_deadline(
+            producer,
+            config,
+            token,
+            delivery,
+            shutdown_timeout,
+            codec,
+            Arc::new(Mutex::new(None)),
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_encoder_and_deadline(
+        producer: Producer,
+        config: &ReplayConfig,
+        token: String,
+        delivery: mpsc::Sender<Control>,
+        shutdown_timeout: Duration,
+        codec: Box<dyn ImageEncoder>,
+        deadline: Arc<Mutex<Option<Instant>>>,
+        running: Option<Arc<AtomicBool>>,
+    ) -> io::Result<Self> {
+        struct Running(Option<Arc<AtomicBool>>);
+        impl Drop for Running {
+            fn drop(&mut self) {
+                if let Some(running) = &self.0 {
+                    running.store(false, Ordering::Release);
+                }
+            }
+        }
         let (tx, rx) = mpsc::channel();
-        let deadline = Arc::new(Mutex::new(None));
         let gate = Arc::new(Gate {
             state: Mutex::new(GateState { tx, closed: false }),
             deadline: deadline.clone(),
@@ -281,6 +324,7 @@ impl Worker {
         let thread = thread::Builder::new()
             .name("posthog-replay-encoder".into())
             .spawn(move || {
+                let _running = Running(running);
                 while let Ok(message) = rx.recv() {
                     match message {
                         Message::Control(control) => {
@@ -345,6 +389,13 @@ impl Worker {
     }
     pub(crate) fn on_worker_thread(&self) -> bool {
         self.id == thread::current().id()
+    }
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.thread
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(true, std::thread::JoinHandle::is_finished)
     }
     pub(crate) fn join(&self) {
         if self.on_worker_thread() {
