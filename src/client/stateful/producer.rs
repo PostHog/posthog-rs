@@ -354,17 +354,23 @@ impl Client {
     /// Passive identity/group events may create attribution, without touching idle time.
     /// The caller owns the recursion guard and the operation's identity snapshot.
     pub(super) fn capture_snapshot(&self, input: Capture, snapshot: &Snapshot) -> CaptureOutcome {
-        let session = self.prepare_admission_session();
+        let session = self.prepare_admission_session(snapshot.generation);
         self.capture_with_session(input, snapshot, session, false, CapturePolicy::Standard)
     }
 
-    pub(super) fn prepare_admission_session(&self) -> Option<super::sessions::AdmissionSession> {
+    /// Select attribution for an event built from an earlier identity snapshot.
+    /// A reset since then means the current session belongs to the next user,
+    /// so the event is sent without a session instead.
+    pub(super) fn prepare_admission_session(
+        &self,
+        generation: u64,
+    ) -> Option<super::sessions::AdmissionSession> {
         let now = self.producer.as_ref().unwrap().session_clock.now();
         self.state
             .as_ref()
             .unwrap()
             .mutate(|snapshot| {
-                (!self.snapshot_opted_out(snapshot))
+                (snapshot.generation == generation && !self.snapshot_opted_out(snapshot))
                     .then(|| snapshot.sessions.prepare_admission(now))
             })
             .ok()
@@ -427,6 +433,8 @@ impl Client {
         let uuid = wire.uuid;
         let now = self.producer.as_ref().unwrap().session_clock.now();
         let mut admission = None;
+        // Measure before taking the state lock, so large events do not extend it.
+        let bytes = crate::client::event_store::record_size(&wire);
         self.state.as_ref().unwrap().admit_capture(
             session.map(|token| (token, now, activity)),
             None,
@@ -435,7 +443,7 @@ impl Client {
                     .transport
                     .as_ref()
                     .unwrap()
-                    .enqueue_prepared_deferred(wire);
+                    .enqueue_measured_deferred(wire, bytes);
                 let accepted = result.admission == Admission::Accepted;
                 admission = Some(result);
                 accepted
