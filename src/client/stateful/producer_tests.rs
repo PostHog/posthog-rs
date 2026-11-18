@@ -77,6 +77,40 @@ fn assembly_preserves_rust_precedence_and_captures_identity_time_and_sdk() {
 }
 
 #[test]
+fn sdk_name_and_version_fill_as_a_pair() {
+    let mut config = Config::new("phc_test");
+    config.sdk_name = "embedding".into();
+    config.sdk_version = "1.2.3".into();
+    let producer = Producer::new(&config);
+    let lib = |properties: serde_json::Value| {
+        let mut input = Capture::new("captured");
+        input.properties = serde_json::from_value(properties).unwrap();
+        let wire = producer.prepare(input, &snapshot(), now()).unwrap();
+        (
+            wire.properties["$lib"].clone(),
+            wire.properties.get("$lib_version").cloned(),
+        )
+    };
+    // No caller $lib: both come from this SDK, replacing a stray version.
+    assert_eq!(lib(json!({})), (json!("embedding"), Some(json!("1.2.3"))));
+    assert_eq!(
+        lib(json!({"$lib_version": "9.9.9"})),
+        (json!("embedding"), Some(json!("1.2.3")))
+    );
+    // A wrapper's own $lib never gets this SDK's version.
+    assert_eq!(lib(json!({"$lib": "wrapper"})), (json!("wrapper"), None));
+    assert_eq!(
+        lib(json!({"$lib": "wrapper", "$lib_version": "4.5.6"})),
+        (json!("wrapper"), Some(json!("4.5.6")))
+    );
+    // This SDK's own name still fills a missing version.
+    assert_eq!(
+        lib(json!({"$lib": "embedding"})),
+        (json!("embedding"), Some(json!("1.2.3")))
+    );
+}
+
+#[test]
 fn normalization_omits_custom_null_members_but_preserves_slots_and_protocol_payloads() {
     let config = Config::new("phc_test");
     let producer = Producer::new(&config);

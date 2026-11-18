@@ -135,8 +135,15 @@ impl Producer {
         for (key, value) in &self.context {
             event.insert_prop_default(key.clone(), value.clone());
         }
-        event.insert_prop_default("$lib", self.sdk_name.clone().into());
-        event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
+        // Fill $lib and $lib_version as a pair, as the server client does, so a
+        // caller's own $lib never gets this SDK's version.
+        let lib = event.properties().get("$lib");
+        if !crate::event::names_a_library(lib) {
+            event.set_prop("$lib", self.sdk_name.clone().into());
+            event.set_prop("$lib_version", self.sdk_version.clone().into());
+        } else if lib.and_then(serde_json::Value::as_str) == Some(self.sdk_name.as_str()) {
+            event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
+        }
         event.insert_prop_default("$device_id", snapshot.anonymous_id.clone().into());
         event.insert_prop_default("$is_identified", false.into());
         event.insert_option_default(PROCESS_PERSON_PROFILE_OPT, false.into());
