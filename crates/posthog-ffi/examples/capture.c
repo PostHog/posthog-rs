@@ -24,7 +24,10 @@ int main(void) {
 
     PostHogOptions *options = posthog_options_new(api_key ? api_key : "");
     if (!options) return fail("posthog_options_new");
-    if (host) posthog_options_set_host(options, host);
+    if (host && posthog_options_set_host(options, host) != POSTHOG_STATUS_OK) {
+        posthog_options_free(options);
+        return fail("posthog_options_set_host");
+    }
     posthog_options_set_is_server(options, false);
 
     PostHogClient *client = posthog_client_new(options);

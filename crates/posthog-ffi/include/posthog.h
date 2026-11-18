@@ -6,7 +6,8 @@
  *
  * Ownership: every `*_new` handle and every `char *` written to an `_out`
  * argument belongs to the caller, who frees it with the matching `*_free`
- * function or `posthog_string_free`. `const char *` arguments are borrowed for
+ * function or `posthog_string_free`. Don't shorten a returned string in place
+ * before freeing it. `const char *` arguments are borrowed for
  * the duration of the call and must be NUL-terminated UTF-8.
  *
  * Threads: a `PostHogClient` and `PostHogFlags` can be shared between threads.
@@ -118,7 +119,9 @@ const char *posthog_version(void);
 const char *posthog_last_error(void);
 
 /**
- * Frees a string returned by the SDK. `NULL` is ignored.
+ * Frees a string returned by the SDK. `NULL` is ignored. Pass the pointer
+ * unchanged, and don't write a NUL into the string first: the SDK uses the
+ * string's length to free it.
  */
 void posthog_string_free(char *value);
 

@@ -14,7 +14,8 @@ header = """
  *
  * Ownership: every `*_new` handle and every `char *` written to an `_out`
  * argument belongs to the caller, who frees it with the matching `*_free`
- * function or `posthog_string_free`. `const char *` arguments are borrowed for
+ * function or `posthog_string_free`. Don't shorten a returned string in place
+ * before freeing it. `const char *` arguments are borrowed for
  * the duration of the call and must be NUL-terminated UTF-8.
  *
  * Threads: a `PostHogClient` and `PostHogFlags` can be shared between threads.

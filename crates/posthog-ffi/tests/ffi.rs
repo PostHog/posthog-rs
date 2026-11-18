@@ -365,3 +365,28 @@ fn shares_one_client_across_threads() {
 
     assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 200);
 }
+
+#[test]
+fn calls_from_thread_local_destructors_do_not_abort() {
+    struct CallsOnDrop;
+    impl Drop for CallsOnDrop {
+        fn drop(&mut self) {
+            unsafe {
+                let event = posthog_event_new(ptr::null(), ptr::null());
+                assert!(event.is_null());
+                let _ = posthog_last_error();
+            }
+        }
+    }
+    thread_local! {
+        static GUARD: CallsOnDrop = const { CallsOnDrop };
+    }
+
+    let result = std::thread::spawn(|| {
+        // Registered before the SDK's error slot, so it is destroyed after it.
+        GUARD.with(|_| {});
+        unsafe { posthog_event_new(ptr::null(), ptr::null()) };
+    })
+    .join();
+    assert!(result.is_ok());
+}

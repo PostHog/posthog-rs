@@ -126,7 +126,9 @@ impl From<posthog::Error> for FfiError {
 fn set_last_error(message: Option<String>) {
     let message = message
         .map(|message| CString::new(message.replace('\0', " ")).expect("NUL bytes were replaced"));
-    LAST_ERROR.with(|slot| *slot.borrow_mut() = message);
+    // `try_with` because C++ thread-local destructors can call in after this
+    // thread's Rust TLS is gone, and `with` would panic outside `catch_unwind`.
+    let _ = LAST_ERROR.try_with(|slot| *slot.borrow_mut() = message);
 }
 
 /// Runs `body`, records its error for `posthog_last_error`, and converts
@@ -223,10 +225,14 @@ pub extern "C" fn posthog_version() -> *const c_char {
 /// call on the same thread.
 #[no_mangle]
 pub extern "C" fn posthog_last_error() -> *const c_char {
-    LAST_ERROR.with(|slot| slot.borrow().as_ref().map_or(ptr::null(), |s| s.as_ptr()))
+    LAST_ERROR
+        .try_with(|slot| slot.borrow().as_ref().map_or(ptr::null(), |s| s.as_ptr()))
+        .unwrap_or(ptr::null())
 }
 
-/// Frees a string returned by the SDK. `NULL` is ignored.
+/// Frees a string returned by the SDK. `NULL` is ignored. Pass the pointer
+/// unchanged, and don't write a NUL into the string first: the SDK uses the
+/// string's length to free it.
 #[no_mangle]
 pub unsafe extern "C" fn posthog_string_free(value: *mut c_char) {
     if !value.is_null() {
