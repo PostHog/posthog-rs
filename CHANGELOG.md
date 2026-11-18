@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 1.1.2 — 2026-11-18
+
+### Patch changes
+
+- [d83cb97](https://github.com/posthog/posthog-rs/commit/d83cb97ccd847f4542ba7d45428e36f8a062fcc6) Send transactional email through PostHog's key-scoped `/api/messaging/` routes, which take the project from the secret key, instead of `/api/projects/@current/messaging/`. Needs PostHog Cloud, or a self-hosted PostHog from 2026-11-18 or later. Older self-hosted versions answer these calls with a 404. — Thanks @rafaeelaudibert!
+
 ## 1.1.1 — 2026-11-18
 
 ### Patch changes
