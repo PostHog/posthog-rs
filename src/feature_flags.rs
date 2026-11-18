@@ -846,10 +846,20 @@ where
 {
     // Check properties first. The caller supplies either the basic matcher or
     // the context-aware matcher; rollout handling remains identical.
+    // Filters in a condition have no defined order, so an inconclusive filter
+    // doesn't stop the loop: a later filter can still rule the condition out.
+    let mut inconclusive = None;
     for prop in &condition.properties {
-        if !property_matcher(prop, properties)? {
-            return Ok(ConditionMatch::NoMatch);
+        match property_matcher(prop, properties) {
+            Ok(true) => {}
+            Ok(false) => return Ok(ConditionMatch::NoMatch),
+            Err(err) => {
+                inconclusive.get_or_insert(err);
+            }
         }
+    }
+    if let Some(err) = inconclusive {
+        return Err(err);
     }
 
     // If all properties match (or no properties), check rollout percentage
@@ -5237,5 +5247,40 @@ mod tests {
                 "{plan}, {region}"
             );
         }
+    }
+
+    #[test]
+    fn test_filter_that_does_not_match_wins_over_earlier_missing_property() {
+        // `plan` is missing, so the first filter can't be checked. The second
+        // one rules the condition out whatever `plan` is, so the flag is
+        // definitively false, not inconclusive.
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {
+                "groups": [
+                    {
+                        "properties": [
+                            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"},
+                            {"key": "region", "value": "US", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 100
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let properties = HashMap::from([("region".to_string(), json!("EU"))]);
+        assert_eq!(
+            evaluate_both_ways(&flag, "user-0", &properties).unwrap(),
+            FlagValue::Boolean(false)
+        );
+
+        // When every filter that can be checked matches, the missing one still
+        // decides, so the result stays inconclusive.
+        let properties = HashMap::from([("region".to_string(), json!("US"))]);
+        let result = evaluate_both_ways(&flag, "user-0", &properties);
+        assert!(result.is_err(), "expected inconclusive, got {:?}", result);
     }
 }
