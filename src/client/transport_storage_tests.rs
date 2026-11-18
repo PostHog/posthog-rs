@@ -178,7 +178,7 @@ fn mixed_capture_time_sdk_versions_survive_recovery_and_partial_retry() {
 }
 
 #[test]
-fn durable_events_survive_incomplete_success_bodies_but_not_complete_invalid_json() {
+fn durable_events_survive_success_bodies_that_do_not_confirm_delivery() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -260,34 +260,28 @@ fn durable_events_survive_incomplete_success_bodies_but_not_complete_invalid_jso
         handle.flush_blocking();
         let _ = close_tx.send(());
         server.join().unwrap();
-        let retained = mode != "invalid-json";
-        assert_eq!(directory.records().len(), usize::from(retained), "{mode}");
+        // A truncated or unparseable 2xx did not confirm delivery.
+        assert_eq!(directory.records().len(), 1, "{mode}");
         assert_eq!(
             handle.pending(),
             0,
             "durable records do not occupy staging: {mode}"
         );
-        assert_eq!(
-            failures.load(Ordering::SeqCst),
-            usize::from(!retained),
-            "{mode}"
-        );
+        assert_eq!(failures.load(Ordering::SeqCst), 0, "{mode}");
         handle.shutdown_blocking();
         assert_eq!(handle.pending(), 0);
-        if retained {
-            let server = MockServer::start();
-            let success = server.mock(|when, then| {
-                when.method(POST);
-                then.status(200).json_body(serde_json::json!({"results":{
-                    (event.uuid.to_string()):{"result":"ok"}
-                }}));
-            });
-            let recovered = persistent(&server, &ManualClock::new(), directory.open());
-            recovered.flush_blocking();
-            success.assert_calls(1);
-            assert!(directory.records().is_empty());
-            recovered.shutdown_blocking();
-        }
+        let server = MockServer::start();
+        let success = server.mock(|when, then| {
+            when.method(POST);
+            then.status(200).json_body(serde_json::json!({"results":{
+                (event.uuid.to_string()):{"result":"ok"}
+            }}));
+        });
+        let recovered = persistent(&server, &ManualClock::new(), directory.open());
+        recovered.flush_blocking();
+        success.assert_calls(1);
+        assert!(directory.records().is_empty());
+        recovered.shutdown_blocking();
     }
 }
 
