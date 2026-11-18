@@ -970,7 +970,6 @@ impl Client {
         flag_key: K,
     ) -> Result<Option<serde_json::Value>, Error> {
         if self.options.is_disabled() {
-            trace!("Client is disabled, skipping remote config payload request");
             return Ok(None);
         }
 
