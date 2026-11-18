@@ -1,5 +1,11 @@
 # posthog-rs
 
+## 1.1.0 — 2026-11-18
+
+### Minor changes
+
+- [3188466](https://github.com/posthog/posthog-rs/commit/3188466a5f56fa6f9c15a67f40656c9138f4e1a5) Add `reload_feature_flags` to the async and blocking clients. It fetches local feature flag definitions now and returns once they are in use, or with the error that kept them from loading. Before, a client could only wait for its next poll. — Thanks @eli-r-ph!
+
 ## 1.0.0 — 2026-11-17
 
 ### Major changes
