@@ -495,3 +495,25 @@ fn passive_admission_never_touches_live_idle_and_rejected_previews_expire() {
     sessions.commit_admission(passive, later(now, IDLE + IDLE / 2), false);
     assert_eq!(sessions.active_id(later(now, IDLE * 2)), None);
 }
+
+#[test]
+fn helper_events_from_before_a_reset_do_not_join_the_next_session() {
+    let mut config = super::super::Config::new("phc_test");
+    config.persistence = super::super::Persistence::Memory;
+    config.host = "http://127.0.0.1:1".into();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = events.clone();
+    config.before_send(move |event| {
+        seen.lock().unwrap().push(event.clone());
+        None
+    });
+    let client = Client::init_blocking(config);
+    let before_reset = client.state.as_ref().unwrap().snapshot();
+    client.reset();
+    let next_session = client.session_id();
+    assert!(next_session.is_some());
+    client.capture_snapshot(super::super::Capture::new("old-user"), &before_reset);
+    let seen = events.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(!seen[0].properties().contains_key("$session_id"));
+}
