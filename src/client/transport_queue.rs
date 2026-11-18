@@ -546,7 +546,14 @@ pub(super) fn run(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
-    queue.clear();
+    // Resident events at exit were never written to disk: memory fallback, or
+    // staging the store did not reach before shutdown.
+    let dropped = queue.clear();
+    if dropped > 0 {
+        tracing::warn!(
+            "posthog-rs: shutdown stopped delivery; dropping {dropped} event(s) that were held only in memory"
+        );
+    }
     drop(retry);
     drop(completed);
     // No further work can access the event store after the coordinator exits.

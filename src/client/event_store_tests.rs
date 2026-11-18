@@ -904,3 +904,28 @@ fn bounded_head_rollover_includes_its_checkpoint_but_not_later_appends() {
     );
     assert_eq!(store.count, 4);
 }
+
+// A literal version-1 record, independent of the current serializer: a format
+// change must still recover records written by earlier releases.
+const FINAL_V1_RECORD: &str = r#"{"version":1,"event":{"event":"fixture","uuid":"018e23f4-1234-7000-8000-000000000001","distinct_id":"original-user","timestamp":"2025-01-01T00:00:00.123456Z","session_id":"original-session","window_id":"original-window","options":{"process_person_profile":false},"properties":{"original":{"array":[false,0,null]}}}}"#;
+
+#[test]
+fn final_v1_record_fixture_recovers_the_complete_event() {
+    let directory = TestDirectory::new();
+    drop(directory.open(limits()));
+    fs::write(
+        directory.0.join("events").join(format!("{:020}.json", 1)),
+        FINAL_V1_RECORD,
+    )
+    .unwrap();
+    let mut store = directory.open(limits());
+    let recovered = store.recover(10, 64 * 1024).unwrap();
+    assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+    assert_eq!(recovered.events.len(), 1);
+    let mut expected = event("fixture");
+    expected.uuid = Uuid::parse_str("018e23f4-1234-7000-8000-000000000001").unwrap();
+    assert_eq!(
+        serde_json::to_value(&recovered.events[0].event).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+}
