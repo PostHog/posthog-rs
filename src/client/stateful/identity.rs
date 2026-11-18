@@ -300,12 +300,14 @@ impl Client {
             self.capture_snapshot(event, snapshot);
             return;
         };
-        let session = self.prepare_admission_session();
+        let session = self.prepare_admission_session(snapshot.generation);
         let Ok(wire) = self.prepare_snapshot(event, snapshot, session) else {
             return;
         };
         let mut admission = None;
         let now = self.producer.as_ref().unwrap().session_clock.now();
+        // Measure before taking the state lock, so large events do not extend it.
+        let bytes = crate::client::event_store::record_size(&wire);
         self.state.as_ref().unwrap().admit_capture(
             session.map(|token| (token, now, false)),
             Some((snapshot.generation, fingerprint, deduplicate)),
@@ -317,7 +319,7 @@ impl Client {
                     .transport
                     .as_ref()
                     .unwrap()
-                    .enqueue_prepared_deferred(wire);
+                    .enqueue_measured_deferred(wire, bytes);
                 let accepted = result.admission == Admission::Accepted;
                 admission = Some(result);
                 accepted

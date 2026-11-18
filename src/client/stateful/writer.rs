@@ -738,6 +738,9 @@ impl Drop for StateWriter {
     }
 }
 
+/// Longest the idle worker sleeps before rechecking for a close request.
+const IDLE_RECHECK: Duration = Duration::from_millis(250);
+
 fn run_worker(
     shared: &Shared,
     mut store: Box<dyn StateStore>,
@@ -821,6 +824,14 @@ fn run_worker(
             state = shared.lock();
             continue;
         }
+        // A closer that lost the try_lock race to this thread has already
+        // notified, and that notification is gone once we wait. Apply its
+        // deadline while still holding the lock so the wait cannot outlive it.
+        let was_closing = state.closing.is_some();
+        state.observe_deadline();
+        if !was_closing && state.closing.is_some() {
+            continue;
+        }
         #[cfg(test)]
         shared.tick_observed(&mut state);
         let wake_at = match (state.due, state.closing) {
@@ -828,11 +839,12 @@ fn run_worker(
             (Some(at), None) | (None, Some(at)) => Some(at),
             (None, None) => None,
         };
-        state = if let Some(at) = wake_at {
-            shared.wait_timeout(state, at.saturating_duration_since(now))
-        } else {
-            shared.wait(state)
-        };
+        // Idle waits still recheck for a close published between the check
+        // above and the wait, so a lost notification only delays shutdown.
+        let timeout = wake_at.map_or(IDLE_RECHECK, |at| {
+            at.saturating_duration_since(now).min(IDLE_RECHECK)
+        });
+        state = shared.wait_timeout(state, timeout);
     }
     // Destructors and callbacks must run without the state lock, including a
     // backend whose destructor releases the last client reference.
