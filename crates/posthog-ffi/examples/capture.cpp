@@ -20,18 +20,21 @@
 
 namespace posthog {
 
+inline std::string last_error() {
+  const char *message = posthog_last_error();
+  return message ? message : "unknown error";
+}
+
+// Thrown when a call fails. Constructors report failure with NULL and no
+// status, so `status()` is empty for them.
 class Error : public std::runtime_error {
  public:
-  Error(const std::string &what, PostHogStatus status)
-      : std::runtime_error(what + " failed: " + last_error()), status_(status) {}
-  PostHogStatus status() const { return status_; }
+  explicit Error(const std::string &what) : std::runtime_error(what + " failed: " + last_error()) {}
+  Error(const std::string &what, PostHogStatus status) : Error(what) { status_ = status; }
+  std::optional<PostHogStatus> status() const { return status_; }
 
  private:
-  static std::string last_error() {
-    const char *message = posthog_last_error();
-    return message ? message : "unknown error";
-  }
-  PostHogStatus status_;
+  std::optional<PostHogStatus> status_;
 };
 
 inline void check(PostHogStatus status, const char *what) {
@@ -56,7 +59,7 @@ class Event {
  public:
   Event(const std::string &name, const std::string &distinct_id)
       : handle_(posthog_event_new(name.c_str(), distinct_id.c_str())) {
-    if (!handle_) throw Error("posthog_event_new", POSTHOG_STATUS_NULL_ARGUMENT);
+    if (!handle_) throw Error("posthog_event_new");
   }
 
   Event &set(const std::string &key, const std::string &value) {
@@ -132,7 +135,7 @@ class Flags {
 
   Flags only_accessed() const {
     PostHogFlags *accessed = posthog_flags_only_accessed(handle_.get());
-    if (!accessed) throw Error("posthog_flags_only_accessed", POSTHOG_STATUS_NULL_ARGUMENT);
+    if (!accessed) throw Error("posthog_flags_only_accessed");
     return Flags(accessed);
   }
 
@@ -147,11 +150,11 @@ class Client {
   Client(const std::string &api_key, const char *host, bool is_server) {
     std::unique_ptr<PostHogOptions, Deleter<PostHogOptions, posthog_options_free>> options(
         posthog_options_new(api_key.c_str()));
-    if (!options) throw Error("posthog_options_new", POSTHOG_STATUS_NULL_ARGUMENT);
+    if (!options) throw Error("posthog_options_new");
     if (host) check(posthog_options_set_host(options.get(), host), "posthog_options_set_host");
     check(posthog_options_set_is_server(options.get(), is_server), "posthog_options_set_is_server");
     handle_.reset(posthog_client_new(options.get()));
-    if (!handle_) throw Error("posthog_client_new", POSTHOG_STATUS_NULL_ARGUMENT);
+    if (!handle_) throw Error("posthog_client_new");
   }
 
   void capture(const Event &event) { check(posthog_capture(handle_.get(), event.get()), "posthog_capture"); }

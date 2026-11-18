@@ -390,3 +390,42 @@ fn calls_from_thread_local_destructors_do_not_abort() {
     .join();
     assert!(result.is_ok());
 }
+
+#[test]
+fn disabled_client_sends_nothing() {
+    let server = MockServer::start();
+    let any_request = server.mock(|when, then| {
+        when.any_request();
+        then.status(200)
+            .json_body(json!({"flags": {}, "results": {}}));
+    });
+
+    unsafe {
+        let options = posthog_options_new(c("phc_test").as_ptr());
+        posthog_options_set_host(options, c(&server.base_url()).as_ptr());
+        posthog_options_set_disabled(options, true);
+        let client = posthog_client_new(options);
+        posthog_options_free(options);
+        assert!(!client.is_null(), "{:?}", last_error());
+
+        let event = posthog_event_new(c("disabled").as_ptr(), c("user-1").as_ptr());
+        assert_eq!(
+            posthog_capture(client, event),
+            PostHogStatus::POSTHOG_STATUS_OK
+        );
+        posthog_event_free(event);
+
+        let mut flags = ptr::null_mut();
+        let status = posthog_evaluate_flags(client, c("user-1").as_ptr(), ptr::null(), &mut flags);
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_OK);
+        let mut keys = ptr::null_mut();
+        posthog_flags_keys(flags, &mut keys);
+        assert_eq!(take_string(keys), "[]");
+        posthog_flags_free(flags);
+
+        assert_eq!(posthog_flush(client), PostHogStatus::POSTHOG_STATUS_OK);
+        posthog_client_free(client);
+    }
+
+    any_request.assert_calls(0);
+}
