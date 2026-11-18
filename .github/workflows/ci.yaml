@@ -192,12 +192,50 @@ jobs:
           native_libs=$(cargo rustc --locked --release --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
             | sed -n 's/.*native-static-libs: //p' | tail -1)
           cc -std=c99 -Wall -Wextra -Werror -pedantic examples/capture.c -Iinclude -Ltarget/release -lposthog_ffi -o capture
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic examples/capture.cpp -Iinclude -Ltarget/release -lposthog_ffi -o capture-cpp
           c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -Ltarget/release -lposthog_ffi -o smoke-shared
           c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude target/release/libposthog_ffi.a $native_libs -o smoke-static
           c++ -std=c++11 -fshort-enums -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude target/release/libposthog_ffi.a $native_libs -o smoke-short-enums
           LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release ./smoke-shared
           ./smoke-static
           ./smoke-short-enums
+
+  ffi-e2e:
+    name: C bindings (E2E)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/posthog-ffi
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/posthog-ffi/target
+          key: ${{ runner.os }}-cargo-ffi-e2e-${{ hashFiles('crates/posthog-ffi/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ffi-
+
+      - name: Run E2E tests
+        env:
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_RS_E2E_TEST_API_KEY }}
+          POSTHOG_HOST: https://us.i.posthog.com
+        run: |
+          if [ -z "$POSTHOG_API_KEY" ]; then
+            echo "::notice::Skipping: POSTHOG_RS_E2E_TEST_API_KEY is not available"
+            exit 0
+          fi
+          tests/e2e/run.sh
 
   ffi-msrv:
     name: C bindings (MSRV)

@@ -73,7 +73,7 @@ if (posthog_evaluate_flags(client, "user-123", NULL, &flags) == POSTHOG_STATUS_O
 posthog_client_free(client);
 ```
 
-See [`examples/capture.c`](examples/capture.c) for a complete program.
+See [`examples/capture.c`](examples/capture.c) for a complete C program. [`examples/capture.cpp`](examples/capture.cpp) is the same program in C++17. It wraps the handles in `std::unique_ptr` and turns error statuses into exceptions, a pattern you can copy into your app.
 
 ### Errors
 
