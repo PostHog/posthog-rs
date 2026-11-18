@@ -341,29 +341,72 @@ fn restart_restores_owned_context_and_removals() {
 }
 
 #[test]
-fn invalid_current_records_are_preserved() {
+fn invalid_current_records_use_configured_fallback_and_allow_replacement() {
     for invalid in [json!(null), json!({"company":1}), json!({" ":"key"})] {
         let directory = Directory::new();
         let client = Client::init_blocking(directory.config());
-        client.shutdown_blocking(None);
+        client.identify("stored-user");
+        client.opt_in();
+        client.register(properties(json!({"stored":true})));
+        assert_eq!(
+            client.shutdown_blocking(None).state,
+            PersistenceOutcome::Persisted
+        );
         drop(client);
         let mut state = directory.state();
         state["state"]["groups"] = invalid;
-        let bytes = serde_json::to_vec(&state).unwrap();
-        std::fs::write(directory.state_path(), &bytes).unwrap();
-        let (client, _) = observed(directory.config());
+        std::fs::write(directory.state_path(), serde_json::to_vec(&state).unwrap()).unwrap();
+        let mut conf = directory.config();
+        conf.bootstrap_anonymous_id = Some("fallback-id".into());
+        conf.opt_out = true;
+        let (client, events) = observed(conf);
         assert!(!client.is_disabled());
-        client.register(properties(json!({"fallback":true})));
+        assert_eq!(client.get_distinct_id(), "fallback-id");
+        assert!(!client.is_identified());
+        assert!(client.is_opt_out());
+        assert_eq!(client.capture("private"), CaptureOutcome::OptedOut);
+        assert!(events.lock().unwrap().is_empty());
+        client.opt_in();
+        client.capture("fallback");
+        {
+            let events = events.lock().unwrap();
+            assert!(!events[0].properties().contains_key("$groups"));
+            assert!(!events[0].properties().contains_key("stored"));
+        }
+        client.register(properties(json!({"replacement":true})));
+        client.group("company", "valid", None);
         assert_eq!(
             client.shutdown_blocking(None).state,
-            PersistenceOutcome::Unavailable
+            PersistenceOutcome::Persisted
         );
-        assert_eq!(std::fs::read(directory.state_path()).unwrap(), bytes);
+        drop(client);
+        assert_eq!(
+            directory.state()["state"]["groups"],
+            json!({"company":"valid"})
+        );
+        let (client, events) = observed(directory.config());
+        assert_eq!(client.get_distinct_id(), "fallback-id");
+        assert!(!client.is_identified());
+        assert!(!client.is_opt_out());
+        client.capture("restored replacement");
+        {
+            let events = events.lock().unwrap();
+            assert_eq!(
+                events[0].properties()["$groups"],
+                json!({"company":"valid"})
+            );
+            assert_eq!(events[0].properties()["replacement"], true);
+            assert!(!events[0].properties().contains_key("stored"));
+        }
+        assert_eq!(
+            client.shutdown_blocking(None).state,
+            PersistenceOutcome::Persisted
+        );
     }
 }
 
 #[test]
-fn dropped_or_full_group_event_keeps_context_without_replay() {
+fn oversized_group_event_keeps_context_without_replay() {
     let server = MockServer::start();
     let request = server.mock(|when, then| {
         when.method(POST)
@@ -374,10 +417,15 @@ fn dropped_or_full_group_event_keeps_context_without_replay() {
     let mut conf = config();
     conf.host = server.base_url();
     conf.max_queue_size = 1;
+    conf.max_queue_bytes = 4096;
+    conf.max_record_bytes = 4096;
     conf.flush_at = 1000;
     let seen = Arc::new(Mutex::new(Vec::new()));
     let events = seen.clone();
-    conf.before_send(move |event| {
+    conf.before_send(move |mut event| {
+        if matches!(event.event_name(), "$groupidentify" | "still-full") {
+            event.insert_prop("padding", "x".repeat(8192)).unwrap();
+        }
         events.lock().unwrap().push(event.clone());
         Some(event)
     });
