@@ -167,7 +167,7 @@ fn consent_disabled_closed_invalid_and_recursive_capture_do_not_create() {
 }
 
 #[test]
-fn background_state_survives_identity_reset_and_passive_helpers_are_sessionless() {
+fn background_state_survives_reset_and_dropped_passive_helpers_do_not_commit() {
     let (client, events) = observed(config());
     client.group("company", "a", None);
     client.identify("person");
@@ -180,10 +180,14 @@ fn background_state_survives_identity_reset_and_passive_helpers_are_sessionless(
     assert_eq!(client.peek_session_id(), None);
     client.set_app_in_background(false);
     assert!(client.peek_session_id().is_some());
+    let events = events.lock().unwrap();
     assert!(events
-        .lock()
-        .unwrap()
         .iter()
+        .take(2)
+        .all(|event| event.properties().contains_key("$session_id")));
+    assert!(events
+        .iter()
+        .skip(2)
         .all(|event| !event.properties().contains_key("$session_id")));
 }
 
@@ -273,9 +277,10 @@ fn reset_clears_persisted_session_and_retains_manual_policy() {
 }
 
 #[test]
-fn invalid_session_files_are_preserved() {
+fn invalid_optional_session_cache_is_repaired_without_discarding_identity() {
     let directory = Directory::new();
     let client = Client::init_blocking(directory.config());
+    let identity = client.get_distinct_id();
     client.session_activity();
     assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
     client.shutdown_blocking(None);
@@ -290,17 +295,17 @@ fn invalid_session_files_are_preserved() {
         let mut value = valid.clone();
         value["state"]["session"] = invalid;
         directory.replace(&value);
-        let bytes = std::fs::read(directory.path()).unwrap();
         let client = Client::init_blocking(directory.config());
+        assert_eq!(client.get_distinct_id(), identity);
         assert!(!client.is_disabled());
         assert_eq!(client.peek_session_id(), None);
         assert!(client.session_id().is_some());
         assert_eq!(
             client.shutdown_blocking(None).state,
-            PersistenceOutcome::Unavailable
+            PersistenceOutcome::Persisted
         );
         drop(client);
-        assert_eq!(std::fs::read(directory.path()).unwrap(), bytes);
+        assert!(directory.state()["state"]["session"].is_object());
     }
 }
 
@@ -459,19 +464,23 @@ fn capture_racing_reset_keeps_coherent_pre_hook_identity_and_session() {
 }
 
 #[test]
-fn full_admission_retains_activity_and_recovered_wire_keeps_original_session() {
+fn full_admission_does_not_create_activity_and_recovery_keeps_original_session() {
     let mut conf = config();
     conf.max_queue_size = 1;
+    conf.max_queue_bytes = 2048;
+    conf.max_record_bytes = 2048;
     let client = Client::init_blocking(conf);
     assert!(matches!(
         client.capture("first"),
         CaptureOutcome::Accepted { .. }
     ));
-    let first = client.peek_session_id();
     client.end_session();
-    assert_eq!(client.capture("full"), CaptureOutcome::Full);
-    assert!(client.peek_session_id().is_some());
-    assert_ne!(client.peek_session_id(), first);
+    let mut too_large = Capture::new("full");
+    too_large
+        .properties
+        .insert("data".into(), "x".repeat(4096).into());
+    assert_eq!(client.capture(too_large), CaptureOutcome::Full);
+    assert_eq!(client.peek_session_id(), None);
     client.shutdown_blocking(None);
 
     let directory = Directory::new();

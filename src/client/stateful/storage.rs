@@ -189,7 +189,7 @@ pub(super) fn encode_snapshot(snapshot: &Snapshot, max_bytes: u64) -> io::Result
             invalid_state()
         }
     })?;
-    // Check the same bounded decoder used at startup before touching files.
+    // Writes remain strict even though startup can discard malformed caches.
     FileStateStore::decode(&buffer.bytes)?;
     Ok(buffer.bytes)
 }
@@ -331,6 +331,13 @@ impl FileStateStore {
             state.insert("device_id".into(), anonymous);
             rewrite_required = true;
         }
+        if let Some(session) = state.get_mut("session") {
+            normalize_optional::<super::sessions::StoredSession>(
+                session,
+                |session| session.is_valid(),
+                &mut rewrite_required,
+            );
+        }
         let snapshot: Snapshot = serde_json::from_value(record.state)
             .map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
         if !snapshot.is_valid() {
@@ -381,6 +388,21 @@ impl FileStateStore {
             let _ = fs::remove_file(temporary);
         }
         result
+    }
+}
+
+/// Recovery applies only to present optional values; missing required fields and
+/// invalid mandatory targeting still reject the core snapshot.
+fn normalize_optional<T: serde::de::DeserializeOwned>(
+    value: &mut serde_json::Value,
+    valid: impl FnOnce(&T) -> bool,
+    rewrite_required: &mut bool,
+) {
+    if !value.is_null()
+        && !serde_json::from_value::<T>(value.clone()).is_ok_and(|decoded| valid(&decoded))
+    {
+        *value = serde_json::Value::Null;
+        *rewrite_required = true;
     }
 }
 

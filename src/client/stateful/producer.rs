@@ -250,6 +250,7 @@ impl Client {
     /// the calling thread, outside client-state locks. Concurrent calls serialize
     /// each mutable hook; a hook must not wait for another capture of this client.
     /// Recursive same-thread capture is rejected rather than skipping hooks.
+    /// Session activity is committed only when local admission succeeds.
     pub fn capture(&self, input: impl Into<Capture>) -> CaptureOutcome {
         if self.is_disabled() {
             return CaptureOutcome::Disabled;
@@ -271,27 +272,37 @@ impl Client {
         let snapshot = self.state.as_ref().unwrap().mutate(|snapshot| {
             let opted_out = self.snapshot_opted_out(snapshot);
             let now = self.producer.as_ref().unwrap().session_clock.now();
-            snapshot.session_operation(super::sessions::Operation::Activity, now, opted_out);
-            let session_id = snapshot.sessions.active_id(now.elapsed);
-            (snapshot.clone(), session_id)
+            let session = (!opted_out).then(|| snapshot.sessions.prepare_admission(now));
+            (snapshot.clone(), session)
         });
-        let Ok((_, (snapshot, session_id))) = snapshot else {
+        let Ok((_, (snapshot, session))) = snapshot else {
             return if self.closed.load(Ordering::Acquire) {
                 CaptureOutcome::Closed
             } else {
                 CaptureOutcome::Full
             };
         };
-        self.capture_with_session(input, &snapshot, session_id)
+        self.capture_with_session(input, &snapshot, session, true)
     }
 
-    /// Passive SDK events inspect attribution without maintaining the session.
+    /// Passive identity/group events may create attribution, without touching idle time.
     /// The caller owns the recursion guard and the operation's identity snapshot.
     pub(super) fn capture_snapshot(&self, input: Capture, snapshot: &Snapshot) -> CaptureOutcome {
-        let session_id = snapshot
-            .sessions
-            .active_id(self.producer.as_ref().unwrap().session_clock.now().elapsed);
-        self.capture_with_session(input, snapshot, session_id)
+        let session = self.prepare_admission_session();
+        self.capture_with_session(input, snapshot, session, false)
+    }
+
+    pub(super) fn prepare_admission_session(&self) -> Option<super::sessions::AdmissionSession> {
+        let now = self.producer.as_ref().unwrap().session_clock.now();
+        self.state
+            .as_ref()
+            .unwrap()
+            .mutate(|snapshot| {
+                (!self.snapshot_opted_out(snapshot))
+                    .then(|| snapshot.sessions.prepare_admission(now))
+            })
+            .ok()
+            .and_then(|(_, token)| token)
     }
 
     /// Attribution was selected with the operation's snapshot. Do not recheck
@@ -300,17 +311,45 @@ impl Client {
         &self,
         input: Capture,
         snapshot: &Snapshot,
-        session_id: Option<Uuid>,
+        session: Option<super::sessions::AdmissionSession>,
+        activity: bool,
     ) -> CaptureOutcome {
-        let wire = match self.prepare_with_session(input, snapshot, session_id) {
-            Ok(wire) => wire,
-            Err(outcome) => return outcome,
-        };
+        let wire =
+            match self.prepare_with_session(input, snapshot, session.and_then(|token| token.id)) {
+                Ok(wire) => wire,
+                Err(outcome) => return outcome,
+            };
+        self.admit_wire(wire, session, activity)
+    }
+
+    fn admit_wire(
+        &self,
+        wire: CaptureEvent,
+        session: Option<super::sessions::AdmissionSession>,
+        activity: bool,
+    ) -> CaptureOutcome {
         let uuid = wire.uuid;
-        match self.transport.as_ref().unwrap().enqueue_prepared(wire) {
-            Admission::Accepted => CaptureOutcome::Accepted { uuid },
-            Admission::Full => CaptureOutcome::Full,
-            Admission::Closed => CaptureOutcome::Closed,
+        let now = self.producer.as_ref().unwrap().session_clock.now();
+        let mut admission = None;
+        self.state.as_ref().unwrap().admit_capture(
+            session.map(|token| (token, now, activity)),
+            None,
+            || {
+                let result = self
+                    .transport
+                    .as_ref()
+                    .unwrap()
+                    .enqueue_prepared_deferred(wire);
+                let accepted = result.admission == Admission::Accepted;
+                admission = Some(result);
+                accepted
+            },
+        );
+        match admission.map(|result| result.report()) {
+            Some(Admission::Accepted) => CaptureOutcome::Accepted { uuid },
+            Some(Admission::Closed) => CaptureOutcome::Closed,
+            _ if self.closed.load(Ordering::Acquire) => CaptureOutcome::Closed,
+            _ => CaptureOutcome::Full,
         }
     }
 
@@ -319,11 +358,9 @@ impl Client {
         &self,
         input: Capture,
         snapshot: &Snapshot,
+        session: Option<super::sessions::AdmissionSession>,
     ) -> Result<CaptureEvent, CaptureOutcome> {
-        let session_id = snapshot
-            .sessions
-            .active_id(self.producer.as_ref().unwrap().session_clock.now().elapsed);
-        self.prepare_with_session(input, snapshot, session_id)
+        self.prepare_with_session(input, snapshot, session.and_then(|token| token.id))
     }
 
     fn prepare_with_session(
@@ -338,12 +375,11 @@ impl Client {
         if self.snapshot_opted_out(snapshot) {
             return Err(CaptureOutcome::OptedOut);
         }
-        let wire = self
-            .producer
-            .as_ref()
-            .unwrap()
-            .prepare(input, snapshot, Utc::now(), session_id)?;
-        // A hook can close the client. Its outer capture must not be admitted.
+        let wire =
+            self.producer
+                .as_ref()
+                .unwrap()
+                .prepare(input, snapshot, Utc::now(), session_id)?;
         if self.closed.load(Ordering::Acquire) {
             return Err(CaptureOutcome::Closed);
         }

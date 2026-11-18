@@ -271,14 +271,15 @@ impl Client {
             self.capture_snapshot(event, snapshot);
             return;
         };
-        let Ok(wire) = self.prepare_snapshot(event, snapshot) else {
+        let session = self.prepare_admission_session();
+        let Ok(wire) = self.prepare_snapshot(event, snapshot, session) else {
             return;
         };
         let mut admission = None;
-        self.state.as_ref().unwrap().admit_person(
-            snapshot.generation,
-            fingerprint,
-            deduplicate,
+        let now = self.producer.as_ref().unwrap().session_clock.now();
+        self.state.as_ref().unwrap().admit_capture(
+            session.map(|token| (token, now, false)),
+            Some((snapshot.generation, fingerprint, deduplicate)),
             || {
                 if self.closed.load(Ordering::Acquire) {
                     return false;

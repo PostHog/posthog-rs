@@ -345,7 +345,7 @@ impl SessionClock for TestClock {
 }
 
 #[test]
-fn capture_uses_injected_clock_and_passive_helpers_never_extend_or_create() {
+fn admitted_passive_helpers_create_and_rotate_without_extending_idle() {
     let now = time();
     let clock = Arc::new(TestClock(Mutex::new(now)));
     let mut config = super::super::Config::new("phc_test");
@@ -354,29 +354,27 @@ fn capture_uses_injected_clock_and_passive_helpers_never_extend_or_create() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let seen = events.clone();
     config.before_send(move |event| {
-        seen.lock().unwrap().push(event);
-        None
+        seen.lock().unwrap().push(event.clone());
+        Some(event)
     });
     let mut client = Client::init_blocking(config);
     client.producer.as_mut().unwrap().session_clock = clock.clone();
     client.group("company", "a", None);
-    assert_eq!(client.peek_session_id(), None);
-    client.capture("first");
     let original = client.peek_session_id().unwrap();
+    client.capture("first");
     *clock.0.lock().unwrap() = later(now, IDLE / 2);
     client.group("company", "a", None);
     assert_eq!(client.session_id(), Some(original));
     *clock.0.lock().unwrap() = later(now, IDLE);
     client.group("company", "a", None);
-    assert_eq!(client.peek_session_id(), Some(original));
-    client.capture("next");
     let next = client.peek_session_id().unwrap();
     assert_ne!(next, original);
+    client.capture("next");
     let seen = events.lock().unwrap();
-    assert!(!seen[0].properties().contains_key("$session_id"));
+    assert_eq!(seen[0].properties()["$session_id"], original.to_string());
     assert_eq!(seen[1].properties()["$session_id"], original.to_string());
     assert_eq!(seen[2].properties()["$session_id"], original.to_string());
-    assert!(!seen[3].properties().contains_key("$session_id"));
+    assert_eq!(seen[3].properties()["$session_id"], next.to_string());
     assert_eq!(seen[4].properties()["$session_id"], next.to_string());
 }
 
@@ -509,9 +507,33 @@ fn linux_system_session_clock_samples_boottime() {
     assert!((before..=after).contains(&sampled));
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 #[test]
-fn non_linux_system_session_clock_uses_std_elapsed_time() {
+fn macos_system_session_clock_samples_continuous_time() {
+    let before = boot_time().expect("macOS continuous time must be available");
+    let now = SystemSessionClock.now();
+    let after = boot_time().unwrap();
+    assert!((before..=after).contains(&now.elapsed.boot_time.unwrap()));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_continuous_ticks_use_wide_checked_conversion() {
+    assert_eq!(
+        continuous_duration(3, 125, 3),
+        Some(Duration::from_nanos(125))
+    );
+    assert_eq!(continuous_duration(1, 1, 0), None);
+    assert_eq!(
+        continuous_duration(u64::MAX, 125, 3),
+        Some(Duration::new(768_614_336_404, 564_650_625))
+    );
+    assert_eq!(continuous_duration(u64::MAX, u32::MAX, 1), None);
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn other_system_session_clocks_use_std_elapsed_time() {
     let before = Instant::now();
     let now = SystemSessionClock.now();
     let after = Instant::now();
@@ -520,7 +542,7 @@ fn non_linux_system_session_clock_uses_std_elapsed_time() {
 }
 
 #[test]
-fn capture_after_suspend_rotates_and_attributes_in_both_persistence_modes() {
+fn dropped_capture_after_suspend_previews_without_committing_in_both_modes() {
     for persistence in [SessionPersistence::Memory, SessionPersistence::Persistent] {
         let now = time();
         let clock = Arc::new(TestClock(Mutex::new(now)));
@@ -541,11 +563,51 @@ fn capture_after_suspend_rotates_and_attributes_in_both_persistence_modes() {
             client.capture("resumed"),
             super::super::CaptureOutcome::Dropped
         );
-        let next = client.peek_session_id();
-        assert_ne!(next, original);
-        assert_eq!(
+        assert_eq!(client.peek_session_id(), original);
+        assert_ne!(
             seen.lock().unwrap().as_ref().unwrap().properties()["$session_id"],
-            next.unwrap().to_string()
+            original.unwrap().to_string()
         );
     }
+}
+
+#[test]
+fn provisional_attribution_is_shared_bounded_and_committed_only_in_current_epoch() {
+    let now = time();
+    let mut sessions = Sessions::default();
+    let a = sessions.prepare_admission(now);
+    let b = sessions.prepare_admission(now);
+    assert_eq!(a.id, b.id);
+    assert!(sessions.live.is_none());
+    assert!(sessions.stored().is_none());
+    sessions.commit_admission(b, later(now, IDLE / 2), true);
+    sessions.commit_admission(a, now, true);
+    assert_eq!(sessions.active_id(later(now, IDLE).elapsed), a.id);
+    assert_eq!(sessions.live.as_ref().unwrap().activity_age, Duration::ZERO);
+    assert_eq!(
+        sessions.live.as_ref().unwrap().observed,
+        later(now, IDLE / 2).elapsed
+    );
+    sessions.apply(Operation::End, now, false);
+    sessions.commit_admission(a, later(now, IDLE), true);
+    assert!(sessions.live.is_none());
+    assert!(sessions.provisional.is_none());
+    let c = sessions.prepare_admission(later(now, IDLE));
+    assert_ne!(c.id, a.id);
+    sessions.apply(Operation::Background(true), later(now, IDLE), false);
+    sessions.commit_admission(c, later(now, IDLE), true);
+    assert!(sessions.live.is_none());
+}
+
+#[test]
+fn passive_admission_never_touches_live_idle_and_rejected_previews_expire() {
+    let now = time();
+    let mut sessions = Sessions::default();
+    let rejected = sessions.prepare_admission(now);
+    let first = sessions.prepare_admission(later(now, IDLE));
+    assert_ne!(first.id, rejected.id);
+    sessions.commit_admission(first, later(now, IDLE), false);
+    let passive = sessions.prepare_admission(later(now, IDLE + IDLE / 2));
+    sessions.commit_admission(passive, later(now, IDLE + IDLE / 2), false);
+    assert_eq!(sessions.active_id(later(now, IDLE * 2).elapsed), None);
 }

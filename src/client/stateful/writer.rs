@@ -407,6 +407,7 @@ impl StateWriter {
     /// Compare, admit, and commit process-local person bookkeeping in queue order.
     /// `admit` must not run hooks, tracing subscribers, or application wakers.
     /// Fingerprints are not persisted, so this cannot schedule a writer notification.
+    #[cfg(test)]
     pub(super) fn admit_person(
         &self,
         generation: u64,
@@ -414,14 +415,70 @@ impl StateWriter {
         deduplicate: bool,
         admit: impl FnOnce() -> bool,
     ) {
-        let mut state = self.shared.lock();
-        let same_generation = state.snapshot.generation == generation;
-        if same_generation && deduplicate && state.snapshot.person_properties == Some(fingerprint) {
-            return;
+        self.admit_capture(None, Some((generation, fingerprint, deduplicate)), admit);
+    }
+
+    /// Validate session persistence before callback-free queue admission, then
+    /// commit session activity and person bookkeeping in the same queue order.
+    pub(super) fn admit_capture(
+        &self,
+        session: Option<(
+            super::sessions::AdmissionSession,
+            super::sessions::SessionTime,
+            bool,
+        )>,
+        person: Option<(u64, [u8; 20], bool)>,
+        admit: impl FnOnce() -> bool,
+    ) -> bool {
+        let persisted_changed = {
+            let mut state = self.shared.lock();
+            if state.closing.is_some()
+                || self
+                    .shared
+                    .deadline
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .is_some()
+            {
+                return false;
+            }
+            let mut candidate = (*state.snapshot).clone();
+            if let Some((generation, fingerprint, deduplicate)) = person {
+                if candidate.generation == generation {
+                    if deduplicate && candidate.person_properties == Some(fingerprint) {
+                        return false;
+                    }
+                    candidate.person_properties = Some(fingerprint);
+                }
+            }
+            if let Some((token, now, activity)) = session {
+                candidate.sessions.commit_admission(token, now, activity);
+                candidate.session = candidate.sessions.stored();
+            }
+            let persisted_changed = !candidate.same_persisted_state(&state.snapshot);
+            if persisted_changed
+                && (validate(&candidate, self.options.max_bytes).is_err()
+                    || state.revision == u64::MAX)
+            {
+                return false;
+            }
+            if !admit() {
+                return false;
+            }
+            state.snapshot = Arc::new(candidate);
+            if persisted_changed {
+                state.revision += 1;
+                if state.mode == Mode::Persistent && state.due.is_none() {
+                    state.due =
+                        Some(self.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
+                }
+            }
+            persisted_changed
+        };
+        if persisted_changed {
+            self.shared.notify();
         }
-        if admit() && same_generation && state.closing.is_none() {
-            Arc::make_mut(&mut state.snapshot).person_properties = Some(fingerprint);
-        }
+        true
     }
 
     /// Capture one revision to drain, expediting coalescing but not retry cooldown.

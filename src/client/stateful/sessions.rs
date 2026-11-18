@@ -36,7 +36,6 @@ pub enum SessionPersistence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct StoredSession {
     id: Uuid,
     started_ms: u64,
@@ -75,6 +74,9 @@ impl LiveSession {
     }
 
     fn touch(&mut self, now: SessionTick) {
+        if now.monotonic < self.observed.monotonic {
+            return;
+        }
         self.start_age = self
             .start_age
             .saturating_add(now.elapsed_since(self.observed));
@@ -95,10 +97,19 @@ pub(super) struct Sessions {
     pub(super) persistence: SessionPersistence,
     pub(super) background: bool,
     live: Option<LiveSession>,
+    epoch: u64,
+    provisional: Option<LiveSession>,
 }
 
-/// Session-only elapsed time. Keep the std clock alongside Linux boot time so
-/// failed/unsupported boot-clock reads can fall back without mixing clock epochs.
+/// Attribution frozen before hooks. Only the current epoch may commit activity.
+#[derive(Clone, Copy)]
+pub(super) struct AdmissionSession {
+    epoch: u64,
+    pub(super) id: Option<Uuid>,
+}
+
+/// Session-only elapsed time. Keep the std clock alongside sleep-inclusive
+/// system time so failed reads can fall back without mixing clock epochs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct SessionTick {
     monotonic: Instant,
@@ -140,7 +151,43 @@ fn boot_time() -> Option<Duration> {
     Some(Duration::new(time.tv_sec as u64, time.tv_nsec as u32))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn boot_time() -> Option<Duration> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Timebase {
+        numerator: u32,
+        denominator: u32,
+    }
+    extern "C" {
+        fn mach_continuous_time() -> u64;
+        fn mach_timebase_info(info: *mut Timebase) -> i32;
+    }
+    static TIMEBASE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    let &(numerator, denominator) = TIMEBASE
+        .get_or_init(|| {
+            let mut info = Timebase::default();
+            // SAFETY: the system writes to a valid, exclusively borrowed struct.
+            (unsafe { mach_timebase_info(&mut info) } == 0 && info.denominator != 0)
+                .then_some((info.numerator, info.denominator))
+        })
+        .as_ref()?;
+    // SAFETY: this system counter has no preconditions and is available since
+    // macOS 10.12. Unlike mach_absolute_time, it includes system sleep.
+    continuous_duration(unsafe { mach_continuous_time() }, numerator, denominator)
+}
+
+#[cfg(target_os = "macos")]
+fn continuous_duration(ticks: u64, numerator: u32, denominator: u32) -> Option<Duration> {
+    use std::convert::TryFrom;
+    let nanos = (ticks as u128 * numerator as u128).checked_div(denominator as u128)?;
+    Some(Duration::new(
+        u64::try_from(nanos / 1_000_000_000).ok()?,
+        (nanos % 1_000_000_000) as u32,
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn boot_time() -> Option<Duration> {
     None
 }
@@ -200,12 +247,16 @@ impl Sessions {
             persistence,
             background: false,
             live,
+            epoch: 0,
+            provisional: None,
         }
     }
 
     pub(super) fn cleared(&self) -> Self {
         Self {
             live: None,
+            provisional: None,
+            epoch: self.epoch.wrapping_add(1),
             ..self.clone()
         }
     }
@@ -223,8 +274,50 @@ impl Sessions {
             .map(|live| live.stored.id)
     }
 
-    fn start(&mut self, now: SessionTime) {
-        self.live = Some(LiveSession {
+    pub(super) fn prepare_admission(&mut self, now: SessionTime) -> AdmissionSession {
+        let mut id = self.active_id(now.elapsed);
+        if id.is_none() && self.mode == SessionMode::Automatic && !self.background {
+            if self
+                .provisional
+                .as_ref()
+                .map_or(true, |live| live.expired(now.elapsed))
+            {
+                self.epoch = self.epoch.wrapping_add(1);
+                self.provisional = Some(Self::new_live(now));
+            }
+            id = self.provisional.as_ref().map(|live| live.stored.id);
+        }
+        AdmissionSession {
+            epoch: self.epoch,
+            id,
+        }
+    }
+
+    pub(super) fn commit_admission(
+        &mut self,
+        token: AdmissionSession,
+        now: SessionTime,
+        activity: bool,
+    ) {
+        if token.epoch != self.epoch || token.id.is_none() {
+            return;
+        }
+        if self.provisional.as_ref().map(|live| live.stored.id) == token.id {
+            self.live = self.provisional.take();
+        }
+        if activity && self.mode == SessionMode::Automatic && !self.background {
+            if let Some(live) = self
+                .live
+                .as_mut()
+                .filter(|live| Some(live.stored.id) == token.id)
+            {
+                live.touch(now.elapsed);
+            }
+        }
+    }
+
+    fn new_live(now: SessionTime) -> LiveSession {
+        LiveSession {
             stored: StoredSession {
                 id: Uuid::now_v7(),
                 started_ms: now.wall_ms,
@@ -233,7 +326,13 @@ impl Sessions {
             observed: now.elapsed,
             start_age: Duration::ZERO,
             activity_age: Duration::ZERO,
-        });
+        }
+    }
+
+    fn start(&mut self, now: SessionTime) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.provisional = None;
+        self.live = Some(Self::new_live(now));
     }
 
     fn maintain(&mut self, now: SessionTime, activity: bool) {
@@ -259,12 +358,18 @@ impl Sessions {
 
     fn apply(&mut self, operation: Operation, now: SessionTime, opted_out: bool) {
         match operation {
-            Operation::End => self.live = None,
+            Operation::End => {
+                self.epoch = self.epoch.wrapping_add(1);
+                self.provisional = None;
+                self.live = None;
+            }
             Operation::Background(background) => {
                 if self.background == background {
                     return;
                 }
                 self.background = background;
+                self.epoch = self.epoch.wrapping_add(1);
+                self.provisional = None;
                 if opted_out || self.mode == SessionMode::Manual {
                     return;
                 }

@@ -219,7 +219,9 @@ fn serialization_limit_is_exact_and_failed_write_preserves_previous_state() {
         assert!(store.save(&Snapshot::anonymous("x".repeat(4096))).is_err());
         assert_eq!(store.load().unwrap(), Some(first.clone()));
     }
-    assert!(FileStateStore::open(directory.lease(), exact_bytes - 1).is_err());
+    let opened = FileStateStore::open(directory.lease(), exact_bytes - 1).unwrap();
+    assert!(opened.snapshot.is_none());
+    assert!(opened.read_error.is_some());
     assert_eq!(
         fs::read(directory.path().join("state.json")).unwrap(),
         record(&first)
