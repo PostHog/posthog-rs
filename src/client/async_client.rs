@@ -37,7 +37,7 @@ pub struct Client {
     client: Option<HttpClient>,
     blocking_http_client: BlockingHttpClient,
     local_evaluator: Option<LocalEvaluator>,
-    _flag_poller: Option<AsyncFlagPoller>,
+    flag_poller: Option<AsyncFlagPoller>,
     flag_event_host: OnceLock<Arc<dyn FeatureFlagEvaluationsHost>>,
     /// Background analytics event transport. `None` for disabled clients.
     transport: Option<Arc<TransportHandle>>,
@@ -162,7 +162,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
         client,
         blocking_http_client,
         local_evaluator,
-        _flag_poller: flag_poller,
+        flag_poller,
         flag_event_host: OnceLock::new(),
         transport,
         ai_transport: OnceLock::new(),
@@ -977,6 +977,26 @@ impl Client {
         Ok(flags)
     }
 
+    /// Fetches local feature flag definitions now and returns once they are in
+    /// use, so the next local evaluation sees them. The background poller keeps
+    /// its own schedule.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] when local evaluation is not
+    /// configured (`enable_local_evaluation` with a `secret_key`), and
+    /// [`Error::Connection`] or [`Error::Serialization`] when the request fails
+    /// or its response cannot be parsed.
+    pub async fn reload_feature_flags(&self) -> Result<(), Error> {
+        let poller = self.flag_poller.as_ref().ok_or_else(|| {
+            Error::InvalidArgument(
+                "local evaluation is not configured: set enable_local_evaluation and secret_key"
+                    .to_string(),
+            )
+        })?;
+        poller.load_flags().await
+    }
+
     /// Evaluate feature flags for `distinct_id`, returning a
     /// [`FeatureFlagEvaluations`] snapshot.
     ///
@@ -1445,7 +1465,7 @@ mod minimal_gate_tests {
             blocking_http_client: BlockingHttpClient(None),
             client: Some(HttpClient::builder().build().unwrap()),
             local_evaluator: Some(LocalEvaluator::new(cache)),
-            _flag_poller: None,
+            flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
             ai_transport: OnceLock::new(),
@@ -1528,7 +1548,7 @@ mod local_payload_tests {
             blocking_http_client: BlockingHttpClient(None),
             client: Some(HttpClient::builder().build().unwrap()),
             local_evaluator: Some(LocalEvaluator::new(cache)),
-            _flag_poller: None,
+            flag_poller: None,
             flag_event_host: OnceLock::new(),
             transport: None,
             ai_transport: OnceLock::new(),

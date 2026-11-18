@@ -1,5 +1,23 @@
 # posthog-rs
 
+## 1.1.2 — 2026-11-18
+
+### Patch changes
+
+- [d83cb97](https://github.com/posthog/posthog-rs/commit/d83cb97ccd847f4542ba7d45428e36f8a062fcc6) Send transactional email through PostHog's key-scoped `/api/messaging/` routes, which take the project from the secret key, instead of `/api/projects/@current/messaging/`. Needs PostHog Cloud, or a self-hosted PostHog from 2026-11-18 or later. Older self-hosted versions answer these calls with a 404. — Thanks @rafaeelaudibert!
+
+## 1.1.1 — 2026-11-18
+
+### Patch changes
+
+- [f022a30](https://github.com/posthog/posthog-rs/commit/f022a30c859e248007a464665c0701efed636c21) Local flag evaluation now checks condition groups in the order they are defined, like the other SDKs, instead of moving groups with a variant override to the front. For a flag with a variant override on a group other than the first, some users can now get a different value: the variant from the first group they match, or `false` from an `early_exit` group. With `early_exit`, a rollout exclusion now also stops evaluation after an earlier inconclusive group, so the flag stays inconclusive (and falls back to the server) instead of matching a later group. — Thanks @luantaraschi!
+
+## 1.1.0 — 2026-11-18
+
+### Minor changes
+
+- [3188466](https://github.com/posthog/posthog-rs/commit/3188466a5f56fa6f9c15a67f40656c9138f4e1a5) Add `reload_feature_flags` to the async and blocking clients. It fetches local feature flag definitions now and returns once they are in use, or with the error that kept them from loading. Before, a client could only wait for its next poll. — Thanks @eli-r-ph!
+
 ## 1.0.0 — 2026-11-17
 
 ### Major changes

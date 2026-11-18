@@ -1818,3 +1818,147 @@ fn test_group_condition_uses_group_key_for_bucketing() {
         .unwrap();
     assert_eq!(result, Some(FlagValue::Boolean(false)));
 }
+
+fn reload_definitions(rollout: f64) -> serde_json::Value {
+    json!({
+        "flags": [{
+            "key": "reload-flag",
+            "active": true,
+            "filters": {"groups": [{"properties": [], "rollout_percentage": rollout}]}
+        }],
+        "group_type_mapping": {},
+        "cohorts": {}
+    })
+}
+
+fn reload_options(server: &MockServer, local_evaluation: bool) -> posthog::ClientOptions {
+    posthog::ClientOptionsBuilder::default()
+        .host(server.base_url())
+        .api_key("test_project_key".to_string())
+        .secret_key("test_personal_key".to_string())
+        .enable_local_evaluation(local_evaluation)
+        .local_evaluation_only(true)
+        .poll_interval_seconds(3600)
+        .build()
+        .unwrap()
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_reload_feature_flags_uses_fresh_definitions_on_return() {
+    let server = MockServer::start();
+    let mut off = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(reload_definitions(0.0));
+    });
+    let client = posthog::client(reload_options(&server, true)).await;
+    client.reload_feature_flags().await.unwrap();
+    let before = client
+        .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        before.get_flag("reload-flag"),
+        Some(FlagValue::Boolean(false))
+    );
+
+    off.delete();
+    let on = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(reload_definitions(100.0));
+    });
+    client.reload_feature_flags().await.unwrap();
+    on.assert_calls(1);
+    let after = client
+        .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        after.get_flag("reload-flag"),
+        Some(FlagValue::Boolean(true))
+    );
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_reload_feature_flags_reports_failures_and_missing_configuration() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(500);
+    });
+    let client = posthog::client(reload_options(&server, true)).await;
+    let err = client.reload_feature_flags().await.unwrap_err();
+    assert!(
+        matches!(err, posthog::Error::Connection(ref m) if m.contains("500")),
+        "{:?}",
+        err
+    );
+
+    let unconfigured = posthog::client(reload_options(&server, false)).await;
+    let err = unconfigured.reload_feature_flags().await.unwrap_err();
+    assert!(
+        matches!(err, posthog::Error::InvalidArgument(_)),
+        "{:?}",
+        err
+    );
+}
+
+#[cfg(not(feature = "async-client"))]
+#[test]
+fn test_reload_feature_flags_uses_fresh_definitions_on_return() {
+    let server = MockServer::start();
+    let mut off = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(reload_definitions(0.0));
+    });
+    let client = posthog::client(reload_options(&server, true));
+    client.reload_feature_flags().unwrap();
+    let before = client
+        .evaluate_flags("user-1", posthog::EvaluateFlagsOptions::default())
+        .unwrap();
+    assert_eq!(
+        before.get_flag("reload-flag"),
+        Some(FlagValue::Boolean(false))
+    );
+
+    off.delete();
+    let on = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(reload_definitions(100.0));
+    });
+    client.reload_feature_flags().unwrap();
+    on.assert_calls(1);
+    let after = client
+        .evaluate_flags("user-1", posthog::EvaluateFlagsOptions::default())
+        .unwrap();
+    assert_eq!(
+        after.get_flag("reload-flag"),
+        Some(FlagValue::Boolean(true))
+    );
+}
+
+#[cfg(not(feature = "async-client"))]
+#[test]
+fn test_reload_feature_flags_reports_failures_and_missing_configuration() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(500);
+    });
+    let client = posthog::client(reload_options(&server, true));
+    let err = client.reload_feature_flags().unwrap_err();
+    assert!(
+        matches!(err, posthog::Error::Connection(ref m) if m.contains("500")),
+        "{:?}",
+        err
+    );
+
+    let unconfigured = posthog::client(reload_options(&server, false));
+    let err = unconfigured.reload_feature_flags().unwrap_err();
+    assert!(
+        matches!(err, posthog::Error::InvalidArgument(_)),
+        "{:?}",
+        err
+    );
+}

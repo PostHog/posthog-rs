@@ -131,6 +131,11 @@ jobs:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
         run: |
           sampo release
+          # Sampo regenerates Cargo.lock, resolving every dependency to its
+          # latest version, which can need a newer Rust than the MSRV. Keep the
+          # released lock and move only the workspace crates to their new versions.
+          git checkout HEAD -- Cargo.lock
+          cargo update --workspace
           new_version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 

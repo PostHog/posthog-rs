@@ -892,10 +892,20 @@ where
 {
     // Check properties first. The caller supplies either the basic matcher or
     // the context-aware matcher; rollout handling remains identical.
+    // Filters in a condition have no defined order, so an inconclusive filter
+    // doesn't stop the loop: a later filter can still rule the condition out.
+    let mut inconclusive = None;
     for prop in &condition.properties {
-        if !property_matcher(prop, properties)? {
-            return Ok(ConditionMatch::NoMatch);
+        match property_matcher(prop, properties) {
+            Ok(true) => {}
+            Ok(false) => return Ok(ConditionMatch::NoMatch),
+            Err(err) => {
+                inconclusive.get_or_insert(err);
+            }
         }
+    }
+    if let Some(err) = inconclusive {
+        return Err(err);
     }
 
     // If all properties match (or no properties), check rollout percentage
@@ -958,16 +968,11 @@ where
 
     let flag_aggregation = flag.filters.aggregation_group_type_index;
 
-    // Stable sorting gives variant overrides priority while retaining their
-    // definition order relative to other overrides.
-    let mut sorted_conditions = flag.filters.groups.clone();
-    sorted_conditions.sort_by_key(|condition| if condition.variant.is_some() { 0 } else { 1 });
-
     let mut is_inconclusive = false;
 
-    for condition in sorted_conditions {
+    for condition in &flag.filters.groups {
         let (effective_bucketing, effective_properties) = match resolve_condition_target(
-            &condition,
+            condition,
             flag_aggregation,
             distinct_id,
             person_properties,
@@ -989,7 +994,7 @@ where
         match is_condition_match(
             flag,
             &effective_bucketing,
-            &condition,
+            condition,
             effective_properties,
             &property_matcher,
         ) {
@@ -1016,10 +1021,10 @@ where
                 return Ok(FlagValue::Boolean(true));
             }
             Ok(ConditionMatch::OutOfRolloutBound) => {
-                // A prior inconclusive condition takes precedence because local
-                // evaluation still cannot provide a definitive answer.
-                if flag.filters.early_exit && !is_inconclusive {
-                    return Ok(FlagValue::Boolean(false));
+                // Later groups can't change the outcome. A prior inconclusive
+                // condition still wins below, so the caller can fall back.
+                if flag.filters.early_exit {
+                    break;
                 }
             }
             Ok(ConditionMatch::NoMatch) => continue,
@@ -5067,14 +5072,14 @@ mod tests {
     );
 
     #[test]
-    fn test_early_exit_does_not_short_circuit_when_prior_group_inconclusive() {
+    fn test_early_exit_stays_inconclusive_when_prior_group_inconclusive() {
         // Group 1: group-targeted (aggregation_group_type_index = 0). The
         // group_type_mapping resolves "0" → "company" and groups supplies the
         // company key, but group_properties has no entry for "company" →
         // ConditionTarget::Inconclusive → is_inconclusive = true.
         // Group 2: person-targeted, rollout 0% → OutOfRolloutBound.
-        // With early_exit = true, the !is_inconclusive guard must prevent
-        // short-circuiting, and the overall result must be InconclusiveMatchError.
+        // With early_exit = true, evaluation stops at group 2 but must not
+        // return a definitive false: the result is InconclusiveMatchError.
         let flag = FeatureFlag {
             key: "early-exit-flag".to_string(),
             active: true,
@@ -5135,5 +5140,220 @@ mod tests {
             group_type_mapping: &group_type_mapping,
         };
         assert!(match_feature_flag_with_context(&flag, &HashMap::new(), &ctx).is_err());
+    }
+
+    /// Evaluates through both public entry points and checks they agree.
+    fn evaluate_both_ways(
+        flag: &FeatureFlag,
+        distinct_id: &str,
+        properties: &HashMap<String, serde_json::Value>,
+    ) -> Result<FlagValue, InconclusiveMatchError> {
+        let basic = match_feature_flag(
+            flag,
+            distinct_id,
+            properties,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_type_mapping = HashMap::new();
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id,
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_type_mapping,
+        };
+        let with_context = match_feature_flag_with_context(flag, properties, &ctx);
+        assert_eq!(
+            basic.as_ref().ok(),
+            with_context.as_ref().ok(),
+            "match_feature_flag and match_feature_flag_with_context disagree"
+        );
+        basic
+    }
+
+    #[test]
+    fn test_conditions_evaluated_in_order() {
+        // A pro user matches the first condition, which has no override, so
+        // the later catch-all overriding to "test" must not win.
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {
+                "groups": [
+                    {
+                        "properties": [
+                            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 100
+                    },
+                    {"properties": [], "rollout_percentage": 100, "variant": "test"}
+                ],
+                "multivariate": {
+                    "variants": [
+                        {"key": "control", "rollout_percentage": 50},
+                        {"key": "test", "rollout_percentage": 50}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        // Variant buckets for "checkout", checked against posthog-python:
+        // user-0 = 0.9407, user-1 = 0.5740, user-2 = 0.3536, user-3 = 0.2522.
+        for (user, plan, expected) in [
+            ("user-0", "pro", "test"),
+            ("user-1", "pro", "test"),
+            ("user-2", "pro", "control"),
+            ("user-3", "pro", "control"),
+            ("user-2", "free", "test"),
+            ("user-3", "free", "test"),
+        ] {
+            let properties = HashMap::from([("plan".to_string(), json!(plan))]);
+            assert_eq!(
+                evaluate_both_ways(&flag, user, &properties).unwrap(),
+                FlagValue::String(expected.into()),
+                "{user}, {plan}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_early_exit_is_not_skipped_by_a_later_variant_override() {
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {
+                "early_exit": true,
+                "groups": [
+                    {
+                        "properties": [
+                            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 0
+                    },
+                    {"properties": [], "rollout_percentage": 100, "variant": "test"}
+                ],
+                "multivariate": {
+                    "variants": [
+                        {"key": "control", "rollout_percentage": 50},
+                        {"key": "test", "rollout_percentage": 50}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        for (plan, expected) in [
+            ("pro", FlagValue::Boolean(false)),
+            ("free", FlagValue::String("test".into())),
+        ] {
+            let properties = HashMap::from([("plan".to_string(), json!(plan))]);
+            assert_eq!(
+                evaluate_both_ways(&flag, "user-0", &properties).unwrap(),
+                expected,
+                "{plan}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_early_exit_after_inconclusive_group_does_not_reach_later_match() {
+        // With `plan` missing, group 1 is inconclusive. Group 2 excludes the
+        // user by rollout, so whatever `plan` is, the user can't get the flag:
+        // evaluation must stop there and stay inconclusive, not return the
+        // catch-all's "test".
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {
+                "early_exit": true,
+                "groups": [
+                    {
+                        "properties": [
+                            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 0
+                    },
+                    {
+                        "properties": [
+                            {"key": "region", "value": "US", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 0,
+                        "variant": "control"
+                    },
+                    {"properties": [], "rollout_percentage": 100, "variant": "test"}
+                ],
+                "multivariate": {
+                    "variants": [
+                        {"key": "control", "rollout_percentage": 50},
+                        {"key": "test", "rollout_percentage": 50}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        let properties = HashMap::from([("region".to_string(), json!("US"))]);
+        let result = evaluate_both_ways(&flag, "user-0", &properties);
+        assert!(result.is_err(), "expected inconclusive, got {:?}", result);
+
+        for (plan, region, expected) in [
+            ("pro", "US", FlagValue::Boolean(false)),
+            ("free", "US", FlagValue::Boolean(false)),
+            ("free", "EU", FlagValue::String("test".into())),
+        ] {
+            let properties = HashMap::from([
+                ("plan".to_string(), json!(plan)),
+                ("region".to_string(), json!(region)),
+            ]);
+            assert_eq!(
+                evaluate_both_ways(&flag, "user-0", &properties).unwrap(),
+                expected,
+                "{plan}, {region}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_filter_that_does_not_match_wins_over_earlier_missing_property() {
+        // `plan` is missing, so the first filter can't be checked. The second
+        // one rules the condition out whatever `plan` is, so the flag is
+        // definitively false, not inconclusive.
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {
+                "groups": [
+                    {
+                        "properties": [
+                            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"},
+                            {"key": "region", "value": "US", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 100
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let properties = HashMap::from([("region".to_string(), json!("EU"))]);
+        assert_eq!(
+            evaluate_both_ways(&flag, "user-0", &properties).unwrap(),
+            FlagValue::Boolean(false)
+        );
+
+        // When every filter that can be checked matches, the missing one still
+        // decides, so the result stays inconclusive.
+        let properties = HashMap::from([("region".to_string(), json!("US"))]);
+        let result = evaluate_both_ways(&flag, "user-0", &properties);
+        assert!(result.is_err(), "expected inconclusive, got {:?}", result);
     }
 }
