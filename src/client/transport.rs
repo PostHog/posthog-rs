@@ -630,6 +630,49 @@ impl TransportHandle {
         self.enqueue_prepared_deferred(event).report()
     }
 
+    /// Like [`Self::enqueue_prepared_deferred`], with the event's serialized size
+    /// measured by the caller before it took any SDK state lock.
+    #[cfg(feature = "stateful")]
+    pub(crate) fn enqueue_measured_deferred(
+        &self,
+        event: CaptureEvent,
+        bytes: usize,
+    ) -> PreparedAdmission {
+        match &self.queue {
+            Some(queue) if !self.closed.load(Ordering::Acquire) => {
+                self.admit_queued(queue, event, bytes)
+            }
+            _ => self.enqueue_prepared_deferred(event),
+        }
+    }
+
+    #[cfg(feature = "stateful")]
+    fn admit_queued(
+        &self,
+        queue: &memory::Queue,
+        event: CaptureEvent,
+        bytes: usize,
+    ) -> PreparedAdmission {
+        let admission = queue.admit_measured(event, bytes);
+        if admission == Admission::Accepted
+            && queue.arm()
+            && self.tx.send(Control::QueueWake).is_err()
+        {
+            self.closed.store(true, Ordering::Release);
+            queue.clear();
+            return PreparedAdmission::new(Admission::Closed);
+        }
+        if admission == Admission::Accepted && queue.len() == 1 {
+            self.full_warned.store(false, Ordering::Release);
+        }
+        PreparedAdmission {
+            admission,
+            warning: (admission == Admission::Full
+                && !self.full_warned.swap(true, Ordering::AcqRel))
+            .then_some(PreparedWarning::Bytes),
+        }
+    }
+
     /// Callback-free admission for callers holding SDK state locks. Report the
     /// returned diagnostic only after releasing those locks: tracing is user code.
     pub(crate) fn enqueue_prepared_deferred(&self, event: CaptureEvent) -> PreparedAdmission {
@@ -638,24 +681,8 @@ impl TransportHandle {
         }
         #[cfg(feature = "stateful")]
         if let Some(queue) = &self.queue {
-            let admission = queue.admit(event);
-            if admission == Admission::Accepted
-                && queue.arm()
-                && self.tx.send(Control::QueueWake).is_err()
-            {
-                self.closed.store(true, Ordering::Release);
-                queue.clear();
-                return PreparedAdmission::new(Admission::Closed);
-            }
-            if admission == Admission::Accepted && queue.len() == 1 {
-                self.full_warned.store(false, Ordering::Release);
-            }
-            return PreparedAdmission {
-                admission,
-                warning: (admission == Admission::Full
-                    && !self.full_warned.swap(true, Ordering::AcqRel))
-                .then_some(PreparedWarning::Bytes),
-            };
+            let bytes = super::event_store::record_size(&event);
+            return self.admit_queued(queue, event, bytes);
         }
         match reserve_slot(&self.len, self.max_queue_size) {
             Some(0) => self.full_warned.store(false, Ordering::Release),
