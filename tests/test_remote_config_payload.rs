@@ -2,7 +2,7 @@ mod common;
 
 use common::default_user_agent;
 use httpmock::prelude::*;
-use posthog_rs::{ClientOptionsBuilder, Error};
+use posthog::{ClientOptionsBuilder, Error};
 use serde_json::{json, Value};
 use std::net::TcpListener;
 use std::sync::{
@@ -13,10 +13,7 @@ use std::time::{Duration, Instant};
 
 const FLAG_PATH: &str = "/api/projects/@current/feature_flags/test-flag/remote_config";
 
-#[cfg(feature = "capture-v1")]
 const CAPTURE_PATH: &str = "/i/v1/analytics/events";
-#[cfg(not(feature = "capture-v1"))]
-const CAPTURE_PATH: &str = "/batch/";
 
 fn builder(host: String) -> ClientOptionsBuilder {
     let mut builder = ClientOptionsBuilder::default();
@@ -83,8 +80,8 @@ const RESERVED_KEYS: [(&str, &str); 6] = [
 mod blocking {
     use super::*;
 
-    fn create_client(options: posthog_rs::ClientOptions) -> posthog_rs::Client {
-        posthog_rs::client(options)
+    fn create_client(options: posthog::ClientOptions) -> posthog::Client {
+        posthog::client(options)
     }
 
     #[test]
@@ -547,8 +544,8 @@ mod blocking {
 mod async_tests {
     use super::*;
 
-    async fn create_client(options: posthog_rs::ClientOptions) -> posthog_rs::Client {
-        posthog_rs::client(options).await
+    async fn create_client(options: posthog::ClientOptions) -> posthog::Client {
+        posthog::client(options).await
     }
 
     #[tokio::test]
