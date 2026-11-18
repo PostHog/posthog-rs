@@ -21,7 +21,7 @@ int main() {
 
   PostHogFlags *flags = nullptr;
   if (posthog_evaluate_flags(client.get(), "user-1", nullptr, &flags) != POSTHOG_STATUS_OK) return 5;
-  PostHogFlagState state = POSTHOG_FLAG_STATE_ENABLED;
+  int32_t state = POSTHOG_FLAG_STATE_ENABLED;
   posthog_flags_get_flag(flags, "beta", &state, nullptr);
   posthog_flags_free(flags);
   if (state != POSTHOG_FLAG_STATE_NOT_FOUND) return 6;

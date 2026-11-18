@@ -194,8 +194,10 @@ jobs:
           cc -std=c99 -Wall -Wextra -Werror -pedantic examples/capture.c -Iinclude -Ltarget/release -lposthog_ffi -o capture
           c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -Ltarget/release -lposthog_ffi -o smoke-shared
           c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude target/release/libposthog_ffi.a $native_libs -o smoke-static
+          c++ -std=c++11 -fshort-enums -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude target/release/libposthog_ffi.a $native_libs -o smoke-short-enums
           LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release ./smoke-shared
           ./smoke-static
+          ./smoke-short-enums
 
   ffi-msrv:
     name: C bindings (MSRV)

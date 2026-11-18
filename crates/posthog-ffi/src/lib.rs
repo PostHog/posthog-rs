@@ -873,18 +873,22 @@ pub unsafe extern "C" fn posthog_flags_is_enabled(
     })
 }
 
-/// Writes the state of `key` to `state_out` and records a
-/// `$feature_flag_called` event. For `POSTHOG_FLAG_STATE_VARIANT`, writes the
+/// Writes the state of `key`, a `PostHogFlagState` value, to `state_out` and
+/// records a `$feature_flag_called` event. `state_out` is an `int32_t` so its
+/// size doesn't depend on how the caller's compiler sizes enums. For `POSTHOG_FLAG_STATE_VARIANT`, writes the
 /// variant to `variant_out` when it is not `NULL`; free it with
 /// `posthog_string_free`. Otherwise `*variant_out` is set to `NULL`.
 #[no_mangle]
 pub unsafe extern "C" fn posthog_flags_get_flag(
     flags: *const PostHogFlags,
     key: *const c_char,
-    state_out: *mut PostHogFlagState,
+    state_out: *mut i32,
     variant_out: *mut *mut c_char,
 ) -> PostHogStatus {
-    write_out(state_out, PostHogFlagState::POSTHOG_FLAG_STATE_NOT_FOUND);
+    write_out(
+        state_out,
+        PostHogFlagState::POSTHOG_FLAG_STATE_NOT_FOUND as i32,
+    );
     write_out(variant_out, ptr::null_mut());
     ffi_call(|| {
         if state_out.is_null() {
@@ -904,7 +908,7 @@ pub unsafe extern "C" fn posthog_flags_get_flag(
         if let (Some(variant), false) = (variant, variant_out.is_null()) {
             variant_out.write(into_c_string(variant)?);
         }
-        state_out.write(state);
+        state_out.write(state as i32);
         Ok(())
     })
 }

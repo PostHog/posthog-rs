@@ -395,14 +395,15 @@ enum PostHogStatus posthog_flags_is_enabled(const struct PostHogFlags *flags,
                                             bool *enabled_out);
 
 /**
- * Writes the state of `key` to `state_out` and records a
- * `$feature_flag_called` event. For `POSTHOG_FLAG_STATE_VARIANT`, writes the
+ * Writes the state of `key`, a `PostHogFlagState` value, to `state_out` and
+ * records a `$feature_flag_called` event. `state_out` is an `int32_t` so its
+ * size doesn't depend on how the caller's compiler sizes enums. For `POSTHOG_FLAG_STATE_VARIANT`, writes the
  * variant to `variant_out` when it is not `NULL`; free it with
  * `posthog_string_free`. Otherwise `*variant_out` is set to `NULL`.
  */
 enum PostHogStatus posthog_flags_get_flag(const struct PostHogFlags *flags,
                                           const char *key,
-                                          enum PostHogFlagState *state_out,
+                                          int32_t *state_out,
                                           char **variant_out);
 
 /**
