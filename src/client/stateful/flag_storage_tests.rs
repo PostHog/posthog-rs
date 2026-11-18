@@ -127,7 +127,7 @@ fn cached_records_round_trip_payload_presence_and_per_record_metadata() {
         second.record.variant = None;
         cache.flags.insert("other".into(), second);
         let directory = TestDirectory::new();
-        let (mut store, _) = FileStateStore::open(directory.lease(), 8192).unwrap();
+        let mut store = FileStateStore::open(directory.lease(), 8192).unwrap().store;
         store.save(&snapshot).unwrap();
         assert_eq!(store.load().unwrap(), Some(snapshot));
     }
@@ -189,7 +189,9 @@ fn fitting_cache_is_evicted_from_disk_before_mandatory_updates_are_rejected() {
     let snapshot = with_cache(Some(json!("x".repeat(512))));
     let directory = TestDirectory::new();
     let limit = snapshot_size(&snapshot) + 1;
-    let (store, _) = FileStateStore::open(directory.lease(), limit as u64).unwrap();
+    let store = FileStateStore::open(directory.lease(), limit as u64)
+        .unwrap()
+        .store;
     let writer = StateWriter::new(
         snapshot.clone(),
         Backend::Persistent {
@@ -306,7 +308,7 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
 }
 
 #[test]
-fn current_flag_fields_are_required_and_invalid_records_are_preserved() {
+fn current_flag_fields_are_required_and_optional_cache_is_repaired() {
     let valid: Value = serde_json::from_slice(&record(&with_cache(Some(json!(false))))).unwrap();
     for path in [
         vec!["flags"],
@@ -322,19 +324,15 @@ fn current_flag_fields_are_required_and_invalid_records_are_preserved() {
         parent.as_object_mut().unwrap().remove(path[path.len() - 1]);
         assert!(FileStateStore::decode(&serde_json::to_vec(&invalid).unwrap()).is_err());
     }
-    for field in ["unknown", "cache"] {
-        let mut invalid = valid.clone();
-        invalid["state"]["flags"][field] = json!(42);
-        let bytes = serde_json::to_vec(&invalid).unwrap();
-        let directory = TestDirectory::new();
-        let lease = directory.lease();
-        fs::write(directory.path().join("state.json"), &bytes).unwrap();
-        assert!(FileStateStore::open(lease, 8192).is_err());
-        assert_eq!(
-            fs::read(directory.path().join("state.json")).unwrap(),
-            bytes
-        );
-    }
+    let mut additive = valid.clone();
+    additive["state"]["flags"]["unknown"] = json!(42);
+    assert!(FileStateStore::decode(&serde_json::to_vec(&additive).unwrap()).is_ok());
+    let mut invalid = valid;
+    invalid["state"]["flags"]["cache"] = json!(42);
+    let decoded = FileStateStore::decode_restored(&serde_json::to_vec(&invalid).unwrap()).unwrap();
+    assert!(decoded.rewrite_required);
+    assert!(decoded.snapshot.flags.cache.is_none());
+    assert_eq!(decoded.snapshot.flags.person_properties["plan"], "pro");
 }
 
 fn checkout_payload(snapshot: &Snapshot) -> Option<Value> {
@@ -354,7 +352,7 @@ fn seed_client_cache(directory: &TestDirectory, identified: bool) -> crate::stat
     config.preload_feature_flags = false;
     config.host = "http://127.0.0.1:1".into();
     config.persistence = Persistence::Directory(directory.0.clone());
-    let scope = namespace(&config.host, &config.project_token, &config.instance_name);
+    let scope = namespace(&config.project_token, &config.instance_name);
     let mut restored = RestoredStorage::open(
         &config.persistence,
         &scope,
@@ -417,7 +415,7 @@ fn bootstrap_reconciles_cache_against_final_identity() {
             config.person_profiles = policy;
             config.opt_out = opted_out;
             config.before_send(|_| None);
-            let scope = namespace(&config.host, &config.project_token, &config.instance_name);
+            let scope = namespace(&config.project_token, &config.instance_name);
             let client = Client::init_blocking(config);
             assert_eq!(client.get_distinct_id(), expected);
             let snapshot = client.state.as_ref().unwrap().snapshot();

@@ -44,14 +44,14 @@ use crate::Event;
 #[path = "transport_flags.rs"]
 pub(super) mod flags;
 #[cfg(feature = "stateful")]
-#[path = "transport_requests.rs"]
-mod requests;
-#[cfg(feature = "stateful")]
 #[path = "transport_memory.rs"]
 mod memory;
 #[cfg(feature = "stateful")]
 #[path = "transport_queue.rs"]
 mod queue;
+#[cfg(feature = "stateful")]
+#[path = "transport_requests.rs"]
+mod requests;
 #[cfg(all(test, feature = "stateful"))]
 #[path = "transport_startup_tests.rs"]
 mod startup_tests;
@@ -583,9 +583,10 @@ impl TransportHandle {
     /// completion must use non-owning state access, not retain this transport.
     #[cfg(feature = "stateful")]
     pub(super) fn schedule_flags(&self, task: flags::Task) -> bool {
-        self.flags.as_ref().zip(self.requests.as_ref()).is_some_and(|(slot, worker)| {
-            slot.enqueue(task, worker.sender(), &self.closed)
-        })
+        self.flags
+            .as_ref()
+            .zip(self.requests.as_ref())
+            .is_some_and(|(slot, worker)| slot.enqueue(task, worker.sender(), &self.closed))
     }
 
     /// Wait only for work preceding this FIFO position, not later requests.
@@ -884,7 +885,10 @@ impl TransportHandle {
     #[cfg(feature = "stateful")]
     pub(super) fn all_stopped(&self) -> bool {
         self.delivery_stopped()
-            && self.requests.as_ref().map_or(true, |worker| worker.is_stopped())
+            && self
+                .requests
+                .as_ref()
+                .map_or(true, |worker| worker.is_stopped())
     }
 
     /// Request shutdown without waiting: used when a lane is spawned by a call
@@ -973,13 +977,16 @@ impl TransportHandle {
     pub(crate) fn on_worker_thread(&self) -> bool {
         let id = thread::current().id();
         #[cfg(feature = "stateful")]
-        if self.requests.as_ref().is_some_and(|worker| worker.on_worker_thread())
+        if self
+            .requests
+            .as_ref()
+            .is_some_and(|worker| worker.on_worker_thread())
             || self
-            .owned_workers
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .any(|worker| worker.thread().id() == id)
+                .owned_workers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .any(|worker| worker.thread().id() == id)
         {
             return true;
         }

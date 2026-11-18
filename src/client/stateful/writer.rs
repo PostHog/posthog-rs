@@ -243,8 +243,31 @@ pub(super) struct StateAccess {
 impl StateAccess {
     /// Read shared state without extending the owning writer's open lifetime.
     pub(super) fn snapshot(&self) -> Option<Arc<Snapshot>> {
-        let state = self.shared.lock();
-        state.closing.is_none().then(|| state.snapshot.clone())
+        // Listener dispatch may hold its registry lock while checking this
+        // snapshot. Closure must be able to interrupt a contended state read.
+        let state = loop {
+            if self
+                .shared
+                .deadline
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_some()
+            {
+                return None;
+            }
+            match self.shared.try_lock() {
+                Some(state) => break state,
+                None => thread::yield_now(),
+            }
+        };
+        (state.closing.is_none()
+            && self
+                .shared
+                .deadline
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_none())
+        .then(|| state.snapshot.clone())
     }
 
     pub(super) fn mutate<T>(
@@ -253,7 +276,14 @@ impl StateAccess {
     ) -> Result<(u64, T), UpdateError> {
         let result = {
             let mut state = self.shared.lock();
-            if state.closing.is_some() {
+            if state.closing.is_some()
+                || self
+                    .shared
+                    .deadline
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .is_some()
+            {
                 return Err(UpdateError::Closed);
             }
             let mut candidate = (*state.snapshot).clone();

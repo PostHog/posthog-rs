@@ -639,6 +639,10 @@ fn state_write_failure_preserves_live_identity_and_retries_the_latest_snapshot()
     let mut conf = config();
     // Keep state persistence recovery independent of HTTP delivery.
     conf.before_send(|_| None);
+    let (tx, rx) = std::sync::mpsc::channel();
+    conf.on_feature_flags(move |_| {
+        let _ = tx.send(());
+    });
     let client = Client::init_blocking(conf);
     client.identify("A");
     assert_eq!(
@@ -647,6 +651,8 @@ fn state_write_failure_preserves_live_identity_and_retries_the_latest_snapshot()
     );
     assert_eq!(client.get_distinct_id(), "A");
     assert!(client.is_identified());
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("identity flags completion");
     flags.assert_calls(1);
     std::fs::remove_dir(&temporary).unwrap();
     assert_eq!(

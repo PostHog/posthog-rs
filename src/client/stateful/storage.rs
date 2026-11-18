@@ -348,6 +348,16 @@ impl FileStateStore {
             state.insert("device_id".into(), anonymous);
             rewrite_required = true;
         }
+        if let Some(cache) = state
+            .get_mut("flags")
+            .and_then(|flags| flags.get_mut("cache"))
+        {
+            normalize_optional::<super::flag_state::FlagCache>(
+                cache,
+                |cache| cache.within_limits(),
+                &mut rewrite_required,
+            );
+        }
         if let Some(session) = state.get_mut("session") {
             normalize_optional::<super::sessions::StoredSession>(
                 session,

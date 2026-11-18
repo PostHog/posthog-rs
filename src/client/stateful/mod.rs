@@ -101,9 +101,10 @@ impl Snapshot {
 
     fn is_valid(&self) -> bool {
         self.flags.is_valid()
-            && self.session
-            .as_ref()
-            .map_or(true, sessions::StoredSession::is_valid)
+            && self
+                .session
+                .as_ref()
+                .map_or(true, sessions::StoredSession::is_valid)
             && !self.device_id.trim().is_empty()
             && !self.anonymous_id.trim().is_empty()
             && !self.distinct_id.trim().is_empty()

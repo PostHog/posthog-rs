@@ -348,7 +348,7 @@ fn concurrent_registration_and_completion_do_not_lose_or_duplicate_current_remot
     for task in threads {
         task.join().unwrap();
     }
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     for count in counts.iter() {
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }

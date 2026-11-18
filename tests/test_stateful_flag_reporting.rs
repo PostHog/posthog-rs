@@ -33,6 +33,22 @@ fn config(server: &MockServer) -> Config {
     c
 }
 
+fn complete(client: &Client, action: impl FnOnce()) {
+    let (tx, rx) = mpsc::channel();
+    let subscription = client.on_feature_flags(move |_| {
+        let _ = tx.send(());
+    });
+    while rx.try_recv().is_ok() {}
+    action();
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("flags completion");
+    subscription.unsubscribe();
+}
+
+fn reload(client: &Client) {
+    complete(client, || client.reload_feature_flags());
+}
+
 fn accept(server: &MockServer) {
     server.mock(|when, then| {
         when.path("/i/v1/analytics/events");
@@ -233,8 +249,7 @@ fn minimization_is_pinned_and_final_after_hooks_with_wire_options_preserved() {
             client.register(HashMap::from([("private-super".into(), json!(true))]));
             client.start_session();
             let session = client.peek_session_id();
-            client.reload_feature_flags();
-            client.flush_blocking();
+            reload(&client);
             let result = client.feature_flag("flag").get().unwrap();
             assert!(!result.enabled);
             assert_eq!(result.variant, None);
@@ -255,6 +270,97 @@ fn minimization_is_pinned_and_final_after_hooks_with_wire_options_preserved() {
             assert_eq!(hooks.load(Ordering::SeqCst), 1);
         }
     }
+}
+
+#[test]
+fn minimized_first_session_event_preserves_exact_registered_attribution() {
+    const ATTRIBUTION: &[&str] = &[
+        "$referring_domain",
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_content",
+        "utm_term",
+        "gad_source",
+        "mc_cid",
+        "gclid",
+        "gclsrc",
+        "dclid",
+        "gbraid",
+        "wbraid",
+        "fbclid",
+        "msclkid",
+        "twclid",
+        "li_fat_id",
+        "igshid",
+        "ttclid",
+        "rdt_cid",
+        "epik",
+        "qclid",
+        "sccid",
+        "oppref",
+        "bfcid",
+        "irclid",
+        "_kx",
+    ];
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.path("/flags/");
+        then.status(200)
+            .json_body(json!({"minimalFlagCalledEvents":true,
+            "flags":{"a":{"key":"a","enabled":true,"metadata":{"id":1,"version":1,"has_experiment":false}}}}));
+    });
+    let (tx, rx) = mpsc::channel();
+    let wire = server.mock(|when, then| {
+        when.path("/i/v1/analytics/events");
+        then.respond_with(move |request| {
+            tx.send(serde_json::from_slice::<Value>(&request.body().to_vec()).unwrap())
+                .unwrap();
+            http::Response::builder()
+                .status(200)
+                .body(r#"{"results":{}}"#.to_owned())
+                .unwrap()
+                .into()
+        });
+    });
+    let mut c = config(&server);
+    c.bootstrap_feature_flags = None;
+    c.before_send(|event| {
+        assert_eq!(
+            event.properties()["$referrer"],
+            "https://example.com/private"
+        );
+        assert_eq!(event.properties()["utm_source"], "registered-utm_source");
+        Some(event)
+    });
+    let client = Client::init_blocking(c);
+    let mut attribution: HashMap<_, _> = ATTRIBUTION
+        .iter()
+        .map(|key| ((*key).to_owned(), json!(format!("registered-{key}"))))
+        .collect();
+    attribution.insert("$referrer".into(), json!("https://example.com/private"));
+    attribution.insert("utm_private".into(), json!("private"));
+    attribution.insert("private-super".into(), json!("private"));
+    client.register(attribution);
+    client.start_session();
+    let session = client.peek_session_id().unwrap();
+    reload(&client);
+    assert!(client.feature_flag("a").get().unwrap().enabled);
+    client.flush_blocking();
+    let body = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let batch = body["batch"].as_array().unwrap();
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0]["event"], "$feature_flag_called");
+    assert_eq!(batch[0]["session_id"], session.to_string());
+    let props = batch[0]["properties"].as_object().unwrap();
+    for key in ATTRIBUTION {
+        assert_eq!(props[*key], format!("registered-{key}"));
+    }
+    for key in ["$referrer", "utm_private", "private-super"] {
+        assert!(!props.contains_key(key));
+    }
+    wire.assert_calls(1);
+    client.shutdown_blocking(None);
 }
 
 #[test]
@@ -280,12 +386,21 @@ fn dropped_and_panicking_hooks_release_reservations() {
 }
 
 #[test]
-fn full_queue_does_not_commit_a_report() {
+fn rejected_admission_does_not_commit_a_report() {
     let server = MockServer::start();
     accept(&server);
     let mut c = config(&server);
-    c.max_queue_size = 1;
+    c.max_queue_bytes = 2048;
+    c.max_record_bytes = 2048;
     let events = observe(&mut c);
+    let attempts = AtomicUsize::new(0);
+    c.before_send(move |mut event| {
+        if event.properties()["$feature_flag"] == "b" && attempts.fetch_add(1, Ordering::SeqCst) < 2
+        {
+            event.insert_prop("oversized", "x".repeat(4096)).unwrap();
+        }
+        Some(event)
+    });
     let client = Client::init_blocking(c);
     let _ = client.feature_flag("a").get();
     for _ in 0..2 {
@@ -390,8 +505,7 @@ fn partial_reload_preserves_per_record_metadata_and_ends_bootstrap_globally() {
     let flags = server.mock(|when, then| {
         when.path("/flags/"); then.status(200).json_body(json!({"featureFlags":{"b":false},"requestId":"partial","errorsWhileComputingFlags":true}));
     });
-    client.reload_feature_flags();
-    client.flush_blocking();
+    reload(&client);
     let retained = client.feature_flag("a").get().unwrap();
     let current = client.feature_flag("b").get().unwrap();
     assert_eq!(retained, before);
@@ -403,17 +517,144 @@ fn partial_reload_preserves_per_record_metadata_and_ends_bootstrap_globally() {
     assert!(!current.enabled);
     assert_eq!(current.payload, None);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     assert_eq!(events[0].properties()["$used_bootstrap_value"], true);
     assert_eq!(events[1].properties()["$used_bootstrap_value"], false);
-    assert!(!events[1]
-        .properties()
-        .contains_key("$feature_flag_request_id"));
     assert_eq!(
-        events[2].properties()["$feature_flag_request_id"],
+        events[1].properties()["$feature_flag_request_id"],
         "partial"
     );
     flags.assert_calls(1);
+}
+
+#[test]
+fn dedup_survives_reload_group_and_targeting_updates_until_identity_changes() {
+    let server = MockServer::start();
+    accept(&server);
+    let mut response = server.mock(|when, then| {
+        when.path("/flags/");
+        then.status(200)
+            .json_body(json!({"featureFlags":{"a":true}}));
+    });
+    let mut c = config(&server);
+    let events = observe(&mut c);
+    let client = Client::init_blocking(c);
+    let reports = || {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.event_name() == "$feature_flag_called")
+            .count()
+    };
+    let read = || client.feature_flag("a").get().unwrap();
+    read();
+    reload(&client);
+    read();
+    assert_eq!(reports(), 1);
+    client.identify("device"); // Same-ID promotion does not reset reports.
+    complete(&client, || client.group("company", "acme", None));
+    read();
+    client.set_person_properties_for_flags(
+        HashMap::from([("plan".into(), json!("pro"))]),
+        Some(false),
+    );
+    client.set_group_properties_for_flags(
+        "company",
+        HashMap::from([("tier".into(), json!(2))]),
+        Some(false),
+    );
+    reload(&client);
+    read();
+    assert_eq!(reports(), 1);
+    response.delete();
+    for (status, body) in [
+        (400, json!({})),
+        (
+            200,
+            json!({"featureFlags":{},"errorsWhileComputingFlags":true}),
+        ),
+        (
+            200,
+            json!({"flags":{"a":{"key":"a","enabled":true,"metadata":{"id":42,"version":2,"payload":"123"}}},"requestId":"metadata"}),
+        ),
+    ] {
+        let mut response = server.mock(|when, then| {
+            when.path("/flags/");
+            then.status(status).json_body(body);
+        });
+        reload(&client);
+        read();
+        assert_eq!(reports(), 1);
+        response.delete();
+    }
+    for (value, expected) in [(json!(false), 2), (json!("true"), 3), (json!(true), 3)] {
+        let mut response = server.mock(|when, then| {
+            when.path("/flags/");
+            then.status(200)
+                .json_body(json!({"featureFlags":{"a":value}}));
+        });
+        reload(&client);
+        read();
+        read();
+        assert_eq!(reports(), expected);
+        response.delete();
+    }
+    server.mock(|when, then| {
+        when.path("/flags/");
+        then.status(200)
+            .json_body(json!({"featureFlags":{"a":true}}));
+    });
+    complete(&client, || client.reset());
+    complete(&client, || client.identify("person"));
+    read();
+    assert_eq!(reports(), 4);
+    complete(&client, || client.reset());
+    read();
+    assert_eq!(reports(), 5);
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn reservations_finish_across_reload_for_both_accepted_and_dropped_captures() {
+    for accepted in [false, true] {
+        let server = MockServer::start();
+        accept(&server);
+        server.mock(|when, then| {
+            when.path("/flags/");
+            then.status(200)
+                .json_body(json!({"featureFlags":{"a":true}}));
+        });
+        let mut c = config(&server);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        c.before_send(move |event| {
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                accepted.then_some(event)
+            } else {
+                Some(event)
+            }
+        });
+        let client = Arc::new(Client::init_blocking(c));
+        let reading = client.clone();
+        let reader = std::thread::spawn(move || reading.feature_flag("a").get().unwrap());
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        reload(&client);
+        client.set_person_properties_for_flags(
+            HashMap::from([("plan".into(), json!("pro"))]),
+            Some(false),
+        );
+        release_tx.send(()).unwrap();
+        assert!(reader.join().unwrap().enabled);
+        let _ = client.feature_flag("a").get();
+        let _ = client.feature_flag("a").get();
+        assert_eq!(calls.load(Ordering::SeqCst), if accepted { 1 } else { 2 });
+        client.shutdown_blocking(None);
+    }
 }
 
 #[test]

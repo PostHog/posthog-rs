@@ -32,54 +32,69 @@ impl Server {
         let (release, release_rx) = mpsc::channel();
         let thread = thread::spawn(move || {
             for (status, response) in responses {
-                let deadline = Instant::now() + WAIT;
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error)
-                            if error.kind() == std::io::ErrorKind::WouldBlock
-                                && Instant::now() < deadline =>
-                        {
-                            thread::sleep(Duration::from_millis(1))
+                loop {
+                    let deadline = Instant::now() + WAIT;
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error)
+                                if error.kind() == std::io::ErrorKind::WouldBlock
+                                    && Instant::now() < deadline =>
+                            {
+                                thread::sleep(Duration::from_millis(1))
+                            }
+                            Err(error) => panic!("bounded flag fixture accept: {}", error),
                         }
-                        Err(error) => panic!("bounded flag fixture accept: {}", error),
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(WAIT)).unwrap();
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") {
+                        assert!(header.len() < 8192);
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).unwrap();
+                        header.push(byte[0]);
                     }
-                };
-                stream.set_nonblocking(false).unwrap();
-                stream.set_read_timeout(Some(WAIT)).unwrap();
-                let mut header = Vec::new();
-                while !header.ends_with(b"\r\n\r\n") {
-                    assert!(header.len() < 8192);
-                    let mut byte = [0];
-                    stream.read_exact(&mut byte).unwrap();
-                    header.push(byte[0]);
+                    let header = String::from_utf8(header).unwrap();
+                    if header.starts_with("GET /array/") && header.contains("/config HTTP/1.1\r\n")
+                    {
+                        let body = br#"{"hasFeatureFlags":true}"#;
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                            body.len()
+                        )
+                        .unwrap();
+                        stream.write_all(body).unwrap();
+                        continue;
+                    }
+                    assert!(header.starts_with("POST /flags/?v=2 HTTP/1.1\r\n"));
+                    let length: usize = header
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    assert!(length <= flags::MAX_REQUEST_BYTES);
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    requests_tx
+                        .send(serde_json::from_slice(&body).unwrap())
+                        .unwrap();
+                    release_rx.recv_timeout(WAIT).unwrap();
+                    let body = serde_json::to_vec(&response).unwrap();
+                    write!(
+                        stream,
+                        "HTTP/1.1 {} Test\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                        status,
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&body).unwrap();
+                    break;
                 }
-                let header = String::from_utf8(header).unwrap();
-                assert!(header.starts_with("POST /flags/?v=2 HTTP/1.1\r\n"));
-                let length: usize = header
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse().unwrap())
-                    })
-                    .unwrap();
-                assert!(length <= flags::MAX_REQUEST_BYTES);
-                let mut body = vec![0; length];
-                stream.read_exact(&mut body).unwrap();
-                requests_tx
-                    .send(serde_json::from_slice(&body).unwrap())
-                    .unwrap();
-                release_rx.recv_timeout(WAIT).unwrap();
-                let body = serde_json::to_vec(&response).unwrap();
-                write!(
-                    stream,
-                    "HTTP/1.1 {} Test\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
-                    status,
-                    body.len()
-                )
-                .unwrap();
-                stream.write_all(&body).unwrap();
             }
         });
         Self {
@@ -199,7 +214,7 @@ fn public_reload_sends_exact_current_context_while_opted_out() {
     client.opt_in();
     client.register(HashMap::from([("during-http".into(), json!(true))]));
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     assert_eq!(
         request,
@@ -234,10 +249,40 @@ fn suppressed_property_change_invalidates_inflight_response_without_refreshing()
         Some(false),
     );
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     let state = client.state.as_ref().unwrap().snapshot();
     assert_eq!(state.flags.cache, old);
+    assert!(state.flag_load.completed.is_none());
+    assert_eq!(state.flag_load.request, 1);
+    assert_eq!(state.flag_load.revision, 1);
+}
+
+#[test]
+fn suppressed_group_targeting_invalidates_active_response_without_fetching() {
+    let server = Server::new(vec![(200, json!({"featureFlags":{"obsolete":true}}))]);
+    let client = Client::init_blocking(config(&server.host));
+    seed(&client);
+    let previous = client
+        .state
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .flags
+        .cache
+        .clone();
+    client.reload_feature_flags();
+    server.request();
+    client.set_group_properties_for_flags(
+        "company",
+        HashMap::from([("tier".into(), json!(2))]),
+        Some(false),
+    );
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    let state = client.state.as_ref().unwrap().snapshot();
+    assert_eq!(state.flags.cache, previous);
     assert!(state.flag_load.completed.is_none());
     assert_eq!(state.flag_load.request, 1);
     assert_eq!(state.flag_load.revision, 1);
@@ -284,7 +329,7 @@ fn identity_group_and_reset_changes_clear_cache_and_reject_late_results() {
         let current = server.request();
         let after_obsolete = client.state.as_ref().unwrap().snapshot();
         server.respond();
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         server.finish();
         assert_eq!(current["distinct_id"], before_release.distinct_id);
         assert_eq!(current["groups"], json!(before_release.groups));
@@ -361,7 +406,7 @@ fn concurrent_reloads_keep_only_latest_requested_context_and_active_result_is_ob
     // Active response is obsolete even before the pending response completes.
     let before_release = client.state.as_ref().unwrap().snapshot();
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     assert!(before_release.flags.cache.is_none());
     assert!(before_release.flag_load.completed.is_none());
@@ -390,7 +435,7 @@ fn partial_merge_preserves_record_provenance_and_restore_filters_stale_records()
             "a":{"key":"a","enabled":false,"failed":true},
             "b":{"key":"b","enabled":false,"metadata":{"id":2,"version":2,"payload":"false"}},
             "c":{"key":"c","enabled":true}
-        },"requestId":"second","evaluatedAt":20}),
+        },"requestId":"second","evaluatedAt":20,"errorsWhileComputingFlags":true}),
         ),
         (200, json!({"featureFlags":{},"requestId":"empty"})),
     ]);
@@ -398,7 +443,7 @@ fn partial_merge_preserves_record_provenance_and_restore_filters_stale_records()
     client.reload_feature_flags();
     server.request();
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     let first = client.state.as_ref().unwrap().snapshot();
     client
         .state
@@ -414,7 +459,7 @@ fn partial_merge_preserves_record_provenance_and_restore_filters_stale_records()
     client.reload_feature_flags();
     server.request();
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     let second = client.state.as_ref().unwrap().snapshot();
     let cache = second.flags.cache.as_ref().unwrap();
     assert_eq!(cache.flags.len(), 3);
@@ -443,7 +488,7 @@ fn partial_merge_preserves_record_provenance_and_restore_filters_stale_records()
     client.reload_feature_flags();
     server.request();
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     let final_state = client.state.as_ref().unwrap().snapshot();
     assert!(final_state.flags.cache.as_ref().unwrap().flags.is_empty());
@@ -478,7 +523,7 @@ fn failures_retain_cache_and_completion_records_error_for_the_request() {
         client.reload_feature_flags();
         server.request();
         server.respond();
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         let state = client.state.as_ref().unwrap().snapshot();
         assert_eq!(state.flags.cache, initial);
         assert_eq!(
@@ -632,7 +677,7 @@ fn request_size_error_hooks_can_mutate_and_reload_without_a_lock_cycle() {
     server.respond();
     assert!(completed.is_ok());
     reload_thread.join().unwrap();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     assert_eq!(request["person_properties"], json!({}));
     assert!(client
@@ -651,6 +696,7 @@ fn request_size_error_hooks_can_mutate_and_reload_without_a_lock_cycle() {
 #[test]
 fn evaluation_revision_changes_only_with_effective_context_and_rejected_mutations_are_atomic() {
     let client = Client::init_blocking(config("http://127.0.0.1:1"));
+    client.flush_blocking();
     seed(&client);
     client.register(HashMap::from([("analytics-only".into(), json!(1))]));
     client.opt_out();
@@ -725,7 +771,7 @@ fn refresh_sequence_and_reset_revision_each_prevent_obsolete_installation() {
         server.request();
         let intermediate = client.state.as_ref().unwrap().snapshot();
         server.respond();
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         server.finish();
         assert!(intermediate.flags.cache.is_none());
         assert!(intermediate.flag_load.completed.is_none());
@@ -756,7 +802,7 @@ fn returning_to_the_original_targeting_does_not_revive_an_obsolete_response() {
     );
     client.reset_person_properties_for_flags(Some(false));
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     assert_eq!(writer.snapshot().flag_load.revision, 2);
     assert!(writer.snapshot().flags.cache.is_none());
@@ -784,7 +830,7 @@ fn public_restart_hydrates_only_records_matching_persisted_targeting() {
     client.reload_feature_flags();
     server.request();
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     client
         .state
         .as_ref()
@@ -799,7 +845,7 @@ fn public_restart_hydrates_only_records_matching_persisted_targeting() {
     client.reload_feature_flags();
     server.request();
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     assert_eq!(
         client
             .state
@@ -949,7 +995,7 @@ fn preload_readiness(asynchronous: bool) {
     server.respond();
     initializing.join().unwrap();
     let client = ready.expect("initialization must not wait for a flags response");
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     assert_eq!(
         request,
@@ -1004,7 +1050,7 @@ fn preload_uses_restored_targeting_after_identified_bootstrap_reconciliation() {
     let request = server.request();
     let before = client.state.as_ref().unwrap().snapshot();
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     assert_eq!(request["distinct_id"], "person");
     assert_eq!(request["$anon_distinct_id"], "device");
@@ -1041,7 +1087,7 @@ fn preload_failure_reports_without_disabling_the_ready_client() {
     server.request();
     assert!(!client.is_disabled());
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     assert!(rx.recv_timeout(WAIT).unwrap());
     assert!(!client.is_disabled());

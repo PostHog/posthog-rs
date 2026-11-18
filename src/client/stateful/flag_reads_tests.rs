@@ -39,7 +39,7 @@ fn cached_exports_finish_before_http_and_identity_invalidates_before_latest_resp
     let request = server.request();
     let while_latest_pending = client.get_feature_flags();
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     assert_eq!(
         ready.expect("memory getters must not wait for a flags response"),

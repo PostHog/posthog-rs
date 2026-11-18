@@ -103,7 +103,9 @@ impl DrainReport {
 /// Setup always returns this type. Invalid configuration or local delivery
 /// startup failure disables the client and reports through `on_error`.
 /// Storage failures instead allow enabled memory-backed operation. No network
-/// request is required to establish readiness.
+/// request is required to establish readiness. Feature flag requests run
+/// independently of event delivery, on a bounded request worker that does not
+/// own event storage.
 ///
 /// Persistent namespaces permit only one live owner. A second client with the
 /// same storage scope uses a generated or bootstrap identity in memory instead
@@ -225,7 +227,10 @@ impl Client {
         let backend = match restored.state_store {
             Some(store) => Backend::Persistent {
                 store: Box::new(store),
-                restored: was_restored && !restored.rewrite_required && !session_changed && !flags_changed,
+                restored: was_restored
+                    && !restored.rewrite_required
+                    && !session_changed
+                    && !flags_changed,
             },
             None if matches!(config.persistence, Persistence::Memory) => Backend::Memory,
             None => Backend::Unavailable,

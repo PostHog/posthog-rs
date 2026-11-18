@@ -23,7 +23,6 @@ use crate::feature_flags::FlagValue;
 /// Carries everything needed to emit a fully-detailed `$feature_flag_called`
 /// event without a follow-up network call.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct EvaluatedFlagRecord {
     pub enabled: bool,
     pub variant: Option<String>,

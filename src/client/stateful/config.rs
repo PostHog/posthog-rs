@@ -155,7 +155,7 @@ impl Config {
 
     /// Observe bootstrap/restored flags before initialization returns, and later
     /// remote completions. Runs in registration order outside SDK locks; panics
-    /// are isolated. Remote calls run on the delivery worker, not a UI thread.
+    /// are isolated. Remote calls run on the independent request worker, not a UI thread.
     /// The callback remains registered until this client's terminal shutdown.
     pub fn on_feature_flags<F>(&mut self, callback: F) -> &mut Self
     where

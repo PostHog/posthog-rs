@@ -7,9 +7,78 @@ use chrono::{DateTime, Utc};
 use std::sync::{mpsc, Weak};
 
 #[test]
+fn memory_close_clears_report_tracking_when_contended_mutation_releases_state() {
+    use crate::client::stateful::{Client, Config, Persistence, PersistenceOutcome};
+    let server = httpmock::MockServer::start();
+    server.mock(|_, then| {
+        then.status(200)
+            .json_body(serde_json::json!({"results":{}}));
+    });
+    let mut config = Config::new("phc_test");
+    config.persistence = Persistence::Memory;
+    config.host = server.base_url();
+    config.preload_feature_flags = false;
+    config.bootstrap_feature_flags = Some(std::collections::HashMap::from([(
+        "a".into(),
+        crate::FlagValue::Boolean(true),
+    )]));
+    let client = Arc::new(Client::init_blocking(config));
+    let _ = client.feature_flag("a").get();
+    let mut expected = client
+        .state
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .flag_load
+        .reports
+        .clone();
+    let before = expected.clone();
+    expected.clear();
+    assert_ne!(before, expected);
+    let (entered, waiting) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    let other = client.clone();
+    let mutation = thread::spawn(move || {
+        other
+            .state
+            .as_ref()
+            .unwrap()
+            .mutate(|state| {
+                entered.send(()).unwrap();
+                gate.recv_timeout(Duration::from_secs(5)).unwrap();
+                state.person_properties = Some([1; 20]);
+            })
+            .unwrap();
+    });
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    let start = Instant::now();
+    assert_eq!(
+        client.shutdown_blocking(Some(Duration::ZERO)).state,
+        PersistenceOutcome::MemoryOnly
+    );
+    assert!(start.elapsed() < Duration::from_secs(1));
+    release.send(()).unwrap();
+    mutation.join().unwrap();
+    // Inspect the raw mutex: reading through StateWriter must not be needed
+    // to complete the deferred cleanup.
+    let state = client
+        .state
+        .as_ref()
+        .unwrap()
+        .shared
+        .state
+        .try_lock()
+        .unwrap();
+    assert_eq!(state.snapshot.flag_load.reports, expected);
+    assert!(state.closing.is_some());
+}
+
+#[test]
 fn shared_access_validates_candidates_without_owning_writer_lifetime() {
     let path = std::env::temp_dir().join(format!("posthog-state-access-{}", uuid::Uuid::now_v7()));
-    let (store, _) = FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096).unwrap();
+    let store = FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096)
+        .unwrap()
+        .store;
     let writer = StateWriter::new(
         Snapshot::anonymous("initial".into()),
         Backend::Persistent {

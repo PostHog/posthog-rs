@@ -1,4 +1,6 @@
-//! Bounded, accepted-only access tracking shares the validated state owner.
+//! Bounded, accepted-only tracking by flag key and typed value. Reloads and
+//! targeting changes retain reports; distinct-ID changes, reset and shutdown clear them.
+//! Reservations share the validated state owner and finish by non-reused ticket.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -30,8 +32,14 @@ impl ReportTracker {
     pub(super) fn clear(&mut self) {
         self.entries.clear();
         self.accepted.clear();
-        // Preserve tickets across reload completion to prevent a late capture
-        // from committing a new reservation for the same key (ABA).
+        // A late capture must not commit a new reservation for the same key (ABA).
+    }
+
+    pub(super) fn cleared(&self) -> Self {
+        Self {
+            next_ticket: self.next_ticket,
+            ..Self::default()
+        }
     }
 
     fn reserve(&mut self, key: Key) -> Option<u64> {
@@ -76,40 +84,26 @@ struct Reservation<'a> {
     client: &'a Client,
     key: Key,
     ticket: u64,
-    revision: u64,
-    request: u64,
     accepted: bool,
 }
 
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
         let _ = self.client.state.as_ref().unwrap().mutate(|state| {
-            if state.flag_load.revision == self.revision && state.flag_load.request == self.request
-            {
-                state
-                    .flag_load
-                    .reports
-                    .finish(self.key, self.ticket, self.accepted);
-            }
+            state
+                .flag_load
+                .reports
+                .finish(self.key, self.ticket, self.accepted);
         });
     }
 }
 
-fn report_key(snapshot: &Snapshot, key: &str, value: &FlagValue) -> Key {
+fn report_key(key: &str, value: &FlagValue) -> Key {
     fn string(hash: &mut Sha1, value: &str) {
         hash.update((value.len() as u64).to_le_bytes());
         hash.update(value.as_bytes());
     }
     let mut hash = Sha1::new();
-    string(&mut hash, &snapshot.distinct_id);
-    string(&mut hash, &snapshot.anonymous_id);
-    let mut groups: Vec<_> = snapshot.groups.iter().collect();
-    groups.sort_unstable();
-    hash.update((groups.len() as u64).to_le_bytes());
-    for (kind, value) in groups {
-        string(&mut hash, kind);
-        string(&mut hash, value);
-    }
     string(&mut hash, key);
     match value {
         FlagValue::Boolean(value) => hash.update([u8::from(*value)]),
@@ -130,7 +124,7 @@ impl Client {
             return;
         };
         let response = flag_value_for(&flag.record);
-        let fingerprint = report_key(snapshot, key, &response);
+        let fingerprint = report_key(key, &response);
         let ticket = self.state.as_ref().unwrap().mutate(|current| {
             if current.flag_load.revision != snapshot.flag_load.revision
                 || current.flag_load.request != snapshot.flag_load.request
@@ -147,8 +141,6 @@ impl Client {
             client: self,
             key: fingerprint,
             ticket,
-            revision: snapshot.flag_load.revision,
-            request: snapshot.flag_load.request,
             accepted: false,
         };
         let mut event = Capture::new("$feature_flag_called");
@@ -198,6 +190,71 @@ mod tests {
         let mut key = [0; 20];
         key[..8].copy_from_slice(&i.to_le_bytes());
         key
+    }
+
+    #[test]
+    fn minimal_event_allowlist_is_literal_and_exhaustive() {
+        let expected = [
+            "$feature_flag",
+            "$feature_flag_response",
+            "$feature_flag_has_experiment",
+            "$feature_flag_id",
+            "$feature_flag_version",
+            "$feature_flag_reason",
+            "$feature_flag_request_id",
+            "$feature_flag_evaluated_at",
+            "$feature_flag_error",
+            "locally_evaluated",
+            "$groups",
+            "$process_person_profile",
+            "$geoip_disable",
+            "$cookieless_mode",
+            "$ignore_sent_at",
+            "$product_tour_id",
+            "$session_id",
+            "$window_id",
+            "$device_id",
+            "$lib",
+            "$lib_version",
+            "$is_server",
+            "$os",
+            "$os_version",
+            "$referring_domain",
+            "utm_source",
+            "utm_medium",
+            "utm_campaign",
+            "utm_content",
+            "utm_term",
+            "gad_source",
+            "mc_cid",
+            "gclid",
+            "gclsrc",
+            "dclid",
+            "gbraid",
+            "wbraid",
+            "fbclid",
+            "msclkid",
+            "twclid",
+            "li_fat_id",
+            "igshid",
+            "ttclid",
+            "rdt_cid",
+            "epik",
+            "qclid",
+            "sccid",
+            "oppref",
+            "bfcid",
+            "irclid",
+            "_kx",
+        ];
+        let mut actual = crate::event::MINIMAL_FLAG_CALLED_EVENT_PROPERTIES.to_vec();
+        let mut expected = expected.to_vec();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+        for key in ["$referrer", "utm_private", "gclid_private", "private"] {
+            assert!(!crate::event::is_minimal_flag_called_property(key));
+        }
     }
 
     #[test]
@@ -269,23 +326,121 @@ mod tests {
     }
 
     #[test]
-    fn keys_are_typed_and_groups_are_order_independent() {
-        let mut a = Snapshot::anonymous("device".into());
-        a.groups = HashMap::from([("company".into(), "a".into()), ("team".into(), "b".into())]);
-        let mut b = a.clone();
-        b.groups = HashMap::from([("team".into(), "b".into()), ("company".into(), "a".into())]);
+    fn reset_and_reidentify_cannot_reuse_a_pending_ticket() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Arc,
+        };
+        use std::time::Duration;
+        const WAIT: Duration = Duration::from_secs(5);
+        let server = httpmock::MockServer::start();
+        server.mock(|when, then| {
+            when.path("/array/phc_test/config");
+            then.status(200)
+                .json_body(serde_json::json!({"hasFeatureFlags":true}));
+        });
+        server.mock(|when, then| {
+            when.path("/flags/");
+            then.status(200)
+                .json_body(serde_json::json!({"featureFlags":{"a":true}}));
+        });
+        let old_uuid = uuid::Uuid::now_v7();
+        let delivered = server.mock(|when, then| {
+            when.path("/i/v1/analytics/events")
+                .body_includes(old_uuid.to_string());
+            then.status(200)
+                .json_body(serde_json::json!({"results":{}}));
+        });
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let mut config = super::super::Config::new("phc_test");
+        config.host = server.base_url();
+        config.persistence = super::super::Persistence::Memory;
+        config.preload_feature_flags = false;
+        config.bootstrap_anonymous_id = Some("original".into());
+        config.bootstrap_feature_flags =
+            Some(HashMap::from([("a".into(), FlagValue::Boolean(true))]));
+        config.flush_at = 1000;
+        config.flush_interval = Duration::from_secs(3600);
+        config.shutdown_timeout = Duration::from_secs(1);
+        config.capture_compression = None;
+        config.before_send(move |mut event| {
+            assert_eq!(event.event_name(), "$feature_flag_called");
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                event.set_uuid(old_uuid);
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(WAIT).expect("old capture release");
+                returned_tx.send(()).unwrap();
+            }
+            Some(event)
+        });
+        let client = Arc::new(Client::init_blocking(config));
+        let reader = client.clone();
+        let old_capture = std::thread::spawn(move || reader.feature_flag("a").get().unwrap());
+        entered_rx.recv_timeout(WAIT).unwrap();
+        let state = client.state.as_ref().unwrap();
+        let fingerprint = report_key("a", &FlagValue::Boolean(true));
+        let old_ticket = state.snapshot().flag_load.reports.entries[&fingerprint].ticket;
+        client.reset();
+        // Identity still changes while opted out, without entering the held FnMut hook.
+        client.opt_out();
+        client.identify("original");
+        client.transport.as_ref().unwrap().request_barrier();
+        assert_eq!(client.get_distinct_id(), "original");
+        assert!(client.is_identified());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        client.opt_in();
+        // Reserve directly to isolate the tracker race from serialized application hooks.
+        let (_, new_ticket) = state
+            .mutate(|state| state.flag_load.reports.reserve(fingerprint).unwrap())
+            .unwrap();
+        assert!(new_ticket > old_ticket);
+        release_tx.send(()).unwrap();
+        assert!(old_capture.join().unwrap().enabled);
+        returned_rx
+            .recv_timeout(WAIT)
+            .expect("old hook must return normally");
+        client.flush_blocking();
+        delivered.assert_calls(1); // The old capture was actually accepted and delivered late.
+        let current = state.snapshot();
         assert_eq!(
-            report_key(&a, "flag", &FlagValue::Boolean(true)),
-            report_key(&b, "flag", &FlagValue::Boolean(true))
+            current.flag_load.reports.entries[&fingerprint].ticket,
+            new_ticket
+        );
+        assert!(!current.flag_load.reports.entries[&fingerprint].accepted);
+        let _ = client.feature_flag("a").get();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        state
+            .mutate(|state| {
+                state
+                    .flag_load
+                    .reports
+                    .finish(fingerprint, new_ticket, false)
+            })
+            .unwrap();
+        let _ = client.feature_flag("a").get();
+        let _ = client.feature_flag("a").get();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(state.snapshot().flag_load.reports.entries[&fingerprint].accepted);
+        client.shutdown_blocking(None);
+    }
+
+    #[test]
+    fn keys_distinguish_flag_names_and_typed_values() {
+        assert_ne!(
+            report_key("flag", &FlagValue::Boolean(true)),
+            report_key("flag", &FlagValue::String("true".into()))
         );
         assert_ne!(
-            report_key(&a, "flag", &FlagValue::Boolean(true)),
-            report_key(&a, "flag", &FlagValue::String("true".into()))
+            report_key("flag", &FlagValue::Boolean(true)),
+            report_key("flag", &FlagValue::Boolean(false))
         );
-        b.groups.insert("company".into(), "other".into());
         assert_ne!(
-            report_key(&a, "flag", &FlagValue::Boolean(true)),
-            report_key(&b, "flag", &FlagValue::Boolean(true))
+            report_key("flag", &FlagValue::Boolean(true)),
+            report_key("other", &FlagValue::Boolean(true))
         );
     }
 }

@@ -33,6 +33,18 @@ fn config(server: &MockServer) -> Config {
     config
 }
 
+fn complete(client: &Client, action: impl FnOnce()) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let subscription = client.on_feature_flags(move |_| {
+        let _ = tx.send(());
+    });
+    while rx.try_recv().is_ok() {}
+    action();
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("flags completion");
+    subscription.unsubscribe();
+}
+
 fn reload(
     server: &MockServer,
     client: &Client,
@@ -53,10 +65,32 @@ fn reload(
             }));
         then.status(200).json_body(json!({"featureFlags": {}}));
     });
-    action();
-    client.flush_blocking();
+    complete(client, action);
     response.assert_calls(1);
     response.delete();
+}
+
+#[test]
+fn reset_flags_use_stable_device_and_rotated_anonymous_identity() {
+    let server = MockServer::start();
+    let client = Client::init_blocking(config(&server));
+    complete(&client, || client.reset());
+    let anonymous = client.get_anonymous_id();
+    assert_ne!(anonymous, "device");
+    let response = server.mock(|when, then| {
+        when.method(POST)
+            .path("/flags/")
+            .query_param("v", "2")
+            .json_body(json!({
+                "api_key":"phc_test", "distinct_id":anonymous,
+                "$anon_distinct_id":anonymous, "$device_id":"device", "geoip_disable":false,
+                "person_properties":{}, "groups":{}, "group_properties":{}
+            }));
+        then.status(200).json_body(json!({"featureFlags": {}}));
+    });
+    complete(&client, || client.reload_feature_flags());
+    response.assert_calls(1);
+    client.shutdown_blocking(None);
 }
 
 #[test]
@@ -162,14 +196,13 @@ fn empty_or_invalid_setters_do_not_reload_but_unchanged_nonempty_setters_do() {
     client.flush_blocking();
     calls.assert_calls(0);
     for count in 1..=2 {
-        client.set_person_properties_for_flags(properties(json!({"p":1})), None);
-        client.flush_blocking();
+        complete(&client, || {
+            client.set_person_properties_for_flags(properties(json!({"p":1})), None)
+        });
         calls.assert_calls(count);
     }
-    client.reset_person_properties_for_flags(None);
-    client.flush_blocking();
-    client.reset_person_properties_for_flags(None);
-    client.flush_blocking();
+    complete(&client, || client.reset_person_properties_for_flags(None));
+    complete(&client, || client.reset_person_properties_for_flags(None));
     calls.assert_calls(4);
     client.shutdown_blocking(None);
     client.set_person_properties_for_flags(properties(json!({"p":2})), None);
@@ -453,11 +486,18 @@ fn mirrored_targeting_is_visible_to_reentrant_hooks_and_survives_event_drop() {
 }
 
 #[test]
-fn mirrored_targeting_survives_full_analytics_queue_without_reloading_automatically() {
+fn mirrored_targeting_survives_rejected_analytics_without_reloading_automatically() {
     use posthog::stateful::CaptureOutcome;
     let server = MockServer::start();
     let mut conf = config(&server);
-    conf.max_queue_size = 1;
+    conf.max_queue_bytes = 2048;
+    conf.max_record_bytes = 2048;
+    conf.before_send(|mut event| {
+        if event.event_name() != "occupy" {
+            event.insert_prop("oversized", "x".repeat(4096)).unwrap();
+        }
+        Some(event)
+    });
     let client = Client::init_blocking(conf);
     assert!(matches!(
         client.capture("occupy"),

@@ -50,7 +50,7 @@ fn bootstrap_filters_values_and_keeps_decoded_payloads_before_preload_completes(
             cache,
         ));
         server.respond();
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         server.finish();
         let after = client.state.as_ref().unwrap().snapshot();
         let flags = &after.flags.cache.as_ref().unwrap().flags;
@@ -139,7 +139,7 @@ fn bootstrap_uses_final_reconciled_identity_before_preload() {
     let request = server.request();
     let state = client.state.as_ref().unwrap().snapshot();
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     assert_eq!(request["distinct_id"], "person");
     assert_eq!(state.flag_load.request, 1);
@@ -176,7 +176,7 @@ fn failed_preload_retains_bootstrap_but_valid_oversized_cache_ends_global_use() 
         let client = Client::init_blocking(config);
         server.request();
         server.respond();
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         server.finish();
         assert!(rx.recv_timeout(WAIT).unwrap());
         let state = client.state.as_ref().unwrap().snapshot();
@@ -211,7 +211,7 @@ fn obsolete_response_does_not_mark_bootstrap_remote_and_reset_drops_all_context(
         Some(false),
     );
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     let state = client.state.as_ref().unwrap().snapshot();
     assert!(!state.flag_load.remote_received);
     assert!(state.flag_load.completed.is_none());
@@ -229,7 +229,7 @@ fn obsolete_response_does_not_mark_bootstrap_remote_and_reset_drops_all_context(
     assert!(!state.flag_load.remote_received);
     assert!(state.flags.cache.is_none());
     server.respond();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     let state = client.state.as_ref().unwrap().snapshot();
     assert!(state.flag_load.remote_received);
@@ -298,8 +298,13 @@ fn bootstrap_limits_are_atomic_and_ignore_unserved_payloads() {
             json!("x".repeat(crate::client::stateful::flag_state::MAX_CACHE_BYTES)),
         );
     let (tx, rx) = mpsc::channel();
-    config.on_error(move |_| tx.send(()).unwrap());
+    config.on_error(move |error| {
+        if matches!(error, crate::PostHogError::FeatureFlags(_)) {
+            tx.send(()).unwrap();
+        }
+    });
     let client = Client::init_blocking(config);
+    client.flush_blocking();
     assert_eq!(
         client
             .state

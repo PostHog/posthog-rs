@@ -1,4 +1,4 @@
-//! Current-user loading uses the shared delivery worker and validated state owner.
+//! Current-user loading uses the independent request worker and validated state owner.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -33,7 +33,7 @@ impl Request {
             "api_key": api_key,
             "distinct_id": self.context.distinct_id,
             "$anon_distinct_id": self.context.anonymous_id,
-            "$device_id": self.context.anonymous_id,
+            "$device_id": self.context.device_id,
             "groups": self.context.groups,
             "person_properties": self.context.person_properties,
             "group_properties": self.context.group_properties,
@@ -59,7 +59,6 @@ impl FlagLoader {
         let request = access.mutate(|state| {
             let sequence = state.flag_load.request.checked_add(1)?;
             state.flag_load.request = sequence;
-            state.flag_load.reports.clear();
             Some(Request {
                 context: Arc::new(FlagContext::current(state, self.options.disable_geoip)),
                 revision: state.flag_load.revision,
@@ -156,7 +155,6 @@ fn install(
                 }
                 Err(error) => completion.error = Some(error),
             }
-            state.flag_load.reports.clear();
             state.flag_load.completed = Some(completion);
             diagnostic
         })
@@ -170,8 +168,8 @@ impl Client {
     /// coalesce to one latest pending refresh; obsolete responses cannot install.
     /// Failures retain cached values and report through `on_error`.
     ///
-    /// Uses the existing delivery worker: an active flags request may delay
-    /// delivery or flush, but not capture admission or in-memory state access.
+    /// Uses the independent request worker. Delivery and in-memory access
+    /// do not wait for requests, and flush does not wait for flag completion.
     pub fn reload_feature_flags(&self) {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return;

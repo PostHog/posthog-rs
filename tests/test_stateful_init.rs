@@ -72,7 +72,11 @@ fn preload_setting_only_controls_startup_requests() {
             then.status(200)
                 .json_body(serde_json::json!({"featureFlags":{}}));
         });
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut config = Config::new("phc_test");
+        config.on_feature_flags(move |_| {
+            let _ = tx.send(());
+        });
         assert!(config.preload_feature_flags);
         if !enabled {
             config.preload_feature_flags = false;
@@ -81,13 +85,18 @@ fn preload_setting_only_controls_startup_requests() {
         config.persistence = Persistence::Memory;
         config.before_send(|_| None);
         let client = Client::init_blocking(config);
-        client.flush_blocking();
+        if enabled {
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("startup completion");
+        }
         flags.assert_calls(usize::from(enabled));
         client.reload_feature_flags();
-        client.flush_blocking();
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reload completion");
         flags.assert_calls(usize::from(enabled) + 1);
         client.identify("person");
-        client.flush_blocking();
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("identity flags completion");
         flags.assert_calls(usize::from(enabled) + 2);
     }
 }

@@ -37,7 +37,6 @@ pub(super) struct FlagCompletion {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct FlagState {
     pub(super) person_properties: HashMap<String, Value>,
     pub(super) group_properties: HashMap<String, HashMap<String, Value>>,
@@ -55,10 +54,10 @@ impl FlagState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct FlagContext {
     pub(super) distinct_id: String,
     pub(super) anonymous_id: String,
+    pub(super) device_id: String,
     pub(super) groups: HashMap<String, String>,
     pub(super) person_properties: HashMap<String, Value>,
     pub(super) group_properties: HashMap<String, HashMap<String, Value>>,
@@ -70,6 +69,7 @@ impl FlagContext {
         Self {
             distinct_id: snapshot.distinct_id.clone(),
             anonymous_id: snapshot.anonymous_id.clone(),
+            device_id: snapshot.device_id.clone(),
             groups: snapshot.groups.clone(),
             person_properties: snapshot.flags.person_properties.clone(),
             group_properties: snapshot.flags.group_properties.clone(),
@@ -79,7 +79,6 @@ impl FlagContext {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct FlagCache {
     pub(super) context: FlagContext,
     pub(super) flags: HashMap<String, CachedFlag>,
@@ -88,7 +87,6 @@ pub(super) struct FlagCache {
 /// Reporting metadata belongs to each retained record: a partial response cannot
 /// relabel older records with the new response's request ID or minimization gate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct CachedFlag {
     #[serde(with = "shared_context")]
     pub(super) context: Arc<FlagContext>,
@@ -216,7 +214,10 @@ impl Snapshot {
             || self.flags.group_properties != previous.flags.group_properties
         {
             self.flag_load.revision = previous.flag_load.revision.checked_add(1)?;
-            self.flag_load.reports.clear();
+            if self.distinct_id != previous.distinct_id {
+                // Reset may have replaced the snapshot; never rewind reservation tickets.
+                self.flag_load.reports = previous.flag_load.reports.cleared();
+            }
             if identity_changed {
                 self.flags.cache = None;
                 self.flag_load.completed = None;

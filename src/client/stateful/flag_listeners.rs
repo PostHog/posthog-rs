@@ -301,7 +301,7 @@ impl Client {
     ///
     /// Each dispatch visits existing registrations in order, outside SDK locks,
     /// with panic isolation. Immediate callbacks run on the caller; remote ones
-    /// run on the delivery worker. Sources may overlap or reenter; no UI dispatch
+    /// run on the independent request worker. Sources may overlap or reenter; no UI dispatch
     /// or callback mutex is provided. Use `Weak<Client>` for back-references.
     /// Reset preserves subscriptions but invalidates old loads. Terminal shutdown
     /// ends subscriptions; callbacks already dispatched may finish. Flush and

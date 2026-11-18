@@ -285,7 +285,6 @@ fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
     }
     let envelope: Envelope =
         serde::Deserialize::deserialize(&value).map_err(|_| LoadError::InvalidResponse)?;
-    let mut failed = false;
     if let Some(flags) = value.get_mut("flags") {
         let flags = flags.as_object_mut().ok_or(LoadError::InvalidResponse)?;
         // Count the original map, including failed evaluations, before filtering.
@@ -294,8 +293,7 @@ fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
         }
         for detail in flags.values() {
             match detail.get("failed") {
-                Some(Value::Bool(true)) => failed = true,
-                Some(Value::Bool(false)) | None => {}
+                Some(Value::Bool(_)) | None => {}
                 _ => return Err(LoadError::InvalidResponse),
             }
         }
@@ -349,7 +347,7 @@ fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
         records,
         request_id: envelope.request_id,
         evaluated_at: envelope.evaluated_at,
-        partial: envelope.partial || details.errors_while_computing_flags || failed,
+        partial: envelope.partial || details.errors_while_computing_flags,
         invalid_payloads,
     })
 }

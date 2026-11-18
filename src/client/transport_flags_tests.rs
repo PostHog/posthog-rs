@@ -124,14 +124,11 @@ fn failed_v2_evaluations_are_not_successful_false_records() {
         let loaded = decode(&serde_json::to_vec(&response).unwrap()).unwrap();
         assert!(
             !loaded.records.contains_key("failed"),
-            "failed evaluation must not replace cached value"
+            "failed evaluation must not produce a record"
         );
         assert!(!loaded.records["disabled"].enabled);
         assert!(loaded.records["enabled"].enabled);
-        assert!(
-            loaded.partial,
-            "failed records require preservation of unrecomputed values"
-        );
+        assert_eq!(loaded.partial, partial.unwrap_or(false));
     }
 }
 
@@ -196,7 +193,7 @@ fn decoder_validates_envelope_and_failed_markers_before_filtering() {
         Err(LoadError::TooManyFlags)
     ));
     let failed_only = decode(br#"{"flags":{"failed":{"failed":true}}}"#).unwrap();
-    assert!(failed_only.partial);
+    assert!(!failed_only.partial);
     assert!(failed_only.records.is_empty());
 }
 
@@ -263,8 +260,11 @@ fn pending_slot_uses_one_token_and_retains_only_latest_task() {
     );
     drop(pending);
     slot.close();
-    assert!(slot.0.lock().unwrap().task.is_none());
     assert!(!slot.enqueue(Task::new(&json!({}), |_| {}).unwrap(), &tx, &closed));
+    // Closure marks the slot; the request worker owns pending destruction.
+    assert!(slot.0.lock().unwrap().task.is_some());
+    slot.discard();
+    assert!(slot.0.lock().unwrap().task.is_none());
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn failed_wake_send_releases_pending_task() {
 }
 
 #[test]
-fn shared_worker_coalesces_while_busy_and_keeps_event_admission_independent() {
+fn request_worker_coalesces_while_busy_and_keeps_event_admission_independent() {
     let server = MockServer::start();
     let flags = server.mock(|when, then| {
         when.method(POST)
@@ -308,15 +308,19 @@ fn shared_worker_coalesces_while_busy_and_keeps_event_admission_independent() {
     assert!(handle.schedule_flags(
         Task::new(&json!({"distinct_id":"first"}), move |result| {
             assert!(result.is_ok());
-            entered_tx.send(thread::current().id()).unwrap();
+            entered_tx
+                .send((
+                    thread::current().id(),
+                    thread::current().name().unwrap().to_owned(),
+                ))
+                .unwrap();
             release_rx.recv_timeout(WAIT).unwrap();
         })
         .unwrap()
     ));
-    assert_eq!(
-        entered_rx.recv_timeout(WAIT).unwrap(),
-        handle.worker_id.unwrap()
-    );
+    let (callback_thread, callback_name) = entered_rx.recv_timeout(WAIT).unwrap();
+    assert_eq!(callback_name, "posthog-requests");
+    assert_ne!(Some(callback_thread), handle.worker_id);
     let (done_tx, done_rx) = mpsc::channel();
     for n in 0..1000 {
         let done_tx = done_tx.clone();
@@ -403,7 +407,7 @@ fn callback_panic_does_not_stop_worker_and_server_lane_has_no_flag_slot() {
     let handle = TransportHandle::spawn_stateful(options(server.base_url()), None, 4096).unwrap();
     assert!(handle
         .schedule_flags(Task::new(&json!({}), |_| panic!("controlled completion panic")).unwrap()));
-    handle.flush_blocking();
+    handle.request_barrier();
     let (tx, rx) = mpsc::channel();
     assert!(handle.schedule_flags(
         Task::new(&json!({}), move |result| {

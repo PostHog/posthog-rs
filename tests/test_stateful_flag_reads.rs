@@ -21,6 +21,19 @@ fn config(server: &MockServer) -> Config {
     config
 }
 
+fn reload(client: &Client) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let subscription = client.on_feature_flags(move |_| {
+        let _ = tx.send(());
+    });
+    // Registration replays the existing cache before a new request is scheduled.
+    while rx.try_recv().is_ok() {}
+    client.reload_feature_flags();
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("flags completion");
+    subscription.unsubscribe();
+}
+
 fn bootstrap(config: &mut Config) {
     config.bootstrap_feature_flags = Some(HashMap::from([
         ("variant".into(), FlagValue::String("blue".into())),
@@ -38,10 +51,78 @@ fn bootstrap(config: &mut Config) {
 }
 
 #[test]
+fn complete_failed_records_replace_cache_while_response_errors_merge_successes() {
+    for partial in [false, true] {
+        let server = MockServer::start();
+        let mut response = server.mock(|when, then| {
+            when.path("/flags/");
+            then.status(200).json_body(json!({
+                "flags": {
+                    "variant": {"failed":true},
+                    "healthy": {"key":"healthy", "enabled":true, "metadata":{"id":7,"version":1,"payload":"null"}},
+                    "disabled": {"key":"disabled", "enabled":false}
+                },
+                "errorsWhileComputingFlags":partial,
+                "requestId":"replacement"
+            }));
+        });
+        let mut settings = config(&server);
+        bootstrap(&mut settings);
+        let client = Client::init_blocking(settings);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let subscription = client.on_feature_flags(move |update| {
+            let _ = tx.send(update.clone());
+        });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap(); // Bootstrap snapshot.
+        client.reload_feature_flags();
+        let update = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.partial, partial);
+        assert_eq!(update.errors_loading, partial);
+        assert_eq!(update.error, None);
+        let flags = client.get_feature_flags().unwrap();
+        assert_eq!(flags.len(), if partial { 5 } else { 2 });
+        assert_eq!(flags.contains_key("variant"), partial);
+        assert_eq!(flags.contains_key("plain"), partial);
+        assert_eq!(flags["healthy"].id, Some(7));
+        assert_eq!(flags["healthy"].payload, Some(Value::Null));
+        assert_eq!(flags["healthy"].request_id.as_deref(), Some("replacement"));
+        assert_eq!(flags["healthy"].partial, partial);
+        assert!(!flags["disabled"].enabled);
+        let enabled = update.flags.unwrap();
+        assert!(enabled.contains_key("healthy"));
+        assert!(!enabled.contains_key("disabled"));
+        assert_eq!(enabled.contains_key("variant"), partial);
+        if partial {
+            assert_eq!(flags["variant"].variant.as_deref(), Some("blue"));
+            assert_eq!(flags["variant"].request_id, None);
+            assert!(!flags["variant"].partial);
+        }
+        response.assert_calls(1);
+        response.delete();
+        let empty = server.mock(|when, then| {
+            when.path("/flags/");
+            then.status(200)
+                .json_body(json!({"flags":{"healthy":{"failed":true}}}));
+        });
+        client.reload_feature_flags();
+        let update = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!update.partial);
+        assert!(!update.errors_loading);
+        assert_eq!(update.flags, Some(HashMap::new()));
+        assert_eq!(client.get_feature_flags(), Some(HashMap::new()));
+        assert_eq!(client.feature_flag("healthy").get(), None);
+        empty.assert_calls(1);
+        subscription.unsubscribe();
+        client.shutdown_blocking(None);
+    }
+}
+
+#[test]
 fn bootstrap_rich_reads_are_owned_memory_only_and_silent_in_all_consent_modes() {
     for opted_out in [false, true] {
         let server = MockServer::start();
-        let requests = server.mock(|_, then| {
+        let requests = server.mock(|when, then| {
+            when.path_not("/array/phc_test/config");
             then.status(500);
         });
         let mut config = config(&server);
@@ -128,8 +209,7 @@ fn lookup_reads_current_cache_and_reports_only_when_get_is_called() {
     let client = Client::init_blocking(config);
     let lookup = client.feature_flag("variant");
     assert_eq!(hooks.load(Ordering::SeqCst), 0);
-    client.reload_feature_flags();
-    client.flush_blocking();
+    reload(&client);
     response.assert_calls(1);
     analytics.assert_calls(0);
     assert_eq!(hooks.load(Ordering::SeqCst), 0);
@@ -213,8 +293,7 @@ fn v2_rich_reads_preserve_disabled_values_and_decoded_payload_types_without_repa
         seen.fetch_add(1, Ordering::SeqCst);
     });
     let client = Client::init_blocking(config);
-    client.reload_feature_flags();
-    client.flush_blocking();
+    reload(&client);
     let errors_before = errors.load(Ordering::SeqCst);
     assert!(
         errors_before > 0,
@@ -280,8 +359,7 @@ fn legacy_http_payloads_decode_once_before_rich_reads() {
         then.status(200);
     });
     let client = Client::init_blocking(config(&server));
-    client.reload_feature_flags();
-    client.flush_blocking();
+    reload(&client);
     let all = client.get_feature_flags().unwrap();
     for (index, payload) in payloads.iter().enumerate() {
         let key = format!("flag-{index}");
@@ -314,8 +392,7 @@ fn remote_empty_variants_are_known_disabled_results() {
             then.status(200).json_body(body);
         });
         let client = Client::init_blocking(config(&server));
-        client.reload_feature_flags();
-        client.flush_blocking();
+        reload(&client);
         let result = client
             .feature_flag("empty")
             .send_event(false)
@@ -338,7 +415,8 @@ fn remote_empty_variants_are_known_disabled_results() {
 #[test]
 fn unavailable_empty_disabled_invalid_and_closed_have_explicit_results() {
     let server = MockServer::start();
-    let requests = server.mock(|_, then| {
+    let requests = server.mock(|when, then| {
+        when.path_not("/array/phc_test/config");
         then.status(500);
     });
     let client = Client::init_blocking(config(&server));
@@ -376,8 +454,7 @@ fn partial_and_complete_results_update_rich_exports_as_one_cache() {
         then.status(200)
             .json_body(json!({"featureFlags":{"variant":false}, "errorsWhileComputingFlags":true}));
     });
-    client.reload_feature_flags();
-    client.flush_blocking();
+    reload(&client);
     partial.assert_calls(1);
     partial.delete();
     let results = client.get_feature_flags().unwrap();
@@ -391,8 +468,7 @@ fn partial_and_complete_results_update_rich_exports_as_one_cache() {
         when.path("/flags/");
         then.status(200).json_body(json!({"featureFlags":{}}));
     });
-    client.reload_feature_flags();
-    client.flush_blocking();
+    reload(&client);
     complete.assert_calls(1);
     assert_eq!(client.get_feature_flags(), Some(HashMap::new()));
     assert_eq!(client.feature_flag("nullable").get(), None);
@@ -401,7 +477,8 @@ fn partial_and_complete_results_update_rich_exports_as_one_cache() {
 #[test]
 fn restored_cache_exports_match_and_suppressed_targeting_retains_only_live_results() {
     let server = MockServer::start();
-    let requests = server.mock(|_, then| {
+    let requests = server.mock(|when, then| {
+        when.path_not("/array/phc_test/config");
         then.status(500);
     });
     let directory =
@@ -448,7 +525,8 @@ fn restored_cache_exports_match_and_suppressed_targeting_retains_only_live_resul
 #[test]
 fn runtime_free_async_initialization_exposes_synchronous_rich_reads() {
     let server = MockServer::start();
-    let requests = server.mock(|_, then| {
+    let requests = server.mock(|when, then| {
+        when.path_not("/array/phc_test/config");
         then.status(500);
     });
     let mut config = config(&server);
