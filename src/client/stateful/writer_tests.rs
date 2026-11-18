@@ -58,7 +58,6 @@ impl StateStore for ControlledStore {
 
 fn options() -> WriterOptions {
     WriterOptions {
-        max_bytes: 4096,
         shutdown_timeout: Duration::ZERO,
         ..WriterOptions::default()
     }
@@ -326,7 +325,7 @@ fn shutdown_does_not_start_a_newer_write_after_its_deadline() {
 }
 
 #[test]
-fn no_op_invalid_and_oversized_mutations_do_not_change_memory_or_revision() {
+fn no_op_and_invalid_mutations_do_not_change_memory_or_revision() {
     let writer = StateWriter::new(
         Snapshot::anonymous("initial".into()),
         Backend::Memory,
@@ -339,10 +338,6 @@ fn no_op_invalid_and_oversized_mutations_do_not_change_memory_or_revision() {
     assert_eq!(
         writer.update(|state| state.anonymous_id.clear()),
         Err(UpdateError::Invalid)
-    );
-    assert_eq!(
-        writer.update(|state| state.distinct_id = "x".repeat(4096)),
-        Err(UpdateError::Full)
     );
     assert_eq!(*writer.snapshot(), Snapshot::anonymous("initial".into()));
     assert_eq!(writer.checkpoint(), 1);
@@ -555,7 +550,7 @@ fn destructor_panic_cannot_leave_shutdown_waiters_asleep() {
 #[test]
 fn new_and_updated_identity_survive_real_file_shutdown_and_restart() {
     let path = std::env::temp_dir().join(format!("posthog-state-writer-{}", uuid::Uuid::now_v7()));
-    let opened = FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096).unwrap();
+    let opened = FileStateStore::open(StorageDirectory::open(&path).unwrap()).unwrap();
     assert!(opened.snapshot.is_none());
     let store = opened.store;
     let writer = StateWriter::new(
@@ -580,7 +575,7 @@ fn new_and_updated_identity_survive_real_file_shutdown_and_restart() {
     writer.request_close();
     assert_eq!(writer.join_blocking(), DrainOutcome::Persisted);
     drop(writer);
-    let loaded = FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096)
+    let loaded = FileStateStore::open(StorageDirectory::open(&path).unwrap())
         .unwrap()
         .snapshot;
     assert_eq!(loaded, Some(Snapshot::anonymous("latest".into())));

@@ -48,14 +48,6 @@ impl StoredSession {
             && self.id.get_variant() == uuid::Variant::RFC4122
             && self.started_ms <= self.activity_ms
     }
-
-    pub(super) fn reserved_bytes() -> usize {
-        crate::client::capture::json_len(&Some(Self {
-            id: Uuid::from_bytes([255; 16]),
-            started_ms: u64::MAX,
-            activity_ms: u64::MAX,
-        }))
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

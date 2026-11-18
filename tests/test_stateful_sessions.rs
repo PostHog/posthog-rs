@@ -333,47 +333,6 @@ fn expired_or_future_wall_timing_is_not_restored_but_identity_survives() {
 }
 
 #[test]
-fn full_state_reserves_session_rotation_activity_and_consent_capacity() {
-    let directory = Directory::new();
-    let mut conf = directory.config();
-    conf.max_state_bytes = 512;
-    let client = Client::init_blocking(conf);
-    assert!(!client.is_disabled());
-    for length in (1..512).rev() {
-        client.identify("x".repeat(length));
-        if client.is_identified() {
-            break;
-        }
-    }
-    assert!(client.is_identified());
-    let person = client.get_distinct_id();
-    let first = client.session_id().unwrap();
-    client.session_activity();
-    client.reset_session();
-    assert_ne!(client.peek_session_id(), Some(first));
-    let id = client.peek_session_id();
-    client.opt_out();
-    assert!(client.is_opt_out());
-    client.opt_in();
-    client.opt_out();
-    assert_eq!(client.get_distinct_id(), person);
-    assert_eq!(
-        client.shutdown_blocking(None).state,
-        PersistenceOutcome::Persisted
-    );
-    drop(client);
-    assert!(std::fs::metadata(directory.path()).unwrap().len() <= 512);
-    let mut conf = directory.config();
-    conf.max_state_bytes = 512;
-    let client = Client::init_blocking(conf);
-    assert_eq!(client.peek_session_id(), id);
-    assert!(client.is_opt_out());
-    assert_eq!(client.get_distinct_id(), person);
-    client.end_session();
-    assert_eq!(client.peek_session_id(), None);
-}
-
-#[test]
 fn session_state_write_failure_preserves_live_session_and_retries() {
     let directory = Directory::new();
     let client = Client::init_blocking(directory.config());
@@ -468,7 +427,6 @@ fn full_admission_does_not_create_activity_and_recovery_keeps_original_session()
     let mut conf = config();
     conf.max_queue_size = 1;
     conf.max_queue_bytes = 2048;
-    conf.max_record_bytes = 2048;
     let client = Client::init_blocking(conf);
     assert!(matches!(
         client.capture("first"),
