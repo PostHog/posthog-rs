@@ -3,8 +3,8 @@
 //
 //   cargo build --release
 //   c++ -std=c++17 examples/capture.cpp -Iinclude -Ltarget/release -lposthog_ffi -o capture-cpp
-//   LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release \
-//     POSTHOG_API_KEY=phc_... ./capture-cpp
+//   export LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release
+//   POSTHOG_API_KEY=phc_... ./capture-cpp
 //
 // Optional: POSTHOG_HOST (defaults to US Cloud) and POSTHOG_DISTINCT_ID.
 // See README.md for static linking.

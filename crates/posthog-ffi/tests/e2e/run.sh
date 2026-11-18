@@ -61,6 +61,7 @@ for step in alias group_identify flush; do
 done
 
 run_case c3_flags
+expect c3_flags "$CASE_OUTPUT" "step=evaluate_flags status=0 "
 if ! grep -q "step=skipped" <<<"$CASE_OUTPUT"; then
     for step in evaluate_flags is_enabled get_flag get_payload set_flags capture flush; do
         expect c3_flags "$CASE_OUTPUT" "step=$step status=0 "

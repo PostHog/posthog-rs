@@ -6,8 +6,8 @@
 //
 // Environment: POSTHOG_API_KEY, POSTHOG_HOST, E2E_RUN_ID, E2E_CASE and, for
 // c1_capture, E2E_UUID. Flag cases read E2E_FLAG_BOOLEAN and
-// E2E_FLAG_MULTIVARIATE, which must name existing flags in the project; the
-// flag case is skipped when they are unset.
+// E2E_FLAG_MULTIVARIATE, which must name existing flags in the project. When
+// they are unset, the flag case only checks that /flags answers.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -95,12 +95,17 @@ int case_identity() {
 int case_flags() {
   const std::string boolean_flag = env("E2E_FLAG_BOOLEAN");
   const std::string multivariate_flag = env("E2E_FLAG_MULTIVARIATE");
+  ClientPtr client = new_client(false);
+  if (!client) return 1;
   if (boolean_flag.empty() || multivariate_flag.empty()) {
+    // Capture and flush don't report delivery failures, so this request is
+    // what proves the key and host work when no flags are configured.
+    PostHogFlags *raw = nullptr;
+    report("evaluate_flags", posthog_evaluate_flags(client.get(), distinct_id.c_str(), nullptr, &raw));
+    FlagsPtr flags(raw);
     std::printf("RESULT step=skipped reason=no_flags_configured\n");
     return 0;
   }
-  ClientPtr client = new_client(false);
-  if (!client) return 1;
   const std::string options = R"({"flag_keys":[")" + boolean_flag + R"(",")" + multivariate_flag +
                               R"(","posthoge2e-missing-flag"]})";
   PostHogFlags *raw = nullptr;

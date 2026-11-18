@@ -22,7 +22,7 @@ Use a test project. The script sends a few synthetic events whose names start wi
 - `E2E_FLAG_BOOLEAN`: a boolean flag that is on for everyone
 - `E2E_FLAG_MULTIVARIATE`: a multivariate flag with a payload
 
-When either is unset, the case is skipped.
+When either is unset, the case still calls `/flags`, because capture and flush don't report delivery failures and this request is what proves the key and host work. It skips the flag-specific checks.
 
 The script checks only what the SDK returns. To confirm that PostHog stored the events, query the project for the printed run ID, for example:
 
