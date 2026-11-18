@@ -300,6 +300,12 @@ fn lowered_record_limit_preserves_oversized_head_while_recovery_and_flush_progre
         std::env::temp_dir().join(format!("posthog-lowered-limit-{}", uuid::Uuid::now_v7())),
     );
     let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/array/phc_test/config");
+        then.status(200)
+            .json_body(serde_json::json!({"hasFeatureFlags": false}));
+    });
     let mut retry = server.mock(|when, then| {
         when.method(POST).path("/i/v1/analytics/events");
         then.status(503).header("Retry-After", "3600");
@@ -322,6 +328,7 @@ fn lowered_record_limit_preserves_oversized_head_while_recovery_and_flush_progre
         seed.capture("healthy-suffix"),
         CaptureOutcome::Accepted { .. }
     ));
+    seed.opt_out();
     assert_eq!(seed.flush_blocking().state, PersistenceOutcome::Persisted);
     assert_eq!(
         seed.shutdown_blocking(None).delivery,
@@ -358,6 +365,8 @@ fn lowered_record_limit_preserves_oversized_head_while_recovery_and_flush_progre
     setup.max_batch_size = 1;
     setup.max_queue_size = 1;
     let client = Arc::new(Client::init_blocking(setup));
+    assert!(client.is_opt_out());
+    assert_eq!(client.capture("new"), CaptureOutcome::OptedOut);
     let (complete, completed) = mpsc::channel();
     let flushing = client.clone();
     let worker = std::thread::spawn(move || {
