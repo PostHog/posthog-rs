@@ -145,9 +145,6 @@ impl Client {
             Ok((_, Some((event, snapshot, deduplicate)))) => {
                 self.capture_person(event, &snapshot, Some(fingerprint), deduplicate);
             }
-            Err(UpdateError::Full) => {
-                tracing::warn!("posthog-rs: identity update exceeds client-state capacity");
-            }
             Err(UpdateError::Invalid) => {
                 tracing::warn!("posthog-rs: identity update cannot be encoded in client state");
             }

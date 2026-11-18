@@ -7,6 +7,7 @@ use crate::{Error, LocalEvaluationFailure, PostHogError};
 use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH, USER_AGENT};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -96,6 +97,93 @@ impl LocalEvaluationResponse {
             property_matching_version: legacy_property_matching_version(),
         }
     }
+}
+
+/// Parse the body of a definitions response.
+///
+/// A body that deserializes as a whole is returned as is. Only when it does
+/// not is each flag definition tried on its own, so that a definition this SDK
+/// cannot read costs local evaluation of that flag, not of every flag.
+fn parse_definitions(body: &[u8]) -> Result<LocalEvaluationResponse, serde_json::Error> {
+    serde_json::from_slice(body)
+        .or_else(|strict_error| salvage_definitions(body).ok_or(strict_error))
+}
+
+/// The `flags` array of a definitions body, kept as its original text.
+#[derive(Deserialize)]
+struct RawDefinitions<'a> {
+    #[serde(borrow)]
+    flags: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct FlagKey {
+    key: String,
+}
+
+/// Rebuild a response that failed to deserialize, leaving out the flag
+/// definitions that fail on their own.
+///
+/// The rebuilt body is the original text without those definitions, and it
+/// goes through the same strict parse, so anything else wrong with the
+/// response still rejects it. `None` when no flag definition fails on its own
+/// or the rest does not deserialize either.
+fn salvage_definitions(body: &[u8]) -> Option<LocalEvaluationResponse> {
+    let body = std::str::from_utf8(body).ok()?;
+    let raw: RawDefinitions = serde_json::from_str(body).ok()?;
+    let flags: Vec<&RawValue> = serde_json::from_str(raw.flags.get()).ok()?;
+
+    let mut kept = Vec::with_capacity(flags.len());
+    let mut skipped = Vec::new();
+    for flag in flags {
+        match serde_json::from_str::<FeatureFlag>(flag.get()) {
+            Ok(_) => kept.push(flag.get()),
+            Err(e) => skipped.push((flag.get(), e)),
+        }
+    }
+    if skipped.is_empty() {
+        return None;
+    }
+
+    // `raw.flags` borrows from `body`, so its address gives the array's position.
+    let start = (raw.flags.get().as_ptr() as usize).checked_sub(body.as_ptr() as usize)?;
+    let end = start.checked_add(raw.flags.get().len())?;
+    let rebuilt = [
+        body.get(..start)?,
+        "[",
+        &kept.join(","),
+        "]",
+        body.get(end..)?,
+    ]
+    .concat();
+    let response = serde_json::from_str(&rebuilt).ok()?;
+
+    for (flag, e) in skipped {
+        let key = serde_json::from_str::<FlagKey>(flag)
+            .ok()
+            .map(|flag| flag.key);
+        warn!(
+            flag = key.as_deref().unwrap_or("<unknown>"),
+            error = %e,
+            "Skipping flag definition that failed to parse"
+        );
+    }
+    Some(response)
+}
+
+fn read_definitions(
+    response: reqwest::blocking::Response,
+) -> Result<LocalEvaluationResponse, String> {
+    let body = response.bytes().map_err(|e| e.to_string())?;
+    parse_definitions(&body).map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "async-client")]
+async fn read_definitions_async(
+    response: reqwest::Response,
+) -> Result<LocalEvaluationResponse, String> {
+    let body = response.bytes().await.map_err(|e| e.to_string())?;
+    parse_definitions(&body).map_err(|e| e.to_string())
 }
 
 /// A cohort definition for local evaluation.
@@ -431,7 +519,7 @@ impl FlagPoller {
                             // Extract ETag before consuming the response body
                             let new_etag = extract_etag(response.headers());
 
-                            match response.json::<LocalEvaluationResponse>() {
+                            match read_definitions(response) {
                                 Ok(data) => {
                                     trace!("Successfully fetched flag definitions");
                                     cache.update(data);
@@ -505,7 +593,7 @@ impl FlagPoller {
         }
 
         let status = response.status().as_u16();
-        let data = match response.json::<LocalEvaluationResponse>() {
+        let data = match read_definitions(response) {
             Ok(d) => d,
             Err(e) => {
                 error!(error = %e, "Failed to parse flag response");
@@ -687,7 +775,7 @@ impl AsyncFlagPoller {
                                     // Extract ETag before consuming the response body
                                     let new_etag = extract_etag(response.headers());
 
-                                    match response.json::<LocalEvaluationResponse>().await {
+                                    match read_definitions_async(response).await {
                                         Ok(data) => {
                                             trace!("Successfully fetched flag definitions");
                                             cache.update(data);
@@ -767,7 +855,7 @@ impl AsyncFlagPoller {
         }
 
         let status = response.status().as_u16();
-        let data = match response.json::<LocalEvaluationResponse>().await {
+        let data = match read_definitions_async(response).await {
             Ok(d) => d,
             Err(e) => {
                 error!(error = %e, "Failed to parse flag response");

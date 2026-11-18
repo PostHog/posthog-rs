@@ -1146,10 +1146,7 @@ async fn get_reads_the_status_without_an_idempotency_key() {
     assert_eq!(status.reason.as_deref(), Some("hard"));
     let request = &server.requests()[0];
     assert_eq!(request.method, "GET");
-    assert_eq!(
-        request.path,
-        format!("/api/projects/@current/messaging/emails/{MESSAGE_ID}/")
-    );
+    assert_eq!(request.path, format!("/api/messaging/emails/{MESSAGE_ID}/"));
     assert_eq!(request.header("authorization"), Some("Bearer phs_test"));
     assert_eq!(request.header("idempotency-key"), None);
     assert_eq!(request.header("content-type"), None);

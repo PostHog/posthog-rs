@@ -64,7 +64,7 @@ struct WriteGate {
 }
 
 fn gated_writer(directory: &Directory) -> (StateWriter, WriteGate) {
-    let inner = FileStateStore::open(StorageDirectory::open(&directory.0).unwrap(), 4096)
+    let inner = FileStateStore::open(StorageDirectory::open(&directory.0).unwrap())
         .unwrap()
         .store;
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -311,7 +311,7 @@ fn consent_is_immediate_while_io_is_gated_and_old_completion_cannot_revert_it() 
     client.shutdown_blocking(None);
     drop(client);
     gate.dropped.recv_timeout(WAIT).unwrap();
-    let restored = FileStateStore::open(StorageDirectory::open(&directory.0).unwrap(), 4096)
+    let restored = FileStateStore::open(StorageDirectory::open(&directory.0).unwrap())
         .unwrap()
         .snapshot;
     assert_eq!(
