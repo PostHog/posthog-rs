@@ -19,29 +19,6 @@ fn config() -> Config {
 }
 
 #[test]
-fn reset_capacity_failure_preserves_device_and_identity() {
-    use super::super::storage::snapshot_size;
-
-    let mut config = config();
-    config.max_state_bytes = 1024;
-    let client = Client::init_blocking(config);
-    let writer = client.state.as_ref().unwrap();
-    writer
-        .mutate(|state| {
-            let capacity = snapshot_size(state);
-            state.device_id = "x".repeat(1024 - capacity + state.device_id.len());
-        })
-        .unwrap();
-    let original = writer.snapshot();
-    assert_eq!(snapshot_size(&original), 1024);
-    client.reset();
-    let after = writer.snapshot();
-    assert!(after.same_persisted_state(&original));
-    assert_eq!(after.generation, original.generation);
-    assert_eq!(client.get_anonymous_id(), "anonymous");
-}
-
-#[test]
 fn overlapping_property_inputs_compare_after_hooks_and_serial_repeats_skip_hooks() {
     for drop_first in [false, true] {
         let (entered_tx, entered_rx) = mpsc::channel();

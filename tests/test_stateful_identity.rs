@@ -224,7 +224,6 @@ fn oversized_identity_event_keeps_identity_and_rejected_properties_remain_retrya
     conf.host = server.base_url();
     conf.max_queue_size = 1;
     conf.max_queue_bytes = 4096;
-    conf.max_record_bytes = 4096;
     conf.before_send(|mut event| {
         if event.event_name() == "$identify" {
             event.insert_prop("padding", "x".repeat(8192)).unwrap();
@@ -345,9 +344,7 @@ fn rejected_identity_updates_report_sanitized_reasons() {
             Ok(())
         }
     }
-    let mut conf = config();
-    conf.max_state_bytes = 256;
-    let (client, events) = observed(conf);
+    let (client, events) = observed(config());
     let original = client.get_distinct_id();
     let output = Arc::new(Mutex::new(Vec::new()));
     let sink = output.clone();
@@ -359,21 +356,11 @@ fn rejected_identity_updates_report_sanitized_reasons() {
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
     client.identify(" \t");
-    let private_id = format!("private-identity-{}", "x".repeat(1000));
-    let mut identify = Identify::new(private_id.clone());
-    identify
-        .set
-        .insert("private-property".into(), json!("private-value"));
-    client.identify(identify);
     assert_eq!(client.get_distinct_id(), original);
     assert!(!client.is_identified());
     assert!(events.lock().unwrap().is_empty());
     let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
     assert!(logs.contains("identity update requires a nonblank distinct ID"));
-    assert!(logs.contains("identity update exceeds client-state capacity"));
-    assert!(!logs.contains(&private_id));
-    assert!(!logs.contains("private-property"));
-    assert!(!logs.contains("private-value"));
     output.lock().unwrap().clear();
     client.shutdown_blocking(None);
     client.identify(" \t");
@@ -381,14 +368,8 @@ fn rejected_identity_updates_report_sanitized_reasons() {
 }
 
 #[test]
-fn invalid_state_size_disabled_and_closed_mutations_do_nothing() {
-    let mut conf = config();
-    conf.max_state_bytes = 256;
-    let (client, events) = observed(conf);
-    client.identify("x".repeat(1000));
-    assert_eq!(client.get_distinct_id(), "anonymous");
-    assert!(!client.is_identified());
-    assert!(events.lock().unwrap().is_empty());
+fn disabled_and_closed_mutations_do_nothing() {
+    let (client, _) = observed(config());
     client.shutdown_blocking(None);
     client.identify("A");
     client.reset();
@@ -722,10 +703,8 @@ fn person_admission_size_warnings_can_read_and_reset_client_state() {
         let mut conf = config();
         if byte_limit {
             conf.max_queue_bytes = 1;
-            conf.max_record_bytes = 1;
         } else {
             conf.max_queue_bytes = 4096;
-            conf.max_record_bytes = 4096;
             conf.before_send(|mut event| {
                 if event.event_name() == "$set" {
                     event.insert_prop("padding", "x".repeat(8192)).unwrap();

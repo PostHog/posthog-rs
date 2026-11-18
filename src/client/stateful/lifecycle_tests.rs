@@ -64,7 +64,7 @@ struct WriteGate {
 }
 
 fn gated_writer(directory: &Directory) -> (StateWriter, WriteGate) {
-    let inner = FileStateStore::open(StorageDirectory::open(&directory.0).unwrap(), 4096)
+    let inner = FileStateStore::open(StorageDirectory::open(&directory.0).unwrap())
         .unwrap()
         .store;
     let (entered_tx, entered_rx) = mpsc::channel();

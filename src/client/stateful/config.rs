@@ -1,17 +1,21 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::storage::snapshot_size;
 use super::{Persistence, PersonProfiles, Snapshot};
 use crate::client::event_store::StoreLimits;
 use crate::client::transport::MAX_SHUTDOWN_TIMEOUT;
 use crate::client::{ClientOptions, OnErrorHook, PostHogError};
 use crate::{BeforeSendHook, CaptureCompression, EndpointManager, Event, DEFAULT_HOST};
 
+/// Largest serialized event the client accepts, roughly the capture endpoint's
+/// own per-event limit. Larger events are rejected at capture.
+const MAX_EVENT_BYTES: u64 = 1024 * 1024;
+
 /// Configuration for a stateful client. Start with [`Config::new`].
 ///
 /// Invalid configuration reports an initialization diagnostic and disables the
 /// client. Storage failures instead preserve enabled, memory-backed operation.
+#[non_exhaustive]
 pub struct Config {
     /// Project token, trimmed during initialization. Never use a personal API key.
     pub project_token: String,
@@ -50,17 +54,16 @@ pub struct Config {
     /// temporarily exceed this by one replacement record while reclaiming old data.
     pub max_stored_events: usize,
     /// Persisted event retention bytes. Default: 64 MiB. Replacement may exceed
-    /// this by at most one max_record_bytes record. Exact accounting includes
-    /// that record; no further appends occur until reclamation succeeds.
+    /// this by at most one event. Exact accounting includes that event; no
+    /// further appends occur until reclamation succeeds.
     pub max_stored_bytes: u64,
-    /// Maximum persisted event record size and replacement overage. Default: 1 MiB.
-    pub max_record_bytes: u64,
-    /// Maximum mandatory state record size. Default: 1 MiB.
-    pub max_state_bytes: usize,
-    /// State-write coalescing window. Default: 250 milliseconds.
-    pub state_coalesce: Duration,
-    /// Timeout per delivery request, in whole seconds. Default: 30.
-    pub request_timeout_seconds: u64,
+    /// How long to wait after a state change before writing client state to
+    /// disk. Changes made within the window are written together. Lower values
+    /// lose less on a crash; higher values write less often. Default: 250 ms.
+    pub state_write_delay: Duration,
+    /// Timeout per network request. Default: 30 seconds. Sub-second precision is
+    /// rounded up to whole seconds.
+    pub request_timeout: Duration,
     /// Default SDK-controlled shutdown/Drop waiting budget. Default: 30 seconds.
     /// The first shutdown selects one deadline; later calls and Drop cannot
     /// extend it. Already-started work owns its resources until completion and
@@ -103,10 +106,8 @@ impl Config {
             max_queue_bytes: 8 * 1024 * 1024,
             max_stored_events: 10_000,
             max_stored_bytes: 64 * 1024 * 1024,
-            max_record_bytes: 1024 * 1024,
-            max_state_bytes: 1024 * 1024,
-            state_coalesce: Duration::from_millis(250),
-            request_timeout_seconds: 30,
+            state_write_delay: Duration::from_millis(250),
+            request_timeout: Duration::from_secs(30),
             shutdown_timeout: Duration::from_secs(30),
             max_capture_attempts: 4,
             capture_compression: Some(CaptureCompression::Gzip),
@@ -189,59 +190,62 @@ impl Config {
         if self.flush_at == 0 || self.max_batch_size == 0 || self.max_queue_size == 0 {
             return Some("flush_at, max_batch_size and max_queue_size must be positive");
         }
-        if self.max_queue_bytes == 0 || self.max_stored_events == 0 || self.max_record_bytes == 0 {
+        if self.max_queue_bytes == 0 || self.max_stored_events == 0 || self.max_stored_bytes == 0 {
             return Some("event byte and storage count limits must be positive");
-        }
-        if self.max_record_bytes > self.max_queue_bytes as u64
-            || self.max_record_bytes > self.max_stored_bytes
-        {
-            return Some("max_record_bytes must fit max_queue_bytes and max_stored_bytes");
         }
         if self.flush_interval.as_millis() == 0
             || self.flush_interval > MAX_SHUTDOWN_TIMEOUT
-            || self.state_coalesce > MAX_SHUTDOWN_TIMEOUT
+            || self.state_write_delay > MAX_SHUTDOWN_TIMEOUT
             || self.shutdown_timeout > MAX_SHUTDOWN_TIMEOUT
         {
             return Some("flush_interval must be at least 1 ms; scheduling durations must not exceed one day");
         }
-        if self.request_timeout_seconds == 0
-            || self.request_timeout_seconds > MAX_SHUTDOWN_TIMEOUT.as_secs()
+        if self.request_timeout.is_zero()
+            || self.request_timeout > MAX_SHUTDOWN_TIMEOUT
             || self.max_capture_attempts == 0
         {
             return Some(
-                "request timeout must be 1..=86400 seconds and capture attempts must be positive",
+                "request_timeout must be positive and at most one day, and capture attempts must be positive",
             );
-        }
-        let generated = Snapshot::anonymous(uuid::Uuid::nil().to_string());
-        if self.max_state_bytes < snapshot_size(&generated) {
-            return Some("max_state_bytes must hold a generated anonymous identity record");
         }
         if self.bootstrap_anonymous_id.is_some() && self.bootstrap_identified_id.is_some() {
             return Some("configure only one bootstrap identity");
         }
         if let Some(id) = &self.bootstrap_identified_id {
-            let mut snapshot = generated;
+            let mut snapshot = Snapshot::anonymous(uuid::Uuid::nil().to_string());
             snapshot.distinct_id = id.clone();
             snapshot.identified = true;
             snapshot.person_processing = true;
-            if !snapshot.is_valid() || snapshot_size(&snapshot) > self.max_state_bytes {
-                return Some("bootstrap_identified_id must be nonblank and fit max_state_bytes");
+            if !snapshot.is_valid() {
+                return Some("bootstrap_identified_id must be nonblank");
             }
         }
         if let Some(id) = &self.bootstrap_anonymous_id {
             let snapshot = Snapshot::anonymous(id.clone());
-            if !snapshot.is_valid() || snapshot_size(&snapshot) > self.max_state_bytes {
-                return Some("bootstrap_anonymous_id must be nonblank and fit max_state_bytes");
+            if !snapshot.is_valid() {
+                return Some("bootstrap_anonymous_id must be nonblank");
             }
         }
         None
+    }
+
+    pub(super) fn request_timeout_seconds(&self) -> u64 {
+        let seconds = self.request_timeout.as_secs();
+        if self.request_timeout.subsec_nanos() == 0 {
+            seconds
+        } else {
+            seconds + 1
+        }
     }
 
     pub(super) fn event_limits(&self) -> StoreLimits {
         StoreLimits {
             max_events: self.max_stored_events,
             max_bytes: self.max_stored_bytes,
-            max_record_bytes: self.max_record_bytes,
+            // Never larger than either budget that has to hold the event.
+            max_record_bytes: MAX_EVENT_BYTES
+                .min(self.max_queue_bytes as u64)
+                .min(self.max_stored_bytes),
         }
     }
 
@@ -256,7 +260,7 @@ impl Config {
         options.max_batch_size = self.max_batch_size;
         options.max_queue_size = self.max_queue_size;
         options.flush_interval_ms = self.flush_interval.as_millis() as u64;
-        options.request_timeout_seconds = self.request_timeout_seconds;
+        options.request_timeout_seconds = self.request_timeout_seconds();
         options.shutdown_timeout_ms = self.shutdown_timeout.as_millis() as u64;
         options.max_capture_attempts = self.max_capture_attempts;
         options.capture_compression = self.capture_compression;
