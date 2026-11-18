@@ -3,7 +3,7 @@
 /// Shows different ways to configure the PostHog Rust SDK for various use cases.
 ///
 /// Run with: cargo run --example advanced_config --features async-client
-use posthog_rs::{ClientOptionsBuilder, PostHogError, EU_INGESTION_ENDPOINT};
+use posthog::{ClientOptionsBuilder, PostHogError, EU_INGESTION_ENDPOINT};
 
 #[cfg(feature = "async-client")]
 #[tokio::main]
@@ -12,17 +12,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. SIMPLEST: Just an API key (uses US endpoint by default)
     println!("1. Basic client (US region):");
-    let _basic = posthog_rs::client("phc_test_api_key").await;
+    let _basic = posthog::client("phc_test_api_key").await;
     println!("   → Created with default settings\n");
 
     // 2. REGIONAL: EU data residency
     println!("2. EU region client:");
-    let _eu = posthog_rs::client(("phc_test_api_key", EU_INGESTION_ENDPOINT)).await;
+    let _eu = posthog::client(("phc_test_api_key", EU_INGESTION_ENDPOINT)).await;
     println!("   → Data stays in EU (GDPR compliant)\n");
 
     // 3. SELF-HOSTED: Your own PostHog instance
     println!("3. Self-hosted instance:");
-    let _custom = posthog_rs::client(("phc_test_api_key", "https://analytics.mycompany.com")).await;
+    let _custom = posthog::client(("phc_test_api_key", "https://analytics.mycompany.com")).await;
     println!("   → Uses your private PostHog deployment\n");
 
     // 4. PRODUCTION: Common production settings
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .disable_geoip(true) // Disable automatic geoip enrichment
         .build()?;
 
-    let _prod = posthog_rs::client(production_config).await;
+    let _prod = posthog::client(production_config).await;
     println!("   → Optimized for production workloads\n");
 
     // 5. HIGH-PERFORMANCE: Local flag evaluation
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .feature_flags_request_timeout_seconds(3)
         .build()?;
 
-    let _perf = posthog_rs::client(performance_config).await;
+    let _perf = posthog::client(performance_config).await;
     println!("   → Evaluates flags locally (100x faster)\n");
 
     // 6. OBSERVABILITY: react to terminal network failures with `on_error`.
@@ -86,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .build()?;
 
-    let _observable = posthog_rs::client(observable_config).await;
+    let _observable = posthog::client(observable_config).await;
     println!("   → Surfaces terminal capture/flags/poller failures\n");
 
     println!("Configuration examples complete!");

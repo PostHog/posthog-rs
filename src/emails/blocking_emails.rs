@@ -55,17 +55,17 @@ impl<'a> Emails<'a> {
     /// # Examples
     ///
     /// ```no_run
-    /// use posthog_rs::{ClientOptionsBuilder, CodeEmail, TemplateEmail};
+    /// use posthog::{ClientOptionsBuilder, CodeEmail, TemplateEmail};
     /// use serde_json::json;
     ///
-    /// # fn example(rendered_html: String) -> Result<(), posthog_rs::EmailError> {
+    /// # fn example(rendered_html: String) -> Result<(), posthog::EmailError> {
     /// let options = ClientOptionsBuilder::default()
     ///     .api_key("phc_...".to_string())
     ///     .secret_key("phs_...")
     ///     .host("https://eu.i.posthog.com")
     ///     .build()
     ///     .unwrap();
-    /// let posthog = posthog_rs::client(options);
+    /// let posthog = posthog::client(options);
     ///
     /// // A template made in PostHog.
     /// let sent = posthog

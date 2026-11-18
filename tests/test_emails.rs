@@ -10,18 +10,17 @@ use std::time::{Duration, Instant};
 
 use common::default_user_agent;
 use email_support::{
-    accepted, closed_url, connection_counting_store, options, s3_error, test_certificate_authority,
-    tls_front, unavailable, Answer, FakePostHog, ScriptedServer, MESSAGE_ID, SEND_PATH,
-    TEMPLATE_ID,
+    accepted, closed_url, connection_counting_store, options, s3_error, unavailable, Answer,
+    FakePostHog, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
-use posthog_rs::{
+use posthog::{
     CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, EmailTracking,
     EmailTrackingOptions, TemplateEmail,
 };
 use serde_json::json;
 
-async fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
-    posthog_rs::client(options(&server.url).build().unwrap()).await
+async fn client_for(server: &ScriptedServer) -> posthog::Client {
+    posthog::client(options(&server.url).build().unwrap()).await
 }
 
 #[tokio::test]
@@ -31,7 +30,7 @@ async fn template_send_posts_the_flat_body_with_auth_and_a_uuid_key() {
         json!({"message_id": MESSAGE_ID, "warnings": [{"code": "w", "detail": "Heads up"}]}),
     )])
     .await;
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&server.url)
             .migrated_from("resend")
             .build()
@@ -139,8 +138,8 @@ fn invoice_with_copies_and_files() -> CodeEmail {
         .attachment(EmailAttachment::new("logo.png", PNG).content_id("logo"))
 }
 
-async fn client_of(posthog: &FakePostHog) -> posthog_rs::Client {
-    posthog_rs::client(options(&posthog.url).build().unwrap()).await
+async fn client_of(posthog: &FakePostHog) -> posthog::Client {
+    posthog::client(options(&posthog.url).build().unwrap()).await
 }
 
 #[tokio::test]
@@ -216,7 +215,7 @@ async fn a_custom_clients_default_credentials_never_reach_the_file_store() {
         .default_headers(defaults)
         .build()
         .unwrap();
-    let client = posthog_rs::client(options(&posthog.url).http_client(http).build().unwrap()).await;
+    let client = posthog::client(options(&posthog.url).http_client(http).build().unwrap()).await;
 
     client
         .emails()
@@ -243,7 +242,7 @@ async fn a_file_store_redirect_is_never_followed() {
         if supplied {
             builder.http_client(reqwest::Client::new());
         }
-        let client = posthog_rs::client(builder.build().unwrap()).await;
+        let client = posthog::client(builder.build().unwrap()).await;
 
         let error = client
             .emails()
@@ -288,7 +287,7 @@ async fn a_custom_clients_uploads_reuse_one_connection_across_sends() {
     ])
     .await;
     let http = reqwest::Client::builder().build().unwrap();
-    let client = posthog_rs::client(options(&server.url).http_client(http).build().unwrap()).await;
+    let client = posthog::client(options(&server.url).http_client(http).build().unwrap()).await;
 
     for file in [
         EmailAttachment::new("invoice.pdf", PDF),
@@ -432,7 +431,7 @@ async fn a_failed_upload_never_shows_the_signed_url() {
 }
 
 /// The error with every source, printed both ways.
-fn error_chain(error: &posthog_rs::EmailError) -> String {
+fn error_chain(error: &posthog::EmailError) -> String {
     let mut chain = format!("{error} {error:?}");
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {
@@ -442,18 +441,19 @@ fn error_chain(error: &posthog_rs::EmailError) -> String {
     chain
 }
 
+#[cfg(feature = "tls")]
 #[tokio::test]
 async fn an_upload_url_that_isnt_https_sends_nothing() {
     // PostHog, reached over https, names a file store URL that is plain http,
     // as a misconfigured store would: the file and its signed URL would travel
     // unencrypted.
     let posthog = FakePostHog::start_async().await;
-    let app_host = tls_front(&posthog.url).await;
+    let app_host = email_support::tls_front(&posthog.url).await;
     let http = reqwest::Client::builder()
-        .tls_certs_only([test_certificate_authority()])
+        .tls_certs_only([email_support::test_certificate_authority()])
         .build()
         .unwrap();
-    let client = posthog_rs::client(options(&app_host).http_client(http).build().unwrap()).await;
+    let client = posthog::client(options(&app_host).http_client(http).build().unwrap()).await;
 
     let error = client
         .emails()
@@ -919,7 +919,7 @@ async fn retries_reuse_the_idempotency_key() {
 #[tokio::test]
 async fn client_retry_limit_applies_and_a_send_can_turn_it_off() {
     let server = ScriptedServer::start_async(vec![unavailable()]).await;
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&server.url)
             .email_request_max_retries(1u32)
             .build()
@@ -1048,7 +1048,7 @@ async fn sends_that_cannot_go_out_make_no_request() {
 
     let mut no_key = options(&server.url);
     no_key.secret_key("  ");
-    let client = posthog_rs::client(no_key.build().unwrap()).await;
+    let client = posthog::client(no_key.build().unwrap()).await;
     let error = client
         .emails()
         .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
@@ -1057,8 +1057,8 @@ async fn sends_that_cannot_go_out_make_no_request() {
     assert_eq!(error.code(), "missing_secret_key");
     assert_eq!(error.kind(), EmailErrorKind::MissingApiKey);
 
-    let client = posthog_rs::client(
-        posthog_rs::ClientOptionsBuilder::default()
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
             .api_key("phc_test".to_string())
             .host(server.url.clone())
             .secret_key("phs_test")
@@ -1073,7 +1073,7 @@ async fn sends_that_cannot_go_out_make_no_request() {
         .unwrap_err();
     assert_eq!(error.code(), "missing_app_host");
 
-    let client = posthog_rs::client(options(&server.url).disabled(true).build().unwrap()).await;
+    let client = posthog::client(options(&server.url).disabled(true).build().unwrap()).await;
     let error = client
         .emails()
         .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
@@ -1095,7 +1095,7 @@ async fn sends_that_cannot_go_out_make_no_request() {
 
 #[tokio::test]
 async fn a_network_error_is_retried_then_reported() {
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&closed_url())
             .email_request_max_retries(1u32)
             .build()
@@ -1236,7 +1236,7 @@ async fn shutdown_off_the_runtime_waits_for_a_send_in_its_retry_backoff() {
 async fn shutdown_keeps_to_its_timeout_during_a_retry_backoff() {
     let server = ScriptedServer::start_async(vec![unavailable(), accepted()]).await;
     let client = Arc::new(
-        posthog_rs::client(
+        posthog::client(
             options(&server.url)
                 .shutdown_timeout_ms(100u64)
                 .build()
@@ -1264,7 +1264,7 @@ async fn shutdown_keeps_to_its_timeout_during_a_retry_backoff() {
 
 #[tokio::test]
 async fn an_email_error_converts_into_the_crate_error() {
-    async fn send(client: &posthog_rs::Client) -> Result<String, posthog_rs::Error> {
+    async fn send(client: &posthog::Client) -> Result<String, posthog::Error> {
         Ok(client
             .emails()
             .send(TemplateEmail::new("", TEMPLATE_ID))
@@ -1274,7 +1274,7 @@ async fn an_email_error_converts_into_the_crate_error() {
     let server = ScriptedServer::start_async(vec![accepted()]).await;
     let client = client_for(&server).await;
     match send(&client).await {
-        Err(posthog_rs::Error::Email(error)) => assert_eq!(error.code(), "invalid_recipient"),
+        Err(posthog::Error::Email(error)) => assert_eq!(error.code(), "invalid_recipient"),
         other => panic!("expected an email error, got {:?}", other),
     }
 }
@@ -1294,7 +1294,7 @@ async fn the_email_timeout_replaces_a_custom_clients_timeout() {
         .timeout(Duration::from_secs(60))
         .build()
         .unwrap();
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&server.base_url())
             .http_client(patient)
             .email_request_timeout_seconds(1)
@@ -1346,7 +1346,7 @@ async fn a_reply_over_one_mebibyte_is_not_read() {
 
 #[tokio::test]
 async fn reading_stops_at_the_cap_on_an_endless_reply() {
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&email_support::endless_body_server())
             .email_request_timeout_seconds(10)
             .email_request_max_retries(0)

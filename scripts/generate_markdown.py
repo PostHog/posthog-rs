@@ -14,6 +14,7 @@ dependency of the crate: `rustup toolchain install nightly-2026-06-12 --profile 
 import argparse
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -25,6 +26,7 @@ NOT_API = {"default", "e2e-test", "test-harness", "tls-no-provider"}
 CLASSES = ["FeatureFlagEvaluations", "LocalEvaluator", "FlagPoller", "EndpointManager"]
 FIRST = ["setup", "capture", "identify"]
 ITEMS: dict = {}  # rustdoc items by id, for variants whose fields are separate items
+HEADINGS: dict = {}  # each item's heading label on the page, by rustdoc id, for intra-doc links
 
 
 class Docs:
@@ -50,9 +52,17 @@ class Docs:
             elif not fence and line.startswith("#"):
                 line = "#" * level + line.lstrip("#")
             out.append(line)
-        # Intra-doc links point at the item's heading on this page.
-        links = [f"[{text}]: #{anchor(text)}" for text in item.get("links", {})]
-        return "\n".join(out + [""] + links).strip().replace("<br>", "<br />")
+        # An intra-doc link points at its target's heading on this page, or at the heading of the type
+        # that lists it. A target with no heading, such as `Client` or `Default`, stays plain text.
+        # Links are written inline, since a reference definition is page-wide and `Self::code` differs per item.
+        text = "\n".join(out)
+        for key, target in item.get("links", {}).items():
+            label = HEADINGS.get(target)
+            dest = f"(#{anchor(f'`{label}`')})" if label else ""
+            k = re.escape(key)
+            text = re.sub(rf"\[([^\]]*)\](?:\({k}\)|\[{k}\])", lambda m: f"[{m[1]}]{dest}" if dest else m[1], text)
+            text = re.sub(rf"\[{k}\](?![(\[])", lambda _: f"[{key}]{dest}" if dest else key, text)
+        return text.strip().replace("<br>", "<br />")
 
 
 def signature(item: dict, name: str = "") -> str:
@@ -216,11 +226,24 @@ def reference(docs: Docs, caps: dict[str, str], crate: str, current: bool) -> li
             raise SystemExit(f"docs/capabilities.json: map {label} to a capability or add it to utils")
         return slug
 
+    uses = [u for u in (docs.index[str(i)]["inner"].get("use") for i in docs.root) if u]
+    # Label every heading first, so a link can point at one further down the page. A field or variant
+    # has no heading, so it points at its type's. `Client` has none either, only its methods do.
+    for use in uses:
+        item, name = docs.index[str(use["id"])], use["name"]
+        kind = next(iter(item["inner"]))
+        if kind in ("function", "constant"):
+            HEADINGS[item["id"]] = f"{crate}::{name}"
+        elif kind in ("struct", "enum", "trait"):
+            inner = item["inner"][kind]
+            plain = inner["kind"].get("plain", {}) if isinstance(inner.get("kind"), dict) else {}
+            if name != "Client":
+                HEADINGS.update(dict.fromkeys([item["id"], *inner.get("variants", []), *plain.get("fields", [])], name))
+            HEADINGS.update({m["id"]: f"{name}::{m['name']}" for m in members(docs, item)})
+
     tagged: dict[str, list[str]] = {slug: [] for slug in caps}
     utils, classes, types = [], {}, []
-    for use in (docs.index[str(i)]["inner"].get("use") for i in docs.root):
-        if not use:
-            continue
+    for use in uses:
         item, name = docs.index[str(use["id"])], use["name"]
         kind = next(iter(item["inner"]))
         if kind in ("function", "constant"):
@@ -288,6 +311,15 @@ def nest(markdown: str) -> str:
     return "\n".join(out).strip()
 
 
+def migration_page(guides: list[str]) -> list[str]:
+    """The migration page. One guide's H1 becomes the page title, so the page shows one title."""
+    title = "PostHog Rust SDK migration guides"
+    if len(guides) == 1 and guides[0].startswith("# "):
+        heading, _, rest = guides[0].partition("\n")
+        title, guides = heading[2:].strip(), [rest.strip()]
+    return [f"---\ntitle: {json.dumps(title)}\nsidebar: Docs\nshowTitle: true\n---", *guides]
+
+
 def write(name: str, sections: list[str]) -> None:
     (ROOT / "references" / name).write_text("\n\n".join(sections) + "\n")
     print(f"wrote references/{name}")
@@ -316,13 +348,12 @@ def main() -> None:
     body = ["## Getting started", nest((ROOT / "docs/getting-started.md").read_text())]
     body += reference(docs, capabilities(opts.sdk_specs), crate, declared >= major)
     (ROOT / "references").mkdir(exist_ok=True)
-    title = f"PostHog Rust SDK {major}.x" + ("" if declared >= major else " (experimental)")
+    title = f"PostHog Rust SDK {major}.x"
     write(f"posthog-rust-{major}.md", [front_matter(title, body), *body])
     if declared >= major:
         write("posthog-rust-reference.md", [front_matter("PostHog Rust SDK", body), *body])
     if guides := sorted((ROOT / "docs").glob("migration-*.md"), reverse=True):
-        head = "---\ntitle: PostHog Rust SDK migration guides\nsidebar: Docs\nshowTitle: true\n---"
-        write("posthog-rust-migration.md", [head, *(g.read_text().strip() for g in guides)])
+        write("posthog-rust-migration.md", migration_page([g.read_text().strip() for g in guides]))
 
 
 if __name__ == "__main__":

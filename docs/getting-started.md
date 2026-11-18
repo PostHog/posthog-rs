@@ -2,14 +2,14 @@
 
 The Rust SDK runs on your server.
 
-To send your first event, add `posthog-rs` and `tokio`, create a client with your project token from your [project settings](https://app.posthog.com/project/settings), and call `capture`.
+To send your first event, add `posthog` and `tokio`, create a client with your project token from your [project settings](https://app.posthog.com/project/settings), and call `capture`.
 
 A background worker sends queued events, so call `shutdown` before your process exits, or the last events are lost.
 
 ## Install
 
 ```bash
-cargo add posthog-rs
+cargo add posthog@1
 cargo add tokio --features rt-multi-thread,macros
 ```
 
@@ -18,10 +18,10 @@ cargo add tokio --features rt-multi-thread,macros
 Create a client with your project API key, capture an event, then shut down so queued events are sent. Without the default `async-client` feature, `client` is synchronous and the calls below drop `.await`.
 
 ```rust
-use posthog_rs::{client, Event};
+use posthog::{client, Event};
 
 #[tokio::main]
-async fn main() -> Result<(), posthog_rs::Error> {
+async fn main() -> Result<(), posthog::Error> {
     let posthog = client("<ph_project_api_key>").await;
 
     let mut event = Event::new("user_signed_up", "distinct_id_of_the_user");
@@ -34,3 +34,25 @@ async fn main() -> Result<(), posthog_rs::Error> {
 ```
 
 `capture` queues the event and returns at once. Call `shutdown` before the process exits.
+
+## Read SDK logs
+
+The SDK logs through [`tracing`](https://docs.rs/tracing) under the `posthog` target. Add a subscriber to your application to see the logs.
+
+This example needs the `env-filter` feature of `tracing-subscriber`. Add `tracing-subscriber = { version = "0.3", features = ["env-filter"] }` to your dependencies.
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+```
+
+Set `RUST_LOG` to choose the level.
+
+```bash
+RUST_LOG=posthog=debug cargo run
+```
+
+Use `posthog=warn` for warnings and errors only. Use `posthog=trace` for detailed local evaluation and cache logs.

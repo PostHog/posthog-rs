@@ -38,6 +38,7 @@ impl RequestFacts {
             server: self.server.clone(),
             timestamp: self.timestamp,
             started: self.started,
+            event_options: None,
         }
     }
 

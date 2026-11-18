@@ -19,7 +19,7 @@ pub(crate) struct SendOptions {
 /// The template sets its own sender, subject and content.
 ///
 /// ```
-/// use posthog_rs::TemplateEmail;
+/// use posthog::TemplateEmail;
 /// use serde_json::json;
 ///
 /// let email = TemplateEmail::new("jane@example.com", "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b")
@@ -83,7 +83,7 @@ impl TemplateEmail {
 /// it to HTML in your app and pass the HTML.
 ///
 /// ```
-/// use posthog_rs::CodeEmail;
+/// use posthog::CodeEmail;
 ///
 /// # let rendered_html = String::new();
 /// let email = CodeEmail::new("jane@example.com", "password-reset", "Reset your password")
@@ -197,7 +197,7 @@ impl CodeEmail {
     /// that key.
     ///
     /// ```
-    /// use posthog_rs::CodeEmail;
+    /// use posthog::CodeEmail;
     ///
     /// // The digest carries no login link, reset token or code, so PostHog
     /// // counts its clicks too.
@@ -219,7 +219,7 @@ impl CodeEmail {
     /// [`sensitive`](Self::sensitive).
     ///
     /// ```
-    /// use posthog_rs::{CodeEmail, EmailTrackingOptions};
+    /// use posthog::{CodeEmail, EmailTrackingOptions};
     ///
     /// // Count the digest's clicks, but capture no engagement events.
     /// let email = CodeEmail::new("jane@example.com", "weekly-digest", "Your weekly digest")
@@ -279,7 +279,7 @@ impl CodeEmail {
 /// by its SHA-256. Its `Debug` output never shows the content.
 ///
 /// ```
-/// use posthog_rs::{CodeEmail, EmailAttachment};
+/// use posthog::{CodeEmail, EmailAttachment};
 ///
 /// # let invoice_pdf: Vec<u8> = Vec::new();
 /// # let logo_png: Vec<u8> = Vec::new();

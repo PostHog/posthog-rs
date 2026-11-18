@@ -1,6 +1,8 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
+use serde_json::{Map, Value};
+
 use super::call::RequestScope;
 use super::capture::{Delivery, EventContext, OutgoingEvent};
 use super::contract::arguments::{CONTEXT_DESCRIPTION, LLM_MODEL_DESCRIPTION};
@@ -103,8 +105,10 @@ impl Core {
             session_id,
             conversation_id,
             identity: self.identify(request),
+            options: self.event_options(scope, request),
             client: scope.client_identity(session.token_client.as_ref()),
             server: scope.server.clone(),
+            request_context: scope.request_context(),
         }
     }
 
@@ -115,6 +119,33 @@ impl Core {
         } else {
             name
         })
+    }
+
+    /// Options set on the call win over the callback's, and a `null` sets nothing.
+    fn event_options(
+        &self,
+        scope: &RequestScope<'_>,
+        request: &RequestInfo<'_>,
+    ) -> Map<String, Value> {
+        let from_callback = self.options.event_options.as_ref().and_then(|callback| {
+            catch_unwind(AssertUnwindSafe(|| callback(request))).unwrap_or_else(|_| {
+                tracing::warn!(
+                    "MCP analytics event_options callback panicked; the request sets no options"
+                );
+                None
+            })
+        });
+        let mut options: Map<String, Value> = from_callback
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, value)| !value.is_null())
+            .collect();
+        for (key, value) in scope.event_options.into_iter().flatten() {
+            if !value.is_null() {
+                options.insert(key.clone(), value.clone());
+            }
+        }
+        options
     }
 
     fn identify(&self, request: &RequestInfo<'_>) -> Option<Identity> {

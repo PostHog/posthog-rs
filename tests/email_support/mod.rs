@@ -504,7 +504,7 @@ fn store_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer {
     let Some(sha256) = path.strip_prefix("/bucket/team/2/") else {
         return s3_error(404, "NoSuchKey", "The specified key does not exist.");
     };
-    let query = request.query_params_map();
+    let query: HashMap<String, String> = request.query_params().into_iter().collect();
     if request.method_str() != "PUT" || !query.contains_key("X-Amz-Signature") {
         return s3_error(403, "AccessDenied", "Access Denied");
     }
@@ -639,6 +639,7 @@ pub fn connection_counting_store() -> (String, Arc<AtomicUsize>) {
 
 /// The test certificate authority that signed [`tls_front`]'s certificate,
 /// for a client that should trust it.
+#[cfg(feature = "tls")]
 pub fn test_certificate_authority() -> reqwest::Certificate {
     reqwest::Certificate::from_der(include_bytes!("tls/ca.der")).unwrap()
 }
@@ -660,6 +661,7 @@ pub fn test_certificate_authority() -> reqwest::Certificate {
 /// openssl x509 -in leaf.pem -outform DER -out leaf.der
 /// openssl pkcs8 -topk8 -nocrypt -in leaf.key -outform DER -out leaf.key.der
 /// ```
+#[cfg(feature = "tls")]
 pub async fn tls_front(plain_url: &str) -> String {
     use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
     use tokio_rustls::rustls::{crypto::aws_lc_rs, ServerConfig};
@@ -702,8 +704,8 @@ pub fn closed_url() -> String {
     "http://127.0.0.1:1".to_string()
 }
 
-pub fn options(app_host: &str) -> posthog_rs::ClientOptionsBuilder {
-    let mut builder = posthog_rs::ClientOptionsBuilder::default();
+pub fn options(app_host: &str) -> posthog::ClientOptionsBuilder {
+    let mut builder = posthog::ClientOptionsBuilder::default();
     builder
         .api_key("phc_test".to_string())
         // A custom host that is never reached: email goes to app_host.
