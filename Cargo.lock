@@ -1752,7 +1752,6 @@ dependencies = [
  "http",
  "http-body-util",
  "httpmock",
- "libc",
  "os_info",
  "regex",
  "reqwest",
