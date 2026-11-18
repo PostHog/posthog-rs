@@ -5,9 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use httpmock::{Method::POST, MockServer};
+
+mod stateful_support;
 use posthog::stateful::{
     CaptureOutcome, Client, Config, DeliveryOutcome, Persistence, PersistenceOutcome,
 };
+use stateful_support::accept_all;
 
 fn config(server: &MockServer) -> Config {
     let mut config = Config::new("phc_test");
@@ -22,7 +25,7 @@ fn blocking_shutdown_override_can_extend_the_configured_drain_budget() {
     let server = MockServer::start();
     let batch = server.mock(|when, then| {
         when.method(POST);
-        then.status(200);
+        then.respond_with(accept_all);
     });
     let mut config = config(&server);
     config.shutdown_timeout = Duration::ZERO;
@@ -109,7 +112,7 @@ fn zero_shutdown_override_preserves_persisted_events_for_restart() {
     fs2::FileExt::unlock(&lease).unwrap();
     let batch = server.mock(|when, then| {
         when.method(POST);
-        then.status(200);
+        then.respond_with(accept_all);
     });
     let records = || {
         std::fs::read_dir(scope.join("events"))
@@ -136,7 +139,7 @@ fn async_drains_are_runtime_independent_and_match_blocking_reports() {
         let server = MockServer::start();
         let batch = server.mock(|when, then| {
             when.method(POST);
-            then.status(200);
+            then.respond_with(accept_all);
         });
         let mut setup = config(&server);
         setup.shutdown_timeout = Duration::ZERO;
@@ -348,7 +351,7 @@ fn lowered_record_limit_preserves_oversized_head_while_recovery_and_flush_progre
             .path("/i/v1/analytics/events")
             .body_includes("healthy-suffix")
             .body_excludes("oversized");
-        then.status(200);
+        then.respond_with(accept_all);
     });
     let mut setup = config(&server);
     setup.persistence = Persistence::Directory(directory.0.clone());
