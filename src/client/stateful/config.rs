@@ -4,12 +4,12 @@ use std::time::Duration;
 use super::{Persistence, Snapshot};
 use crate::client::event_store::StoreLimits;
 use crate::client::transport::MAX_SHUTDOWN_TIMEOUT;
+use crate::client::{ClientOptions, OnErrorHook, PostHogError};
+use crate::{BeforeSendHook, CaptureCompression, EndpointManager, Event, DEFAULT_HOST};
 
 /// Largest serialized event the client accepts, roughly the capture endpoint's
 /// own per-event limit. Larger events are rejected at capture.
 const MAX_EVENT_BYTES: u64 = 1024 * 1024;
-use crate::client::{ClientOptions, OnErrorHook, PostHogError};
-use crate::{BeforeSendHook, CaptureCompression, EndpointManager, Event, DEFAULT_HOST};
 
 /// Configuration for a stateful client. Start with [`Config::new`].
 ///
