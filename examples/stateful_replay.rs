@@ -36,7 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seen.fetch_add(1, Ordering::SeqCst);
     });
     let client = Client::init_blocking(config);
-    client.flush_blocking();
+    // This one-shot sample does not wait for project settings. A long-lived host
+    // can check eligibility again at a later capture opportunity.
     let replay = client.session_replay();
     replay.start();
     let active = replay.is_active();

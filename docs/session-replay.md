@@ -17,12 +17,10 @@ config.persistence = Persistence::Memory;
 config.session_replay.jpeg_quality = 65;
 config.session_replay.max_frames_in_flight = 2;
 let client = Client::init_blocking(config);
-// Wait for the initial remote-settings attempt before this one-shot capture.
-client.flush_blocking();
 let replay = client.session_replay();
 replay.start();
 if !replay.is_active() {
-    // Remote settings, consent or the session can still prevent recording.
+    // Skip this capture. A long-lived host can check again on a later frame.
     client.shutdown_blocking(None);
     return;
 }
@@ -57,8 +55,10 @@ reservation failures return None. Tokens have no time-based expiry.
 Only `start()` requests recording. It resumes a valid session or creates one
 through the existing session manager, without touching activity. Recording also
 requires current consent, a valid session and remotely enabled project settings.
-Settings load asynchronously; unavailable settings prevent recording, while a
-valid restored project cache can permit it during a failed/pending refresh.
+Settings load asynchronously; delivery flush does not wait for them. Check
+`is_active()` on a later capture opportunity if recording is not yet eligible.
+Unavailable settings prevent recording, while a valid restored project cache
+can permit it during a failed/pending refresh.
 
 Remote enablement alone never requests recording. A manual stop remains stopped
 until another explicit start. Remote disablement stops new acquisitions.
