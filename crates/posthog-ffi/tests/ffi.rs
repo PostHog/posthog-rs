@@ -206,14 +206,14 @@ fn evaluates_flags_and_records_flag_called_events() {
         posthog_flags_is_enabled(flags, c("beta").as_ptr(), &mut enabled);
         assert!(enabled);
 
-        let mut state = -1;
+        let mut state = PostHogFlagState::POSTHOG_FLAG_STATE_DISABLED;
         let mut variant = ptr::null_mut();
         posthog_flags_get_flag(flags, c("checkout").as_ptr(), &mut state, &mut variant);
-        assert_eq!(state, PostHogFlagState::POSTHOG_FLAG_STATE_VARIANT as i32);
+        assert_eq!(state, PostHogFlagState::POSTHOG_FLAG_STATE_VARIANT);
         assert_eq!(take_string(variant), "test");
 
         posthog_flags_get_flag(flags, c("missing").as_ptr(), &mut state, &mut variant);
-        assert_eq!(state, PostHogFlagState::POSTHOG_FLAG_STATE_NOT_FOUND as i32);
+        assert_eq!(state, PostHogFlagState::POSTHOG_FLAG_STATE_NOT_FOUND);
         assert!(variant.is_null());
 
         let mut payload = ptr::null_mut();

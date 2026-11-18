@@ -2,9 +2,13 @@
 // links and that a disabled client accepts calls without a network.
 #include "posthog.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
+
+static_assert(sizeof(PostHogStatus) == sizeof(int32_t), "PostHogStatus must match the library");
+static_assert(sizeof(PostHogFlagState) == sizeof(int32_t), "PostHogFlagState must match the library");
 
 int main() {
   std::unique_ptr<PostHogOptions, decltype(&posthog_options_free)> options(
@@ -21,7 +25,7 @@ int main() {
 
   PostHogFlags *flags = nullptr;
   if (posthog_evaluate_flags(client.get(), "user-1", nullptr, &flags) != POSTHOG_STATUS_OK) return 5;
-  int32_t state = POSTHOG_FLAG_STATE_ENABLED;
+  PostHogFlagState state = POSTHOG_FLAG_STATE_ENABLED;
   posthog_flags_get_flag(flags, "beta", &state, nullptr);
   posthog_flags_free(flags);
   if (state != POSTHOG_FLAG_STATE_NOT_FOUND) return 6;
