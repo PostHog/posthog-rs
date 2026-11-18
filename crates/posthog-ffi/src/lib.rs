@@ -46,7 +46,8 @@ pub enum PostHogStatus {
     POSTHOG_STATUS_INVALID_ARGUMENT = 4,
     /// A network request failed or PostHog returned an error.
     POSTHOG_STATUS_REQUEST = 5,
-    /// The SDK panicked. The call had no effect.
+    /// The SDK panicked and the panic was caught. The call may have partly
+    /// run, so don't assume it had no effect.
     POSTHOG_STATUS_PANIC = 6,
 }
 
@@ -221,8 +222,9 @@ pub extern "C" fn posthog_version() -> *const c_char {
 }
 
 /// Returns a description of the last error on the calling thread, or `NULL`
-/// if the last call succeeded. The string is valid until the next PostHog
-/// call on the same thread.
+/// if the last call that returns a status or creates a handle succeeded.
+/// `posthog_version`, `posthog_last_error` and the free functions leave it
+/// unchanged. The string is valid until the next call that updates it.
 #[no_mangle]
 pub extern "C" fn posthog_last_error() -> *const c_char {
     LAST_ERROR

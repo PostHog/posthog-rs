@@ -32,6 +32,8 @@ To link the shared library:
 cc app.c -Ipath/to/include -Lpath/to/target/release -lposthog_ffi
 ```
 
+At run time, the loader must find the library. Install it in a system library directory, link with an rpath, or set `LD_LIBRARY_PATH` on Linux or `DYLD_LIBRARY_PATH` on macOS.
+
 The static library also needs the system libraries the SDK uses. Print them for your target with:
 
 ```bash
@@ -75,7 +77,7 @@ See [`examples/capture.c`](examples/capture.c) for a complete program.
 
 ### Errors
 
-Functions return a `PostHogStatus`, and constructors return `NULL` on error. `posthog_last_error()` describes the last error on the calling thread. The SDK never unwinds into your code: if it panics, the call returns `POSTHOG_STATUS_PANIC`.
+Functions return a `PostHogStatus`, and constructors return `NULL` on error. `posthog_last_error()` describes the last error on the calling thread. The SDK never unwinds into your code. If it panics, the call returns `POSTHOG_STATUS_PANIC`, and it may have partly run.
 
 ### Memory and threads
 

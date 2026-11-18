@@ -23,7 +23,7 @@ header = """
  *
  * Errors: calls return `POSTHOG_STATUS_OK` or an error status, and
  * constructors return NULL on error. `posthog_last_error` describes the last
- * error on the calling thread.
+ * error on the calling thread. The free functions don't change it.
  */
 """
 

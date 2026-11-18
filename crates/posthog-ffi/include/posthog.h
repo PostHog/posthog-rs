@@ -15,7 +15,7 @@
  *
  * Errors: calls return `POSTHOG_STATUS_OK` or an error status, and
  * constructors return NULL on error. `posthog_last_error` describes the last
- * error on the calling thread.
+ * error on the calling thread. The free functions don't change it.
  */
 
 
@@ -55,7 +55,8 @@ typedef enum PostHogStatus {
    */
   POSTHOG_STATUS_REQUEST = 5,
   /**
-   * The SDK panicked. The call had no effect.
+   * The SDK panicked and the panic was caught. The call may have partly
+   * run, so don't assume it had no effect.
    */
   POSTHOG_STATUS_PANIC = 6,
 } PostHogStatus;
@@ -113,8 +114,9 @@ const char *posthog_version(void);
 
 /**
  * Returns a description of the last error on the calling thread, or `NULL`
- * if the last call succeeded. The string is valid until the next PostHog
- * call on the same thread.
+ * if the last call that returns a status or creates a handle succeeded.
+ * `posthog_version`, `posthog_last_error` and the free functions leave it
+ * unchanged. The string is valid until the next call that updates it.
  */
 const char *posthog_last_error(void);
 
