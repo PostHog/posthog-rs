@@ -478,11 +478,12 @@ fn state_files_are_private_and_symlink_state_is_not_followed() {
 }
 
 #[test]
-fn device_bytes_are_mandatory_and_failed_updates_preserve_identity() {
+fn device_bytes_are_mandatory_and_failed_updates_preserve_identity_and_consent() {
     let directory = TestDirectory::new();
     let mut snapshot = Snapshot::anonymous("anonymous".into());
     snapshot.device_id = "用户\\\"\n".into();
-    let exact = snapshot_size(&snapshot) as u64;
+    snapshot.opt_out = Some(false);
+    let exact = snapshot_capacity(&snapshot) as u64;
     assert!(encode_snapshot(&snapshot, exact - 1).is_err());
     let mut store = FileStateStore::open(directory.lease(), exact)
         .unwrap()

@@ -317,7 +317,7 @@ fn permitted_hook_can_finish_after_opt_out_and_nested_capture_checks_new_consent
 }
 
 #[test]
-fn invalid_or_oversized_state_preserves_bytes_and_uses_configured_default() {
+fn corrupt_state_is_replaced_but_oversized_state_is_preserved_with_configured_default() {
     for oversized in [false, true] {
         let directory = Directory::new();
         let client = Client::init_blocking(directory.config());
@@ -355,10 +355,24 @@ fn invalid_or_oversized_state_preserves_bytes_and_uses_configured_default() {
         assert_eq!(client.capture("blocked"), CaptureOutcome::OptedOut);
         assert_eq!(
             client.flush_blocking().state,
-            PersistenceOutcome::Unavailable
+            if oversized {
+                PersistenceOutcome::Unavailable
+            } else {
+                PersistenceOutcome::Persisted
+            }
         );
         assert!(*errors.lock().unwrap() > 0);
-        assert_eq!(std::fs::read(directory.state_path()).unwrap(), bytes);
+        client.shutdown_blocking(None);
+        drop(client);
+        if oversized {
+            assert_eq!(std::fs::read(directory.state_path()).unwrap(), bytes);
+        } else {
+            assert_eq!(directory.state()["state"]["opt_out"], Value::Null);
+            let restored = Client::init_blocking(directory.config());
+            assert!(!restored.is_opt_out());
+            assert_eq!(restored.get_anonymous_id(), "anonymous");
+            restored.shutdown_blocking(None);
+        }
     }
 }
 
@@ -443,11 +457,10 @@ fn admitted_event_recovers_and_delivers_with_restored_opt_out() {
     assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
     accepted(client.capture("admitted-before-opt-out"));
     client.opt_out();
-    client.flush_blocking();
-    assert_eq!(
-        client.shutdown_blocking(Some(Duration::ZERO)).state,
-        PersistenceOutcome::Persisted
-    );
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
+    let report = client.shutdown_blocking(None);
+    assert_eq!(report.state, PersistenceOutcome::Persisted);
+    assert_eq!(report.delivery, posthog::stateful::DeliveryOutcome::Stopped);
     drop(client);
     assert!(reject.calls() >= 1);
     reject.delete();

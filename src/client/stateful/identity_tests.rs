@@ -19,8 +19,8 @@ fn config() -> Config {
 }
 
 #[test]
-fn reset_capacity_failure_preserves_device_and_identity() {
-    use super::super::storage::snapshot_size;
+fn reset_capacity_failure_keeps_long_device_identity_and_consent_transactional() {
+    use super::super::storage::snapshot_capacity;
 
     let mut config = config();
     config.max_state_bytes = 1024;
@@ -28,17 +28,19 @@ fn reset_capacity_failure_preserves_device_and_identity() {
     let writer = client.state.as_ref().unwrap();
     writer
         .mutate(|state| {
-            let capacity = snapshot_size(state);
+            state.opt_out = Some(true);
+            let capacity = snapshot_capacity(state);
             state.device_id = "x".repeat(1024 - capacity + state.device_id.len());
         })
         .unwrap();
     let original = writer.snapshot();
-    assert_eq!(snapshot_size(&original), 1024);
+    assert_eq!(snapshot_capacity(&original), 1024);
     client.reset();
     let after = writer.snapshot();
     assert!(after.same_persisted_state(&original));
     assert_eq!(after.generation, original.generation);
     assert_eq!(client.get_anonymous_id(), "anonymous");
+    assert!(client.is_opt_out());
 }
 
 #[test]
