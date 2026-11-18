@@ -1625,7 +1625,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "posthog"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "axum",
  "backtrace",
@@ -1668,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "posthog-rs"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "posthog",
 ]
@@ -1782,9 +1782,9 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rand_pcg"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
+checksum = "eb95882a1e14462c69aea9984bb261293ccfe6022ef8de0eda18bd5afb0052df"
 dependencies = [
  "rand_core",
 ]
