@@ -1,5 +1,17 @@
 # posthog-rs
 
+## 1.1.3 — 2026-11-18
+
+### Patch changes
+
+- [a66aefb](https://github.com/posthog/posthog-rs/commit/a66aefbd8b476146aba16b5f61d8b00411fd513d) Fix local flag evaluation for projects with an `is_set` or `is_not_set` filter that has no `value`.
+  
+  PostHog accepts these two property filters without a `value`, but `Property` required one, so a single such filter made the whole `LocalEvaluationResponse` fail to deserialize and no flags loaded at all. They now deserialize without a `value`, on flags and on cohort leaves. Other operators still require one. — Thanks @shaun-wispr!
+- [a66aefb](https://github.com/posthog/posthog-rs/commit/a66aefbd8b476146aba16b5f61d8b00411fd513d) Stop one unreadable flag definition from disabling local evaluation for the whole project.
+  
+  The flag pollers rejected a definitions response when any single flag definition failed to deserialize, so no flag loaded. A response that deserializes as a whole is handled as before. When it does not, each flag definition is now tried on its own: the ones that fail are skipped with a warning naming the flag, and the rest load. A skipped flag is absent from the local cache, so it falls back to `/flags` like any other flag local evaluation cannot resolve. A response that is unreadable for any other reason is still rejected. — Thanks @shaun-wispr!
+- [1b623af](https://github.com/posthog/posthog-rs/commit/1b623afa3dde285143ac5cc142a32692c8860fca) Local flag evaluation no longer stops at the first property filter in a condition it can't check. A later filter that doesn't match now rules the condition out, like the other SDKs, so a flag that can't match is `false` instead of inconclusive and doesn't need a call to `/flags`. — Thanks @luantaraschi!
+
 ## 1.1.2 — 2026-11-18
 
 ### Patch changes
