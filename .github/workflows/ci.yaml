@@ -139,6 +139,79 @@ jobs:
       - name: Build
         run: ${{ matrix.command }}
 
+  ffi:
+    name: C bindings (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: crates/posthog-ffi
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cbindgen
+            crates/posthog-ffi/target
+          key: ${{ runner.os }}-cargo-ffi-${{ hashFiles('crates/posthog-ffi/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ffi-
+
+      - name: Format
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Check the header matches the source
+        run: |
+          command -v cbindgen >/dev/null || cargo install cbindgen --version 0.29.4 --locked
+          cbindgen --config cbindgen.toml --output include/posthog.h
+          git diff --exit-code include/posthog.h
+
+      - name: Link from C and C++
+        run: |
+          cargo build --locked --release
+          native_libs=$(cargo rustc --locked --release --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
+            | sed -n 's/.*native-static-libs: //p' | tail -1)
+          cc -std=c99 -Wall -Wextra -Werror -pedantic examples/capture.c -Iinclude -Ltarget/release -lposthog_ffi -o capture
+          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -Ltarget/release -lposthog_ffi -o smoke-shared
+          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude target/release/libposthog_ffi.a $native_libs -o smoke-static
+          LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release ./smoke-shared
+          ./smoke-static
+
+  ffi-msrv:
+    name: C bindings (MSRV)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust 1.78.0
+        run: |
+          rustup toolchain install 1.78.0 --profile minimal
+          rustup default 1.78.0
+
+      - name: Check
+        run: cargo check --locked --lib --manifest-path crates/posthog-ffi/Cargo.toml
+
   package:
     name: Cargo publish dry run
     runs-on: ubuntu-latest

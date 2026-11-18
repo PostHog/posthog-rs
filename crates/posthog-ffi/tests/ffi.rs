@@ -1,0 +1,367 @@
+use std::ffi::{c_char, CStr, CString};
+use std::ptr;
+
+use httpmock::prelude::*;
+use posthog_ffi::*;
+use serde_json::{json, Value};
+
+const CAPTURE_PATH: &str = "/i/v1/analytics/events";
+
+fn c(value: &str) -> CString {
+    CString::new(value).unwrap()
+}
+
+fn last_error() -> Option<String> {
+    let error = posthog_last_error();
+    (!error.is_null()).then(|| {
+        unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+unsafe fn take_string(value: *mut c_char) -> String {
+    let text = CStr::from_ptr(value).to_str().unwrap().to_owned();
+    posthog_string_free(value);
+    text
+}
+
+unsafe fn new_client(server: &MockServer) -> *mut PostHogClient {
+    let options = posthog_options_new(c("phc_test").as_ptr());
+    assert_eq!(
+        posthog_options_set_host(options, c(&server.base_url()).as_ptr()),
+        PostHogStatus::POSTHOG_STATUS_OK
+    );
+    posthog_options_set_feature_flags_request_max_retries(options, 0);
+    let client = posthog_client_new(options);
+    posthog_options_free(options);
+    assert!(!client.is_null(), "{:?}", last_error());
+    client
+}
+
+fn captured_batch(request: &HttpMockRequest) -> Vec<Value> {
+    let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
+    body["batch"].as_array().cloned().unwrap_or_default()
+}
+
+#[test]
+fn captures_event_with_typed_properties_and_ffi_lib() {
+    let server = MockServer::start();
+    let capture = server.mock(|when, then| {
+        when.method(POST).path(CAPTURE_PATH).is_true(|request| {
+            let batch = captured_batch(request);
+            let [event] = batch.as_slice() else {
+                return false;
+            };
+            let properties = &event["properties"];
+            event["event"] == "app_started"
+                && event["distinct_id"] == "user-1"
+                && event["timestamp"] == "2024-01-02T03:04:05.006Z"
+                && event["uuid"] == "01920000-0000-7000-8000-000000000001"
+                && properties["edition"] == "community"
+                && properties["plugins"] == 3
+                && properties["ratio"] == 0.5
+                && properties["beta"] == true
+                && properties["$set"] == json!({"plan": "free"})
+                && properties["$groups"] == json!({"company": "acme"})
+                && properties["$lib"] == "posthog-rs-ffi"
+                && properties["$lib_version"] == env!("POSTHOG_SDK_VERSION")
+        });
+        then.status(200).json_body(json!({"results": {}}));
+    });
+
+    unsafe {
+        let client = new_client(&server);
+        let event = posthog_event_new(c("app_started").as_ptr(), c("user-1").as_ptr());
+        let key = |k: &str| c(k);
+        assert_eq!(
+            posthog_event_set_property_string(
+                event,
+                key("edition").as_ptr(),
+                c("community").as_ptr()
+            ),
+            PostHogStatus::POSTHOG_STATUS_OK
+        );
+        posthog_event_set_property_int(event, key("plugins").as_ptr(), 3);
+        posthog_event_set_property_double(event, key("ratio").as_ptr(), 0.5);
+        posthog_event_set_property_bool(event, key("beta").as_ptr(), true);
+        posthog_event_set_property_json(
+            event,
+            key("$set").as_ptr(),
+            c(r#"{"plan":"free"}"#).as_ptr(),
+        );
+        posthog_event_add_group(event, key("company").as_ptr(), c("acme").as_ptr());
+        posthog_event_set_timestamp_ms(event, 1_704_164_645_006);
+        assert_eq!(
+            posthog_event_set_uuid(event, c("01920000-0000-7000-8000-000000000001").as_ptr()),
+            PostHogStatus::POSTHOG_STATUS_OK
+        );
+
+        assert_eq!(
+            posthog_capture(client, event),
+            PostHogStatus::POSTHOG_STATUS_OK
+        );
+        posthog_event_free(event);
+        assert_eq!(posthog_flush(client), PostHogStatus::POSTHOG_STATUS_OK);
+        posthog_client_free(client);
+    }
+
+    capture.assert();
+}
+
+#[test]
+fn reports_invalid_arguments_through_status_and_last_error() {
+    unsafe {
+        let event = posthog_event_new(c("e").as_ptr(), c("u").as_ptr());
+
+        let status = posthog_event_set_property_json(event, c("k").as_ptr(), c("{").as_ptr());
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_INVALID_JSON);
+        assert!(last_error().unwrap().contains("value_json"));
+
+        let status = posthog_event_set_property_string(event, ptr::null(), c("v").as_ptr());
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_NULL_ARGUMENT);
+        assert_eq!(last_error().unwrap(), "`key` is NULL");
+
+        let invalid_utf8 = [0xffu8, 0];
+        let status =
+            posthog_event_set_property_string(event, invalid_utf8.as_ptr().cast(), c("v").as_ptr());
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_INVALID_UTF8);
+
+        let status = posthog_event_set_uuid(event, c("not-a-uuid").as_ptr());
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_INVALID_ARGUMENT);
+
+        let status = posthog_event_set_property_bool(event, c("ok").as_ptr(), true);
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_OK);
+        assert_eq!(last_error(), None);
+
+        posthog_event_free(event);
+        assert!(posthog_event_new(ptr::null(), c("u").as_ptr()).is_null());
+        assert!(posthog_client_new(ptr::null()).is_null());
+    }
+}
+
+#[test]
+fn evaluates_flags_and_records_flag_called_events() {
+    let server = MockServer::start();
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/flags/")
+            .json_body_includes(r#"{"distinct_id":"user-1","groups":{"company":"acme"}}"#);
+        then.status(200).json_body(json!({
+            "flags": {
+                "beta": {
+                    "key": "beta", "enabled": true, "variant": null,
+                    "reason": {"code": "condition_match"},
+                    "metadata": {"id": 1, "version": 1, "payload": null}
+                },
+                "checkout": {
+                    "key": "checkout", "enabled": true, "variant": "test",
+                    "reason": {"code": "condition_match"},
+                    "metadata": {"id": 2, "version": 1, "payload": {"color": "blue"}}
+                },
+                "off": {
+                    "key": "off", "enabled": false, "variant": null,
+                    "reason": {"code": "out_of_rollout_bound"},
+                    "metadata": {"id": 3, "version": 1, "payload": null}
+                }
+            },
+            "errorsWhileComputingFlags": false,
+            "requestId": "req-1"
+        }));
+    });
+    let capture = server.mock(|when, then| {
+        when.method(POST).path(CAPTURE_PATH).is_true(|request| {
+            let batch = captured_batch(request);
+            let called: Vec<_> = batch
+                .iter()
+                .filter(|event| event["event"] == "$feature_flag_called")
+                .map(|event| event["properties"]["$feature_flag"].clone())
+                .collect();
+            let purchase = batch.iter().find(|event| event["event"] == "purchase");
+            called == [json!("beta"), json!("checkout"), json!("missing")]
+                && purchase.is_some_and(|event| {
+                    event["properties"]["$feature/beta"] == true
+                        && event["properties"]["$feature/checkout"] == "test"
+                        && event["properties"]["$active_feature_flags"]
+                            == json!(["beta", "checkout"])
+                })
+        });
+        then.status(200).json_body(json!({"results": {}}));
+    });
+
+    unsafe {
+        let client = new_client(&server);
+        let mut flags = ptr::null_mut();
+        let options = c(r#"{"groups":{"company":"acme"}}"#);
+        let status =
+            posthog_evaluate_flags(client, c("user-1").as_ptr(), options.as_ptr(), &mut flags);
+        assert_eq!(
+            status,
+            PostHogStatus::POSTHOG_STATUS_OK,
+            "{:?}",
+            last_error()
+        );
+
+        let mut enabled = false;
+        posthog_flags_is_enabled(flags, c("beta").as_ptr(), &mut enabled);
+        assert!(enabled);
+
+        let mut state = PostHogFlagState::POSTHOG_FLAG_STATE_NOT_FOUND;
+        let mut variant = ptr::null_mut();
+        posthog_flags_get_flag(flags, c("checkout").as_ptr(), &mut state, &mut variant);
+        assert_eq!(state, PostHogFlagState::POSTHOG_FLAG_STATE_VARIANT);
+        assert_eq!(take_string(variant), "test");
+
+        posthog_flags_get_flag(flags, c("missing").as_ptr(), &mut state, &mut variant);
+        assert_eq!(state, PostHogFlagState::POSTHOG_FLAG_STATE_NOT_FOUND);
+        assert!(variant.is_null());
+
+        let mut payload = ptr::null_mut();
+        posthog_flags_get_payload(flags, c("checkout").as_ptr(), &mut payload);
+        assert_eq!(take_string(payload), r#"{"color":"blue"}"#);
+
+        let mut keys = ptr::null_mut();
+        posthog_flags_keys(flags, &mut keys);
+        assert_eq!(take_string(keys), r#"["beta","checkout","off"]"#);
+
+        let accessed = posthog_flags_only_accessed(flags);
+        let event = posthog_event_new(c("purchase").as_ptr(), c("user-1").as_ptr());
+        posthog_event_set_flags(event, accessed);
+        posthog_capture(client, event);
+        posthog_event_free(event);
+        posthog_flags_free(accessed);
+        posthog_flags_free(flags);
+
+        posthog_client_free(client);
+    }
+
+    flags_mock.assert();
+    capture.assert();
+}
+
+#[test]
+fn rejects_malformed_flag_options_without_a_request() {
+    let server = MockServer::start();
+    let flags_mock = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({"flags": {}}));
+    });
+
+    unsafe {
+        let client = new_client(&server);
+        let mut flags = ptr::null_mut();
+        let status = posthog_evaluate_flags(
+            client,
+            c("user-1").as_ptr(),
+            c(r#"{"flag_keys":"beta"}"#).as_ptr(),
+            &mut flags,
+        );
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_INVALID_JSON);
+        assert!(flags.is_null());
+        assert!(last_error().unwrap().contains("flag_keys"));
+        posthog_client_free(client);
+    }
+
+    flags_mock.assert_calls(0);
+}
+
+#[test]
+fn surfaces_flag_request_failures() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(500).body("boom");
+    });
+
+    unsafe {
+        let client = new_client(&server);
+        let mut flags = ptr::null_mut();
+        let status = posthog_evaluate_flags(client, c("user-1").as_ptr(), ptr::null(), &mut flags);
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_REQUEST);
+        assert!(flags.is_null());
+        assert!(last_error().is_some());
+        posthog_client_free(client);
+    }
+}
+
+#[test]
+fn alias_and_group_identify_capture_events() {
+    let server = MockServer::start();
+    let capture = server.mock(|when, then| {
+        when.method(POST).path(CAPTURE_PATH).is_true(|request| {
+            let batch = captured_batch(request);
+            let names: Vec<_> = batch.iter().map(|event| event["event"].clone()).collect();
+            names == [json!("$create_alias"), json!("$groupidentify")]
+                && batch[1]["properties"]["$group_set"] == json!({"name": "Acme"})
+        });
+        then.status(200).json_body(json!({"results": {}}));
+    });
+
+    unsafe {
+        let client = new_client(&server);
+        let status = posthog_alias(client, c("anon-1").as_ptr(), c("user-1").as_ptr());
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_OK);
+        let status = posthog_group_identify(
+            client,
+            c("company").as_ptr(),
+            c("acme").as_ptr(),
+            c(r#"{"name":"Acme"}"#).as_ptr(),
+        );
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_OK);
+        let status = posthog_group_identify(
+            client,
+            c("company").as_ptr(),
+            c("acme").as_ptr(),
+            c("[1]").as_ptr(),
+        );
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_INVALID_JSON);
+        posthog_client_free(client);
+    }
+
+    capture.assert();
+}
+
+#[test]
+fn shares_one_client_across_threads() {
+    let server = MockServer::start();
+    let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&sent);
+    server.mock(|when, then| {
+        when.method(POST)
+            .path(CAPTURE_PATH)
+            .is_true(move |request| {
+                counter.fetch_add(
+                    captured_batch(request).len(),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                true
+            });
+        then.status(200).json_body(json!({"results": {}}));
+    });
+
+    struct Shared(*mut PostHogClient);
+    unsafe impl Send for Shared {}
+    unsafe impl Sync for Shared {}
+
+    let client = Shared(unsafe { new_client(&server) });
+    std::thread::scope(|scope| {
+        for thread in 0..8 {
+            let client = &client;
+            scope.spawn(move || unsafe {
+                for i in 0..25 {
+                    let event =
+                        posthog_event_new(c("tick").as_ptr(), c(&format!("u{thread}")).as_ptr());
+                    posthog_event_set_property_int(event, c("i").as_ptr(), i);
+                    assert_eq!(
+                        posthog_capture(client.0, event),
+                        PostHogStatus::POSTHOG_STATUS_OK
+                    );
+                    posthog_event_free(event);
+                }
+            });
+        }
+    });
+    unsafe { posthog_client_free(client.0) };
+
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 200);
+}
