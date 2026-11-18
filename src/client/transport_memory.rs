@@ -267,13 +267,22 @@ impl Queue {
         }
         None
     }
-    pub(super) fn view(&self, count: usize, bytes: usize) -> Vec<(u64, CaptureEvent)> {
+    pub(super) fn view(
+        &self,
+        count: usize,
+        bytes: usize,
+        persistent: bool,
+    ) -> Vec<(u64, CaptureEvent)> {
         let resident = self.resident.lock().unwrap_or_else(|p| p.into_inner());
         let mut used = 0;
         resident
             .items
             .iter()
             .take(count)
+            // Only the coordinator calls stage and view. An unattempted
+            // persistent entry can still acquire a disk identity on the next
+            // turn and must not enter the upload view as memory first.
+            .take_while(|item| !persistent || item.attempted.load(Ordering::Acquire))
             .take_while(|item| {
                 let next = item._bytes.bytes();
                 if used != 0 && next > bytes.saturating_sub(used) {
@@ -304,11 +313,11 @@ mod queue_tests {
         let mut replacement = wire("replacement");
         replacement.uuid = first.uuid;
         assert_eq!(queue.admit(first), Admission::Accepted);
-        let old_id = queue.view(1, 4096)[0].0;
+        let old_id = queue.view(1, 4096, false)[0].0;
         assert_eq!(queue.admit(wire("second")), Admission::Accepted);
         assert_eq!(queue.admit(replacement), Admission::Accepted);
         assert!(!queue.remove(old_id));
-        let view = queue.view(10, 4096);
+        let view = queue.view(10, 4096, false);
         assert_eq!(
             view.iter()
                 .map(|(_, event)| event.event.as_str())

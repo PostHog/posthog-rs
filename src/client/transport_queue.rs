@@ -372,6 +372,7 @@ pub(super) fn run(
                             .view(
                                 options.max_batch_size.max(1),
                                 batch_bytes_target.min(queue.limit()),
+                                persistent,
                             )
                             .into_iter()
                             .take_while(|(id, _)| {
@@ -594,6 +595,7 @@ mod tests {
     struct Observed {
         store: FileEventStore,
         written: mpsc::Sender<String>,
+        first_head: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
     }
     impl EventStore for Observed {
         fn recover(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
@@ -603,6 +605,10 @@ mod tests {
             self.store.head(count, bytes)
         }
         fn head_batch(&mut self, count: usize, bytes: u64, target: u64) -> io::Result<Recovery> {
+            if let Some((entered, release)) = self.first_head.take() {
+                entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
             self.store.head_batch(count, bytes, target)
         }
         fn head_batch_through(
@@ -641,6 +647,75 @@ mod tests {
         fn remove(&mut self, key: StoreKey) -> io::Result<()> {
             self.store.remove(key)
         }
+    }
+
+    #[test]
+    fn admission_during_a_head_read_is_uploaded_once_after_staging() {
+        use httpmock::{Method::POST, MockServer};
+
+        let directory = TestDirectory::new();
+        let server = MockServer::start();
+        let (attempted, attempts) = mpsc::channel();
+        let (release_a, a_gate) = mpsc::channel();
+        let a_gate = Mutex::new(Some(a_gate));
+        let a_attempted = attempted.clone();
+        server.mock(|when, then| {
+            when.method(POST).body_includes("\"event\":\"A\"");
+            then.respond_with(move |_| {
+                a_attempted.send("A").unwrap();
+                if let Some(gate) = a_gate.lock().unwrap().take() {
+                    gate.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                http::Response::builder()
+                    .status(200)
+                    .body(r#"{"results":{}}"#.to_string())
+                    .unwrap()
+                    .into()
+            });
+        });
+        server.mock(|when, then| {
+            when.method(POST).body_includes("\"event\":\"B\"");
+            then.respond_with(move |_| {
+                attempted.send("B").unwrap();
+                http::Response::builder()
+                    .status(200)
+                    .body(r#"{"results":{}}"#.to_string())
+                    .unwrap()
+                    .into()
+            });
+        });
+        let options = super::super::tests::options(server.base_url())
+            .flush_at(1usize)
+            .max_batch_size(1usize)
+            .build()
+            .unwrap();
+        let (head_entered, head) = mpsc::channel();
+        let (release_head, head_gate) = mpsc::channel();
+        let (written, writes) = mpsc::channel();
+        let store = Observed {
+            store: directory.open(),
+            written,
+            first_head: Some((head_entered, head_gate)),
+        };
+        let handle = TransportHandle::spawn_stateful(options, Some(Box::new(store)), 8192).unwrap();
+        head.recv_timeout(Duration::from_secs(3)).unwrap();
+        // The empty disk head is being read after the coordinator took its
+        // staging snapshot. These two arrivals need a subsequent staging turn.
+        assert_eq!(handle.enqueue_prepared(wire("A")), Admission::Accepted);
+        assert_eq!(handle.enqueue_prepared(wire("B")), Admission::Accepted);
+        let (complete, flushed) = mpsc::channel();
+        assert!(handle.send_control(Control::Flush(Completion::Blocking(complete))));
+        release_head.send(()).unwrap();
+        // Keep A's request open until both writes happen, so a premature
+        // in-memory upload cannot race its own durable duplicate away.
+        assert_eq!(writes.recv_timeout(Duration::from_secs(3)).unwrap(), "A");
+        assert_eq!(writes.recv_timeout(Duration::from_secs(3)).unwrap(), "B");
+        assert!(matches!(flushed.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        release_a.send(()).unwrap();
+        flushed.recv_timeout(Duration::from_secs(3)).unwrap();
+        handle.close_blocking();
+        assert!(directory.records().is_empty());
+        assert_eq!(attempts.try_iter().collect::<Vec<_>>(), ["A", "B"]);
     }
 
     fn durable_fallback_checkpoint(checkpoint: &str) {
@@ -707,7 +782,11 @@ mod tests {
             .unwrap();
         let handle = TransportHandle::spawn_stateful(
             options,
-            Some(Box::new(Observed { store, written })),
+            Some(Box::new(Observed {
+                store,
+                written,
+                first_head: None,
+            })),
             8192,
         )
         .unwrap();
@@ -1179,7 +1258,11 @@ mod tests {
                 .unwrap();
             let handle = TransportHandle::spawn_stateful(
                 options,
-                Some(Box::new(Observed { store, written })),
+                Some(Box::new(Observed {
+                    store,
+                    written,
+                    first_head: None,
+                })),
                 4096,
             )
             .unwrap();
