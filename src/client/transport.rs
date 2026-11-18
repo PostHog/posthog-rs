@@ -1578,7 +1578,22 @@ impl Pipeline {
         if self.persistent_retention {
             return super::capture::RetryRetention::Retain;
         }
+        #[cfg(feature = "stateful")]
+        if self.coordinated {
+            return super::capture::RetryRetention::Bounded;
+        }
         super::capture::RetryRetention::Discard
+    }
+
+    /// Only disk-backed delivery keeps a sequence past its attempt budget.
+    #[cfg(feature = "stateful")]
+    fn retains_past_attempts(&self) -> bool {
+        self.persistent_retention
+    }
+
+    #[cfg(not(feature = "stateful"))]
+    fn retains_past_attempts(&self) -> bool {
+        false
     }
 
     /// The codec for this lane's request bodies, from the lane's client option.
@@ -1738,7 +1753,7 @@ impl Pipeline {
         use crate::capture_event::{BatchRequestRef, CaptureErrorResponse};
 
         let retention = self.retry_retention();
-        let retaining = retention != super::capture::RetryRetention::Discard;
+        let retaining = self.retains_past_attempts();
 
         let req = BatchRequestRef {
             created_at: &batch.created_at,
@@ -1796,7 +1811,10 @@ impl Pipeline {
                 http_status = Some(status);
                 let retry_after = capture::parse_retry_after(resp.headers());
                 match resp.text() {
-                    Err(error) if retaining && (200..=299).contains(&status) => {
+                    Err(error)
+                        if retention.retries_unconfirmed_success()
+                            && (200..=299).contains(&status) =>
+                    {
                         capture::after_transport_error_with_retention(
                             &self.options,
                             &batch.request_id,
@@ -1969,9 +1987,7 @@ impl Pipeline {
         // deadline expiry rather than scheduling another attempt. Persisted
         // records remain available for the next process.
         for batch in std::mem::take(&mut self.retries) {
-            if self.retry_retention() != super::capture::RetryRetention::Discard
-                && self.clock.now() < batch.next_at
-            {
+            if self.retains_past_attempts() && self.clock.now() < batch.next_at {
                 if deadline.is_some() {
                     self.warn_retained_shutdown(
                         batch.pending.len(),
@@ -2004,7 +2020,7 @@ impl Pipeline {
     }
 
     fn warn_shutdown_drop(&self, count: usize, persisted: usize, category: &str) {
-        if self.retry_retention() == super::capture::RetryRetention::Discard {
+        if !self.retains_past_attempts() {
             warn!(
                 "posthog-rs: shutdown timeout reached; dropping {count} {category}event(s) for {}",
                 self.lane.endpoint
@@ -2138,6 +2154,41 @@ mod tests {
             .flush_at(100usize)
             .flush_interval_ms(10_000u64);
         builder
+    }
+
+    /// A capture v1 reply that accepts every event in the request, one result
+    /// per uuid, as capture does.
+    #[cfg(feature = "stateful")]
+    pub(super) fn accept_all(request: &httpmock::HttpMockRequest) -> String {
+        use std::io::Read;
+        let raw = request.body_vec();
+        let mut body = Vec::new();
+        if raw.starts_with(&[0x1f, 0x8b]) {
+            flate2::read::GzDecoder::new(raw.as_slice())
+                .read_to_end(&mut body)
+                .unwrap();
+        } else {
+            body = raw;
+        }
+        accept_all_body(&body)
+    }
+
+    /// [`accept_all`] for a raw, uncompressed request body.
+    #[cfg(feature = "stateful")]
+    pub(super) fn accept_all_body(body: &[u8]) -> String {
+        let batch: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let results: serde_json::Map<String, serde_json::Value> = batch["batch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| {
+                (
+                    event["uuid"].as_str().unwrap().to_owned(),
+                    serde_json::json!({"result": "ok"}),
+                )
+            })
+            .collect();
+        serde_json::json!({ "results": results }).to_string()
     }
 
     #[test]
@@ -2317,6 +2368,76 @@ mod tests {
 
     #[cfg(feature = "stateful")]
     #[test]
+    fn stateful_delivery_retries_unconfirmed_success_until_its_last_attempt() {
+        use super::super::capture::{after_response_with_retention, RetryRetention, Step};
+        let opts = options("http://localhost".into())
+            .max_capture_attempts(2u32)
+            .build()
+            .unwrap();
+        let confirmed = CaptureEvent::from_event(&Event::new("confirmed", "user"));
+        let missing = CaptureEvent::from_event(&Event::new("missing", "user"));
+        let partial = serde_json::json!({"results": {
+            (confirmed.uuid.to_string()): {"result": "ok"}
+        }})
+        .to_string();
+        for (retention, attempt, malformed, missing_kept) in [
+            // Server delivery trusts any 2xx, as it shipped.
+            (RetryRetention::Discard, 1, "fail", false),
+            // Memory-only stateful delivery retries until its attempts run out.
+            (RetryRetention::Bounded, 1, "backoff", true),
+            (RetryRetention::Bounded, 2, "fail", true),
+            // Disk-backed delivery keeps retrying.
+            (RetryRetention::Retain, 2, "backoff", true),
+        ] {
+            let mut pending = vec![DeliveryEvent::from(missing.clone())];
+            let step = after_response_with_retention(
+                &opts,
+                &Uuid::now_v7(),
+                attempt,
+                200,
+                None,
+                "<html>proxy</html>",
+                &mut pending,
+                &mut HashMap::new(),
+                retention,
+            );
+            let outcome = match step {
+                Step::Backoff(_) => "backoff",
+                Step::Fail(_) => "fail",
+                Step::Done => "done",
+            };
+            assert_eq!(outcome, malformed, "malformed body, attempt {attempt}");
+            assert_eq!(pending.len(), 1);
+
+            let mut pending = vec![
+                DeliveryEvent::from(confirmed.clone()),
+                DeliveryEvent::from(missing.clone()),
+            ];
+            let mut results = HashMap::new();
+            after_response_with_retention(
+                &opts,
+                &Uuid::now_v7(),
+                attempt,
+                200,
+                None,
+                &partial,
+                &mut pending,
+                &mut results,
+                retention,
+            );
+            assert!(results.contains_key(&confirmed.uuid));
+            assert_eq!(
+                pending
+                    .iter()
+                    .any(|event| event.as_ref().uuid == missing.uuid),
+                missing_kept,
+                "missing result, attempt {attempt}"
+            );
+        }
+    }
+
+    #[cfg(feature = "stateful")]
+    #[test]
     fn durable_retention_keeps_transient_failures_but_not_terminal_protocol_errors() {
         use super::super::capture::{
             after_response_with_retention, after_transport_error_with_retention, RetryRetention,
@@ -2338,7 +2459,9 @@ mod tests {
             (400, "bad input", false),
             (401, "invalid key", false),
             (413, "oversize", false),
-            (200, "malformed JSON", false),
+            // A 2xx that capture did not produce cannot confirm delivery.
+            (200, "malformed JSON", true),
+            (200, "{\"results\":{}}", true),
         ] {
             let mut entry =
                 DeliveryEvent::from(CaptureEvent::from_event(&Event::new("event", "user")));

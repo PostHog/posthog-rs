@@ -445,18 +445,37 @@ pub(crate) fn process_batch_response<T: AsRef<CaptureEvent> + AsMut<CaptureEvent
 // Sans-IO control flow
 // ---------------------------------------------------------------------------
 
-/// Active-attempt exhaustion is terminal for server delivery, but not for a
-/// bounded durable queue. The worker owns when a retained sequence resumes.
+/// How a delivery sequence treats retries. The worker owns when a retained
+/// sequence resumes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RetryRetention {
+    /// Server delivery: attempts end at `max_capture_attempts`, and any 2xx ends
+    /// the request.
     Discard,
+    /// Memory-only stateful delivery: attempts end at `max_capture_attempts`,
+    /// but a 2xx that does not confirm every event is retried.
+    #[cfg(feature = "stateful")]
+    Bounded,
+    /// Disk-backed stateful delivery: running out of attempts is not final, and
+    /// a 2xx that does not confirm every event is retried.
     #[cfg(feature = "stateful")]
     Retain,
 }
 
 impl RetryRetention {
     fn is_final(self, opts: &ClientOptions, attempt: u32) -> bool {
-        self == Self::Discard && attempt >= opts.max_capture_attempts
+        #[cfg(feature = "stateful")]
+        if self == Self::Retain {
+            return false;
+        }
+        attempt >= opts.max_capture_attempts
+    }
+
+    /// A stateful queue never treats a 2xx as delivery unless capture
+    /// confirmed each event: something other than capture, such as a proxy,
+    /// may have answered.
+    pub(crate) fn retries_unconfirmed_success(self) -> bool {
+        self != Self::Discard
     }
 }
 
@@ -533,8 +552,12 @@ pub(crate) fn after_response_with_retention<T: AsRef<CaptureEvent> + AsMut<Captu
     // The backend sends exactly 200 today; accept the whole 2xx class so a
     // future 201/202 isn't misclassified as a connection error.
     if (200..=299).contains(&status) {
+        let is_final = retention.is_final(opts, attempt);
         let batch_resp: CaptureResponse = match serde_json::from_str(body) {
             Ok(r) => r,
+            Err(_) if retention.retries_unconfirmed_success() && !is_final => {
+                return Step::Backoff(capture_backoff_duration(opts, attempt, retry_after));
+            }
             Err(e) => return Step::Fail(Error::Serialization(e.to_string())),
         };
 
@@ -548,13 +571,20 @@ pub(crate) fn after_response_with_retention<T: AsRef<CaptureEvent> + AsMut<Captu
             );
         }
 
-        let is_final = retention.is_final(opts, attempt);
-        let next = process_batch_response(
-            std::mem::take(pending),
-            &batch_resp.results,
-            final_results,
-            is_final,
-        );
+        let mut unconfirmed = Vec::new();
+        let mut confirmed = std::mem::take(pending);
+        if retention.retries_unconfirmed_success() {
+            // Keep events capture did not report on; at the final attempt they
+            // remain pending and are reported as not persisted.
+            let (present, missing) = confirmed
+                .into_iter()
+                .partition(|event| batch_resp.results.contains_key(&event.as_ref().uuid));
+            confirmed = present;
+            unconfirmed = missing;
+        }
+        let mut next =
+            process_batch_response(confirmed, &batch_resp.results, final_results, is_final);
+        next.append(&mut unconfirmed);
         *pending = next;
 
         if pending.is_empty() || is_final {
