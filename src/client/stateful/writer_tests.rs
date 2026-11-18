@@ -158,7 +158,6 @@ fn flag_http_uses_shared_worker_without_blocking_state_mutation_or_admission() {
                     .then(|| value.trim().parse().unwrap())
             })
             .unwrap();
-        assert!(length <= crate::client::transport::flags::MAX_REQUEST_BYTES);
         stream.read_exact(&mut vec![0; length]).unwrap();
         entered_tx.send(()).unwrap();
         release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -192,15 +191,15 @@ fn flag_http_uses_shared_worker_without_blocking_state_mutation_or_admission() {
     .unwrap();
     let access = writer.access();
     let (complete_tx, complete_rx) = mpsc::channel();
-    assert!(transport.schedule_flags(
-        Task::new(&json!({"distinct_id":"initial"}), move |result| {
+    assert!(transport.schedule_flags(Task::new(
+        &json!({"distinct_id":"initial"}),
+        move |result| {
             assert!(result.is_ok());
             // A completion uses the original validated lock, not a new state owner.
             let result = access.mutate(|state| state.distinct_id.clone());
             complete_tx.send(result).unwrap();
-        })
-        .unwrap()
-    ));
+        }
+    )));
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     let updated = writer.mutate(|state| state.distinct_id = "while-http-blocked".into());
     let mut event =

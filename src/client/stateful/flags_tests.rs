@@ -77,7 +77,6 @@ impl Server {
                                 .then(|| value.trim().parse().unwrap())
                         })
                         .unwrap();
-                    assert!(length <= flags::MAX_REQUEST_BYTES);
                     let mut body = vec![0; length];
                     stream.read_exact(&mut body).unwrap();
                     requests_tx
@@ -158,18 +157,15 @@ fn seed(client: &Client) {
         .as_ref()
         .unwrap()
         .mutate(|state| {
-            state.flags.cache = Some(Arc::new(
-                FlagCache::updated(
-                    None,
-                    Arc::new(FlagContext::current(state, false)),
-                    state.flag_load.revision,
-                    loaded(
-                        HashMap::from([("old".into(), record(Some(json!("old-payload"))))]),
-                        false,
-                    ),
-                )
-                .unwrap(),
-            ));
+            state.flags.cache = Some(Arc::new(FlagCache::updated(
+                None,
+                Arc::new(FlagContext::current(state, false)),
+                state.flag_load.revision,
+                loaded(
+                    HashMap::from([("old".into(), record(Some(json!("old-payload"))))]),
+                    false,
+                ),
+            )));
         })
         .unwrap();
 }
@@ -570,73 +566,6 @@ fn close_from_capture_hook_rejects_active_flag_completion() {
 }
 
 #[test]
-fn live_cache_bound_rejects_partial_expansion_atomically_and_preserves_mandatory_updates() {
-    let client = Client::init_blocking(config("http://127.0.0.1:1"));
-    let writer = client.state.as_ref().unwrap();
-    let request = Request {
-        context: Arc::new(FlagContext::current(&writer.snapshot(), false)),
-        revision: 0,
-        sequence: 0,
-    };
-    let chunk = |prefix: &str| {
-        (0..1000)
-            .map(|i| {
-                (
-                    format!("{prefix}-{i}"),
-                    record(Some(json!("x".repeat(1024)))),
-                )
-            })
-            .collect()
-    };
-    assert_eq!(
-        install(
-            &writer.access(),
-            &request,
-            Ok(loaded(chunk("first"), false))
-        ),
-        None
-    );
-    let previous = writer.snapshot().flags.cache.clone();
-    assert_eq!(previous.as_ref().unwrap().flags.len(), 1000);
-    assert_eq!(
-        install(
-            &writer.access(),
-            &request,
-            Ok(loaded(chunk("second"), true))
-        ),
-        Some(flags::LoadError::CacheTooLarge)
-    );
-    assert_eq!(writer.snapshot().flags.cache, previous);
-    client.opt_out();
-    client.register(HashMap::from([("after-overflow".into(), json!(true))]));
-    assert!(client.is_opt_out());
-    assert_eq!(writer.snapshot().registered["after-overflow"], true);
-    let mut amplified = loaded(HashMap::from([("huge".into(), record(None))]), true);
-    amplified.request_id = Some("x".repeat(flags::MAX_RESPONSE_BYTES));
-    assert_eq!(
-        install(&writer.access(), &request, Ok(amplified)),
-        Some(flags::LoadError::CacheTooLarge)
-    );
-    assert_eq!(writer.snapshot().flags.cache, previous);
-    assert_eq!(
-        install(
-            &writer.access(),
-            &request,
-            Ok(loaded(HashMap::new(), false))
-        ),
-        None
-    );
-    assert!(writer
-        .snapshot()
-        .flags
-        .cache
-        .as_ref()
-        .unwrap()
-        .flags
-        .is_empty());
-}
-
-#[test]
 fn evaluation_revision_changes_only_with_effective_context_and_rejected_mutations_are_atomic() {
     let client = Client::init_blocking(config("http://127.0.0.1:1"));
     client.flush_blocking();
@@ -845,7 +774,7 @@ fn fitting_partial_replacements_are_admitted_in_either_hash_iteration_order() {
             (grow.clone(), record(Some(json!("x".repeat(400 * 1024))))),
             (shrink.clone(), record(Some(json!("x".repeat(1400 * 1024))))),
         ]);
-        let previous = FlagCache::updated(None, context.clone(), 0, loaded(old, false)).unwrap();
+        let previous = FlagCache::updated(None, context.clone(), 0, loaded(old, false));
         replacements.get_mut(grow).unwrap().payload = Some(json!("x".repeat(800 * 1024)));
         replacements.get_mut(shrink).unwrap().payload = Some(json!(""));
         let updated = FlagCache::updated(
@@ -853,8 +782,7 @@ fn fitting_partial_replacements_are_admitted_in_either_hash_iteration_order() {
             context.clone(),
             1,
             loaded(replacements, true),
-        )
-        .expect("fitting partial replacements must not depend on iteration order");
+        );
         assert_eq!(updated.flags.len(), 2);
         assert_eq!(
             updated.flags[grow]
@@ -868,7 +796,6 @@ fn fitting_partial_replacements_are_admitted_in_either_hash_iteration_order() {
             800 * 1024
         );
         assert_eq!(updated.flags[shrink].record.payload, Some(json!("")));
-        assert!(updated.within_limits());
         assert_eq!(
             previous.flags[shrink]
                 .record

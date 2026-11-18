@@ -8,12 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::Snapshot;
-use crate::client::event_store::RecordBuffer;
-use crate::client::transport::flags::{LoadError, LoadedFlags, MAX_FLAGS};
+use crate::client::transport::flags::{LoadError, LoadedFlags};
 use crate::feature_flag_evaluations::EvaluatedFlagRecord;
-
-/// Serialized cache data, including producing contexts; not allocator/RSS usage.
-pub(super) const MAX_CACHE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct FlagLoadState {
@@ -50,6 +46,8 @@ impl FlagState {
         self.group_properties
             .keys()
             .all(|key| !key.trim().is_empty())
+            && super::within_depth(self.person_properties.values())
+            && super::within_depth(self.group_properties.values().flat_map(HashMap::values))
     }
 }
 
@@ -78,7 +76,7 @@ impl FlagContext {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct FlagCache {
     pub(super) context: FlagContext,
     pub(super) flags: HashMap<String, CachedFlag>,
@@ -86,9 +84,8 @@ pub(super) struct FlagCache {
 
 /// Reporting metadata belongs to each retained record: a partial response cannot
 /// relabel older records with the new response's request ID or minimization gate.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CachedFlag {
-    #[serde(with = "shared_context")]
     pub(super) context: Arc<FlagContext>,
     pub(super) revision: u64,
     pub(super) partial: bool,
@@ -97,20 +94,112 @@ pub(super) struct CachedFlag {
     pub(super) evaluated_at: Option<i64>,
 }
 
-// Share a response's context in memory without changing the default/server serde
-// feature graph. On disk each record remains self-contained.
-mod shared_context {
-    use super::*;
-    pub(super) fn serialize<S: serde::Serializer>(
-        context: &Arc<FlagContext>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        context.as_ref().serialize(serializer)
+// On disk each distinct evaluation context is written once. `contexts[0]` is
+// the cache's own context; every flag refers to its producing context by index.
+#[derive(Serialize)]
+struct StoredCacheRef<'a> {
+    contexts: Vec<&'a FlagContext>,
+    flags: HashMap<&'a str, StoredFlagRef<'a>>,
+}
+
+#[derive(Serialize)]
+struct StoredFlagRef<'a> {
+    context: usize,
+    revision: u64,
+    partial: bool,
+    record: &'a EvaluatedFlagRecord,
+    request_id: &'a Option<String>,
+    evaluated_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct StoredCache {
+    contexts: Vec<FlagContext>,
+    flags: HashMap<String, StoredFlag>,
+}
+
+#[derive(Deserialize)]
+struct StoredFlag {
+    context: usize,
+    revision: u64,
+    partial: bool,
+    record: EvaluatedFlagRecord,
+    request_id: Option<String>,
+    evaluated_at: Option<i64>,
+}
+
+impl Serialize for FlagCache {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut contexts = vec![&self.context];
+        // Flags from one response share an Arc, so each distinct context is
+        // compared by value at most once.
+        let mut seen: Vec<(*const FlagContext, usize)> = Vec::new();
+        let flags = self
+            .flags
+            .iter()
+            .map(|(key, flag)| {
+                let pointer = Arc::as_ptr(&flag.context);
+                let index = match seen.iter().find(|(seen, _)| *seen == pointer) {
+                    Some((_, index)) => *index,
+                    None => {
+                        let index = contexts
+                            .iter()
+                            .position(|context| **context == *flag.context)
+                            .unwrap_or_else(|| {
+                                contexts.push(&flag.context);
+                                contexts.len() - 1
+                            });
+                        seen.push((pointer, index));
+                        index
+                    }
+                };
+                (
+                    key.as_str(),
+                    StoredFlagRef {
+                        context: index,
+                        revision: flag.revision,
+                        partial: flag.partial,
+                        record: &flag.record,
+                        request_id: &flag.request_id,
+                        evaluated_at: flag.evaluated_at,
+                    },
+                )
+            })
+            .collect();
+        StoredCacheRef { contexts, flags }.serialize(serializer)
     }
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Arc<FlagContext>, D::Error> {
-        FlagContext::deserialize(deserializer).map(Arc::new)
+}
+
+impl<'de> Deserialize<'de> for FlagCache {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stored = StoredCache::deserialize(deserializer)?;
+        let contexts: Vec<Arc<FlagContext>> = stored.contexts.into_iter().map(Arc::new).collect();
+        let context = contexts
+            .first()
+            .map(|context| (**context).clone())
+            .ok_or_else(|| serde::de::Error::custom("missing flag cache context"))?;
+        let flags = stored
+            .flags
+            .into_iter()
+            .map(|(key, flag)| {
+                let context = contexts
+                    .get(flag.context)
+                    .cloned()
+                    .ok_or_else(|| serde::de::Error::custom("unknown flag context"))?;
+                Ok((
+                    key,
+                    CachedFlag {
+                        context,
+                        revision: flag.revision,
+                        partial: flag.partial,
+                        record: flag.record,
+                        request_id: flag.request_id,
+                        evaluated_at: flag.evaluated_at,
+                    },
+                ))
+            })
+            .collect::<Result<_, D::Error>>()?;
+        Ok(Self { context, flags })
     }
 }
 
@@ -132,24 +221,12 @@ mod shared_cache {
 }
 
 impl FlagCache {
-    pub(super) fn within_limits(&self) -> bool {
-        self.flags.len() <= MAX_FLAGS
-            && serde_json::to_writer(
-                &mut RecordBuffer {
-                    bytes: Vec::new(),
-                    limit: MAX_CACHE_BYTES as u64,
-                },
-                self,
-            )
-            .is_ok()
-    }
-
     pub(super) fn updated(
         previous: Option<&Self>,
         context: Arc<FlagContext>,
         revision: u64,
         loaded: LoadedFlags,
-    ) -> Result<Self, LoadError> {
+    ) -> Self {
         let mut flags = if loaded.partial {
             previous
                 .map(|cache| cache.flags.clone())
@@ -157,47 +234,22 @@ impl FlagCache {
         } else {
             HashMap::new()
         };
-        // Remove every recomputed entry before accounting. A growing replacement
-        // must not be charged alongside a shrinking entry it will also replace.
-        flags.retain(|key, _| !loaded.records.contains_key(key));
-        // Stop while assembling, not only after it: a response-level request ID
-        // can otherwise expand into an unbounded number of owned per-key copies.
-        let entry_size = |key: &str, flag: &CachedFlag| {
-            let mut buffer = RecordBuffer {
-                bytes: Vec::new(),
-                limit: MAX_CACHE_BYTES as u64,
-            };
-            serde_json::to_writer(&mut buffer, &(key, flag))
-                .map(|_| buffer.bytes.len() - 2)
-                .map_err(|_| LoadError::CacheTooLarge)
-        };
-        let mut bytes = 0usize;
-        for (key, flag) in &flags {
-            bytes += entry_size(key, flag)?;
-        }
         for (key, record) in loaded.records {
-            let flag = CachedFlag {
-                context: context.clone(),
-                revision,
-                partial: loaded.partial,
-                record,
-                request_id: loaded.request_id.clone(),
-                evaluated_at: loaded.evaluated_at,
-            };
-            bytes += entry_size(&key, &flag)?;
-            if bytes > MAX_CACHE_BYTES || flags.len() >= MAX_FLAGS {
-                return Err(LoadError::CacheTooLarge);
-            }
-            flags.insert(key, flag);
+            flags.insert(
+                key,
+                CachedFlag {
+                    context: context.clone(),
+                    revision,
+                    partial: loaded.partial,
+                    record,
+                    request_id: loaded.request_id.clone(),
+                    evaluated_at: loaded.evaluated_at,
+                },
+            );
         }
-        let cache = Self {
+        Self {
             context: (*context).clone(),
             flags,
-        };
-        if cache.within_limits() {
-            Ok(cache)
-        } else {
-            Err(LoadError::CacheTooLarge)
         }
     }
 }
@@ -233,7 +285,7 @@ impl Snapshot {
         let Some(cache) = self.flags.cache.as_mut() else {
             return false;
         };
-        if cache.context != context || !cache.within_limits() {
+        if cache.context != context {
             self.flags.cache = None;
             return true;
         }

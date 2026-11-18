@@ -282,7 +282,7 @@ impl FileStateStore {
         {
             normalize_optional::<super::flag_state::FlagCache>(
                 cache,
-                |cache| cache.within_limits(),
+                |_| true,
                 &mut rewrite_required,
             );
         }

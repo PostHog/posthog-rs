@@ -88,8 +88,14 @@ fn writer_mutations_share_unchanged_flag_cache() {
 #[test]
 fn reconciling_shared_cache_preserves_retained_snapshots() {
     let mut encoded = serde_json::to_value(with_cache(Some(json!({"nested": null})))).unwrap();
-    encoded["flags"]["cache"]["flags"]["checkout"]["context"]["person_properties"]["plan"] =
-        json!("previous-plan");
+    // Give the flag its own, older context.
+    let mut previous = encoded["flags"]["cache"]["contexts"][0].clone();
+    previous["person_properties"]["plan"] = json!("previous-plan");
+    encoded["flags"]["cache"]["contexts"]
+        .as_array_mut()
+        .unwrap()
+        .push(previous);
+    encoded["flags"]["cache"]["flags"]["checkout"]["context"] = json!(1);
     let before: Snapshot = serde_json::from_value(encoded.clone()).unwrap();
     let mut restored = before.clone();
     assert!(restored.reconcile_flag_cache(false));
@@ -431,4 +437,63 @@ fn cache_restore_requires_exact_evaluation_context_but_ignores_analytics_and_con
         assert!(changed.flags.cache.is_none());
         assert!(!changed.reconcile_flag_cache(index == 5));
     }
+}
+
+#[test]
+fn large_flag_sets_persist_each_context_once() {
+    let mut snapshot = Snapshot::anonymous("device".into());
+    snapshot
+        .flags
+        .person_properties
+        .insert("bio".into(), json!("x".repeat(4096)));
+    let context = Arc::new(FlagContext::current(&snapshot, false));
+    let records = (0..5_000)
+        .map(|i| {
+            (
+                format!("flag-{i}"),
+                EvaluatedFlagRecord {
+                    enabled: true,
+                    variant: None,
+                    payload: Some(json!({"index": i})),
+                    id: None,
+                    version: None,
+                    reason: None,
+                    locally_evaluated: false,
+                    has_experiment: None,
+                    minimal_flag_called_events: false,
+                },
+            )
+        })
+        .collect();
+    snapshot.flags.cache = Some(Arc::new(FlagCache::updated(
+        None,
+        context,
+        0,
+        crate::client::transport::flags::LoadedFlags {
+            records,
+            request_id: None,
+            evaluated_at: None,
+            partial: false,
+            invalid_payloads: false,
+        },
+    )));
+    let bytes = encode_snapshot(&snapshot).unwrap();
+    let encoded: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        encoded["state"]["flags"]["cache"]["contexts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // Without sharing, the 4 KiB person property alone would add about 20 MiB.
+    assert!(bytes.len() < 4 * 1024 * 1024, "{}", bytes.len());
+    let restored = FileStateStore::decode(&bytes).unwrap();
+    let cache = restored.flags.cache.as_ref().unwrap();
+    assert_eq!(cache.flags.len(), 5_000);
+    assert!(Arc::ptr_eq(
+        &cache.flags["flag-0"].context,
+        &cache.flags["flag-4999"].context
+    ));
+    assert_eq!(restored, snapshot);
 }

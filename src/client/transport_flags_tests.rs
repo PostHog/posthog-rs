@@ -185,27 +185,30 @@ fn decoder_validates_envelope_and_failed_markers_before_filtering() {
             Err(LoadError::InvalidResponse)
         ));
     }
-    let flags: HashMap<_, _> = (0..MAX_FLAGS + 1)
-        .map(|i| (format!("failed{i}"), json!({"failed":true})))
-        .collect();
-    assert!(matches!(
-        decode(&serde_json::to_vec(&json!({"flags":flags})).unwrap()),
-        Err(LoadError::TooManyFlags)
-    ));
     let failed_only = decode(br#"{"flags":{"failed":{"failed":true}}}"#).unwrap();
     assert!(!failed_only.partial);
     assert!(failed_only.records.is_empty());
 }
 
 #[test]
-fn decoder_bounds_and_failure_classification() {
+fn decoder_accepts_large_flag_sets() {
+    let flags: HashMap<_, _> = (0..20_000)
+        .map(|i| {
+            (
+                format!("key{i}"),
+                json!({"key": format!("key{i}"), "enabled": true}),
+            )
+        })
+        .collect();
+    let loaded = decode(&serde_json::to_vec(&json!({"flags": flags})).unwrap()).unwrap();
+    assert_eq!(loaded.records.len(), 20_000);
+}
+
+#[test]
+fn decoder_failure_classification() {
     for bytes in [b"{}".as_slice(), b"not json", b"{\"flags\":false}"] {
         assert!(matches!(decode(bytes), Err(LoadError::InvalidResponse)));
     }
-    assert!(matches!(
-        decode(&vec![b' '; MAX_RESPONSE_BYTES + 1]),
-        Err(LoadError::ResponseTooLarge)
-    ));
     assert!(matches!(
         decode(br#"{"flags":{},"quotaLimited":true}"#),
         Err(LoadError::QuotaLimited)
@@ -226,17 +229,6 @@ fn decoder_bounds_and_failure_classification() {
         .unwrap()
         .records
         .is_empty());
-    let many: HashMap<_, _> = (0..MAX_FLAGS + 1)
-        .map(|n| (format!("key{n}"), false))
-        .collect();
-    assert!(matches!(
-        decode(&serde_json::to_vec(&json!({"featureFlags":many})).unwrap()),
-        Err(LoadError::TooManyFlags)
-    ));
-    assert!(matches!(
-        Task::new(&json!({"large":"x".repeat(MAX_REQUEST_BYTES)}), |_| {}),
-        Err(LoadError::RequestTooLarge)
-    ));
     assert!(decode(br#"{"flags":{}}"#).unwrap().records.is_empty());
 }
 
@@ -247,7 +239,7 @@ fn pending_slot_uses_one_token_and_retains_only_latest_task() {
     let (tx, rx) = mpsc::channel();
     for id in 0..1000 {
         assert!(slot.enqueue(
-            Task::new(&json!({"distinct_id":id.to_string()}), |_| {}).unwrap(),
+            Task::new(&json!({"distinct_id":id.to_string()}), |_| {}),
             &tx,
             &closed
         ));
@@ -260,7 +252,7 @@ fn pending_slot_uses_one_token_and_retains_only_latest_task() {
     );
     drop(pending);
     slot.close();
-    assert!(!slot.enqueue(Task::new(&json!({}), |_| {}).unwrap(), &tx, &closed));
+    assert!(!slot.enqueue(Task::new(&json!({}), |_| {}), &tx, &closed));
     // Closure marks the slot; the request worker owns pending destruction.
     assert!(slot.0.lock().unwrap().task.is_some());
     slot.discard();
@@ -273,7 +265,7 @@ fn failed_wake_send_releases_pending_task() {
     let closed = AtomicBool::new(false);
     let (tx, rx) = mpsc::channel();
     drop(rx);
-    assert!(!slot.enqueue(Task::new(&json!({}), |_| {}).unwrap(), &tx, &closed));
+    assert!(!slot.enqueue(Task::new(&json!({}), |_| {}), &tx, &closed));
     let pending = slot.0.lock().unwrap();
     assert!(pending.closed);
     assert!(!pending.queued);
@@ -305,8 +297,8 @@ fn request_worker_coalesces_while_busy_and_keeps_event_admission_independent() {
         TransportHandle::spawn_stateful(options(server.base_url()), None, 1024 * 1024).unwrap();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    assert!(handle.schedule_flags(
-        Task::new(&json!({"distinct_id":"first"}), move |result| {
+    assert!(
+        handle.schedule_flags(Task::new(&json!({"distinct_id":"first"}), move |result| {
             assert!(result.is_ok());
             entered_tx
                 .send((
@@ -315,9 +307,8 @@ fn request_worker_coalesces_while_busy_and_keeps_event_admission_independent() {
                 ))
                 .unwrap();
             release_rx.recv_timeout(WAIT).unwrap();
-        })
-        .unwrap()
-    ));
+        }))
+    );
     let (callback_thread, callback_name) = entered_rx.recv_timeout(WAIT).unwrap();
     assert_eq!(callback_name, "posthog-requests");
     assert_ne!(Some(callback_thread), handle.worker_id);
@@ -329,12 +320,11 @@ fn request_worker_coalesces_while_busy_and_keeps_event_admission_independent() {
         } else {
             format!("discarded-{n}")
         };
-        assert!(handle.schedule_flags(
-            Task::new(&json!({"distinct_id":id}), move |result| {
+        assert!(
+            handle.schedule_flags(Task::new(&json!({"distinct_id":id}), move |result| {
                 done_tx.send((n, result.is_ok())).unwrap();
-            })
-            .unwrap()
-        ));
+            }))
+        );
     }
     assert_eq!(
         handle.enqueue_prepared(wire("while-flags-busy")),
@@ -364,25 +354,19 @@ fn close_discards_pending_but_allows_active_completion_and_reentrant_shutdown() 
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
-    assert!(handle.schedule_flags(
-        Task::new(&json!({}), move |_| {
-            entered_tx.send(()).unwrap();
-            release_rx.recv_timeout(WAIT).unwrap();
-            weak.upgrade().unwrap().shutdown_blocking();
-            done_tx.send(()).unwrap();
-        })
-        .unwrap()
-    ));
+    assert!(handle.schedule_flags(Task::new(&json!({}), move |_| {
+        entered_tx.send(()).unwrap();
+        release_rx.recv_timeout(WAIT).unwrap();
+        weak.upgrade().unwrap().shutdown_blocking();
+        done_tx.send(()).unwrap();
+    })));
     entered_rx.recv_timeout(WAIT).unwrap();
     let (pending_tx, pending_rx) = mpsc::channel();
-    assert!(handle.schedule_flags(
-        Task::new(&json!({}), move |_| {
-            let _ = pending_tx.send(());
-        })
-        .unwrap()
-    ));
+    assert!(handle.schedule_flags(Task::new(&json!({}), move |_| {
+        let _ = pending_tx.send(());
+    })));
     handle.begin_close();
-    assert!(!handle.schedule_flags(Task::new(&json!({}), |_| {}).unwrap()));
+    assert!(!handle.schedule_flags(Task::new(&json!({}), |_| {})));
     release_tx.send(()).unwrap();
     done_rx.recv_timeout(WAIT).unwrap();
     // begin_close is the split lifecycle primitive; explicitly send its control.
@@ -405,21 +389,19 @@ fn callback_panic_does_not_stop_worker_and_server_lane_has_no_flag_slot() {
         then.status(200).json_body(json!({"flags":{}}));
     });
     let handle = TransportHandle::spawn_stateful(options(server.base_url()), None, 4096).unwrap();
-    assert!(handle
-        .schedule_flags(Task::new(&json!({}), |_| panic!("controlled completion panic")).unwrap()));
+    assert!(handle.schedule_flags(Task::new(&json!({}), |_| panic!(
+        "controlled completion panic"
+    ))));
     handle.request_barrier();
     let (tx, rx) = mpsc::channel();
-    assert!(handle.schedule_flags(
-        Task::new(&json!({}), move |result| {
-            tx.send(result.is_ok()).unwrap();
-        })
-        .unwrap()
-    ));
+    assert!(handle.schedule_flags(Task::new(&json!({}), move |result| {
+        tx.send(result.is_ok()).unwrap();
+    })));
     assert!(rx.recv_timeout(WAIT).unwrap());
     handle.shutdown_blocking();
     flags.assert_calls(2);
     let server_lane = TransportHandle::spawn(options(server.base_url()));
-    assert!(!server_lane.schedule_flags(Task::new(&json!({}), |_| {}).unwrap()));
+    assert!(!server_lane.schedule_flags(Task::new(&json!({}), |_| {})));
     server_lane.shutdown_blocking();
 }
 
@@ -445,12 +427,9 @@ fn request_wire_is_exact_and_diagnostics_omit_response_bodies() {
         }));
     let handle = TransportHandle::spawn_stateful(settings, None, 4096).unwrap();
     let (tx, rx) = mpsc::channel();
-    assert!(handle.schedule_flags(
-        Task::new(&payload, move |result| {
-            tx.send(result.err()).unwrap();
-        })
-        .unwrap()
-    ));
+    assert!(handle.schedule_flags(Task::new(&payload, move |result| {
+        tx.send(result.err()).unwrap();
+    })));
     assert_eq!(rx.recv_timeout(WAIT).unwrap(), Some(LoadError::Http(503)));
     let diagnostic = errors_rx.recv_timeout(WAIT).unwrap();
     assert!(!diagnostic.contains("private server response"));
@@ -474,12 +453,9 @@ fn flags_retry_policy_reuses_existing_status_rules_and_same_request_body() {
         settings.feature_flags_request_max_retries = 1;
         let handle = TransportHandle::spawn_stateful(settings, None, 4096).unwrap();
         let (tx, rx) = mpsc::channel();
-        assert!(handle.schedule_flags(
-            Task::new(&payload, move |result| {
-                tx.send(result.err()).unwrap();
-            })
-            .unwrap()
-        ));
+        assert!(handle.schedule_flags(Task::new(&payload, move |result| {
+            tx.send(result.err()).unwrap();
+        })));
         assert_eq!(
             rx.recv_timeout(WAIT).unwrap(),
             Some(LoadError::Http(status))
@@ -487,27 +463,4 @@ fn flags_retry_policy_reuses_existing_status_rules_and_same_request_body() {
         handle.shutdown_blocking();
         flags.assert_calls(attempts);
     }
-}
-
-#[test]
-fn response_stream_has_a_byte_limit() {
-    let server = MockServer::start();
-    let flags = server.mock(|when, then| {
-        when.method(POST).path("/flags/");
-        then.status(200).body(" ".repeat(MAX_RESPONSE_BYTES + 1));
-    });
-    let handle = TransportHandle::spawn_stateful(options(server.base_url()), None, 4096).unwrap();
-    let (tx, rx) = mpsc::channel();
-    assert!(handle.schedule_flags(
-        Task::new(&json!({}), move |result| {
-            tx.send(result.err()).unwrap();
-        })
-        .unwrap()
-    ));
-    assert_eq!(
-        rx.recv_timeout(WAIT).unwrap(),
-        Some(LoadError::ResponseTooLarge)
-    );
-    handle.shutdown_blocking();
-    flags.assert_calls(1);
 }

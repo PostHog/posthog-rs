@@ -57,7 +57,6 @@ pub struct Config {
     /// Optional initial flags snapshot, replacing restored values before preload.
     /// Only true and nonempty variants are served. None preserves restored values;
     /// Some(empty) installs an empty snapshot. Reset does not reapply this seed.
-    /// Oversized snapshots are ignored and reported through `on_error`.
     pub bootstrap_feature_flags: Option<HashMap<String, crate::FlagValue>>,
     /// Already-decoded JSON payloads for enabled bootstrap flags only. Strings
     /// are not parsed again; JSON null is a present payload. Ignored without flags.

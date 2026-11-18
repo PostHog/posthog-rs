@@ -3,11 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::flag_state::{FlagCache, FlagContext, MAX_CACHE_BYTES};
+use super::flag_state::{FlagCache, FlagContext};
 use super::{Client, Config};
-use crate::client::event_store::RecordBuffer;
-use crate::client::transport::flags::{self, LoadError, LoadedFlags, MAX_FLAGS};
-use crate::endpoints::Endpoint;
+use crate::client::transport::flags::LoadedFlags;
 use crate::feature_flag_evaluations::EvaluatedFlagRecord;
 use crate::FlagValue;
 
@@ -16,27 +14,17 @@ impl Client {
         let Some(values) = &config.bootstrap_feature_flags else {
             return;
         };
-        let result = self.state.as_ref().unwrap().mutate(|state| {
+        let _ = self.state.as_ref().unwrap().mutate(|state| {
             let context = Arc::new(FlagContext::current(state, config.disable_geoip));
             let cache = Arc::new(bootstrap_cache(
                 config,
                 values,
                 context,
                 state.flag_load.revision,
-            )?);
+            ));
             state.flag_load.bootstrap = Some(cache.clone());
             state.flags.cache = Some(cache);
-            Ok::<_, LoadError>(())
         });
-        if let Ok((_, Err(error))) = result {
-            let options = config.transport_options();
-            flags::report(
-                &options,
-                &options.endpoints().build_url(Endpoint::Flags),
-                Some(&self.get_distinct_id()),
-                error,
-            );
-        }
     }
 }
 
@@ -45,14 +33,9 @@ fn bootstrap_cache(
     values: &HashMap<String, FlagValue>,
     context: Arc<FlagContext>,
     revision: u64,
-) -> Result<FlagCache, LoadError> {
+) -> FlagCache {
     let mut records = HashMap::new();
-    // Bound selected input before cloning it. Unserved/orphan payloads are
-    // ignored. The ordinary cache assembler also bounds normalized metadata.
-    let mut buffer = RecordBuffer {
-        bytes: Vec::new(),
-        limit: MAX_CACHE_BYTES as u64,
-    };
+    // Unserved/orphan payloads are ignored.
     for (key, value) in values {
         match value {
             FlagValue::Boolean(false) => continue,
@@ -63,11 +46,6 @@ fn bootstrap_cache(
             .bootstrap_feature_flag_payloads
             .as_ref()
             .and_then(|payloads| payloads.get(key));
-        if records.len() >= MAX_FLAGS
-            || serde_json::to_writer(&mut buffer, &(key, value, payload)).is_err()
-        {
-            return Err(LoadError::CacheTooLarge);
-        }
         records.insert(
             key.clone(),
             EvaluatedFlagRecord {

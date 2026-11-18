@@ -469,13 +469,11 @@ const FINAL_V1: &str = r#"{
       "person_properties":{"plan":"pro"},
       "group_properties":{"company":{"tier":2}},
       "cache":{
-        "context":{"distinct_id":"person","anonymous_id":"anonymous","device_id":"device",
+        "contexts":[{"distinct_id":"person","anonymous_id":"anonymous","device_id":"device",
           "groups":{"company":"a"},"person_properties":{"plan":"pro"},
-          "group_properties":{"company":{"tier":2}},"disable_geoip":false},
+          "group_properties":{"company":{"tier":2}},"disable_geoip":false}],
         "flags":{"checkout":{
-          "context":{"distinct_id":"person","anonymous_id":"anonymous","device_id":"device",
-            "groups":{"company":"a"},"person_properties":{"plan":"pro"},
-            "group_properties":{"company":{"tier":2}},"disable_geoip":false},
+          "context":0,
           "revision":0,"partial":false,"request_id":"request","evaluated_at":123,
           "record":{"enabled":true,"variant":"blue","payload":[null],"id":1,"version":3,
             "reason":"Matched","locally_evaluated":false,"has_experiment":false,
@@ -526,9 +524,8 @@ fn additive_unknown_fields_are_tolerated_at_each_persisted_depth() {
         "/state",
         "/state/flags",
         "/state/flags/cache",
-        "/state/flags/cache/context",
+        "/state/flags/cache/contexts/0",
         "/state/flags/cache/flags/checkout",
-        "/state/flags/cache/flags/checkout/context",
         "/state/flags/cache/flags/checkout/record",
         "/state/session",
     ] {
@@ -560,8 +557,12 @@ fn optional_sections_recover_independently_without_losing_targeting_or_consent()
             serde_json::json!([1, 2]),
         ),
         (
-            "/state/flags/cache/context/device_id",
+            "/state/flags/cache/contexts/0/device_id",
             serde_json::json!(false),
+        ),
+        (
+            "/state/flags/cache/flags/checkout/context",
+            serde_json::json!(1),
         ),
         ("/state/session", serde_json::json!(true)),
         ("/state/session/started_ms", serde_json::json!(201)),

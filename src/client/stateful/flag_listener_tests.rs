@@ -61,52 +61,6 @@ fn same_context_reload_in_first_listener_does_not_starve_later_listener() {
 }
 
 #[test]
-fn same_context_reload_after_commit_does_not_suppress_delayed_notification() {
-    let server = Server::new(vec![
-        (
-            200,
-            json!({"featureFlags":{"a":true,"b":true,"c":true}, "requestId":"x".repeat(750 * 1024)}),
-        ),
-        (200, json!({"featureFlags":{"fresh":true}})),
-    ]);
-    let mut config = config(&server.host);
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let release_rx = Mutex::new(release_rx);
-    // Cache admission commits its failure before reporting the diagnostic.
-    // Pause that report so another thread can queue a refresh before dispatch.
-    config.on_error(move |_| {
-        entered_tx.send(()).unwrap();
-        release_rx.lock().unwrap().recv_timeout(WAIT).unwrap();
-    });
-    let client = Client::init_blocking(config);
-    let (tx, rx) = mpsc::channel();
-    client.on_feature_flags(move |data| {
-        tx.send(data.clone()).unwrap();
-    });
-    client.reload_feature_flags();
-    server.request();
-    server.respond();
-    entered_rx.recv_timeout(WAIT).unwrap();
-    client.reload_feature_flags();
-    release_tx.send(()).unwrap();
-    server.request();
-    let committed_before_second_response = rx.try_recv();
-    server.respond();
-    let fresh = rx.recv_timeout(WAIT).unwrap();
-    client.flush_blocking();
-    server.finish();
-    let committed = committed_before_second_response
-        .expect("queued reload must not suppress an already-committed load status");
-    assert_eq!(
-        committed.error,
-        Some(crate::stateful::FeatureFlagLoadError::CacheTooLarge)
-    );
-    assert!(committed.errors_loading);
-    assert!(fresh.flags.unwrap()["fresh"].enabled);
-}
-
-#[test]
 fn reset_discards_inflight_completion_and_does_not_replay_it_to_new_listener() {
     let server = Server::new(vec![
         (200, json!({"featureFlags":{"obsolete":true}})),
@@ -133,7 +87,7 @@ fn reset_discards_inflight_completion_and_does_not_replay_it_to_new_listener() {
     server.respond();
     let fresh = rx.recv_timeout(WAIT).unwrap();
     assert_eq!(fresh, late_rx.recv_timeout(WAIT).unwrap());
-    assert_eq!(fresh.context.distinct_id, client.get_distinct_id());
+    assert_eq!(fresh.context.distinct_id(), client.get_distinct_id());
     assert!(fresh.flags.unwrap().is_empty());
     let all = client.get_feature_flags().unwrap();
     assert_eq!(all.keys().collect::<Vec<_>>(), vec!["fresh"]);
@@ -183,7 +137,7 @@ fn reentrant_reset_preserves_registration_and_snapshot_but_skips_remaining_old_d
     for id in [1, 2, 3] {
         let (seen, data) = rx.recv_timeout(WAIT).unwrap();
         assert_eq!(seen, id);
-        assert_eq!(data.context.distinct_id, client.get_distinct_id());
+        assert_eq!(data.context.distinct_id(), client.get_distinct_id());
         assert!(data.flags.unwrap().is_empty());
         assert!(!client.get_feature_flags().unwrap()["new"].enabled);
     }

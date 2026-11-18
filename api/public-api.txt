@@ -156,14 +156,10 @@ pub posthog::stateful::DeliveryOutcome::Stopped
 pub posthog::stateful::DeliveryOutcome::TimedOut
 pub posthog::stateful::DeliveryOutcome::Unavailable
 #[non_exhaustive] pub enum posthog::stateful::FeatureFlagLoadError
-pub posthog::stateful::FeatureFlagLoadError::CacheTooLarge
 pub posthog::stateful::FeatureFlagLoadError::Http(u16)
 pub posthog::stateful::FeatureFlagLoadError::InvalidResponse
 pub posthog::stateful::FeatureFlagLoadError::Network
 pub posthog::stateful::FeatureFlagLoadError::QuotaLimited
-pub posthog::stateful::FeatureFlagLoadError::RequestTooLarge
-pub posthog::stateful::FeatureFlagLoadError::ResponseTooLarge
-pub posthog::stateful::FeatureFlagLoadError::TooManyFlags
 #[non_exhaustive] pub enum posthog::stateful::Persistence
 pub posthog::stateful::Persistence::Automatic
 pub posthog::stateful::Persistence::Directory(std::path::PathBuf)
@@ -293,13 +289,14 @@ pub fn posthog::stateful::Config::on_feature_flags<F>(&mut self, F) -> &mut Self
 #[non_exhaustive] pub struct posthog::stateful::DrainReport
 pub posthog::stateful::DrainReport::delivery: posthog::stateful::DeliveryOutcome
 pub posthog::stateful::DrainReport::state: posthog::stateful::PersistenceOutcome
-#[non_exhaustive] pub struct posthog::stateful::FeatureFlagContext
-pub posthog::stateful::FeatureFlagContext::anonymous_id: alloc::string::String
-pub posthog::stateful::FeatureFlagContext::disable_geoip: bool
-pub posthog::stateful::FeatureFlagContext::distinct_id: alloc::string::String
-pub posthog::stateful::FeatureFlagContext::group_properties: std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>
-pub posthog::stateful::FeatureFlagContext::groups: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
-pub posthog::stateful::FeatureFlagContext::person_properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub struct posthog::stateful::FeatureFlagContext(_)
+impl posthog::stateful::FeatureFlagContext
+pub fn posthog::stateful::FeatureFlagContext::anonymous_id(&self) -> &str
+pub fn posthog::stateful::FeatureFlagContext::disable_geoip(&self) -> bool
+pub fn posthog::stateful::FeatureFlagContext::distinct_id(&self) -> &str
+pub fn posthog::stateful::FeatureFlagContext::group_properties(&self) -> &std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>
+pub fn posthog::stateful::FeatureFlagContext::groups(&self) -> &std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
+pub fn posthog::stateful::FeatureFlagContext::person_properties(&self) -> &std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub struct posthog::stateful::FeatureFlagLookup<'a>
 impl posthog::stateful::FeatureFlagLookup<'_>
 pub fn posthog::stateful::FeatureFlagLookup<'_>::get(self) -> core::option::Option<posthog::stateful::FeatureFlagResult>

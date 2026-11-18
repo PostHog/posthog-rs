@@ -10,7 +10,6 @@ use super::writer::StateAccess;
 use super::Client;
 use crate::client::transport::{flags, TransportHandle};
 use crate::client::ClientOptions;
-use crate::endpoints::Endpoint;
 
 pub(super) struct FlagLoader {
     options: Arc<ClientOptions>,
@@ -70,96 +69,59 @@ impl FlagLoader {
         };
         let completion_request = request.clone();
         let completion_access = access.clone();
-        let options = self.options.clone();
         let listeners = self.listeners.clone();
         let task = flags::Task::new(&request.payload(&self.options.api_key), move |result| {
-            if let Some(error) = install(&completion_access, &completion_request, result) {
-                report(&options, &completion_request, error);
-            }
+            install(&completion_access, &completion_request, result);
             listeners.notify_completion(
                 &completion_access,
                 completion_request.revision,
                 completion_request.sequence,
             );
         });
-        let failure = match task {
-            Ok(task) => {
-                transport.schedule_flags(task);
-                None
-            }
-            Err(error) => Some(error),
-        };
+        transport.schedule_flags(task);
         drop(scheduling);
-        // Error hooks may reenter reload or shutdown; never invoke them while
-        // holding either the scheduling mutex or the state owner's lock.
-        if let Some(error) = failure {
-            install(&access, &request, Err(error));
-            report(&self.options, &request, error);
-            self.listeners
-                .notify_completion(&access, request.revision, request.sequence);
-        }
     }
 }
 
-fn report(options: &ClientOptions, request: &Request, error: flags::LoadError) {
-    flags::report(
-        options,
-        &options.endpoints().build_url(Endpoint::Flags),
-        Some(&request.context.distinct_id),
-        error,
-    );
-}
-
-/// Return only a new cache-admission error; transport failures are already
-/// diagnosed by the worker. An obsolete completion changes no state or status.
+/// Transport failures are diagnosed by the worker. An obsolete completion
+/// changes no state or status.
 fn install(
     access: &StateAccess,
     request: &Request,
     result: Result<flags::LoadedFlags, flags::LoadError>,
-) -> Option<flags::LoadError> {
-    access
-        .mutate(|state| {
-            if state.flag_load.revision != request.revision
-                || state.flag_load.request != request.sequence
-            {
-                return None;
+) {
+    let _ = access.mutate(|state| {
+        if state.flag_load.revision != request.revision
+            || state.flag_load.request != request.sequence
+        {
+            return;
+        }
+        let mut completion = FlagCompletion {
+            context: request.context.clone(),
+            revision: request.revision,
+            request: request.sequence,
+            error: None,
+            partial: false,
+            invalid_payloads: false,
+        };
+        match result {
+            Ok(loaded) => {
+                // A valid response, including a partial one, ends bootstrap
+                // use globally, not just for replaced keys.
+                state.flag_load.remote_received = true;
+                completion.partial = loaded.partial;
+                completion.invalid_payloads = loaded.invalid_payloads;
+                state.flags.cache = Some(Arc::new(FlagCache::updated(
+                    state.flags.cache.as_deref(),
+                    request.context.clone(),
+                    request.revision,
+                    loaded,
+                )));
             }
-            let mut completion = FlagCompletion {
-                context: request.context.clone(),
-                revision: request.revision,
-                request: request.sequence,
-                error: None,
-                partial: false,
-                invalid_payloads: false,
-            };
-            let mut diagnostic = None;
-            match result {
-                Ok(loaded) => {
-                    // A valid response, including partial or cache-too-large,
-                    // ends bootstrap use globally, not just for replaced keys.
-                    state.flag_load.remote_received = true;
-                    completion.partial = loaded.partial;
-                    completion.invalid_payloads = loaded.invalid_payloads;
-                    match FlagCache::updated(
-                        state.flags.cache.as_deref(),
-                        request.context.clone(),
-                        request.revision,
-                        loaded,
-                    ) {
-                        Ok(cache) => state.flags.cache = Some(Arc::new(cache)),
-                        Err(error) => {
-                            completion.error = Some(error);
-                            diagnostic = Some(error);
-                        }
-                    }
-                }
-                Err(error) => completion.error = Some(error),
-            }
-            state.flag_load.completed = Some(completion);
-            diagnostic
-        })
-        .ok()
-        .and_then(|(_, diagnostic)| diagnostic)
+            Err(error) => completion.error = Some(error),
+        }
+        state.flag_load.completed = Some(completion);
+    });
 }
 
 impl Client {

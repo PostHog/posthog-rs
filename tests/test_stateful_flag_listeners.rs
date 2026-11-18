@@ -128,7 +128,7 @@ fn setup_runtime_order_panic_isolation_drop_and_silent_opted_out_reads() {
         let (actual, mut data) = rx.recv_timeout(WAIT).unwrap();
         assert_eq!(actual, id);
         assert!(!data.errors_loading);
-        assert_eq!(data.context.distinct_id, "device");
+        assert_eq!(data.context.distinct_id(), "device");
         let a = data.flags.as_mut().unwrap().get_mut("a").unwrap();
         assert_eq!(a.payload, Some(Value::Null));
         a.payload = Some(json!("changed copy"));
@@ -194,14 +194,14 @@ fn failures_partial_provenance_malformed_payloads_and_known_empty_are_not_confla
     );
     assert!(partial.errors_loading && partial.partial && !partial.invalid_payloads);
     assert_eq!(partial.error, None);
-    assert_eq!(partial.context.person_properties["role"], "new");
+    assert_eq!(partial.context.person_properties()["role"], "new");
     let flags = partial.flags.unwrap();
     assert!(!flags.contains_key("a"));
     let all = client.get_feature_flags().unwrap();
     assert!(!all["a"].enabled);
-    assert_eq!(all["a"].context.person_properties["role"], "new");
+    assert_eq!(all["a"].context.person_properties()["role"], "new");
     assert_eq!(all["a"].request_id.as_deref(), Some("partial"));
-    assert!(flags["b"].context.person_properties.is_empty());
+    assert!(flags["b"].context.person_properties().is_empty());
     assert_eq!(flags["b"].request_id, None);
     client.set_person_properties_for_flags(
         HashMap::from([("role".into(), json!("later"))]),
@@ -211,7 +211,7 @@ fn failures_partial_provenance_malformed_payloads_and_known_empty_are_not_confla
     let late = client.on_feature_flags(move |data| {
         late_tx.send(data.clone()).unwrap();
     });
-    assert_eq!(update(&late_rx).context.person_properties["role"], "new");
+    assert_eq!(update(&late_rx).context.person_properties()["role"], "new");
     late.unsubscribe();
     let malformed = load(
         &client,
@@ -223,7 +223,7 @@ fn failures_partial_provenance_malformed_payloads_and_known_empty_are_not_confla
     assert!(malformed.errors_loading && malformed.invalid_payloads && !malformed.partial);
     assert_eq!(malformed.error, None);
     assert_eq!(malformed.flags.as_ref().unwrap()["a"].payload, None);
-    assert_eq!(malformed.context.person_properties["role"], "later");
+    assert_eq!(malformed.context.person_properties()["role"], "later");
     let invalid = load(&client, &server, &rx, 200, json!({}));
     assert_eq!(invalid.error, Some(FeatureFlagLoadError::InvalidResponse));
     assert_eq!(invalid.flags, malformed.flags);
