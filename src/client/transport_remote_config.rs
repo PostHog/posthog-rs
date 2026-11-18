@@ -12,8 +12,6 @@ use crate::client::on_error::RemoteConfigFailure;
 use crate::client::{ClientOptions, PostHogError};
 use crate::endpoints::{EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT};
 
-pub(crate) const MAX_CONFIG_BYTES: usize = 2 * 1024 * 1024;
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RemoteConfig {
     pub(crate) has_feature_flags: Option<bool>,
@@ -25,7 +23,6 @@ impl RemoteConfig {
         self.session_recording
             .as_ref()
             .map_or(true, |value| value.is_boolean() || value.is_object())
-            && crate::client::capture::json_len(self) <= MAX_CONFIG_BYTES
     }
 }
 
@@ -34,7 +31,6 @@ pub(crate) enum LoadError {
     Network,
     Http(u16),
     InvalidResponse,
-    ResponseTooLarge,
 }
 
 pub(crate) fn config_url(host: &str, project_token: &str) -> Option<String> {
@@ -54,9 +50,6 @@ pub(crate) fn config_url(host: &str, project_token: &str) -> Option<String> {
 }
 
 fn decode(bytes: &[u8]) -> Result<RemoteConfig, LoadError> {
-    if bytes.len() > MAX_CONFIG_BYTES {
-        return Err(LoadError::ResponseTooLarge);
-    }
     let value: Value = serde_json::from_slice(bytes).map_err(|_| LoadError::InvalidResponse)?;
     let object = value.as_object().ok_or(LoadError::InvalidResponse)?;
     let recording_quota_limited = object
@@ -81,7 +74,7 @@ fn decode(bytes: &[u8]) -> Result<RemoteConfig, LoadError> {
     if config.valid() {
         Ok(config)
     } else {
-        Err(LoadError::ResponseTooLarge)
+        Err(LoadError::InvalidResponse)
     }
 }
 
@@ -132,7 +125,7 @@ fn fetch(
     options: &ClientOptions,
     url: &str,
 ) -> Result<RemoteConfig, LoadError> {
-    let response = http
+    let mut response = http
         .get(url)
         .header(
             reqwest::header::USER_AGENT,
@@ -146,7 +139,6 @@ fn fetch(
     }
     let mut bytes = Vec::new();
     response
-        .take(MAX_CONFIG_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| LoadError::Network)?;
     decode(&bytes)
@@ -160,9 +152,6 @@ pub(crate) fn report(options: &ClientOptions, error: LoadError) {
             Some(status),
         ),
         LoadError::InvalidResponse => ("Remote configuration response is invalid", None),
-        LoadError::ResponseTooLarge => {
-            ("Remote configuration response exceeds its byte limit", None)
-        }
     };
     if options.on_error.is_empty() {
         tracing::warn!("posthog-rs: {message}; status={status:?}");
@@ -212,19 +201,10 @@ mod tests {
                 "Remote configuration response is invalid",
                 None,
             ),
-            (
-                LoadError::ResponseTooLarge,
-                "Remote configuration response exceeds its byte limit",
-                None,
-            ),
         ] {
             for with_hook in [false, true] {
                 let server = MockServer::start();
-                let body = if error == LoadError::ResponseTooLarge {
-                    format!("private-body-marker{}", "x".repeat(MAX_CONFIG_BYTES))
-                } else {
-                    "private-body-marker".to_owned()
-                };
+                let body = "private-body-marker".to_owned();
                 let response = server.mock(|when, then| {
                     when.method(GET)
                         .path("/private-url-marker/array/private-token-marker/config");
@@ -475,9 +455,5 @@ mod tests {
         }
         assert_eq!(decode(b"[]"), Err(LoadError::InvalidResponse));
         assert_eq!(decode(b"broken"), Err(LoadError::InvalidResponse));
-        assert_eq!(
-            decode(&vec![b' '; MAX_CONFIG_BYTES + 1]),
-            Err(LoadError::ResponseTooLarge)
-        );
     }
 }
