@@ -31,7 +31,7 @@ pub struct Config {
     /// Session restart continuity. Default: Memory. Persistent uses the configured
     /// state store; it does not override Persistence::Memory.
     pub session_persistence: SessionPersistence,
-    /// Isolates storage for instances using the same host and project. Default: "default".
+    /// Isolates storage for instances using the same project. Default: "default".
     /// Each persistent namespace has one live owner; see [`Persistence`] for
     /// sharing a client or selecting independent identities.
     pub instance_name: String,

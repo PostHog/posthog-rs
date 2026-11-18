@@ -194,8 +194,9 @@ impl Client {
     /// coalesce to one latest pending refresh; obsolete responses cannot install.
     /// Failures retain cached values and report through `on_error`.
     ///
-    /// Uses the independent request worker. Delivery and in-memory access
-    /// do not wait for requests, and flush does not wait for flag completion.
+    /// Uses the independent request worker: flags and remote configuration share
+    /// request execution, but do not delay delivery, flush or in-memory access.
+    /// Flush does not wait for flag requests to complete.
     pub fn reload_feature_flags(&self) {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return;

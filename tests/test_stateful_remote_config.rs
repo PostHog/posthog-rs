@@ -1,13 +1,14 @@
 #![cfg(feature = "stateful")]
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use httpmock::prelude::*;
-use posthog::stateful::{CaptureOutcome, Client, Config, DeliveryOutcome, Persistence};
-use posthog::FlagValue;
+use posthog::stateful::{
+    CaptureOutcome, Client, Config, DeliveryOutcome, FeatureFlagsUpdate, Persistence,
+    PersistenceOutcome,
+};
 use serde_json::json;
 
 struct Directory(PathBuf);
@@ -34,6 +35,24 @@ fn settings(server: &MockServer, root: &Directory, preload: bool) -> Config {
     config
 }
 
+fn updates_until(
+    receiver: &mpsc::Receiver<FeatureFlagsUpdate>,
+    complete: impl Fn(&FeatureFlagsUpdate) -> bool,
+) -> Vec<FeatureFlagsUpdate> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut updates = Vec::new();
+    loop {
+        let update = receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("feature flag completion did not arrive before deadline");
+        let done = complete(&update);
+        updates.push(update);
+        if done {
+            return updates;
+        }
+    }
+}
+
 #[test]
 fn oversized_config_retains_fitting_flags_on_restart() {
     for oversized in [false, true] {
@@ -58,12 +77,19 @@ fn oversized_config_retains_fitting_flags_on_restart() {
 
         let mut config = settings(&server, &root, true);
         config.max_state_bytes = 4096;
+        let (completed, updates) = mpsc::channel();
+        config.on_feature_flags(move |update| {
+            completed.send(update.clone()).unwrap();
+        });
         let client = Client::init_blocking(config);
-
-        // First flush waits for delivery-side config/flags completion.
-        // Second captures and drains the resulting state revision.
-        client.flush_blocking();
-        client.flush_blocking();
+        updates_until(&updates, |update| {
+            !update.errors_loading
+                && update
+                    .flags
+                    .as_ref()
+                    .is_some_and(|flags| flags.contains_key("kept"))
+        });
+        assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
         assert!(client.get_feature_flags().unwrap()["kept"].enabled);
         client.shutdown_blocking(None);
         drop(client);
@@ -92,38 +118,34 @@ fn oversized_config_retains_fitting_flags_on_restart() {
     }
 }
 
-// A ready-listener's captures are destroyed after request_shutdown has
-// requested closure of both workers, not merely after Client.closed changes.
-struct CloseNotice(mpsc::Sender<()>);
-
-impl Drop for CloseNotice {
-    fn drop(&mut self) {
-        let _ = self.0.send(());
-    }
-}
-
 #[test]
-fn shutdown_does_not_start_config_queued_behind_recovery() {
-    const WAIT: Duration = Duration::from_secs(15);
-
+fn config_completes_while_durable_recovery_is_blocked_and_shutdown_is_bounded() {
     let root = Directory::new();
     let server = MockServer::start();
     let mut first_project = server.mock(|when, then| {
         when.method(GET).path("/array/example-project/config");
         then.status(200).json_body(json!({"hasFeatureFlags": true}));
     });
-
-    // Seed one persisted event without sending it, following the existing
-    // zero_shutdown_override_preserves_persisted_events_for_restart test.
+    let mut retry = server.mock(|when, then| {
+        when.method(POST).path("/i/v1/analytics/events");
+        then.status(503).header("Retry-After", "3600");
+    });
     let client = Client::init_blocking(settings(&server, &root, false));
-    client.flush_blocking();
+    let identity = client.get_distinct_id();
     assert!(matches!(
         client.capture("persisted-before-restart"),
         CaptureOutcome::Accepted { .. }
     ));
-    client.shutdown_blocking(Some(Duration::ZERO));
+    client.opt_out();
+    let flushed = client.flush_blocking();
+    assert_eq!(flushed.state, PersistenceOutcome::Persisted);
+    assert_eq!(flushed.delivery, DeliveryOutcome::Attempted);
+    assert_eq!(
+        client.shutdown_blocking(None).delivery,
+        DeliveryOutcome::Stopped
+    );
     drop(client);
-
+    retry.assert_calls(1);
     let scope = std::fs::read_dir(&root.0)
         .unwrap()
         .next()
@@ -136,58 +158,133 @@ fn shutdown_does_not_start_config_queued_behind_recovery() {
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
         .count();
     assert_eq!(records, 1);
-
     first_project.delete();
-    let project = server.mock(|when, then| {
-        when.method(GET).path("/array/example-project/config");
-        then.status(200).json_body(json!({"hasFeatureFlags": true}));
-    });
+    retry.delete();
 
+    // Each accepted connection needs independent progress while the upload is held.
+    // httpmock's local server runs synchronous response callbacks on one runtime thread.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let accepting = listener.try_clone().unwrap();
     let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let release_rx = Mutex::new(release_rx);
-    let recovered = server.mock(|when, then| {
-        when.method(POST).path("/i/v1/analytics/events");
-        then.respond_with(move |_| {
-            entered_tx.send(()).unwrap();
-            release_rx.lock().unwrap().recv_timeout(WAIT).unwrap();
-            http::Response::builder()
-                .status(200)
-                .body(String::new())
-                .unwrap()
-                .into()
-        });
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (returned_tx, returned_rx) = mpsc::channel();
+    let (release_config, config_gate) = tokio::sync::oneshot::channel();
+    let serving = std::thread::spawn(move || {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let listener = tokio::net::TcpListener::from_std(accepting).unwrap();
+                let mut upload_gate = Some(release_rx);
+                let mut config_gate = Some(config_gate);
+                let mut handlers = Vec::new();
+                for _ in 0..2 {
+                    let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                        .await.unwrap().unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    let mut length = 0;
+                    let route = tokio::time::timeout(Duration::from_secs(5), async {
+                        stream.read_line(&mut line).await.unwrap();
+                        let route = line.trim_end().to_owned();
+                        loop {
+                            line.clear();
+                            assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                            if line == "\r\n" {
+                                break;
+                            }
+                            if let Some((name, value)) = line.split_once(':') {
+                                if name.eq_ignore_ascii_case("content-length") {
+                                    length = value.trim().parse().unwrap();
+                                }
+                            }
+                        }
+                        stream.read_exact(&mut vec![0; length]).await.unwrap();
+                        route
+                    }).await.unwrap();
+                    match route.as_str() {
+                        "POST /i/v1/analytics/events HTTP/1.1" => {
+                            let gate = upload_gate.take().expect("one recovered upload");
+                            let entered = entered_tx.clone();
+                            let returned = returned_tx.clone();
+                            handlers.push(tokio::spawn(async move {
+                                assert!(length > 0);
+                                entered.send(()).unwrap();
+                                tokio::time::timeout(Duration::from_secs(10), gate).await.unwrap().unwrap();
+                                returned.send(()).unwrap();
+                                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                            }));
+                        }
+                        "GET /array/example-project/config HTTP/1.1" => {
+                            let gate = config_gate.take().expect("one config request");
+                            handlers.push(tokio::spawn(async move {
+                                assert_eq!(length, 0);
+                                tokio::time::timeout(Duration::from_secs(5), gate).await.unwrap().unwrap();
+                                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 25\r\nConnection: close\r\n\r\n{\"hasFeatureFlags\":false}").await.unwrap();
+                            }));
+                        }
+                        _ => panic!("unexpected request: {}", route),
+                    }
+                }
+                for handler in handlers {
+                    handler.await.unwrap();
+                }
+            });
     });
-
-    let (closed_tx, closed_rx) = mpsc::channel();
-    let notice = CloseNotice(closed_tx);
-    let entered_rx = Mutex::new(entered_rx);
-
+    let (completed, updates) = mpsc::channel();
     let mut config = settings(&server, &root, false);
-    config.bootstrap_feature_flags = Some(HashMap::from([(
-        "ready-gate".into(),
-        FlagValue::Boolean(true),
-    )]));
-    config.on_feature_flags(move |_| {
-        let _keep_until_listener_is_destroyed = &notice;
-        // notify_ready runs before load_remote_config. Do not allow init
-        // to queue config until startup recovery is already blocked.
-        entered_rx.lock().unwrap().recv_timeout(WAIT).unwrap();
+    config.host = host;
+    config.request_timeout_seconds = 30;
+    config.on_feature_flags(move |update| {
+        completed.send(update.clone()).unwrap();
     });
-
     let client = Arc::new(Client::init_blocking(config));
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    release_config.send(()).unwrap();
+    updates_until(&updates, |update| {
+        !update.errors_loading && update.flags.as_ref().is_some_and(|flags| flags.is_empty())
+    });
+    assert!(returned_rx.try_recv().is_err());
+    assert_eq!(client.get_distinct_id(), identity);
+    assert!(client.is_opt_out());
+    assert_eq!(
+        client.capture("new opted-out event"),
+        CaptureOutcome::OptedOut
+    );
+
     let closing = client.clone();
-    let shutdown = std::thread::spawn(move || closing.shutdown_blocking(Some(Duration::ZERO)));
-
-    let closed = closed_rx.recv_timeout(WAIT);
-    // Release controlled I/O before any assertion can unwind and join.
+    let (closed_tx, closed_rx) = mpsc::channel();
+    let shutdown = std::thread::spawn(move || {
+        let start = Instant::now();
+        let report = closing.shutdown_blocking(Some(Duration::from_millis(20)));
+        closed_tx.send((report, start.elapsed())).unwrap();
+    });
+    let (report, elapsed) = closed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(report.delivery, DeliveryOutcome::TimedOut);
+    assert!(elapsed < Duration::from_secs(1));
+    assert!(returned_rx.try_recv().is_err());
+    assert_eq!(client.capture("closed"), CaptureOutcome::Closed);
+    shutdown.join().unwrap();
     release_tx.send(()).unwrap();
-    let report = shutdown.join().unwrap();
-
-    closed.unwrap();
-    assert_eq!(report.delivery, DeliveryOutcome::Stopped);
-    recovered.assert_calls(1);
-    project.assert_calls(0);
+    returned_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.shutdown_blocking(None).delivery != DeliveryOutcome::Stopped {
+        assert!(
+            Instant::now() < deadline,
+            "delivery worker did not finish after release"
+        );
+        std::thread::yield_now();
+    }
+    serving.join().unwrap();
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]
@@ -203,9 +300,20 @@ fn false_hint_clears_restored_server_flags_and_notifies_current_and_late_subscri
         then.status(200)
             .json_body(json!({"featureFlags": {"stale": true}}));
     });
-    let client = Client::init_blocking(settings(&server, &root, true));
-    client.flush_blocking();
-    client.flush_blocking();
+    let (seed_tx, seed_rx) = mpsc::channel();
+    let mut config = settings(&server, &root, true);
+    config.on_feature_flags(move |update| {
+        seed_tx.send(update.clone()).unwrap();
+    });
+    let client = Client::init_blocking(config);
+    updates_until(&seed_rx, |update| {
+        !update.errors_loading
+            && update
+                .flags
+                .as_ref()
+                .is_some_and(|flags| flags.contains_key("stale"))
+    });
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
     assert!(client.get_feature_flags().unwrap()["stale"].enabled);
     client.shutdown_blocking(None);
     drop(client);
@@ -227,9 +335,10 @@ fn false_hint_clears_restored_server_flags_and_notifies_current_and_late_subscri
         updates_tx.send(update.clone()).unwrap();
     });
     let client = Client::init_blocking(config);
-    client.flush_blocking();
+    let updates = updates_until(&updates_rx, |update| {
+        !update.errors_loading && update.flags.as_ref().is_some_and(|flags| flags.is_empty())
+    });
     assert!(client.get_feature_flags().unwrap().is_empty());
-    let updates: Vec<_> = updates_rx.try_iter().collect();
     assert!(updates.iter().any(|update| {
         update
             .flags

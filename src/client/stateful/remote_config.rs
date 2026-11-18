@@ -75,7 +75,6 @@ impl Client {
                                     .ok()
                                     .map(Arc::new)
                                 });
-                            state.flag_load.reports.clear();
                             state.flag_load.completed = Some(FlagCompletion {
                                 context,
                                 revision: state.flag_load.revision,

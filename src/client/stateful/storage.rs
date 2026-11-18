@@ -388,6 +388,13 @@ impl FileStateStore {
                 &mut rewrite_required,
             );
         }
+        if let Some(config) = state.get_mut("remote_config") {
+            normalize_optional::<crate::client::transport::remote_config::RemoteConfig>(
+                config,
+                |config| config.valid(),
+                &mut rewrite_required,
+            );
+        }
         if let Some(session) = state.get_mut("session") {
             normalize_optional::<super::sessions::StoredSession>(
                 session,

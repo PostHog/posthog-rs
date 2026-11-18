@@ -50,11 +50,11 @@ mod memory;
 #[path = "transport_queue.rs"]
 mod queue;
 #[cfg(feature = "stateful")]
-#[path = "transport_requests.rs"]
-mod requests;
-#[cfg(feature = "stateful")]
 #[path = "transport_remote_config.rs"]
 pub(super) mod remote_config;
+#[cfg(feature = "stateful")]
+#[path = "transport_requests.rs"]
+mod requests;
 #[cfg(all(test, feature = "stateful"))]
 #[path = "transport_startup_tests.rs"]
 mod startup_tests;

@@ -15,7 +15,6 @@ use crate::endpoints::{EU_INGESTION_ENDPOINT, US_INGESTION_ENDPOINT};
 pub(crate) const MAX_CONFIG_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct RemoteConfig {
     pub(crate) has_feature_flags: Option<bool>,
     pub(crate) session_recording: Option<Value>,
@@ -60,12 +59,24 @@ fn decode(bytes: &[u8]) -> Result<RemoteConfig, LoadError> {
     }
     let value: Value = serde_json::from_slice(bytes).map_err(|_| LoadError::InvalidResponse)?;
     let object = value.as_object().ok_or(LoadError::InvalidResponse)?;
+    let recording_quota_limited = object
+        .get("quotaLimited")
+        .and_then(Value::as_array)
+        .is_some_and(|resources| {
+            resources
+                .iter()
+                .any(|resource| resource.as_str() == Some("mobile_recordings"))
+        });
     let config = RemoteConfig {
         has_feature_flags: object.get("hasFeatureFlags").and_then(Value::as_bool),
-        session_recording: object
-            .get("sessionRecording")
-            .filter(|value| value.is_boolean() || value.is_object())
-            .cloned(),
+        session_recording: if recording_quota_limited {
+            Some(Value::Bool(false))
+        } else {
+            object
+                .get("sessionRecording")
+                .filter(|value| value.is_boolean() || value.is_object())
+                .cloned()
+        },
     };
     if config.valid() {
         Ok(config)
@@ -92,7 +103,12 @@ impl Task {
         }
     }
 
-    pub(crate) fn run(self, http: &reqwest::blocking::Client, options: &ClientOptions) {
+    pub(crate) fn run(
+        self,
+        http: &reqwest::blocking::Client,
+        options: &ClientOptions,
+        closed: &std::sync::atomic::AtomicBool,
+    ) {
         let result = fetch(http, options, &self.url);
         if let Err(error) = result.as_ref() {
             report(options, *error);
@@ -102,8 +118,10 @@ impl Task {
         let follow_up =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.complete)(result)));
         match follow_up {
-            Ok(Some(task)) => task.run(http, options),
-            Ok(None) => {}
+            Ok(Some(task)) if !closed.load(std::sync::atomic::Ordering::Acquire) => {
+                task.run(http, options)
+            }
+            Ok(_) => {}
             Err(_) => tracing::warn!("posthog-rs: remote config completion panicked"),
         }
     }
@@ -262,7 +280,11 @@ mod tests {
                         None
                     },
                 )
-                .run(&reqwest::blocking::Client::new(), &options);
+                .run(
+                    &reqwest::blocking::Client::new(),
+                    &options,
+                    &std::sync::atomic::AtomicBool::new(false),
+                );
                 assert_eq!(rx.recv().unwrap(), Some(error));
                 let diagnostics = diagnostics.lock().unwrap();
                 assert_eq!(diagnostics.len(), usize::from(with_hook));
@@ -311,6 +333,127 @@ mod tests {
             config_url("https://example.com/prefix", "a/b?c").unwrap(),
             "https://example.com/prefix/array/a%2Fb%3Fc/config"
         );
+    }
+
+    #[test]
+    fn mobile_recordings_quota_normalizes_recording_permission_independently_of_flags() {
+        use serde_json::json;
+
+        for recording in [
+            None,
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(json!({})),
+            Some(json!({"sampleRate":"0.5"})),
+            Some(json!(null)),
+            Some(json!(42)),
+            Some(json!("enabled")),
+            Some(json!([])),
+        ] {
+            for flags in [
+                None,
+                Some(json!(true)),
+                Some(json!(false)),
+                Some(json!("false")),
+            ] {
+                for quota in [
+                    json!(["mobile_recordings"]),
+                    json!([null, 42, {}, "future", "mobile_recordings", "feature_flags"]),
+                ] {
+                    let mut response = json!({"quotaLimited": quota});
+                    if let Some(recording) = &recording {
+                        response["sessionRecording"] = recording.clone();
+                    }
+                    if let Some(flags) = &flags {
+                        response["hasFeatureFlags"] = flags.clone();
+                    }
+                    let config = decode(&serde_json::to_vec(&response).unwrap()).unwrap();
+                    assert_eq!(config.session_recording, Some(json!(false)), "{response}");
+                    assert_eq!(
+                        config.has_feature_flags,
+                        flags.as_ref().and_then(Value::as_bool),
+                        "{response}"
+                    );
+                    assert!(config.valid());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_or_malformed_quota_preserves_supported_recording_parsing() {
+        use serde_json::json;
+
+        for quota in [
+            None,
+            Some(json!([])),
+            Some(json!(["recordings", "feature_flags", "future"])),
+            Some(json!([
+                "mobile_recordings_extra",
+                "Mobile_recordings",
+                " mobile_recordings"
+            ])),
+            Some(json!("mobile_recordings")),
+            Some(json!(true)),
+            Some(json!(null)),
+            Some(json!(42)),
+            Some(json!({"mobile_recordings":true})),
+            Some(json!([["mobile_recordings"]])),
+        ] {
+            for recording in [
+                None,
+                Some(json!(true)),
+                Some(json!(false)),
+                Some(json!({"endpoint":"/s/"})),
+                Some(json!(null)),
+                Some(json!([])),
+                Some(json!(42)),
+            ] {
+                let mut response = json!({"hasFeatureFlags":true});
+                if let Some(quota) = &quota {
+                    response["quotaLimited"] = quota.clone();
+                }
+                if let Some(recording) = &recording {
+                    response["sessionRecording"] = recording.clone();
+                }
+                let config = decode(&serde_json::to_vec(&response).unwrap()).unwrap();
+                assert_eq!(config.has_feature_flags, Some(true));
+                assert_eq!(
+                    config.session_recording,
+                    recording
+                        .clone()
+                        .filter(|value| value.is_boolean() || value.is_object()),
+                    "{response}"
+                );
+            }
+        }
+        for response in [
+            json!({"sessionRecording":{"quotaLimited":["mobile_recordings"]}}),
+            json!({"sessionRecording":{},"quota_limited":["mobile_recordings"]}),
+        ] {
+            let config = decode(&serde_json::to_vec(&response).unwrap()).unwrap();
+            assert_eq!(
+                config.session_recording,
+                response.get("sessionRecording").cloned()
+            );
+        }
+    }
+
+    #[test]
+    fn normalized_quota_cache_tolerates_extensions_and_preserves_its_projection() {
+        use serde_json::json;
+
+        let config = decode(br#"{"hasFeatureFlags":false,"sessionRecording":{},"quotaLimited":["mobile_recordings"]}"#).unwrap();
+        let stored = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            stored,
+            json!({"has_feature_flags":false,"session_recording":false})
+        );
+        let mut extended = stored;
+        extended["future"] = json!({"enabled":true});
+        let restored: RemoteConfig = serde_json::from_value(extended).unwrap();
+        assert_eq!(restored, config);
+        assert!(restored.valid());
     }
 
     #[test]

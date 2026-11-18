@@ -65,7 +65,7 @@ fn no_flags_hint_preserves_bootstrap_after_suppressed_property_changes() {
             client.set_person_properties_for_flags(properties, Some(false));
         }
         release_tx.send(()).unwrap();
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         project.assert_calls(1);
         flags.assert_calls(0);
         assert_eq!(
@@ -123,7 +123,7 @@ fn remote_config_cache_capacity_failure_reports_without_discarding_live_or_manda
     };
     let client = Client::init_blocking(settings());
     client.register(HashMap::from([("kept".into(), json!(true))]));
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     let report = client.flush_blocking();
     assert_eq!(report.state, crate::stateful::PersistenceOutcome::Persisted);
     assert!(client
@@ -145,7 +145,7 @@ fn remote_config_cache_capacity_failure_reports_without_discarding_live_or_manda
                 .into(),
         )
     );
-    let scope = super::super::storage::namespace(&server.base_url(), "example-project", "default");
+    let scope = super::super::storage::namespace("example-project", "default");
     let stored: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join(scope).join("state.json")).unwrap())
             .unwrap();
@@ -160,7 +160,7 @@ fn remote_config_cache_capacity_failure_reports_without_discarding_live_or_manda
         then.status(503);
     });
     let restored = Client::init_blocking(settings());
-    restored.flush_blocking();
+    restored.transport.as_ref().unwrap().request_barrier();
     assert_eq!(restored.get_distinct_id(), "cache-device");
     assert_eq!(
         restored.state.as_ref().unwrap().snapshot().registered["kept"],
@@ -205,11 +205,11 @@ fn startup_gating_preserves_explicit_reload_and_config_is_bodyless() {
                 .json_body(json!({"featureFlags":{"available":true}}));
         });
         let client = Client::init_blocking(config(&server, preload));
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         project.assert_calls(1);
         flags.assert_calls(automatic);
         client.reload_feature_flags();
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         flags.assert_calls(automatic + 1);
         assert!(client.get_feature_flags().unwrap()["available"].enabled);
         client.shutdown_blocking(None);
@@ -229,7 +229,7 @@ fn failed_refresh_keeps_config_but_does_not_apply_a_cached_false_preload_hint() 
         then.status(200).json_body(json!({"featureFlags":{}}));
     });
     let client = Client::init_blocking(config(&server, false));
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     let cached = client
         .state
         .as_ref()
@@ -244,7 +244,7 @@ fn failed_refresh_keeps_config_but_does_not_apply_a_cached_false_preload_hint() 
         then.status(503);
     });
     client.load_remote_config(true);
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     flags.assert_calls(1);
     assert_eq!(
         client.state.as_ref().unwrap().snapshot().remote_config,
@@ -267,7 +267,7 @@ fn successful_missing_or_malformed_replay_fields_replace_prior_enablement() {
             then.status(200).json_body(json!({"sessionRecording":{}}));
         });
         let client = Client::init_blocking(config(&server, false));
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         assert_eq!(
             client
                 .state
@@ -286,7 +286,7 @@ fn successful_missing_or_malformed_replay_fields_replace_prior_enablement() {
             then.status(200).json_body(response.clone());
         });
         client.load_remote_config(false);
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         let expected = response
             .get("sessionRecording")
             .filter(|value| value.is_boolean())
@@ -325,7 +325,7 @@ fn no_flags_hint_preserves_bootstrap_values_and_config_survives_reset() {
         crate::FlagValue::Boolean(true),
     )]));
     let client = Client::init_blocking(options);
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     project.assert_calls(1);
     flags.assert_calls(0);
     assert!(client.get_feature_flags().unwrap()["bootstrap"].enabled);
@@ -337,7 +337,7 @@ fn no_flags_hint_preserves_bootstrap_values_and_config_survives_reset() {
         .remote_config
         .clone();
     client.reset();
-    client.flush_blocking();
+    client.transport.as_ref().unwrap().request_barrier();
     flags.assert_calls(1);
     assert_eq!(
         client.state.as_ref().unwrap().snapshot().remote_config,
@@ -360,8 +360,7 @@ fn remote_config_restores_from_the_configured_state_store() {
         config
     };
     let client = Client::init_blocking(settings());
-    client.flush_blocking();
-    // Config may complete after the flush captured its state revision.
+    client.transport.as_ref().unwrap().request_barrier();
     client.flush_blocking();
     let cached = client
         .state
@@ -371,7 +370,7 @@ fn remote_config_restores_from_the_configured_state_store() {
         .remote_config
         .clone();
     assert!(cached.is_some());
-    let scope = super::super::storage::namespace(&server.base_url(), "example-project", "default");
+    let scope = super::super::storage::namespace("example-project", "default");
     let stored: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join(scope).join("state.json")).unwrap())
             .unwrap();
@@ -391,7 +390,7 @@ fn remote_config_restores_from_the_configured_state_store() {
         restored.state.as_ref().unwrap().snapshot().remote_config,
         cached
     );
-    restored.flush_blocking();
+    restored.transport.as_ref().unwrap().request_barrier();
     assert_eq!(
         restored.state.as_ref().unwrap().snapshot().remote_config,
         cached
@@ -441,7 +440,7 @@ fn initialization_is_async_and_pending_config_survives_reset_without_duplicate_f
                 .json_body(json!({"featureFlags":{"current-user":true}}));
         });
         release_tx.send(()).unwrap();
-        client.flush_blocking();
+        client.transport.as_ref().unwrap().request_barrier();
         project.assert_calls(1);
         flags.assert_calls(1);
         assert!(client.get_feature_flags().unwrap()["current-user"].enabled);

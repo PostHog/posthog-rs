@@ -103,9 +103,9 @@ impl DrainReport {
 /// Setup always returns this type. Invalid configuration or local delivery
 /// startup failure disables the client and reports through `on_error`.
 /// Storage failures instead allow enabled memory-backed operation. No network
-/// request is required to establish readiness. Feature flag requests run
-/// independently of event delivery, on a bounded request worker that does not
-/// own event storage.
+/// request is required to establish readiness. Project configuration and feature
+/// flag requests run independently of event delivery, on a bounded request worker
+/// that does not own event storage.
 ///
 /// Persistent namespaces permit only one live owner. A second client with the
 /// same storage scope uses a generated or bootstrap identity in memory instead
