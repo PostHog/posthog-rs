@@ -8,7 +8,7 @@ fn config(server: &MockServer, preload: bool) -> Config {
     config.host = server.base_url();
     config.persistence = Persistence::Memory;
     config.preload_feature_flags = preload;
-    config.request_timeout_seconds = 2;
+    config.request_timeout = std::time::Duration::from_secs(2);
     config
 }
 
@@ -40,7 +40,7 @@ fn no_flags_hint_preserves_bootstrap_after_suppressed_property_changes() {
             then.status(200).json_body(json!({"featureFlags":{}}));
         });
         let mut options = config(&server, true);
-        options.request_timeout_seconds = 10;
+        options.request_timeout = std::time::Duration::from_secs(10);
         options.bootstrap_feature_flags = Some(HashMap::from([(
             "bootstrap".into(),
             crate::FlagValue::Boolean(true),
@@ -89,93 +89,6 @@ fn no_flags_hint_preserves_bootstrap_after_suppressed_property_changes() {
         );
         client.shutdown_blocking(None);
     }
-}
-
-#[test]
-fn remote_config_cache_capacity_failure_reports_without_discarding_live_or_mandatory_state() {
-    let root =
-        std::env::temp_dir().join(format!("posthog-config-capacity-{}", uuid::Uuid::now_v7()));
-    let server = MockServer::start();
-    let mut project = server.mock(|when, then| {
-        when.method(GET).path("/array/example-project/config");
-        then.status(200)
-            .json_body(json!({"sessionRecording":{"futureSetting":"x".repeat(4096)}}));
-    });
-    let (diagnostic_tx, diagnostic_rx) = std::sync::mpsc::channel();
-    let settings = || {
-        let mut options = config(&server, false);
-        options.persistence = Persistence::Directory(root.clone());
-        options.bootstrap_anonymous_id = Some("cache-device".into());
-        options.max_state_bytes = 1024;
-        let diagnostic_tx = diagnostic_tx.clone();
-        options.on_error(move |failure| {
-            if let crate::PostHogError::Storage(failure) = failure {
-                diagnostic_tx
-                    .send((
-                        failure.operation(),
-                        failure.error().kind(),
-                        failure.error().to_string(),
-                    ))
-                    .unwrap();
-            }
-        });
-        options
-    };
-    let client = Client::init_blocking(settings());
-    client.register(HashMap::from([("kept".into(), json!(true))]));
-    client.transport.as_ref().unwrap().request_barrier();
-    let report = client.flush_blocking();
-    assert_eq!(report.state, crate::stateful::PersistenceOutcome::Persisted);
-    assert!(client
-        .state
-        .as_ref()
-        .unwrap()
-        .snapshot()
-        .remote_config
-        .is_some());
-    let diagnostic = diagnostic_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap();
-    assert_eq!(
-        diagnostic,
-        (
-            crate::StorageOperation::Write,
-            std::io::ErrorKind::InvalidInput,
-            "Remote configuration cache exceeds state storage bounds; live settings retained"
-                .into(),
-        )
-    );
-    let scope = super::super::storage::namespace("example-project", "default");
-    let stored: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join(scope).join("state.json")).unwrap())
-            .unwrap();
-    assert_eq!(stored["state"]["remote_config"], json!(null));
-    assert_eq!(stored["state"]["distinct_id"], "cache-device");
-    assert_eq!(stored["state"]["registered"]["kept"], true);
-    client.shutdown_blocking(None);
-    drop(client);
-    project.delete();
-    let _offline = server.mock(|when, then| {
-        when.method(GET).path("/array/example-project/config");
-        then.status(503);
-    });
-    let restored = Client::init_blocking(settings());
-    restored.transport.as_ref().unwrap().request_barrier();
-    assert_eq!(restored.get_distinct_id(), "cache-device");
-    assert_eq!(
-        restored.state.as_ref().unwrap().snapshot().registered["kept"],
-        true
-    );
-    assert!(restored
-        .state
-        .as_ref()
-        .unwrap()
-        .snapshot()
-        .remote_config
-        .is_none());
-    restored.shutdown_blocking(None);
-    drop(restored);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -424,7 +337,7 @@ fn initialization_is_async_and_pending_config_survives_reset_without_duplicate_f
             });
         });
         let mut options = config(&server, true);
-        options.request_timeout_seconds = 10;
+        options.request_timeout = std::time::Duration::from_secs(10);
         let client = Client::init_blocking(options);
         entered_rx
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -482,7 +395,7 @@ fn shutdown_during_config_does_not_start_flags_or_install_late_settings() {
         then.status(200).json_body(json!({"featureFlags":{}}));
     });
     let mut options = config(&server, true);
-    options.request_timeout_seconds = 10;
+    options.request_timeout = std::time::Duration::from_secs(10);
     let client = Arc::new(Client::init_blocking(options));
     entered_rx
         .recv_timeout(std::time::Duration::from_secs(5))

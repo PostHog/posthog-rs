@@ -17,8 +17,8 @@ use sha2::{Digest, Sha256};
 
 pub const TEMPLATE_ID: &str = "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b";
 pub const MESSAGE_ID: &str = "01a18356-c56c-0001-e494-7666bc915188";
-pub const SEND_PATH: &str = "/api/projects/@current/messaging/send/email/";
-pub const UPLOADS_PATH: &str = "/api/projects/@current/messaging/attachments/uploads/";
+pub const SEND_PATH: &str = "/api/messaging/send/email/";
+pub const UPLOADS_PATH: &str = "/api/messaging/attachments/uploads/";
 
 #[derive(Debug, Clone)]
 pub struct Answer {

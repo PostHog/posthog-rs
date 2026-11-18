@@ -151,7 +151,7 @@ fn bootstrap_rich_reads_are_owned_memory_only_and_silent_in_all_consent_modes() 
                     Some(result)
                 );
                 assert_eq!(result.key, *key);
-                assert_eq!(result.context.distinct_id, "device");
+                assert_eq!(result.context.distinct_id(), "device");
             }
             for key in ["missing", "disabled", "empty", "orphan"] {
                 assert_eq!(client.feature_flag(key).send_event(false).get(), None);
@@ -160,7 +160,6 @@ fn bootstrap_rich_reads_are_owned_memory_only_and_silent_in_all_consent_modes() 
         }
         let mut results = client.get_feature_flags().unwrap();
         results.get_mut("variant").unwrap().payload = Some(json!("changed"));
-        results.get_mut("variant").unwrap().context.distinct_id = "changed".into();
         results.clear();
         let mut result = client
             .feature_flag("variant")

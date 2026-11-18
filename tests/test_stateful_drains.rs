@@ -361,7 +361,8 @@ fn lowered_record_limit_preserves_oversized_head_while_recovery_and_flush_progre
     let mut setup = config(&server);
     setup.persistence = Persistence::Directory(directory.0.clone());
     setup.capture_compression = None;
-    setup.max_record_bytes = lowered;
+    // The event size limit never exceeds the queue byte budget.
+    setup.max_queue_bytes = lowered as usize;
     setup.max_batch_size = 1;
     setup.max_queue_size = 1;
     let client = Arc::new(Client::init_blocking(setup));

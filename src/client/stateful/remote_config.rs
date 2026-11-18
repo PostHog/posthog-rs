@@ -60,7 +60,7 @@ impl Client {
                                 })
                                 .cloned()
                                 .or_else(|| {
-                                    FlagCache::updated(
+                                    Some(Arc::new(FlagCache::updated(
                                         None,
                                         context.clone(),
                                         state.flag_load.revision,
@@ -71,9 +71,7 @@ impl Client {
                                             partial: false,
                                             invalid_payloads: false,
                                         },
-                                    )
-                                    .ok()
-                                    .map(Arc::new)
+                                    )))
                                 });
                             state.flag_load.completed = Some(FlagCompletion {
                                 context,

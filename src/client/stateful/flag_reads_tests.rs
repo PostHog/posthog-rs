@@ -57,5 +57,5 @@ fn cached_exports_finish_before_http_and_identity_invalidates_before_latest_resp
     assert!(!results["fresh"].enabled);
     assert_eq!(results["fresh"].variant, None);
     assert_eq!(results["fresh"].payload, Some(Value::Null));
-    assert_eq!(results["fresh"].context.distinct_id, "person");
+    assert_eq!(results["fresh"].context.distinct_id(), "person");
 }

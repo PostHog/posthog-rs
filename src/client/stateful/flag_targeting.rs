@@ -28,7 +28,8 @@ impl Client {
     /// not removal. Empty input is ignored. `None` reloads flags, as does
     /// `Some(true)`; `Some(false)` keeps the last-known values until a later reload.
     /// Available while opted out or person profiles are disabled.
-    /// Memory changes synchronously; bounded persistence is asynchronous.
+    /// Memory changes synchronously; persistence is asynchronous. An update
+    /// containing a value nested more than 100 levels deep is rejected as a whole.
     pub fn set_person_properties_for_flags(
         &self,
         properties: HashMap<String, Value>,
@@ -49,8 +50,8 @@ impl Client {
     /// Merge local targeting for one nonblank group type without changing group
     /// membership or emitting analytics. Empty input is ignored. `None` or
     /// `Some(true)` reloads; `Some(false)` retains last-known flags until refreshed.
-    /// Available while opted out or person profiles are disabled. Updates exceeding
-    /// mandatory state limits are rejected as a whole, without a reload.
+    /// Available while opted out or person profiles are disabled. Updates with a
+    /// value nested more than 100 levels deep are rejected as a whole, without a reload.
     pub fn set_group_properties_for_flags(
         &self,
         group_type: impl Into<String>,

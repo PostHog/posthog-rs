@@ -88,8 +88,14 @@ fn writer_mutations_share_unchanged_flag_cache() {
 #[test]
 fn reconciling_shared_cache_preserves_retained_snapshots() {
     let mut encoded = serde_json::to_value(with_cache(Some(json!({"nested": null})))).unwrap();
-    encoded["flags"]["cache"]["flags"]["checkout"]["context"]["person_properties"]["plan"] =
-        json!("previous-plan");
+    // Give the flag its own, older context.
+    let mut previous = encoded["flags"]["cache"]["contexts"][0].clone();
+    previous["person_properties"]["plan"] = json!("previous-plan");
+    encoded["flags"]["cache"]["contexts"]
+        .as_array_mut()
+        .unwrap()
+        .push(previous);
+    encoded["flags"]["cache"]["flags"]["checkout"]["context"] = json!(1);
     let before: Snapshot = serde_json::from_value(encoded.clone()).unwrap();
     let mut restored = before.clone();
     assert!(restored.reconcile_flag_cache(false));
@@ -127,44 +133,10 @@ fn cached_records_round_trip_payload_presence_and_per_record_metadata() {
         second.record.variant = None;
         cache.flags.insert("other".into(), second);
         let directory = TestDirectory::new();
-        let mut store = FileStateStore::open(directory.lease(), 8192).unwrap().store;
+        let mut store = FileStateStore::open(directory.lease()).unwrap().store;
         store.save(&snapshot).unwrap();
         assert_eq!(store.load().unwrap(), Some(snapshot));
     }
-}
-
-#[test]
-fn optional_cache_byte_pressure_does_not_displace_mandatory_state_or_live_cache() {
-    let mut snapshot = with_cache(Some(json!("x".repeat(4096))));
-    let capacity = snapshot_capacity(&snapshot);
-    assert!(snapshot_size(&snapshot) > capacity);
-    let original_cache = snapshot.flags.cache.clone();
-    let encoded = encode_snapshot(&snapshot, capacity as u64).unwrap();
-    let mut restored = FileStateStore::decode(&encoded).unwrap();
-    assert!(restored.flags.cache.is_none());
-    assert_eq!(
-        restored.flags.person_properties,
-        snapshot.flags.person_properties
-    );
-    assert_eq!(
-        restored.flags.group_properties,
-        snapshot.flags.group_properties
-    );
-    assert_eq!(snapshot.flags.cache, original_cache);
-    for choice in [Some(false), Some(true), None] {
-        snapshot.opt_out = choice;
-        let bytes = encode_snapshot(&snapshot, capacity as u64).unwrap();
-        assert!(bytes.len() <= capacity);
-        restored = FileStateStore::decode(&bytes).unwrap();
-        assert_eq!(restored.opt_out, choice);
-        assert_eq!(restored.distinct_id, "person");
-        assert!(restored.flags.cache.is_none());
-    }
-    snapshot
-        .flags
-        .person_properties
-        .insert("oversized".into(), json!("x".repeat(capacity)));
-    assert!(encode_snapshot(&snapshot, capacity as u64).is_err());
 }
 
 #[test]
@@ -174,68 +146,18 @@ fn optional_cache_codec_failure_isolated_from_mandatory_codec_failure() {
         deep = json!({"nested":deep});
     }
     let mut snapshot = with_cache(Some(deep.clone()));
-    let bytes = encode_snapshot(&snapshot, 16_384).unwrap();
+    let bytes = encode_snapshot_with_outcome(&snapshot)
+        .map(|(bytes, _)| bytes)
+        .unwrap();
     let restored = FileStateStore::decode(&bytes).unwrap();
     assert!(restored.flags.cache.is_none());
     assert_eq!(restored.distinct_id, "person");
     assert!(snapshot.flags.cache.is_some());
     // Optional omission must not hide invalid mandatory targeting.
     snapshot.flags.person_properties.insert("deep".into(), deep);
-    assert!(encode_snapshot(&snapshot, 16_384).is_err());
-}
-
-#[test]
-fn fitting_cache_is_evicted_from_disk_before_mandatory_updates_are_rejected() {
-    let snapshot = with_cache(Some(json!("x".repeat(512))));
-    let directory = TestDirectory::new();
-    let limit = snapshot_size(&snapshot) + 1;
-    let store = FileStateStore::open(directory.lease(), limit as u64)
-        .unwrap()
-        .store;
-    let writer = StateWriter::new(
-        snapshot.clone(),
-        Backend::Persistent {
-            store: Box::new(store),
-            restored: false,
-        },
-        WriterOptions {
-            max_bytes: limit,
-            ..WriterOptions::default()
-        },
-        vec![],
-        Arc::new(SystemClock),
-    )
-    .unwrap();
-    assert_eq!(
-        writer.wait_blocking(writer.checkpoint()),
-        DrainOutcome::Persisted
-    );
-    let initial =
-        FileStateStore::decode(&fs::read(directory.path().join("state.json")).unwrap()).unwrap();
-    assert!(initial.flags.cache.is_some());
-    writer
-        .mutate(|state| {
-            state
-                .registered
-                .insert("padding".into(), json!("x".repeat(512)));
-            state.opt_out = Some(false);
-            state
-                .flags
-                .person_properties
-                .insert("team".into(), json!("next"));
-        })
-        .unwrap();
-    assert_eq!(
-        writer.wait_blocking(writer.checkpoint()),
-        DrainOutcome::Persisted
-    );
-    let disk =
-        FileStateStore::decode(&fs::read(directory.path().join("state.json")).unwrap()).unwrap();
-    assert_eq!(disk.opt_out, Some(false));
-    assert_eq!(disk.flags.person_properties["team"], "next");
-    assert_eq!(disk.registered["padding"], json!("x".repeat(512)));
-    assert!(disk.flags.cache.is_none());
-    assert_eq!(writer.snapshot().flags.cache, snapshot.flags.cache);
+    assert!(encode_snapshot_with_outcome(&snapshot)
+        .map(|(bytes, _)| bytes)
+        .is_err());
 }
 
 #[test]
@@ -354,13 +276,8 @@ fn seed_client_cache(directory: &TestDirectory, identified: bool) -> crate::stat
     config.host = "http://127.0.0.1:1".into();
     config.persistence = Persistence::Directory(directory.0.clone());
     let scope = namespace(&config.project_token, &config.instance_name);
-    let mut restored = RestoredStorage::open(
-        &config.persistence,
-        &scope,
-        config.max_state_bytes as u64,
-        config.event_limits(),
-        &[],
-    );
+    let mut restored =
+        RestoredStorage::open(&config.persistence, &scope, config.event_limits(), &[]);
     let mut snapshot = with_cache(Some(json!("bootstrap-cache")));
     snapshot.identified = identified;
     if !identified {
@@ -525,4 +442,65 @@ fn cache_restore_requires_exact_evaluation_context_but_ignores_analytics_and_con
         assert!(changed.flags.cache.is_none());
         assert!(!changed.reconcile_flag_cache(index == 5));
     }
+}
+
+#[test]
+fn large_flag_sets_persist_each_context_once() {
+    let mut snapshot = Snapshot::anonymous("device".into());
+    snapshot
+        .flags
+        .person_properties
+        .insert("bio".into(), json!("x".repeat(4096)));
+    let context = Arc::new(FlagContext::current(&snapshot, false));
+    let records = (0..5_000)
+        .map(|i| {
+            (
+                format!("flag-{i}"),
+                EvaluatedFlagRecord {
+                    enabled: true,
+                    variant: None,
+                    payload: Some(json!({"index": i})),
+                    id: None,
+                    version: None,
+                    reason: None,
+                    locally_evaluated: false,
+                    has_experiment: None,
+                    minimal_flag_called_events: false,
+                },
+            )
+        })
+        .collect();
+    snapshot.flags.cache = Some(Arc::new(FlagCache::updated(
+        None,
+        context,
+        0,
+        crate::client::transport::flags::LoadedFlags {
+            records,
+            request_id: None,
+            evaluated_at: None,
+            partial: false,
+            invalid_payloads: false,
+        },
+    )));
+    let bytes = encode_snapshot_with_outcome(&snapshot)
+        .map(|(bytes, _)| bytes)
+        .unwrap();
+    let encoded: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        encoded["state"]["flags"]["cache"]["contexts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // Without sharing, the 4 KiB person property alone would add about 20 MiB.
+    assert!(bytes.len() < 4 * 1024 * 1024, "{}", bytes.len());
+    let restored = FileStateStore::decode(&bytes).unwrap();
+    let cache = restored.flags.cache.as_ref().unwrap();
+    assert_eq!(cache.flags.len(), 5_000);
+    assert!(Arc::ptr_eq(
+        &cache.flags["flag-0"].context,
+        &cache.flags["flag-4999"].context
+    ));
+    assert_eq!(restored, snapshot);
 }

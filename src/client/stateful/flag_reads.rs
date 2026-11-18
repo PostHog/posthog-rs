@@ -6,20 +6,13 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::flag_state::CachedFlag;
+use super::flag_state::{CachedFlag, FlagContext};
 use super::{Client, Snapshot};
 
 /// Inputs that produced a cached flag, not necessarily the latest targeting.
+/// Cloning is cheap: results from one evaluation share a single context.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct FeatureFlagContext {
-    pub distinct_id: String,
-    pub anonymous_id: String,
-    pub groups: HashMap<String, String>,
-    pub person_properties: HashMap<String, Value>,
-    pub group_properties: HashMap<String, HashMap<String, Value>>,
-    pub disable_geoip: bool,
-}
+pub struct FeatureFlagContext(Arc<FlagContext>);
 
 /// An owned evaluation snapshot. False is a known result, not unavailability.
 /// Payloads and metadata belong to this record's producing response, including
@@ -43,15 +36,32 @@ pub struct FeatureFlagResult {
 }
 
 impl FeatureFlagContext {
-    pub(super) fn from_context(context: &super::flag_state::FlagContext) -> Self {
-        Self {
-            distinct_id: context.distinct_id.clone(),
-            anonymous_id: context.anonymous_id.clone(),
-            groups: context.groups.clone(),
-            person_properties: context.person_properties.clone(),
-            group_properties: context.group_properties.clone(),
-            disable_geoip: context.disable_geoip,
-        }
+    pub(super) fn new(context: Arc<FlagContext>) -> Self {
+        Self(context)
+    }
+
+    pub fn distinct_id(&self) -> &str {
+        &self.0.distinct_id
+    }
+
+    pub fn anonymous_id(&self) -> &str {
+        &self.0.anonymous_id
+    }
+
+    pub fn groups(&self) -> &HashMap<String, String> {
+        &self.0.groups
+    }
+
+    pub fn person_properties(&self) -> &HashMap<String, Value> {
+        &self.0.person_properties
+    }
+
+    pub fn group_properties(&self) -> &HashMap<String, HashMap<String, Value>> {
+        &self.0.group_properties
+    }
+
+    pub fn disable_geoip(&self) -> bool {
+        self.0.disable_geoip
     }
 }
 
@@ -66,7 +76,7 @@ impl FeatureFlagResult {
                 None
             },
             payload: flag.record.payload.clone(),
-            context: FeatureFlagContext::from_context(&flag.context),
+            context: FeatureFlagContext::new(flag.context.clone()),
             evaluation_revision: flag.revision,
             request_id: flag.request_id.clone(),
             evaluated_at: flag.evaluated_at,

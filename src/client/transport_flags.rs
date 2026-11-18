@@ -11,29 +11,20 @@ use serde_json::Value;
 
 use super::{ClientOptions, Control};
 use crate::client::common::{extract_flag_details, remote_record_from_detail, report_flags_error};
-use crate::client::event_store::RecordBuffer;
 use crate::client::retry::{self, FeatureFlagsResponseStep, FeatureFlagsTransportStep};
 use crate::endpoints::Endpoint;
 use crate::feature_flag_evaluations::EvaluatedFlagRecord;
 use crate::feature_flags::FeatureFlagsResponse;
 use crate::Error;
 
-pub(crate) const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
-pub(crate) const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-pub(crate) const MAX_FLAGS: usize = 10_000;
-
 /// Sanitized stateful flags-load failure; cached values may remain usable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LoadError {
-    RequestTooLarge,
     Network,
     Http(u16),
-    ResponseTooLarge,
     InvalidResponse,
-    TooManyFlags,
     QuotaLimited,
-    CacheTooLarge,
 }
 
 pub(crate) struct LoadedFlags {
@@ -54,20 +45,16 @@ impl Task {
     pub(crate) fn new(
         payload: &Value,
         complete: impl FnOnce(Result<LoadedFlags, LoadError>) + Send + 'static,
-    ) -> Result<Self, LoadError> {
-        let mut buffer = RecordBuffer {
-            bytes: Vec::new(),
-            limit: MAX_REQUEST_BYTES as u64,
-        };
-        serde_json::to_writer(&mut buffer, payload).map_err(|_| LoadError::RequestTooLarge)?;
-        Ok(Self {
-            body: buffer.bytes,
+    ) -> Self {
+        Self {
+            // Serializing a JSON value cannot fail.
+            body: serde_json::to_vec(payload).unwrap_or_default(),
             distinct_id: payload
                 .get("distinct_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             complete: Box::new(complete),
-        })
+        }
     }
 
     pub(crate) fn run(self, http: &reqwest::blocking::Client, options: &ClientOptions) {
@@ -164,14 +151,10 @@ impl Slot {
 
 pub(crate) fn report(options: &ClientOptions, endpoint: &str, id: Option<&str>, error: LoadError) {
     let message = match error {
-        LoadError::RequestTooLarge => "Feature flags request exceeds limit",
         LoadError::Network => "Feature flags request failed",
         LoadError::Http(_) => "Feature flags HTTP request failed",
-        LoadError::ResponseTooLarge => "Feature flags response exceeds limit",
         LoadError::InvalidResponse => "Invalid feature flags response or payload",
-        LoadError::TooManyFlags => "Feature flags count exceeds limit",
         LoadError::QuotaLimited => "Feature flags quota exceeded",
-        LoadError::CacheTooLarge => "Feature flags cache exceeds limit",
     };
     let status = match error {
         LoadError::Http(status) => Some(status),
@@ -205,7 +188,7 @@ fn fetch(
             ))
             .body(body.to_vec());
         match request.send() {
-            Ok(response) => {
+            Ok(mut response) => {
                 let status = response.status().as_u16();
                 match retry::feature_flags_after_response(options, attempt, status) {
                     FeatureFlagsResponseStep::Backoff(delay) => {
@@ -221,12 +204,8 @@ fn fetch(
                 }
                 let mut bytes = Vec::new();
                 response
-                    .take(MAX_RESPONSE_BYTES as u64 + 1)
                     .read_to_end(&mut bytes)
                     .map_err(|_| LoadError::Network)?;
-                if bytes.len() > MAX_RESPONSE_BYTES {
-                    return Err(LoadError::ResponseTooLarge);
-                }
                 return decode(&bytes);
             }
             Err(error) => match retry::feature_flags_after_transport_error(
@@ -260,9 +239,6 @@ struct Envelope {
 }
 
 fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
-    if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(LoadError::ResponseTooLarge);
-    }
     let mut value: Value = serde_json::from_slice(bytes).map_err(|_| LoadError::InvalidResponse)?;
     // Client v2 responses use product names; retain compatibility with the
     // boolean form understood by the existing Rust decoder. A quota-only
@@ -287,10 +263,6 @@ fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
         serde::Deserialize::deserialize(&value).map_err(|_| LoadError::InvalidResponse)?;
     if let Some(flags) = value.get_mut("flags") {
         let flags = flags.as_object_mut().ok_or(LoadError::InvalidResponse)?;
-        // Count the original map, including failed evaluations, before filtering.
-        if flags.len() > MAX_FLAGS {
-            return Err(LoadError::TooManyFlags);
-        }
         for detail in flags.values() {
             match detail.get("failed") {
                 Some(Value::Bool(_)) | None => {}
@@ -305,9 +277,6 @@ fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
     let details = extract_flag_details(response);
     if details.quota_limited {
         return Err(LoadError::QuotaLimited);
-    }
-    if details.flags.len() > MAX_FLAGS {
-        return Err(LoadError::TooManyFlags);
     }
     let mut invalid_payloads = false;
     let minimal = envelope.minimal;
