@@ -415,10 +415,14 @@ fn explicit_shutdown_deadline_is_shared_and_cannot_be_extended_by_later_close() 
     writer.checkpoint();
     let pending = call(&calls);
     let deadline = clock.now() + Duration::from_secs(1);
+    let selected = writer.deadline_handle();
     writer.request_close_before(deadline);
-    writer.request_close_before(deadline + Duration::from_secs(10));
-    writer.request_close();
-    assert_eq!(writer.shared.lock().closing, Some(deadline));
+    assert_eq!(*selected.lock().unwrap(), Some(deadline));
+    std::thread::scope(|scope| {
+        scope.spawn(|| writer.request_close_before(deadline + Duration::from_secs(10)));
+        scope.spawn(|| writer.request_close());
+    });
+    assert_eq!(*selected.lock().unwrap(), Some(deadline));
     clock.advance(Duration::from_secs(1));
     pending.finish(Err(io::Error::other("test failure")));
     assert_eq!(writer.join_blocking(), DrainOutcome::WriteFailed);
@@ -523,9 +527,9 @@ fn destructor_panic_cannot_leave_shutdown_waiters_asleep() {
 #[test]
 fn new_and_updated_identity_survive_real_file_shutdown_and_restart() {
     let path = std::env::temp_dir().join(format!("posthog-state-writer-{}", uuid::Uuid::now_v7()));
-    let (store, initial) =
-        FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096).unwrap();
-    assert!(initial.is_none());
+    let opened = FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096).unwrap();
+    assert!(opened.snapshot.is_none());
+    let store = opened.store;
     let writer = StateWriter::new(
         Snapshot::anonymous("initial".into()),
         Backend::Persistent {
@@ -550,7 +554,7 @@ fn new_and_updated_identity_survive_real_file_shutdown_and_restart() {
     drop(writer);
     let loaded = FileStateStore::open(StorageDirectory::open(&path).unwrap(), 4096)
         .unwrap()
-        .1;
+        .snapshot;
     assert_eq!(loaded, Some(Snapshot::anonymous("latest".into())));
     std::fs::remove_dir_all(path).unwrap();
 }

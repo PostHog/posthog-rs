@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use super::storage::{snapshot_size, StateStore};
+use super::storage::{encode_snapshot, StateStore};
 use super::Snapshot;
 use crate::client::common::report_storage_error;
 use crate::client::retry::exponential_backoff;
@@ -86,6 +86,16 @@ struct State {
 }
 
 impl State {
+    fn observe_close(&mut self, deadline: Instant, now: Instant) {
+        if self.closing.is_none() {
+            self.closing = Some(deadline);
+            if self.mode == Mode::Persistent && self.persisted < self.revision && self.failures == 0
+            {
+                self.due = Some(now);
+            }
+        }
+    }
+
     fn outcome(&self, revision: u64) -> Option<DrainOutcome> {
         match self.mode {
             Mode::Memory => Some(DrainOutcome::MemoryOnly),
@@ -103,15 +113,88 @@ impl State {
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
+    deadline: Arc<Mutex<Option<Instant>>>,
+    clock: Arc<dyn Clock>,
     #[cfg(feature = "async-client")]
     progress: tokio::sync::watch::Sender<()>,
 }
 
+// Apply deferred closure while the current state owner releases its lock,
+// including memory-only clients that have no persistence worker to wake.
+struct StateGuard<'a> {
+    state: Option<MutexGuard<'a, State>>,
+    shared: &'a Shared,
+}
+impl<'a> StateGuard<'a> {
+    fn observe_deadline(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            if state.closing.is_none() {
+                let selected = *self
+                    .shared
+                    .deadline
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if let Some(deadline) = selected {
+                    state.observe_close(deadline, self.shared.clock.now());
+                }
+            }
+        }
+    }
+    fn into_inner(mut self) -> MutexGuard<'a, State> {
+        self.observe_deadline();
+        self.state.take().unwrap()
+    }
+}
+impl std::ops::Deref for StateGuard<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        self.state.as_ref().unwrap()
+    }
+}
+impl std::ops::DerefMut for StateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        self.state.as_mut().unwrap()
+    }
+}
+impl Drop for StateGuard<'_> {
+    fn drop(&mut self) {
+        self.observe_deadline();
+    }
+}
+
 impl Shared {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn guard<'a>(&'a self, state: MutexGuard<'a, State>) -> StateGuard<'a> {
+        let mut guard = StateGuard {
+            state: Some(state),
+            shared: self,
+        };
+        guard.observe_deadline();
+        guard
+    }
+    fn lock(&self) -> StateGuard<'_> {
+        self.guard(self.state.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+    fn try_lock(&self) -> Option<StateGuard<'_>> {
+        match self.state.try_lock() {
+            Ok(state) => Some(self.guard(state)),
+            Err(std::sync::TryLockError::Poisoned(error)) => Some(self.guard(error.into_inner())),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+    fn wait<'a>(&'a self, state: StateGuard<'a>) -> StateGuard<'a> {
+        self.guard(
+            self.changed
+                .wait(state.into_inner())
+                .unwrap_or_else(|p| p.into_inner()),
+        )
+    }
+    fn wait_timeout<'a>(&'a self, state: StateGuard<'a>, timeout: Duration) -> StateGuard<'a> {
+        self.guard(
+            self.changed
+                .wait_timeout(state.into_inner(), timeout)
+                .unwrap_or_else(|p| p.into_inner())
+                .0,
+        )
     }
 
     /// Call outside the state lock: waking an executor may run caller code.
@@ -151,17 +234,37 @@ pub(super) struct StateWriter {
     shared: Arc<Shared>,
     worker: Mutex<Option<JoinHandle<()>>>,
     worker_id: Option<ThreadId>,
+    mode: Mode,
     clock: Arc<dyn Clock>,
     options: WriterOptions,
 }
 
 impl StateWriter {
+    #[cfg(test)]
     pub(super) fn new(
         snapshot: Snapshot,
         backend: Backend,
         options: WriterOptions,
         hooks: Vec<OnErrorHook>,
         clock: Arc<dyn Clock>,
+    ) -> Result<Self, UpdateError> {
+        Self::new_with_deadline(
+            snapshot,
+            backend,
+            options,
+            hooks,
+            clock,
+            Arc::new(Mutex::new(None)),
+        )
+    }
+
+    pub(super) fn new_with_deadline(
+        snapshot: Snapshot,
+        backend: Backend,
+        options: WriterOptions,
+        hooks: Vec<OnErrorHook>,
+        clock: Arc<dyn Clock>,
+        deadline: Arc<Mutex<Option<Instant>>>,
     ) -> Result<Self, UpdateError> {
         if options.max_bytes == 0
             || options.retry_initial_ms == 0
@@ -194,6 +297,8 @@ impl StateWriter {
                 in_flight: None,
             }),
             changed: Condvar::new(),
+            deadline,
+            clock: clock.clone(),
             #[cfg(feature = "async-client")]
             progress: tokio::sync::watch::channel(()).0,
         });
@@ -249,6 +354,7 @@ impl StateWriter {
             shared,
             worker: Mutex::new(worker),
             worker_id,
+            mode,
             clock,
             options,
         })
@@ -312,11 +418,7 @@ impl StateWriter {
             if let Some(outcome) = state.outcome(revision) {
                 return outcome;
             }
-            state = self
-                .shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = self.shared.wait(state);
         }
     }
 
@@ -338,7 +440,11 @@ impl StateWriter {
 
     #[cfg(test)]
     pub(super) fn is_closed(&self) -> bool {
-        self.shared.lock().closing.is_some()
+        self.shared
+            .deadline
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
     }
 
     pub(super) fn on_worker_thread(&self) -> bool {
@@ -354,20 +460,50 @@ impl StateWriter {
 
     pub(super) fn request_close_before(&self, deadline: Instant) {
         {
-            let mut state = self.shared.lock();
-            if state.closing.is_none() {
-                state.closing = Some(deadline);
-                if state.mode == Mode::Persistent
-                    && state.persisted < state.revision
-                    && state.failures == 0
-                {
-                    state.due = Some(self.clock.now());
-                }
+            let mut selected = self
+                .shared
+                .deadline
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if selected.is_none() {
+                *selected = Some(deadline);
             }
         }
-        self.shared.notify();
+        // A contended state owner applies closure when releasing its guard.
+        // Neither path waits for mutation/validation or invokes executor wakers.
+        drop(self.shared.try_lock());
+        self.shared.changed.notify_all();
     }
 
+    #[cfg(test)]
+    pub(super) fn deadline_handle(&self) -> Arc<Mutex<Option<Instant>>> {
+        self.shared.deadline.clone()
+    }
+
+    pub(super) fn is_stopped(&self) -> bool {
+        self.worker
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(true, JoinHandle::is_finished)
+    }
+
+    pub(super) fn shutdown_outcome(&self) -> DrainOutcome {
+        match self.mode {
+            Mode::Memory => return DrainOutcome::MemoryOnly,
+            Mode::Unavailable => return DrainOutcome::Unavailable,
+            Mode::Persistent => {}
+        }
+        let state = match self.shared.try_lock() {
+            Some(state) => state,
+            None => return DrainOutcome::TimedOut,
+        };
+        state
+            .outcome(state.revision)
+            .unwrap_or(DrainOutcome::TimedOut)
+    }
+
+    #[cfg(test)]
     pub(super) fn join_blocking(&self) -> DrainOutcome {
         if self.on_worker_thread() {
             return DrainOutcome::Deferred;
@@ -375,11 +511,7 @@ impl StateWriter {
         let outcome = {
             let mut state = self.shared.lock();
             while !state.stopped {
-                state = self
-                    .shared
-                    .changed
-                    .wait(state)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state = self.shared.wait(state);
             }
             state
                 .outcome(state.revision)
@@ -389,7 +521,7 @@ impl StateWriter {
         outcome
     }
 
-    #[cfg(feature = "async-client")]
+    #[cfg(all(test, feature = "async-client"))]
     pub(super) async fn join_async(&self) -> DrainOutcome {
         if self.on_worker_thread() {
             return DrainOutcome::Deferred;
@@ -441,11 +573,7 @@ impl StateWriter {
         self.shared.changed.notify_all();
         let requested = state.tick_requested;
         while state.tick_processed < requested && !state.stopped {
-            state = self
-                .shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = self.shared.wait(state);
         }
     }
 }
@@ -453,7 +581,7 @@ impl StateWriter {
 impl Drop for StateWriter {
     fn drop(&mut self) {
         self.request_close();
-        if !self.on_worker_thread() {
+        if !self.on_worker_thread() && self.is_stopped() {
             self.join();
         }
     }
@@ -463,9 +591,15 @@ fn validate(snapshot: &Snapshot, max_bytes: usize) -> Result<(), UpdateError> {
     if !snapshot.is_valid() {
         return Err(UpdateError::Invalid);
     }
-    if snapshot_size(snapshot) > max_bytes {
-        return Err(UpdateError::Full);
-    }
+    // No candidate may make unrelated future state changes unpersistable.
+    // Use the persistence codec itself, including its byte and decoder bounds.
+    encode_snapshot(snapshot, max_bytes as u64).map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidInput {
+            UpdateError::Full
+        } else {
+            UpdateError::Invalid
+        }
+    })?;
     Ok(())
 }
 
@@ -479,6 +613,10 @@ fn run_worker(
     let mut state = shared.lock();
     loop {
         let now = clock.now();
+        let selected = *shared.deadline.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(deadline) = selected {
+            state.observe_close(deadline, now);
+        }
         if state
             .closing
             .is_some_and(|deadline| now >= deadline || state.persisted >= state.revision)
@@ -498,6 +636,15 @@ fn run_worker(
                 shared.tick_observed(&mut state);
             }
             drop(state);
+            let selected = *shared.deadline.lock().unwrap_or_else(|p| p.into_inner());
+            if selected.is_some_and(|end| clock.now() >= end) {
+                state = shared.lock();
+                #[cfg(test)]
+                {
+                    state.in_flight = None;
+                }
+                continue;
+            }
             let result = store.save(&snapshot);
             state = shared.lock();
             #[cfg(test)]
@@ -538,16 +685,9 @@ fn run_worker(
             (None, None) => None,
         };
         state = if let Some(at) = wake_at {
-            shared
-                .changed
-                .wait_timeout(state, at.saturating_duration_since(now))
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .0
+            shared.wait_timeout(state, at.saturating_duration_since(now))
         } else {
-            shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+            shared.wait(state)
         };
     }
     // Destructors and callbacks must run without the state lock, including a

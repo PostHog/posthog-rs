@@ -386,7 +386,7 @@ impl Client {
     /// Unbounded synchronous flush: blocks until the worker has attempted
     /// delivery of everything queued. Test-only; the panic hook uses
     /// `flush_blocking_timeout`.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "error-tracking"))]
     pub(crate) fn flush_blocking(&self) {
         for transport in self.lanes() {
             transport.flush_blocking();

@@ -152,6 +152,7 @@ pub posthog::stateful::DeliveryOutcome::Closed
 pub posthog::stateful::DeliveryOutcome::Deferred
 pub posthog::stateful::DeliveryOutcome::Disabled
 pub posthog::stateful::DeliveryOutcome::Stopped
+pub posthog::stateful::DeliveryOutcome::TimedOut
 pub posthog::stateful::DeliveryOutcome::Unavailable
 #[non_exhaustive] pub enum posthog::stateful::Persistence
 pub posthog::stateful::Persistence::Automatic

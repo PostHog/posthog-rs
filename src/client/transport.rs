@@ -42,12 +42,12 @@ use crate::Event;
 #[cfg(feature = "stateful")]
 #[path = "transport_memory.rs"]
 mod memory;
-#[cfg(all(test, feature = "stateful"))]
-#[path = "transport_startup_tests.rs"]
-mod startup_tests;
 #[cfg(feature = "stateful")]
 #[path = "transport_queue.rs"]
 mod queue;
+#[cfg(all(test, feature = "stateful"))]
+#[path = "transport_startup_tests.rs"]
+mod startup_tests;
 #[cfg(feature = "stateful")]
 #[path = "transport_storage.rs"]
 mod storage_support;
@@ -140,6 +140,47 @@ pub(crate) enum Admission {
     Closed,
 }
 
+enum PreparedWarning {
+    Count {
+        endpoint: Endpoint,
+        capacity: usize,
+    },
+    #[cfg(feature = "stateful")]
+    Bytes,
+}
+
+/// Admission is final; only its application-facing diagnostic is deferred.
+#[must_use]
+pub(crate) struct PreparedAdmission {
+    pub(crate) admission: Admission,
+    warning: Option<PreparedWarning>,
+}
+
+impl PreparedAdmission {
+    fn new(admission: Admission) -> Self {
+        Self {
+            admission,
+            warning: None,
+        }
+    }
+
+    pub(crate) fn report(self) -> Admission {
+        match self.warning {
+            Some(PreparedWarning::Count { endpoint, capacity }) => {
+                warn!(
+                    "posthog-rs: event queue full for {endpoint} (capacity {capacity}); dropping events"
+                );
+            }
+            #[cfg(feature = "stateful")]
+            Some(PreparedWarning::Bytes) => {
+                warn!("posthog-rs: event queue byte limit reached; rejecting new event");
+            }
+            None => {}
+        }
+        self.admission
+    }
+}
+
 /// Completion signal handed to the worker so the caller can wait for a flush or
 /// shutdown to finish. The worker calls [`Completion::signal`] without needing a
 /// runtime — `oneshot::Sender::send` and `mpsc::Sender::send` are both runtime-free.
@@ -193,8 +234,6 @@ pub(crate) struct TransportHandle {
     /// Set once `shutdown`/`Drop` begins; blocks further enqueue and control sends.
     closed: AtomicBool,
     worker: Mutex<Option<JoinHandle<()>>>,
-    #[cfg(all(feature = "stateful", feature = "async-client"))]
-    stopped: Option<tokio::sync::watch::Receiver<()>>,
     /// Latches the single "queue full" warning so a full queue doesn't spam logs.
     full_warned: AtomicBool,
     max_queue_size: usize,
@@ -340,23 +379,41 @@ impl TransportHandle {
     ///
     /// Call only from blocking initialization or its helper thread. The caller
     /// has already opened the namespace; subsequent store I/O belongs here.
-    #[cfg(feature = "stateful")]
+    #[cfg(all(test, feature = "stateful"))]
     pub(super) fn spawn_stateful(
         options: ClientOptions,
         store: Option<Box<dyn super::event_store::EventStore>>,
         max_queue_bytes: usize,
+    ) -> Result<Self, StartupFailure> {
+        Self::spawn_stateful_with_deadline(
+            options,
+            store,
+            max_queue_bytes,
+            Arc::new(Mutex::new(None)),
+            Arc::new(SystemClock),
+        )
+    }
+
+    #[cfg(feature = "stateful")]
+    pub(super) fn spawn_stateful_with_deadline(
+        options: ClientOptions,
+        store: Option<Box<dyn super::event_store::EventStore>>,
+        max_queue_bytes: usize,
+        deadline: Arc<Mutex<Option<Instant>>>,
+        clock: Arc<dyn Clock>,
     ) -> Result<Self, StartupFailure> {
         let storage = match store {
             Some(store) => StorageState::new(store, max_queue_bytes),
             None => StorageState::memory(max_queue_bytes),
         };
         let (tx, rx) = mpsc::channel();
-        Self::spawn_configured_with_startup(
+        Self::spawn_configured_with_deadline(
             options,
             LaneConfig::analytics(),
-            Arc::new(SystemClock),
+            clock,
             storage,
             Some(tx),
+            Some(deadline),
         )
         .finish_startup(rx)
     }
@@ -370,7 +427,7 @@ impl TransportHandle {
             Err(_) => StartupFailure::WorkerStopped,
         };
         // Do not leave a partially initialized worker or namespace lease behind.
-        self.request_close();
+        self.request_close_before(Instant::now());
         self.join();
         Err(failure)
     }
@@ -388,8 +445,19 @@ impl TransportHandle {
         options: ClientOptions,
         lane: LaneConfig,
         clock: Arc<dyn Clock>,
+        storage: StorageState,
+        ready: Option<mpsc::Sender<bool>>,
+    ) -> Self {
+        Self::spawn_configured_with_deadline(options, lane, clock, storage, ready, None)
+    }
+
+    fn spawn_configured_with_deadline(
+        options: ClientOptions,
+        lane: LaneConfig,
+        clock: Arc<dyn Clock>,
         _storage: StorageState,
         _ready: Option<mpsc::Sender<bool>>,
+        _deadline: Option<Arc<Mutex<Option<Instant>>>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Control>();
         let len = Arc::new(AtomicUsize::new(0));
@@ -415,7 +483,7 @@ impl TransportHandle {
         #[cfg(feature = "stateful")]
         let worker_queue = queue.clone();
         #[cfg(feature = "stateful")]
-        let closing_deadline = Arc::new(Mutex::new(None));
+        let closing_deadline = _deadline.unwrap_or_else(|| Arc::new(Mutex::new(None)));
         #[cfg(feature = "stateful")]
         let worker_deadline = closing_deadline.clone();
         #[cfg(feature = "stateful")]
@@ -427,18 +495,9 @@ impl TransportHandle {
         #[cfg(feature = "stateful")]
         let drain_timeout =
             Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT);
-        #[cfg(all(feature = "stateful", feature = "async-client"))]
-        let (worker_done, stopped) = if _ready.is_some() {
-            let (tx, rx) = tokio::sync::watch::channel(());
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
         let worker = thread::Builder::new()
             .name(lane.thread_name.to_string())
             .spawn(move || {
-                #[cfg(all(feature = "stateful", feature = "async-client"))]
-                let _done = worker_done;
                 #[cfg(feature = "stateful")]
                 if let Some(queue) = worker_queue {
                     queue::run(
@@ -465,8 +524,6 @@ impl TransportHandle {
             len,
             closed: AtomicBool::new(false),
             worker: Mutex::new(worker),
-            #[cfg(all(feature = "stateful", feature = "async-client"))]
-            stopped,
             full_warned: AtomicBool::new(false),
             max_queue_size,
             endpoint,
@@ -507,10 +564,16 @@ impl TransportHandle {
 
     /// Admit an already assembled event without request-context enrichment,
     /// defaults, hooks, or wire conversion. The producer owns those steps.
-    #[cfg_attr(not(feature = "stateful"), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn enqueue_prepared(&self, event: CaptureEvent) -> Admission {
+        self.enqueue_prepared_deferred(event).report()
+    }
+
+    /// Callback-free admission for callers holding SDK state locks. Report the
+    /// returned diagnostic only after releasing those locks: tracing is user code.
+    pub(crate) fn enqueue_prepared_deferred(&self, event: CaptureEvent) -> PreparedAdmission {
         if self.closed.load(Ordering::Acquire) {
-            return Admission::Closed;
+            return PreparedAdmission::new(Admission::Closed);
         }
         #[cfg(feature = "stateful")]
         if let Some(queue) = &self.queue {
@@ -521,21 +584,35 @@ impl TransportHandle {
             {
                 self.closed.store(true, Ordering::Release);
                 queue.clear();
-                return Admission::Closed;
+                return PreparedAdmission::new(Admission::Closed);
             }
             if admission == Admission::Accepted && queue.len() == 1 {
                 self.full_warned.store(false, Ordering::Release);
             }
-            if admission == Admission::Full && !self.full_warned.swap(true, Ordering::AcqRel) {
-                warn!("posthog-rs: event queue byte limit reached; rejecting new event");
-            }
-            return admission;
+            return PreparedAdmission {
+                admission,
+                warning: (admission == Admission::Full
+                    && !self.full_warned.swap(true, Ordering::AcqRel))
+                .then_some(PreparedWarning::Bytes),
+            };
         }
-        if !self.try_reserve() {
-            return Admission::Full;
+        match reserve_slot(&self.len, self.max_queue_size) {
+            Some(0) => self.full_warned.store(false, Ordering::Release),
+            Some(_) => {}
+            None => {
+                return PreparedAdmission {
+                    admission: Admission::Full,
+                    warning: (!self.full_warned.swap(true, Ordering::AcqRel)).then_some(
+                        PreparedWarning::Count {
+                            endpoint: self.endpoint,
+                            capacity: self.max_queue_size,
+                        },
+                    ),
+                };
+            }
         }
         let event = DeliveryEvent::from(event);
-        if self
+        let admission = if self
             .tx
             .send(Control::Prepared {
                 event: Box::new(event),
@@ -546,7 +623,8 @@ impl TransportHandle {
             Admission::Closed
         } else {
             Admission::Accepted
-        }
+        };
+        PreparedAdmission::new(admission)
     }
 
     /// Like `enqueue`, but never logs — no full-queue `warn!`. The panic hook
@@ -684,15 +762,17 @@ impl TransportHandle {
         completion: Completion,
         deadline: Option<Instant>,
     ) -> bool {
-        if self.begin_close() {
-            #[cfg(feature = "stateful")]
-            if self.queue.is_some() {
-                *self
-                    .closing_deadline
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) =
-                    Some(deadline.unwrap_or_else(|| self.clock.now() + self.drain_timeout));
+        #[cfg(feature = "stateful")]
+        if self.queue.is_some() {
+            let mut selected = self
+                .closing_deadline
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if selected.is_none() {
+                *selected = Some(deadline.unwrap_or_else(|| self.clock.now() + self.drain_timeout));
             }
+        }
+        if self.begin_close() {
             self.send_control(Control::Shutdown {
                 completion,
                 deadline,
@@ -704,21 +784,21 @@ impl TransportHandle {
 
     #[cfg(feature = "stateful")]
     pub(super) fn request_close_before(&self, deadline: Instant) {
+        let mut selected = self
+            .closing_deadline
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if selected.is_none() {
+            *selected = Some(deadline);
+        }
+        drop(selected);
+        let _ = self.tx.send(Control::QueueWake);
         let (tx, _rx) = mpsc::channel();
         self.request_shutdown_with_deadline(Completion::Blocking(tx), Some(deadline));
     }
 
-    /// Await the stateful worker body, not OS thread-local destruction. The
-    /// final join remains necessary and may exceed the shutdown budget.
-    #[cfg(all(feature = "stateful", feature = "async-client"))]
-    pub(super) async fn wait_stopped(&self) {
-        if let Some(mut stopped) = self.stopped.clone() {
-            let _ = stopped.changed().await;
-        }
-    }
-
-    #[cfg(all(test, feature = "stateful"))]
-    fn all_stopped(&self) -> bool {
+    #[cfg(feature = "stateful")]
+    pub(super) fn all_stopped(&self) -> bool {
         self.worker
             .lock()
             .unwrap_or_else(|p| p.into_inner())

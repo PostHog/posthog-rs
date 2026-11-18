@@ -14,6 +14,22 @@ use crate::client::event_store::{
 };
 use crate::{Event, PostHogError, StorageOperation};
 
+impl TransportHandle {
+    /// Storage integration fixture with the normal asynchronous worker startup.
+    fn spawn_persistent(
+        options: crate::ClientOptions,
+        store: Box<dyn EventStore>,
+        max_queue_bytes: usize,
+    ) -> Self {
+        Self::spawn_configured(
+            options,
+            LaneConfig::analytics(),
+            Arc::new(super::SystemClock),
+            StorageState::new(store, max_queue_bytes),
+        )
+    }
+}
+
 pub(super) struct TestDirectory(pub(super) PathBuf);
 
 impl TestDirectory {

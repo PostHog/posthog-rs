@@ -23,7 +23,6 @@ impl Directory {
     fn scope(&self) -> PathBuf {
         let config = self.config();
         self.0.join(super::namespace(
-            &config.host,
             &config.project_token,
             &config.instance_name,
         ))
@@ -224,10 +223,62 @@ fn anonymous_bootstrap_persists_and_does_not_replace_restored_identity() {
 }
 
 #[test]
-fn unreadable_state_is_preserved_and_client_remains_enabled() {
-    for original in [
-        b"not json".as_slice(),
-        b"{\"version\":99,\"state\":{}}".as_slice(),
+fn host_changes_share_identity_queue_and_single_owner_scope() {
+    let directory = Directory::new();
+    let config = || {
+        let mut config = directory.config();
+        config.flush_interval = Duration::from_secs(3600);
+        config.max_capture_attempts = 1;
+        config
+    };
+    let client = Client::init_blocking(config());
+    let id = client.get_anonymous_id();
+    client.capture("queued");
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
+    let changed_host = "http://127.0.0.1:2";
+    let mut next = config();
+    next.host = changed_host.into();
+    let contender = Client::init_blocking(next);
+    assert_ne!(contender.get_anonymous_id(), id);
+    assert_eq!(
+        contender.flush_blocking().state,
+        PersistenceOutcome::Unavailable
+    );
+    contender.shutdown_blocking(None);
+    drop(contender);
+    client.shutdown_blocking(None);
+    drop(client);
+    let mut next = config();
+    next.host = changed_host.into();
+    {
+        use crate::client::event_store::EventStore;
+        let scope = super::namespace(&next.project_token, &next.instance_name);
+        let mut storage = super::RestoredStorage::open(
+            &next.persistence,
+            &scope,
+            next.max_state_bytes as u64,
+            next.event_limits(),
+            &[],
+        );
+        let recovered = storage
+            .event_store
+            .as_mut()
+            .unwrap()
+            .recover(10, next.max_stored_bytes)
+            .unwrap();
+        assert_eq!(recovered.events.len(), 1);
+        assert!(recovered.errors.is_empty());
+    }
+    let restored = Client::init_blocking(next);
+    assert_eq!(restored.get_anonymous_id(), id);
+    restored.shutdown_blocking(None);
+}
+
+#[test]
+fn corrupt_state_is_replaced_but_future_state_is_preserved() {
+    for (original, recoverable) in [
+        (b"not json".as_slice(), true),
+        (b"{\"version\":99,\"state\":{}}".as_slice(), false),
     ] {
         let directory = Directory::new();
         fs::create_dir_all(directory.scope()).unwrap();
@@ -248,11 +299,44 @@ fn unreadable_state_is_preserved_and_client_remains_enabled() {
             StorageOperation::Read
         );
         let report = client.flush_blocking();
-        assert_eq!(report.state, PersistenceOutcome::Unavailable);
+        assert_eq!(
+            report.state,
+            if recoverable {
+                PersistenceOutcome::Persisted
+            } else {
+                PersistenceOutcome::Unavailable
+            }
+        );
         assert_eq!(report.delivery, DeliveryOutcome::Attempted);
+        let id = client.get_anonymous_id();
         client.shutdown_blocking(None);
-        assert_eq!(fs::read(&path).unwrap(), original);
+        drop(client);
+        if recoverable {
+            let restored = Client::init_blocking(directory.config());
+            assert_eq!(restored.get_anonymous_id(), id);
+            restored.shutdown_blocking(None);
+        } else {
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
     }
+}
+
+#[test]
+fn startup_rewrites_missing_device_and_tolerates_additive_fields() {
+    let directory = Directory::new();
+    fs::create_dir_all(directory.scope()).unwrap();
+    let path = directory.scope().join("state.json");
+    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","future_field":42}}"#).unwrap();
+    let client = Client::init_blocking(directory.config());
+    assert_eq!(client.get_anonymous_id(), "anonymous");
+    assert_eq!(client.get_distinct_id(), "person");
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
+    assert_eq!(
+        client.shutdown_blocking(None).delivery,
+        DeliveryOutcome::Stopped
+    );
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(value["state"]["device_id"], "anonymous");
 }
 
 #[test]

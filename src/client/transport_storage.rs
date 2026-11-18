@@ -2,7 +2,6 @@
 //! created key; failed acknowledgements never claim reclaimed disk capacity.
 
 use crate::capture_event::CaptureEvent;
-use std::io;
 
 use crate::client::common::report_storage_error;
 use crate::client::event_store::{EventStore, StoreKey};

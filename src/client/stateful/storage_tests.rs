@@ -54,57 +54,38 @@ fn record(snapshot: &Snapshot) -> Vec<u8> {
 
 #[test]
 fn namespace_has_stable_byte_encoding_and_zero_padded_hex() {
-    for (host, token, instance, expected) in [
+    for (token, instance, expected) in [
         (
-            "https://us.i.posthog.com",
             "project",
             "default",
-            "v1-ecfe5d95996e3a3cf5569de5efc4c54c3a614429",
+            "v1-158e7eddb459563fe83b100c75c7e2274ae6a0be",
         ),
         (
-            "https://local",
             "project-µ",
             "instance-🎯",
-            "v1-8c488bf868510430c13cc0c4adb367a7bbece7b3",
+            "v1-2a07fec3d2138dd6951f4325da387214ad7e915c",
         ),
         (
-            "https://local",
             "project",
             "11",
-            "v1-0022e31390e2ad7a48e393177bf9818c9394fc3d",
+            "v1-57b16285117db1fa578f63958169c6ef1ce4da2e",
         ),
     ] {
-        assert_eq!(namespace(host, token, instance), expected);
+        assert_eq!(namespace(token, instance), expected);
     }
 }
 
 #[test]
-fn namespace_is_stable_normalized_isolated_and_path_safe() {
-    let scope = namespace("https://us.posthog.com/", "project", "default");
-    assert_eq!(
-        scope,
-        namespace("https://us.i.posthog.com", "project", "default")
-    );
-    assert_ne!(
-        scope,
-        namespace("https://eu.posthog.com", "project", "default")
-    );
-    assert_ne!(
-        scope,
-        namespace("https://us.posthog.com", "other", "default")
-    );
-    assert_ne!(
-        scope,
-        namespace("https://us.posthog.com", "project", "other")
-    );
-    assert_ne!(
-        namespace("https://local", "ab", "c"),
-        namespace("https://local", "a", "bc")
-    );
+fn namespace_is_stable_isolated_and_path_safe() {
+    let scope = namespace("project", "default");
+    assert_eq!(scope, namespace("project", "default"));
+    assert_ne!(scope, namespace("other", "default"));
+    assert_ne!(scope, namespace("project", "other"));
+    assert_ne!(namespace("ab", "c"), namespace("a", "bc"));
     assert_eq!(scope.len(), 43);
     assert!(scope.starts_with("v1-"));
     assert!(scope[3..].bytes().all(|byte| byte.is_ascii_hexdigit()));
-    let hostile = namespace("https://local/../../", "private/credential", "../../other");
+    let hostile = namespace("private/credential", "../../other");
     assert_eq!(Path::new(&hostile).components().count(), 1);
     assert!(!hostile.contains("private"));
 }
@@ -155,24 +136,27 @@ fn fresh_state_roundtrips_and_atomic_replacement_keeps_latest_snapshot() {
     let first = Snapshot::anonymous("anonymous-用户".into());
     let second = Snapshot::anonymous("replacement".into());
     {
-        let (mut store, loaded) = FileStateStore::open(directory.lease(), 4096).unwrap();
-        assert!(loaded.is_none());
+        let opened = FileStateStore::open(directory.lease(), 4096).unwrap();
+        assert!(opened.snapshot.is_none());
+        let mut store = opened.store;
         store.save(&first).unwrap();
         assert_eq!(store.load().unwrap(), Some(first));
         store.save(&second).unwrap();
         assert!(!directory.path().join("state.json.tmp").exists());
     }
-    let (_, loaded) = FileStateStore::open(directory.lease(), 4096).unwrap();
-    assert_eq!(loaded, Some(second));
+    let opened = FileStateStore::open(directory.lease(), 4096).unwrap();
+    assert_eq!(opened.snapshot, Some(second));
 }
 
 #[test]
 fn serialization_limit_is_exact_and_failed_write_preserves_previous_state() {
     let directory = TestDirectory::new();
     let first = Snapshot::anonymous("用户".into());
-    let exact_bytes = record(&first).len() as u64;
+    let exact_bytes = snapshot_size(&first) as u64;
     {
-        let (mut store, _) = FileStateStore::open(directory.lease(), exact_bytes - 1).unwrap();
+        let mut store = FileStateStore::open(directory.lease(), exact_bytes - 1)
+            .unwrap()
+            .store;
         assert_eq!(
             store.save(&first).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
@@ -180,9 +164,15 @@ fn serialization_limit_is_exact_and_failed_write_preserves_previous_state() {
         assert!(!store.path().exists());
     }
     {
-        let (mut store, _) = FileStateStore::open(directory.lease(), exact_bytes).unwrap();
+        let mut store = FileStateStore::open(directory.lease(), exact_bytes)
+            .unwrap()
+            .store;
         store.save(&first).unwrap();
-        assert_eq!(fs::metadata(store.path()).unwrap().len(), exact_bytes);
+        assert_eq!(
+            fs::metadata(store.path()).unwrap().len(),
+            record(&first).len() as u64
+        );
+        assert_eq!(snapshot_size(&first) as u64, exact_bytes);
         assert!(store.save(&Snapshot::anonymous("x".repeat(4096))).is_err());
         assert_eq!(store.load().unwrap(), Some(first.clone()));
     }
@@ -197,13 +187,14 @@ fn serialization_limit_is_exact_and_failed_write_preserves_previous_state() {
 fn invalid_identity_cannot_replace_persisted_state() {
     let directory = TestDirectory::new();
     let original = Snapshot::anonymous("original".into());
-    let (mut store, _) = FileStateStore::open(directory.lease(), 4096).unwrap();
+    let mut store = FileStateStore::open(directory.lease(), 4096).unwrap().store;
     store.save(&original).unwrap();
     for invalid in [
         Snapshot::anonymous(" \t".into()),
         Snapshot {
             anonymous_id: "valid".into(),
             distinct_id: String::new(),
+            ..Snapshot::anonymous("valid".into())
         },
     ] {
         assert_eq!(
@@ -219,7 +210,7 @@ fn uncommitted_temporary_is_replaced_without_displacing_last_committed_state() {
     let directory = TestDirectory::new();
     let original = Snapshot::anonymous("original".into());
     {
-        let (mut store, _) = FileStateStore::open(directory.lease(), 4096).unwrap();
+        let mut store = FileStateStore::open(directory.lease(), 4096).unwrap().store;
         store.save(&original).unwrap();
         fs::write(
             directory.path().join("state.json.tmp"),
@@ -227,8 +218,9 @@ fn uncommitted_temporary_is_replaced_without_displacing_last_committed_state() {
         )
         .unwrap();
     }
-    let (mut store, loaded) = FileStateStore::open(directory.lease(), 4096).unwrap();
-    assert_eq!(loaded, Some(original));
+    let opened = FileStateStore::open(directory.lease(), 4096).unwrap();
+    assert_eq!(opened.snapshot, Some(original));
+    let mut store = opened.store;
     let next = Snapshot::anonymous("next".into());
     store.save(&next).unwrap();
     assert_eq!(store.load().unwrap(), Some(next));
@@ -240,7 +232,7 @@ fn failed_replacement_can_retry_and_does_not_destroy_previous_state() {
     let directory = TestDirectory::new();
     let original = Snapshot::anonymous("original".into());
     let next = Snapshot::anonymous("next".into());
-    let (mut store, _) = FileStateStore::open(directory.lease(), 4096).unwrap();
+    let mut store = FileStateStore::open(directory.lease(), 4096).unwrap().store;
     store.save(&original).unwrap();
     let temporary = directory.path().join("state.json.tmp");
     fs::create_dir(&temporary).unwrap();
@@ -252,14 +244,12 @@ fn failed_replacement_can_retry_and_does_not_destroy_previous_state() {
 }
 
 #[test]
-fn corrupt_oversized_and_future_records_are_preserved_and_never_writable() {
+fn oversized_and_future_records_are_preserved_and_never_writable() {
     for bytes in [
-        b"truncated {".to_vec(),
         vec![b' '; 4097],
-        br#"{"version":2,"state":{"anonymous_id":"private","distinct_id":"private"}}"#.to_vec(),
-        br#"{"version":1,"state":{"anonymous_id":"private","distinct_id":"private","future":true}}"#.to_vec(),
-        br#"{"version":1,"state":{"anonymous_id":"private","distinct_id":17}}"#.to_vec(),
-        br#"{"version":1,"state":{"anonymous_id":"","distinct_id":"private"}}"#.to_vec(),
+        br#"{"version":99,"state":{"anonymous_id":"private","distinct_id":"private"}}"#.to_vec(),
+        br#"{"version":99}"#.to_vec(),
+        br#"{"version":4294967296,"state":false}"#.to_vec(),
     ] {
         let directory = TestDirectory::new();
         let lease = directory.lease();
@@ -336,7 +326,7 @@ fn lock_failure_degrades_to_memory_and_reports_on_the_initialization_thread() {
 }
 
 #[test]
-fn corrupt_state_reports_and_preserves_data_while_event_storage_remains_usable() {
+fn corrupt_state_reports_and_allows_replacement_while_event_storage_remains_usable() {
     let directory = TestDirectory::new();
     drop(directory.lease());
     let path = directory.path().join("state.json");
@@ -352,7 +342,7 @@ fn corrupt_state_reports_and_preserves_data_while_event_storage_remains_usable()
         }
     });
     let mut restored = directory.restore(&[hook]);
-    assert!(restored.state_store.is_none());
+    assert!(restored.state_store.is_some());
     assert!(restored.snapshot.is_none());
     assert!(restored
         .event_store
@@ -369,7 +359,19 @@ fn corrupt_state_reports_and_preserves_data_while_event_storage_remains_usable()
             "Invalid persisted client state".into()
         )]
     );
-    assert_eq!(fs::read_to_string(path).unwrap(), "private malformed state");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "private malformed state"
+    );
+    let replacement = Snapshot::anonymous("replacement".into());
+    restored
+        .state_store
+        .as_mut()
+        .unwrap()
+        .save(&replacement)
+        .unwrap();
+    drop(restored);
+    assert_eq!(directory.restore(&[]).snapshot, Some(replacement));
 }
 
 #[test]
@@ -377,7 +379,7 @@ fn event_store_open_failure_does_not_discard_restored_identity_or_state_writer()
     let directory = TestDirectory::new();
     let original = Snapshot::anonymous("original".into());
     {
-        let (mut store, _) = FileStateStore::open(directory.lease(), 4096).unwrap();
+        let mut store = FileStateStore::open(directory.lease(), 4096).unwrap().store;
         store.save(&original).unwrap();
     }
     fs::write(directory.path().join("events"), b"not a directory").unwrap();
@@ -416,7 +418,7 @@ fn state_files_are_private_and_symlink_state_is_not_followed() {
     let directory = TestDirectory::new();
     let snapshot = Snapshot::anonymous("private-id".into());
     {
-        let (mut store, _) = FileStateStore::open(directory.lease(), 4096).unwrap();
+        let mut store = FileStateStore::open(directory.lease(), 4096).unwrap().store;
         store.save(&snapshot).unwrap();
         assert_eq!(
             fs::metadata(store.path()).unwrap().permissions().mode() & 0o777,
@@ -430,4 +432,21 @@ fn state_files_are_private_and_symlink_state_is_not_followed() {
         fs::read(directory.path().join("other.json")).unwrap(),
         record(&snapshot)
     );
+}
+
+#[test]
+fn device_bytes_are_mandatory_and_failed_updates_preserve_identity() {
+    let directory = TestDirectory::new();
+    let mut snapshot = Snapshot::anonymous("anonymous".into());
+    snapshot.device_id = "用户\\\"\n".into();
+    let exact = snapshot_size(&snapshot) as u64;
+    assert!(encode_snapshot(&snapshot, exact - 1).is_err());
+    let mut store = FileStateStore::open(directory.lease(), exact)
+        .unwrap()
+        .store;
+    store.save(&snapshot).unwrap();
+    let mut too_large = snapshot.clone();
+    too_large.device_id = "x".repeat(exact as usize);
+    assert!(store.save(&too_large).is_err());
+    assert_eq!(store.load().unwrap(), Some(snapshot));
 }

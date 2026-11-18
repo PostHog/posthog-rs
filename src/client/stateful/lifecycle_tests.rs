@@ -64,8 +64,9 @@ struct WriteGate {
 }
 
 fn gated_writer(directory: &Directory) -> (StateWriter, WriteGate) {
-    let (inner, _) =
-        FileStateStore::open(StorageDirectory::open(&directory.0).unwrap(), 4096).unwrap();
+    let inner = FileStateStore::open(StorageDirectory::open(&directory.0).unwrap(), 4096)
+        .unwrap()
+        .store;
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let (dropped_tx, dropped_rx) = mpsc::channel();
@@ -107,16 +108,29 @@ fn config() -> Config {
 }
 
 fn client_with_writer(config: &Config, state: StateWriter) -> Client {
+    client_with_store(config, state, None)
+}
+
+fn client_with_store(
+    config: &Config,
+    state: StateWriter,
+    store: Option<Box<dyn crate::client::event_store::EventStore>>,
+) -> Client {
+    let deadline = state.deadline_handle();
+    let shutdown = super::shutdown::Shutdown::new_with_deadline(deadline.clone()).unwrap();
     Client {
         disabled: false,
         shutdown_timeout: config.shutdown_timeout,
+        shutdown: Some(shutdown),
         producer: Some(Producer::new(config)),
         state: Some(state),
         transport: Some(
-            TransportHandle::spawn_stateful(
+            TransportHandle::spawn_stateful_with_deadline(
                 config.transport_options(),
-                None,
+                store,
                 config.max_queue_bytes,
+                deadline,
+                Arc::new(SystemClock),
             )
             .unwrap(),
         ),
@@ -290,4 +304,161 @@ fn closing_from_capture_hook_does_not_wait_for_gated_state_io() {
         result.expect("hook shutdown waited for state I/O"),
         CaptureOutcome::Closed
     );
+}
+
+#[test]
+fn expired_sdk_shutdown_and_immediate_drop_do_not_rejoin_blocked_storage() {
+    let directory = Directory::new();
+    let (state, gate) = gated_writer(&directory);
+    gate.entered.recv_timeout(WAIT).unwrap();
+    let mut config = config();
+    config.shutdown_timeout = Duration::from_millis(20);
+    let client = client_with_writer(&config, state);
+    let start = Instant::now();
+    let report = client.shutdown_blocking(None);
+    let waited = start.elapsed();
+    assert_eq!(report.state, PersistenceOutcome::TimedOut);
+    assert!(
+        waited < Duration::from_secs(1),
+        "SDK wait exceeded watchdog: {:?}",
+        waited
+    );
+    let selected = client.shutdown.as_ref().unwrap().deadline();
+    let repeated = Instant::now();
+    assert_eq!(
+        client.shutdown_blocking(Some(Duration::from_secs(5))).state,
+        PersistenceOutcome::TimedOut
+    );
+    assert_eq!(client.shutdown.as_ref().unwrap().deadline(), selected);
+    assert!(repeated.elapsed() < Duration::from_secs(1));
+    let dropping = Instant::now();
+    drop(client);
+    let dropped = dropping.elapsed();
+    assert!(
+        dropped < Duration::from_secs(1),
+        "Drop rejoined unfinished I/O"
+    );
+    assert!(StorageDirectory::open(&directory.0).is_err());
+    gate.release.send(()).unwrap();
+    gate.dropped.recv_timeout(WAIT).unwrap();
+    drop(StorageDirectory::open(&directory.0).unwrap());
+    eprintln!(
+        "blocked-state shutdown_wait_us={} immediate_drop_us={}",
+        waited.as_micros(),
+        dropped.as_micros()
+    );
+}
+
+#[test]
+fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads() {
+    use crate::capture_event::CaptureEvent;
+    use crate::client::event_store::{
+        EventStore, FileEventStore, Recovery, StoreKey, StoreLimits, StoreWriteError,
+    };
+    struct Events {
+        inner: Option<FileEventStore>,
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        dropped: mpsc::Sender<()>,
+    }
+    impl EventStore for Events {
+        fn recover(&mut self, n: usize, b: u64) -> io::Result<Recovery> {
+            self.inner.as_mut().unwrap().recover(n, b)
+        }
+        fn head(&mut self, n: usize, b: u64) -> io::Result<Recovery> {
+            self.inner.as_mut().unwrap().head(n, b)
+        }
+        fn end_key(&self) -> Option<StoreKey> {
+            self.inner.as_ref().unwrap().end_key()
+        }
+        fn contains(&self, key: StoreKey) -> io::Result<bool> {
+            self.inner.as_ref().unwrap().contains(key)
+        }
+        fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
+            self.inner.as_mut().unwrap().put(event)
+        }
+        fn put_at(
+            &mut self,
+            event: &CaptureEvent,
+            key: StoreKey,
+        ) -> Result<StoreKey, StoreWriteError> {
+            self.entered.send(()).unwrap();
+            self.release.recv_timeout(GATE_WAIT).unwrap();
+            self.inner.as_mut().unwrap().put_at(event, key)
+        }
+        fn remove(&mut self, key: StoreKey) -> io::Result<()> {
+            self.inner.as_mut().unwrap().remove(key)
+        }
+    }
+    impl Drop for Events {
+        fn drop(&mut self) {
+            drop(self.inner.take());
+            let _ = self.dropped.send(());
+        }
+    }
+    let directory = Directory::new();
+    let server = MockServer::start();
+    let upload = server.mock(|when, then| {
+        when.method(POST);
+        then.status(200);
+    });
+    let mut config = config();
+    config.host = server.base_url();
+    config.shutdown_timeout = Duration::from_millis(20);
+    let state = StateWriter::new(
+        Snapshot::anonymous("anonymous".into()),
+        Backend::Memory,
+        WriterOptions::default(),
+        vec![],
+        Arc::new(SystemClock),
+    )
+    .unwrap();
+    let (entered, wait) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    let (dropped, done) = mpsc::channel();
+    let store = FileEventStore::open(
+        StorageDirectory::open(&directory.0).unwrap(),
+        StoreLimits {
+            max_events: 10,
+            max_bytes: 64 * 1024,
+            max_record_bytes: 4096,
+        },
+    )
+    .unwrap();
+    let client = client_with_store(
+        &config,
+        state,
+        Some(Box::new(Events {
+            inner: Some(store),
+            entered,
+            release: gate,
+            dropped,
+        })),
+    );
+    assert!(matches!(
+        client.capture("blocked-write"),
+        super::super::CaptureOutcome::Accepted { .. }
+    ));
+    wait.recv_timeout(WAIT).unwrap();
+    let start = Instant::now();
+    assert_eq!(
+        client.shutdown_blocking(None).delivery,
+        DeliveryOutcome::TimedOut
+    );
+    drop(client);
+    let elapsed = start.elapsed();
+    let still_owned = StorageDirectory::open(&directory.0).is_err();
+    release.send(()).unwrap();
+    done.recv_timeout(WAIT).unwrap();
+    assert!(still_owned);
+    assert!(elapsed < Duration::from_secs(1));
+    drop(StorageDirectory::open(&directory.0).unwrap());
+    upload.assert_calls(0);
+    assert_eq!(
+        std::fs::read_dir(directory.0.join("events"))
+            .unwrap()
+            .count(),
+        1
+    );
+    eprintln!("blocked-event shutdown_and_drop_us={}", elapsed.as_micros());
 }

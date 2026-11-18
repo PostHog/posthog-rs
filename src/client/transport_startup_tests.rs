@@ -12,7 +12,9 @@ use super::{
     Admission, Clock, LaneConfig, StartupFailure, StorageState, SystemClock, TransportHandle,
 };
 use crate::capture_event::CaptureEvent;
-use crate::client::event_store::{record_size, EventStore, FileEventStore, Recovery, StoreKey};
+use crate::client::event_store::{
+    record_size, EventStore, FileEventStore, Recovery, StoreKey, StoreWriteError,
+};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -36,7 +38,7 @@ fn ready_memory_transport_does_not_connect_and_has_a_byte_bound() {
     )
     .expect("local initialization does not require a reachable ingestion service");
     assert_eq!(handle.enqueue_prepared(event.clone()), Admission::Accepted);
-    assert_eq!(handle.enqueue_prepared(event), Admission::Full);
+    assert_eq!(handle.enqueue_prepared(event), Admission::Accepted);
     assert_eq!(handle.pending(), 1);
     handle.shutdown_blocking();
     assert_eq!(handle.byte_budget.as_ref().unwrap().available(), bytes);
@@ -103,6 +105,16 @@ struct GatedRecovery {
 }
 
 impl EventStore for GatedRecovery {
+    fn head(&mut self, events: usize, bytes: u64) -> io::Result<Recovery> {
+        if let Some(entered) = self.entered.take() {
+            entered.send(()).unwrap();
+            self.release.recv_timeout(WAIT).unwrap();
+        }
+        self.inner.head(events, bytes)
+    }
+    fn contains(&self, key: StoreKey) -> io::Result<bool> {
+        self.inner.contains(key)
+    }
     fn recover(&mut self, events: usize, bytes: u64) -> io::Result<Recovery> {
         if let Some(entered) = self.entered.take() {
             entered.send(()).unwrap();
@@ -111,7 +123,7 @@ impl EventStore for GatedRecovery {
         self.inner.recover(events, bytes)
     }
 
-    fn put(&mut self, event: &CaptureEvent) -> io::Result<StoreKey> {
+    fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
         self.inner.put(event)
     }
 
@@ -166,13 +178,11 @@ fn readiness_does_not_wait_for_recovery_and_preserves_shared_admission() {
     }
     let handle = result.unwrap().expect("local transport is ready");
     entered_rx.recv_timeout(WAIT).unwrap();
-    // Recovery owns the window while its read is blocked. Ready does not mean
-    // the queue has free capacity, and capture does not wait for that read.
+    // Recovery reads into its bounded upload view without reserving staging.
     let during_recovery = handle.enqueue_prepared(fresh.clone());
     release_tx.send(()).unwrap();
-    assert_eq!(during_recovery, Admission::Full);
+    assert_eq!(during_recovery, Admission::Accepted);
     handle.tick();
-    assert_eq!(handle.enqueue_prepared(fresh), Admission::Accepted);
     handle.flush_blocking();
     delivery.assert_calls(2);
     assert!(directory.records().is_empty());

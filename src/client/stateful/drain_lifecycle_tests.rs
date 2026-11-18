@@ -65,7 +65,7 @@ fn async_writer_join_resumed_inline_on_its_worker_defers() {
 }
 
 #[test]
-fn async_shutdown_resumed_inline_on_transport_worker_defers() {
+fn async_shutdown_resumed_inline_by_deadline_notifier_does_not_cross_join() {
     let server = MockServer::start();
     let rejected = server.mock(|when, then| {
         when.method(POST);
@@ -77,7 +77,10 @@ fn async_shutdown_resumed_inline_on_transport_worker_defers() {
     let mut config = config();
     config.host = server.base_url();
     config.flush_at = 1;
-    config.on_error(move |_| {
+    config.on_error(move |failure| {
+        if !matches!(failure, crate::PostHogError::Capture(_)) {
+            return;
+        }
         entered_tx.send(thread::current().id()).unwrap();
         release_rx.lock().unwrap().recv_timeout(GATE_WAIT).unwrap();
     });
@@ -95,7 +98,7 @@ fn async_shutdown_resumed_inline_on_transport_worker_defers() {
     assert!(InlineTask::poll(&task).is_pending());
     release_tx.send(()).unwrap();
     let (resumed_on, result) = rx.recv_timeout(WAIT).unwrap();
-    assert_eq!(resumed_on, worker);
+    assert_ne!(resumed_on, worker);
     assert_eq!(result.unwrap().delivery, DeliveryOutcome::Deferred);
     assert_eq!(
         client.shutdown_blocking(None).delivery,
@@ -148,6 +151,7 @@ fn async_drains_from_state_writer_callback_defer_without_cross_worker_waits() {
     let callback_slot = slot.clone();
     let (tx, rx) = mpsc::channel();
     let mut config = config();
+    config.shutdown_timeout = Duration::from_secs(2);
     config.on_error(move |_| {
         let client = callback_slot.lock().unwrap().upgrade().unwrap();
         let flush = futures::executor::block_on(client.flush());
@@ -211,6 +215,33 @@ fn cancelled_shutdown_wait_keeps_both_workers_closing_and_allows_another_waiter(
     assert_eq!(async_report, blocking_report);
     assert_eq!(async_report.state, PersistenceOutcome::Persisted);
     assert_eq!(async_report.delivery, DeliveryOutcome::Stopped);
+    gate.dropped.recv_timeout(WAIT).unwrap();
+    drop(StorageDirectory::open(&directory.0).unwrap());
+}
+
+#[test]
+fn cancelled_and_concurrent_waiters_share_expired_deadline_without_joining_storage() {
+    let directory = Directory::new();
+    let (state, gate) = gated_writer(&directory);
+    gate.entered.recv_timeout(WAIT).unwrap();
+    let client = Arc::new(client_with_writer(&config(), state));
+    let mut context = Context::from_waker(futures::task::noop_waker_ref());
+    let mut cancelled = Box::pin(client.shutdown(Some(Duration::from_millis(30))));
+    assert!(cancelled.as_mut().poll(&mut context).is_pending());
+    drop(cancelled);
+    let selected = client.shutdown.as_ref().unwrap().deadline();
+    let blocking_client = client.clone();
+    let blocking =
+        thread::spawn(move || blocking_client.shutdown_blocking(Some(Duration::from_secs(5))));
+    let start = Instant::now();
+    let report = futures::executor::block_on(client.shutdown(Some(Duration::from_secs(5))));
+    assert_eq!(report.state, PersistenceOutcome::TimedOut);
+    assert_eq!(blocking.join().unwrap().state, PersistenceOutcome::TimedOut);
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(client.shutdown.as_ref().unwrap().deadline(), selected);
+    drop(client);
+    assert!(StorageDirectory::open(&directory.0).is_err());
+    gate.release.send(()).unwrap();
     gate.dropped.recv_timeout(WAIT).unwrap();
     drop(StorageDirectory::open(&directory.0).unwrap());
 }

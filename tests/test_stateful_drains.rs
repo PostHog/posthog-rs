@@ -50,30 +50,67 @@ fn zero_shutdown_override_preserves_persisted_events_for_restart() {
     let directory =
         Directory(std::env::temp_dir().join(format!("posthog-drains-{}", uuid::Uuid::now_v7())));
     let server = MockServer::start();
-    let batch = server.mock(|when, then| {
+    let mut rejected = server.mock(|when, then| {
         when.method(POST);
-        then.status(200);
+        then.status(400);
     });
+    let (entered, waiting) = std::sync::mpsc::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = std::sync::Mutex::new(gate);
     let mut setup = config(&server);
     setup.persistence = Persistence::Directory(directory.0.clone());
+    setup.flush_at = 1;
+    setup.on_error(move |failure| {
+        if matches!(failure, posthog::PostHogError::Capture(_)) {
+            entered.send(()).unwrap();
+            gate.lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }
+    });
     let client = Client::init_blocking(setup);
-    client.flush_blocking(); // Wait for initial recovery reservations.
+    client.flush_blocking();
     let identity = client.get_distinct_id();
     assert!(matches!(
         client.capture("persisted"),
         CaptureOutcome::Accepted { .. }
     ));
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    let start = std::time::Instant::now();
     assert_eq!(
         client.shutdown_blocking(Some(Duration::ZERO)).delivery,
-        DeliveryOutcome::Stopped
+        DeliveryOutcome::TimedOut
     );
-    batch.assert_calls(0);
+    drop(client);
+    assert!(start.elapsed() < Duration::from_secs(1));
+    release.send(()).unwrap();
+    rejected.delete();
     let scope = std::fs::read_dir(&directory.0)
         .unwrap()
         .next()
         .unwrap()
         .unwrap()
         .path();
+    // Reopening requires actual storage ownership release, not merely timeout.
+    let lease = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(scope.join("lock"))
+        .unwrap();
+    let end = std::time::Instant::now() + Duration::from_secs(5);
+    while fs2::FileExt::try_lock_exclusive(&lease).is_err() {
+        assert!(
+            std::time::Instant::now() < end,
+            "storage owner did not finish"
+        );
+        std::thread::yield_now();
+    }
+    fs2::FileExt::unlock(&lease).unwrap();
+    let batch = server.mock(|when, then| {
+        when.method(POST);
+        then.status(200);
+    });
     let records = || {
         std::fs::read_dir(scope.join("events"))
             .unwrap()
@@ -148,7 +185,10 @@ fn async_drains_from_delivery_callback_defer_without_waiting() {
     let callback_slot = slot.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let mut setup = config(&server);
-    setup.on_error(move |_| {
+    setup.on_error(move |failure| {
+        if !matches!(failure, posthog::PostHogError::Capture(_)) {
+            return;
+        }
         let client = callback_slot.lock().unwrap().upgrade().unwrap();
         let flush = futures::executor::block_on(client.flush());
         let shutdown = futures::executor::block_on(client.shutdown(Some(Duration::ZERO)));
@@ -161,10 +201,10 @@ fn async_drains_from_delivery_callback_defer_without_waiting() {
     let (flush, shutdown) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(flush.delivery, DeliveryOutcome::Deferred);
     assert_eq!(shutdown.state, PersistenceOutcome::Deferred);
-    assert_eq!(
+    assert!(matches!(
         futures::executor::block_on(client.shutdown(None)).delivery,
-        DeliveryOutcome::Stopped
-    );
+        DeliveryOutcome::Stopped | DeliveryOutcome::TimedOut
+    ));
     rejected.assert_calls(1);
 }
 
@@ -210,7 +250,10 @@ fn cancelled_and_concurrent_shutdown_waiters_await_delivery_body_without_blockin
     let release_rx = Mutex::new(release_rx);
     let mut setup = config(&server);
     setup.flush_at = 1;
-    setup.on_error(move |_| {
+    setup.on_error(move |failure| {
+        if !matches!(failure, posthog::PostHogError::Capture(_)) {
+            return;
+        }
         entered_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -240,4 +283,110 @@ fn cancelled_and_concurrent_shutdown_waiters_await_delivery_body_without_blockin
     assert_eq!(report.delivery, DeliveryOutcome::Stopped);
     assert_eq!(client.capture("closed"), CaptureOutcome::Closed);
     rejected.assert_calls(1);
+}
+
+#[test]
+fn lowered_record_limit_preserves_oversized_head_while_recovery_and_flush_progress() {
+    use std::sync::{mpsc, Arc};
+    use std::time::Instant;
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let directory = Directory(
+        std::env::temp_dir().join(format!("posthog-lowered-limit-{}", uuid::Uuid::now_v7())),
+    );
+    let server = MockServer::start();
+    let mut retry = server.mock(|when, then| {
+        when.method(POST).path("/i/v1/analytics/events");
+        then.status(503).header("Retry-After", "3600");
+    });
+    let mut setup = config(&server);
+    setup.persistence = Persistence::Directory(directory.0.clone());
+    setup.capture_compression = None;
+    setup.before_send(|mut event| {
+        if event.event_name() == "oversized" {
+            event.insert_prop("padding", "x".repeat(8192)).unwrap();
+        }
+        Some(event)
+    });
+    let seed = Client::init_blocking(setup);
+    assert!(matches!(
+        seed.capture("oversized"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    assert!(matches!(
+        seed.capture("healthy-suffix"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    assert_eq!(seed.flush_blocking().state, PersistenceOutcome::Persisted);
+    assert_eq!(
+        seed.shutdown_blocking(None).delivery,
+        DeliveryOutcome::Stopped
+    );
+    drop(seed);
+    let scope = std::fs::read_dir(&directory.0)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut records: Vec<_> = std::fs::read_dir(scope.join("events"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    records.sort();
+    assert_eq!(records.len(), 2);
+    let preserved = std::fs::read(&records[0]).unwrap();
+    let lowered = std::fs::metadata(&records[1]).unwrap().len();
+    assert!(preserved.len() as u64 > lowered);
+    retry.delete();
+    let delivered = server.mock(|when, then| {
+        when.method(POST)
+            .path("/i/v1/analytics/events")
+            .body_includes("healthy-suffix")
+            .body_excludes("oversized");
+        then.status(200);
+    });
+    let mut setup = config(&server);
+    setup.persistence = Persistence::Directory(directory.0.clone());
+    setup.capture_compression = None;
+    setup.max_record_bytes = lowered;
+    setup.max_batch_size = 1;
+    setup.max_queue_size = 1;
+    let client = Arc::new(Client::init_blocking(setup));
+    let (complete, completed) = mpsc::channel();
+    let flushing = client.clone();
+    let worker = std::thread::spawn(move || {
+        let recovered = flushing.flush_blocking();
+        // Only the preserved oversized record remains: a completed unreadable
+        // scan must still let the next queued flush finish.
+        let unreadable = flushing.flush_blocking();
+        complete.send((recovered, unreadable)).unwrap();
+    });
+    let result = completed.recv_timeout(Duration::from_secs(2));
+    // End the real coordinator even on the pre-fix liveness failure, so the
+    // regression fails its bounded observation rather than hanging teardown.
+    client.shutdown_blocking(Some(Duration::ZERO));
+    if result.is_err() {
+        completed.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    worker.join().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.shutdown_blocking(None).delivery != DeliveryOutcome::Stopped {
+        assert!(
+            Instant::now() < deadline,
+            "delivery did not stop after bounded close"
+        );
+        std::thread::yield_now();
+    }
+    let (recovered, unreadable) = result.expect("healthy suffix recovery starved the queued flush");
+    assert_eq!(recovered.delivery, DeliveryOutcome::Attempted);
+    assert_eq!(unreadable.delivery, DeliveryOutcome::Attempted);
+    delivered.assert_calls(1);
+    assert_eq!(std::fs::read(&records[0]).unwrap(), preserved);
+    assert!(!records[1].exists());
+    assert_eq!(std::fs::read_dir(scope.join("events")).unwrap().count(), 1);
 }

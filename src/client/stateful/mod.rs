@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 
 /// The complete mandatory state persisted as one versioned snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Snapshot {
+    device_id: String,
     anonymous_id: String,
     distinct_id: String,
 }
@@ -28,12 +28,15 @@ struct Snapshot {
 impl Snapshot {
     fn anonymous(id: String) -> Self {
         Self {
+            device_id: id.clone(),
             anonymous_id: id.clone(),
             distinct_id: id,
         }
     }
 
     fn is_valid(&self) -> bool {
-        !self.anonymous_id.trim().is_empty() && !self.distinct_id.trim().is_empty()
+        !self.device_id.trim().is_empty()
+            && !self.anonymous_id.trim().is_empty()
+            && !self.distinct_id.trim().is_empty()
     }
 }

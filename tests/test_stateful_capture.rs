@@ -131,7 +131,7 @@ fn invalid_and_filtered_events_never_reach_delivery() {
 }
 
 #[test]
-fn bounded_admission_rejects_new_work_and_recovers_a_failed_byte_reservation() {
+fn bounded_admission_replaces_oldest_and_recovers_a_failed_byte_reservation() {
     let mut config = config();
     config.max_queue_size = 1;
     config.max_queue_bytes = 1024;
@@ -146,7 +146,10 @@ fn bounded_admission_rejects_new_work_and_recovers_a_failed_byte_reservation() {
         client.capture("accepted"),
         CaptureOutcome::Accepted { .. }
     ));
-    assert_eq!(client.capture("new"), CaptureOutcome::Full);
+    assert!(matches!(
+        client.capture("new"),
+        CaptureOutcome::Accepted { .. }
+    ));
     client.shutdown_blocking(None);
 }
 
@@ -191,10 +194,10 @@ fn closing_from_a_hook_prevents_the_outer_capture_from_being_admitted() {
     let client = Arc::new(Client::init_blocking(config));
     *slot.lock().unwrap() = Arc::downgrade(&client);
     assert_eq!(client.capture("outer"), CaptureOutcome::Closed);
-    assert_eq!(
+    assert!(matches!(
         client.shutdown_blocking(None).delivery,
-        DeliveryOutcome::Stopped
-    );
+        DeliveryOutcome::Stopped | DeliveryOutcome::TimedOut
+    ));
 }
 
 #[test]
@@ -312,10 +315,10 @@ fn capture_and_shutdown_are_safe_during_thread_local_destruction() {
     let (capture, shutdown) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
     client.shutdown_blocking(None);
     assert_eq!(capture, Some(CaptureOutcome::Dropped));
-    assert_eq!(
+    assert!(matches!(
         shutdown.map(|report| report.delivery),
-        Some(DeliveryOutcome::Stopped)
-    );
+        Some(DeliveryOutcome::Stopped | DeliveryOutcome::TimedOut)
+    ));
 }
 
 #[test]

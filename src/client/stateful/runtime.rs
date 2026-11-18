@@ -10,6 +10,9 @@ use crate::client::common::apply_on_error_hooks;
 use crate::client::transport::{Completion, Control, StartupFailure, SystemClock, TransportHandle};
 use crate::client::PostHogError;
 
+#[path = "shutdown.rs"]
+mod shutdown;
+
 /// Persistence result through a captured state revision, not an ingestion acknowledgment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -22,7 +25,8 @@ pub enum PersistenceOutcome {
     Unavailable,
     /// A write attempt failed; dirty live state remains available for retry.
     WriteFailed,
-    /// The writer stopped before persisting the requested revision.
+    /// The revision was not confirmed persisted before the shutdown deadline.
+    /// An already-started write may still finish afterward.
     TimedOut,
     /// Waiting would block a client worker inside its callback.
     Deferred,
@@ -50,9 +54,14 @@ impl From<DrainOutcome> for PersistenceOutcome {
 #[non_exhaustive]
 pub enum DeliveryOutcome {
     /// A flush attempt completed; retries or persisted backlog may remain.
+    /// With session-replay, includes preceding submitted encoding and eligible
+    /// screenshot delivery, but not frames held by the host.
     Attempted,
     /// The worker has stopped. Undelivered persisted records may remain.
     Stopped,
+    /// The selected shutdown deadline expired before all delivery work stopped;
+    /// already-started work may finish afterward.
+    TimedOut,
     /// The delivery worker exited without completing this flush.
     Unavailable,
     /// The client is closing; no new flush was requested.
@@ -100,14 +109,17 @@ impl DrainReport {
 /// same storage scope uses a generated or bootstrap identity in memory instead
 /// of restoring the first client's identity. Share an `Arc<Client>` when the
 /// identity should be shared; see [`Persistence`] for namespace ownership and
-/// retrying persistent initialization.
+/// retrying persistent initialization. A shutdown timeout does not release a
+/// namespace lease while already-started storage I/O can still access it.
 ///
-/// Dropping the client requests shutdown and blocks until its workers finish,
-/// except from a worker callback where waiting would deadlock. In-flight I/O
-/// and callbacks can exceed the shutdown scheduling budget.
+/// Dropping the client requests shutdown. SDK-controlled waiting ends by the
+/// first selected shutdown deadline; already-started work retains its resources
+/// until completion. Arbitrary destructors of application objects captured by
+/// callbacks may run synchronously and block outside that waiting bound.
 pub struct Client {
     disabled: bool,
     shutdown_timeout: Duration,
+    shutdown: Option<shutdown::Shutdown>,
     pub(super) producer: Option<Producer>,
     pub(super) state: Option<StateWriter>,
     pub(super) transport: Option<TransportHandle>,
@@ -171,8 +183,12 @@ impl Client {
         if let Some(reason) = config.invalid_reason() {
             return Self::disabled(&config, Some(reason));
         }
+        let shutdown = match shutdown::Shutdown::new() {
+            Ok(shutdown) => shutdown,
+            Err(_) => return Self::disabled(&config, Some("Cannot start the shutdown notifier")),
+        };
         let producer = Producer::new(&config);
-        let scope = namespace(&config.host, &config.project_token, &config.instance_name);
+        let scope = namespace(&config.project_token, &config.instance_name);
         let restored = RestoredStorage::open(
             &config.persistence,
             &scope,
@@ -192,17 +208,19 @@ impl Client {
         let backend = match restored.state_store {
             Some(store) => Backend::Persistent {
                 store: Box::new(store),
-                restored: was_restored,
+                restored: was_restored && !restored.rewrite_required,
             },
             None if matches!(config.persistence, Persistence::Memory) => Backend::Memory,
             None => Backend::Unavailable,
         };
-        let transport = match TransportHandle::spawn_stateful(
+        let transport = match TransportHandle::spawn_stateful_with_deadline(
             config.transport_options(),
             restored
                 .event_store
                 .map(|store| Box::new(store) as Box<dyn crate::client::event_store::EventStore>),
             config.max_queue_bytes,
+            shutdown.deadline_handle(),
+            Arc::new(SystemClock),
         ) {
             Ok(transport) => transport,
             Err(failure) => {
@@ -218,7 +236,7 @@ impl Client {
                 );
             }
         };
-        let state = match StateWriter::new(
+        let state = match StateWriter::new_with_deadline(
             snapshot,
             backend,
             WriterOptions {
@@ -229,6 +247,7 @@ impl Client {
             },
             config.on_error.clone(),
             Arc::new(SystemClock),
+            shutdown.deadline_handle(),
         ) {
             Ok(state) => state,
             Err(_) => {
@@ -241,6 +260,7 @@ impl Client {
         };
         Self {
             disabled: false,
+            shutdown: Some(shutdown),
             shutdown_timeout: config.shutdown_timeout,
             producer: Some(producer),
             state: Some(state),
@@ -262,6 +282,7 @@ impl Client {
         }
         Self {
             disabled: true,
+            shutdown: None,
             shutdown_timeout: config.shutdown_timeout,
             producer: None,
             state: None,
@@ -292,9 +313,13 @@ impl Client {
     }
 
     fn on_worker_thread(&self) -> bool {
-        self.state
+        self.shutdown
             .as_ref()
-            .is_some_and(StateWriter::on_worker_thread)
+            .is_some_and(shutdown::Shutdown::on_worker_thread)
+            || self
+                .state
+                .as_ref()
+                .is_some_and(StateWriter::on_worker_thread)
             || self
                 .transport
                 .as_ref()
@@ -370,26 +395,25 @@ impl Client {
             + timeout
                 .unwrap_or(self.shutdown_timeout)
                 .min(crate::client::transport::MAX_SHUTDOWN_TIMEOUT);
-        // The first caller selects one deadline for both workers. Later calls,
-        // including Drop, cannot restart or extend that drain budget.
-        if !self.closed.swap(true, Ordering::AcqRel) {
+        let (deadline, first) = self.shutdown.as_ref().unwrap().select(deadline);
+        // Publish the selected deadline and closure before queueing any work.
+        self.closed.store(true, Ordering::Release);
+        if first {
+            self.state.as_ref().unwrap().request_close_before(deadline);
             self.transport
                 .as_ref()
                 .unwrap()
                 .request_close_before(deadline);
-            self.state.as_ref().unwrap().request_close_before(deadline);
         }
     }
 
-    /// Close admission, request both workers to stop, then join them. `None`
-    /// uses Config::shutdown_timeout; `Some` overrides it for this shutdown.
-    /// Durations are clamped to one day. The first shutdown call selects the
-    /// shared budget; repeated calls wait for the same teardown.
-    ///
-    /// This is a best-effort scheduling budget, not a hard return deadline.
-    /// Already-running work, I/O, callbacks and final thread joins may exceed it.
-    /// Calls from worker callbacks or synchronous capture hooks request closure
-    /// but return Deferred instead of waiting.
+    /// Close admission and wait for SDK workers until the first selected deadline.
+    /// `None` uses Config::shutdown_timeout; `Some` overrides it (at most one day).
+    /// Repeated calls share that deadline. Already-started work owns its resources
+    /// through completion; return does not promise every event reached disk.
+    /// Application callback-capture destructors may run synchronously and block
+    /// outside the SDK-controlled waiting bound. Worker callbacks and synchronous
+    /// capture hooks request closure but return Deferred instead of waiting.
     pub fn shutdown_blocking(&self, timeout: Option<Duration>) -> DrainReport {
         if self.disabled {
             return DrainReport::disabled();
@@ -400,19 +424,26 @@ impl Client {
         if self.on_worker_thread() || self.in_capture() {
             return DrainReport::deferred();
         }
-        transport.join();
+        self.shutdown
+            .as_ref()
+            .unwrap()
+            .wait_blocking(|| transport.all_stopped() && state.is_stopped());
+        if transport.all_stopped() && state.is_stopped() {
+            self.shutdown.as_ref().unwrap().complete();
+        }
         DrainReport {
-            state: state.join_blocking().into(),
-            delivery: DeliveryOutcome::Stopped,
+            state: state.shutdown_outcome().into(),
+            delivery: if transport.all_stopped() {
+                DeliveryOutcome::Stopped
+            } else {
+                DeliveryOutcome::TimedOut
+            },
         }
     }
 
-    /// Async shutdown with the same best-effort budget as `shutdown_blocking`.
-    /// `None` uses Config::shutdown_timeout; `Some` overrides it (at most one day).
-    /// Worker completion waits need no Tokio runtime, but final thread joins
-    /// are synchronous and can block polling or exceed the requested budget.
-    /// Cancelling a pending wait does not reopen admission or cancel teardown.
-    /// Dropping Client still performs blocking cleanup.
+    /// Runtime-independent async shutdown with the same deadline and application
+    /// destructor boundary as `shutdown_blocking`. Cancelling a waiter does not
+    /// reopen admission, extend the deadline, or cancel already-requested teardown.
     #[cfg(feature = "async-client")]
     pub async fn shutdown(&self, timeout: Option<Duration>) -> DrainReport {
         if self.disabled {
@@ -424,18 +455,24 @@ impl Client {
         }
         let transport = self.transport.as_ref().unwrap();
         let state = self.state.as_ref().unwrap();
-        transport.wait_stopped().await;
+        self.shutdown
+            .as_ref()
+            .unwrap()
+            .wait_async(|| transport.all_stopped() && state.is_stopped())
+            .await;
         if self.on_worker_thread() {
             return DrainReport::deferred();
         }
-        let persisted = state.join_async().await;
-        if self.on_worker_thread() {
-            return DrainReport::deferred();
+        if transport.all_stopped() && state.is_stopped() {
+            self.shutdown.as_ref().unwrap().complete();
         }
-        transport.join();
         DrainReport {
-            state: persisted.into(),
-            delivery: DeliveryOutcome::Stopped,
+            state: state.shutdown_outcome().into(),
+            delivery: if transport.all_stopped() {
+                DeliveryOutcome::Stopped
+            } else {
+                DeliveryOutcome::TimedOut
+            },
         }
     }
 }

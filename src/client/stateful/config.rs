@@ -33,15 +33,21 @@ pub struct Config {
     pub max_batch_size: usize,
     /// Interval between automatic flushes. Default: 10 seconds.
     pub flush_interval: Duration,
-    /// Maximum resident events, including buffered, in-flight and retry work. Default: 1,000.
+    /// Maximum resident staging, recovery and memory-fallback events. Default: 1,000.
+    /// One additional upload view of this logical queue is bounded separately by
+    /// this count and max_queue_bytes; it is not a second retry backlog.
     pub max_queue_size: usize,
-    /// Maximum resident serialized event bytes, not allocator memory. Default: 8 MiB.
+    /// Maximum serialized event bytes in the resident queue and, separately, its
+    /// one upload view. Not an allocator/process-memory cap. Default: 8 MiB.
     pub max_queue_bytes: usize,
-    /// Maximum persisted event records. Default: 10,000.
+    /// Persisted event retention count. Default: 10,000. Newest retention may
+    /// temporarily exceed this by one replacement record while reclaiming old data.
     pub max_stored_events: usize,
-    /// Maximum persisted event bytes. Default: 64 MiB.
+    /// Persisted event retention bytes. Default: 64 MiB. Replacement may exceed
+    /// this by at most one max_record_bytes record. Exact accounting includes
+    /// that record; no further appends occur until reclamation succeeds.
     pub max_stored_bytes: u64,
-    /// Maximum persisted event record size. Default: 1 MiB.
+    /// Maximum persisted event record size and replacement overage. Default: 1 MiB.
     pub max_record_bytes: u64,
     /// Maximum mandatory state record size. Default: 1 MiB.
     pub max_state_bytes: usize,
@@ -49,8 +55,11 @@ pub struct Config {
     pub state_coalesce: Duration,
     /// Timeout per delivery request, in whole seconds. Default: 30.
     pub request_timeout_seconds: u64,
-    /// Default best-effort shutdown budget, including Drop. Explicit shutdown
-    /// may override it. In-flight work and joins may exceed it. Default: 30 seconds.
+    /// Default SDK-controlled shutdown/Drop waiting budget. Default: 30 seconds.
+    /// The first shutdown selects one deadline; later calls and Drop cannot
+    /// extend it. Already-started work owns its resources until completion and
+    /// may retain them indefinitely if it never returns. Arbitrary destructors
+    /// of application objects captured by callbacks may block outside this bound.
     pub shutdown_timeout: Duration,
     /// Attempts per active delivery sequence, including the first. Default: 4.
     pub max_capture_attempts: u32,
