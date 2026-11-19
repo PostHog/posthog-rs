@@ -129,6 +129,7 @@ fn client_with_store(
                 config.transport_options(),
                 store,
                 config.max_queue_bytes,
+                config.max_event_bytes(),
                 deadline,
                 Arc::new(SystemClock),
             )

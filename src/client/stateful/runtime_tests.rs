@@ -75,6 +75,13 @@ fn client_defaults_map_to_shared_delivery_without_changing_server_defaults() {
     );
     assert_eq!(options.flush_interval_ms, 10_000);
     assert_eq!(
+        (
+            options.retry_initial_backoff_ms,
+            options.retry_max_backoff_ms
+        ),
+        (1_000, 30_000)
+    );
+    assert_eq!(
         options.capture_compression,
         Some(crate::CaptureCompression::Gzip)
     );

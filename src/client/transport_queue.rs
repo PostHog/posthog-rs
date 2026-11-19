@@ -189,6 +189,7 @@ pub(super) fn run(
     let mut flushes: Vec<Flush> = Vec::new();
     let mut removals = Vec::new();
     let mut cleanup_due: Option<Instant> = None;
+    let mut eviction_warned = false;
     let mut admitted_since_upload = 0usize;
     loop {
         let end = *deadline.lock().unwrap_or_else(|p| p.into_inner());
@@ -219,6 +220,11 @@ pub(super) fn run(
                 retry = Some(result.view);
             }
             due = clock.now();
+        }
+        if queue.take_replaced() > 0 && !std::mem::replace(&mut eviction_warned, true) {
+            tracing::warn!(
+                "posthog-rs: event queue is full; dropping the oldest queued event(s) to keep new ones"
+            );
         }
         if let Some(store) = &mut storage.store {
             if cleanup_due.map_or(true, |at| clock.now() >= at) {
@@ -257,6 +263,7 @@ pub(super) fn run(
                         &item.wire,
                         StoreKey(item.id),
                         &options.on_error,
+                        &mut eviction_warned,
                     );
                     if let Some(key) = key {
                         queue.persisted(key.0);
@@ -387,6 +394,10 @@ pub(super) fn run(
                             entries.push((token, Entry::Memory(id)));
                             events.push(event);
                         }
+                    }
+                    if head_empty && events.is_empty() {
+                        // The queue drained, so a later overflow warns again.
+                        eviction_warned = false;
                     }
                     let mut body_bytes = 0usize;
                     let keep = events
@@ -546,7 +557,14 @@ pub(super) fn run(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
-    queue.clear();
+    // Resident events at exit were never written to disk: memory fallback, or
+    // staging the store did not reach before shutdown.
+    let dropped = queue.clear();
+    if dropped > 0 {
+        tracing::warn!(
+            "posthog-rs: shutdown stopped delivery; dropping {dropped} event(s) that were held only in memory"
+        );
+    }
     drop(retry);
     drop(completed);
     // No further work can access the event store after the coordinator exits.

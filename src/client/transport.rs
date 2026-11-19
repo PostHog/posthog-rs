@@ -70,6 +70,9 @@ struct StorageState {
     store: Option<Box<dyn super::event_store::EventStore>>,
     #[cfg(feature = "stateful")]
     byte_budget: Option<Arc<memory::ByteBudget>>,
+    /// Largest serialized event the resident queue admits.
+    #[cfg(feature = "stateful")]
+    max_event_bytes: usize,
 }
 
 #[cfg(feature = "stateful")]
@@ -84,8 +87,14 @@ impl StorageState {
     fn memory(max_queue_bytes: usize) -> Self {
         Self {
             byte_budget: Some(memory::ByteBudget::new(max_queue_bytes)),
+            max_event_bytes: max_queue_bytes,
             ..Self::default()
         }
+    }
+
+    fn with_max_event_bytes(mut self, max_event_bytes: usize) -> Self {
+        self.max_event_bytes = self.max_event_bytes.min(max_event_bytes);
+        self
     }
 }
 
@@ -389,6 +398,7 @@ impl TransportHandle {
             options,
             store,
             max_queue_bytes,
+            max_queue_bytes,
             Arc::new(Mutex::new(None)),
             Arc::new(SystemClock),
         )
@@ -399,13 +409,15 @@ impl TransportHandle {
         options: ClientOptions,
         store: Option<Box<dyn super::event_store::EventStore>>,
         max_queue_bytes: usize,
+        max_event_bytes: usize,
         deadline: Arc<Mutex<Option<Instant>>>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, StartupFailure> {
         let storage = match store {
             Some(store) => StorageState::new(store, max_queue_bytes),
             None => StorageState::memory(max_queue_bytes),
-        };
+        }
+        .with_max_event_bytes(max_event_bytes);
         let (tx, rx) = mpsc::channel();
         Self::spawn_configured_with_deadline(
             options,
@@ -471,6 +483,7 @@ impl TransportHandle {
         let queue = byte_budget.as_ref().map(|budget| {
             memory::Queue::new(
                 budget.clone(),
+                _storage.max_event_bytes,
                 len.clone(),
                 max_queue_size,
                 _storage
@@ -515,6 +528,10 @@ impl TransportHandle {
                     );
                     return;
                 }
+                // Only the coordinator sends to itself. Dropping this copy lets
+                // the channel close when the handle drops without a shutdown.
+                #[cfg(feature = "stateful")]
+                drop(worker_tx);
                 run_worker(options, lane, rx, worker_len, worker_clock);
             })
             .ok();
@@ -1812,8 +1829,7 @@ impl Pipeline {
                 let retry_after = capture::parse_retry_after(resp.headers());
                 match resp.text() {
                     Err(error)
-                        if retention.retries_unconfirmed_success()
-                            && (200..=299).contains(&status) =>
+                        if retention.retries_unread_body() && (200..=299).contains(&status) =>
                     {
                         capture::after_transport_error_with_retention(
                             &self.options,
@@ -2192,6 +2208,26 @@ mod tests {
     }
 
     #[test]
+    fn stateless_worker_exits_when_its_handle_drops_without_shutdown() {
+        // A cancelled async constructor drops the handle before any client can
+        // shut it down.
+        let clock = Arc::new(ManualClock::new());
+        let handle = TransportHandle::spawn_with_clock(
+            options("http://localhost".into()).build().unwrap(),
+            clock.clone(),
+        );
+        drop(handle);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&clock) > 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker thread still holds its clock"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
     fn prepared_events_share_capacity_and_retry_without_reprocessing() {
         let server = MockServer::start();
         let clock = ManualClock::new();
@@ -2368,71 +2404,59 @@ mod tests {
 
     #[cfg(feature = "stateful")]
     #[test]
-    fn stateful_delivery_retries_unconfirmed_success_until_its_last_attempt() {
+    fn every_delivery_mode_reads_2xx_results_the_same_way() {
         use super::super::capture::{after_response_with_retention, RetryRetention, Step};
         let opts = options("http://localhost".into())
-            .max_capture_attempts(2u32)
+            .max_capture_attempts(3u32)
             .build()
             .unwrap();
         let confirmed = CaptureEvent::from_event(&Event::new("confirmed", "user"));
         let missing = CaptureEvent::from_event(&Event::new("missing", "user"));
-        let partial = serde_json::json!({"results": {
-            (confirmed.uuid.to_string()): {"result": "ok"}
-        }})
-        .to_string();
-        for (retention, attempt, malformed, missing_kept) in [
-            // Server delivery trusts any 2xx, as it shipped.
-            (RetryRetention::Discard, 1, "fail", false),
-            // Memory-only stateful delivery retries until its attempts run out.
-            (RetryRetention::Bounded, 1, "backoff", true),
-            (RetryRetention::Bounded, 2, "fail", true),
-            // Disk-backed delivery keeps retrying.
-            (RetryRetention::Retain, 2, "backoff", true),
-        ] {
-            let mut pending = vec![DeliveryEvent::from(missing.clone())];
-            let step = after_response_with_retention(
-                &opts,
-                &Uuid::now_v7(),
-                attempt,
-                200,
-                None,
-                "<html>proxy</html>",
-                &mut pending,
-                &mut HashMap::new(),
-                retention,
-            );
-            let outcome = match step {
-                Step::Backoff(_) => "backoff",
-                Step::Fail(_) => "fail",
-                Step::Done => "done",
-            };
-            assert_eq!(outcome, malformed, "malformed body, attempt {attempt}");
-            assert_eq!(pending.len(), 1);
-
+        let respond = |retention, body: &str| {
             let mut pending = vec![
                 DeliveryEvent::from(confirmed.clone()),
                 DeliveryEvent::from(missing.clone()),
             ];
             let mut results = HashMap::new();
-            after_response_with_retention(
+            let step = after_response_with_retention(
                 &opts,
                 &Uuid::now_v7(),
-                attempt,
+                1,
                 200,
                 None,
-                &partial,
+                body,
                 &mut pending,
                 &mut results,
                 retention,
             );
+            (step, pending.len(), results)
+        };
+        let partial = serde_json::json!({"results": {
+            (confirmed.uuid.to_string()): {"result": "ok"}
+        }})
+        .to_string();
+        for retention in [
+            RetryRetention::Discard,
+            RetryRetention::Bounded,
+            RetryRetention::Retain,
+        ] {
+            // An event absent from a readable `results` map was delivered.
+            let (step, pending, results) = respond(retention, &partial);
+            assert!(matches!(step, Step::Done));
+            assert_eq!(pending, 0);
             assert!(results.contains_key(&confirmed.uuid));
-            assert_eq!(
-                pending
-                    .iter()
-                    .any(|event| event.as_ref().uuid == missing.uuid),
-                missing_kept,
-                "missing result, attempt {attempt}"
-            );
+            assert!(!results.contains_key(&missing.uuid));
+
+            let (step, pending, _) = respond(retention, r#"{"results":{}}"#);
+            assert!(matches!(step, Step::Done));
+            assert_eq!(pending, 0);
+
+            // A 2xx whose results cannot be read is terminal, not resent.
+            for unreadable in ["<html>proxy</html>", "{}", r#"{"results":null}"#] {
+                let (step, pending, _) = respond(retention, unreadable);
+                assert!(matches!(step, Step::Fail(_)), "{}", unreadable);
+                assert_eq!(pending, 2, "{}", unreadable);
+            }
         }
     }
 
@@ -2459,9 +2483,6 @@ mod tests {
             (400, "bad input", false),
             (401, "invalid key", false),
             (413, "oversize", false),
-            // A 2xx that capture did not produce cannot confirm delivery.
-            (200, "malformed JSON", true),
-            (200, "{\"results\":{}}", true),
         ] {
             let mut entry =
                 DeliveryEvent::from(CaptureEvent::from_event(&Event::new("event", "user")));

@@ -154,6 +154,26 @@ fn bounded_admission_replaces_oldest_and_recovers_a_failed_byte_reservation() {
 }
 
 #[test]
+fn events_over_the_per_event_limit_are_refused_at_capture() {
+    // The default queue holds 8 MiB; the per-event limit is 1 MiB.
+    let client = Client::init_blocking(config());
+    let mut oversized = Capture::new("too-big");
+    oversized
+        .properties
+        .insert("data".into(), "x".repeat(1024 * 1024).into());
+    assert_eq!(client.capture(oversized), CaptureOutcome::Full);
+    let mut large = Capture::new("large");
+    large
+        .properties
+        .insert("data".into(), "x".repeat(512 * 1024).into());
+    assert!(matches!(
+        client.capture(large),
+        CaptureOutcome::Accepted { .. }
+    ));
+    client.shutdown_blocking(None);
+}
+
+#[test]
 fn hooks_can_read_identity_but_recursive_capture_and_waiting_are_deferred() {
     let slot = Arc::new(Mutex::new(Weak::<Client>::new()));
     let hook_slot = slot.clone();

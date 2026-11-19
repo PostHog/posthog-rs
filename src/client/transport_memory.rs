@@ -136,13 +136,17 @@ struct Resident {
 pub(super) struct Queue {
     resident: Mutex<Resident>,
     budget: Arc<ByteBudget>,
+    max_event_bytes: usize,
     count: Arc<AtomicUsize>,
     capacity: usize,
     wake: AtomicBool,
+    /// Resident events dropped to admit newer ones since the coordinator last looked.
+    replaced: AtomicUsize,
 }
 impl Queue {
     pub(super) fn new(
         budget: Arc<ByteBudget>,
+        max_event_bytes: usize,
         count: Arc<AtomicUsize>,
         capacity: usize,
         disk_end: Option<u64>,
@@ -154,14 +158,16 @@ impl Queue {
                 items: VecDeque::new(),
             }),
             budget,
+            max_event_bytes,
             count,
             capacity,
             wake: AtomicBool::new(false),
+            replaced: AtomicUsize::new(0),
         })
     }
     pub(super) fn admit(&self, wire: CaptureEvent) -> super::Admission {
         let bytes = super::super::event_store::record_size(&wire);
-        if bytes > self.budget.limit || self.capacity == 0 {
+        if bytes > self.budget.limit || bytes > self.max_event_bytes || self.capacity == 0 {
             return super::Admission::Full;
         }
         let mut resident = self.resident.lock().unwrap_or_else(|p| p.into_inner());
@@ -190,6 +196,7 @@ impl Queue {
         while self.count.load(Ordering::Acquire) >= self.capacity || self.budget.available() < bytes
         {
             resident.items.pop_front();
+            self.replaced.fetch_add(1, Ordering::AcqRel);
         }
         let reservation = self
             .budget
@@ -205,6 +212,9 @@ impl Queue {
             count: self.count.clone(),
         }));
         super::Admission::Accepted
+    }
+    pub(super) fn take_replaced(&self) -> usize {
+        self.replaced.swap(0, Ordering::AcqRel)
     }
     pub(super) fn arm(&self) -> bool {
         !self.wake.swap(true, Ordering::AcqRel)
@@ -235,12 +245,12 @@ impl Queue {
             false
         }
     }
-    pub(super) fn clear(&self) {
-        self.resident
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .items
-            .clear();
+    /// Drop every resident event and return how many there were.
+    pub(super) fn clear(&self) -> usize {
+        let mut resident = self.resident.lock().unwrap_or_else(|p| p.into_inner());
+        let dropped = resident.items.len();
+        resident.items.clear();
+        dropped
     }
     pub(super) fn persisted(&self, key: u64) {
         let mut resident = self.resident.lock().unwrap_or_else(|p| p.into_inner());
@@ -302,9 +312,39 @@ mod queue_tests {
     use crate::client::transport::{storage_tests::wire, Admission};
 
     #[test]
+    fn admission_counts_the_resident_events_it_replaces() {
+        let queue = Queue::new(
+            ByteBudget::new(4096),
+            4096,
+            Arc::new(AtomicUsize::new(0)),
+            2,
+            None,
+        );
+        assert_eq!(queue.admit(wire("first")), Admission::Accepted);
+        assert_eq!(queue.admit(wire("second")), Admission::Accepted);
+        assert_eq!(queue.take_replaced(), 0);
+        assert_eq!(queue.admit(wire("third")), Admission::Accepted);
+        assert_eq!(queue.admit(wire("fourth")), Admission::Accepted);
+        assert_eq!(queue.take_replaced(), 2);
+        assert_eq!(queue.take_replaced(), 0);
+    }
+
+    #[test]
+    fn clearing_reports_how_many_resident_events_were_dropped() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let queue = Queue::new(ByteBudget::new(4096), 4096, count.clone(), 4, None);
+        assert_eq!(queue.admit(wire("first")), Admission::Accepted);
+        assert_eq!(queue.admit(wire("second")), Admission::Accepted);
+        assert_eq!(queue.clear(), 2);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        assert_eq!(queue.clear(), 0);
+    }
+
+    #[test]
     fn retained_memory_is_fifo_and_replacements_have_exact_admission_identity() {
         let queue = Queue::new(
             ByteBudget::new(4096),
+            4096,
             Arc::new(AtomicUsize::new(0)),
             2,
             None,
@@ -333,6 +373,7 @@ mod queue_tests {
         let bytes = super::super::super::event_store::record_size(&first);
         let queue = Queue::new(
             ByteBudget::new(bytes),
+            bytes,
             Arc::new(AtomicUsize::new(0)),
             1,
             None,
