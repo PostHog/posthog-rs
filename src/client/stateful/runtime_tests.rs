@@ -233,6 +233,8 @@ fn host_changes_share_identity_queue_and_single_owner_scope() {
     let config = || {
         let mut config = directory.config();
         config.flush_interval = Duration::from_secs(3600);
+        // The hosts refuse connections; don't wait out retries at shutdown.
+        config.shutdown_timeout = Duration::from_millis(200);
         config
     };
     let client = Client::init_blocking(config());

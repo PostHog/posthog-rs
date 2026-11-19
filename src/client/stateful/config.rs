@@ -92,9 +92,12 @@ pub struct Config {
     /// Platform properties cached at initialization. Per-event properties win.
     /// Missing $os/$os_version are discovered once during initialization.
     pub platform_context: HashMap<String, serde_json::Value>,
-    /// Capture-time SDK name. Defaults to posthog-rs; embedding clients may override it.
+    /// SDK name for events' `$lib` and for the `PostHog-Sdk-Info` and
+    /// `User-Agent` headers of capture requests. Defaults to posthog-rs; a
+    /// wrapper SDK sets its own.
     pub sdk_name: String,
-    /// Capture-time SDK version. Defaults to this crate's version.
+    /// SDK version for events' `$lib_version` and for the same headers.
+    /// Defaults to this crate's version.
     pub sdk_version: String,
     pub(super) before_send: Vec<BeforeSendHook>,
     pub(super) on_error: Vec<OnErrorHook>,
