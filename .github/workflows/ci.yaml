@@ -197,17 +197,17 @@ jobs:
             cache-key: stateful-macos
             command: >-
               cargo test --locked --lib --features stateful client::
-              && cargo test --locked --features stateful --test test_stateful_init --test test_stateful_capture --test test_stateful_drains
+              && cargo test --locked --features stateful --test test_stateful_init --test test_stateful_capture --test test_stateful_drains --test test_stateful_identity
               && cargo test --locked --no-default-features --features stateful,tls --lib client::stateful
-              && cargo test --locked --no-default-features --features stateful,tls --test test_stateful_init --test test_stateful_capture --test test_stateful_drains
+              && cargo test --locked --no-default-features --features stateful,tls --test test_stateful_init --test test_stateful_capture --test test_stateful_drains --test test_stateful_identity
           - name: Stateful client, storage and transport (Windows)
             os: windows-latest
             cache-key: stateful-windows
             command: >-
               cargo test --locked --lib --features stateful client::
-              && cargo test --locked --features stateful --test test_stateful_init --test test_stateful_capture --test test_stateful_drains
+              && cargo test --locked --features stateful --test test_stateful_init --test test_stateful_capture --test test_stateful_drains --test test_stateful_identity
               && cargo test --locked --no-default-features --features stateful,tls --lib client::stateful
-              && cargo test --locked --no-default-features --features stateful,tls --test test_stateful_init --test test_stateful_capture --test test_stateful_drains
+              && cargo test --locked --no-default-features --features stateful,tls --test test_stateful_init --test test_stateful_capture --test test_stateful_drains --test test_stateful_identity
           - name: Unit test (workspace)
             cache-key: workspace
             command: cargo test --workspace --verbose

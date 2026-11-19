@@ -272,6 +272,14 @@ fn host_changes_share_identity_queue_and_single_owner_scope() {
 fn corrupt_state_is_replaced_but_future_state_is_preserved() {
     for (original, recoverable) in [
         (b"not json".as_slice(), true),
+        (
+            br#"{"version":1,"state":{"anonymous_id":"private","distinct_id":17,"identified":false,"person_processing":false}}"#.as_slice(),
+            true,
+        ),
+        (
+            br#"{"version":1,"state":{"anonymous_id":"","distinct_id":"private","identified":false,"person_processing":false}}"#.as_slice(),
+            true,
+        ),
         (b"{\"version\":99,\"state\":{}}".as_slice(), false),
     ] {
         let directory = Directory::new();
@@ -320,10 +328,11 @@ fn startup_rewrites_missing_device_and_tolerates_additive_fields() {
     let directory = Directory::new();
     fs::create_dir_all(directory.scope()).unwrap();
     let path = directory.scope().join("state.json");
-    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","future_field":42}}"#).unwrap();
+    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","identified":true,"person_processing":true,"future_field":42}}"#).unwrap();
     let client = Client::init_blocking(directory.config());
     assert_eq!(client.get_anonymous_id(), "anonymous");
     assert_eq!(client.get_distinct_id(), "person");
+    assert!(client.is_identified());
     assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
     assert_eq!(
         client.shutdown_blocking(None).delivery,
