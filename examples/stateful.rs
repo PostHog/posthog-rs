@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     client.register(HashMap::from([("example_context".into(), json!("rust"))]));
     if let Ok(group) = std::env::var("POSTHOG_GROUP_KEY") {
-        client.group("organization", group, None);
+        client.group(("organization", group));
     }
     // Analytics registration is not implicit flag targeting. Combine explicit
     // targeting with the final identity/group context before requesting a refresh.
@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert("source".into(), json!("rust-example"));
     println!("capture: {:?}", client.capture(event));
     println!("session active: {}", client.peek_session_id().is_some());
-    println!("screen: {:?}", client.screen("Example", HashMap::new()));
+    println!("screen: {:?}", client.screen("Example"));
     println!("flush: {:?}", client.flush_blocking());
     if let Ok(key) = std::env::var("POSTHOG_FLAG_KEY") {
         // Cached read only: None is unavailable, not false. A known value reports

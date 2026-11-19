@@ -30,8 +30,9 @@ pub use crate::client::transport::flags::LoadError as FeatureFlagLoadError;
 pub use config::Config;
 pub use flag_listeners::{FeatureFlagsSubscription, FeatureFlagsUpdate};
 pub use flag_reads::{FeatureFlagContext, FeatureFlagLookup, FeatureFlagResult};
-pub use identity::{Identify, PersonProfiles};
-pub use producer::{Capture, CaptureOutcome};
+pub use identity::{Alias, Identify, PersonProfiles, PersonProperties};
+pub use producer::{Capture, CaptureOutcome, Screen};
+pub use properties::Group;
 #[cfg(feature = "session-replay")]
 pub use replay::{
     FrameLayout, FrameUnavailable, PixelFormat, ReplayConfig, ReplayFrame, SessionReplay,
@@ -74,7 +75,7 @@ struct Snapshot {
     distinct_id: String,
     identified: bool,
     person_processing: bool,
-    // None follows the configured default, including after reset.
+    // None follows the configured default. Reset keeps an explicit choice.
     #[serde(deserialize_with = "Option::<bool>::deserialize")]
     opt_out: Option<bool>,
     registered: HashMap<String, Value>,

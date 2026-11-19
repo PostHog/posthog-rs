@@ -108,10 +108,7 @@ fn toggles_are_immediate_and_blocked_capture_never_runs_hooks() {
     client.opt_out();
     assert!(client.is_opt_out());
     assert_eq!(client.capture("blocked"), CaptureOutcome::OptedOut);
-    assert_eq!(
-        client.screen("blocked", HashMap::new()),
-        CaptureOutcome::OptedOut
-    );
+    assert_eq!(client.screen("blocked"), CaptureOutcome::OptedOut);
     assert_eq!(events.lock().unwrap().len(), 1);
     client.opt_in();
     client.opt_in();
@@ -145,7 +142,7 @@ fn disabled_and_closed_clients_cannot_be_opted_in() {
 }
 
 #[test]
-fn reset_restores_configured_default_and_clears_persisted_override() {
+fn reset_keeps_an_explicit_consent_choice() {
     for default in [false, true] {
         let directory = Directory::new();
         let mut conf = directory.config();
@@ -159,17 +156,17 @@ fn reset_restores_configured_default_and_clears_persisted_override() {
         }
         assert_eq!(client.is_opt_out(), !default);
         client.reset();
-        assert_eq!(client.is_opt_out(), default);
+        assert_eq!(client.is_opt_out(), !default);
         assert_ne!(client.get_distinct_id(), "anonymous");
         assert_eq!(
             client.shutdown_blocking(None).state,
             PersistenceOutcome::Persisted
         );
         drop(client);
-        assert!(directory.state()["state"]["opt_out"].is_null());
-        // Absence is not frozen to the previous launch's default.
+        assert_eq!(directory.state()["state"]["opt_out"], !default);
+        // The persisted choice wins over a changed configured default.
         let mut conf = directory.config();
-        conf.opt_out = !default;
+        conf.opt_out = default;
         let client = Client::init_blocking(conf);
         assert_eq!(client.is_opt_out(), !default);
     }
@@ -242,11 +239,11 @@ fn alias_and_profile_creation_are_noops_while_out_and_properties_remain_retryabl
     assert_eq!(events.lock().unwrap()[1].event_name(), "$set");
     client.opt_out();
     let set = HashMap::from([("plan".into(), json!("pro"))]);
-    client.set_person_properties(set.clone(), HashMap::new());
+    client.set_person_properties(set.clone());
     assert_eq!(events.lock().unwrap().len(), 2);
     client.opt_in();
-    client.set_person_properties(set.clone(), HashMap::new());
-    client.set_person_properties(set, HashMap::new());
+    client.set_person_properties(set.clone());
+    client.set_person_properties(set);
     assert_eq!(events.lock().unwrap().len(), 3);
 }
 

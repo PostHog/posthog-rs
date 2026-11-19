@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use httpmock::{Method::POST, MockServer};
 use posthog::stateful::{
-    Capture, CaptureOutcome, Client, Config, Persistence, PersistenceOutcome, PersonProfiles,
+    Capture, CaptureOutcome, Client, Config, Group, Persistence, PersistenceOutcome, PersonProfiles,
 };
 use posthog::Event;
 use serde_json::{json, Value};
@@ -93,8 +93,8 @@ fn registration_owns_values_replaces_top_level_and_unregister_is_local() {
 #[test]
 fn direct_group_identify_enables_processing_without_membership_or_identification() {
     let (client, events) = observed(config());
-    client.group_identify("company", "a", HashMap::new());
-    client.group_identify("company", "a", HashMap::new());
+    client.group_identify(("company", "a"));
+    client.group_identify(("company", "a"));
     client.capture("after");
     assert!(!client.is_identified());
     let seen = events.lock().unwrap();
@@ -135,20 +135,24 @@ fn concurrent_registrations_are_observed_as_whole_snapshots() {
 fn groups_emit_every_call_and_direct_identify_does_not_replace_membership() {
     let (client, events) = observed(config());
     client.register(properties(json!({"plan":"pro"})));
-    client.group("company", "a", None);
-    client.group("company", "a", None);
-    client.group(
-        "company",
-        "a",
-        Some(properties(json!({"name":"A", "clear":null}))),
-    );
-    client.group_identify("company", "b", properties(json!({"$group_key":"literal"})));
-    client.group("team", "t", None);
+    client.group(("company", "a"));
+    client.group(("company", "a"));
+    client.group({
+        let mut group = Group::new("company", "a");
+        group.properties = properties(json!({"name":"A", "clear":null}));
+        group
+    });
+    client.group_identify({
+        let mut group = Group::new("company", "b");
+        group.properties = properties(json!({"$group_key":"literal"}));
+        group
+    });
+    client.group(("team", "t"));
     client.capture("before-remove");
     client.remove_group("company");
     client.remove_group("missing");
     client.capture("after-remove");
-    client.group("team", "new", None);
+    client.group(("team", "new"));
     client.capture("replacement");
     assert!(!client.is_identified());
     let seen = events.lock().unwrap();
@@ -192,8 +196,8 @@ fn processing_and_consent_matrix_preserves_local_registration_and_per_event_sema
             let (client, events) = observed(conf);
             client.register(properties(json!({"keep":1, "remove":2})));
             client.unregister("remove");
-            client.group("company", "a", None);
-            client.group_identify("company", "b", HashMap::new());
+            client.group(("company", "a"));
+            client.group_identify(("company", "b"));
             let allowed = !opted_out && mode != PersonProfiles::Never;
             assert_eq!(events.lock().unwrap().len(), if allowed { 2 } else { 0 });
             client.opt_in();
@@ -224,7 +228,7 @@ fn removal_while_out_or_never_and_reset_clear_context_without_events() {
     let directory = Directory::new();
     let (client, _) = observed(directory.config());
     client.register(properties(json!({"plan":"pro"})));
-    client.group("company", "a", None);
+    client.group(("company", "a"));
     assert_eq!(
         client.shutdown_blocking(None).state,
         PersistenceOutcome::Persisted
@@ -258,8 +262,8 @@ fn invalid_groups_reject_whole_candidate() {
     assert!(!client.is_disabled());
     client.register(properties(json!({"plan":"old"})));
     for (kind, key) in [(" ", "a"), ("company", "\t")] {
-        client.group(kind, key, None);
-        client.group_identify(kind, key, HashMap::new());
+        client.group((kind, key));
+        client.group_identify((kind, key));
     }
     assert!(events.lock().unwrap().is_empty());
     client.capture("after");
@@ -275,7 +279,7 @@ fn disabled_and_closed_operations_do_not_mutate_persisted_context() {
         let directory = Directory::new();
         let (seed, _) = observed(directory.config());
         seed.register(properties(json!({"plan":"old"})));
-        seed.group("company", "old", None);
+        seed.group(("company", "old"));
         seed.shutdown_blocking(None);
         drop(seed);
         let bytes = std::fs::read(directory.state_path()).unwrap();
@@ -287,8 +291,8 @@ fn disabled_and_closed_operations_do_not_mutate_persisted_context() {
         }
         client.register(properties(json!({"plan":"new"})));
         client.unregister("plan");
-        client.group("company", "new", None);
-        client.group_identify("company", "new", HashMap::new());
+        client.group(("company", "new"));
+        client.group_identify(("company", "new"));
         client.remove_group("company");
         drop(client);
         assert!(events.lock().unwrap().is_empty());
@@ -303,7 +307,7 @@ fn restart_restores_owned_context_and_removals() {
     client.register(properties(
         json!({"object":{"nested":null}, "list":[1,null]}),
     ));
-    client.group("company", "a", None);
+    client.group(("company", "a"));
     assert_eq!(
         client.shutdown_blocking(None).state,
         PersistenceOutcome::Persisted
@@ -368,7 +372,7 @@ fn invalid_current_records_use_configured_fallback_and_allow_replacement() {
             assert!(!events[0].properties().contains_key("stored"));
         }
         client.register(properties(json!({"replacement":true})));
-        client.group("company", "valid", None);
+        client.group(("company", "valid"));
         assert_eq!(
             client.shutdown_blocking(None).state,
             PersistenceOutcome::Persisted
@@ -427,7 +431,7 @@ fn oversized_group_event_keeps_context_without_replay() {
         client.capture("occupy"),
         CaptureOutcome::Accepted { .. }
     ));
-    client.group("company", "a", None);
+    client.group(("company", "a"));
     assert_eq!(client.capture("still-full"), CaptureOutcome::Full);
     client.flush_blocking();
     request.assert_calls(1);
@@ -450,7 +454,7 @@ fn hook_mutation_and_reset_keep_the_outer_context_coherent_and_reentrant_groups_
         if event.event_name() == "outer" {
             client.register(properties(json!({"value":"new"})));
             client.remove_group("company");
-            client.group("recursive", "ignored", None);
+            client.group(("recursive", "ignored"));
             client.reset();
         }
         events.lock().unwrap().push(event);
@@ -459,7 +463,7 @@ fn hook_mutation_and_reset_keep_the_outer_context_coherent_and_reentrant_groups_
     let client = Arc::new(Client::init_blocking(conf));
     *holder.lock().unwrap() = Arc::downgrade(&client);
     client.register(properties(json!({"value":"old"})));
-    client.group("company", "old", None);
+    client.group(("company", "old"));
     client.capture("outer");
     client.capture("after");
     let events = seen.lock().unwrap();
@@ -490,7 +494,7 @@ fn blocked_group_hook_retains_snapshot_through_concurrent_reset_and_opt_out() {
     let client = Arc::new(Client::init_blocking(conf));
     client.register(properties(json!({"value":"old"})));
     let group_client = client.clone();
-    let thread = std::thread::spawn(move || group_client.group("company", "a", None));
+    let thread = std::thread::spawn(move || group_client.group(("company", "a")));
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     client.reset();
     client.opt_out();
@@ -537,7 +541,11 @@ fn group_and_registered_context_reach_wire_after_hook_scrubbing() {
     client.register(properties(
         json!({"private":"secret", "list":[null,{"custom_null":null}], "custom_null":null}),
     ));
-    client.group("company", "a", Some(properties(json!({"clear":null}))));
+    client.group({
+        let mut group = Group::new("company", "a");
+        group.properties = properties(json!({"clear":null}));
+        group
+    });
     client.flush_blocking();
     request.assert_calls(1);
 }
@@ -555,7 +563,7 @@ fn queued_context_survives_reset_restart_and_retry_without_reenrichment() {
     let client = Client::init_blocking(conf);
     client.flush_blocking(); // Initialization readiness does not promise recovery capacity.
     client.register(properties(json!({"plan":"old"})));
-    client.group("company", "old", None);
+    client.group(("company", "old"));
     assert!(matches!(
         client.capture("old-capture"),
         CaptureOutcome::Accepted { .. }
@@ -603,13 +611,13 @@ fn failed_write_preserves_live_context_then_persists_latest_revision() {
     let temporary = directory.state_path().with_file_name("state.json.tmp");
     std::fs::create_dir(&temporary).unwrap();
     client.register(properties(json!({"plan":"first"})));
-    client.group("company", "a", None);
+    client.group(("company", "a"));
     assert_eq!(
         client.flush_blocking().state,
         PersistenceOutcome::WriteFailed
     );
     client.register(properties(json!({"plan":"latest"})));
-    client.group("company", "b", None);
+    client.group(("company", "b"));
     client.capture("live");
     let seen = events.lock().unwrap();
     assert_eq!(seen.last().unwrap().properties()["plan"], "latest");
@@ -656,7 +664,7 @@ fn registered_depth_boundary_rejects_whole_update_and_preserves_other_durable_st
         assert_eq!(seen[0].properties().contains_key("nested"), decodable);
         drop(seen);
         assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
-        client.group("company", "a", None);
+        client.group(("company", "a"));
         client.opt_out();
         assert_eq!(
             client.shutdown_blocking(None).state,
@@ -684,9 +692,28 @@ fn async_initialization_and_drains_share_synchronous_context_mutations() {
         });
         let client = Client::init(conf).await;
         client.register(properties(json!({"plan":"pro"})));
-        client.group("company", "a", None);
+        client.group(("company", "a"));
         assert_eq!(client.capture("capture"), CaptureOutcome::Dropped);
         assert_eq!(client.flush().await.state, PersistenceOutcome::MemoryOnly);
         client.shutdown(None).await;
     });
+}
+
+#[test]
+fn group_options_reach_their_events() {
+    let (client, events) = observed(config());
+    for identify_only in [false, true] {
+        let mut group = Group::new("company", "a");
+        group.options.insert("cookieless_mode".into(), json!(true));
+        if identify_only {
+            client.group_identify(group);
+        } else {
+            client.group(group);
+        }
+    }
+    let seen = events.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    for event in seen.iter() {
+        assert_eq!(event.options()["cookieless_mode"], true);
+    }
 }

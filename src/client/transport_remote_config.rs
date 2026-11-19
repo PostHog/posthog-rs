@@ -111,8 +111,16 @@ impl Task {
         let follow_up =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.complete)(result)));
         match follow_up {
-            Ok(Some(task)) if !closed.load(std::sync::atomic::Ordering::Acquire) => {
-                task.run(http, options)
+            Ok(Some(task)) => {
+                // A flags completion may continue with one follow-up for newer
+                // targeting; it only exists when no newer request was made.
+                let mut next = Some(task);
+                while let Some(task) = next.take() {
+                    if closed.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    next = task.run(http, options);
+                }
             }
             Ok(_) => {}
             Err(_) => tracing::warn!("posthog-rs: remote config completion panicked"),

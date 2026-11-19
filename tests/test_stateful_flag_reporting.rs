@@ -1,9 +1,12 @@
 #![cfg(feature = "stateful")]
 
 use httpmock::{Method::POST, MockServer};
+
+mod stateful_support;
 use posthog::stateful::{Client, Config, DeliveryOutcome, Persistence, PersonProfiles};
 use posthog::{Event, FlagValue};
 use serde_json::{json, Value};
+use stateful_support::accept_all;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -52,7 +55,7 @@ fn reload(client: &Client) {
 fn accept(server: &MockServer) {
     server.mock(|when, then| {
         when.path("/i/v1/analytics/events");
-        then.status(200).json_body(json!({"results":{}}));
+        then.respond_with(accept_all);
     });
 }
 
@@ -134,14 +137,7 @@ fn defaults_overrides_and_consent_share_accepted_dedup() {
                 .map(|flag| flag.enabled),
             Some(true)
         );
-        assert_eq!(client.feature_flag("missing").get(), None);
-        assert_eq!(
-            client
-                .feature_flag("missing")
-                .get()
-                .map(|flag| flag.enabled),
-            None
-        );
+        assert_eq!(client.feature_flag("missing").send_event(false).get(), None);
         assert!(events.lock().unwrap().is_empty());
         let result = client.feature_flag("a").get().unwrap();
         assert!(result.enabled);
@@ -552,7 +548,7 @@ fn dedup_survives_reload_group_and_targeting_updates_until_identity_changes() {
     read();
     assert_eq!(reports(), 1);
     client.identify("device"); // Same-ID promotion does not reset reports.
-    complete(&client, || client.group("company", "acme", None));
+    complete(&client, || client.group(("company", "acme")));
     read();
     client.set_person_properties_for_flags(
         HashMap::from([("plan".into(), json!("pro"))]),
@@ -690,4 +686,22 @@ fn reset_or_shutdown_from_hook_does_not_deadlock_or_replace_returned_result() {
             None
         );
     }
+}
+
+#[test]
+fn missing_flag_reads_report_a_null_response_once() {
+    let server = MockServer::start();
+    accept(&server);
+    let mut c = config(&server);
+    let events = observe(&mut c);
+    let client = Client::init_blocking(c);
+    assert_eq!(client.feature_flag("missing").get(), None);
+    assert_eq!(client.feature_flag("missing").get(), None);
+    let seen = events.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].event_name(), "$feature_flag_called");
+    assert_eq!(seen[0].properties()["$feature_flag"], "missing");
+    assert_eq!(seen[0].properties()["$feature_flag_response"], Value::Null);
+    drop(seen);
+    client.shutdown_blocking(None);
 }
