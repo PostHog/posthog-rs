@@ -261,14 +261,10 @@ fn host_changes_share_identity_queue_and_single_owner_scope() {
         let scope = super::namespace(&next.project_token, &next.instance_name);
         let mut storage =
             super::RestoredStorage::open(&next.persistence, &scope, next.event_limits(), &[]);
-        let recovered = storage
-            .event_store
-            .as_mut()
-            .unwrap()
-            .recover(10, next.max_stored_bytes)
-            .unwrap();
-        assert_eq!(recovered.events.len(), 1);
-        assert!(recovered.errors.is_empty());
+        let store = storage.event_store.as_mut().unwrap();
+        let index = store.take_index();
+        assert_eq!(index.len(), 1);
+        assert!(store.read(index[0].0).is_ok());
     }
     let restored = Client::init_blocking(next);
     assert_eq!(restored.get_anonymous_id(), id);
@@ -388,9 +384,10 @@ fn shutdown_from_delivery_callback_defers_then_external_shutdown_joins_both_work
     )
     .unwrap();
     store
-        .put(&crate::capture_event::CaptureEvent::from_event(
-            &crate::Event::new("old", "old-user"),
-        ))
+        .write(
+            crate::client::event_store::StoreKey(1),
+            &crate::capture_event::CaptureEvent::from_event(&crate::Event::new("old", "old-user")),
+        )
         .unwrap();
     drop(store);
     let path = fs::read_dir(directory.scope().join("events"))

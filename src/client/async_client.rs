@@ -4,7 +4,10 @@ use std::error::Error as StdError;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use reqwest::{header::CONTENT_TYPE, header::USER_AGENT, Client as HttpClient};
+use reqwest::{
+    header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT},
+    Client as HttpClient,
+};
 use serde::Serialize;
 use serde_json::json;
 #[cfg(feature = "error-tracking")]
@@ -27,6 +30,10 @@ use super::capture::ImmediateLane;
 use super::common::{
     extract_flag_details, http_client_or_disable, report_flags_error, DetailedFlagsResponse,
     EvaluationState, FlagEventHost,
+};
+use super::remote_config_payload::{
+    authorization_header, decode_remote_config_payload, reject_unsendable_key,
+    remote_config_payload_url,
 };
 use super::transport::{Completion, Control, LaneConfig, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
@@ -323,7 +330,7 @@ impl Client {
     /// Create or update a group and set its properties by sending a `$groupidentify`
     /// event.
     ///
-    /// See <https://posthog.com/docs/product-analytics/group-analytics#setting-group-properties>.
+    /// See <https://posthog.com/docs/product-analytics/group-analytics#set-group-properties>.
     ///
     /// # Parameters
     ///
@@ -918,6 +925,89 @@ impl Client {
     #[cfg(feature = "test-harness")]
     pub fn pending_events(&self) -> usize {
         self.lanes().map(|t| t.pending()).sum()
+    }
+
+    /// Fetch the payload of a remote config flag by key, with no distinct ID.
+    ///
+    /// Use this method, not [`Client::evaluate_flags`] with
+    /// [`FeatureFlagEvaluations::get_flag_payload`], for a remote config flag, and
+    /// always when the payload is encrypted: flag evaluation through `/flags` does
+    /// not return a remote config flag that has an encrypted payload. The method
+    /// needs `secret_key`. A personal API key (`phx_...`) returns an encrypted
+    /// payload decrypted, and a project secret API key (`phs_...`) returns it
+    /// redacted.
+    ///
+    /// Remote config flags serve one payload to everyone. This method reads it
+    /// from the PostHog API, so it works without local evaluation and sends no
+    /// `$feature_flag_called` event.
+    ///
+    /// # Parameters
+    ///
+    /// - `flag_key`: Key of the remote config flag. The SDK percent-encodes it as
+    ///   one URL path segment.
+    ///
+    /// # Returns
+    ///
+    /// The payload as JSON. PostHog stores the payload as a JSON string, so the
+    /// SDK parses a string value a second time. A string that is not JSON is
+    /// returned as `Value::String`. Returns `Ok(None)` when PostHog answers with an
+    /// empty body, which means the flag has no payload. Returns `Ok(None)` without
+    /// a request when the client is disabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unauthorized`] when `secret_key` is missing, or PostHog
+    /// answers 401. Returns [`Error::Connection`] for a request failure, a timeout
+    /// (`feature_flags_request_timeout_seconds`), or a status the SDK has no
+    /// specific error for, such as 404. Returns [`Error::RateLimit`],
+    /// [`Error::BadRequest`] or [`Error::ServerError`] for 429, 400 or 413, and 5xx.
+    /// Returns [`Error::BadRequest`] for an empty, `.` or `..` flag key. Returns
+    /// [`Error::Serialization`] when the body is not empty and is not JSON. The request is not
+    /// retried and does not call the `on_error` hooks.
+    #[must_use = "remote config payload result should be used"]
+    pub async fn get_remote_config_payload<K: Into<String>>(
+        &self,
+        flag_key: K,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        if self.options.is_disabled() {
+            return Ok(None);
+        }
+
+        let Some(secret_key) = self.options.secret_key.as_deref() else {
+            warn!("get_remote_config_payload requires secret_key to be set");
+            return Err(Error::Unauthorized);
+        };
+        let flag_key = flag_key.into();
+        reject_unsendable_key(&flag_key)?;
+
+        let url = remote_config_payload_url(&self.options, &flag_key)?;
+        let request = self
+            .http()?
+            .get(url)
+            .header(AUTHORIZATION, authorization_header(secret_key)?)
+            .header(USER_AGENT, get_default_user_agent());
+        let response = self
+            .flags_request_timeout(request)
+            .send()
+            .await
+            .map_err(|e| Error::Connection(e.without_url().to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            if let Some(err) = Error::from_http_response(status.as_u16(), body) {
+                return Err(err);
+            }
+            return Err(Error::Connection(format!(
+                "Unexpected HTTP status {status}"
+            )));
+        }
+
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| Error::Connection(e.without_url().to_string()))?;
+        decode_remote_config_payload(&body)
     }
 
     /// Evaluate a supplied feature flag definition locally.
