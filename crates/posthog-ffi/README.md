@@ -9,9 +9,15 @@ The bindings wrap the SDK's blocking client:
 
 Events report `$lib` as `posthog-rs-ffi`. `$lib_version` is the version of the Rust SDK the bindings are built from.
 
+## Download
+
+Each [posthog-rs release](https://github.com/PostHog/posthog-rs/releases) attaches prebuilt archives for Linux (x86_64 and arm64, glibc 2.35 or newer), macOS (Intel and Apple silicon) and Windows (x86_64, MSVC). The archives are named `posthog-ffi-<version>-<target>`. Each contains the shared and static libraries, `include/posthog.h`, the examples, and `lib/native-static-libs.txt`, which lists the system libraries to link with the static library.
+
+The bindings share the `posthog` crate's version, so `posthog-ffi-1.2.0` wraps `posthog` 1.2.0.
+
 ## Build
 
-You need Rust 1.78 or newer.
+To build from source, or for another platform, you need Rust 1.78 or newer.
 
 ```bash
 cd crates/posthog-ffi

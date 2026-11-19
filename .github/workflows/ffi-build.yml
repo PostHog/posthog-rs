@@ -1,0 +1,153 @@
+name: "Build C bindings"
+
+# Builds and smoke-tests posthog-ffi for each supported platform, and uploads
+# one archive per platform as a workflow artifact. release-ffi.yml attaches
+# them to a GitHub Release. CI runs it on pull requests without publishing.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "posthog version used in the archive names"
+        required: true
+        type: string
+      ref:
+        description: "Git ref to build. Empty builds the commit that triggered the run."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/posthog-ffi
+    steps:
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VERSION' is not a version like 1.2.0"
+            exit 1
+          fi
+        working-directory: .
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Check the posthog version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          crate_version=$(grep -m1 '^version = ' ../../Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if [ "$crate_version" != "$VERSION" ]; then
+            echo "::error::Expected posthog $VERSION, found $crate_version"
+            exit 1
+          fi
+
+      - name: Set up Rust
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add "$TARGET"
+
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --locked --release --target "$TARGET"
+
+      - name: Smoke test
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          out="target/$TARGET/release"
+          if [[ "$TARGET" == *windows* ]]; then
+            # Link the import library. The DLL must sit next to the program.
+            clang++ -std=c++17 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude "$out/posthog_ffi.dll.lib" -o smoke.exe
+            cp "$out/posthog_ffi.dll" .
+            ./smoke.exe
+          else
+            c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -L"$out" -lposthog_ffi -o smoke
+            LD_LIBRARY_PATH="$out" DYLD_LIBRARY_PATH="$out" ./smoke
+          fi
+
+      - name: Package
+        id: package
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          name="posthog-ffi-$VERSION-$TARGET"
+          out="target/$TARGET/release"
+          native_libs=$(cargo rustc --locked --release --lib --target "$TARGET" --crate-type staticlib -- --print native-static-libs 2>&1 \
+            | sed -n 's/.*native-static-libs: //p' | tail -1)
+
+          mkdir -p "dist/$name/include" "dist/$name/lib" "dist/$name/examples"
+          cp include/posthog.h "dist/$name/include/"
+          cp examples/capture.c examples/capture.cpp "dist/$name/examples/"
+          cp README.md "dist/$name/"
+          cp ../../LICENSE "dist/$name/"
+          case "$TARGET" in
+            *windows*)
+              cp "$out/posthog_ffi.dll" "$out/posthog_ffi.dll.lib" "$out/posthog_ffi.lib" "dist/$name/lib/" ;;
+            *apple*)
+              cp "$out/libposthog_ffi.dylib" "$out/libposthog_ffi.a" "dist/$name/lib/" ;;
+            *)
+              cp "$out/libposthog_ffi.so" "$out/libposthog_ffi.a" "dist/$name/lib/" ;;
+          esac
+          printf '%s\n' "$native_libs" > "dist/$name/lib/native-static-libs.txt"
+
+          cd dist
+          if [[ "$TARGET" == *windows* ]]; then
+            archive="$name.zip"
+            7z a -tzip "$archive" "$name" >/dev/null
+          else
+            archive="$name.tar.gz"
+            tar -czf "$archive" "$name"
+          fi
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: posthog-ffi-${{ matrix.target }}
+          path: |
+            crates/posthog-ffi/dist/${{ steps.package.outputs.archive }}
+            crates/posthog-ffi/dist/${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 7

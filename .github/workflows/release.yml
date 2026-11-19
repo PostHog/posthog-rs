@@ -83,6 +83,9 @@ jobs:
       contents: read
       actions: write
       id-token: write
+    outputs:
+      new_version: ${{ steps.sampo-release.outputs.new_version }}
+      released: ${{ steps.check-changes.outputs.committed }}
     steps:
       - name: Notify Slack - Approved
         if: needs.notify-approval-needed.outputs.slack_ts != ''
@@ -136,6 +139,9 @@ jobs:
           # released lock and move only the workspace crates to their new versions.
           git checkout HEAD -- Cargo.lock
           cargo update --workspace
+          # posthog-ffi is its own workspace, so its lock records the posthog
+          # version separately and `--locked` builds fail until it moves too.
+          cargo update --workspace --manifest-path crates/posthog-ffi/Cargo.toml
           new_version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
@@ -252,6 +258,16 @@ jobs:
               "alertText": ":rotating_light: Failed to release posthog-rs@${{ steps.sampo-release.outputs.new_version }} :rotating_light:",
               "alertContext": "The release workflow failed before completion."
             }
+
+  ffi-binaries:
+    name: C bindings
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-ffi.yml
+    with:
+      version: ${{ needs.release.outputs.new_version }}
 
   notify-released:
     name: Notify Slack - Released

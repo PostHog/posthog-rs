@@ -24,6 +24,26 @@ Both packages use crates.io Trusted Publishing for the `PostHog/posthog-rs` repo
 
 You can also trigger a release manually via the workflow's `workflow_dispatch` trigger (still requires pending changesets).
 
+## C bindings
+
+`crates/posthog-ffi` isn't published to crates.io. Each release attaches prebuilt archives of it to the GitHub Release, built from the same tag and named with the same version as `posthog`:
+
+- `posthog-ffi-<version>-x86_64-unknown-linux-gnu.tar.gz`
+- `posthog-ffi-<version>-aarch64-unknown-linux-gnu.tar.gz`
+- `posthog-ffi-<version>-x86_64-apple-darwin.tar.gz`
+- `posthog-ffi-<version>-aarch64-apple-darwin.tar.gz`
+- `posthog-ffi-<version>-x86_64-pc-windows-msvc.zip`
+
+Each archive contains the shared and static libraries, `posthog.h`, the C and C++ examples, the README, the license, and `lib/native-static-libs.txt`, which lists the system libraries to link with the static library. Each archive has a `.sha256` file next to it.
+
+The "C bindings" job in `release.yml` runs after "Release and publish" and calls [`release-ffi.yml`](.github/workflows/release-ffi.yml). It builds each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml), runs the C++ smoke test against the built library, and uploads the archives to the release. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
+
+The release step also updates `crates/posthog-ffi/Cargo.lock` to the new `posthog` version, because the bindings crate has its own workspace and lockfile.
+
+If the C bindings job fails after the crates are published, the release still stands. Fix the problem, then run "Release C bindings" from the Actions tab with the release version (for example `1.2.0`). It rebuilds the archives from that tag and replaces any already attached.
+
+A change that affects only the bindings still needs a changeset for `cargo/posthog` to produce a release, because the bindings ship with each `posthog` release.
+
 ## Failed or cancelled release
 
 The independent [release failure notification workflow](.github/workflows/release-failure-notification.yml) checks every completed `main` release attempt and posts to the release approvals Slack channel if a job failed, timed out, or was cancelled. It also alerts when the "Release and publish" job never ran in a failed run, which is what happens when GitHub Actions dies mid-run. It only acts on runs that a push or a manual dispatch started in this repository.

@@ -1,0 +1,56 @@
+name: "Release C bindings"
+
+# Builds posthog-ffi from a release tag and attaches the archives to that
+# GitHub Release. release.yml calls this after it creates the release. Run it
+# by hand to rebuild the archives for a release.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "posthog version, which is also the GitHub Release tag (for example 1.2.0)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "posthog version, which is also the GitHub Release tag (for example 1.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-ffi-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/ffi-build.yml
+    with:
+      version: ${{ inputs.version }}
+      ref: refs/tags/${{ inputs.version }}
+
+  publish:
+    name: Attach to the GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: posthog-ffi-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          ls -l dist
+          gh release upload "$VERSION" dist/* --clobber
