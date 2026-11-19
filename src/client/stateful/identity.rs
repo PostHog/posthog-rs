@@ -168,6 +168,7 @@ impl Client {
         }
         let fingerprint = properties_hash(&input.set, &input.set_once);
         let has_properties = !input.set.is_empty() || !input.set_once.is_empty();
+        let deduplicable = surely_processes_person(&input.options);
         let mut reset_required = false;
         let result = self.state.as_ref().unwrap().mutate(|state| {
             if state.identified && state.distinct_id != input.distinct_id {
@@ -183,7 +184,9 @@ impl Client {
                 state.person_processing = true;
                 state.generation = state.generation.wrapping_add(1);
                 state.person_properties = None;
-            } else if !has_properties || state.person_properties == Some(fingerprint) {
+            } else if !has_properties
+                || (deduplicable && state.person_properties == Some(fingerprint))
+            {
                 return None;
             }
             let mut event = person_event(
@@ -266,8 +269,9 @@ impl Client {
             return;
         }
         let fingerprint = properties_hash(&set, &set_once);
+        let deduplicable = surely_processes_person(&options);
         let result = self.state.as_ref().unwrap().mutate(|state| {
-            if state.person_properties == Some(fingerprint) {
+            if deduplicable && state.person_properties == Some(fingerprint) {
                 return None;
             }
             state.person_processing = true;
@@ -335,9 +339,13 @@ impl Client {
         let Ok(wire) = self.prepare_snapshot(event, snapshot) else {
             return;
         };
+        // Read the setting as sent, after hooks: an update that may be
+        // personless neither checks nor records the hash, and clears it.
+        let fingerprint = surely_processes_person(&wire.options).then_some(fingerprint);
         let mut admission = None;
         self.state.as_ref().unwrap().admit_person(
             snapshot.generation,
+            &snapshot.distinct_id,
             fingerprint,
             deduplicate,
             || {
@@ -383,6 +391,18 @@ impl Client {
             self.identify(id);
         }
     }
+}
+
+/// Whether an update surely processes the person: its `process_person_profile`
+/// option is missing, null or `true`. Only such updates check or record the
+/// person-properties hash. Any other value is left for PostHog to read.
+fn surely_processes_person<'a>(options: impl IntoIterator<Item = (&'a String, &'a Value)>) -> bool {
+    options
+        .into_iter()
+        .find(|(key, _)| *key == "process_person_profile")
+        .map_or(true, |(_, value)| {
+            matches!(value, Value::Null | Value::Bool(true))
+        })
 }
 
 fn person_event(

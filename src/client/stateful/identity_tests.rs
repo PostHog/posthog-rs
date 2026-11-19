@@ -112,3 +112,46 @@ fn reset_scope_does_not_suppress_or_cache_an_old_prepared_property_event() {
         Some(fingerprint)
     );
 }
+
+#[test]
+fn only_updates_that_surely_process_the_person_are_deduplicated() {
+    let client = Client::init_blocking(config());
+    let pending = || client.transport.as_ref().unwrap().pending();
+    let update = |setting: Option<Value>| {
+        let mut update = PersonProperties::new();
+        update.set.insert("plan".into(), json!("pro"));
+        if let Some(setting) = setting {
+            update
+                .options
+                .insert("process_person_profile".into(), setting);
+        }
+        client.set_person_properties(update);
+    };
+    update(Some(json!(false)));
+    assert_eq!(pending(), 1);
+    // The personless update recorded nothing, so this one is sent.
+    update(None);
+    assert_eq!(pending(), 2);
+    update(Some(json!(true)));
+    assert_eq!(pending(), 2);
+    // A value PostHog reads is never parsed: it is sent and clears the hash.
+    update(Some(json!("false")));
+    update(Some(json!("false")));
+    assert_eq!(pending(), 4);
+    update(None);
+    assert_eq!(pending(), 5);
+
+    // A hook that turns processing off is read as sent.
+    let mut config = config();
+    config.before_send(|mut event| {
+        event
+            .insert_option("process_person_profile", false)
+            .unwrap();
+        Some(event)
+    });
+    let client = Client::init_blocking(config);
+    for _ in 0..2 {
+        client.set_person_properties(HashMap::from([("plan".into(), json!("pro"))]));
+    }
+    assert_eq!(client.transport.as_ref().unwrap().pending(), 2);
+}

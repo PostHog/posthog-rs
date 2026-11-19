@@ -404,20 +404,35 @@ impl StateWriter {
     /// Compare, admit, and commit process-local person bookkeeping in queue order.
     /// `admit` must not run hooks, tracing subscribers, or application wakers.
     /// Fingerprints are not persisted, so this cannot schedule a writer notification.
+    /// `None` is an update that may be personless: it never matches, and once
+    /// admitted it clears the stored fingerprint.
     pub(super) fn admit_person(
         &self,
         generation: u64,
-        fingerprint: [u8; 20],
+        distinct_id: &str,
+        fingerprint: Option<[u8; 20]>,
         deduplicate: bool,
         admit: impl FnOnce() -> bool,
     ) {
         let mut state = self.shared.lock();
         let same_generation = state.snapshot.generation == generation;
-        if same_generation && deduplicate && state.snapshot.person_properties == Some(fingerprint) {
+        if same_generation
+            && deduplicate
+            && fingerprint.is_some()
+            && state.snapshot.person_properties == fingerprint
+        {
             return;
         }
-        if admit() && same_generation && state.closing.is_none() {
-            Arc::make_mut(&mut state.snapshot).person_properties = Some(fingerprint);
+        if !admit() || state.closing.is_some() {
+            return;
+        }
+        if same_generation {
+            Arc::make_mut(&mut state.snapshot).person_properties = fingerprint;
+        } else if state.snapshot.distinct_id == distinct_id {
+            // An update prepared before a newer identity change for the same
+            // ID is now the latest for that person, so the newer
+            // fingerprint no longer describes what PostHog last received.
+            Arc::make_mut(&mut state.snapshot).person_properties = None;
         }
     }
 
