@@ -62,7 +62,7 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          crate_version=$(grep -m1 '^version = ' ../../Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          crate_version=$(grep -m1 '^version = ' ../../Cargo.toml | tr -d '\r' | sed 's/version = "\(.*\)"/\1/')
           if [ "$crate_version" != "$VERSION" ]; then
             echo "::error::Expected posthog $VERSION, found $crate_version"
             exit 1
