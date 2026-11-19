@@ -4,7 +4,9 @@
 //! only takes this short lock: no I/O, hooks or logging. It assigns each event
 //! its queue position (`seq`), and when more than the count or byte limit is
 //! waiting it drops the oldest waiting events, always keeping the newest, as
-//! the disk queue does. The coordinator reports those drops.
+//! the disk queue does. The coordinator reports those drops. Once the
+//! coordinator takes the last waiting events at shutdown, the inbox is closed
+//! and refuses every later admission.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -23,6 +25,8 @@ struct State {
     last_seq: u64,
     waiting: VecDeque<Waiting>,
     bytes: usize,
+    /// Set by the final drain: nothing will take a later event.
+    closed: bool,
 }
 
 pub(super) struct Inbox {
@@ -52,6 +56,7 @@ impl Inbox {
                 last_seq,
                 waiting: VecDeque::new(),
                 bytes: 0,
+                closed: false,
             }),
             max_events: max_events.max(1),
             max_bytes,
@@ -68,6 +73,9 @@ impl Inbox {
             return Admission::Full;
         }
         let mut state = self.lock();
+        if state.closed {
+            return Admission::Closed;
+        }
         let Some(seq) = state.last_seq.checked_add(1) else {
             return Admission::Full;
         };
@@ -101,6 +109,15 @@ impl Inbox {
     /// Take every waiting event, oldest first.
     pub(super) fn drain(&self) -> Vec<Waiting> {
         let mut state = self.lock();
+        state.bytes = 0;
+        state.waiting.drain(..).collect()
+    }
+
+    /// Close the inbox and take every waiting event, oldest first. Later
+    /// admissions are refused, so no event is accepted after the final drain.
+    pub(super) fn close_and_drain(&self) -> Vec<Waiting> {
+        let mut state = self.lock();
+        state.closed = true;
         state.bytes = 0;
         state.waiting.drain(..).collect()
     }
@@ -188,6 +205,17 @@ mod tests {
         assert_eq!(inbox.admit(wire("too-big"), 101), Admission::Full);
         assert_eq!(inbox.last_seq(), 41, "a refused event takes no position");
         assert_eq!(inbox.pending.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn the_final_drain_closes_the_inbox_to_later_admissions() {
+        let inbox = inbox(10, 1000, 100);
+        assert_eq!(inbox.admit(wire("last"), 10), Admission::Accepted);
+        assert_eq!(names(&inbox.close_and_drain()), [(42, "last")]);
+        assert_eq!(inbox.admit(wire("late"), 10), Admission::Closed);
+        assert_eq!(inbox.last_seq(), 42, "a refused event takes no position");
+        assert_eq!(inbox.pending.load(Ordering::Acquire), 1);
+        assert!(inbox.drain().is_empty());
     }
 
     #[test]

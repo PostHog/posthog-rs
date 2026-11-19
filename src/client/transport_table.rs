@@ -52,18 +52,30 @@ pub(super) struct Usage {
 }
 
 impl Usage {
-    fn add(&mut self, bytes: u64) {
+    pub(super) fn add(&mut self, bytes: u64) {
         self.events += 1;
         self.bytes += bytes;
     }
 
-    fn remove(&mut self, bytes: u64) {
+    pub(super) fn remove(&mut self, bytes: u64) {
         self.events -= 1;
         self.bytes -= bytes;
     }
 
+    pub(super) fn plus(self, other: Usage) -> Usage {
+        Usage {
+            events: self.events + other.events,
+            bytes: self.bytes + other.bytes,
+        }
+    }
+
     fn over(&self, limits: Limits) -> bool {
         self.events > limits.events || self.bytes > limits.bytes
+    }
+
+    /// Whether `limits` leave no room for another entry.
+    pub(super) fn reaches(&self, limits: Limits) -> bool {
+        self.events >= limits.events || self.bytes >= limits.bytes
     }
 }
 
@@ -91,8 +103,7 @@ impl Table {
         self.memory
     }
 
-    #[cfg(test)]
-    fn disk(&self) -> Usage {
+    pub(super) fn disk(&self) -> Usage {
         self.disk
     }
 
@@ -202,6 +213,28 @@ impl Table {
             .filter_map(|entry| entry.read_after)
             .filter(|after| *after > now)
             .min()
+    }
+
+    /// The memory-only entries' events, oldest first.
+    pub(super) fn memory_entries(&self) -> Vec<(u64, Arc<CaptureEvent>)> {
+        self.entries
+            .iter()
+            .filter_map(|entry| Some((entry.seq, entry.payload.clone()?)))
+            .collect()
+    }
+
+    /// Record that a memory-only entry was written to disk as `bytes`.
+    pub(super) fn mark_on_disk(&mut self, seq: u64, bytes: u64) {
+        let Some(index) = self.position(seq) else {
+            return;
+        };
+        let entry = &mut self.entries[index];
+        if entry.payload.take().is_none() {
+            return;
+        }
+        self.memory.remove(entry.bytes);
+        entry.bytes = bytes;
+        self.disk.add(bytes);
     }
 
     /// Remove every entry, for shutdown.
@@ -347,6 +380,32 @@ mod tests {
         let evicted = table.evict(limits(10, 5), limits(10, 5));
         assert_eq!(seqs(&evicted), [3]);
         assert_eq!(table.select(10, 1000, Instant::now()), [4, 5]);
+    }
+
+    #[test]
+    fn an_entry_written_to_disk_moves_its_usage_from_memory_to_disk() {
+        let mut table = Table::default();
+        table.push(disk(1, 10));
+        table.push(memory(2, 20));
+        assert_eq!(
+            table
+                .memory_entries()
+                .iter()
+                .map(|(seq, _)| *seq)
+                .collect::<Vec<_>>(),
+            [2]
+        );
+        table.mark_on_disk(2, 25);
+        assert!(table.get(2).unwrap().on_disk());
+        assert!(table.memory_entries().is_empty());
+        assert_eq!(table.memory(), Usage::default());
+        assert_eq!(
+            table.disk(),
+            Usage {
+                events: 2,
+                bytes: 35
+            }
+        );
     }
 
     #[test]

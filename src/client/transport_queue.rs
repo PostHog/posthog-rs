@@ -11,9 +11,11 @@
 //! Delivery state lives in one place: an event is queued exactly while it has
 //! an entry in the table. A delivered event leaves the table before its file is
 //! deleted, so a failed delete never holds up later delivery; the file is
-//! retried as an orphan and may be sent again after a restart.
+//! retried as an orphan and may be sent again after a restart. Orphan files
+//! still count against the disk limits: while they fill the disk quota, new
+//! events stay in memory instead of adding files.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,8 +23,8 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 use uuid::Uuid;
 
-use super::inbox::Inbox;
-use super::table::{Entry, Limits, Table};
+use super::inbox::{Inbox, Waiting};
+use super::table::{Entry, Limits, Table, Usage};
 use super::{
     apply_on_error_hooks, bound_request, dec_len, drain_pending_completions, undelivered_results,
     undelivered_totals, Clock, Completion, Control, LaneConfig,
@@ -35,6 +37,9 @@ use crate::client::event_store::{EventStore, ReadError, StoreKey};
 use crate::client::{CaptureFailure, ClientOptions, PostHogError, StorageOperation};
 use crate::endpoints::Endpoint;
 use crate::error::Error;
+
+/// The most orphan deletes retried in one cleanup pass.
+const ORPHAN_RETRIES_PER_PASS: usize = 64;
 
 /// One event in a request, tagged with its queue position.
 pub(crate) struct Sending {
@@ -84,7 +89,8 @@ enum Verdict {
 
 enum Outcome {
     /// No response was read: a network error, timeout, or a 2xx body the
-    /// connection cut off.
+    /// connection cut off. A cut-off body with any other status is still a
+    /// `Response`, classified by its status.
     Network(String),
     Response {
         status: u16,
@@ -139,8 +145,11 @@ pub(super) struct Coordinator {
     /// The newest queue position when the last request was selected. Entries
     /// at or below it that remain once it is answered are a backlog.
     selected_through: u64,
-    /// Files of events that left the queue but could not be deleted.
-    orphans: Vec<StoreKey>,
+    /// Files of events that left the queue but could not be deleted, with
+    /// their sizes, least recently tried first.
+    orphans: VecDeque<(StoreKey, u64)>,
+    /// The disk the orphan files take up.
+    orphan_usage: Usage,
     orphans_due: Option<Instant>,
     waiters: Vec<Waiter>,
     shutdown: Option<Completion>,
@@ -208,7 +217,8 @@ impl Coordinator {
             jobs: None,
             sending: false,
             retry: None,
-            orphans: Vec::new(),
+            orphans: VecDeque::new(),
+            orphan_usage: Usage::default(),
             orphans_due: None,
             waiters: Vec::new(),
             shutdown: None,
@@ -290,36 +300,33 @@ impl Coordinator {
         }
     }
 
-    /// Move admitted events into the queue, writing each to disk when there is
-    /// a store. A failed write keeps the event in memory, in order.
     fn drain_inbox(&mut self) {
+        let waiting = self.inbox.drain();
+        self.enqueue(waiting);
+    }
+
+    /// Move admitted events into the queue, writing each to disk when there is
+    /// a store. An event that is not written stays in memory, in order.
+    fn enqueue(&mut self, waiting: Vec<Waiting>) {
         let now = self.clock.now();
-        for waiting in self.inbox.drain() {
-            let mut entry = Entry {
-                seq: waiting.seq,
-                bytes: waiting.bytes as u64,
-                payload: None,
-                read_after: None,
-            };
-            let written = self
-                .store
-                .as_mut()
-                .map(|store| store.write(StoreKey(waiting.seq), &waiting.event));
-            match written {
-                Some(Ok(bytes)) => {
-                    entry.bytes = bytes;
-                    self.write_failing = false;
+        for waiting in waiting {
+            let entry = match self.write(waiting.seq, &waiting.event) {
+                Some(bytes) => {
                     dec_len(&self.pending, 1);
-                }
-                Some(Err(error)) => {
-                    // One report per run of failures, not one per event.
-                    if !std::mem::replace(&mut self.write_failing, true) {
-                        self.report_storage(StorageOperation::Write, &error);
+                    Entry {
+                        seq: waiting.seq,
+                        bytes,
+                        payload: None,
+                        read_after: None,
                     }
-                    entry.payload = Some(Arc::new(waiting.event));
                 }
-                None => entry.payload = Some(Arc::new(waiting.event)),
-            }
+                None => Entry {
+                    seq: waiting.seq,
+                    bytes: waiting.bytes as u64,
+                    payload: Some(Arc::new(waiting.event)),
+                    read_after: None,
+                },
+            };
             self.table.push(entry);
             if self.due.is_none() {
                 self.due = Some(now + self.interval);
@@ -327,10 +334,42 @@ impl Coordinator {
         }
     }
 
-    /// Drop the oldest events over the memory or disk limits, warning once per
-    /// overflow until the queue drains.
-    fn evict_over_capacity(&mut self) {
-        let disk = self.store.as_ref().map_or(
+    /// Write an event to disk and return its record size. `None` keeps it in
+    /// memory: there is no store, the write failed, or orphan files fill the
+    /// disk quota.
+    fn write(&mut self, seq: u64, event: &CaptureEvent) -> Option<u64> {
+        if self.orphans_fill_disk() {
+            return None;
+        }
+        match self.store.as_mut()?.write(StoreKey(seq), event) {
+            Ok(bytes) => {
+                self.write_failing = false;
+                Some(bytes)
+            }
+            Err(error) => {
+                // One report per run of failures, not one per event.
+                if !std::mem::replace(&mut self.write_failing, true) {
+                    self.report_storage(StorageOperation::Write, &error);
+                }
+                None
+            }
+        }
+    }
+
+    /// Whether files that could not be deleted leave no room on disk, counted
+    /// with the queued records. Evicting queued records would not make room,
+    /// so new events stay in memory instead.
+    fn orphans_fill_disk(&self) -> bool {
+        !self.orphans.is_empty()
+            && self
+                .table
+                .disk()
+                .plus(self.orphan_usage)
+                .reaches(self.disk_limits())
+    }
+
+    fn disk_limits(&self) -> Limits {
+        self.store.as_ref().map_or(
             Limits {
                 events: usize::MAX,
                 bytes: u64::MAX,
@@ -342,8 +381,13 @@ impl Coordinator {
                     bytes: limits.max_bytes,
                 }
             },
-        );
-        let evicted = self.table.evict(self.memory_limits, disk);
+        )
+    }
+
+    /// Drop the oldest events over the memory or disk limits, warning once per
+    /// overflow until the queue drains.
+    fn evict_over_capacity(&mut self) {
+        let evicted = self.table.evict(self.memory_limits, self.disk_limits());
         let dropped = self.inbox.take_dropped() + evicted.len();
         self.discard(evicted);
         if dropped > 0 && !std::mem::replace(&mut self.capacity_warned, true) {
@@ -360,33 +404,43 @@ impl Coordinator {
         for entry in entries {
             self.copies.remove(&entry.seq);
             if entry.on_disk() {
-                self.delete(StoreKey(entry.seq));
+                self.delete(StoreKey(entry.seq), entry.bytes);
             } else {
                 dec_len(&self.pending, 1);
             }
         }
     }
 
-    fn delete(&mut self, key: StoreKey) {
+    fn delete(&mut self, key: StoreKey, bytes: u64) {
         let Some(store) = &mut self.store else {
             return;
         };
         if let Err(error) = store.delete(key) {
             self.report_storage(StorageOperation::Remove, &error);
-            self.orphans.push(key);
+            self.orphans.push_back((key, bytes));
+            self.orphan_usage.add(bytes);
             if self.orphans_due.is_none() {
                 self.orphans_due = Some(self.clock.now() + self.interval);
             }
         }
     }
 
+    /// Retry deleting the least recently tried orphan files, a bounded number
+    /// per pass. One that still fails goes to the back of the line.
     fn retry_orphans(&mut self) {
         let now = self.clock.now();
         if self.orphans_due.map_or(true, |due| now < due) {
             return;
         }
         if let Some(store) = &mut self.store {
-            self.orphans.retain(|key| store.delete(*key).is_err());
+            for _ in 0..ORPHAN_RETRIES_PER_PASS.min(self.orphans.len()) {
+                let (key, bytes) = self.orphans.pop_front().expect("counted above");
+                if store.delete(key).is_ok() {
+                    self.orphan_usage.remove(bytes);
+                } else {
+                    self.orphans.push_back((key, bytes));
+                }
+            }
         }
         self.orphans_due = (!self.orphans.is_empty()).then(|| now + self.interval);
     }
@@ -538,7 +592,8 @@ impl Coordinator {
             Verdict::Finished => self.finish_events(&sent.seqs),
             Verdict::Retry { retained, delay } => {
                 for (seq, copies) in &retained {
-                    if *copies > 0 {
+                    // Capacity may have evicted the event while it was out.
+                    if *copies > 0 && self.table.get(*seq).is_some() {
                         self.copies.insert(*seq, *copies);
                     }
                 }
@@ -648,38 +703,22 @@ impl Coordinator {
             .is_some_and(|end| self.clock.now() >= end)
     }
 
-    /// Stop: write whatever is only in memory to disk when there is a store,
-    /// report once what delivery could not finish, release storage, and
+    /// Stop: close the inbox and write whatever is only in memory to disk
+    /// when there is a store, within the disk limits as in normal operation.
+    /// Then report once what delivery could not finish, release storage, and
     /// signal every waiter.
     fn finish(mut self, rx: &mpsc::Receiver<Control>) {
+        let waiting = self.inbox.close_and_drain();
+        self.enqueue(waiting);
+        self.write_memory_entries();
+        self.evict_over_capacity();
         let mut on_disk = 0;
         let mut dropped = 0;
-        let in_memory = self
-            .table
-            .take_all()
-            .into_iter()
-            .filter_map(|entry| {
-                if entry.on_disk() {
-                    on_disk += 1;
-                }
-                let seq = entry.seq;
-                entry.payload.map(|payload| (seq, payload))
-            })
-            .collect::<Vec<_>>();
-        let waiting = self
-            .inbox
-            .drain()
-            .into_iter()
-            .map(|waiting| (waiting.seq, Arc::new(waiting.event)));
-        for (seq, event) in in_memory.into_iter().chain(waiting) {
-            dec_len(&self.pending, 1);
-            let written = self
-                .store
-                .as_mut()
-                .is_some_and(|store| store.write(StoreKey(seq), &event).is_ok());
-            if written {
+        for entry in self.table.take_all() {
+            if entry.on_disk() {
                 on_disk += 1;
             } else {
+                dec_len(&self.pending, 1);
                 dropped += 1;
             }
         }
@@ -713,6 +752,16 @@ impl Coordinator {
         drain_pending_completions(rx, &self.pending);
     }
 
+    /// Write events held only in memory to disk, oldest first.
+    fn write_memory_entries(&mut self) {
+        for (seq, event) in self.table.memory_entries() {
+            if let Some(bytes) = self.write(seq, &event) {
+                self.table.mark_on_disk(seq, bytes);
+                dec_len(&self.pending, 1);
+            }
+        }
+    }
+
     fn report_storage(&self, operation: StorageOperation, error: &std::io::Error) {
         crate::client::common::report_storage_error(&self.options.on_error, operation, error);
     }
@@ -727,9 +776,6 @@ pub(super) struct Executor {
     pub(super) lane: LaneConfig,
     pub(super) clock: Arc<dyn Clock>,
     pub(super) deadline: Arc<Mutex<Option<Instant>>>,
-    /// Without a store, delivery gives up after `max_capture_attempts`; with
-    /// one it keeps retrying, as the retry-queue spec allows a client queue.
-    pub(super) memory_only: bool,
 }
 
 impl Executor {
@@ -774,7 +820,10 @@ impl Executor {
         let count = events.len();
         let mut pending = events;
         let mut results = HashMap::new();
-        let is_final = self.memory_only && attempt >= self.options.max_capture_attempts;
+        // A client queue has no attempt limit, as the retry-queue spec allows:
+        // an event is retried until it is delivered, evicted by the queue
+        // limits, or left behind at shutdown.
+        let is_final = false;
         let mut status = None;
         let mut error_body = None;
         let step = match outcome {
@@ -928,8 +977,17 @@ impl Executor {
                         retry_after,
                         body,
                     },
-                    // The answer never fully arrived: a network error.
-                    Err(error) => Outcome::Network(error.to_string()),
+                    // A success whose body never fully arrived is a network
+                    // error: its per-event results are unknown.
+                    Err(error) if (200..=299).contains(&status) => {
+                        Outcome::Network(error.to_string())
+                    }
+                    // Any other status is the answer, whatever its body.
+                    Err(_) => Outcome::Response {
+                        status,
+                        retry_after,
+                        body: String::new(),
+                    },
                 }
             }
         }
