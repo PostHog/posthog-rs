@@ -26,7 +26,8 @@ impl FlagState {
 impl Client {
     /// Merge local person targeting without emitting analytics. Null is a value,
     /// not removal. Empty input is ignored. `None` reloads flags, as does
-    /// `Some(true)`; `Some(false)` keeps the last-known values until a later reload.
+    /// `Some(true)`; `Some(false)` starts no request and keeps the last-known
+    /// values, though a load already in flight continues with the new targeting.
     /// Available while opted out or person profiles are disabled.
     /// Memory changes synchronously; persistence is asynchronous. An update
     /// containing a value nested more than 100 levels deep is rejected as a whole.
@@ -49,7 +50,9 @@ impl Client {
 
     /// Merge local targeting for one nonblank group type without changing group
     /// membership or emitting analytics. Empty input is ignored. `None` or
-    /// `Some(true)` reloads; `Some(false)` retains last-known flags until refreshed.
+    /// `Some(true)` reloads; `Some(false)` starts no request and retains
+    /// last-known flags, though a load already in flight continues with the new
+    /// targeting.
     /// Available while opted out or person profiles are disabled. Updates with a
     /// value nested more than 100 levels deep are rejected as a whole, without a reload.
     pub fn set_group_properties_for_flags(

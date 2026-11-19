@@ -38,13 +38,26 @@ pub(crate) struct LoadedFlags {
 pub(crate) struct Task {
     body: Vec<u8>,
     distinct_id: Option<String>,
-    complete: Box<dyn FnOnce(Result<LoadedFlags, LoadError>) + Send>,
+    complete: Box<dyn FnOnce(Result<LoadedFlags, LoadError>) -> Option<Task> + Send>,
 }
 
 impl Task {
+    #[cfg(test)]
     pub(crate) fn new(
         payload: &Value,
         complete: impl FnOnce(Result<LoadedFlags, LoadError>) + Send + 'static,
+    ) -> Self {
+        Self::with_follow_up(payload, move |result| {
+            complete(result);
+            None
+        })
+    }
+
+    /// A task whose completion may return one follow-up request, which the
+    /// request worker runs next unless a newer request is already waiting.
+    pub(crate) fn with_follow_up(
+        payload: &Value,
+        complete: impl FnOnce(Result<LoadedFlags, LoadError>) -> Option<Task> + Send + 'static,
     ) -> Self {
         Self {
             // Serializing a JSON value cannot fail.
@@ -57,7 +70,7 @@ impl Task {
         }
     }
 
-    fn run(self, http: &reqwest::blocking::Client, options: &ClientOptions) {
+    fn run(self, http: &reqwest::blocking::Client, options: &ClientOptions) -> Option<Task> {
         let endpoint = options.endpoints().build_url(Endpoint::Flags);
         let result = fetch(http, options, &endpoint, &self.body);
         if let Err(error) = &result {
@@ -72,10 +85,12 @@ impl Task {
         }
         // Completion invokes state integration and application notifications, never
         // under the slot lock. A callback panic cannot terminate event delivery.
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.complete)(result)))
-            .is_err()
-        {
-            tracing::warn!("posthog-rs: feature flag completion panicked");
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.complete)(result))) {
+            Ok(follow_up) => follow_up,
+            Err(_) => {
+                tracing::warn!("posthog-rs: feature flag completion panicked");
+                None
+            }
         }
     }
 }
@@ -143,8 +158,20 @@ impl Slot {
             }
             pending.task.take()
         };
-        if let Some(task) = task {
-            task.run(http, options);
+        let mut next = task;
+        while let Some(task) = next.take() {
+            let Some(follow_up) = task.run(http, options) else {
+                break;
+            };
+            // A newer request already waiting supersedes the follow-up. Decide
+            // under the lock; drop a superseded task, and its captures, after it.
+            let superseded = {
+                let pending = self.0.lock().unwrap_or_else(|p| p.into_inner());
+                pending.closed || pending.task.is_some()
+            };
+            if !superseded {
+                next = Some(follow_up);
+            }
         }
     }
 }

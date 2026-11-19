@@ -121,15 +121,21 @@ impl FeatureFlagLookup<'_> {
     #[must_use]
     pub fn get(self) -> Option<FeatureFlagResult> {
         let snapshot = self.client.flag_snapshot()?;
-        let flag = snapshot.flags.cache.as_ref()?.flags.get(self.key)?;
-        let result = FeatureFlagResult::from_cached(self.key, flag);
+        let flag = snapshot
+            .flags
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.flags.get(self.key));
+        let result = flag.map(|flag| FeatureFlagResult::from_cached(self.key, flag));
+        // A missing or not-yet-loaded flag is still a read, as on iOS and
+        // Android: it reports a null response.
         if self
             .send_event
             .unwrap_or(self.client.producer.as_ref()?.send_feature_flag_event)
         {
             self.client.report_flag_access(self.key, &snapshot, flag);
         }
-        Some(result)
+        result
     }
 }
 
