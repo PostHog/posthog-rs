@@ -72,6 +72,18 @@ fn wire(name: &str) -> CaptureEvent {
     CaptureEvent::from_event(&Event::new(name, "user"))
 }
 
+/// An event whose disk record measures exactly `bytes`.
+fn sized(name: &str, bytes: usize) -> CaptureEvent {
+    let padded = |padding: usize| {
+        let mut event = Event::new(name, "user");
+        event.insert_prop("padding", "x".repeat(padding)).unwrap();
+        CaptureEvent::from_event(&event)
+    };
+    let event = padded(bytes - record_size(&padded(0)));
+    assert_eq!(record_size(&event), bytes);
+    event
+}
+
 /// Storage faults a test can switch on while delivery runs.
 #[derive(Clone, Default)]
 struct Faults {
@@ -111,12 +123,7 @@ impl EventStore for FaultyStore {
         self.inner.read(key)
     }
     fn delete(&mut self, key: StoreKey) -> io::Result<()> {
-        if self
-            .faults
-            .deletes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-            .is_ok()
-        {
+        if take_one(&self.faults.deletes) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "test delete",
@@ -124,6 +131,20 @@ impl EventStore for FaultyStore {
         }
         self.inner.delete(key)
     }
+}
+
+/// Take one from `count` unless it is zero. Rust 1.99 deprecates
+/// `fetch_update` for `try_update`, which the 1.78 minimum lacks.
+fn take_one(count: &AtomicUsize) -> bool {
+    let mut current = count.load(Ordering::Acquire);
+    while current > 0 {
+        match count.compare_exchange_weak(current, current - 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+    false
 }
 
 /// One request the mock server received.
@@ -404,6 +425,67 @@ fn a_terminal_status_whose_body_is_cut_off_is_reported_lost_and_not_retried() {
     harness.handle.join();
 }
 
+/// A capture response body just over the read limit, valid JSON when read
+/// in full.
+fn oversized_body() -> String {
+    let padding = " ".repeat(super::MAX_RESPONSE_BODY_BYTES as usize);
+    format!("{{\"results\": {{}}}}{padding}")
+}
+
+fn capture_failures(builder: &mut ClientOptionsBuilder) -> Arc<AtomicUsize> {
+    let failures = Arc::new(AtomicUsize::new(0));
+    let observed = failures.clone();
+    builder.on_error(move |error| {
+        if matches!(error, PostHogError::Capture(_)) {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    failures
+}
+
+#[test]
+fn an_oversized_success_body_is_unreadable_reported_lost_and_not_retried() {
+    let server = MockServer::start();
+    let directory = TestDirectory::new();
+    let mut builder = base(&server);
+    let failures = capture_failures(&mut builder);
+    let harness = spawn(&mut builder, Some(Box::new(directory.open(10))), 64 * 1024);
+    let oversized = server.mock(|when, then| {
+        when.method(POST);
+        then.status(200).body(oversized_body());
+    });
+    admit(&harness.handle, "lost");
+    flush(&harness.handle);
+    harness.clock.advance(Duration::from_secs(60));
+    harness.handle.tick();
+    oversized.assert_calls(1);
+    assert!(directory.records().is_empty());
+    assert_eq!(failures.load(Ordering::SeqCst), 1);
+    harness.handle.shutdown_blocking();
+}
+
+#[test]
+fn an_oversized_retryable_body_is_still_retried() {
+    let server = MockServer::start();
+    let directory = TestDirectory::new();
+    let mut builder = base(&server);
+    let failures = capture_failures(&mut builder);
+    let harness = spawn(&mut builder, Some(Box::new(directory.open(10))), 64 * 1024);
+    let oversized = server.mock(|when, then| {
+        when.method(POST);
+        then.status(503).body(oversized_body());
+    });
+    admit(&harness.handle, "kept");
+    flush(&harness.handle);
+    harness.clock.advance(Duration::from_secs(60));
+    harness.handle.tick();
+    oversized.assert_calls(2);
+    assert_eq!(directory.records(), [1]);
+    assert_eq!(failures.load(Ordering::SeqCst), 0);
+    harness.handle.request_close_before(harness.clock.now());
+    harness.handle.join();
+}
+
 // -- retries ------------------------------------------------------------------
 
 #[test]
@@ -590,6 +672,44 @@ fn orphan_files_filling_the_disk_quota_keep_new_events_in_memory() {
     );
     assert_eq!(directory.records(), [1, 2]);
     assert_eq!(harness.handle.pending(), 0);
+    harness.handle.request_close_before(harness.clock.now());
+    harness.handle.join();
+}
+
+#[test]
+fn an_orphan_file_keeps_a_record_in_memory_that_would_overfill_the_disk_quota() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let _ok = delivered(&server, &log);
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    faults.deletes.store(usize::MAX, Ordering::Release);
+    let store = FileEventStore::open(
+        StorageDirectory::open(&directory.0).unwrap(),
+        StoreLimits {
+            max_events: 10,
+            max_bytes: 1000,
+            max_record_bytes: 1000,
+        },
+    )
+    .unwrap();
+    let harness = spawn(
+        &mut base(&server),
+        Some(Box::new(FaultyStore {
+            inner: store,
+            faults,
+        })),
+        64 * 1024,
+    );
+    for name in ["orphan", "next"] {
+        let event = sized(name, 600);
+        assert_eq!(harness.handle.enqueue_prepared(event), Admission::Accepted);
+        flush(&harness.handle);
+    }
+    assert_eq!(log.names(), [names(&["orphan"]), names(&["next"])]);
+    // Writing "next" next to the 600-byte orphan would take the disk to 1,200
+    // bytes, over its 1,000-byte quota, so it was sent from memory.
+    assert_eq!(directory.records(), [1]);
     harness.handle.request_close_before(harness.clock.now());
     harness.handle.join();
 }
@@ -858,25 +978,20 @@ fn entries_waiting_out_a_read_failure_do_not_wake_the_coordinator_early() {
 
 #[test]
 fn events_admitted_after_the_deadline_are_still_written_to_disk() {
-    let server = MockServer::start();
     let directory = TestDirectory::new();
-    let harness = spawn(
-        &mut base(&server),
-        Some(Box::new(directory.open(10))),
-        64 * 1024,
-    );
-    // Let the coordinator go idle first, so the deadline stops it only after
-    // the admission below wakes it.
-    flush(&harness.handle);
-    *harness.deadline.lock().unwrap() = Some(harness.clock.now());
-    admit(&harness.handle, "last");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !harness.handle.all_stopped() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let clock = ManualClock::new();
+    // The deadline has already passed when the event is admitted, before the
+    // coordinator's final drain.
+    let (coordinator, inbox, pending) =
+        idle_coordinator(Box::new(directory.open(10)), &clock, Some(clock.now()));
+    let last = wire("last");
+    let bytes = record_size(&last);
+    assert_eq!(inbox.admit(last, bytes), Admission::Accepted);
+    let (jobs, _jobs) = mpsc::sync_channel(1);
+    let (_control, rx) = mpsc::channel();
+    coordinator.run(jobs, rx);
     assert_eq!(directory.records(), [1]);
-    assert_eq!(harness.handle.pending(), 0);
+    assert_eq!(pending.load(Ordering::Acquire), 0);
 }
 
 #[test]
