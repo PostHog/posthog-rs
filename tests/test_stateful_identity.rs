@@ -219,6 +219,8 @@ fn rejected_identify_keeps_identity_without_replaying_link_and_properties_remain
     client.identify(input.clone());
     assert_eq!(client.get_distinct_id(), "A");
     client.identify("A");
+    // A repeat with no properties sends nothing only while still identified.
+    assert_eq!(attempts.lock().unwrap().len(), 1);
     client.identify(input.clone());
     client.identify(input.clone());
     client.identify(input);
@@ -347,8 +349,18 @@ impl std::io::Write for Recorder {
     }
 }
 
+/// Keeps a second dispatch alive for the whole test process. With a single
+/// dispatch, tracing-core registers a new callsite against the registering
+/// thread's default, so a thread without a recorder could hide a log line from
+/// a thread that has one.
+fn keep_callsites_shared() {
+    static REGISTRATION: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    REGISTRATION.get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
+}
+
 /// Records this thread's log output at `level` and above while the guard lives.
 fn record_logs(level: tracing::Level) -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+    keep_callsites_shared();
     let output = Arc::new(Mutex::new(Vec::new()));
     let sink = output.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -783,10 +795,7 @@ fn person_admission_size_warnings_can_read_and_reset_client_state() {
         }
     }
 
-    // Keep a second dispatch alive: tracing-core's single-dispatch fast path
-    // registers new callsites against the registering thread's default. Other
-    // producer threads may first reach the shared warning without our observer.
-    let _registration = tracing::Dispatch::new(tracing_subscriber::registry());
+    keep_callsites_shared();
     for byte_limit in [false, true] {
         let mut conf = config();
         if byte_limit {
