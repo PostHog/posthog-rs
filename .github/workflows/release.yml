@@ -274,9 +274,14 @@ jobs:
           RELEASE_SHA: ${{ steps.release-commit.outputs.commit-hash }}
         run: |
           tag="posthog-rs-ffi-v$FFI_VERSION"
-          # `sampo` tags locally only, so create the remote tag here. A rerun finds it already there.
-          if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+          # `sampo` tags locally only, so create the remote tag here. A rerun finds it
+          # already there, and must not build a tag that points anywhere else.
+          existing=$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk '{print $1}' | tail -1)
+          if [ -z "$existing" ]; then
             gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$RELEASE_SHA" >/dev/null
+          elif [ "$existing" != "$RELEASE_SHA" ]; then
+            echo "::error::Tag $tag points to $existing, not the release commit $RELEASE_SHA"
+            exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -360,8 +365,12 @@ jobs:
           VERSION: ${{ needs.release.outputs.ffi_version }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            # A rerun after the release was published replaces its archives.
+            # A rerun replaces the archives. `gh release create` uploads to a draft
+            # first, so an interrupted run can leave one that still needs publishing.
             gh release upload "$TAG" dist/* --clobber
+            if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ]; then
+              gh release edit "$TAG" --draft=false --latest=false
+            fi
             exit 0
           fi
           notes=$(awk -v defText="see crates/posthog-rs-ffi/CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' source/crates/posthog-rs-ffi/CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
