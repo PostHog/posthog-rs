@@ -360,11 +360,13 @@ impl FileEventStore {
         // change an active bounded sweep's limit.
         if !self.continue_head || self.head_limit != limit {
             self.start_head(limit);
-        } else if let Some(limit) = limit {
-            let end = self.last_key.min(limit.0);
+        } else {
+            let end = limit.map_or(self.last_key, |limit| self.last_key.min(limit.0));
             if end > self.recovery_end {
-                // Include newly persisted pre-checkpoint records, never later
-                // arrivals. Existing retry metadata stays owned by this sweep.
+                // Include newly persisted records: a bounded sweep only up to
+                // its checkpoint, an unbounded one all of them, so a record
+                // that keeps failing to read cannot hide later ones. Existing
+                // retry metadata stays owned by this sweep.
                 self.recovery_end = end;
                 self.scan_complete = false;
             }
