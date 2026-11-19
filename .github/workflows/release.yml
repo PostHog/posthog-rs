@@ -86,6 +86,7 @@ jobs:
     outputs:
       ffi_version: ${{ steps.ffi-pending.outputs.version }}
       ffi_tag: ${{ steps.ffi-release.outputs.tag }}
+      ffi_sha: ${{ steps.ffi-pending.outputs.sha }}
     steps:
       - name: Notify Slack - Approved
         if: needs.notify-approval-needed.outputs.slack_ts != ''
@@ -132,13 +133,17 @@ jobs:
         id: sampo-release
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
+          GH_TOKEN: ${{ steps.releaser.outputs.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           version_of() { grep -m1 '^version = ' "$1" | sed 's/version = "\(.*\)"/\1/'; }
           if ! find .sampo/changesets -name '*.md' | grep -q .; then
             # A rerun after the release commit landed finds the changesets consumed.
-            # Only a posthog-rs-ffi version still waiting for its tag can be finished.
+            # Only a posthog-rs-ffi version whose GitHub Release isn't published yet
+            # can be finished, whether or not its tag was already pushed.
             ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
-            if [ "$ffi_version" != "0.0.0" ] && ! git ls-remote --exit-code --tags origin "refs/tags/posthog-rs-ffi-v$ffi_version" >/dev/null; then
+            published=$(gh release view "posthog-rs-ffi-v$ffi_version" --json isDraft --jq '.isDraft == false' 2>/dev/null || echo false)
+            if [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
               echo "::notice::No changesets left. Finishing the posthog-rs-ffi $ffi_version release."
               echo "rerun=true" >> "$GITHUB_OUTPUT"
               exit 0
@@ -275,14 +280,19 @@ jobs:
                  '{ref: $ref, inputs: {package_name: $package_name, package_version: $package_version}}' \
                )"
 
-      - name: Find an untagged posthog-rs-ffi release
+      - name: Find an unpublished posthog-rs-ffi release
         id: ffi-pending
         # Runs even if publishing posthog failed: the release commit is already on main.
         if: ${{ !cancelled() && (steps.sync.outcome == 'success' || steps.sampo-release.outputs.rerun == 'true') }}
+        env:
+          # The releaser token can see draft releases, which `github.token` can't.
+          GH_TOKEN: ${{ steps.releaser.outputs.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           version=$(grep -m1 '^version = ' crates/posthog-rs-ffi/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          if [ "$version" = "0.0.0" ] || git ls-remote --exit-code --tags origin "refs/tags/posthog-rs-ffi-v$version" >/dev/null; then
-            echo "No posthog-rs-ffi release waiting for a tag."
+          published=$(gh release view "posthog-rs-ffi-v$version" --json isDraft --jq '.isDraft == false' 2>/dev/null || echo false)
+          if [ "$version" = "0.0.0" ] || [ "$published" = true ]; then
+            echo "No posthog-rs-ffi release waiting to be published."
             exit 0
           fi
           # The commit that set this version is the release commit, on a normal run
@@ -348,6 +358,7 @@ jobs:
     with:
       version: ${{ needs.release.outputs.ffi_version }}
       release: true
+      release-commit: ${{ needs.release.outputs.ffi_sha }}
 
   ffi-publish:
     name: Publish the C bindings GitHub Release
@@ -399,6 +410,17 @@ jobs:
           ref: refs/tags/${{ needs.release.outputs.ffi_tag }}
           path: source
           persist-credentials: false
+
+      - name: Check the tag still points to the release commit
+        env:
+          RELEASE_COMMIT: ${{ needs.release.outputs.ffi_sha }}
+          TAG: ${{ needs.release.outputs.ffi_tag }}
+        run: |
+          actual=$(git -C source rev-parse HEAD)
+          if [ -z "$RELEASE_COMMIT" ] || [ "$actual" != "$RELEASE_COMMIT" ]; then
+            echo "::error::Tag $TAG points to $actual, not the release commit $RELEASE_COMMIT"
+            exit 1
+          fi
 
       - name: Publish the GitHub Release with its archives
         env:

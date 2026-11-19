@@ -56,9 +56,13 @@ All of this runs in [`release.yml`](.github/workflows/release.yml), in the same 
 
 The two C bindings jobs run even if publishing `posthog` fails, as long as the `posthog-rs-ffi` tag exists. A failure in either sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
 
-If "Release and publish" fails after the release commit lands but before the `posthog-rs-ffi` tag is pushed, **Re-run failed jobs** finishes it. The rerun finds no changesets, finds the bindings' version without a tag, and tags the commit that set that version.
+If anything fails after the release commit lands, use **Re-run failed jobs** on that Release run. The rerun finds no changesets left. If the bindings' version has no published GitHub Release yet, it finishes that release:
 
-If a C bindings job fails, the tag exists but no GitHub Release is published. Use **Re-run failed jobs** on that Release run. It rebuilds from the same tag and publishes the release. If the release was already published, the rerun leaves its downloads unchanged and fails if they're missing or differ from the new build. If the build itself needs a fix, release a `posthog-rs-ffi` patch version instead.
+- It finds the commit that set the version and tags it, or checks that an existing tag points to it. It fails if the tag points anywhere else.
+- It builds that tag. Each build, and the publish job, check that the tag still points to the release commit.
+- It publishes the GitHub Release with the archives, finishing a draft left by an interrupted run.
+
+Once the GitHub Release is published, a rerun has nothing to do. Its downloads never change. If the build itself needs a fix, release a `posthog-rs-ffi` patch version instead.
 
 ## Failed or cancelled release
 

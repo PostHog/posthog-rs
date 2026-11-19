@@ -16,6 +16,11 @@ on:
         required: false
         default: false
         type: boolean
+      release-commit:
+        description: "With `release`, the commit the tag must point to. The build fails if it points anywhere else."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -58,6 +63,19 @@ jobs:
         with:
           ref: ${{ inputs.release && format('refs/tags/posthog-rs-ffi-v{0}', inputs.version) || '' }}
           persist-credentials: false
+
+      - name: Check the tag points to the release commit
+        if: inputs.release
+        env:
+          RELEASE_COMMIT: ${{ inputs.release-commit }}
+          VERSION: ${{ inputs.version }}
+        working-directory: .
+        run: |
+          actual=$(git rev-parse HEAD)
+          if [ -z "$RELEASE_COMMIT" ] || [ "$actual" != "$RELEASE_COMMIT" ]; then
+            echo "::error::Tag posthog-rs-ffi-v$VERSION points to $actual, not the release commit $RELEASE_COMMIT"
+            exit 1
+          fi
 
       - name: Check the posthog-rs-ffi version
         env:
