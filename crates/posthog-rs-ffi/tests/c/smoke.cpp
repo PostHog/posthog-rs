@@ -31,6 +31,6 @@ int main() {
   posthog_flags_free(flags);
   if (state != POSTHOG_FLAG_STATE_NOT_FOUND) return 6;
 
-  std::printf("posthog-rs-ffi %s OK\n", posthog_version());
+  std::printf("posthog-rs-ffi OK\n");
   return 0;
 }

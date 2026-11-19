@@ -130,15 +130,9 @@ extern "C" {
 #endif // __cplusplus
 
 /**
- * Returns the version of these bindings as a static, NUL-terminated string.
- */
-const char *posthog_version(void);
-
-/**
  * Returns a description of the last error on the calling thread, or `NULL`
  * if the last call that returns a status or creates a handle succeeded.
- * `posthog_version`, `posthog_last_error` and the free functions leave it
- * unchanged. The string belongs to the calling thread: copy it before the
+ * `posthog_last_error` and the free functions leave it unchanged. The string belongs to the calling thread: copy it before the
  * next call that updates it, and before the thread exits.
  */
 const char *posthog_last_error(void);

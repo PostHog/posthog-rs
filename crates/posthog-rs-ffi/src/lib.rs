@@ -29,11 +29,6 @@ const LIB_VERSION_PARTS: [(&str, &str); 3] = [
     ("$lib_version__minor", env!("CARGO_PKG_VERSION_MINOR")),
     ("$lib_version__patch", env!("CARGO_PKG_VERSION_PATCH")),
 ];
-const VERSION: &CStr =
-    match CStr::from_bytes_with_nul(concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes()) {
-        Ok(version) => version,
-        Err(_) => panic!("version contains a NUL byte"),
-    };
 
 /// Result of a PostHog call.
 #[repr(i32)]
@@ -228,16 +223,9 @@ fn apply_lib_identity(mut event: Event) -> Option<Event> {
     Some(event)
 }
 
-/// Returns the version of these bindings as a static, NUL-terminated string.
-#[no_mangle]
-pub extern "C" fn posthog_version() -> *const c_char {
-    VERSION.as_ptr()
-}
-
 /// Returns a description of the last error on the calling thread, or `NULL`
 /// if the last call that returns a status or creates a handle succeeded.
-/// `posthog_version`, `posthog_last_error` and the free functions leave it
-/// unchanged. The string belongs to the calling thread: copy it before the
+/// `posthog_last_error` and the free functions leave it unchanged. The string belongs to the calling thread: copy it before the
 /// next call that updates it, and before the thread exits.
 #[no_mangle]
 pub extern "C" fn posthog_last_error() -> *const c_char {
@@ -997,12 +985,6 @@ mod tests {
     fn enums_are_four_bytes() {
         assert_eq!(std::mem::size_of::<PostHogStatus>(), 4);
         assert_eq!(std::mem::size_of::<PostHogFlagState>(), 4);
-    }
-
-    #[test]
-    fn version_matches_crate() {
-        let version = unsafe { CStr::from_ptr(posthog_version()) };
-        assert_eq!(version.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

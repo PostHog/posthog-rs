@@ -23,7 +23,7 @@ lib/pkgconfig/                      pkg-config files (Linux and macOS)
 examples/capture.c, capture.cpp
 ```
 
-`posthog-rs-ffi` has its own version, independent of the `posthog` crate. `posthog_version()` returns it, and events report it as `$lib_version`.
+`posthog-rs-ffi` has its own version, independent of the `posthog` crate. Events report it as `$lib_version`.
 
 ## Linking
 
