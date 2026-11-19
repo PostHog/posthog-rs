@@ -99,9 +99,10 @@ pub struct FeatureFlagLookup<'a> {
 }
 
 impl FeatureFlagLookup<'_> {
-    /// Override access reporting for this lookup. Without an override, `get()`
-    /// uses [`Config::send_feature_flag_event`](super::Config::send_feature_flag_event).
-    /// Consent still applies. Set false for a silent payload read.
+    /// Override access reporting for this lookup. Without an override, `get()`,
+    /// `is_enabled()` and `value()` use
+    /// [`Config::send_feature_flag_event`](super::Config::send_feature_flag_event)
+    /// and `payload()` does not report. Consent still applies.
     pub fn send_event(mut self, send: bool) -> Self {
         self.send_event = Some(send);
         self
@@ -121,6 +122,49 @@ impl FeatureFlagLookup<'_> {
     /// never HTTP. Reporting success does not change the returned result.
     #[must_use]
     pub fn get(self) -> Option<FeatureFlagResult> {
+        let report = self.reports_by_default();
+        self.read(report)
+    }
+
+    /// Whether the flag is enabled: true for an enabled flag or a non-empty
+    /// variant, false when it is disabled, missing or not loaded yet, or the
+    /// client is disabled or closed. Reports access like [`Self::get`]; use
+    /// `get()` to tell a disabled flag from an unavailable one.
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        self.get().is_some_and(|flag| flag.enabled)
+    }
+
+    /// The flag's value: its variant for a multivariate match, otherwise
+    /// whether it is enabled. None when the flag is unavailable. Reports
+    /// access like [`Self::get`].
+    #[must_use]
+    pub fn value(self) -> Option<FlagValue> {
+        let flag = self.get()?;
+        Some(match flag.variant {
+            Some(variant) if flag.enabled => FlagValue::String(variant),
+            _ => FlagValue::Boolean(flag.enabled),
+        })
+    }
+
+    /// The flag's decoded payload. A payload read does not report access unless
+    /// [`Self::send_event`] is set to true; the configured default does not apply.
+    #[must_use]
+    pub fn payload(self) -> Option<Value> {
+        let report = self.send_event.unwrap_or(false);
+        self.read(report)?.payload
+    }
+
+    fn reports_by_default(&self) -> bool {
+        self.send_event.unwrap_or_else(|| {
+            self.client
+                .producer
+                .as_ref()
+                .is_some_and(|producer| producer.send_feature_flag_event)
+        })
+    }
+
+    fn read(self, report: bool) -> Option<FeatureFlagResult> {
         let snapshot = self.client.flag_snapshot()?;
         let flag = snapshot
             .flags
@@ -130,10 +174,7 @@ impl FeatureFlagLookup<'_> {
         let result = flag.map(|flag| FeatureFlagResult::from_cached(self.key, flag));
         // A missing or not-yet-loaded flag is still a read, as on iOS and
         // Android: it reports a null response.
-        if self
-            .send_event
-            .unwrap_or(self.client.producer.as_ref()?.send_feature_flag_event)
-        {
+        if report {
             self.client.report_flag_access(self.key, &snapshot, flag);
         }
         result
@@ -146,13 +187,13 @@ impl Client {
     ///
     /// ```
     /// # fn example(client: &posthog::stateful::Client) {
-    /// let enabled = client.feature_flag("checkout").get()
-    ///     .map_or(false, |flag| flag.enabled);
-    /// let variant = client.feature_flag("button-color").get()
-    ///     .and_then(|flag| flag.variant)
-    ///     .unwrap_or_else(|| "control".into());
-    /// let payload = client.feature_flag("checkout").send_event(false).get()
-    ///     .and_then(|flag| flag.payload);
+    /// use posthog::FlagValue;
+    ///
+    /// let enabled = client.feature_flag("checkout").is_enabled();
+    /// let blue = client.feature_flag("button-color").value()
+    ///     == Some(FlagValue::String("blue".into()));
+    /// let payload = client.feature_flag("checkout").payload();
+    /// let result = client.feature_flag("checkout").send_event(false).get();
     /// # }
     /// ```
     pub fn feature_flag<'a>(&'a self, key: &'a str) -> FeatureFlagLookup<'a> {
@@ -161,40 +202,6 @@ impl Client {
             key,
             send_event: None,
         }
-    }
-
-    /// Whether `key` is enabled: true for an enabled flag or a non-empty
-    /// variant, false when it is disabled, missing or not loaded yet, or the
-    /// client is disabled or closed. Reports access like
-    /// [`FeatureFlagLookup::get`]. Use [`Self::feature_flag`] to tell a disabled
-    /// flag from an unavailable one, or to override reporting for one read.
-    #[must_use]
-    pub fn is_feature_enabled(&self, key: &str) -> bool {
-        self.feature_flag(key)
-            .get()
-            .is_some_and(|flag| flag.enabled)
-    }
-
-    /// The flag's value: its variant for a multivariate match, otherwise
-    /// whether it is enabled. None when the flag is unavailable. Reports
-    /// access like [`FeatureFlagLookup::get`].
-    #[must_use]
-    pub fn get_feature_flag(&self, key: &str) -> Option<FlagValue> {
-        let flag = self.feature_flag(key).get()?;
-        Some(match flag.variant {
-            Some(variant) if flag.enabled => FlagValue::String(variant),
-            _ => FlagValue::Boolean(flag.enabled),
-        })
-    }
-
-    /// The flag's decoded payload. Never reports access, as with the server
-    /// client's `get_flag_payload`.
-    #[must_use]
-    pub fn get_feature_flag_payload(&self, key: &str) -> Option<Value> {
-        self.feature_flag(key)
-            .send_event(false)
-            .get()
-            .and_then(|flag| flag.payload)
     }
 
     /// Export all cached rich results without fetching flags or emitting analytics.
