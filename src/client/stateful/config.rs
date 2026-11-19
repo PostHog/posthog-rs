@@ -11,6 +11,10 @@ use crate::{BeforeSendHook, CaptureCompression, EndpointManager, Event, DEFAULT_
 /// own per-event limit. Larger events are rejected at capture.
 const MAX_EVENT_BYTES: u64 = 1024 * 1024;
 
+/// A client SDK waits 1 second before its first resend, doubling to the
+/// 30-second ceiling, where a server SDK starts at 100 ms.
+const RETRY_INITIAL_BACKOFF_MS: u64 = 1_000;
+
 /// Configuration for a stateful client. Start with [`Config::new`].
 ///
 /// Invalid configuration reports an initialization diagnostic and disables the
@@ -243,6 +247,7 @@ impl Config {
         options.request_timeout_seconds = self.request_timeout_seconds();
         options.shutdown_timeout_ms = self.shutdown_timeout.as_millis() as u64;
         options.max_capture_attempts = self.max_capture_attempts;
+        options.retry_initial_backoff_ms = RETRY_INITIAL_BACKOFF_MS;
         options.capture_compression = self.capture_compression;
         options.on_error = self.on_error.clone();
         options
