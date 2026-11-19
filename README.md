@@ -44,20 +44,21 @@ without discarding valid identity.
 Event persistence continues while HTTP is blocked. Staging, recovery and memory
 fallback share the configured resident count/serialized-byte limits, plus one
 separately bounded upload view of that logical queue. These are not process-memory
-limits. Newest disk retention permits one replacement-record overage, bounded by
-`max_record_bytes` and included in exact accounting; additional appends wait for
-reclamation. Local acceptance does not guarantee disk persistence or ingestion.
+limits. Newest disk retention permits one replacement-event overage, included in
+exact accounting; additional appends wait for reclamation. Events larger than
+about 1 MiB, roughly the capture endpoint's own limit, are rejected at capture.
+Local acceptance does not guarantee disk persistence or ingestion.
 
 Ordinary session activity commits only after local event admission. Hook drops,
 validation/size rejection and passive getters do not refresh idle time. Identity
 and session attribution is frozen before hooks; hooks can still edit wire fields.
-Sleep-inclusive elapsed clocks are used where supported, independently of wall
-clock corrections.
+Session idle and maximum-age limits use wall-clock time, as the other stateful
+PostHog SDKs do, so time spent suspended counts toward them.
 
 Stateful shutdown selects one deadline for SDK-controlled waiting, including Drop;
 concurrent/later calls cannot extend it. `DeliveryOutcome::Stopped` means actual
 delivery-worker completion, while `TimedOut` means unfinished work at expiry.
-State persistence has its own outcome. Already-started storage, HTTP or
+State persistence has its own outcome. Already-started storage, HTTP, encoding or
 callback work owns its resources until completion, potentially indefinitely if it
 never returns. Storage work retains its namespace lease while access is possible;
 request-only work does not. Arbitrary destructors of application objects captured
@@ -69,6 +70,13 @@ targeting invalidation alone does not fetch. Complete flag responses replace the
 cache with successful records; partial responses merge successes and retain prior
 records. Accepted exposure reports deduplicate by key and typed value until an
 identity change, reset or shutdown, including across reloads and targeting updates.
+
+## Screenshot replay
+
+The optional `session-replay` feature adds manual screenshot recording to the
+stateful client. Hosts supply already-masked, downscaled BGRA pixels; Rust owns
+encoding, attribution, bounded admission and memory-only delivery.
+See [manual screenshot replay](docs/session-replay.md).
 
 ## Request context
 

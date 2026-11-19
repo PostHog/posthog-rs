@@ -141,7 +141,9 @@ enum CapturePolicy {
     FlagCalled { minimal: bool },
 }
 
-pub(super) struct Producer {
+#[derive(Clone)]
+pub(crate) struct Producer {
+    capture_key: std::sync::Arc<()>,
     context: HashMap<String, Value>,
     sdk_name: String,
     sdk_version: String,
@@ -151,6 +153,10 @@ pub(super) struct Producer {
     pub(super) default_opt_out: bool,
     pub(super) send_feature_flag_event: bool,
     pub(super) session_clock: std::sync::Arc<dyn super::sessions::SessionClock>,
+    /// Set once the replay controller starts; empty when the encoder could not start.
+    #[cfg(feature = "session-replay")]
+    pub(super) replay:
+        std::sync::Arc<std::sync::OnceLock<std::sync::Weak<super::replay::Controller>>>,
 }
 
 impl Producer {
@@ -165,6 +171,7 @@ impl Producer {
             .entry("$os_version".into())
             .or_insert_with(|| info.version().to_string().into());
         Self {
+            capture_key: std::sync::Arc::new(()),
             context,
             sdk_name: config.sdk_name.clone(),
             sdk_version: config.sdk_version.clone(),
@@ -174,6 +181,8 @@ impl Producer {
             default_opt_out: config.opt_out,
             send_feature_flag_event: config.send_feature_flag_event,
             session_clock: std::sync::Arc::new(super::sessions::SystemSessionClock),
+            #[cfg(feature = "session-replay")]
+            replay: Default::default(),
         }
     }
 
@@ -196,6 +205,31 @@ impl Producer {
         session_id: Option<Uuid>,
         policy: CapturePolicy,
     ) -> Result<CaptureEvent, CaptureOutcome> {
+        let mut event = self.assemble(input, snapshot, now, session_id)?;
+        if matches!(policy, CapturePolicy::FlagCalled { minimal: true }) {
+            event.mark_minimal_flag_called();
+            event.apply_minimal_flag_called_allowlist();
+        }
+        let mut wire = CaptureEvent::from_stateful_event_at(&event, now);
+        normalize_custom_properties(
+            &mut wire.properties,
+            matches!(policy, CapturePolicy::FlagCalled { .. }),
+        );
+        Ok(wire)
+    }
+
+    pub(super) fn capture_key(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.capture_key) as usize
+    }
+
+    /// Assemble a native event before selecting its wire protocol.
+    pub(super) fn assemble(
+        &self,
+        input: Capture,
+        snapshot: &Snapshot,
+        now: DateTime<Utc>,
+        session_id: Option<Uuid>,
+    ) -> Result<Event, CaptureOutcome> {
         if input.event.trim().is_empty() {
             return Err(CaptureOutcome::Invalid);
         }
@@ -240,6 +274,8 @@ impl Producer {
         } else if lib.and_then(serde_json::Value::as_str) == Some(self.sdk_name.as_str()) {
             event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
         }
+        #[cfg(feature = "session-replay")]
+        self.fill_replay_debug_properties(&mut event, snapshot, session_id);
         event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
         event.insert_prop_default("$is_identified", snapshot.identified.into());
         fill_person_profile_option(&mut event, self.person_profiles.processes(snapshot));
@@ -247,21 +283,35 @@ impl Producer {
             event.insert_prop_default("$geoip_disable", true.into());
         }
         event.merge_groups_into_properties();
-        let mut event =
-            apply_before_send_hooks(&self.hooks, event).ok_or(CaptureOutcome::Dropped)?;
+        let event = apply_before_send_hooks(&self.hooks, event).ok_or(CaptureOutcome::Dropped)?;
         if event.event_name().trim().is_empty() || event.distinct_id().trim().is_empty() {
             return Err(CaptureOutcome::Invalid);
         }
-        if matches!(policy, CapturePolicy::FlagCalled { minimal: true }) {
-            event.mark_minimal_flag_called();
-            event.apply_minimal_flag_called_allowlist();
+        Ok(event)
+    }
+}
+
+#[cfg(feature = "session-replay")]
+impl Producer {
+    /// `$snapshot` is replay data, not a report about replay, so it carries none.
+    /// A caller or registered value for the same key wins.
+    fn fill_replay_debug_properties(
+        &self,
+        event: &mut Event,
+        snapshot: &Snapshot,
+        session_id: Option<Uuid>,
+    ) {
+        if event.event_name() == "$snapshot" {
+            return;
         }
-        let mut wire = CaptureEvent::from_stateful_event_at(&event, now);
-        normalize_custom_properties(
-            &mut wire.properties,
-            matches!(policy, CapturePolicy::FlagCalled { .. }),
-        );
-        Ok(wire)
+        match self.replay.get().and_then(std::sync::Weak::upgrade) {
+            Some(replay) => {
+                for (key, value) in replay.debug_properties(snapshot, session_id) {
+                    event.insert_prop_default(key, value);
+                }
+            }
+            None => event.insert_prop_default("$recording_status", "disabled".into()),
+        }
     }
 }
 
@@ -303,8 +353,18 @@ thread_local! {
 pub(super) struct CaptureGuard(usize);
 
 impl CaptureGuard {
+    #[cfg(feature = "session-replay")]
+    pub(super) fn active(key: usize) -> bool {
+        CAPTURING
+            .try_with(|active| active.borrow().contains(&key))
+            .unwrap_or(true)
+    }
+
     pub(super) fn enter(client: &Client) -> Result<Self, CaptureOutcome> {
-        let key = client as *const Client as usize;
+        Self::enter_key(client.producer.as_ref().unwrap().capture_key())
+    }
+
+    pub(super) fn enter_key(key: usize) -> Result<Self, CaptureOutcome> {
         CAPTURING
             .try_with(|active| {
                 let mut active = active.borrow_mut();
@@ -326,7 +386,10 @@ impl Drop for CaptureGuard {
 
 impl Client {
     pub(super) fn in_capture(&self) -> bool {
-        let key = self as *const Client as usize;
+        let Some(producer) = &self.producer else {
+            return false;
+        };
+        let key = producer.capture_key();
         CAPTURING
             .try_with(|active| active.borrow().contains(&key))
             .unwrap_or(false)

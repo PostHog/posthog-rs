@@ -120,6 +120,8 @@ fn client_with_store(
     let shutdown = super::shutdown::Shutdown::new_with_deadline(deadline.clone()).unwrap();
     Client {
         disabled: false,
+        #[cfg(feature = "session-replay")]
+        replay: None,
         shutdown_timeout: config.shutdown_timeout,
         shutdown: Some(shutdown),
         producer: Some(Producer::new(config)),
@@ -719,6 +721,108 @@ fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads()
         1
     );
     eprintln!("blocked-event shutdown_and_drop_us={}", elapsed.as_micros());
+}
+
+#[cfg(feature = "session-replay")]
+#[test]
+fn blocked_encoder_self_owns_until_completion_without_extending_shutdown_or_drop() {
+    struct Finished(mpsc::Sender<()>);
+    impl Finished {
+        fn retain(&self) {}
+    }
+    impl Drop for Finished {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    let server = MockServer::start();
+    let screenshots = server.mock(|when, then| {
+        when.method(POST).path("/s/");
+        then.status(200);
+    });
+    let (entered, waiting) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    let gate = Mutex::new(gate);
+    let (finished, done) = mpsc::channel();
+    let finished = Finished(finished);
+    let directory = Directory::new();
+    let mut config = config();
+    config.persistence = super::super::Persistence::Directory(directory.0.clone());
+    let namespace = directory.0.join(super::super::storage::namespace(
+        &config.project_token,
+        &config.instance_name,
+    ));
+    config.host = server.base_url();
+    config.shutdown_timeout = Duration::from_millis(20);
+    config.before_send(move |event| {
+        finished.retain();
+        if event.event_name() == "$snapshot" {
+            entered.send(()).unwrap();
+            gate.lock().unwrap().recv_timeout(GATE_WAIT).unwrap();
+        }
+        Some(event)
+    });
+    let client = Client::init_blocking(config);
+    assert!(StorageDirectory::open(&namespace).is_err());
+    client
+        .state
+        .as_ref()
+        .unwrap()
+        .mutate(|state| {
+            state.remote_config = Some(Arc::new(
+                crate::client::transport::remote_config::RemoteConfig {
+                    has_feature_flags: Some(false),
+                    session_recording: Some(serde_json::json!(true)),
+                },
+            ));
+        })
+        .unwrap();
+    let replay = client.session_replay();
+    replay.start();
+    let layout = super::super::FrameLayout {
+        width: 1,
+        height: 1,
+        row_stride_bytes: 4,
+        format: super::super::PixelFormat::Bgra8888,
+    };
+    let frame = replay.begin_frame(layout).unwrap();
+    assert_eq!(
+        replay.submit_frame(frame),
+        super::super::SubmitOutcome::Accepted
+    );
+    waiting.recv_timeout(WAIT).unwrap();
+    let host_held = replay.begin_frame(layout).unwrap();
+    let start = Instant::now();
+    assert_eq!(
+        client.shutdown_blocking(None).delivery,
+        DeliveryOutcome::TimedOut
+    );
+    drop(client);
+    let elapsed = start.elapsed();
+    let limit = Instant::now() + WAIT;
+    let lease = loop {
+        match StorageDirectory::open(&namespace) {
+            Ok(lease) => break lease,
+            Err(_) => {
+                assert!(
+                    Instant::now() < limit,
+                    "encoder retained the namespace lease"
+                );
+                thread::yield_now();
+            }
+        }
+    };
+    assert!(done.try_recv().is_err());
+    drop(lease);
+    release.send(()).unwrap();
+    done.recv_timeout(WAIT).unwrap();
+    drop(host_held);
+    assert!(elapsed < Duration::from_secs(1));
+    screenshots.assert_calls(0);
+    eprintln!(
+        "blocked-encoder shutdown_and_drop_us={}",
+        elapsed.as_micros()
+    );
 }
 
 #[test]
