@@ -97,10 +97,10 @@ mcp = [
 ]
 
 [workspace]
-members = [".", "compliance/adapter", "crates/posthog-ffi", "crates/posthog-rs"]
+members = [".", "compliance/adapter", "crates/posthog-rs-ffi", "crates/posthog-rs"]
 resolver = "2"
 
-# Cargo's default `strip = "debuginfo"` produces a posthog-ffi dylib that
+# Cargo's default `strip = "debuginfo"` produces a posthog-rs-ffi dylib that
 # Apple's ld rejects with "mis-aligned LINKEDIT string pool".
-[profile.release.package.posthog-ffi]
+[profile.release.package.posthog-rs-ffi]
 strip = false

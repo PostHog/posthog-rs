@@ -1,7 +1,7 @@
 /*
  * Captures an event and reads a feature flag.
  *
- *   cargo build --release -p posthog-ffi
+ *   cargo build --release -p posthog-rs-ffi
  *   cc examples/capture.c -Iinclude -L../../target/release -lposthog_ffi -o capture
  *   LD_LIBRARY_PATH=../../target/release DYLD_LIBRARY_PATH=../../target/release \
  *     POSTHOG_API_KEY=phc_... ./capture

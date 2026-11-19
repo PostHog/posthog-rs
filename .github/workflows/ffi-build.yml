@@ -1,18 +1,18 @@
 name: "Build C bindings"
 
-# Builds and smoke-tests posthog-ffi for each supported platform, and uploads
+# Builds and smoke-tests posthog-rs-ffi for each supported platform, and uploads
 # one archive per platform as a workflow artifact. release.yml calls it for a
-# posthog-ffi release tag and attaches the archives to that GitHub Release. CI
+# posthog-rs-ffi release tag and attaches the archives to that GitHub Release. CI
 # calls it on pull requests, where it builds the PR's commit.
 on:
   workflow_call:
     inputs:
       version:
-        description: "posthog-ffi version, used in the archive names"
+        description: "posthog-rs-ffi version, used in the archive names"
         required: true
         type: string
       release:
-        description: "Build the release tag posthog-ffi-v<version>. Otherwise build the commit that triggered the run."
+        description: "Build the release tag posthog-rs-ffi-v<version>. Otherwise build the commit that triggered the run."
         required: false
         default: false
         type: boolean
@@ -41,7 +41,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: crates/posthog-ffi
+        working-directory: crates/posthog-rs-ffi
     steps:
       - name: Check the version
         env:
@@ -56,16 +56,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.release && format('refs/tags/posthog-ffi-v{0}', inputs.version) || '' }}
+          ref: ${{ inputs.release && format('refs/tags/posthog-rs-ffi-v{0}', inputs.version) || '' }}
           persist-credentials: false
 
-      - name: Check the posthog-ffi version
+      - name: Check the posthog-rs-ffi version
         env:
           VERSION: ${{ inputs.version }}
         run: |
           crate_version=$(grep -m1 '^version = ' Cargo.toml | tr -d '\r' | sed 's/version = "\(.*\)"/\1/')
           if [ "$crate_version" != "$VERSION" ]; then
-            echo "::error::Expected posthog-ffi $VERSION, found $crate_version"
+            echo "::error::Expected posthog-rs-ffi $VERSION, found $crate_version"
             exit 1
           fi
 
@@ -80,7 +80,7 @@ jobs:
       - name: Build
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo build --locked --release -p posthog-ffi --target "$TARGET"
+        run: cargo build --locked --release -p posthog-rs-ffi --target "$TARGET"
 
       - name: Smoke test
         if: runner.os != 'Windows'
@@ -108,9 +108,9 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ inputs.version }}
         run: |
-          name="posthog-ffi-$VERSION-$TARGET"
+          name="posthog-rs-ffi-$VERSION-$TARGET"
           out="../../target/$TARGET/release"
-          native_libs=$(cargo rustc --locked --release -p posthog-ffi --lib --target "$TARGET" --crate-type staticlib -- --print native-static-libs 2>&1 \
+          native_libs=$(cargo rustc --locked --release -p posthog-rs-ffi --lib --target "$TARGET" --crate-type staticlib -- --print native-static-libs 2>&1 \
             | sed -n 's/.*native-static-libs: //p' | tail -1)
 
           mkdir -p "dist/$name/include" "dist/$name/lib" "dist/$name/examples"
@@ -146,9 +146,9 @@ jobs:
       - name: Upload archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: posthog-ffi-${{ matrix.target }}
+          name: posthog-rs-ffi-${{ matrix.target }}
           path: |
-            crates/posthog-ffi/dist/${{ steps.package.outputs.archive }}
-            crates/posthog-ffi/dist/${{ steps.package.outputs.archive }}.sha256
+            crates/posthog-rs-ffi/dist/${{ steps.package.outputs.archive }}
+            crates/posthog-rs-ffi/dist/${{ steps.package.outputs.archive }}.sha256
           if-no-files-found: error
           retention-days: 7

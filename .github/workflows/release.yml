@@ -135,7 +135,7 @@ jobs:
         run: |
           version_of() { grep -m1 '^version = ' "$1" | sed 's/version = "\(.*\)"/\1/'; }
           old_version=$(version_of Cargo.toml)
-          old_ffi_version=$(version_of crates/posthog-ffi/Cargo.toml)
+          old_ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
           sampo release
           # Sampo regenerates Cargo.lock, resolving every dependency to its
           # latest version, which can need a newer Rust than the MSRV. Keep the
@@ -143,10 +143,10 @@ jobs:
           git checkout HEAD -- Cargo.lock
           cargo update --workspace
           new_version=$(version_of Cargo.toml)
-          ffi_version=$(version_of crates/posthog-ffi/Cargo.toml)
+          ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
           echo "ffi_version=$ffi_version" >> "$GITHUB_OUTPUT"
-          # posthog-ffi has its own version and changesets, so a release can
+          # posthog-rs-ffi has its own version and changesets, so a release can
           # bump either package or both.
           released=()
           if [ "$new_version" != "$old_version" ]; then
@@ -155,7 +155,7 @@ jobs:
           fi
           if [ "$ffi_version" != "$old_ffi_version" ]; then
             echo "ffi_released=true" >> "$GITHUB_OUTPUT"
-            released+=("posthog-ffi v$ffi_version")
+            released+=("posthog-rs-ffi v$ffi_version")
           fi
           title=$(printf '%s, ' "${released[@]}")
           title=${title%, }
@@ -255,7 +255,7 @@ jobs:
                  '{ref: $ref, inputs: {package_name: $package_name, package_version: $package_version}}' \
                )"
 
-      - name: Create posthog-ffi GitHub Release
+      - name: Create posthog-rs-ffi GitHub Release
         id: ffi-release
         # Runs even if publishing posthog failed: the release commit is already on main.
         if: ${{ !cancelled() && steps.sync.outcome == 'success' && steps.sampo-release.outputs.ffi_released == 'true' }}
@@ -263,9 +263,9 @@ jobs:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           FFI_VERSION: ${{ steps.sampo-release.outputs.ffi_version }}
         run: |
-          tag="posthog-ffi-v$FFI_VERSION"
-          notes=$(awk -v defText="see crates/posthog-ffi/CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' crates/posthog-ffi/CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
-          gh release create "$tag" --target "$(git rev-parse HEAD)" --title "posthog-ffi $FFI_VERSION" --notes "$notes" --latest=false
+          tag="posthog-rs-ffi-v$FFI_VERSION"
+          notes=$(awk -v defText="see crates/posthog-rs-ffi/CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' crates/posthog-rs-ffi/CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
+          gh release create "$tag" --target "$(git rev-parse HEAD)" --title "posthog-rs-ffi $FFI_VERSION" --notes "$notes" --latest=false
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Send failure event to PostHog
@@ -293,7 +293,7 @@ jobs:
   ffi-build:
     name: Build C bindings
     needs: release
-    # The posthog-ffi GitHub Release exists once this output is set, even if a later step failed.
+    # The posthog-rs-ffi GitHub Release exists once this output is set, even if a later step failed.
     if: ${{ !cancelled() && needs.release.outputs.ffi_tag != '' }}
     uses: ./.github/workflows/ffi-build.yml
     with:
@@ -311,7 +311,7 @@ jobs:
       - name: Download archives
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: posthog-ffi-*
+          pattern: posthog-rs-ffi-*
           path: dist
           merge-multiple: true
 
@@ -323,8 +323,8 @@ jobs:
           ls -l
           missing=0
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc; do
-            archive="posthog-ffi-$VERSION-$target.tar.gz"
-            [[ "$target" == *windows* ]] && archive="posthog-ffi-$VERSION-$target.zip"
+            archive="posthog-rs-ffi-$VERSION-$target.tar.gz"
+            [[ "$target" == *windows* ]] && archive="posthog-rs-ffi-$VERSION-$target.zip"
             if [ ! -f "$archive" ] || [ ! -f "$archive.sha256" ]; then
               echo "::error::Missing $archive or its checksum"
               missing=1

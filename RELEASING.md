@@ -26,37 +26,37 @@ You can also trigger a release manually via the workflow's `workflow_dispatch` t
 
 ## C bindings
 
-`crates/posthog-ffi` is released on its own, with its own version, changesets and changelog (`crates/posthog-ffi/CHANGELOG.md`). It isn't published to crates.io. Use the `cargo/posthog-ffi` changeset key for changes to the bindings:
+`crates/posthog-rs-ffi` is released on its own, with its own version, changesets and changelog (`crates/posthog-rs-ffi/CHANGELOG.md`). It isn't published to crates.io. Use the `cargo/posthog-rs-ffi` changeset key for changes to the bindings:
 
 ```md
 ---
-cargo/posthog-ffi: minor
+cargo/posthog-rs-ffi: minor
 ---
 ```
 
 The bindings report their own version as `$lib_version`, next to `$lib` set to `posthog-rs-ffi`.
 
-Because `posthog-ffi` depends on `posthog`, Sampo also gives `posthog-ffi` a patch release whenever `posthog` is released. Those releases ship the bindings with the new SDK.
+Because `posthog-rs-ffi` depends on `posthog`, Sampo also gives `posthog-rs-ffi` a patch release whenever `posthog` is released. Those releases ship the bindings with the new SDK.
 
-Sampo tags each `posthog-ffi` release as `posthog-ffi-v<version>`. The release workflow then creates a GitHub Release for that tag, separate from the `posthog` release and not marked as latest. It attaches these archives:
+Sampo tags each `posthog-rs-ffi` release as `posthog-rs-ffi-v<version>`. The release workflow then creates a GitHub Release for that tag, separate from the `posthog` release and not marked as latest. It attaches these archives:
 
-- `posthog-ffi-<version>-x86_64-unknown-linux-gnu.tar.gz`
-- `posthog-ffi-<version>-aarch64-unknown-linux-gnu.tar.gz`
-- `posthog-ffi-<version>-x86_64-apple-darwin.tar.gz`
-- `posthog-ffi-<version>-aarch64-apple-darwin.tar.gz`
-- `posthog-ffi-<version>-x86_64-pc-windows-msvc.zip`
+- `posthog-rs-ffi-<version>-x86_64-unknown-linux-gnu.tar.gz`
+- `posthog-rs-ffi-<version>-aarch64-unknown-linux-gnu.tar.gz`
+- `posthog-rs-ffi-<version>-x86_64-apple-darwin.tar.gz`
+- `posthog-rs-ffi-<version>-aarch64-apple-darwin.tar.gz`
+- `posthog-rs-ffi-<version>-x86_64-pc-windows-msvc.zip`
 
 Each archive contains the shared and static libraries, `posthog.h`, the C and C++ examples, the README, the license, and `lib/native-static-libs.txt`, which lists the system libraries to link with the static library. Each archive has a `.sha256` file next to it.
 
 All of this runs in [`release.yml`](.github/workflows/release.yml), in the same approved release as `posthog`:
 
-- "Release and publish" bumps whichever packages have changesets, publishes `posthog` and `posthog-rs` only when they changed, and creates the `posthog-ffi` GitHub Release when its version changed.
-- "Build C bindings" builds the `posthog-ffi-v<version>` tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml) and runs the C++ smoke test against each built library.
+- "Release and publish" bumps whichever packages have changesets, publishes `posthog` and `posthog-rs` only when they changed, and creates the `posthog-rs-ffi` GitHub Release when its version changed.
+- "Build C bindings" builds the `posthog-rs-ffi-v<version>` tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml) and runs the C++ smoke test against each built library.
 - "Attach C bindings to the GitHub Release" checks that all five archives and their checksums are present, then uploads them.
 
-The two C bindings jobs run even if publishing `posthog` fails, as long as the `posthog-ffi` GitHub Release exists. A failure in either sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
+The two C bindings jobs run even if publishing `posthog` fails, as long as the `posthog-rs-ffi` GitHub Release exists. A failure in either sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
 
-If a C bindings job fails, use **Re-run failed jobs** on that Release run. It rebuilds from the same tag and replaces any archives already attached. If the build itself needs a fix, release a `posthog-ffi` patch version instead.
+If a C bindings job fails, use **Re-run failed jobs** on that Release run. It rebuilds from the same tag and replaces any archives already attached. If the build itself needs a fix, release a `posthog-rs-ffi` patch version instead.
 
 ## Failed or cancelled release
 

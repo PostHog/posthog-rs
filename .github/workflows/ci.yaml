@@ -148,7 +148,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     defaults:
       run:
-        working-directory: crates/posthog-ffi
+        working-directory: crates/posthog-rs-ffi
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -172,13 +172,13 @@ jobs:
             ${{ runner.os }}-cargo-ffi-
 
       - name: Format
-        run: cargo fmt -p posthog-ffi -- --check
+        run: cargo fmt -p posthog-rs-ffi -- --check
 
       - name: Clippy
-        run: cargo clippy --locked -p posthog-ffi --all-targets -- -D warnings
+        run: cargo clippy --locked -p posthog-rs-ffi --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --locked -p posthog-ffi
+        run: cargo test --locked -p posthog-rs-ffi
 
       - name: Check the header matches the source
         run: |
@@ -188,8 +188,8 @@ jobs:
 
       - name: Link from C and C++
         run: |
-          cargo build --locked --release -p posthog-ffi
-          read -ra native_libs <<< "$(cargo rustc --locked --release -p posthog-ffi --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
+          cargo build --locked --release -p posthog-rs-ffi
+          read -ra native_libs <<< "$(cargo rustc --locked --release -p posthog-rs-ffi --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
             | sed -n 's/.*native-static-libs: //p' | tail -1)"
           cc -std=c99 -Wall -Wextra -Werror -pedantic examples/capture.c -Iinclude -L../../target/release -lposthog_ffi -o capture
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic examples/capture.cpp -Iinclude -L../../target/release -lposthog_ffi -o capture-cpp
@@ -212,9 +212,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Read the posthog-ffi version
+      - name: Read the posthog-rs-ffi version
         id: version
-        run: echo "version=$(grep -m1 '^version = ' crates/posthog-ffi/Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(grep -m1 '^version = ' crates/posthog-rs-ffi/Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
 
   ffi-release-dry-run:
     name: C bindings release build
@@ -236,7 +236,7 @@ jobs:
           rustup default 1.78.0
 
       - name: Check
-        run: cargo check --locked -p posthog-ffi --lib
+        run: cargo check --locked -p posthog-rs-ffi --lib
 
   package:
     name: Cargo publish dry run
@@ -276,7 +276,7 @@ jobs:
             command: cargo test --verbose
           - name: Unit test (workspace)
             cache-key: workspace
-            command: cargo test --workspace --exclude posthog-ffi --verbose
+            command: cargo test --workspace --exclude posthog-rs-ffi --verbose
           - name: Compatibility crate
             cache-key: compatibility-crate
             command: >-

@@ -1726,7 +1726,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "posthog-ffi"
+name = "posthog-rs"
+version = "1.2.0"
+dependencies = [
+ "posthog",
+]
+
+[[package]]
+name = "posthog-rs-ffi"
 version = "0.0.0"
 dependencies = [
  "chrono",
@@ -1735,13 +1742,6 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
-]
-
-[[package]]
-name = "posthog-rs"
-version = "1.2.0"
-dependencies = [
- "posthog",
 ]
 
 [[package]]

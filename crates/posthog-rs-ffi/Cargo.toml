@@ -1,5 +1,5 @@
 [package]
-name = "posthog-ffi"
+name = "posthog-rs-ffi"
 license = "MIT"
 version = "0.0.0"
 authors = ["PostHog <engineering@posthog.com>"]
