@@ -128,7 +128,8 @@ pub enum CaptureOutcome {
     Dropped,
     /// This thread is already capturing through the same client.
     Reentrant,
-    /// The resident count or serialized-byte budget refused the event.
+    /// The resident count or serialized-byte budget refused the event, or it
+    /// is larger than the per-event limit.
     Full,
 }
 

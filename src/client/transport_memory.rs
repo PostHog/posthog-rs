@@ -136,6 +136,7 @@ struct Resident {
 pub(super) struct Queue {
     resident: Mutex<Resident>,
     budget: Arc<ByteBudget>,
+    max_event_bytes: usize,
     count: Arc<AtomicUsize>,
     capacity: usize,
     wake: AtomicBool,
@@ -143,6 +144,7 @@ pub(super) struct Queue {
 impl Queue {
     pub(super) fn new(
         budget: Arc<ByteBudget>,
+        max_event_bytes: usize,
         count: Arc<AtomicUsize>,
         capacity: usize,
         disk_end: Option<u64>,
@@ -154,6 +156,7 @@ impl Queue {
                 items: VecDeque::new(),
             }),
             budget,
+            max_event_bytes,
             count,
             capacity,
             wake: AtomicBool::new(false),
@@ -161,7 +164,7 @@ impl Queue {
     }
     pub(super) fn admit(&self, wire: CaptureEvent) -> super::Admission {
         let bytes = super::super::event_store::record_size(&wire);
-        if bytes > self.budget.limit || self.capacity == 0 {
+        if bytes > self.budget.limit || bytes > self.max_event_bytes || self.capacity == 0 {
             return super::Admission::Full;
         }
         let mut resident = self.resident.lock().unwrap_or_else(|p| p.into_inner());
@@ -304,7 +307,7 @@ mod queue_tests {
     #[test]
     fn clearing_reports_how_many_resident_events_were_dropped() {
         let count = Arc::new(AtomicUsize::new(0));
-        let queue = Queue::new(ByteBudget::new(4096), count.clone(), 4, None);
+        let queue = Queue::new(ByteBudget::new(4096), 4096, count.clone(), 4, None);
         assert_eq!(queue.admit(wire("first")), Admission::Accepted);
         assert_eq!(queue.admit(wire("second")), Admission::Accepted);
         assert_eq!(queue.clear(), 2);
@@ -316,6 +319,7 @@ mod queue_tests {
     fn retained_memory_is_fifo_and_replacements_have_exact_admission_identity() {
         let queue = Queue::new(
             ByteBudget::new(4096),
+            4096,
             Arc::new(AtomicUsize::new(0)),
             2,
             None,
@@ -344,6 +348,7 @@ mod queue_tests {
         let bytes = super::super::super::event_store::record_size(&first);
         let queue = Queue::new(
             ByteBudget::new(bytes),
+            bytes,
             Arc::new(AtomicUsize::new(0)),
             1,
             None,

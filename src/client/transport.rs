@@ -70,6 +70,9 @@ struct StorageState {
     store: Option<Box<dyn super::event_store::EventStore>>,
     #[cfg(feature = "stateful")]
     byte_budget: Option<Arc<memory::ByteBudget>>,
+    /// Largest serialized event the resident queue admits.
+    #[cfg(feature = "stateful")]
+    max_event_bytes: usize,
 }
 
 #[cfg(feature = "stateful")]
@@ -84,8 +87,14 @@ impl StorageState {
     fn memory(max_queue_bytes: usize) -> Self {
         Self {
             byte_budget: Some(memory::ByteBudget::new(max_queue_bytes)),
+            max_event_bytes: max_queue_bytes,
             ..Self::default()
         }
+    }
+
+    fn with_max_event_bytes(mut self, max_event_bytes: usize) -> Self {
+        self.max_event_bytes = self.max_event_bytes.min(max_event_bytes);
+        self
     }
 }
 
@@ -389,6 +398,7 @@ impl TransportHandle {
             options,
             store,
             max_queue_bytes,
+            max_queue_bytes,
             Arc::new(Mutex::new(None)),
             Arc::new(SystemClock),
         )
@@ -399,13 +409,15 @@ impl TransportHandle {
         options: ClientOptions,
         store: Option<Box<dyn super::event_store::EventStore>>,
         max_queue_bytes: usize,
+        max_event_bytes: usize,
         deadline: Arc<Mutex<Option<Instant>>>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, StartupFailure> {
         let storage = match store {
             Some(store) => StorageState::new(store, max_queue_bytes),
             None => StorageState::memory(max_queue_bytes),
-        };
+        }
+        .with_max_event_bytes(max_event_bytes);
         let (tx, rx) = mpsc::channel();
         Self::spawn_configured_with_deadline(
             options,
@@ -471,6 +483,7 @@ impl TransportHandle {
         let queue = byte_budget.as_ref().map(|budget| {
             memory::Queue::new(
                 budget.clone(),
+                _storage.max_event_bytes,
                 len.clone(),
                 max_queue_size,
                 _storage

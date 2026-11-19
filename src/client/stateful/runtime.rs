@@ -218,6 +218,7 @@ impl Client {
                 .event_store
                 .map(|store| Box::new(store) as Box<dyn crate::client::event_store::EventStore>),
             config.max_queue_bytes,
+            config.max_event_bytes(),
             shutdown.deadline_handle(),
             Arc::new(SystemClock),
         ) {

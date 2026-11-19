@@ -8,7 +8,8 @@ use crate::client::{ClientOptions, OnErrorHook, PostHogError};
 use crate::{BeforeSendHook, CaptureCompression, EndpointManager, Event, DEFAULT_HOST};
 
 /// Largest serialized event the client accepts, roughly the capture endpoint's
-/// own per-event limit. Larger events are rejected at capture.
+/// own per-event limit. Larger events are refused at capture with
+/// `CaptureOutcome::Full`.
 const MAX_EVENT_BYTES: u64 = 1024 * 1024;
 
 /// A client SDK waits 1 second before its first resend, doubling to the
@@ -44,9 +45,17 @@ pub struct Config {
     /// Maximum resident staging, recovery and memory-fallback events. Default: 1,000.
     /// One additional upload view of this logical queue is bounded separately by
     /// this count and max_queue_bytes; it is not a second retry backlog.
+    ///
+    /// At this limit or `max_queue_bytes`, a new event replaces the oldest
+    /// resident events, which are lost if they were not yet on disk. Capture
+    /// still returns [`CaptureOutcome::Accepted`](super::CaptureOutcome::Accepted);
+    /// it returns [`CaptureOutcome::Full`](super::CaptureOutcome::Full) only when
+    /// no replacement makes room.
     pub max_queue_size: usize,
     /// Maximum serialized event bytes in the resident queue and, separately, its
     /// one upload view. Not an allocator/process-memory cap. Default: 8 MiB.
+    /// Capture also refuses any single event over 1 MiB, or over this limit if
+    /// it is smaller.
     pub max_queue_bytes: usize,
     /// Persisted event retention count. Default: 10,000. Newest retention may
     /// temporarily exceed this by one replacement record while reclaiming old data.
@@ -222,14 +231,17 @@ impl Config {
         }
     }
 
+    /// Largest serialized event capture admits, never larger than the queue.
+    pub(super) fn max_event_bytes(&self) -> usize {
+        (MAX_EVENT_BYTES as usize).min(self.max_queue_bytes)
+    }
+
     pub(super) fn event_limits(&self) -> StoreLimits {
         StoreLimits {
             max_events: self.max_stored_events,
             max_bytes: self.max_stored_bytes,
             // Never larger than either budget that has to hold the event.
-            max_record_bytes: MAX_EVENT_BYTES
-                .min(self.max_queue_bytes as u64)
-                .min(self.max_stored_bytes),
+            max_record_bytes: (self.max_event_bytes() as u64).min(self.max_stored_bytes),
         }
     }
 
