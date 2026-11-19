@@ -161,14 +161,17 @@ struct Version {
 /// One file per record, named by its key: `events/{key:020}.json`. A record
 /// that cannot be decoded is renamed to `.corrupt`, and one from a newer
 /// format to `.unsupported`; neither is read again or counted.
+///
+/// Records are written to a temporary file and renamed, so a process crash
+/// never leaves a partial record. They are not synced to the device, as in
+/// the iOS and Android queues: a record written just before power loss may be
+/// lost, or come back truncated and be moved aside on read.
 pub(crate) struct FileEventStore {
     _directory: Arc<StorageDirectory>,
     events_path: PathBuf,
     limits: StoreLimits,
     index: Vec<(StoreKey, u64)>,
     last_key: StoreKey,
-    #[cfg(test)]
-    pub(crate) fail_directory_sync: std::cell::Cell<bool>,
 }
 
 impl FileEventStore {
@@ -222,23 +225,11 @@ impl FileEventStore {
             limits,
             index,
             last_key,
-            #[cfg(test)]
-            fail_directory_sync: std::cell::Cell::new(false),
         })
     }
 
     fn path(&self, key: StoreKey) -> PathBuf {
         self.events_path.join(format!("{:020}.json", key.0))
-    }
-
-    fn sync_directory(&self) -> io::Result<()> {
-        #[cfg(test)]
-        if self.fail_directory_sync.replace(false) {
-            return Err(io::Error::other("directory sync failed"));
-        }
-        #[cfg(unix)]
-        File::open(&self.events_path)?.sync_all()?;
-        Ok(())
     }
 
     /// Move an unreadable record aside so it is never read or sent again.
@@ -290,7 +281,6 @@ impl EventStore for FileEventStore {
         let written = (|| -> io::Result<()> {
             let mut file = open_private(&temporary, true)?;
             file.write_all(&encoded)?;
-            file.sync_all()?;
             // Closing first also permits rename on Windows.
             drop(file);
             fs::rename(&temporary, &path)
@@ -299,9 +289,6 @@ impl EventStore for FileEventStore {
             let _ = fs::remove_file(&temporary);
             return Err(error);
         }
-        // The record is complete and named. A failed directory sync risks it
-        // only on power loss, which the queue cannot do better than here.
-        let _ = self.sync_directory();
         Ok(encoded.len() as u64)
     }
 

@@ -96,6 +96,14 @@ impl Table {
         self.disk
     }
 
+    pub(super) fn first_seq(&self) -> Option<u64> {
+        self.entries.front().map(|entry| entry.seq)
+    }
+
+    pub(super) fn last_seq(&self) -> Option<u64> {
+        self.entries.back().map(|entry| entry.seq)
+    }
+
     pub(super) fn get(&self, seq: u64) -> Option<&Entry> {
         self.position(seq).map(|index| &self.entries[index])
     }
@@ -103,6 +111,13 @@ impl Table {
     pub(super) fn delay_read(&mut self, seq: u64, until: Instant) {
         if let Some(index) = self.position(seq) {
             self.entries[index].read_after = Some(until);
+        }
+    }
+
+    /// Make an entry ready again once a read of it succeeds.
+    pub(super) fn clear_read_delay(&mut self, seq: u64) {
+        if let Some(index) = self.position(seq) {
+            self.entries[index].read_after = None;
         }
     }
 
@@ -176,6 +191,16 @@ impl Table {
         self.entries
             .iter()
             .filter_map(|entry| entry.read_after)
+            .min()
+    }
+
+    /// The earliest time later than `now` that an entry waiting after a read
+    /// failure becomes ready.
+    pub(super) fn next_read_after(&self, now: Instant) -> Option<Instant> {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.read_after)
+            .filter(|after| *after > now)
             .min()
     }
 
@@ -287,6 +312,24 @@ mod tests {
         table.delay_read(1, now + Duration::from_secs(1));
         assert!(!table.ready_through(4, now));
         assert!(table.ready_through(5, now));
+    }
+
+    #[test]
+    fn the_next_read_time_skips_past_and_cleared_delays() {
+        let mut table = Table::default();
+        for seq in 1..=3 {
+            table.push(disk(seq, 10));
+        }
+        let now = Instant::now();
+        table.delay_read(1, now + Duration::from_secs(1));
+        table.delay_read(2, now + Duration::from_secs(3));
+        let later = now + Duration::from_secs(2);
+        assert_eq!(
+            table.next_read_after(later),
+            Some(now + Duration::from_secs(3))
+        );
+        table.clear_read_delay(2);
+        assert_eq!(table.next_read_after(later), None);
     }
 
     #[test]
