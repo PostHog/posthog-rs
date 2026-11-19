@@ -242,7 +242,8 @@ fn lookup_reads_current_cache_and_reports_only_when_get_is_called() {
             .unwrap_or_else(|| "control".into()),
         "control"
     );
-    assert_eq!(hooks.load(Ordering::SeqCst), 2);
+    // A missing flag is reported once, like any other value.
+    assert_eq!(hooks.load(Ordering::SeqCst), 3);
     client.flush_blocking();
     analytics.assert_calls(1);
 }
@@ -420,7 +421,9 @@ fn unavailable_empty_disabled_invalid_and_closed_have_explicit_results() {
     });
     let client = Client::init_blocking(config(&server));
     assert_eq!(client.get_feature_flags(), None);
-    assert_eq!(client.feature_flag("missing").get(), None);
+    // Reads of missing flags report $feature_flag_called; this test checks
+    // only the returned values, so it reads silently.
+    assert_eq!(client.feature_flag("missing").send_event(false).get(), None);
     for mode in 0..4 {
         let mut config = config(&server);
         bootstrap(&mut config);
@@ -431,7 +434,7 @@ fn unavailable_empty_disabled_invalid_and_closed_have_explicit_results() {
             _ => {}
         }
         let client = Client::init_blocking(config);
-        let lookup = client.feature_flag("nullable");
+        let lookup = client.feature_flag("nullable").send_event(false);
         if mode == 3 {
             client.shutdown_blocking(None);
         }

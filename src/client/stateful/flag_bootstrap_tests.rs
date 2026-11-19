@@ -232,6 +232,7 @@ fn failed_preload_retains_bootstrap() {
 fn obsolete_response_does_not_mark_bootstrap_remote_and_reset_drops_all_context() {
     let server = Server::new(vec![
         (200, json!({"featureFlags":{"obsolete":true}})),
+        (200, json!({"featureFlags":{"current":true}})),
         (200, json!({"featureFlags":{}})),
     ]);
     let mut config = config(&server.host);
@@ -244,7 +245,10 @@ fn obsolete_response_does_not_mark_bootstrap_remote_and_reset_drops_all_context(
         Some(false),
     );
     server.respond();
-    client.transport.as_ref().unwrap().request_barrier();
+    // The obsolete response is discarded and the load continues with a
+    // follow-up for the current targeting.
+    let follow_up = server.request();
+    assert_eq!(follow_up["person_properties"]["changed"], true);
     let state = client.state.as_ref().unwrap().snapshot();
     assert!(!state.flag_load.remote_received);
     assert!(state.flag_load.completed.is_none());
@@ -255,11 +259,21 @@ fn obsolete_response_does_not_mark_bootstrap_remote_and_reset_drops_all_context(
         .unwrap()
         .flags
         .contains_key("keep"));
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    let state = client.state.as_ref().unwrap().snapshot();
+    assert!(state.flag_load.remote_received);
+    assert!(state
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("current"));
     client.reset();
     server.request();
     let state = client.state.as_ref().unwrap().snapshot();
     assert!(state.flag_load.bootstrap.is_none());
-    assert!(!state.flag_load.remote_received);
     assert!(state.flags.cache.is_none());
     server.respond();
     client.transport.as_ref().unwrap().request_barrier();

@@ -318,7 +318,14 @@ fn bootstrap_reconciles_cache_against_final_identity() {
                 "device",
                 true,
             ),
-            (false, "new-person", PersonProfiles::Never, "device", true),
+            // Never adopts the bootstrap ID locally, without an identify event.
+            (
+                false,
+                "new-person",
+                PersonProfiles::Never,
+                "new-person",
+                false,
+            ),
             (
                 true,
                 "new-person",

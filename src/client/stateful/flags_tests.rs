@@ -226,47 +226,41 @@ fn public_reload_sends_exact_current_context_while_opted_out() {
 }
 
 #[test]
-fn suppressed_property_change_invalidates_inflight_response_without_refreshing() {
-    let server = Server::new(vec![(200, json!({"featureFlags":{"obsolete":true}}))]);
+fn property_change_in_flight_continues_with_a_follow_up_request() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"obsolete":true}})),
+        (200, json!({"featureFlags":{"current":true}})),
+    ]);
     let client = Client::init_blocking(config(&server.host));
     seed(&client);
-    let old = client
-        .state
-        .as_ref()
-        .unwrap()
-        .snapshot()
-        .flags
-        .cache
-        .clone();
     client.reload_feature_flags();
     server.request();
-    client.set_person_properties_for_flags(
-        HashMap::from([("plan".into(), json!("pro"))]),
-        Some(false),
-    );
+    client.set_person_properties_for_flags(HashMap::from([("plan".into(), json!(2))]), Some(false));
+    server.respond();
+    // The response for the old targeting is discarded; the load continues with
+    // a follow-up for the current targeting instead of being lost.
+    let follow_up = server.request();
+    assert_eq!(follow_up["person_properties"]["plan"], json!(2));
     server.respond();
     client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     let state = client.state.as_ref().unwrap().snapshot();
-    assert_eq!(state.flags.cache, old);
-    assert!(state.flag_load.completed.is_none());
-    assert_eq!(state.flag_load.request, 1);
+    let cache = state.flags.cache.as_ref().unwrap();
+    assert!(cache.flags.contains_key("current"));
+    assert!(!cache.flags.contains_key("obsolete"));
+    assert!(state.flag_load.completed.is_some());
+    assert_eq!(state.flag_load.request, 2);
     assert_eq!(state.flag_load.revision, 1);
 }
 
 #[test]
-fn suppressed_group_targeting_invalidates_active_response_without_fetching() {
-    let server = Server::new(vec![(200, json!({"featureFlags":{"obsolete":true}}))]);
+fn group_targeting_change_in_flight_continues_with_a_follow_up_request() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"obsolete":true}})),
+        (200, json!({"featureFlags":{"current":true}})),
+    ]);
     let client = Client::init_blocking(config(&server.host));
     seed(&client);
-    let previous = client
-        .state
-        .as_ref()
-        .unwrap()
-        .snapshot()
-        .flags
-        .cache
-        .clone();
     client.reload_feature_flags();
     server.request();
     client.set_group_properties_for_flags(
@@ -275,12 +269,19 @@ fn suppressed_group_targeting_invalidates_active_response_without_fetching() {
         Some(false),
     );
     server.respond();
+    // The response for the old targeting is discarded; the load continues with
+    // a follow-up for the current targeting instead of being lost.
+    let follow_up = server.request();
+    assert_eq!(follow_up["group_properties"]["company"]["tier"], json!(2));
+    server.respond();
     client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     let state = client.state.as_ref().unwrap().snapshot();
-    assert_eq!(state.flags.cache, previous);
-    assert!(state.flag_load.completed.is_none());
-    assert_eq!(state.flag_load.request, 1);
+    let cache = state.flags.cache.as_ref().unwrap();
+    assert!(cache.flags.contains_key("current"));
+    assert!(!cache.flags.contains_key("obsolete"));
+    assert!(state.flag_load.completed.is_some());
+    assert_eq!(state.flag_load.request, 2);
     assert_eq!(state.flag_load.revision, 1);
 }
 
@@ -316,7 +317,7 @@ fn identity_group_and_reset_changes_clear_cache_and_reject_late_results() {
         server.request();
         match operation {
             0 => client.identify("person"),
-            1 => client.group("company", "new", None),
+            1 => client.group(("company", "new")),
             2 => client.remove_group("company"),
             _ => client.reset(),
         }

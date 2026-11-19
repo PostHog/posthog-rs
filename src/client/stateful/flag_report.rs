@@ -98,7 +98,7 @@ impl Drop for Reservation<'_> {
     }
 }
 
-fn report_key(key: &str, value: &FlagValue) -> Key {
+fn report_key(key: &str, value: Option<&FlagValue>) -> Key {
     fn string(hash: &mut Sha1, value: &str) {
         hash.update((value.len() as u64).to_le_bytes());
         hash.update(value.as_bytes());
@@ -106,25 +106,31 @@ fn report_key(key: &str, value: &FlagValue) -> Key {
     let mut hash = Sha1::new();
     string(&mut hash, key);
     match value {
-        FlagValue::Boolean(value) => hash.update([u8::from(*value)]),
-        FlagValue::String(value) => {
+        Some(FlagValue::Boolean(value)) => hash.update([u8::from(*value)]),
+        Some(FlagValue::String(value)) => {
             hash.update([2]);
             string(&mut hash, value);
         }
+        None => hash.update([3]),
     }
     hash.finalize().into()
 }
 
 impl Client {
-    pub(super) fn report_flag_access(&self, key: &str, snapshot: &Snapshot, flag: &CachedFlag) {
+    pub(super) fn report_flag_access(
+        &self,
+        key: &str,
+        snapshot: &Snapshot,
+        flag: Option<&CachedFlag>,
+    ) {
         if self.snapshot_opted_out(snapshot) {
             return;
         }
         let Ok(_guard) = CaptureGuard::enter(self) else {
             return;
         };
-        let response = flag_value_for(&flag.record);
-        let fingerprint = report_key(key, &response);
+        let response = flag.map(|flag| flag_value_for(&flag.record));
+        let fingerprint = report_key(key, response.as_ref());
         let ticket = self.state.as_ref().unwrap().mutate(|current| {
             if current.flag_load.revision != snapshot.flag_load.revision
                 || current.flag_load.request != snapshot.flag_load.request
@@ -146,11 +152,11 @@ impl Client {
         let mut event = Capture::new("$feature_flag_called");
         event.properties = flag_called_properties(
             key,
-            Some(&flag.record),
-            &Some(response),
-            flag.request_id.as_deref(),
-            flag.evaluated_at,
-            flag.partial,
+            flag.map(|flag| &flag.record),
+            &response,
+            flag.and_then(|flag| flag.request_id.as_deref()),
+            flag.and_then(|flag| flag.evaluated_at),
+            flag.is_some_and(|flag| flag.partial),
             false,
         );
         if let Some(bootstrap) = snapshot
@@ -173,8 +179,9 @@ impl Client {
             "$used_bootstrap_value".into(),
             (!snapshot.flag_load.remote_received).into(),
         );
-        let minimal =
-            flag.record.minimal_flag_called_events && flag.record.has_experiment == Some(false);
+        let minimal = flag.is_some_and(|flag| {
+            flag.record.minimal_flag_called_events && flag.record.has_experiment == Some(false)
+        });
         reservation.accepted = matches!(
             self.capture_flag_snapshot(event, snapshot, minimal),
             CaptureOutcome::Accepted { .. }
@@ -382,7 +389,7 @@ mod tests {
         let old_capture = std::thread::spawn(move || reader.feature_flag("a").get().unwrap());
         entered_rx.recv_timeout(WAIT).unwrap();
         let state = client.state.as_ref().unwrap();
-        let fingerprint = report_key("a", &FlagValue::Boolean(true));
+        let fingerprint = report_key("a", Some(&FlagValue::Boolean(true)));
         let old_ticket = state.snapshot().flag_load.reports.entries[&fingerprint].ticket;
         client.reset();
         // Identity still changes while opted out, without entering the held FnMut hook.
@@ -431,16 +438,25 @@ mod tests {
     #[test]
     fn keys_distinguish_flag_names_and_typed_values() {
         assert_ne!(
-            report_key("flag", &FlagValue::Boolean(true)),
-            report_key("flag", &FlagValue::String("true".into()))
+            report_key("flag", Some(&FlagValue::Boolean(true))),
+            report_key("flag", Some(&FlagValue::String("true".into())))
         );
         assert_ne!(
-            report_key("flag", &FlagValue::Boolean(true)),
-            report_key("flag", &FlagValue::Boolean(false))
+            report_key("flag", Some(&FlagValue::Boolean(true))),
+            report_key("flag", Some(&FlagValue::Boolean(false)))
         );
         assert_ne!(
-            report_key("flag", &FlagValue::Boolean(true)),
-            report_key("other", &FlagValue::Boolean(true))
+            report_key("flag", Some(&FlagValue::Boolean(true))),
+            report_key("other", Some(&FlagValue::Boolean(true)))
+        );
+        // A missing flag has its own key, distinct from every typed value.
+        assert_ne!(
+            report_key("flag", None),
+            report_key("flag", Some(&FlagValue::Boolean(false)))
+        );
+        assert_ne!(
+            report_key("flag", None),
+            report_key("flag", Some(&FlagValue::String(String::new())))
         );
     }
 }

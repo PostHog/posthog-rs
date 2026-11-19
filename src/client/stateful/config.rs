@@ -24,7 +24,7 @@ pub struct Config {
     /// Explicitly disable this client. Defaults to false.
     pub disabled: bool,
     /// Default collection choice when no explicit consent can be restored,
-    /// including after reset or state-storage open/read failure. False by default.
+    /// including after state-storage open/read failure. False by default.
     /// Set true when unavailable consent must require opt-in. A successfully
     /// restored explicit opt-in/out choice takes precedence.
     pub opt_out: bool,

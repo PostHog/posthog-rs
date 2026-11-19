@@ -93,34 +93,63 @@ impl FlagLoader {
         let Ok((_, Some(request))) = request else {
             return;
         };
-        let completion_request = request.clone();
-        let completion_access = access.clone();
-        let listeners = self.listeners.clone();
-        let task = flags::Task::new(&request.payload(&self.options.api_key), move |result| {
-            install(&completion_access, &completion_request, result);
-            listeners.notify_completion(
-                &completion_access,
-                completion_request.revision,
-                completion_request.sequence,
-            );
-        });
+        let task = task_for(
+            access,
+            self.options.clone(),
+            self.listeners.clone(),
+            request,
+        );
         enqueue(task);
         drop(scheduling);
     }
 }
 
+/// The request task. If targeting changed while it was in flight and no newer
+/// request exists, its completion continues with a follow-up for the current
+/// targeting, as iOS and Android do, so a load is never lost.
+fn task_for(
+    access: StateAccess,
+    options: Arc<ClientOptions>,
+    listeners: Arc<super::flag_listeners::Listeners>,
+    request: Request,
+) -> flags::Task {
+    let payload = request.payload(&options.api_key);
+    flags::Task::with_follow_up(&payload, move |result| {
+        let follow_up = install(&access, &request, result, options.disable_geoip);
+        listeners.notify_completion(&access, request.revision, request.sequence);
+        follow_up.map(|next| task_for(access, options, listeners, next))
+    })
+}
+
 /// Transport failures are diagnosed by the worker. An obsolete completion
-/// changes no state or status.
+/// changes no state or status. When only targeting properties made it obsolete
+/// and no newer request exists, returns the follow-up request, reserved in the
+/// same update so a concurrent reload supersedes it.
 fn install(
     access: &StateAccess,
     request: &Request,
     result: Result<flags::LoadedFlags, flags::LoadError>,
-) {
-    let _ = access.mutate(|state| {
-        if state.flag_load.revision != request.revision
-            || state.flag_load.request != request.sequence
-        {
-            return;
+    disable_geoip: bool,
+) -> Option<Request> {
+    let follow_up = access.mutate(|state| {
+        if state.flag_load.request != request.sequence {
+            return None;
+        }
+        if state.flag_load.revision != request.revision {
+            // Identity changes (identify, reset, groups) start their own request.
+            if state.distinct_id != request.context.distinct_id
+                || state.anonymous_id != request.context.anonymous_id
+                || state.groups != request.context.groups
+            {
+                return None;
+            }
+            let sequence = state.flag_load.request.checked_add(1)?;
+            state.flag_load.request = sequence;
+            return Some(Request {
+                context: Arc::new(FlagContext::current(state, disable_geoip)),
+                revision: state.flag_load.revision,
+                sequence,
+            });
         }
         let mut completion = FlagCompletion {
             context: request.context.clone(),
@@ -147,7 +176,9 @@ fn install(
             Err(error) => completion.error = Some(error),
         }
         state.flag_load.completed = Some(completion);
+        None
     });
+    follow_up.ok().and_then(|(_, next)| next)
 }
 
 impl Client {
