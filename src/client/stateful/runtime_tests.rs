@@ -17,6 +17,9 @@ impl Directory {
     fn config(&self) -> Config {
         let mut config = memory_config();
         config.persistence = Persistence::Directory(self.0.clone());
+        // Shutdown returns once the workers stop; the deadline only bounds the
+        // wait. A loaded runner must not expire it before storage is released.
+        config.shutdown_timeout = Duration::from_secs(30);
         config
     }
 
