@@ -900,3 +900,354 @@ fn a_slow_on_error_hook_never_holds_up_persistence() {
     handle.request_close_before(harness.clock.now());
     handle.join();
 }
+
+#[test]
+fn a_flush_completes_once_its_events_are_attempted_despite_newer_traffic() {
+    let server = MockServer::start();
+    let slot: Arc<Mutex<Option<Arc<TransportHandle>>>> = Arc::new(Mutex::new(None));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let _ok = {
+        let slot = slot.clone();
+        let requests = requests.clone();
+        server.mock(move |when, then| {
+            when.method(POST).is_true(move |_| {
+                // Every request brings a newer event while it is out.
+                if requests.fetch_add(1, Ordering::SeqCst) < 30 {
+                    if let Some(handle) = slot.lock().unwrap().as_ref() {
+                        let _ = handle.enqueue_prepared(wire("newer"));
+                    }
+                }
+                true
+            });
+            then.status(200).json_body(json!({"results": {}}));
+        })
+    };
+    let mut builder = base(&server);
+    builder.flush_at(1usize);
+    let harness = spawn(&mut builder, None, 64 * 1024);
+    let handle = Arc::new(harness.handle);
+    *slot.lock().unwrap() = Some(handle.clone());
+    admit(&handle, "first");
+    flush(&handle);
+    let at_flush = requests.load(Ordering::SeqCst);
+    *slot.lock().unwrap() = None;
+    handle.request_close_before(harness.clock.now());
+    handle.join();
+    assert!(
+        at_flush < 10,
+        "the flush waited for {} requests of newer events",
+        at_flush
+    );
+}
+
+#[test]
+fn events_admitted_during_a_send_wait_for_their_own_flush_interval() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let slot: Arc<Mutex<Option<Arc<TransportHandle>>>> = Arc::new(Mutex::new(None));
+    let _ok = {
+        let slot = slot.clone();
+        let log = log.clone();
+        server.mock(move |when, then| {
+            when.method(POST).is_true(move |request| {
+                let body: Value = serde_json::from_slice(request.body_ref()).unwrap_or_default();
+                let mut requests = log.0.lock().unwrap();
+                if requests.is_empty() {
+                    if let Some(handle) = slot.lock().unwrap().as_ref() {
+                        let _ = handle.enqueue_prepared(wire("newer"));
+                    }
+                }
+                requests.push(Received {
+                    id: String::new(),
+                    attempt: 0,
+                    events: body["batch"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|event| event["event"].as_str().unwrap_or_default().to_string())
+                        .collect(),
+                });
+                true
+            });
+            then.status(200).json_body(json!({"results": {}}));
+        })
+    };
+    let harness = spawn(&mut base(&server), None, 64 * 1024);
+    let handle = Arc::new(harness.handle);
+    *slot.lock().unwrap() = Some(handle.clone());
+    admit(&handle, "first");
+    handle.tick();
+    // The clock stands still, so the newer event's interval never ends.
+    std::thread::sleep(Duration::from_millis(300));
+    *slot.lock().unwrap() = None;
+    handle.request_close_before(harness.clock.now());
+    handle.join();
+    assert_eq!(
+        log.names(),
+        [names(&["first"])],
+        "a newer event skipped its flush interval"
+    );
+}
+
+#[test]
+fn events_admitted_during_a_retry_wait_go_in_their_own_request_once_it_clears() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let harness = spawn(&mut base(&server), None, 64 * 1024);
+    let mut offline = respond(&server, &log, 503, json!({}));
+    admit(&harness.handle, "a");
+    flush(&harness.handle);
+    offline.delete();
+    let _ok = delivered(&server, &log);
+    admit(&harness.handle, "b");
+    harness.clock.advance(Duration::from_secs(2));
+    // Wake the coordinator with a flush that covers only "a", so nothing but
+    // the cleared retry sends "b" before its interval.
+    let (done, finished) = mpsc::channel();
+    assert!(harness.handle.send_control(Control::QueueFlush {
+        completion: Completion::Blocking(done),
+        through: 1,
+    }));
+    finished.recv_timeout(Duration::from_secs(5)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while log.all().len() < 3 {
+        assert!(Instant::now() < deadline, "{:?}", log.names());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let requests = log.all();
+    assert_eq!(log.names(), [names(&["a"]), names(&["a"]), names(&["b"])]);
+    assert_eq!(requests[1].id, requests[0].id);
+    assert_eq!(requests[1].attempt, 2);
+    assert_ne!(requests[2].id, requests[0].id);
+    assert_eq!(requests[2].attempt, 1);
+    harness.handle.shutdown_blocking();
+}
+
+#[test]
+fn a_retry_that_stays_unreadable_gives_way_to_later_events() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    let harness = spawn(
+        &mut base(&server),
+        Some(Box::new(FaultyStore {
+            inner: directory.open(10),
+            faults: faults.clone(),
+        })),
+        64 * 1024,
+    );
+    let mut offline = respond(&server, &log, 503, json!({}));
+    admit(&harness.handle, "a");
+    flush(&harness.handle);
+    offline.delete();
+    let _ok = delivered(&server, &log);
+    faults.reads.lock().unwrap().insert(1);
+    admit(&harness.handle, "later");
+    for _ in 0..5 {
+        harness.clock.advance(Duration::from_secs(60));
+        harness.handle.tick();
+    }
+    let requests = log.all();
+    assert_eq!(log.names(), [names(&["a"]), names(&["later"])]);
+    assert_ne!(requests[1].id, requests[0].id);
+    assert_eq!(
+        directory.records(),
+        [1],
+        "the unreadable event stays queued"
+    );
+    harness.handle.request_close_before(harness.clock.now());
+    harness.handle.join();
+}
+
+fn read_fault_coordinator(
+    records: &[(u64, &str)],
+    faults: &Faults,
+    directory: &TestDirectory,
+    clock: &ManualClock,
+) -> super::Coordinator {
+    use super::super::table::Limits;
+    use super::{Coordinator, Settings};
+    {
+        let mut store = directory.open(10);
+        for (key, name) in records {
+            store.write(StoreKey(*key), &wire(name)).unwrap();
+        }
+    }
+    let options = options("http://127.0.0.1:1".into()).build().unwrap();
+    let (coordinator, _inbox) = Coordinator::new(
+        Settings {
+            lane: super::super::LaneConfig::analytics(),
+            memory: Limits {
+                events: 10,
+                bytes: 64 * 1024,
+            },
+            options,
+        },
+        Some(Box::new(FaultyStore {
+            inner: directory.open(10),
+            faults: faults.clone(),
+        })),
+        4096,
+        Arc::new(clock.clone()),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(Mutex::new(None)),
+    );
+    coordinator
+}
+
+fn retry_answer(seq: u64, delay: Duration) -> super::Sent {
+    super::Sent {
+        seqs: vec![seq],
+        request_id: Uuid::now_v7(),
+        attempt: 1,
+        created_at: String::new(),
+        verdict: super::Verdict::Retry {
+            retained: vec![(seq, 0)],
+            delay,
+        },
+    }
+}
+
+#[test]
+fn a_retry_wait_does_not_spin_once_a_skipped_record_is_readable_again() {
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    faults.reads.lock().unwrap().insert(1);
+    let clock = ManualClock::new();
+    let mut coordinator = read_fault_coordinator(
+        &[(1, "unreadable"), (2, "retried")],
+        &faults,
+        &directory,
+        &clock,
+    );
+    let (jobs, _sent) = mpsc::sync_channel(1);
+    coordinator.jobs = Some(jobs);
+    assert!(coordinator.start_request());
+    assert!(coordinator.sending);
+    coordinator.apply(retry_answer(2, Duration::from_secs(30)));
+    clock.advance(Duration::from_secs(15));
+    let wake = coordinator.next_wake().expect("the retry is pending");
+    assert!(
+        wake > clock.now(),
+        "a past wake time spins until the retry is due"
+    );
+}
+
+#[test]
+fn a_record_read_after_a_failure_does_not_spin_its_later_retry_wait() {
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    faults.reads.lock().unwrap().insert(1);
+    let clock = ManualClock::new();
+    let mut coordinator = read_fault_coordinator(&[(1, "flaky")], &faults, &directory, &clock);
+    let (jobs, _sent) = mpsc::sync_channel(1);
+    coordinator.jobs = Some(jobs);
+    assert!(coordinator.start_request());
+    assert!(!coordinator.sending, "the only record could not be read");
+    faults.reads.lock().unwrap().clear();
+    clock.advance(Duration::from_secs(11));
+    assert!(coordinator.start_request());
+    assert!(coordinator.sending, "the record is read and sent");
+    coordinator.apply(retry_answer(1, Duration::from_secs(30)));
+    clock.advance(Duration::from_secs(1));
+    let wake = coordinator.next_wake().expect("the retry is pending");
+    assert!(
+        wake > clock.now(),
+        "a stale read time spins for the whole retry wait"
+    );
+}
+
+#[test]
+fn a_record_waiting_out_a_read_failure_does_not_make_newer_events_skip_their_interval() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let slot: Arc<Mutex<Option<Arc<TransportHandle>>>> = Arc::new(Mutex::new(None));
+    let _ok = {
+        let slot = slot.clone();
+        let log = log.clone();
+        server.mock(move |when, then| {
+            when.method(POST).is_true(move |request| {
+                let body: Value = serde_json::from_slice(request.body_ref()).unwrap_or_default();
+                let mut requests = log.0.lock().unwrap();
+                if requests.is_empty() {
+                    if let Some(handle) = slot.lock().unwrap().as_ref() {
+                        let _ = handle.enqueue_prepared(wire("newer"));
+                    }
+                }
+                requests.push(Received {
+                    id: String::new(),
+                    attempt: 0,
+                    events: body["batch"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|event| event["event"].as_str().unwrap_or_default().to_string())
+                        .collect(),
+                });
+                true
+            });
+            then.status(200).json_body(json!({"results": {}}));
+        })
+    };
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    faults.reads.lock().unwrap().insert(1);
+    let harness = spawn(
+        &mut base(&server),
+        Some(Box::new(FaultyStore {
+            inner: directory.open(10),
+            faults,
+        })),
+        64 * 1024,
+    );
+    let handle = Arc::new(harness.handle);
+    *slot.lock().unwrap() = Some(handle.clone());
+    admit(&handle, "blocked");
+    admit(&handle, "first");
+    handle.tick();
+    std::thread::sleep(Duration::from_millis(300));
+    *slot.lock().unwrap() = None;
+    handle.request_close_before(harness.clock.now());
+    handle.join();
+    assert_eq!(
+        log.names(),
+        [names(&["first"])],
+        "a newer event skipped its flush interval"
+    );
+}
+
+#[test]
+fn a_record_left_behind_by_a_read_failure_is_sent_once_readable_without_new_traffic() {
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    faults.reads.lock().unwrap().insert(1);
+    let clock = ManualClock::new();
+    let mut coordinator =
+        read_fault_coordinator(&[(1, "delayed"), (2, "sent")], &faults, &directory, &clock);
+    let (jobs, sent) = mpsc::sync_channel(1);
+    coordinator.jobs = Some(jobs);
+    assert!(coordinator.start_request());
+    assert!(coordinator.sending, "the readable record goes");
+    sent.try_recv().unwrap();
+    coordinator.apply(super::Sent {
+        seqs: vec![2],
+        request_id: Uuid::now_v7(),
+        attempt: 1,
+        created_at: String::new(),
+        verdict: super::Verdict::Finished,
+    });
+    assert!(coordinator.start_request());
+    assert!(!coordinator.sending, "the delayed record is not ready yet");
+    let wake = coordinator
+        .next_wake()
+        .expect("the delayed record needs a wake");
+    assert!(wake > clock.now());
+    faults.reads.lock().unwrap().clear();
+    clock.advance(wake - clock.now());
+    assert!(coordinator.start_request());
+    assert!(
+        coordinator.sending,
+        "the delayed record is sent once readable, with no new trigger"
+    );
+}

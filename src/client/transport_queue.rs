@@ -6,7 +6,7 @@
 //! makes the one shutdown decision. The executor thread sends each request,
 //! reads capture's verdicts and reports failures through `on_error`, then
 //! hands back which events are done and which to retry. A slow upload or a
-//! slow hook never blocks persistence.
+//! slow capture hook never blocks persistence.
 //!
 //! Delivery state lives in one place: an event is queued exactly while it has
 //! an entry in the table. A delivered event leaves the table before its file is
@@ -102,6 +102,8 @@ struct Retry {
     attempt: u32,
     created_at: String,
     next_at: Instant,
+    /// The retry already waited once for an event it could not read.
+    waited_for_read: bool,
 }
 
 struct Waiter {
@@ -134,6 +136,9 @@ pub(super) struct Coordinator {
     retry: Option<Retry>,
     /// When the next request is due without a flush or a full batch.
     due: Option<Instant>,
+    /// The newest queue position when the last request was selected. Entries
+    /// at or below it that remain once it is answered are a backlog.
+    selected_through: u64,
     /// Files of events that left the queue but could not be deleted.
     orphans: Vec<StoreKey>,
     orphans_due: Option<Instant>,
@@ -197,6 +202,7 @@ impl Coordinator {
             store,
             // A backlog from an earlier run is sent at once.
             due: (!table.is_empty()).then_some(now),
+            selected_through: 0,
             table,
             deadline,
             jobs: None,
@@ -446,7 +452,10 @@ impl Coordinator {
                         .expect("an on-disk entry has a store")
                         .read(StoreKey(*seq));
                     match read {
-                        Ok(event) => event,
+                        Ok(event) => {
+                            self.table.clear_read_delay(*seq);
+                            event
+                        }
                         Err(ReadError::Transient(error)) => {
                             self.report_storage(StorageOperation::Read, &error);
                             self.table.delay_read(*seq, now + self.interval);
@@ -469,12 +478,20 @@ impl Coordinator {
             events.push(sending);
         }
         let identity = match retry {
-            // Nothing left the queue: keep the request and wait for the read.
+            // Nothing left the queue: keep the request and wait once for the read.
             Some(retry) if unreadable && self.table.contains_all(&seqs) => {
-                self.retry = Some(Retry {
-                    next_at: now + self.interval,
-                    ..retry
-                });
+                if retry.waited_for_read {
+                    // Still unreadable: give the request up, so the readable
+                    // events go from the queue in a new one, past the delayed
+                    // entry.
+                    self.due = Some(now);
+                } else {
+                    self.retry = Some(Retry {
+                        next_at: now + self.interval,
+                        waited_for_read: true,
+                        ..retry
+                    });
+                }
                 return true;
             }
             Some(retry) if events.len() == seqs.len() => {
@@ -501,6 +518,10 @@ impl Coordinator {
         match self.jobs.as_ref().map(|jobs| jobs.try_send(job)) {
             Some(Ok(())) => {
                 self.sending = true;
+                // This request uses up the due time: events admitted while it
+                // is out start their own interval.
+                self.due = None;
+                self.selected_through = self.table.last_seq().unwrap_or(0);
                 true
             }
             // Only one request is ever outstanding, so the slot is free.
@@ -535,12 +556,28 @@ impl Coordinator {
                     attempt: sent.attempt.saturating_add(1),
                     created_at: sent.created_at,
                     next_at: self.clock.now() + delay,
+                    waited_for_read: false,
                 });
             }
         }
-        if self.retry.is_none() && !self.table.is_empty() {
-            // Keep draining a backlog.
-            self.due = Some(self.clock.now());
+        // Events that were queued when the request was selected but did not go
+        // in it are a backlog: send them now. This includes events admitted
+        // during a retry wait, once the retry clears. A backlog waiting out a
+        // read failure is sent once readable, not before newer events are due.
+        if self.retry.is_none() {
+            let now = self.clock.now();
+            if self.table.ready_through(self.selected_through, now) {
+                self.due = Some(now);
+            } else if self
+                .table
+                .first_seq()
+                .is_some_and(|seq| seq <= self.selected_through)
+            {
+                self.due = match (self.due, self.table.next_read()) {
+                    (Some(due), Some(read)) => Some(due.min(read)),
+                    (due, read) => due.or(read),
+                };
+            }
         }
     }
 
@@ -555,14 +592,17 @@ impl Coordinator {
 
     fn complete_waiters(&mut self) {
         let now = self.clock.now();
-        let sending = self.sending;
         let retrying = self.retry.is_some();
         let table = &self.table;
         // A request waiting to be retried has been attempted, and holds back
-        // everything after it.
-        let (done, waiting): (Vec<_>, Vec<_>) = self.waiters.drain(..).partition(|waiter| {
-            !sending && (retrying || !table.ready_through(waiter.through, now))
-        });
+        // everything after it. Events in flight stay in the table until their
+        // answer is applied, so a waiter does not complete before them, unless
+        // capacity evicted them first: they are then no longer queued, and a
+        // flush does not wait for them.
+        let (done, waiting): (Vec<_>, Vec<_>) = self
+            .waiters
+            .drain(..)
+            .partition(|waiter| retrying || !table.ready_through(waiter.through, now));
         self.waiters = waiting;
         for waiter in done {
             waiter.completion.signal();
@@ -587,11 +627,14 @@ impl Coordinator {
         let mut wakes = vec![self.current_deadline(), self.orphans_due];
         if !self.sending {
             match &self.retry {
+                // Nothing else is sent before the retry.
                 Some(retry) => wakes.push(Some(retry.next_at)),
-                None if !self.table.is_empty() => wakes.push(self.due),
+                None if !self.table.is_empty() => {
+                    wakes.push(self.due);
+                    wakes.push(self.table.next_read_after(self.clock.now()));
+                }
                 None => {}
             }
-            wakes.push(self.table.next_read());
         }
         wakes.into_iter().flatten().min()
     }
