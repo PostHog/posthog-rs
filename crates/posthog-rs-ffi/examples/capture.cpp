@@ -179,10 +179,15 @@ class Client {
           "posthog_group_identify");
   }
 
+  // A failed flags request still returns a snapshot, which reads as defaults,
+  // so this only throws when there's no snapshot at all.
   Flags evaluate_flags(const std::string &distinct_id, const char *options_json = nullptr) {
     PostHogFlags *flags = nullptr;
-    check(posthog_evaluate_flags(handle_.get(), distinct_id.c_str(), options_json, &flags),
-          "posthog_evaluate_flags");
+    PostHogStatus status = posthog_evaluate_flags(handle_.get(), distinct_id.c_str(), options_json, &flags);
+    if (!flags) check(status, "posthog_evaluate_flags");
+    if (status != POSTHOG_STATUS_OK) {
+      std::fprintf(stderr, "posthog_evaluate_flags: %s\n", last_error().c_str());
+    }
     return Flags(flags);
   }
 

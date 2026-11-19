@@ -44,13 +44,15 @@ int main(void) {
 
     int exit_code = 0;
     PostHogFlags *flags = NULL;
-    if (posthog_evaluate_flags(client, "user-123", NULL, &flags) == POSTHOG_STATUS_OK) {
+    if (posthog_evaluate_flags(client, "user-123", NULL, &flags) != POSTHOG_STATUS_OK) {
+        /* A failed request still writes a snapshot, which reads as defaults. */
+        exit_code = fail("posthog_evaluate_flags");
+    }
+    if (flags) {
         bool enabled = false;
         posthog_flags_is_enabled(flags, "new-onboarding", &enabled);
         printf("new-onboarding: %s\n", enabled ? "on" : "off");
         posthog_flags_free(flags);
-    } else {
-        exit_code = fail("posthog_evaluate_flags");
     }
 
     posthog_client_free(client);

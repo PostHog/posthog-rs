@@ -812,8 +812,13 @@ fn evaluate_flags_options(options_json: Option<Value>) -> Result<EvaluateFlagsOp
 }
 
 /// Evaluates feature flags for `distinct_id` and writes a snapshot to
-/// `flags_out`, or `NULL` on error. Blocks while flags are fetched. Free the
-/// snapshot with `posthog_flags_free`.
+/// `flags_out`. Blocks while flags are fetched. Free the snapshot with
+/// `posthog_flags_free`.
+///
+/// If the flags request fails, this returns `POSTHOG_STATUS_REQUEST` and still
+/// writes a snapshot, holding only flags evaluated locally. Reading it returns
+/// defaults for the other flags. For any other error, `*flags_out` is `NULL`.
+/// Free a non-`NULL` snapshot whatever the status.
 ///
 /// `options_json` may be `NULL` or a JSON object with any of these fields:
 /// `groups` (`{"company": "acme"}`), `person_properties` (`{"plan": "pro"}`),
@@ -841,7 +846,21 @@ pub unsafe extern "C" fn posthog_evaluate_flags(
             Some(json_arg(options_json, "options_json")?)
         };
         let options = evaluate_flags_options(options_json)?;
-        let flags = client.client.evaluate_flags(distinct_id, options)?;
+        let flags = match client.client.evaluate_flags(distinct_id, options.clone()) {
+            Ok(flags) => flags,
+            Err(error) => {
+                // The request failed before any flag resolved. Still hand back a
+                // snapshot for this user, with whatever local evaluation resolved,
+                // so reads return defaults and report missing flags. Local-only
+                // evaluation makes no second request.
+                let mut local_only = options;
+                local_only.only_evaluate_locally = true;
+                if let Ok(flags) = client.client.evaluate_flags(distinct_id, local_only) {
+                    flags_out.write(Box::into_raw(Box::new(PostHogFlags { flags })));
+                }
+                return Err(error.into());
+            }
+        };
         flags_out.write(Box::into_raw(Box::new(PostHogFlags { flags })));
         Ok(())
     })

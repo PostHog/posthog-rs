@@ -382,8 +382,13 @@ PostHogStatus posthog_event_set_flags(struct PostHogEvent *event, const struct P
 
 /**
  * Evaluates feature flags for `distinct_id` and writes a snapshot to
- * `flags_out`, or `NULL` on error. Blocks while flags are fetched. Free the
- * snapshot with `posthog_flags_free`.
+ * `flags_out`. Blocks while flags are fetched. Free the snapshot with
+ * `posthog_flags_free`.
+ *
+ * If the flags request fails, this returns `POSTHOG_STATUS_REQUEST` and still
+ * writes a snapshot, holding only flags evaluated locally. Reading it returns
+ * defaults for the other flags. For any other error, `*flags_out` is `NULL`.
+ * Free a non-`NULL` snapshot whatever the status.
  *
  * `options_json` may be `NULL` or a JSON object with any of these fields:
  * `groups` (`{"company": "acme"}`), `person_properties` (`{"plan": "pro"}`),

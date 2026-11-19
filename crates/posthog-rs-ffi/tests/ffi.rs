@@ -297,11 +297,27 @@ fn null_only_evaluate_locally_is_rejected_without_a_request() {
 }
 
 #[test]
-fn surfaces_flag_request_failures() {
+fn flag_request_failure_still_returns_a_readable_snapshot() {
     let server = MockServer::start();
-    server.mock(|when, then| {
+    let flags_mock = server.mock(|when, then| {
         when.method(POST).path("/flags/");
-        then.status(500).body("boom");
+        then.status(503).body("unavailable");
+    });
+    let capture = server.mock(|when, then| {
+        when.method(POST).path(CAPTURE_PATH).is_true(|request| {
+            let batch = captured_batch(request);
+            let called: Vec<_> = batch
+                .iter()
+                .filter(|event| event["event"] == "$feature_flag_called")
+                .collect();
+            called.len() == 1
+                && called[0]["distinct_id"] == "user-1"
+                && called[0]["properties"]["$feature_flag"] == "beta"
+                && called[0]["properties"]["$feature_flag_error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("flag_missing"))
+        });
+        then.status(200).json_body(json!({"results": {}}));
     });
 
     unsafe {
@@ -309,10 +325,29 @@ fn surfaces_flag_request_failures() {
         let mut flags = ptr::null_mut();
         let status = posthog_evaluate_flags(client, c("user-1").as_ptr(), ptr::null(), &mut flags);
         assert_eq!(status, PostHogStatus::POSTHOG_STATUS_REQUEST);
-        assert!(flags.is_null());
-        assert!(last_error().is_some());
+        assert!(last_error().unwrap().contains("503"));
+        assert!(
+            !flags.is_null(),
+            "a failed request still returns a snapshot"
+        );
+
+        let mut enabled = true;
+        assert_eq!(
+            posthog_flags_is_enabled(flags, c("beta").as_ptr(), &mut enabled),
+            PostHogStatus::POSTHOG_STATUS_OK
+        );
+        assert!(!enabled);
+        let mut keys = ptr::null_mut();
+        posthog_flags_keys(flags, &mut keys);
+        assert_eq!(take_string(keys), "[]");
+        posthog_flags_free(flags);
+
+        assert_eq!(posthog_flush(client), PostHogStatus::POSTHOG_STATUS_OK);
         posthog_client_free(client);
     }
+
+    flags_mock.assert_calls(1);
+    capture.assert();
 }
 
 #[test]
