@@ -74,8 +74,11 @@ fn wire(name: &str) -> CaptureEvent {
 
 /// An event whose disk record measures exactly `bytes`.
 fn sized(name: &str, bytes: usize) -> CaptureEvent {
+    // A fixed timestamp: its serialized length varies with sub-second precision.
+    let timestamp = chrono::Utc::now();
     let padded = |padding: usize| {
         let mut event = Event::new(name, "user");
+        event.set_timestamp(timestamp).unwrap();
         event.insert_prop("padding", "x".repeat(padding)).unwrap();
         CaptureEvent::from_event(&event)
     };
