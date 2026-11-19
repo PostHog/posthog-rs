@@ -69,13 +69,8 @@ impl Usage {
         }
     }
 
-    fn over(&self, limits: Limits) -> bool {
+    pub(super) fn over(&self, limits: Limits) -> bool {
         self.events > limits.events || self.bytes > limits.bytes
-    }
-
-    /// Whether `limits` leave no room for another entry.
-    pub(super) fn reaches(&self, limits: Limits) -> bool {
-        self.events >= limits.events || self.bytes >= limits.bytes
     }
 }
 
@@ -215,11 +210,12 @@ impl Table {
             .min()
     }
 
-    /// The memory-only entries' events, oldest first.
-    pub(super) fn memory_entries(&self) -> Vec<(u64, Arc<CaptureEvent>)> {
+    /// The memory-only entries' sequence numbers, sizes and events, oldest
+    /// first.
+    pub(super) fn memory_entries(&self) -> Vec<(u64, u64, Arc<CaptureEvent>)> {
         self.entries
             .iter()
-            .filter_map(|entry| Some((entry.seq, entry.payload.clone()?)))
+            .filter_map(|entry| Some((entry.seq, entry.bytes, entry.payload.clone()?)))
             .collect()
     }
 
@@ -391,7 +387,7 @@ mod tests {
             table
                 .memory_entries()
                 .iter()
-                .map(|(seq, _)| *seq)
+                .map(|(seq, _, _)| *seq)
                 .collect::<Vec<_>>(),
             [2]
         );

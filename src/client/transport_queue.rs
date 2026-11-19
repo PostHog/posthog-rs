@@ -16,6 +16,7 @@
 //! events stay in memory instead of adding files.
 
 use std::collections::{HashMap, VecDeque};
+use std::io::Read;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,6 +41,10 @@ use crate::error::Error;
 
 /// The most orphan deletes retried in one cleanup pass.
 const ORPHAN_RETRIES_PER_PASS: usize = 64;
+
+/// The largest capture response body read, as in posthog-android. A larger
+/// body is unreadable.
+const MAX_RESPONSE_BODY_BYTES: u64 = 1024 * 1024;
 
 /// One event in a request, tagged with its queue position.
 pub(crate) struct Sending {
@@ -310,7 +315,7 @@ impl Coordinator {
     fn enqueue(&mut self, waiting: Vec<Waiting>) {
         let now = self.clock.now();
         for waiting in waiting {
-            let entry = match self.write(waiting.seq, &waiting.event) {
+            let entry = match self.write(waiting.seq, &waiting.event, waiting.bytes as u64) {
                 Some(bytes) => {
                     dec_len(&self.pending, 1);
                     Entry {
@@ -334,11 +339,11 @@ impl Coordinator {
         }
     }
 
-    /// Write an event to disk and return its record size. `None` keeps it in
-    /// memory: there is no store, the write failed, or orphan files fill the
-    /// disk quota.
-    fn write(&mut self, seq: u64, event: &CaptureEvent) -> Option<u64> {
-        if self.orphans_fill_disk() {
+    /// Write an event whose record measures `bytes` to disk and return the
+    /// written record size. `None` keeps it in memory: there is no store, the
+    /// write failed, or orphan files leave no room for it in the disk quota.
+    fn write(&mut self, seq: u64, event: &CaptureEvent, bytes: u64) -> Option<u64> {
+        if self.orphans_fill_disk(bytes) {
             return None;
         }
         match self.store.as_mut()?.write(StoreKey(seq), event) {
@@ -356,16 +361,17 @@ impl Coordinator {
         }
     }
 
-    /// Whether files that could not be deleted leave no room on disk, counted
-    /// with the queued records. Evicting queued records would not make room,
-    /// so new events stay in memory instead.
-    fn orphans_fill_disk(&self) -> bool {
-        !self.orphans.is_empty()
-            && self
-                .table
-                .disk()
-                .plus(self.orphan_usage)
-                .reaches(self.disk_limits())
+    /// Whether files that could not be deleted leave no room on disk for a
+    /// record of `bytes`, counted with the queued records. Eviction ignores
+    /// orphan files and would not bring usage back down, so the record stays
+    /// in memory instead.
+    fn orphans_fill_disk(&self, bytes: u64) -> bool {
+        if self.orphans.is_empty() {
+            return false;
+        }
+        let mut usage = self.table.disk().plus(self.orphan_usage);
+        usage.add(bytes);
+        usage.over(self.disk_limits())
     }
 
     fn disk_limits(&self) -> Limits {
@@ -754,8 +760,8 @@ impl Coordinator {
 
     /// Write events held only in memory to disk, oldest first.
     fn write_memory_entries(&mut self) {
-        for (seq, event) in self.table.memory_entries() {
-            if let Some(bytes) = self.write(seq, &event) {
+        for (seq, bytes, event) in self.table.memory_entries() {
+            if let Some(bytes) = self.write(seq, &event, bytes) {
                 self.table.mark_on_disk(seq, bytes);
                 dec_len(&self.pending, 1);
             }
@@ -971,11 +977,23 @@ impl Executor {
             Ok(response) => {
                 let status = response.status().as_u16();
                 let retry_after = capture::parse_retry_after(response.headers());
-                match response.text() {
-                    Ok(body) => Outcome::Response {
+                let mut bytes = Vec::new();
+                let read = response
+                    .take(MAX_RESPONSE_BODY_BYTES + 1)
+                    .read_to_end(&mut bytes);
+                match read {
+                    // An oversized body is unreadable, not cut off: a success
+                    // has no results to read, and any other status is the
+                    // answer by itself.
+                    Ok(_) if bytes.len() as u64 > MAX_RESPONSE_BODY_BYTES => Outcome::Response {
                         status,
                         retry_after,
-                        body,
+                        body: String::new(),
+                    },
+                    Ok(_) => Outcome::Response {
+                        status,
+                        retry_after,
+                        body: String::from_utf8_lossy(&bytes).into_owned(),
                     },
                     // A success whose body never fully arrived is a network
                     // error: its per-event results are unknown.
