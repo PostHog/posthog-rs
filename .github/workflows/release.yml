@@ -137,17 +137,18 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           version_of() { grep -m1 '^version = ' "$1" | sed 's/version = "\(.*\)"/\1/'; }
+          # Finish an earlier run's posthog-rs-ffi release first. Its release commit
+          # is on main, but its GitHub Release isn't published, so a step failed after
+          # the commit landed. Recover that version, and leave any changesets that
+          # landed since for the next release.
+          ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
+          published=$(gh release view "posthog-rs-ffi-v$ffi_version" --json isDraft --jq '.isDraft == false' 2>/dev/null || echo false)
+          if [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
+            echo "::notice::Finishing the posthog-rs-ffi $ffi_version release. Changesets on main wait for the next release."
+            echo "rerun=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if ! find .sampo/changesets -name '*.md' | grep -q .; then
-            # A rerun after the release commit landed finds the changesets consumed.
-            # Only a posthog-rs-ffi version whose GitHub Release isn't published yet
-            # can be finished, whether or not its tag was already pushed.
-            ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
-            published=$(gh release view "posthog-rs-ffi-v$ffi_version" --json isDraft --jq '.isDraft == false' 2>/dev/null || echo false)
-            if [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
-              echo "::notice::No changesets left. Finishing the posthog-rs-ffi $ffi_version release."
-              echo "rerun=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
             echo "::error::No changesets to release"
             exit 1
           fi

@@ -160,7 +160,7 @@ Never put a secret key in an application you distribute, such as a desktop app o
 ### Not covered
 
 - **Error tracking:** the bindings don't capture C or C++ crashes. Send your own `$exception` events with `posthog_capture`, or use a crash reporter.
-- **Delivery failures:** `posthog_capture` returns `POSTHOG_STATUS_OK` once the event is queued. If PostHog later rejects the batch, or sending runs out of retries, the event is dropped and the C API doesn't report it. Flag requests run while you wait, so their failures come back as `POSTHOG_STATUS_REQUEST`.
+- **Delivery failures:** `POSTHOG_STATUS_OK` from `posthog_capture` means the call succeeded, not that the event was queued or delivered. The event is dropped without an error status when the client is shut down or the queue is full, and when PostHog rejects its batch or sending runs out of retries. Flag requests run while you wait, so their failures come back as `POSTHOG_STATUS_REQUEST`.
 - **Not in the C API yet:** the SDK's `before_send` and `on_error` hooks, AI events, and transactional email.
 
 ## Development
