@@ -71,7 +71,7 @@ impl std::io::Write for CountingWriter {
     }
 }
 
-fn json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+pub(super) fn json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
     let mut w = CountingWriter(0);
     // Serialization of an already-built `CaptureEvent` cannot fail short of an
     // allocation error; a failure here would also fail at send time, where it
@@ -396,46 +396,49 @@ pub(crate) fn count_results(resp: &CaptureResponse) -> HashMap<(String, Option<S
 }
 
 /// O(n) consuming pass: records terminal results, returns only retry events.
-/// Events absent from `results` are silently dropped.
+/// Events absent from `results` count as delivered.
 ///
 /// When a result carries `duplicates_dropped: n`, the first event with that
 /// uuid takes the result and the next `n` copies are terminal drops: neither
 /// resent nor recorded, and counted through the first copy's entry. A kept copy
 /// that is retried carries the count to its final result.
-pub(crate) fn process_batch_response(
-    pending: Vec<CaptureEvent>,
+pub(crate) fn process_batch_response<T: AsRef<CaptureEvent> + AsMut<CaptureEvent>>(
+    pending: Vec<T>,
     results: &HashMap<Uuid, EventResult>,
     final_results: &mut HashMap<Uuid, EventResult>,
     is_final_attempt: bool,
-) -> Vec<CaptureEvent> {
+) -> Vec<T> {
     let mut next = Vec::new();
     // `HashMap::new` does not allocate, so batches without duplicates pay nothing.
     let mut copies_seen: HashMap<Uuid, u32> = HashMap::new();
     for mut v1 in pending {
-        let Some(r) = results.get(&v1.uuid) else {
+        let uuid = v1.as_ref().uuid;
+        let Some(r) = results.get(&uuid) else {
             continue;
         };
         if let Some(dropped) = r.duplicates_dropped {
-            let seen = copies_seen.entry(v1.uuid).or_insert(0);
+            let seen = copies_seen.entry(uuid).or_insert(0);
             *seen = seen.saturating_add(1);
             if (1..=dropped).contains(&(*seen - 1)) {
                 continue;
             }
         }
         if r.result == EventStatus::Retry && !is_final_attempt {
-            v1.dropped_copies = v1
+            let wire = v1.as_mut();
+            wire.dropped_copies = wire
                 .dropped_copies
                 .saturating_add(r.duplicates_dropped.unwrap_or(0));
             next.push(v1);
         } else {
             let mut result = r.clone();
-            if v1.dropped_copies > 0 {
+            if v1.as_ref().dropped_copies > 0 {
                 result.duplicates_dropped = Some(
-                    v1.dropped_copies
+                    v1.as_ref()
+                        .dropped_copies
                         .saturating_add(result.duplicates_dropped.unwrap_or(0)),
                 );
             }
-            final_results.insert(v1.uuid, result);
+            final_results.insert(uuid, result);
         }
     }
     next
@@ -451,7 +454,19 @@ pub(crate) fn after_transport_error(
     attempt: u32,
     err_msg: String,
 ) -> Step {
-    if attempt >= opts.max_capture_attempts {
+    let is_final = attempt >= opts.max_capture_attempts;
+    transport_error_step(opts, request_id, attempt, err_msg, is_final)
+}
+
+/// [`after_transport_error`] for a caller that decides which attempt is final.
+pub(crate) fn transport_error_step(
+    opts: &ClientOptions,
+    request_id: &Uuid,
+    attempt: u32,
+    err_msg: String,
+    is_final: bool,
+) -> Step {
+    if is_final {
         return Step::Fail(Error::Connection(err_msg));
     }
     debug!(
@@ -474,6 +489,33 @@ pub(crate) fn after_response(
     pending: &mut Vec<CaptureEvent>,
     final_results: &mut HashMap<Uuid, EventResult>,
 ) -> Step {
+    let is_final = attempt >= opts.max_capture_attempts;
+    response_step(
+        opts,
+        request_id,
+        attempt,
+        status,
+        retry_after,
+        body,
+        pending,
+        final_results,
+        is_final,
+    )
+}
+
+/// [`after_response`] for a caller that decides which attempt is final.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn response_step<T: AsRef<CaptureEvent> + AsMut<CaptureEvent>>(
+    opts: &ClientOptions,
+    request_id: &Uuid,
+    attempt: u32,
+    status: u16,
+    retry_after: Option<Duration>,
+    body: &str,
+    pending: &mut Vec<T>,
+    final_results: &mut HashMap<Uuid, EventResult>,
+    is_final: bool,
+) -> Step {
     // The backend sends exactly 200 today; accept the whole 2xx class so a
     // future 201/202 isn't misclassified as a connection error.
     if (200..=299).contains(&status) {
@@ -492,7 +534,6 @@ pub(crate) fn after_response(
             );
         }
 
-        let is_final = attempt >= opts.max_capture_attempts;
         let next = process_batch_response(
             std::mem::take(pending),
             &batch_resp.results,
@@ -520,7 +561,7 @@ pub(crate) fn after_response(
             "Capture request failed, will retry"
         );
 
-        if attempt >= opts.max_capture_attempts {
+        if is_final {
             Step::Fail(terminal_response_error(status, body))
         } else {
             Step::Backoff(capture_backoff_duration(opts, attempt, retry_after))

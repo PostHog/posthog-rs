@@ -39,6 +39,35 @@ use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::Event;
 
+#[cfg(feature = "stateful")]
+#[allow(dead_code)] // Composed by the stateful client layered above.
+#[path = "transport_delivery.rs"]
+mod delivery;
+#[cfg(feature = "stateful")]
+#[allow(dead_code)] // Composed by the stateful client layered above.
+#[path = "transport_inbox.rs"]
+mod inbox;
+#[cfg(feature = "stateful")]
+#[allow(dead_code)] // Composed by the stateful client layered above.
+#[path = "transport_queue.rs"]
+mod queue;
+#[cfg(all(test, feature = "stateful"))]
+#[path = "transport_startup_tests.rs"]
+mod startup_tests;
+#[cfg(feature = "stateful")]
+#[allow(dead_code)] // Composed by the stateful client layered above.
+#[path = "transport_storage.rs"]
+mod storage;
+#[cfg(feature = "stateful")]
+#[allow(dead_code)] // Composed by the stateful client layered above.
+#[path = "transport_table.rs"]
+mod table;
+#[cfg(feature = "stateful")]
+use delivery::Delivery;
+#[cfg(feature = "stateful")]
+#[allow(unused_imports)] // Used by the stateful client layered above.
+pub(crate) use delivery::{Admission, PreparedAdmission, StartupFailure};
+
 /// Messages sent from producers (`capture`/`flush`/`shutdown`) to the worker.
 pub(crate) enum Control {
     // Boxed so the channel node isn't sized to a whole Event on every flush/
@@ -63,6 +92,22 @@ pub(crate) enum Control {
     /// due, so interval and backoff timing can be driven without real sleeps.
     #[cfg(test)]
     Tick(Completion),
+    /// Stateful delivery: events are waiting in the inbox.
+    #[cfg(feature = "stateful")]
+    #[allow(dead_code)] // Sent by the stateful client layered above.
+    QueueWake,
+    /// Stateful delivery: a flush covering every event admitted at or below
+    /// `through`, the queue position when it was requested.
+    #[cfg(feature = "stateful")]
+    #[allow(dead_code)] // Sent by the stateful client layered above.
+    QueueFlush {
+        completion: Completion,
+        through: u64,
+    },
+    /// Stateful delivery: the executor finished a request.
+    #[cfg(feature = "stateful")]
+    #[allow(dead_code)] // Sent by the stateful client layered above.
+    Sent(Box<queue::Sent>),
 }
 
 /// Completion signal handed to the worker so the caller can wait for a flush or
@@ -98,7 +143,7 @@ pub(crate) trait Clock: Send + Sync + 'static {
     fn now_utc(&self) -> DateTime<Utc>;
 }
 
-struct SystemClock;
+pub(crate) struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
@@ -128,6 +173,10 @@ pub(crate) struct TransportHandle {
     /// The worker thread's id, so teardown and the panic hook can avoid waiting
     /// for or joining this client's own worker.
     worker_id: Option<std::thread::ThreadId>,
+    /// Present for a stateful client's delivery queue, whose worker is the
+    /// coordinator.
+    #[cfg(feature = "stateful")]
+    delivery: Option<Delivery>,
 }
 
 /// Name of the analytics worker thread (aids debugging). The panic hook detects
@@ -219,7 +268,7 @@ impl LaneConfig {
 /// Upper bound on a blocking-flush / shutdown timeout, so an absurd value can't
 /// overflow the `now + timeout` deadlines (worker drain) or the `recv_timeout`
 /// bound on `flush_blocking_timeout`.
-const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(86_400);
+pub(crate) const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(86_400);
 
 impl TransportHandle {
     /// Spawn the analytics worker with the real system clock.
@@ -264,6 +313,8 @@ impl TransportHandle {
             endpoint,
             clock,
             worker_id,
+            #[cfg(feature = "stateful")]
+            delivery: None,
         }
     }
 
@@ -366,6 +417,16 @@ impl TransportHandle {
     /// `drain_pending_completions`), and any it doesn't reach are dropped with the
     /// channel — which wakes the caller's wait with a recv error.
     pub(crate) fn send_control(&self, control: Control) -> bool {
+        #[cfg(feature = "stateful")]
+        let control = match (control, &self.delivery) {
+            (Control::Flush(completion) | Control::FlushCaptures(completion), Some(delivery)) => {
+                Control::QueueFlush {
+                    completion,
+                    through: delivery.inbox.last_seq(),
+                }
+            }
+            (control, _) => control,
+        };
         self.tx.send(control).is_ok()
     }
 
@@ -403,6 +464,10 @@ impl TransportHandle {
     /// as this returns.
     pub(crate) fn request_shutdown(&self, completion: Completion) -> bool {
         if self.begin_close() {
+            #[cfg(feature = "stateful")]
+            if let Some(delivery) = &self.delivery {
+                delivery.select_deadline(self.clock.now() + delivery.drain_timeout);
+            }
             self.send_control(Control::Shutdown(completion))
         } else {
             false
@@ -448,6 +513,10 @@ impl TransportHandle {
         if let Some(handle) = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = handle.join();
         }
+        #[cfg(feature = "stateful")]
+        if let Some(delivery) = &self.delivery {
+            delivery.join_executor();
+        }
     }
 
     /// Test helper: drive one worker cycle against the current (virtual) clock.
@@ -489,7 +558,16 @@ impl TransportHandle {
     /// must not synchronously wait there; the panic hook also skips capturing to
     /// avoid a self-flush deadlock or recursive `before_send` panic.
     pub(crate) fn on_worker_thread(&self) -> bool {
-        self.worker_id == Some(std::thread::current().id())
+        let current = Some(std::thread::current().id());
+        #[cfg(feature = "stateful")]
+        if self
+            .delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.executor_id == current)
+        {
+            return true;
+        }
+        self.worker_id == current
     }
 
     /// Test helper: flush + stop + join, mirroring the client's shutdown.
@@ -863,6 +941,10 @@ fn run_worker(
                 drain_pending_completions(&rx, &pipeline.len);
                 return;
             }
+            #[cfg(feature = "stateful")]
+            Wake::Msg(Control::QueueFlush { completion, .. }) => completion.signal(),
+            #[cfg(feature = "stateful")]
+            Wake::Msg(Control::QueueWake | Control::Sent(_)) => {}
             #[cfg(test)]
             Wake::Msg(Control::Tick(completion)) => {
                 // Defer the signal until after the shared servicing block below,
@@ -917,6 +999,10 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             Control::Tick(c) => c.signal(),
             Control::Capture { .. } => dec_len(len, 1),
             Control::HistoricalBatch { events } => dec_len(len, events.len()),
+            #[cfg(feature = "stateful")]
+            Control::QueueFlush { completion, .. } => completion.signal(),
+            #[cfg(feature = "stateful")]
+            Control::QueueWake | Control::Sent(_) => {}
         }
     }
 }
@@ -1425,12 +1511,12 @@ mod tests {
     /// Test clock with manually advanced virtual time, so interval and backoff
     /// timing are exercised without real sleeps.
     #[derive(Clone)]
-    struct ManualClock {
+    pub(super) struct ManualClock {
         inner: Arc<Mutex<(Instant, DateTime<Utc>)>>,
     }
 
     impl ManualClock {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self::at(Utc::now())
         }
         fn at(wall: DateTime<Utc>) -> Self {
@@ -1438,7 +1524,7 @@ mod tests {
                 inner: Arc::new(Mutex::new((Instant::now(), wall))),
             }
         }
-        fn advance(&self, by: Duration) {
+        pub(super) fn advance(&self, by: Duration) {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.0 += by;
             g.1 += chrono::Duration::from_std(by).expect("test duration fits chrono");
@@ -1463,7 +1549,7 @@ mod tests {
         })
     }
 
-    fn options(base_url: String) -> ClientOptionsBuilder {
+    pub(super) fn options(base_url: String) -> ClientOptionsBuilder {
         let mut builder = ClientOptionsBuilder::default();
         builder
             .api_key("phc_test".to_string())
