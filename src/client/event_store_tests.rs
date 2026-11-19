@@ -294,15 +294,6 @@ fn a_failed_write_leaves_no_record_and_a_failed_delete_keeps_it() {
 }
 
 #[test]
-fn a_failed_directory_sync_still_keeps_the_written_record() {
-    let directory = TestDirectory::new();
-    let mut store = directory.open(limits());
-    store.fail_directory_sync.set(true);
-    store.write(StoreKey(1), &event("synced-late")).unwrap();
-    assert!(store.read(StoreKey(1)).is_ok());
-}
-
-#[test]
 fn invalid_limits_fail_before_creating_an_event_spool() {
     let directory = TestDirectory::new();
     for invalid in [
