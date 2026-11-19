@@ -365,11 +365,21 @@ jobs:
           VERSION: ${{ needs.release.outputs.ffi_version }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            # A rerun replaces the archives. `gh release create` uploads to a draft
-            # first, so an interrupted run can leave one that still needs publishing.
-            gh release upload "$TAG" dist/* --clobber
             if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ]; then
+              # `gh release create` uploads to a draft first, so an interrupted
+              # run can leave one behind. Finish it.
+              gh release upload "$TAG" dist/* --clobber
               gh release edit "$TAG" --draft=false --latest=false
+            else
+              # Never change a published release's downloads. Only check they're complete.
+              mkdir published
+              gh release download "$TAG" --pattern '*.sha256' --dir published
+              for sum in dist/*.sha256; do
+                cmp -s "$sum" "published/$(basename "$sum")" || {
+                  echo "::error::The published $(basename "$sum" .sha256) is missing or differs from this build"
+                  exit 1
+                }
+              done
             fi
             exit 0
           fi

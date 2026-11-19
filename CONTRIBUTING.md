@@ -25,6 +25,8 @@ cargo clippy -- -D warnings
 scripts/check-public-api.sh
 ```
 
+`crates/posthog-rs-ffi` (the C bindings) is a workspace member so Sampo can release it, but it builds only without `posthog`'s `async-client` feature. A workspace-wide build turns that feature on, so use `--workspace --exclude posthog-rs-ffi` and build the bindings with `-p posthog-rs-ffi`. See [its README](crates/posthog-rs-ffi/README.md#development).
+
 `check-public-api.sh` compares the public API in your working tree with the checked-in `api/public-api.txt` snapshot. If an API change is intentional, run `scripts/check-public-api.sh --update` and review the snapshot diff. It requires:
 
 ```bash
