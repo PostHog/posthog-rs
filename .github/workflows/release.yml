@@ -141,8 +141,21 @@ jobs:
           # is on main, but its GitHub Release isn't published, so a step failed after
           # the commit landed. Recover that version, and leave any changesets that
           # landed since for the next release.
+          # Prints true or false. Fails on any lookup error other than "release not
+          # found", so an outage isn't mistaken for an unpublished release.
+          ffi_release_published() {
+            local out
+            if out=$(gh release view "posthog-rs-ffi-v$1" --json isDraft --jq '.isDraft == false' 2>&1); then
+              echo "$out"
+            elif [ "$out" = "release not found" ]; then
+              echo false
+            else
+              echo "::error::Couldn't look up the posthog-rs-ffi-v$1 release: $out" >&2
+              return 1
+            fi
+          }
           ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
-          published=$(gh release view "posthog-rs-ffi-v$ffi_version" --json isDraft --jq '.isDraft == false' 2>/dev/null || echo false)
+          published=$(ffi_release_published "$ffi_version")
           if [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
             echo "::notice::Finishing the posthog-rs-ffi $ffi_version release. Changesets on main wait for the next release."
             echo "rerun=true" >> "$GITHUB_OUTPUT"
@@ -290,8 +303,21 @@ jobs:
           GH_TOKEN: ${{ steps.releaser.outputs.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # Prints true or false. Fails on any lookup error other than "release not
+          # found", so an outage isn't mistaken for an unpublished release.
+          ffi_release_published() {
+            local out
+            if out=$(gh release view "posthog-rs-ffi-v$1" --json isDraft --jq '.isDraft == false' 2>&1); then
+              echo "$out"
+            elif [ "$out" = "release not found" ]; then
+              echo false
+            else
+              echo "::error::Couldn't look up the posthog-rs-ffi-v$1 release: $out" >&2
+              return 1
+            fi
+          }
           version=$(grep -m1 '^version = ' crates/posthog-rs-ffi/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          published=$(gh release view "posthog-rs-ffi-v$version" --json isDraft --jq '.isDraft == false' 2>/dev/null || echo false)
+          published=$(ffi_release_published "$version")
           if [ "$version" = "0.0.0" ] || [ "$published" = true ]; then
             echo "No posthog-rs-ffi release waiting to be published."
             exit 0

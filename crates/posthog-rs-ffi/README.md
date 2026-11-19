@@ -115,11 +115,12 @@ posthog_capture(client, event);
 posthog_event_free(event);
 
 PostHogFlags *flags = NULL;
-if (posthog_evaluate_flags(client, "user-123", NULL, &flags) == POSTHOG_STATUS_OK) {
-    bool enabled = false;
-    posthog_flags_is_enabled(flags, "new-export-dialog", &enabled);
-    posthog_flags_free(flags);
-}
+// A failed request returns an error status and still writes a snapshot,
+// which reads as defaults. Free it whatever the status.
+posthog_evaluate_flags(client, "user-123", NULL, &flags);
+bool enabled = false;
+posthog_flags_is_enabled(flags, "new-export-dialog", &enabled);
+posthog_flags_free(flags);
 
 // Delivers queued events, then frees the client.
 posthog_client_free(client);
