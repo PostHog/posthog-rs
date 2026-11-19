@@ -115,8 +115,9 @@ jobs:
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           set "OUT=..\..\target\x86_64-pc-windows-msvc\release"
           rem MSVC has no -fshort-enums, and its enums are always int-sized.
-          cl /nologo /W4 /WX examples\capture.c /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:capture.exe || exit /b 1
-          cl /nologo /std:c++17 /EHsc /W4 /WX examples\capture.cpp /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:capture-cpp.exe || exit /b 1
+          rem The examples read settings with getenv, which MSVC flags as unsafe (C4996).
+          cl /nologo /W4 /WX /D_CRT_SECURE_NO_WARNINGS examples\capture.c /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:capture.exe || exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX /D_CRT_SECURE_NO_WARNINGS examples\capture.cpp /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:capture-cpp.exe || exit /b 1
           rem Shared: link the DLL's import library. The DLL must sit next to the program.
           cl /nologo /std:c++17 /EHsc /W4 /WX tests\c\smoke.cpp /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:smoke-shared.exe || exit /b 1
           copy /y "%OUT%\posthog_ffi.dll" . || exit /b 1
