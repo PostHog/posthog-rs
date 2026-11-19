@@ -52,9 +52,7 @@ All of this runs in [`release.yml`](.github/workflows/release.yml), in the same 
 
 - "Release and publish" bumps whichever packages have changesets and commits the release. It publishes `posthog` and `posthog-rs` only when their version changed, and pushes the `posthog-rs-ffi-v<version>` tag only when the bindings' version changed. Every tag points at the release commit itself, even if `main` has moved on.
 - "Build C bindings" builds that tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml). It compiles both examples, runs the C++ smoke test against the shared and static libraries, packages the archive, then unpacks it elsewhere and builds the smoke test through CMake and pkg-config, as a customer would.
-- "Publish the C bindings GitHub Release" checks that all five archives and their checksums are present, attests their build provenance with `actions/attest`, then publishes the GitHub Release with them attached.
-
-The build provenance names the commit that started the Release run, the commit with the merged changesets. The archives are built from the release commit after it, which has the version bump, so `$lib_version` is the released version. The two commits differ only by the release's version numbers and changelogs. Each build checks that the tag points to the release commit and that `crates/posthog-rs-ffi/Cargo.toml` has the released version. The source commit `actions/attest` signs comes from the run's token and can't be set, so the provenance can only name the release commit if a separate run starts on the tag.
+- "Publish the C bindings GitHub Release" checks that all five archives and their checksums are present, then publishes the GitHub Release with them attached.
 
 The two C bindings jobs run even if publishing `posthog` fails, as long as the `posthog-rs-ffi` tag exists. A failure in either sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
 

@@ -23,14 +23,6 @@ lib/pkgconfig/                      pkg-config files (Linux and macOS)
 examples/capture.c, capture.cpp
 ```
 
-Each archive has signed build provenance showing it was built by this repository's release workflow. Check it before use with the [GitHub CLI](https://cli.github.com/):
-
-```bash
-gh attestation verify posthog-rs-ffi-0.1.0-x86_64-unknown-linux-gnu.tar.gz --repo PostHog/posthog-rs
-```
-
-The source commit in the provenance is the commit that started the release, the one before the version bump. The archive itself is built from the `posthog-rs-ffi-v<version>` tag, which points to the release commit.
-
 `posthog-rs-ffi` has its own version, independent of the `posthog` crate. Events report it as `$lib_version`.
 
 ## Linking

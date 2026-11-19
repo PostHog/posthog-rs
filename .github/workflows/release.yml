@@ -367,10 +367,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      # Signed build provenance for the archives, which `gh attestation verify` checks.
-      id-token: write
-      attestations: write
-      artifact-metadata: write
     steps:
       - name: Download archives
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -396,13 +392,6 @@ jobs:
           done
           [ "$missing" -eq 0 ]
           sha256sum -c ./*.sha256
-
-      - name: Attest build provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: |
-            dist/*.tar.gz
-            dist/*.zip
 
       - name: Checkout the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
