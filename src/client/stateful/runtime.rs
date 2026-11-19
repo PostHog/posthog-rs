@@ -103,9 +103,9 @@ impl DrainReport {
 /// Setup always returns this type. Invalid configuration or local delivery
 /// startup failure disables the client and reports through `on_error`.
 /// Storage failures instead allow enabled memory-backed operation. No network
-/// request is required to establish readiness. Feature flag requests run
-/// independently of event delivery, on a bounded request worker that does not
-/// own event storage.
+/// request is required to establish readiness. Project configuration and feature
+/// flag requests run independently of event delivery, on a bounded request worker
+/// that does not own event storage.
 ///
 /// Persistent namespaces permit only one live owner. A second client with the
 /// same storage scope uses a generated or bootstrap identity in memory instead
@@ -123,7 +123,7 @@ pub struct Client {
     shutdown_timeout: Duration,
     shutdown: Option<shutdown::Shutdown>,
     pub(super) producer: Option<Producer>,
-    pub(super) flag_loader: Option<super::flags::FlagLoader>,
+    pub(super) flag_loader: Option<Arc<super::flags::FlagLoader>>,
     pub(super) state: Option<StateWriter>,
     pub(super) transport: Option<TransportHandle>,
     pub(super) closed: AtomicBool,
@@ -283,10 +283,10 @@ impl Client {
             shutdown: Some(shutdown),
             shutdown_timeout: config.shutdown_timeout,
             producer: Some(producer),
-            flag_loader: Some(super::flags::FlagLoader::new(
+            flag_loader: Some(Arc::new(super::flags::FlagLoader::new(
                 config.transport_options(),
                 config.on_feature_flags.clone(),
-            )),
+            ))),
             state: Some(state),
             transport: Some(transport),
             closed: AtomicBool::new(false),
@@ -303,9 +303,7 @@ impl Client {
             .unwrap()
             .listeners
             .notify_ready(&client.state.as_ref().unwrap().access());
-        if config.preload_feature_flags {
-            client.reload_feature_flags();
-        }
+        client.load_remote_config(config.preload_feature_flags);
         client
     }
 

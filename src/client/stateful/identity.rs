@@ -350,8 +350,12 @@ impl Client {
             let context_revision = state.context_revision.wrapping_add(1);
             let device_id = state.device_id.clone();
             let sessions = state.sessions.cleared();
+            let remote_config = state.remote_config.clone();
+            let remote_config_loading = state.remote_config_loading;
             *state = Snapshot::anonymous(id);
             state.device_id = device_id;
+            state.remote_config = remote_config;
+            state.remote_config_loading = remote_config_loading;
             state.sessions = sessions;
             state.generation = generation;
             state.context_revision = context_revision;

@@ -70,7 +70,11 @@ impl Task {
         }
     }
 
-    fn run(self, http: &reqwest::blocking::Client, options: &ClientOptions) -> Option<Task> {
+    pub(crate) fn run(
+        self,
+        http: &reqwest::blocking::Client,
+        options: &ClientOptions,
+    ) -> Option<Task> {
         let endpoint = options.endpoints().build_url(Endpoint::Flags);
         let result = fetch(http, options, &endpoint, &self.body);
         if let Err(error) = &result {

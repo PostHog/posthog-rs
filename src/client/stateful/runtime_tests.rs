@@ -274,11 +274,11 @@ fn corrupt_state_is_replaced_but_future_state_is_preserved() {
     for (original, recoverable) in [
         (b"not json".as_slice(), true),
         (
-            br#"{"version":1,"state":{"anonymous_id":"private","distinct_id":17,"identified":false,"person_processing":false,"opt_out":null,"registered":{},"groups":{},"flags":{"person_properties":{},"group_properties":{},"cache":null},"session":null}}"#.as_slice(),
+            br#"{"version":1,"state":{"anonymous_id":"private","distinct_id":17,"identified":false,"person_processing":false,"opt_out":null,"registered":{},"groups":{},"flags":{"person_properties":{},"group_properties":{},"cache":null},"remote_config":null,"session":null}}"#.as_slice(),
             true,
         ),
         (
-            br#"{"version":1,"state":{"anonymous_id":"","distinct_id":"private","identified":false,"person_processing":false,"opt_out":null,"registered":{},"groups":{},"flags":{"person_properties":{},"group_properties":{},"cache":null},"session":null}}"#.as_slice(),
+            br#"{"version":1,"state":{"anonymous_id":"","distinct_id":"private","identified":false,"person_processing":false,"opt_out":null,"registered":{},"groups":{},"flags":{"person_properties":{},"group_properties":{},"cache":null},"remote_config":null,"session":null}}"#.as_slice(),
             true,
         ),
         (b"{\"version\":99,\"state\":{}}".as_slice(), false),
@@ -329,7 +329,7 @@ fn startup_rewrites_missing_device_and_tolerates_additive_fields() {
     let directory = Directory::new();
     fs::create_dir_all(directory.scope()).unwrap();
     let path = directory.scope().join("state.json");
-    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","identified":true,"person_processing":true,"opt_out":true,"registered":{},"groups":{},"flags":{"person_properties":{},"group_properties":{},"cache":null},"session":null,"future_field":42}}"#).unwrap();
+    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","identified":true,"person_processing":true,"opt_out":true,"registered":{},"groups":{},"flags":{"person_properties":{},"group_properties":{},"cache":null},"remote_config":null,"session":null,"future_field":42}}"#).unwrap();
     let client = Client::init_blocking(directory.config());
     assert_eq!(client.get_anonymous_id(), "anonymous");
     assert_eq!(client.get_distinct_id(), "person");
@@ -346,7 +346,7 @@ fn startup_rewrites_missing_device_and_tolerates_additive_fields() {
 }
 
 #[test]
-fn startup_rewrites_invalid_optional_flags_and_session_without_mutation() {
+fn startup_rewrites_invalid_optional_caches_and_session_without_mutation() {
     let directory = Directory::new();
     fs::create_dir_all(directory.scope()).unwrap();
     let mut snapshot = super::Snapshot::anonymous("restored-anonymous".into());
@@ -357,6 +357,7 @@ fn startup_rewrites_invalid_optional_flags_and_session_without_mutation() {
         .insert("plan".into(), serde_json::json!("pro"));
     let mut value = serde_json::json!({"version":1,"state":snapshot});
     value["state"]["flags"]["cache"] = serde_json::json!(false);
+    value["state"]["remote_config"] = serde_json::json!([]);
     value["state"]["session"] = serde_json::json!(false);
     let path = directory.scope().join("state.json");
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
@@ -372,6 +373,7 @@ fn startup_rewrites_invalid_optional_flags_and_session_without_mutation() {
         "pro"
     );
     assert!(rewritten["state"]["flags"]["cache"].is_null());
+    assert!(rewritten["state"]["remote_config"].is_null());
     assert!(rewritten["state"]["session"].is_null());
     client.shutdown_blocking(None);
 }
@@ -506,8 +508,11 @@ fn cancelling_initialization_cleans_up_without_blocking_the_polling_thread() {
     let release_rx = Mutex::new(release_rx);
     let (dropped_tx, dropped_rx) = mpsc::channel();
     let dropped = Dropped(dropped_tx);
-    config.on_error(move |_| {
+    config.on_error(move |failure| {
         let _ = &dropped;
+        if !matches!(failure, PostHogError::Storage(_)) {
+            return;
+        }
         entered_tx.send(std::thread::current().id()).unwrap();
         release_rx
             .lock()

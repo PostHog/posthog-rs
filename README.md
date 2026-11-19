@@ -14,6 +14,62 @@ SDK usage examples and code snippets live in the official documentation so they 
 - [Rust library docs](https://posthog.com/docs/libraries/rust)
 - Stateful application client (`stateful` feature): local anonymous identity, capture/screen, native hooks and persistent delivery.
 
+## Stateful remote configuration
+
+The `stateful` client loads remote configuration asynchronously at initialization,
+without delaying readiness. Settings use the configured persistence scope and
+survive identity changes and reset. Failed refreshes retain the last valid settings;
+`Persistence::Memory` keeps them in memory only.
+
+Startup feature flags load after remote configuration. A successful
+`hasFeatureFlags: false` response skips preload and clears stale server flags while
+preserving bootstrap values. Missing or unavailable settings fall back to loading
+flags. `Config::preload_feature_flags = false` suppresses startup flag loading, not
+remote configuration. Explicit and targeting-triggered flag refreshes remain available.
+Project-request failures are reported through `Config::on_error`. Project cache
+writes are best effort: when settings exceed state-storage bounds, live settings
+remain available and `on_error` receives a storage diagnostic. Successful state
+drains describe mandatory state, not guaranteed cache retention.
+
+## Stateful storage, sessions and shutdown
+
+Disk storage is scoped by project token and instance name, independently of the
+ingestion host. Each namespace has one live owner; share an `Arc<Client>` or use
+different instance names for independent identities. The device ID survives
+identity reset. Malformed current-format core state falls back to configured
+identity/consent and can be replaced by a normal save; future-version and
+inaccessible state is not overwritten. Invalid optional caches are discarded
+without discarding valid identity.
+
+Event persistence continues while HTTP is blocked. Staging, recovery and memory
+fallback share the configured resident count/serialized-byte limits, plus one
+separately bounded upload view of that logical queue. These are not process-memory
+limits. Newest disk retention permits one replacement-record overage, bounded by
+`max_record_bytes` and included in exact accounting; additional appends wait for
+reclamation. Local acceptance does not guarantee disk persistence or ingestion.
+
+Ordinary session activity commits only after local event admission. Hook drops,
+validation/size rejection and passive getters do not refresh idle time. Identity
+and session attribution is frozen before hooks; hooks can still edit wire fields.
+Sleep-inclusive elapsed clocks are used where supported, independently of wall
+clock corrections.
+
+Stateful shutdown selects one deadline for SDK-controlled waiting, including Drop;
+concurrent/later calls cannot extend it. `DeliveryOutcome::Stopped` means actual
+delivery-worker completion, while `TimedOut` means unfinished work at expiry.
+State persistence has its own outcome. Already-started storage, HTTP or
+callback work owns its resources until completion, potentially indefinitely if it
+never returns. Storage work retains its namespace lease while access is possible;
+request-only work does not. Arbitrary destructors of application objects captured
+by callbacks may block outside the SDK-controlled waiting bound.
+
+Configuration/flags requests run independently from event persistence and upload.
+A delivery flush is not a request-completion barrier. Requested reloads coalesce;
+targeting invalidation alone does not fetch. Complete flag responses replace the
+cache with successful records; partial responses merge successes and retain prior
+records. Accepted exposure reports deduplicate by key and typed value until an
+identity change, reset or shutdown, including across reloads and targeting updates.
+
 ## Request context
 
 With the optional `tower` feature, `tower::PostHogLayer` reads

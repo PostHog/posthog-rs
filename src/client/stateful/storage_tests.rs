@@ -481,6 +481,7 @@ const FINAL_V1: &str = r#"{
         }}
       }
     },
+    "remote_config":{"has_feature_flags":true,"session_recording":{"sampleRate":1}},
     "session":{"id":"018e23f4-1234-7000-8000-000000000001","started_ms":100,"activity_ms":200}
   }
 }"#;
@@ -490,7 +491,7 @@ fn fixture() -> serde_json::Value {
 }
 
 #[test]
-fn final_v1_fixture_restores_identity_consent_and_flag_and_session_caches() {
+fn final_v1_fixture_restores_identity_consent_and_all_caches() {
     let decoded = FileStateStore::decode_restored(FINAL_V1.as_bytes()).unwrap();
     assert!(!decoded.rewrite_required);
     let mut snapshot = decoded.snapshot;
@@ -509,9 +510,18 @@ fn final_v1_fixture_restores_identity_consent_and_flag_and_session_caches() {
         cache.flags["checkout"].request_id.as_deref(),
         Some("request")
     );
+    assert!(snapshot.remote_config.is_some());
     assert!(snapshot.session.is_some());
-    let encoded = encode_snapshot(&snapshot).unwrap();
+    let encoded = encode_snapshot_with_outcome(&snapshot)
+        .map(|(bytes, _)| bytes)
+        .unwrap();
     assert_eq!(FileStateStore::decode(&encoded).unwrap(), snapshot);
+    let written: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        written,
+        fixture(),
+        "the writer must keep producing the v1 format"
+    );
 }
 
 #[test]
@@ -546,6 +556,17 @@ fn additive_unknown_fields_are_tolerated_at_each_persisted_depth() {
 }
 
 #[test]
+fn additive_remote_config_fields_preserve_the_cached_config() {
+    let expected = FileStateStore::decode_restored(FINAL_V1.as_bytes())
+        .unwrap()
+        .snapshot;
+    let mut value = fixture();
+    value["state"]["remote_config"]["additional"] = serde_json::json!({"nested":[true,null]});
+    let decoded = FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(decoded.snapshot, expected);
+}
+
+#[test]
 fn optional_sections_recover_independently_without_losing_targeting_or_consent() {
     let original = FileStateStore::decode_restored(FINAL_V1.as_bytes())
         .unwrap()
@@ -564,6 +585,11 @@ fn optional_sections_recover_independently_without_losing_targeting_or_consent()
             "/state/flags/cache/flags/checkout/context",
             serde_json::json!(1),
         ),
+        ("/state/remote_config", serde_json::json!([])),
+        (
+            "/state/remote_config/session_recording",
+            serde_json::json!(42),
+        ),
         ("/state/session", serde_json::json!(true)),
         ("/state/session/started_ms", serde_json::json!(201)),
         (
@@ -579,6 +605,9 @@ fn optional_sections_recover_independently_without_losing_targeting_or_consent()
         if path.starts_with("/state/flags") {
             expected.flags.cache = None;
         }
+        if path.starts_with("/state/remote_config") {
+            expected.remote_config = None;
+        }
         if path.starts_with("/state/session") {
             expected.session = None;
         }
@@ -587,9 +616,11 @@ fn optional_sections_recover_independently_without_losing_targeting_or_consent()
     }
     let mut value = fixture();
     value["state"]["flags"]["cache"] = serde_json::json!(false);
+    value["state"]["remote_config"] = serde_json::json!(false);
     value["state"]["session"] = serde_json::json!(false);
     let decoded = FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()).unwrap();
     assert!(decoded.snapshot.flags.cache.is_none());
+    assert!(decoded.snapshot.remote_config.is_none());
     assert!(decoded.snapshot.session.is_none());
     assert_eq!(
         decoded.snapshot.flags.person_properties,

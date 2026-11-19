@@ -12,7 +12,7 @@ use crate::client::transport::{flags, TransportHandle};
 use crate::client::ClientOptions;
 
 pub(super) struct FlagLoader {
-    options: Arc<ClientOptions>,
+    pub(super) options: Arc<ClientOptions>,
     // Serialize request snapshotting and enqueueing, not network execution. An
     // older caller must not overwrite a newer caller's pending refresh.
     scheduling: Mutex<()>,
@@ -54,8 +54,34 @@ impl FlagLoader {
     }
 
     fn reload(&self, access: StateAccess, transport: &TransportHandle) {
+        self.schedule(access, None, |task| {
+            transport.schedule_flags(task);
+        });
+    }
+
+    pub(super) fn startup_task(
+        &self,
+        access: StateAccess,
+        expected_request: u64,
+    ) -> Option<flags::Task> {
+        let mut task = None;
+        self.schedule(access, Some(expected_request), |prepared| {
+            task = Some(prepared)
+        });
+        task
+    }
+
+    fn schedule(
+        &self,
+        access: StateAccess,
+        expected_request: Option<u64>,
+        enqueue: impl FnOnce(flags::Task),
+    ) {
         let scheduling = self.scheduling.lock().unwrap_or_else(|p| p.into_inner());
         let request = access.mutate(|state| {
+            if expected_request.is_some_and(|expected| state.flag_load.request != expected) {
+                return None;
+            }
             let sequence = state.flag_load.request.checked_add(1)?;
             state.flag_load.request = sequence;
             Some(Request {
@@ -73,7 +99,7 @@ impl FlagLoader {
             self.listeners.clone(),
             request,
         );
-        transport.schedule_flags(task);
+        enqueue(task);
         drop(scheduling);
     }
 }
@@ -161,8 +187,9 @@ impl Client {
     /// coalesce to one latest pending refresh; obsolete responses cannot install.
     /// Failures retain cached values and report through `on_error`.
     ///
-    /// Uses the independent request worker. Delivery and in-memory access
-    /// do not wait for requests, and flush does not wait for flag completion.
+    /// Uses the independent request worker: flags and remote configuration share
+    /// request execution, but do not delay delivery, flush or in-memory access.
+    /// Flush does not wait for flag requests to complete.
     pub fn reload_feature_flags(&self) {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return;

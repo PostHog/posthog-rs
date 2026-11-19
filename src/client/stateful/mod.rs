@@ -15,12 +15,13 @@ mod identity;
 mod initialization;
 mod producer;
 mod properties;
+mod remote_config;
 mod runtime;
 mod sessions;
 mod storage;
 mod writer;
 
-pub use crate::client::on_error::InitializationFailure;
+pub use crate::client::on_error::{InitializationFailure, RemoteConfigFailure};
 pub use crate::client::transport::flags::LoadError as FeatureFlagLoadError;
 pub use config::Config;
 pub use flag_listeners::{FeatureFlagsSubscription, FeatureFlagsUpdate};
@@ -33,9 +34,12 @@ pub use sessions::{SessionMode, SessionPersistence};
 pub use storage::Persistence;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::client::transport::remote_config::RemoteConfig;
 
 /// Saved JSON must stay readable by serde_json's 128-level decoder, including
 /// the few levels the state record adds around application values.
@@ -68,6 +72,10 @@ struct Snapshot {
     registered: HashMap<String, Value>,
     groups: HashMap<String, String>,
     flags: flag_state::FlagState,
+    #[serde(with = "remote_config::cache_serde")]
+    remote_config: Option<Arc<RemoteConfig>>,
+    #[serde(skip)]
+    remote_config_loading: bool,
     #[serde(skip)]
     flag_load: flag_state::FlagLoadState,
     #[serde(deserialize_with = "Option::<sessions::StoredSession>::deserialize")]
@@ -95,6 +103,8 @@ impl Snapshot {
             registered: HashMap::new(),
             groups: HashMap::new(),
             flags: flag_state::FlagState::default(),
+            remote_config: None,
+            remote_config_loading: false,
             flag_load: flag_state::FlagLoadState::default(),
             session: None,
             sessions: sessions::Sessions::default(),
@@ -114,12 +124,17 @@ impl Snapshot {
             && self.registered == other.registered
             && self.groups == other.groups
             && self.flags == other.flags
+            && self.remote_config == other.remote_config
             && self.session == other.session
     }
 
     fn is_valid(&self) -> bool {
         self.flags.is_valid()
             && within_depth(self.registered.values())
+            && self
+                .remote_config
+                .as_ref()
+                .map_or(true, |config| config.valid())
             && self
                 .session
                 .as_ref()

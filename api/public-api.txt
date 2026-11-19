@@ -367,6 +367,10 @@ impl posthog::stateful::PersonProperties
 pub fn posthog::stateful::PersonProperties::new() -> Self
 impl core::convert::From<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>> for posthog::stateful::PersonProperties
 pub fn posthog::stateful::PersonProperties::from(std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>) -> Self
+#[non_exhaustive] pub struct posthog::stateful::RemoteConfigFailure
+impl posthog::stateful::RemoteConfigFailure
+pub fn posthog::stateful::RemoteConfigFailure::message(&self) -> &str
+pub fn posthog::stateful::RemoteConfigFailure::status(&self) -> core::option::Option<u16>
 #[non_exhaustive] pub struct posthog::stateful::Screen
 pub posthog::stateful::Screen::name: alloc::string::String
 pub posthog::stateful::Screen::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
@@ -510,6 +514,7 @@ pub posthog::PostHogError::Capture(posthog::CaptureFailure<'a>)
 pub posthog::PostHogError::FeatureFlags(posthog::FlagsFailure<'a>)
 pub posthog::PostHogError::Initialization(posthog::stateful::InitializationFailure)
 pub posthog::PostHogError::LocalEvaluation(posthog::LocalEvaluationFailure<'a>)
+pub posthog::PostHogError::RemoteConfig(posthog::stateful::RemoteConfigFailure)
 pub posthog::PostHogError::Storage(posthog::StorageFailure<'a>)
 #[non_exhaustive] pub enum posthog::SendEmail
 pub posthog::SendEmail::Code(posthog::CodeEmail)
