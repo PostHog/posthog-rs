@@ -36,11 +36,16 @@ You can also trigger a release manually via the workflow's `workflow_dispatch` t
 
 Each archive contains the shared and static libraries, `posthog.h`, the C and C++ examples, the README, the license, and `lib/native-static-libs.txt`, which lists the system libraries to link with the static library. Each archive has a `.sha256` file next to it.
 
-After it creates the GitHub Release, "Release and publish" starts [`release-ffi.yml`](.github/workflows/release-ffi.yml) on the new tag. That workflow builds each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml), runs the C++ smoke test against the built library, and uploads the archives to the release. It runs separately, so check its run in the Actions tab. A failure sends the same PostHog failure event as the main release. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
+The bindings are part of the `posthog` release. They share its changeset, version, tag and GitHub Release, so `cargo/posthog` is the only changeset key they need. After "Release and publish" creates the GitHub Release, two more jobs in [`release.yml`](.github/workflows/release.yml) run:
+
+- "Build C bindings" builds the published commit for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml) and runs the C++ smoke test against each built library.
+- "Attach C bindings to the GitHub Release" uploads the archives to the release.
+
+They run even if a later step of "Release and publish" fails, as long as the GitHub Release exists. A failure in either job sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
 
 The release step also updates `crates/posthog-ffi/Cargo.lock` to the new `posthog` version, because the bindings crate has its own workspace and lockfile.
 
-If the C bindings release fails, the crates are still published. Fix the problem on `main`. Then, to attach archives built from the release's own code, run "Release C bindings" from the Actions tab with **Use workflow from** set to the release tag (for example `1.2.0`) and the same version. It refuses to run from any other ref, and it replaces archives already attached. If the fix is needed in the build itself, release a patch version instead.
+If a C bindings job fails, the crates are still published. Use **Re-run failed jobs** on that Release run. It rebuilds from the same published commit and replaces any archives already attached. If the build itself needs a fix, release a patch version instead.
 
 A change that affects only the bindings still needs a changeset for `cargo/posthog` to produce a release, because the bindings ship with each `posthog` release.
 

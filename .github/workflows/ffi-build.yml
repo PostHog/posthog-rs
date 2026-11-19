@@ -1,15 +1,20 @@
 name: "Build C bindings"
 
-# Builds and smoke-tests posthog-ffi for each supported platform from the
-# commit the run started on, and uploads one archive per platform as a
-# workflow artifact. release-ffi.yml attaches them to a GitHub Release. CI
-# runs it on pull requests without publishing.
+# Builds and smoke-tests posthog-ffi for each supported platform, and uploads
+# one archive per platform as a workflow artifact. release.yml calls it with
+# the published commit and attaches the archives to the GitHub Release. CI
+# calls it on pull requests without a ref, which builds the PR's commit.
 on:
   workflow_call:
     inputs:
       version:
         description: "posthog version used in the archive names"
         required: true
+        type: string
+      ref:
+        description: "Commit to build. Empty builds the commit that triggered the run."
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -51,6 +56,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Check the posthog version
