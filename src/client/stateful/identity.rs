@@ -324,12 +324,8 @@ impl Client {
             let generation = state.generation.wrapping_add(1);
             let context_revision = state.context_revision.wrapping_add(1);
             let device_id = state.device_id.clone();
-            // Consent belongs to the device, not the identity: an opted-out user
-            // stays opted out after logging out.
-            let opt_out = state.opt_out;
             *state = Snapshot::anonymous(id);
             state.device_id = device_id;
-            state.opt_out = opt_out;
             state.generation = generation;
             state.context_revision = context_revision;
         });

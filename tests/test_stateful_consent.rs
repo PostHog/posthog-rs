@@ -141,7 +141,7 @@ fn disabled_and_closed_clients_cannot_be_opted_in() {
 }
 
 #[test]
-fn reset_keeps_an_explicit_consent_choice() {
+fn reset_restores_configured_default_and_clears_persisted_override() {
     for default in [false, true] {
         let directory = Directory::new();
         let mut conf = directory.config();
@@ -155,17 +155,17 @@ fn reset_keeps_an_explicit_consent_choice() {
         }
         assert_eq!(client.is_opt_out(), !default);
         client.reset();
-        assert_eq!(client.is_opt_out(), !default);
+        assert_eq!(client.is_opt_out(), default);
         assert_ne!(client.get_distinct_id(), "anonymous");
         assert_eq!(
             client.shutdown_blocking(None).state,
             PersistenceOutcome::Persisted
         );
         drop(client);
-        assert_eq!(directory.state()["state"]["opt_out"], !default);
-        // The persisted choice wins over a changed configured default.
+        assert!(directory.state()["state"]["opt_out"].is_null());
+        // Absence is not frozen to the previous launch's default.
         let mut conf = directory.config();
-        conf.opt_out = default;
+        conf.opt_out = !default;
         let client = Client::init_blocking(conf);
         assert_eq!(client.is_opt_out(), !default);
     }
