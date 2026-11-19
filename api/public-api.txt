@@ -226,7 +226,10 @@ pub fn posthog::stateful::Client::set_app_in_background(&self, bool)
 pub fn posthog::stateful::Client::start_session(&self)
 impl posthog::stateful::Client
 pub fn posthog::stateful::Client::feature_flag<'a>(&'a self, &'a str) -> posthog::stateful::FeatureFlagLookup<'a>
+pub fn posthog::stateful::Client::get_feature_flag(&self, &str) -> core::option::Option<posthog::FlagValue>
+pub fn posthog::stateful::Client::get_feature_flag_payload(&self, &str) -> core::option::Option<serde_json::value::Value>
 pub fn posthog::stateful::Client::get_feature_flags(&self) -> core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, posthog::stateful::FeatureFlagResult>>
+pub fn posthog::stateful::Client::is_feature_enabled(&self, &str) -> bool
 impl posthog::stateful::Client
 pub async fn posthog::stateful::Client::flush(&self) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::flush_blocking(&self) -> posthog::stateful::DrainReport
