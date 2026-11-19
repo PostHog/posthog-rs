@@ -21,7 +21,7 @@ use super::types::{
     CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailStatus, EmailWarning, SendEmail,
     SendEmailResult, SendOptions, TemplateEmail,
 };
-use crate::client::{get_default_user_agent, ClientOptions};
+use crate::client::ClientOptions;
 
 pub(crate) const SEND_PATH: &str = "/api/messaging/send/email/";
 const UPLOADS_PATH: &str = "/api/messaging/attachments/uploads/";
@@ -615,7 +615,7 @@ pub(crate) fn connect(options: &ClientOptions, key_needed: &str) -> Result<Conne
     authorization.set_sensitive(true);
     headers.insert(AUTHORIZATION, authorization);
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    if let Ok(user_agent) = HeaderValue::from_str(&get_default_user_agent()) {
+    if let Ok(user_agent) = HeaderValue::from_str(&options.sdk_identity.user_agent()) {
         headers.insert(USER_AGENT, user_agent);
     }
     if let Some(migrated_from) = &options.migrated_from {

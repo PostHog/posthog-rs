@@ -100,12 +100,30 @@ impl BeforeSendHook {
 pub(crate) const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SDK_USERAGENT_NAME: &str = "posthog-rs";
 
+/// The library name and version the client reports: in the `PostHog-Sdk-Info`
+/// and `User-Agent` headers, and as the default `$lib` and `$lib_version`.
+/// An SDK that wraps this one replaces it with its own, so its events and
+/// requests are attributed to it rather than to this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SdkIdentity {
+    pub(crate) name: &'static str,
+    pub(crate) version: &'static str,
+}
+
+impl SdkIdentity {
+    pub(crate) const DEFAULT: SdkIdentity = SdkIdentity {
+        name: SDK_USERAGENT_NAME,
+        version: CRATE_VERSION,
+    };
+
+    /// `<name>/<version>`, the `PostHog-Sdk-Info` and `User-Agent` value.
+    pub(crate) fn user_agent(&self) -> String {
+        format!("{}/{}", self.name, self.version)
+    }
+}
+
 /// Prefix of a personal API key, which capture always rejects as a project key.
 const PERSONAL_API_KEY_PREFIX: &str = "phx_";
-
-pub(crate) fn get_default_user_agent() -> String {
-    format!("{}/{}", SDK_USERAGENT_NAME, CRATE_VERSION)
-}
 
 /// Most redirects an SDK-built HTTP client follows for one request.
 const MAX_REDIRECTS: usize = 5;
@@ -375,6 +393,9 @@ pub struct ClientOptions {
     #[builder(default, setter(custom))]
     pub(crate) before_send: Vec<BeforeSendHook>,
 
+    #[builder(default = "SdkIdentity::DEFAULT", setter(custom))]
+    pub(crate) sdk_identity: SdkIdentity,
+
     /// Hooks invoked once per terminal failure on a network surface (capture
     /// batch delivery, remote `/flags` requests, the local-evaluation poller).
     /// Observability only; registering at least one also silences the default
@@ -405,6 +426,7 @@ pub struct ClientOptions {
 pub(crate) struct CaptureDefaults {
     pub(crate) disable_geoip: bool,
     pub(crate) is_server: bool,
+    pub(crate) identity: SdkIdentity,
 }
 
 impl ClientOptions {
@@ -413,6 +435,7 @@ impl ClientOptions {
         CaptureDefaults {
             disable_geoip: self.disable_geoip,
             is_server: self.is_server,
+            identity: self.sdk_identity,
         }
     }
 
@@ -486,6 +509,16 @@ fn trimmed(value: Option<String>) -> Option<String> {
 }
 
 impl ClientOptionsBuilder {
+    /// Report another library's name and version instead of this crate's, in
+    /// the `PostHog-Sdk-Info` and `User-Agent` headers and as the default
+    /// `$lib` and `$lib_version`. For SDKs built on this one, such as the C
+    /// bindings in `posthog-rs-ffi`. Not part of the supported API.
+    #[doc(hidden)]
+    pub fn sdk_identity(&mut self, name: &'static str, version: &'static str) -> &mut Self {
+        self.sdk_identity = Some(SdkIdentity { name, version });
+        self
+    }
+
     /// Add a hook that can modify or discard events before they are sent.
     ///
     /// Hooks should avoid panicking. Panics are caught and drop the current event,

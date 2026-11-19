@@ -14,7 +14,6 @@ use serde_json::json;
 use tracing::trace;
 use tracing::{instrument, warn};
 
-use super::get_default_user_agent;
 use crate::emails::{EmailTracker, Emails};
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
@@ -148,6 +147,7 @@ pub async fn client<C: Into<ClientOptions>>(options: C) -> Client {
                     options.http_client.clone(),
                 );
                 poller.set_on_error(options.on_error.clone());
+                poller.set_user_agent(options.sdk_identity.user_agent());
                 poller.start().await;
 
                 (Some(LocalEvaluator::new(cache)), Some(poller))
@@ -985,7 +985,7 @@ impl Client {
             .http()?
             .get(url)
             .header(AUTHORIZATION, authorization_header(secret_key)?)
-            .header(USER_AGENT, get_default_user_agent());
+            .header(USER_AGENT, self.options.sdk_identity.user_agent());
         let response = self
             .flags_request_timeout(request)
             .send()
@@ -1167,7 +1167,7 @@ impl Client {
                 .http()?
                 .post(flags_endpoint)
                 .header(CONTENT_TYPE, "application/json")
-                .header(USER_AGENT, get_default_user_agent())
+                .header(USER_AGENT, self.options.sdk_identity.user_agent())
                 .json(payload);
             let request = self.flags_request_timeout(request);
             #[cfg(feature = "test-harness")]

@@ -22,13 +22,7 @@ use posthog::{
 use serde_json::Value;
 
 const LIB_NAME: &str = "posthog-rs-ffi";
-const SDK_LIB_NAME: &str = "posthog-rs";
 const LIB_VERSION: &str = env!("CARGO_PKG_VERSION");
-const LIB_VERSION_PARTS: [(&str, &str); 3] = [
-    ("$lib_version__major", env!("CARGO_PKG_VERSION_MAJOR")),
-    ("$lib_version__minor", env!("CARGO_PKG_VERSION_MINOR")),
-    ("$lib_version__patch", env!("CARGO_PKG_VERSION_PATCH")),
-];
 
 /// Result of a PostHog call.
 #[repr(i32)]
@@ -204,23 +198,6 @@ fn into_c_string(value: String) -> Result<*mut c_char, FfiError> {
             "returned string contains a NUL byte",
         )
     })
-}
-
-/// Reports these bindings, rather than the Rust SDK, as the event source.
-/// The SDK fills `$lib`, `$lib_version` and its version parts before
-/// `before_send` hooks run. Values the caller set are left alone, because the
-/// SDK only fills `$lib` when it's unset.
-fn apply_lib_identity(mut event: Event) -> Option<Event> {
-    if event.properties().get("$lib").and_then(Value::as_str) == Some(SDK_LIB_NAME) {
-        let _ = event.insert_prop("$lib", LIB_NAME);
-        let _ = event.insert_prop("$lib_version", LIB_VERSION);
-        for (key, part) in LIB_VERSION_PARTS {
-            if let Ok(part) = part.parse::<u64>() {
-                let _ = event.insert_prop(key, part);
-            }
-        }
-    }
-    Some(event)
 }
 
 /// Returns a description of the last error on the calling thread, or `NULL`
@@ -473,7 +450,9 @@ pub unsafe extern "C" fn posthog_options_set_secret_key(
 pub unsafe extern "C" fn posthog_client_new(options: *const PostHogOptions) -> *mut PostHogClient {
     ffi_new(|| {
         let mut builder = ref_arg(options, "options")?.builder.clone();
-        builder.before_send(apply_lib_identity);
+        // Reports these bindings, not the Rust SDK, in the request headers and
+        // as the default `$lib` and `$lib_version` of every event.
+        builder.sdk_identity(LIB_NAME, LIB_VERSION);
         let options = builder.build().map_err(|error| {
             FfiError::new(
                 PostHogStatus::POSTHOG_STATUS_INVALID_ARGUMENT,

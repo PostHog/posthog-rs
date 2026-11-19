@@ -497,3 +497,30 @@ fn only_evaluate_locally_never_calls_flags() {
 
     flags_mock.assert_calls(0);
 }
+
+#[test]
+fn capture_requests_identify_the_bindings() {
+    let server = MockServer::start();
+    let sdk_info = format!("posthog-rs-ffi/{}", env!("CARGO_PKG_VERSION"));
+    let capture = server.mock(|when, then| {
+        when.method(POST)
+            .path(CAPTURE_PATH)
+            .header("posthog-sdk-info", &sdk_info)
+            .header("user-agent", &sdk_info);
+        then.status(200).json_body(json!({"results": {}}));
+    });
+
+    unsafe {
+        let client = new_client(&server);
+        let event = posthog_event_new(c("identity").as_ptr(), c("user-1").as_ptr());
+        assert_eq!(
+            posthog_capture(client, event),
+            PostHogStatus::POSTHOG_STATUS_OK
+        );
+        posthog_event_free(event);
+        assert_eq!(posthog_flush(client), PostHogStatus::POSTHOG_STATUS_OK);
+        posthog_client_free(client);
+    }
+
+    capture.assert();
+}
