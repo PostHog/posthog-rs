@@ -81,7 +81,7 @@ fn defaults_getters_capture_and_manual_boundaries() {
     client.start_session();
     assert_eq!(client.peek_session_id(), Some(first));
     client.capture("first");
-    client.screen("screen", HashMap::new());
+    client.screen("screen");
     client.reset_session();
     let next = client.peek_session_id().unwrap();
     assert_ne!(first, next);
@@ -169,7 +169,7 @@ fn consent_disabled_closed_invalid_and_recursive_capture_do_not_create() {
 #[test]
 fn background_state_survives_reset_and_dropped_passive_helpers_do_not_commit() {
     let (client, events) = observed(config());
-    client.group("company", "a", None);
+    client.group(("company", "a"));
     client.identify("person");
     assert_eq!(client.peek_session_id(), None);
     client.set_app_in_background(true);

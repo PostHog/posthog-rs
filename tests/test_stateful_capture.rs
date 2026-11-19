@@ -1,12 +1,13 @@
 #![cfg(feature = "stateful")]
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use httpmock::{Method::POST, MockServer};
-use posthog::stateful::{Capture, CaptureOutcome, Client, Config, DeliveryOutcome, Persistence};
+use posthog::stateful::{
+    Capture, CaptureOutcome, Client, Config, DeliveryOutcome, Persistence, Screen,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -70,10 +71,13 @@ fn public_capture_and_screen_share_enrichment_hooks_and_wire_delivery() {
     input.uuid = Some(id);
     assert_eq!(client.capture(input), CaptureOutcome::Accepted { uuid: id });
     assert_eq!(
-        client.screen(
-            "Settings",
-            HashMap::from([("$screen_name".into(), "wrong-screen".into())])
-        ),
+        client.screen({
+            let mut screen = Screen::new("Settings");
+            screen
+                .properties
+                .insert("$screen_name".into(), "wrong-screen".into());
+            screen
+        }),
         CaptureOutcome::Accepted { uuid: screen_id }
     );
     assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Attempted);
@@ -91,7 +95,7 @@ fn disabled_and_closed_calls_do_not_convert_inputs_or_run_hooks() {
         }
     }
     struct Name;
-    impl From<Name> for String {
+    impl From<Name> for Screen {
         fn from(_: Name) -> Self {
             panic!("disabled screen converted name")
         }
@@ -101,14 +105,11 @@ fn disabled_and_closed_calls_do_not_convert_inputs_or_run_hooks() {
     disabled.before_send(|_| panic!("disabled hook ran"));
     let client = Client::init_blocking(disabled);
     assert_eq!(client.capture(Input), CaptureOutcome::Disabled);
-    assert_eq!(
-        client.screen(Name, HashMap::new()),
-        CaptureOutcome::Disabled
-    );
+    assert_eq!(client.screen(Name), CaptureOutcome::Disabled);
     let client = Client::init_blocking(config());
     client.shutdown_blocking(None);
     assert_eq!(client.capture(Input), CaptureOutcome::Closed);
-    assert_eq!(client.screen(Name, HashMap::new()), CaptureOutcome::Closed);
+    assert_eq!(client.screen(Name), CaptureOutcome::Closed);
 }
 
 #[test]
@@ -123,7 +124,7 @@ fn invalid_and_filtered_events_never_reach_delivery() {
     config.before_send(|_| None);
     let client = Client::init_blocking(config);
     assert_eq!(client.capture(" "), CaptureOutcome::Invalid);
-    assert_eq!(client.screen("", HashMap::new()), CaptureOutcome::Invalid);
+    assert_eq!(client.screen(""), CaptureOutcome::Invalid);
     assert_eq!(client.capture("filtered"), CaptureOutcome::Dropped);
     client.flush_blocking();
     client.shutdown_blocking(None);
@@ -161,10 +162,7 @@ fn hooks_can_read_identity_but_recursive_capture_and_waiting_are_deferred() {
         let client = hook_slot.lock().unwrap().upgrade().unwrap();
         assert_eq!(client.get_distinct_id(), event.distinct_id());
         assert_eq!(client.capture("recursive"), CaptureOutcome::Reentrant);
-        assert_eq!(
-            client.screen("recursive", HashMap::new()),
-            CaptureOutcome::Reentrant
-        );
+        assert_eq!(client.screen("recursive"), CaptureOutcome::Reentrant);
         assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Deferred);
         Some(event)
     });
@@ -341,5 +339,23 @@ fn async_initialization_and_sync_capture_work_without_a_tokio_runtime() {
         client.capture("runtime-neutral"),
         CaptureOutcome::Accepted { .. }
     ));
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn screen_options_reach_the_wire() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut config = config();
+    config.before_send(move |event| {
+        tx.send(event.options().clone()).unwrap();
+        None
+    });
+    let client = Client::init_blocking(config);
+    let mut screen = Screen::new("Settings");
+    screen
+        .options
+        .insert("process_person_profile".into(), true.into());
+    assert_eq!(client.screen(screen), CaptureOutcome::Dropped);
+    assert_eq!(rx.recv().unwrap()["process_person_profile"], true);
     client.shutdown_blocking(None);
 }

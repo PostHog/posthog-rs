@@ -323,14 +323,14 @@ fn admitted_passive_helpers_create_and_rotate_without_extending_idle() {
     });
     let mut client = Client::init_blocking(config);
     client.producer.as_mut().unwrap().session_clock = clock.clone();
-    client.group("company", "a", None);
+    client.group(("company", "a"));
     let original = client.peek_session_id().unwrap();
     client.capture("first");
     *clock.0.lock().unwrap() = later(now, IDLE / 2);
-    client.group("company", "a", None);
+    client.group(("company", "a"));
     assert_eq!(client.session_id(), Some(original));
     *clock.0.lock().unwrap() = later(now, IDLE);
-    client.group("company", "a", None);
+    client.group(("company", "a"));
     let next = client.peek_session_id().unwrap();
     assert_ne!(next, original);
     client.capture("next");

@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use httpmock::{Method::POST, MockServer};
 use posthog::stateful::{
-    Capture, CaptureOutcome, Client, Config, Identify, Persistence, PersistenceOutcome,
-    PersonProfiles,
+    Alias, Capture, CaptureOutcome, Client, Config, Identify, Persistence, PersistenceOutcome,
+    PersonProfiles, PersonProperties,
 };
 use posthog::Event;
 use serde_json::{json, Value};
@@ -106,7 +106,7 @@ fn identity_table_and_reset_preserve_device_across_reset() {
 fn same_anonymous_id_promotes_once_even_if_properties_were_cached() {
     let (client, events) = observed(config());
     let set = properties(json!({"name":"Ada"}));
-    client.set_person_properties(set.clone(), HashMap::new());
+    client.set_person_properties(set.clone());
     let mut input = Identify::new("anonymous");
     input.set = set;
     client.identify(input.clone());
@@ -139,7 +139,7 @@ fn profile_modes_and_explicit_capture_options_keep_rust_precedence() {
         client.alias("alias");
         assert_eq!(client.get_distinct_id(), "anonymous");
         assert!(!client.is_identified());
-        client.set_person_properties(properties(json!({"a":1})), HashMap::new());
+        client.set_person_properties(properties(json!({"a":1})));
         client.identify("A");
         client.capture("after");
         let seen = events.lock().unwrap();
@@ -254,23 +254,11 @@ fn oversized_identity_event_keeps_identity_and_rejected_properties_remain_retrya
 #[test]
 fn sorted_nested_properties_deduplicate_but_array_order_and_null_do_not() {
     let (client, events) = observed(config());
-    client.set_person_properties(HashMap::new(), HashMap::new());
-    client.set_person_properties(
-        properties(json!({"nested":{"b":2,"a":1},"arr":[null,1]})),
-        HashMap::new(),
-    );
-    client.set_person_properties(
-        properties(json!({"arr":[null,1],"nested":{"a":1,"b":2}})),
-        HashMap::new(),
-    );
-    client.set_person_properties(
-        properties(json!({"nested":{"a":1,"b":2},"arr":[1,null]})),
-        HashMap::new(),
-    );
-    client.set_person_properties(
-        properties(json!({"nested":{"a":1,"b":2},"arr":[1]})),
-        HashMap::new(),
-    );
+    client.set_person_properties(HashMap::new());
+    client.set_person_properties(properties(json!({"nested":{"b":2,"a":1},"arr":[null,1]})));
+    client.set_person_properties(properties(json!({"arr":[null,1],"nested":{"a":1,"b":2}})));
+    client.set_person_properties(properties(json!({"nested":{"a":1,"b":2},"arr":[1,null]})));
+    client.set_person_properties(properties(json!({"nested":{"a":1,"b":2},"arr":[1]})));
     assert_eq!(events.lock().unwrap().len(), 3);
 }
 
@@ -323,7 +311,7 @@ fn slow_hook_does_not_block_reset_or_poison_new_generation_dedup() {
     let reset = client.get_distinct_id();
     release_tx.send(()).unwrap();
     thread.join().unwrap();
-    client.set_person_properties(set, HashMap::new());
+    client.set_person_properties(set);
     let seen = events.lock().unwrap();
     assert_eq!(seen.len(), 2);
     assert_eq!(seen[0].distinct_id(), "A");
@@ -380,7 +368,7 @@ fn disabled_and_closed_mutations_do_nothing() {
     client.identify("A");
     client.alias("alias");
     client.create_person_profile();
-    client.set_person_properties(properties(json!({"a":1})), HashMap::new());
+    client.set_person_properties(properties(json!({"a":1})));
     client.reset();
     assert!(!client.is_identified());
     assert!(events.lock().unwrap().is_empty());
@@ -729,7 +717,7 @@ fn person_admission_size_warnings_can_read_and_reset_client_state() {
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             tracing::subscriber::with_default(subscriber, || {
-                producer.set_person_properties(properties(json!({"plan":"A"})), HashMap::new());
+                producer.set_person_properties(properties(json!({"plan":"A"})));
             });
             done_tx.send(()).unwrap();
         });
@@ -740,4 +728,126 @@ fn person_admission_size_warnings_can_read_and_reset_client_state() {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_ne!(client.get_distinct_id(), "anonymous");
     }
+}
+
+#[test]
+fn blank_or_self_alias_sends_nothing() {
+    let (client, events) = observed(config());
+    client.alias(" ");
+    client.alias("anonymous");
+    assert!(events.lock().unwrap().is_empty());
+    client.alias("other");
+    let seen = events.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].event_name(), "$create_alias");
+}
+
+#[test]
+fn identity_options_reach_their_events() {
+    let (client, events) = observed(config());
+    let mut identify = Identify::new("A");
+    identify
+        .options
+        .insert("cookieless_mode".into(), json!(true));
+    client.identify(identify);
+    let mut alias = Alias::new("other");
+    alias.options.insert("cookieless_mode".into(), json!(true));
+    client.alias(alias);
+    let mut update = PersonProperties::new();
+    update.set.insert("plan".into(), json!("pro"));
+    update.options.insert("cookieless_mode".into(), json!(true));
+    client.set_person_properties(update);
+    let seen = events.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    for event in seen.iter() {
+        assert_eq!(
+            event.options()["cookieless_mode"],
+            true,
+            "{}",
+            event.event_name()
+        );
+    }
+}
+
+#[test]
+fn alias_and_person_properties_each_enable_anonymous_processing() {
+    for alias in [true, false] {
+        let (client, events) = observed(config());
+        if alias {
+            client.alias("other");
+        } else {
+            client.set_person_properties(properties(json!({"plan": "pro"})));
+        }
+        client.capture("after");
+        assert_eq!(client.get_distinct_id(), "anonymous");
+        assert_eq!(client.get_anonymous_id(), "anonymous");
+        assert!(!client.is_identified());
+        let seen = events.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        for event in seen.iter() {
+            assert_eq!(
+                event.options()["process_person_profile"],
+                true,
+                "alias={alias} {}",
+                event.event_name()
+            );
+        }
+    }
+}
+
+#[test]
+fn set_once_changes_are_not_deduplicated_away() {
+    let (client, events) = observed(config());
+    let update = |set: Value, set_once: Value| {
+        let mut update = PersonProperties::new();
+        update.set = properties(set);
+        update.set_once = properties(set_once);
+        update
+    };
+    client.set_person_properties(update(json!({"a": 1}), json!({"b": 1})));
+    // Only set_once changes.
+    client.set_person_properties(update(json!({"a": 1}), json!({"b": 2})));
+    // An exact repeat sends nothing.
+    client.set_person_properties(update(json!({"a": 1}), json!({"b": 2})));
+    // set_once with an empty set.
+    client.set_person_properties(update(json!({}), json!({"b": 2})));
+    // The same property moved from set_once to set.
+    client.set_person_properties(update(json!({"b": 2}), json!({})));
+    let seen = events.lock().unwrap();
+    let payloads: Vec<_> = seen
+        .iter()
+        .map(|event| {
+            (
+                event.properties()["$set"].clone(),
+                event.properties()["$set_once"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        payloads,
+        vec![
+            (json!({"a": 1}), json!({"b": 1})),
+            (json!({"a": 1}), json!({"b": 2})),
+            (json!({}), json!({"b": 2})),
+            (json!({"b": 2}), json!({})),
+        ]
+    );
+}
+
+#[test]
+fn never_mode_bootstrap_switches_a_restored_anonymous_install_without_an_event() {
+    let directory = Directory::new();
+    let client = Client::init_blocking(directory.config());
+    client.shutdown_blocking(None);
+    drop(client);
+    let mut conf = directory.config();
+    conf.bootstrap_anonymous_id = None;
+    conf.bootstrap_identified_id = Some("seed".into());
+    conf.person_profiles = PersonProfiles::Never;
+    let (client, events) = observed(conf);
+    assert!(client.is_identified());
+    assert_eq!(client.get_distinct_id(), "seed");
+    assert_eq!(client.get_anonymous_id(), "anonymous");
+    assert!(events.lock().unwrap().is_empty());
+    client.shutdown_blocking(None);
 }

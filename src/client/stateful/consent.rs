@@ -19,7 +19,7 @@ impl Client {
 
     /// Block new collection immediately, persisting the choice asynchronously.
     /// Captures permitted before this transition and previously queued requests
-    /// may still complete, persist, retry and deliver. Reset clears this choice.
+    /// may still complete, persist, retry and deliver. Reset keeps this choice.
     pub fn opt_out(&self) {
         self.set_opt_out(true);
     }
