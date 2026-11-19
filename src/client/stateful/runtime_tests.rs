@@ -156,7 +156,6 @@ fn incoherent_limits_disable_before_creating_storage() {
         |c| c.shutdown_timeout = Duration::MAX,
         |c| c.state_write_delay = Duration::MAX,
         |c| c.request_timeout = Duration::ZERO,
-        |c| c.max_capture_attempts = 0,
         |c| c.bootstrap_anonymous_id = Some(" ".into()),
         |c| c.host = "file:///tmp/events".into(),
         |c| c.host = "https://name:password@example.test".into(),
@@ -234,7 +233,6 @@ fn host_changes_share_identity_queue_and_single_owner_scope() {
     let config = || {
         let mut config = directory.config();
         config.flush_interval = Duration::from_secs(3600);
-        config.max_capture_attempts = 1;
         config
     };
     let client = Client::init_blocking(config());

@@ -131,7 +131,7 @@ pub(crate) fn build_headers_at(
     attempt: u32,
     now: DateTime<Utc>,
 ) -> HeaderMap {
-    let sdk_info = get_default_user_agent();
+    let sdk_info = opts.sdk_info.clone().unwrap_or_else(get_default_user_agent);
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

@@ -54,8 +54,6 @@ impl From<DrainOutcome> for PersistenceOutcome {
 #[non_exhaustive]
 pub enum DeliveryOutcome {
     /// A flush attempt completed; retries or persisted backlog may remain.
-    /// With session-replay, includes preceding submitted encoding and eligible
-    /// screenshot delivery, but not frames held by the host.
     Attempted,
     /// The worker has stopped. Undelivered persisted records may remain.
     Stopped,

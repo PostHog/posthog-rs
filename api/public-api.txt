@@ -206,7 +206,6 @@ pub posthog::stateful::Config::flush_interval: core::time::Duration
 pub posthog::stateful::Config::host: alloc::string::String
 pub posthog::stateful::Config::instance_name: alloc::string::String
 pub posthog::stateful::Config::max_batch_size: usize
-pub posthog::stateful::Config::max_capture_attempts: u32
 pub posthog::stateful::Config::max_queue_bytes: usize
 pub posthog::stateful::Config::max_queue_size: usize
 pub posthog::stateful::Config::max_stored_bytes: u64

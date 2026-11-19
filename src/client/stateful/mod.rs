@@ -1,5 +1,20 @@
-//! Memory-first client state. Filesystem access belongs to initialization and
-//! the state-persistence worker, never ordinary capture or state access.
+//! A client for applications: it keeps a local anonymous identity and queues
+//! events, and both survive restarts unless you choose memory-only storage.
+//!
+//! Create a [`Config`] with your project token and pass it to
+//! [`Client::init_blocking`], or to `Client::init` with the `async-client`
+//! feature. Initialization restores the saved identity and queued events and
+//! never waits for the network. [`Client::capture`] and [`Client::screen`]
+//! return a [`CaptureOutcome`] at once; background workers write to disk and
+//! deliver events in batches. Call [`Client::flush_blocking`] to request
+//! delivery now, and [`Client::shutdown_blocking`] before the app exits.
+//! Dropping the client also shuts it down.
+//!
+//! [`Config::persistence`] selects where state and events are kept: the OS
+//! local application-data directory by default, a directory you choose, or
+//! memory only. See [`Persistence`].
+//!
+//! A complete program is in `examples/stateful.rs`.
 
 mod config;
 #[cfg(feature = "async-client")]
