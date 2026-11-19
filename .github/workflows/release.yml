@@ -209,6 +209,7 @@ jobs:
         run: sampo publish
 
       - name: Create GitHub Release
+        id: github-release
         if: steps.check-changes.outputs.committed == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
@@ -236,7 +237,8 @@ jobs:
                )"
 
       - name: Start the C bindings release
-        if: steps.check-changes.outputs.committed == 'true'
+        # Runs even if the upgrade dispatch above failed, because the release exists.
+        if: ${{ !cancelled() && steps.github-release.outcome == 'success' }}
         env:
           # A workflow_dispatch from GITHUB_TOKEN still starts a run, and the job's
           # `actions: write` permission allows it.
