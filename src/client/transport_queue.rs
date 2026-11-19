@@ -339,7 +339,7 @@ pub(super) fn run(
                             Ok(page) => {
                                 scanned_more = page.events.is_empty() && page.advanced && page.more;
                                 for error in page.errors {
-                                    storage_support::report_storage_error(
+                                    super::super::common::report_storage_error(
                                         &options.on_error,
                                         crate::client::StorageOperation::Read,
                                         &error,
@@ -356,7 +356,7 @@ pub(super) fn run(
                                 }
                             }
                             Err(error) => {
-                                storage_support::report_storage_error(
+                                super::super::common::report_storage_error(
                                     &options.on_error,
                                     crate::client::StorageOperation::Read,
                                     &error,
@@ -531,7 +531,7 @@ pub(super) fn run(
                 let (disk, memory) = queue.checkpoint();
                 flushes.push(Flush::new(completion, disk, memory));
             }
-            Ok(Control::Shutdown(completion)) => {
+            Ok(Control::Shutdown { completion, .. }) => {
                 closing = true;
                 flushes.push(Flush::new(completion, u64::MAX, u64::MAX));
             }

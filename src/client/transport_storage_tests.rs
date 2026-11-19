@@ -14,6 +14,22 @@ use crate::client::event_store::{
 };
 use crate::{Event, PostHogError, StorageOperation};
 
+impl TransportHandle {
+    /// Storage integration fixture with the normal asynchronous worker startup.
+    fn spawn_persistent(
+        options: crate::ClientOptions,
+        store: Box<dyn EventStore>,
+        max_queue_bytes: usize,
+    ) -> Self {
+        Self::spawn_configured(
+            options,
+            LaneConfig::analytics(),
+            Arc::new(super::SystemClock),
+            StorageState::new(store, max_queue_bytes),
+        )
+    }
+}
+
 pub(super) struct TestDirectory(pub(super) PathBuf);
 
 impl TestDirectory {
@@ -74,6 +90,91 @@ fn persistent(
         Arc::new(clock.clone()),
         StorageState::new(Box::new(store), 64 * 1024),
     )
+}
+
+#[test]
+fn mixed_capture_time_sdk_versions_survive_recovery_and_partial_retry() {
+    let server = MockServer::start();
+    let directory = TestDirectory::new();
+    let now = "2025-01-01T00:00:00.123456789Z".parse().unwrap();
+    let snapshots: Vec<_> = [("old-sdk", "1.0.0"), ("new-sdk", "2.0.0")]
+        .iter()
+        .map(|&(lib, version)| {
+            let mut input = Event::new("captured", "anonymous-id");
+            input.set_uuid(Uuid::now_v7());
+            input.insert_prop("$lib", lib).unwrap();
+            input.insert_prop("$lib_version", version).unwrap();
+            CaptureEvent::from_stateful_event_at(&input, now)
+        })
+        .collect();
+    let old = &snapshots[0];
+    let new = &snapshots[1];
+    let old_json = serde_json::to_string(old).unwrap();
+    let new_json = serde_json::to_string(new).unwrap();
+    {
+        let mut store = directory.open();
+        for snapshot in &snapshots {
+            store.put(snapshot).unwrap();
+        }
+    }
+    let mut partial = server.mock(|when, then| {
+        when.method(POST)
+            .header("posthog-sdk-info", crate::client::get_default_user_agent())
+            .body_includes(&old_json)
+            .body_includes(&new_json);
+        then.status(200).json_body(serde_json::json!({"results": {
+            (old.uuid.to_string()): {"result": "retry"},
+            (new.uuid.to_string()): {"result": "ok"}
+        }}));
+    });
+    let hook_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let worker_options = || {
+        let calls = hook_calls.clone();
+        options(server.base_url())
+            .max_capture_attempts(1u32)
+            .shutdown_timeout_ms(0u64)
+            .before_send(move |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                None
+            })
+            .build()
+            .unwrap()
+    };
+    let handle = TransportHandle::spawn_configured(
+        worker_options(),
+        LaneConfig::analytics(),
+        Arc::new(ManualClock::new()),
+        StorageState::new(Box::new(directory.open()), 64 * 1024),
+    );
+    handle.flush_blocking();
+    partial.assert_calls(1);
+    assert_eq!(directory.records().len(), 1);
+    let retained: serde_json::Value =
+        serde_json::from_slice(&fs::read(&directory.records()[0]).unwrap()).unwrap();
+    assert_eq!(retained["event"], serde_json::to_value(old).unwrap());
+    handle.shutdown_blocking();
+    partial.delete();
+
+    let recovered = server.mock(|when, then| {
+        when.method(POST)
+            .header("posthog-sdk-info", crate::client::get_default_user_agent())
+            .body_includes(&old_json)
+            .body_excludes(&new_json);
+        then.status(200).json_body(serde_json::json!({"results": {
+            (old.uuid.to_string()): {"result": "ok"}
+        }}));
+    });
+    let handle = TransportHandle::spawn_stateful(
+        worker_options(),
+        Some(Box::new(directory.open())),
+        64 * 1024,
+    )
+    .unwrap();
+    handle.flush_blocking();
+    handle.shutdown_blocking();
+    recovered.assert_calls(1);
+    assert!(directory.records().is_empty());
+    assert_eq!(hook_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[test]

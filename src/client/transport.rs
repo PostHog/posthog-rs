@@ -45,12 +45,24 @@ mod memory;
 #[cfg(feature = "stateful")]
 #[path = "transport_queue.rs"]
 mod queue;
+#[cfg(all(test, feature = "stateful"))]
+#[path = "transport_startup_tests.rs"]
+mod startup_tests;
 #[cfg(feature = "stateful")]
 #[path = "transport_storage.rs"]
 mod storage_support;
 #[cfg(all(test, feature = "stateful"))]
 #[path = "transport_storage_tests.rs"]
 mod storage_tests;
+
+/// Local startup failures, not delivery failures such as an offline network.
+#[cfg(feature = "stateful")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StartupFailure {
+    Spawn,
+    Http,
+    WorkerStopped,
+}
 
 #[derive(Default)]
 struct StorageState {
@@ -110,7 +122,10 @@ pub(crate) enum Control {
     /// the hook's short bounded wait.
     #[cfg_attr(not(feature = "error-tracking"), allow(dead_code))]
     FlushCaptures(Completion),
-    Shutdown(Completion),
+    Shutdown {
+        completion: Completion,
+        deadline: Option<Instant>,
+    },
     /// Test-only: re-evaluate the (virtual) clock and flush/retry whatever is now
     /// due, so interval and backoff timing can be driven without real sleeps.
     #[cfg(test)]
@@ -123,6 +138,47 @@ pub(crate) enum Admission {
     Accepted,
     Full,
     Closed,
+}
+
+enum PreparedWarning {
+    Count {
+        endpoint: Endpoint,
+        capacity: usize,
+    },
+    #[cfg(feature = "stateful")]
+    Bytes,
+}
+
+/// Admission is final; only its application-facing diagnostic is deferred.
+#[must_use]
+pub(crate) struct PreparedAdmission {
+    pub(crate) admission: Admission,
+    warning: Option<PreparedWarning>,
+}
+
+impl PreparedAdmission {
+    fn new(admission: Admission) -> Self {
+        Self {
+            admission,
+            warning: None,
+        }
+    }
+
+    pub(crate) fn report(self) -> Admission {
+        match self.warning {
+            Some(PreparedWarning::Count { endpoint, capacity }) => {
+                warn!(
+                    "posthog-rs: event queue full for {endpoint} (capacity {capacity}); dropping events"
+                );
+            }
+            #[cfg(feature = "stateful")]
+            Some(PreparedWarning::Bytes) => {
+                warn!("posthog-rs: event queue byte limit reached; rejecting new event");
+            }
+            None => {}
+        }
+        self.admission
+    }
 }
 
 /// Completion signal handed to the worker so the caller can wait for a flush or
@@ -158,7 +214,7 @@ pub(crate) trait Clock: Send + Sync + 'static {
     fn now_utc(&self) -> DateTime<Utc>;
 }
 
-struct SystemClock;
+pub(super) struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
@@ -289,7 +345,7 @@ impl LaneConfig {
 /// Upper bound on a blocking-flush / shutdown timeout, so an absurd value can't
 /// overflow the `now + timeout` deadlines (worker drain) or the `recv_timeout`
 /// bound on `flush_blocking_timeout`.
-const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(86_400);
+pub(super) const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(86_400);
 
 impl TransportHandle {
     /// Spawn the analytics worker with the real system clock.
@@ -316,22 +372,64 @@ impl TransportHandle {
         Self::spawn_configured(options, lane, clock, StorageState::default())
     }
 
-    /// The initialization worker opens the namespace/store first. Ordinary
-    /// captures enter through `enqueue_prepared`; all subsequent storage I/O
-    /// belongs to the transport worker.
-    #[cfg(feature = "stateful")]
-    #[allow(dead_code)] // Composed by the stateful client.
-    pub(crate) fn spawn_persistent(
+    /// Wait for local HTTP initialization on the existing worker, not network
+    /// reachability or backlog recovery. The stateful initializer maps failure
+    /// to its disabled client and reports the diagnostic. Both persistent and
+    /// memory-only clients use the same bounded admission path.
+    ///
+    /// Call only from blocking initialization or its helper thread. The caller
+    /// has already opened the namespace; subsequent store I/O belongs here.
+    #[cfg(all(test, feature = "stateful"))]
+    pub(super) fn spawn_stateful(
         options: ClientOptions,
-        store: Box<dyn super::event_store::EventStore>,
+        store: Option<Box<dyn super::event_store::EventStore>>,
         max_queue_bytes: usize,
-    ) -> Self {
-        Self::spawn_configured(
+    ) -> Result<Self, StartupFailure> {
+        Self::spawn_stateful_with_deadline(
+            options,
+            store,
+            max_queue_bytes,
+            Arc::new(Mutex::new(None)),
+            Arc::new(SystemClock),
+        )
+    }
+
+    #[cfg(feature = "stateful")]
+    pub(super) fn spawn_stateful_with_deadline(
+        options: ClientOptions,
+        store: Option<Box<dyn super::event_store::EventStore>>,
+        max_queue_bytes: usize,
+        deadline: Arc<Mutex<Option<Instant>>>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, StartupFailure> {
+        let storage = match store {
+            Some(store) => StorageState::new(store, max_queue_bytes),
+            None => StorageState::memory(max_queue_bytes),
+        };
+        let (tx, rx) = mpsc::channel();
+        Self::spawn_configured_with_deadline(
             options,
             LaneConfig::analytics(),
-            Arc::new(SystemClock),
-            StorageState::new(store, max_queue_bytes),
+            clock,
+            storage,
+            Some(tx),
+            Some(deadline),
         )
+        .finish_startup(rx)
+    }
+
+    #[cfg(feature = "stateful")]
+    fn finish_startup(self, ready: mpsc::Receiver<bool>) -> Result<Self, StartupFailure> {
+        let failure = match ready.recv() {
+            Ok(true) => return Ok(self),
+            Ok(false) => StartupFailure::Http,
+            Err(_) if self.worker_id.is_none() => StartupFailure::Spawn,
+            Err(_) => StartupFailure::WorkerStopped,
+        };
+        // Do not leave a partially initialized worker or namespace lease behind.
+        self.request_close_before(Instant::now());
+        self.join();
+        Err(failure)
     }
 
     fn spawn_configured(
@@ -343,40 +441,23 @@ impl TransportHandle {
         Self::spawn_configured_with_startup(options, lane, clock, storage, None)
     }
 
-    #[cfg(feature = "stateful")]
-    #[allow(dead_code)] // Composed by the stateful client.
-    fn spawn_stateful(
+    fn spawn_configured_with_startup(
         options: ClientOptions,
-        store: Option<Box<dyn super::event_store::EventStore>>,
-        max_queue_bytes: usize,
-    ) -> Result<Self, ()> {
-        let storage = store.map_or_else(
-            || StorageState::memory(max_queue_bytes),
-            |store| StorageState::new(store, max_queue_bytes),
-        );
-        let (ready, started) = mpsc::channel();
-        let handle = Self::spawn_configured_with_startup(
-            options,
-            LaneConfig::analytics(),
-            Arc::new(SystemClock),
-            storage,
-            Some(ready),
-        );
-        if matches!(started.recv(), Ok(true)) {
-            Ok(handle)
-        } else {
-            handle.request_close();
-            handle.join();
-            Err(())
-        }
+        lane: LaneConfig,
+        clock: Arc<dyn Clock>,
+        storage: StorageState,
+        ready: Option<mpsc::Sender<bool>>,
+    ) -> Self {
+        Self::spawn_configured_with_deadline(options, lane, clock, storage, ready, None)
     }
 
-    fn spawn_configured_with_startup(
+    fn spawn_configured_with_deadline(
         options: ClientOptions,
         lane: LaneConfig,
         clock: Arc<dyn Clock>,
         _storage: StorageState,
         _ready: Option<mpsc::Sender<bool>>,
+        _deadline: Option<Arc<Mutex<Option<Instant>>>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Control>();
         let len = Arc::new(AtomicUsize::new(0));
@@ -402,7 +483,7 @@ impl TransportHandle {
         #[cfg(feature = "stateful")]
         let worker_queue = queue.clone();
         #[cfg(feature = "stateful")]
-        let closing_deadline = Arc::new(Mutex::new(None));
+        let closing_deadline = _deadline.unwrap_or_else(|| Arc::new(Mutex::new(None)));
         #[cfg(feature = "stateful")]
         let worker_deadline = closing_deadline.clone();
         #[cfg(feature = "stateful")]
@@ -483,10 +564,16 @@ impl TransportHandle {
 
     /// Admit an already assembled event without request-context enrichment,
     /// defaults, hooks, or wire conversion. The producer owns those steps.
-    #[allow(dead_code)] // Used by the stateful producer layered above this transport.
+    #[allow(dead_code)]
     pub(crate) fn enqueue_prepared(&self, event: CaptureEvent) -> Admission {
+        self.enqueue_prepared_deferred(event).report()
+    }
+
+    /// Callback-free admission for callers holding SDK state locks. Report the
+    /// returned diagnostic only after releasing those locks: tracing is user code.
+    pub(crate) fn enqueue_prepared_deferred(&self, event: CaptureEvent) -> PreparedAdmission {
         if self.closed.load(Ordering::Acquire) {
-            return Admission::Closed;
+            return PreparedAdmission::new(Admission::Closed);
         }
         #[cfg(feature = "stateful")]
         if let Some(queue) = &self.queue {
@@ -497,21 +584,35 @@ impl TransportHandle {
             {
                 self.closed.store(true, Ordering::Release);
                 queue.clear();
-                return Admission::Closed;
+                return PreparedAdmission::new(Admission::Closed);
             }
             if admission == Admission::Accepted && queue.len() == 1 {
                 self.full_warned.store(false, Ordering::Release);
             }
-            if admission == Admission::Full && !self.full_warned.swap(true, Ordering::AcqRel) {
-                warn!("posthog-rs: event queue byte limit reached; rejecting new event");
-            }
-            return admission;
+            return PreparedAdmission {
+                admission,
+                warning: (admission == Admission::Full
+                    && !self.full_warned.swap(true, Ordering::AcqRel))
+                .then_some(PreparedWarning::Bytes),
+            };
         }
-        if !self.try_reserve() {
-            return Admission::Full;
+        match reserve_slot(&self.len, self.max_queue_size) {
+            Some(0) => self.full_warned.store(false, Ordering::Release),
+            Some(_) => {}
+            None => {
+                return PreparedAdmission {
+                    admission: Admission::Full,
+                    warning: (!self.full_warned.swap(true, Ordering::AcqRel)).then_some(
+                        PreparedWarning::Count {
+                            endpoint: self.endpoint,
+                            capacity: self.max_queue_size,
+                        },
+                    ),
+                };
+            }
         }
         let event = DeliveryEvent::from(event);
-        if self
+        let admission = if self
             .tx
             .send(Control::Prepared {
                 event: Box::new(event),
@@ -522,7 +623,8 @@ impl TransportHandle {
             Admission::Closed
         } else {
             Admission::Accepted
-        }
+        };
+        PreparedAdmission::new(admission)
     }
 
     /// Like `enqueue`, but never logs — no full-queue `warn!`. The panic hook
@@ -652,36 +754,51 @@ impl TransportHandle {
     /// Marking happens before the send, so `is_closed()` is observable as soon
     /// as this returns.
     pub(crate) fn request_shutdown(&self, completion: Completion) -> bool {
-        if self.begin_close() {
-            #[cfg(feature = "stateful")]
-            if self.queue.is_some() {
-                *self
-                    .closing_deadline
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) =
-                    Some(self.clock.now() + self.drain_timeout);
+        self.request_shutdown_with_deadline(completion, None)
+    }
+
+    fn request_shutdown_with_deadline(
+        &self,
+        completion: Completion,
+        deadline: Option<Instant>,
+    ) -> bool {
+        #[cfg(feature = "stateful")]
+        if self.queue.is_some() {
+            let mut selected = self
+                .closing_deadline
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if selected.is_none() {
+                *selected = Some(deadline.unwrap_or_else(|| self.clock.now() + self.drain_timeout));
             }
-            self.send_control(Control::Shutdown(completion))
+        }
+        if self.begin_close() {
+            self.send_control(Control::Shutdown {
+                completion,
+                deadline,
+            })
         } else {
             false
         }
     }
 
-    #[cfg(all(test, feature = "stateful"))]
-    fn request_close_before(&self, deadline: Instant) {
-        if self.begin_close() {
-            *self
-                .closing_deadline
-                .lock()
-                .unwrap_or_else(|p| p.into_inner()) = Some(deadline);
-            let _ = self.tx.send(Control::QueueWake);
-            let (tx, _) = mpsc::channel();
-            self.send_control(Control::Shutdown(Completion::Blocking(tx)));
+    #[cfg(feature = "stateful")]
+    pub(super) fn request_close_before(&self, deadline: Instant) {
+        let mut selected = self
+            .closing_deadline
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if selected.is_none() {
+            *selected = Some(deadline);
         }
+        drop(selected);
+        let _ = self.tx.send(Control::QueueWake);
+        let (tx, _rx) = mpsc::channel();
+        self.request_shutdown_with_deadline(Completion::Blocking(tx), Some(deadline));
     }
 
-    #[cfg(all(test, feature = "stateful"))]
-    fn all_stopped(&self) -> bool {
+    #[cfg(feature = "stateful")]
+    pub(super) fn all_stopped(&self) -> bool {
         self.worker
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -1225,7 +1342,10 @@ fn run_worker(
 
                 completion.signal();
             }
-            Wake::Msg(Control::Shutdown(completion)) => {
+            Wake::Msg(Control::Shutdown {
+                completion,
+                deadline,
+            }) => {
                 // Drain held retries, queued historical batches, then buffered
                 // events — one final attempt each, bounded by `shutdown_timeout`:
                 // once the deadline passes the rest is dropped so the drain can't
@@ -1233,7 +1353,7 @@ fn run_worker(
                 // when this Shutdown arrives runs to completion first — up to
                 // `request_timeout_seconds` per in-flight batch — since the single
                 // worker can't preempt it; see `shutdown_timeout_ms`.)
-                let deadline = clock.now() + shutdown_timeout;
+                let deadline = deadline.unwrap_or_else(|| clock.now() + shutdown_timeout);
                 pipeline.flush_retries(Some(deadline));
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
@@ -1299,7 +1419,9 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
             Control::QueueWake | Control::UploadComplete(_) => {}
             #[cfg(feature = "stateful")]
             Control::QueueFlush { completion, .. } => completion.signal(),
-            Control::Flush(c) | Control::FlushCaptures(c) | Control::Shutdown(c) => c.signal(),
+            Control::Flush(c)
+            | Control::FlushCaptures(c)
+            | Control::Shutdown { completion: c, .. } => c.signal(),
             #[cfg(test)]
             Control::Tick(c) => c.signal(),
             Control::Capture { .. } | Control::Prepared { .. } => dec_len(len, 1),
@@ -2468,8 +2590,11 @@ mod tests {
         let (stx, srx) = mpsc::channel::<()>();
         let len = AtomicUsize::new(3); // 1 capture + 2 historical events reserved
         tx.send(Control::Flush(Completion::Blocking(ftx))).unwrap();
-        tx.send(Control::Shutdown(Completion::Blocking(stx)))
-            .unwrap();
+        tx.send(Control::Shutdown {
+            completion: Completion::Blocking(stx),
+            deadline: None,
+        })
+        .unwrap();
         tx.send(Control::Capture {
             event: Box::new(Event::new("dropped", "user-1")),
         })

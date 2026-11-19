@@ -10,6 +10,7 @@
 /// Run:
 ///   export POSTHOG_API_TOKEN=phc_your_key
 ///   cargo run --example evaluate_flags --features async-client
+#[cfg(feature = "async-client")]
 use posthog::{EvaluateFlagsOptions, Event};
 
 #[cfg(feature = "async-client")]
