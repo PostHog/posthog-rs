@@ -1,0 +1,47 @@
+# CMake package for posthog-rs-ffi, the C bindings for the PostHog Rust SDK.
+#
+#   find_package(posthog-rs-ffi CONFIG REQUIRED)
+#   target_link_libraries(app PRIVATE posthog-rs-ffi::posthog-rs-ffi)
+#
+# Targets:
+#   posthog-rs-ffi::shared         the shared library (.so, .dylib or .dll)
+#   posthog-rs-ffi::static         the static library and the system libraries it needs
+#   posthog-rs-ffi::posthog-rs-ffi the shared library, or the static one when
+#                                  POSTHOG_RS_FFI_STATIC is ON
+#
+# Ship the shared library with your app. On macOS its install name is
+# @rpath/libposthog_ffi.dylib, and on Linux its SONAME is libposthog_ffi.so.
+
+get_filename_component(_posthog_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+
+if(NOT TARGET posthog-rs-ffi::shared)
+    add_library(posthog-rs-ffi::shared SHARED IMPORTED)
+    set_target_properties(posthog-rs-ffi::shared PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${_posthog_prefix}/include"
+        IMPORTED_LOCATION "${_posthog_prefix}/lib/@SHARED_FILE@")
+    if(WIN32)
+        set_target_properties(posthog-rs-ffi::shared PROPERTIES
+            IMPORTED_IMPLIB "${_posthog_prefix}/lib/posthog_ffi.dll.lib")
+    else()
+        set_target_properties(posthog-rs-ffi::shared PROPERTIES
+            IMPORTED_SONAME "@SHARED_SONAME@")
+    endif()
+
+    add_library(posthog-rs-ffi::static STATIC IMPORTED)
+    set_target_properties(posthog-rs-ffi::static PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${_posthog_prefix}/include"
+        IMPORTED_LOCATION "${_posthog_prefix}/lib/@STATIC_FILE@"
+        IMPORTED_LINK_INTERFACE_LANGUAGES "C"
+        INTERFACE_LINK_LIBRARIES "@NATIVE_LIBS@")
+
+    add_library(posthog-rs-ffi::posthog-rs-ffi INTERFACE IMPORTED)
+    if(POSTHOG_RS_FFI_STATIC)
+        set_target_properties(posthog-rs-ffi::posthog-rs-ffi PROPERTIES
+            INTERFACE_LINK_LIBRARIES posthog-rs-ffi::static)
+    else()
+        set_target_properties(posthog-rs-ffi::posthog-rs-ffi PROPERTIES
+            INTERFACE_LINK_LIBRARIES posthog-rs-ffi::shared)
+    endif()
+endif()
+
+unset(_posthog_prefix)

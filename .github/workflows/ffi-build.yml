@@ -132,38 +132,41 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ inputs.version }}
         run: |
-          name="posthog-rs-ffi-$VERSION-$TARGET"
-          out="../../target/$TARGET/release"
-
-          mkdir -p "dist/$name/include" "dist/$name/lib" "dist/$name/examples"
-          cp include/posthog.h "dist/$name/include/"
-          cp examples/capture.c examples/capture.cpp "dist/$name/examples/"
-          cp README.md "dist/$name/"
-          cp ../../LICENSE "dist/$name/"
-          case "$TARGET" in
-            *windows*)
-              cp "$out/posthog_ffi.dll" "$out/posthog_ffi.dll.lib" "$out/posthog_ffi.lib" "dist/$name/lib/" ;;
-            *apple*)
-              cp "$out/libposthog_ffi.dylib" "$out/libposthog_ffi.a" "dist/$name/lib/" ;;
-            *)
-              cp "$out/libposthog_ffi.so" "$out/libposthog_ffi.a" "dist/$name/lib/" ;;
-          esac
-          cp "$out/native-static-libs.txt" "dist/$name/lib/"
-
-          cd dist
-          if [[ "$TARGET" == *windows* ]]; then
-            archive="$name.zip"
-            7z a -tzip "$archive" "$name" >/dev/null
-          else
-            archive="$name.tar.gz"
-            tar -czf "$archive" "$name"
-          fi
-          if command -v sha256sum >/dev/null; then
-            sha256sum "$archive" > "$archive.sha256"
-          else
-            shasum -a 256 "$archive" > "$archive.sha256"
-          fi
+          archive=$(packaging/package.sh "$TARGET" "$VERSION" "$PWD/../../target/$TARGET/release" "$PWD/dist")
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Use the archive from CMake and pkg-config
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Unpack to a new place, as a customer would, so nothing points back at the build.
+          consumer="$RUNNER_TEMP/consumer"
+          rm -rf "$consumer" && mkdir -p "$consumer"
+          archive="dist/posthog-rs-ffi-$VERSION-$TARGET"
+          if [[ "$TARGET" == *windows* ]]; then
+            7z x -o"$consumer" "$archive.zip" >/dev/null
+          else
+            tar -xzf "$archive.tar.gz" -C "$consumer"
+          fi
+          prefix="$consumer/posthog-rs-ffi-$VERSION-$TARGET"
+          minor=$(echo "$VERSION" | cut -d. -f1,2)
+          for mode in OFF ON; do
+            cmake -S packaging/test -B "$consumer/cmake-$mode" -DCMAKE_PREFIX_PATH="$prefix" \
+              -DPOSTHOG_RS_FFI_STATIC="$mode" -DPOSTHOG_RS_FFI_VERSION="$minor"
+            cmake --build "$consumer/cmake-$mode" --config Release
+            smoke=$(find "$consumer/cmake-$mode" -name 'smoke' -o -name 'smoke.exe' | head -1)
+            (cd "$(dirname "$smoke")" && "./$(basename "$smoke")")
+          done
+          if [[ "$TARGET" != *windows* ]]; then
+            export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+            # shellcheck disable=SC2046 # pkg-config prints several flags.
+            c++ -std=c++11 tests/c/smoke.cpp $(pkg-config --cflags --libs posthog-rs-ffi) -Wl,-rpath,"$prefix/lib" -o "$consumer/pc-shared"
+            # shellcheck disable=SC2046
+            c++ -std=c++11 tests/c/smoke.cpp $(pkg-config --cflags --libs posthog-rs-ffi-static) -o "$consumer/pc-static"
+            "$consumer/pc-shared"
+            "$consumer/pc-static"
+          fi
 
       - name: Upload archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

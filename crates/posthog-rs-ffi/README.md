@@ -11,28 +11,50 @@ Events report `$lib` as `posthog-rs-ffi` and `$lib_version` as the `posthog-rs-f
 
 ## Download
 
-Prebuilt archives are attached to each [`posthog-rs-ffi` release](https://github.com/PostHog/posthog-rs/releases?q=posthog-rs-ffi), tagged `posthog-rs-ffi-v<version>`. They cover Linux (x86_64 and arm64, glibc 2.35 or newer), macOS (Intel and Apple silicon) and Windows (x86_64, MSVC). The archives are named `posthog-rs-ffi-<version>-<target>`. Each contains the shared and static libraries, `include/posthog.h`, the examples, and `lib/native-static-libs.txt`, which lists the system libraries to link with the static library.
+Prebuilt archives are attached to each [`posthog-rs-ffi` release](https://github.com/PostHog/posthog-rs/releases?q=posthog-rs-ffi), tagged `posthog-rs-ffi-v<version>`. They cover Linux (x86_64 and arm64, glibc 2.35 or newer), macOS (Intel and Apple silicon) and Windows (x86_64, MSVC). Each archive is named `posthog-rs-ffi-<version>-<target>` and has a `.sha256` file next to it.
+
+```
+include/posthog.h
+lib/libposthog_ffi.so, .dylib or posthog_ffi.dll (+ posthog_ffi.dll.lib)   shared library
+lib/libposthog_ffi.a or posthog_ffi.lib                                    static library
+lib/native-static-libs.txt          system libraries the static library needs
+lib/cmake/posthog-rs-ffi/           CMake package
+lib/pkgconfig/                      pkg-config files (Linux and macOS)
+examples/capture.c, capture.cpp
+```
 
 `posthog-rs-ffi` has its own version, independent of the `posthog` crate. `posthog_version()` returns it, and events report it as `$lib_version`.
 
-## Build
+## Linking
 
-To build from source, or for another platform, you need Rust 1.78 or newer.
+### CMake
 
-From the repository root:
+Unpack the archive, point `CMAKE_PREFIX_PATH` at it, and link the imported target:
 
-```bash
-cargo build --release -p posthog-rs-ffi
+```cmake
+find_package(posthog-rs-ffi 0.1 CONFIG REQUIRED)
+target_link_libraries(app PRIVATE posthog-rs-ffi::posthog-rs-ffi)
 ```
 
-This builds, in the repository's `target/release` directory:
+```bash
+cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/posthog-rs-ffi-0.1.0-x86_64-unknown-linux-gnu
+```
 
-- `libposthog_ffi.{so,dylib}` or `posthog_ffi.dll`: the shared library
-- `libposthog_ffi.a` or `posthog_ffi.lib`: the static library
+`posthog-rs-ffi::posthog-rs-ffi` is the shared library. Set `POSTHOG_RS_FFI_STATIC=ON` before `find_package` to link the static library, including the system libraries it needs, instead. You can also link `posthog-rs-ffi::shared` or `posthog-rs-ffi::static` directly.
 
-The header is checked in at `crates/posthog-rs-ffi/include/posthog.h`.
+Before 1.0, a minor version can change the API, so `find_package(posthog-rs-ffi 0.1)` accepts 0.1.x and rejects 0.2.
 
-### Linking
+### pkg-config
+
+On Linux and macOS, add the archive's `lib/pkgconfig` to `PKG_CONFIG_PATH`:
+
+```bash
+export PKG_CONFIG_PATH=/path/to/posthog-rs-ffi-0.1.0-x86_64-unknown-linux-gnu/lib/pkgconfig
+cc app.c $(pkg-config --cflags --libs posthog-rs-ffi)          # shared
+cc app.c $(pkg-config --cflags --libs posthog-rs-ffi-static)   # static
+```
+
+### By hand
 
 To link the shared library on Linux or macOS:
 
@@ -40,24 +62,39 @@ To link the shared library on Linux or macOS:
 cc app.c -Ipath/to/include -Lpath/to/lib -lposthog_ffi
 ```
 
-At run time, the loader must find the library. Install it in a system library directory, link with an rpath, or set `LD_LIBRARY_PATH` on Linux or `DYLD_LIBRARY_PATH` on macOS.
-
-On Windows, link the DLL's import library `posthog_ffi.dll.lib`, not `posthog_ffi.lib`, which is the static library. Put `posthog_ffi.dll` next to your executable or in a directory on `PATH`:
+On Windows, link the DLL's import library `posthog_ffi.dll.lib`, not `posthog_ffi.lib`, which is the static library:
 
 ```bat
 cl app.c /Ipath\to\include path\to\lib\posthog_ffi.dll.lib
-copy path\to\lib\posthog_ffi.dll .
 ```
 
-The static library also needs the system libraries the SDK uses. Print them for your target with:
+To link the static library, add the flags in `lib/native-static-libs.txt`, for example `-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc` on Linux.
+
+### Shipping the shared library
+
+The shared library has to be found at run time. Ship it with your app and point the loader at it:
+
+- **Linux:** link with an rpath such as `-Wl,-rpath,'$ORIGIN'`, or install it in a system library directory.
+- **macOS:** the library's install name is `@rpath/libposthog_ffi.dylib`, so link with an rpath such as `-Wl,-rpath,@executable_path`.
+- **Windows:** put `posthog_ffi.dll` next to your executable or in a directory on `PATH`.
+
+The static library avoids this, at the cost of a larger binary.
+
+## Build from source
+
+To build for another platform or toolchain, you need Rust 1.78 or newer. From the repository root:
 
 ```bash
-cargo rustc --release --lib --crate-type staticlib -- --print native-static-libs
+cargo build --release -p posthog-rs-ffi
 ```
 
-On macOS, for example, that is `-framework CoreFoundation -framework Foundation -framework Security -lobjc -liconv`.
+The libraries are written to the repository's `target/release` directory, and the header is checked in at `crates/posthog-rs-ffi/include/posthog.h`. To list the system libraries the static library needs:
 
-To build for another platform, pass `--target`, such as `cargo build --release -p posthog-rs-ffi --target x86_64-pc-windows-msvc`.
+```bash
+cargo rustc --release -p posthog-rs-ffi --lib --crate-type staticlib -- --print native-static-libs
+```
+
+To build for another platform, pass `--target`, such as `cargo build --release -p posthog-rs-ffi --target x86_64-pc-windows-msvc`. `packaging/package.sh` builds the same archive the release ships, from a release build.
 
 ## Usage
 

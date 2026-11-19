@@ -46,12 +46,12 @@ Each `posthog-rs-ffi` release is tagged `posthog-rs-ffi-v<version>` and gets its
 - `posthog-rs-ffi-<version>-aarch64-apple-darwin.tar.gz`
 - `posthog-rs-ffi-<version>-x86_64-pc-windows-msvc.zip`
 
-Each archive contains the shared and static libraries, `posthog.h`, the C and C++ examples, the README, the license, and `lib/native-static-libs.txt`, which lists the system libraries to link with the static library. Each archive has a `.sha256` file next to it.
+Each archive contains the shared and static libraries, `posthog.h`, the C and C++ examples, the README, the license, `lib/native-static-libs.txt` (the system libraries to link with the static library), a CMake package in `lib/cmake/posthog-rs-ffi/`, and pkg-config files in `lib/pkgconfig/` on Linux and macOS. [`crates/posthog-rs-ffi/packaging/package.sh`](crates/posthog-rs-ffi/packaging/package.sh) builds it. Each archive has a `.sha256` file next to it.
 
 All of this runs in [`release.yml`](.github/workflows/release.yml), in the same approved release as `posthog`:
 
 - "Release and publish" bumps whichever packages have changesets and commits the release. It publishes `posthog` and `posthog-rs` only when their version changed, and pushes the `posthog-rs-ffi-v<version>` tag only when the bindings' version changed. Every tag points at the release commit itself, even if `main` has moved on.
-- "Build C bindings" builds that tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml) and runs the C++ smoke test against each built library.
+- "Build C bindings" builds that tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml). It compiles both examples, runs the C++ smoke test against the shared and static libraries, packages the archive, then unpacks it elsewhere and builds the smoke test through CMake and pkg-config, as a customer would.
 - "Publish the C bindings GitHub Release" checks that all five archives and their checksums are present, then publishes the GitHub Release with them attached.
 
 The two C bindings jobs run even if publishing `posthog` fails, as long as the `posthog-rs-ffi` tag exists. A failure in either sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
