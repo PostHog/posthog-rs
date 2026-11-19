@@ -1059,3 +1059,195 @@ fn a_retry_that_stays_unreadable_gives_way_to_later_events() {
     harness.handle.request_close_before(harness.clock.now());
     harness.handle.join();
 }
+
+fn read_fault_coordinator(
+    records: &[(u64, &str)],
+    faults: &Faults,
+    directory: &TestDirectory,
+    clock: &ManualClock,
+) -> super::Coordinator {
+    use super::super::table::Limits;
+    use super::{Coordinator, Settings};
+    {
+        let mut store = directory.open(10);
+        for (key, name) in records {
+            store.write(StoreKey(*key), &wire(name)).unwrap();
+        }
+    }
+    let options = options("http://127.0.0.1:1".into()).build().unwrap();
+    let (coordinator, _inbox) = Coordinator::new(
+        Settings {
+            lane: super::super::LaneConfig::analytics(),
+            memory: Limits {
+                events: 10,
+                bytes: 64 * 1024,
+            },
+            options,
+        },
+        Some(Box::new(FaultyStore {
+            inner: directory.open(10),
+            faults: faults.clone(),
+        })),
+        4096,
+        Arc::new(clock.clone()),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(Mutex::new(None)),
+    );
+    coordinator
+}
+
+fn retry_answer(seq: u64, delay: Duration) -> super::Sent {
+    super::Sent {
+        seqs: vec![seq],
+        request_id: Uuid::now_v7(),
+        attempt: 1,
+        created_at: String::new(),
+        verdict: super::Verdict::Retry {
+            retained: vec![(seq, 0)],
+            delay,
+        },
+    }
+}
+
+#[test]
+fn a_retry_wait_does_not_spin_once_a_skipped_record_is_readable_again() {
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    faults.reads.lock().unwrap().insert(1);
+    let clock = ManualClock::new();
+    let mut coordinator = read_fault_coordinator(
+        &[(1, "unreadable"), (2, "retried")],
+        &faults,
+        &directory,
+        &clock,
+    );
+    let (jobs, _sent) = mpsc::sync_channel(1);
+    coordinator.jobs = Some(jobs);
+    assert!(coordinator.start_request());
+    assert!(coordinator.sending);
+    coordinator.apply(retry_answer(2, Duration::from_secs(30)));
+    clock.advance(Duration::from_secs(15));
+    let wake = coordinator.next_wake().expect("the retry is pending");
+    assert!(
+        wake > clock.now(),
+        "a past wake time spins until the retry is due"
+    );
+}
+
+#[test]
+fn a_record_read_after_a_failure_does_not_spin_its_later_retry_wait() {
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    faults.reads.lock().unwrap().insert(1);
+    let clock = ManualClock::new();
+    let mut coordinator = read_fault_coordinator(&[(1, "flaky")], &faults, &directory, &clock);
+    let (jobs, _sent) = mpsc::sync_channel(1);
+    coordinator.jobs = Some(jobs);
+    assert!(coordinator.start_request());
+    assert!(!coordinator.sending, "the only record could not be read");
+    faults.reads.lock().unwrap().clear();
+    clock.advance(Duration::from_secs(11));
+    assert!(coordinator.start_request());
+    assert!(coordinator.sending, "the record is read and sent");
+    coordinator.apply(retry_answer(1, Duration::from_secs(30)));
+    clock.advance(Duration::from_secs(1));
+    let wake = coordinator.next_wake().expect("the retry is pending");
+    assert!(
+        wake > clock.now(),
+        "a stale read time spins for the whole retry wait"
+    );
+}
+
+#[test]
+fn a_record_waiting_out_a_read_failure_does_not_make_newer_events_skip_their_interval() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let slot: Arc<Mutex<Option<Arc<TransportHandle>>>> = Arc::new(Mutex::new(None));
+    let _ok = {
+        let slot = slot.clone();
+        let log = log.clone();
+        server.mock(move |when, then| {
+            when.method(POST).is_true(move |request| {
+                let body: Value = serde_json::from_slice(request.body_ref()).unwrap_or_default();
+                let mut requests = log.0.lock().unwrap();
+                if requests.is_empty() {
+                    if let Some(handle) = slot.lock().unwrap().as_ref() {
+                        let _ = handle.enqueue_prepared(wire("newer"));
+                    }
+                }
+                requests.push(Received {
+                    id: String::new(),
+                    attempt: 0,
+                    events: body["batch"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|event| event["event"].as_str().unwrap_or_default().to_string())
+                        .collect(),
+                });
+                true
+            });
+            then.status(200).json_body(json!({"results": {}}));
+        })
+    };
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    faults.reads.lock().unwrap().insert(1);
+    let harness = spawn(
+        &mut base(&server),
+        Some(Box::new(FaultyStore {
+            inner: directory.open(10),
+            faults,
+        })),
+        64 * 1024,
+    );
+    let handle = Arc::new(harness.handle);
+    *slot.lock().unwrap() = Some(handle.clone());
+    admit(&handle, "blocked");
+    admit(&handle, "first");
+    handle.tick();
+    std::thread::sleep(Duration::from_millis(300));
+    *slot.lock().unwrap() = None;
+    handle.request_close_before(harness.clock.now());
+    handle.join();
+    assert_eq!(
+        log.names(),
+        [names(&["first"])],
+        "a newer event skipped its flush interval"
+    );
+}
+
+#[test]
+fn a_record_left_behind_by_a_read_failure_is_sent_once_readable_without_new_traffic() {
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    faults.reads.lock().unwrap().insert(1);
+    let clock = ManualClock::new();
+    let mut coordinator =
+        read_fault_coordinator(&[(1, "delayed"), (2, "sent")], &faults, &directory, &clock);
+    let (jobs, sent) = mpsc::sync_channel(1);
+    coordinator.jobs = Some(jobs);
+    assert!(coordinator.start_request());
+    assert!(coordinator.sending, "the readable record goes");
+    sent.try_recv().unwrap();
+    coordinator.apply(super::Sent {
+        seqs: vec![2],
+        request_id: Uuid::now_v7(),
+        attempt: 1,
+        created_at: String::new(),
+        verdict: super::Verdict::Finished,
+    });
+    assert!(coordinator.start_request());
+    assert!(!coordinator.sending, "the delayed record is not ready yet");
+    let wake = coordinator
+        .next_wake()
+        .expect("the delayed record needs a wake");
+    assert!(wake > clock.now());
+    faults.reads.lock().unwrap().clear();
+    clock.advance(wake - clock.now());
+    assert!(coordinator.start_request());
+    assert!(
+        coordinator.sending,
+        "the delayed record is sent once readable, with no new trigger"
+    );
+}

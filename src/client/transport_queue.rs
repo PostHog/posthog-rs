@@ -452,7 +452,10 @@ impl Coordinator {
                         .expect("an on-disk entry has a store")
                         .read(StoreKey(*seq));
                     match read {
-                        Ok(event) => event,
+                        Ok(event) => {
+                            self.table.clear_read_delay(*seq);
+                            event
+                        }
                         Err(ReadError::Transient(error)) => {
                             self.report_storage(StorageOperation::Read, &error);
                             self.table.delay_read(*seq, now + self.interval);
@@ -559,14 +562,22 @@ impl Coordinator {
         }
         // Events that were queued when the request was selected but did not go
         // in it are a backlog: send them now. This includes events admitted
-        // during a retry wait, once the retry clears.
-        if self.retry.is_none()
-            && self
+        // during a retry wait, once the retry clears. A backlog waiting out a
+        // read failure is sent once readable, not before newer events are due.
+        if self.retry.is_none() {
+            let now = self.clock.now();
+            if self.table.ready_through(self.selected_through, now) {
+                self.due = Some(now);
+            } else if self
                 .table
                 .first_seq()
                 .is_some_and(|seq| seq <= self.selected_through)
-        {
-            self.due = Some(self.clock.now());
+            {
+                self.due = match (self.due, self.table.next_read()) {
+                    (Some(due), Some(read)) => Some(due.min(read)),
+                    (due, read) => due.or(read),
+                };
+            }
         }
     }
 
@@ -585,7 +596,9 @@ impl Coordinator {
         let table = &self.table;
         // A request waiting to be retried has been attempted, and holds back
         // everything after it. Events in flight stay in the table until their
-        // answer is applied, so a waiter does not complete before them.
+        // answer is applied, so a waiter does not complete before them, unless
+        // capacity evicted them first: they are then no longer queued, and a
+        // flush does not wait for them.
         let (done, waiting): (Vec<_>, Vec<_>) = self
             .waiters
             .drain(..)
@@ -614,11 +627,14 @@ impl Coordinator {
         let mut wakes = vec![self.current_deadline(), self.orphans_due];
         if !self.sending {
             match &self.retry {
+                // Nothing else is sent before the retry.
                 Some(retry) => wakes.push(Some(retry.next_at)),
-                None if !self.table.is_empty() => wakes.push(self.due),
+                None if !self.table.is_empty() => {
+                    wakes.push(self.due);
+                    wakes.push(self.table.next_read_after(self.clock.now()));
+                }
                 None => {}
             }
-            wakes.push(self.table.next_read());
         }
         wakes.into_iter().flatten().min()
     }

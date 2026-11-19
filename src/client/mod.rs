@@ -513,8 +513,9 @@ impl ClientOptionsBuilder {
     /// failed remote `/flags` request, or failed local-evaluation poll. With
     /// persistent delivery, it also receives recoverable storage read, write,
     /// and removal errors. A storage error does not imply delivery failed: a
-    /// failed write still permits bounded memory-backed delivery. A partial write
-    /// can leave a record on disk and cause duplicate delivery after restart.
+    /// failed write still permits bounded memory-backed delivery. An event can
+    /// be delivered again after restart when removing its delivered record
+    /// failed, or when shutdown stopped while it was being sent.
     /// Multiple hooks fire in registration order.
     ///
     /// # Observability only — never emit from the hook
