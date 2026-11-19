@@ -516,6 +516,12 @@ fn final_v1_fixture_restores_identity_consent_and_all_caches() {
         .map(|(bytes, _)| bytes)
         .unwrap();
     assert_eq!(FileStateStore::decode(&encoded).unwrap(), snapshot);
+    let written: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        written,
+        fixture(),
+        "the writer must keep producing the v1 format"
+    );
 }
 
 #[test]
