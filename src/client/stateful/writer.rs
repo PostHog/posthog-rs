@@ -363,20 +363,30 @@ impl StateWriter {
 
     /// Domain-internal mutation only; do not call application code in `change`.
     /// Candidate validation happens before the authoritative state is replaced.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn update(&self, change: impl FnOnce(&mut Snapshot)) -> Result<u64, UpdateError> {
-        let revision = {
+        self.mutate(change).map(|(revision, ())| revision)
+    }
+
+    pub(super) fn mutate<T>(
+        &self,
+        change: impl FnOnce(&mut Snapshot) -> T,
+    ) -> Result<(u64, T), UpdateError> {
+        let result = {
             let mut state = self.shared.lock();
             if state.closing.is_some() {
                 return Err(UpdateError::Closed);
             }
             let mut candidate = (*state.snapshot).clone();
-            change(&mut candidate);
+            let result = change(&mut candidate);
             if !candidate.is_valid() {
                 return Err(UpdateError::Invalid);
             }
-            if candidate == *state.snapshot {
-                return Ok(state.revision);
+            if candidate.same_persisted_state(&state.snapshot) {
+                if candidate != *state.snapshot {
+                    state.snapshot = Arc::new(candidate);
+                }
+                return Ok((state.revision, result));
             }
             let revision = state.revision.checked_add(1).ok_or(UpdateError::Full)?;
             state.snapshot = Arc::new(candidate);
@@ -385,10 +395,45 @@ impl StateWriter {
                 state.due =
                     Some(self.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
             }
-            revision
+            (revision, result)
         };
         self.shared.notify();
-        Ok(revision)
+        Ok(result)
+    }
+
+    /// Compare, admit, and commit process-local person bookkeeping in queue order.
+    /// `admit` must not run hooks, tracing subscribers, or application wakers.
+    /// Fingerprints are not persisted, so this cannot schedule a writer notification.
+    /// `None` is an update that may be personless: it never matches, and once
+    /// admitted it clears the stored fingerprint.
+    pub(super) fn admit_person(
+        &self,
+        generation: u64,
+        distinct_id: &str,
+        fingerprint: Option<[u8; 20]>,
+        deduplicate: bool,
+        admit: impl FnOnce() -> bool,
+    ) {
+        let mut state = self.shared.lock();
+        let same_generation = state.snapshot.generation == generation;
+        if same_generation
+            && deduplicate
+            && fingerprint.is_some()
+            && state.snapshot.person_properties == fingerprint
+        {
+            return;
+        }
+        if !admit() || state.closing.is_some() {
+            return;
+        }
+        if same_generation {
+            Arc::make_mut(&mut state.snapshot).person_properties = fingerprint;
+        } else if state.snapshot.distinct_id == distinct_id {
+            // An update prepared before a newer identity change for the same
+            // ID is now the latest for that person, so the newer
+            // fingerprint no longer describes what PostHog last received.
+            Arc::make_mut(&mut state.snapshot).person_properties = None;
+        }
     }
 
     /// Capture one revision to drain, expediting coalescing but not retry cooldown.
