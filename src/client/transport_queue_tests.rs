@@ -478,7 +478,7 @@ fn a_retry_whose_events_left_the_queue_starts_a_new_request() {
 }
 
 #[test]
-fn memory_only_delivery_gives_up_after_its_attempts_and_disk_delivery_does_not() {
+fn delivery_keeps_retrying_past_max_capture_attempts_with_or_without_a_store() {
     for persistent in [false, true] {
         let server = MockServer::start();
         let log = Log::default();
@@ -501,14 +501,10 @@ fn memory_only_delivery_gives_up_after_its_attempts_and_disk_delivery_does_not()
             harness.clock.advance(Duration::from_secs(60));
             harness.handle.tick();
         }
+        assert_eq!(log.all().len(), 4);
+        assert_eq!(failures.load(Ordering::SeqCst), 0);
         if persistent {
-            assert_eq!(log.all().len(), 4);
-            assert_eq!(failures.load(Ordering::SeqCst), 0);
             assert_eq!(directory.records(), [1]);
-        } else {
-            assert_eq!(log.all().len(), 2);
-            assert_eq!(failures.load(Ordering::SeqCst), 1);
-            assert_eq!(harness.handle.pending(), 0);
         }
         harness.handle.request_close_before(harness.clock.now());
         harness.handle.join();

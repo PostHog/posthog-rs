@@ -776,9 +776,6 @@ pub(super) struct Executor {
     pub(super) lane: LaneConfig,
     pub(super) clock: Arc<dyn Clock>,
     pub(super) deadline: Arc<Mutex<Option<Instant>>>,
-    /// Without a store, delivery gives up after `max_capture_attempts`; with
-    /// one it keeps retrying, as the retry-queue spec allows a client queue.
-    pub(super) memory_only: bool,
 }
 
 impl Executor {
@@ -823,7 +820,10 @@ impl Executor {
         let count = events.len();
         let mut pending = events;
         let mut results = HashMap::new();
-        let is_final = self.memory_only && attempt >= self.options.max_capture_attempts;
+        // A client queue has no attempt limit, as the retry-queue spec allows:
+        // an event is retried until it is delivered, evicted by the queue
+        // limits, or left behind at shutdown.
+        let is_final = false;
         let mut status = None;
         let mut error_body = None;
         let step = match outcome {

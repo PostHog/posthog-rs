@@ -163,7 +163,6 @@ impl TransportHandle {
                 bytes: max_queue_bytes as u64,
             },
         };
-        let memory_only = store.is_none();
         let (coordinator, inbox) = Coordinator::new(
             settings,
             store,
@@ -195,7 +194,6 @@ impl TransportHandle {
                         lane,
                         clock,
                         deadline,
-                        memory_only,
                     }
                     .run(jobs_rx, results);
                 })

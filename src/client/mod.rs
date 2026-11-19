@@ -534,8 +534,7 @@ impl ClientOptionsBuilder {
     /// `before_send` drops, and retryable failures that shutdown stops from being
     /// retried, keep their WARN logs and do **not** fire the hook. A batch that
     /// has used all `max_capture_attempts` still fires it. Stateful delivery
-    /// with events on disk has no attempt limit, so its retryable failures never
-    /// fire it.
+    /// has no attempt limit, so its retryable failures never fire it.
     /// The existing `/flags` and poller WARN logs are unaffected.
     pub fn on_error<F>(&mut self, hook: F) -> &mut Self
     where
