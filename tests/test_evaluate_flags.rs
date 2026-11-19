@@ -1269,12 +1269,14 @@ mod blocking {
         let client = create_test_client(server.base_url());
 
         for options in over_limit_known_absent_options() {
-            let error = client.evaluate_flags("user-1", options).err();
-            assert!(
-                matches!(error, Some(posthog::Error::InvalidArgument(_))),
-                "{:?}",
-                error
-            );
+            for distinct_id in ["user-1", ""] {
+                let error = client.evaluate_flags(distinct_id, options.clone()).err();
+                assert!(
+                    matches!(error, Some(posthog::Error::InvalidArgument(_))),
+                    "{:?}",
+                    error
+                );
+            }
         }
         let mut at_limit = EvaluateFlagsOptions::default();
         at_limit.person_property_keys_known_absent = Some(vec!["plan".to_string(); 1000]);
@@ -1836,12 +1838,17 @@ mod async_tests {
         let client = create_test_client(server.base_url()).await;
 
         for options in over_limit_known_absent_options() {
-            let error = client.evaluate_flags("user-1", options).await.err();
-            assert!(
-                matches!(error, Some(posthog::Error::InvalidArgument(_))),
-                "{:?}",
-                error
-            );
+            for distinct_id in ["user-1", ""] {
+                let error = client
+                    .evaluate_flags(distinct_id, options.clone())
+                    .await
+                    .err();
+                assert!(
+                    matches!(error, Some(posthog::Error::InvalidArgument(_))),
+                    "{:?}",
+                    error
+                );
+            }
         }
         let mut at_limit = EvaluateFlagsOptions::default();
         at_limit.person_property_keys_known_absent = Some(vec!["plan".to_string(); 1000]);

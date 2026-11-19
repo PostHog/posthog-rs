@@ -1797,7 +1797,11 @@ fn match_property_with_version(
     property_matching_version: i64,
     known_absent_keys: Option<&HashSet<String>>,
 ) -> Result<bool, InconclusiveMatchError> {
-    if known_absent_keys.is_some_and(|keys| keys.contains(&property.key)) {
+    // Flag dependency filters are resolved by evaluating the flag, never by
+    // property absence.
+    if !property.key.starts_with("$feature/")
+        && known_absent_keys.is_some_and(|keys| keys.contains(&property.key))
+    {
         return match_known_absent_property(property);
     }
 
@@ -5856,5 +5860,31 @@ mod known_absent_tests {
             .unwrap(),
             FlagValue::Boolean(true)
         );
+    }
+
+    #[test]
+    fn listed_flag_dependency_key_does_not_resolve_a_nested_dependency() {
+        let leaf = person_flag(
+            "leaf",
+            json!([{"key": "plan", "operator": "is_set", "type": "person"}]),
+        );
+        let middle = person_flag(
+            "middle",
+            json!([{"key": "$feature/leaf", "value": true, "operator": "exact", "type": "flag"}]),
+        );
+        let flags = HashMap::from([(leaf.key.clone(), leaf), (middle.key.clone(), middle)]);
+        let flag = person_flag(
+            "outer",
+            json!([{"key": "$feature/middle", "value": true, "operator": "exact", "type": "flag"}]),
+        );
+
+        assert!(evaluate_with(
+            &flag,
+            &HashMap::new(),
+            &person_keys(&["$feature/leaf"]),
+            &HashMap::new(),
+            &flags
+        )
+        .is_err());
     }
 }

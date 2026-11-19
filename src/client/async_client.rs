@@ -1118,11 +1118,10 @@ impl Client {
     ) -> Result<FeatureFlagEvaluations, Error> {
         let distinct_id: String = distinct_id.into();
         let host = self.flag_event_host();
+        validate_known_absent_keys(&options)?;
         if distinct_id.is_empty() || self.options.is_disabled() {
             return Ok(FeatureFlagEvaluations::empty(host));
         }
-
-        validate_known_absent_keys(&options)?;
 
         if options.flag_keys.as_ref().is_some_and(Vec::is_empty) {
             return Ok(FeatureFlagEvaluations::new(

@@ -90,7 +90,9 @@ pub struct EvaluateFlagsOptions {
     /// evaluation treats a listed key as absent even when `person_properties`
     /// holds a value for it: `is_not_set` and the negated operators (`is_not`,
     /// `not_icontains`, `not_starts_with`, `not_ends_with`, `not_regex`) match,
-    /// and every other operator doesn't. Keys starting with
+    /// and every other supported operator doesn't. Operators this SDK doesn't
+    /// support and malformed filter values stay inconclusive, as they do for a
+    /// supplied value. Keys starting with
     /// `__posthog_person_metadata__` are ignored locally. The list is also sent
     /// as `person_property_keys_known_absent` when the `/flags` request is made.
     ///
