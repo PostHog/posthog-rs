@@ -334,10 +334,10 @@ fn property_and_group_mutations_complete_while_state_io_is_gated() {
             "plan".into(),
             serde_json::json!("pro"),
         )]));
-        caller_client.group("company", "old", None);
-        caller_client.group_identify("company", "metadata-only", std::collections::HashMap::new());
+        caller_client.group(("company", "old"));
+        caller_client.group_identify(("company", "metadata-only"));
         let before = caller_client.state.as_ref().unwrap().snapshot();
-        caller_client.group("company", "new", None);
+        caller_client.group(("company", "new"));
         caller_client.unregister("plan");
         caller_client.remove_group("company");
         let after = caller_client.state.as_ref().unwrap().snapshot();

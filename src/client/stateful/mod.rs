@@ -16,6 +16,7 @@ pub use crate::client::on_error::InitializationFailure;
 pub use config::Config;
 pub use identity::{Alias, Identify, PersonProfiles, PersonProperties};
 pub use producer::{Capture, CaptureOutcome, Screen};
+pub use properties::Group;
 pub use runtime::{Client, DeliveryOutcome, DrainReport, PersistenceOutcome};
 pub use storage::Persistence;
 

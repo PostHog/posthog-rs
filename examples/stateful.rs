@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     client.register(HashMap::from([("example_context".into(), json!("rust"))]));
     if let Ok(group) = std::env::var("POSTHOG_GROUP_KEY") {
-        client.group("organization", group, None);
+        client.group(("organization", group));
     }
     let mut event = Capture::new("example opened");
     event
