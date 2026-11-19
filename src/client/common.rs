@@ -11,7 +11,9 @@ use crate::feature_flag_evaluations::{
     EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
     FlagCalledEventParams,
 };
-use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
+use crate::feature_flags::{
+    FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue, KnownAbsentProperties,
+};
 use crate::local_evaluation::LocalEvaluator;
 use crate::Error;
 use crate::Event;
@@ -390,6 +392,57 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
     }
 }
 
+/// The flags service rejects a known-absent key list longer than this, counting
+/// duplicates, and per group type for group keys.
+const MAX_KNOWN_ABSENT_KEYS: usize = 1000;
+
+/// Rejects known-absent key lists the flags service would reject, so the caller
+/// gets a local error instead of a failed `/flags` request.
+pub(super) fn validate_known_absent_keys(options: &EvaluateFlagsOptions) -> Result<(), Error> {
+    if options
+        .person_property_keys_known_absent
+        .as_ref()
+        .is_some_and(|keys| keys.len() > MAX_KNOWN_ABSENT_KEYS)
+    {
+        return Err(Error::InvalidArgument(format!(
+            "person_property_keys_known_absent allows at most {MAX_KNOWN_ABSENT_KEYS} keys"
+        )));
+    }
+    if let Some((group_type, _)) = options
+        .group_property_keys_known_absent
+        .iter()
+        .flatten()
+        .find(|(_, keys)| keys.len() > MAX_KNOWN_ABSENT_KEYS)
+    {
+        return Err(Error::InvalidArgument(format!(
+            "group_property_keys_known_absent allows at most {MAX_KNOWN_ABSENT_KEYS} keys per group type, and group type {group_type:?} has more"
+        )));
+    }
+    Ok(())
+}
+
+/// Adds the caller's known-absent keys to a `/flags` request body, leaving out
+/// a field the caller didn't provide or left empty.
+pub(super) fn add_known_absent_keys(
+    payload: &mut serde_json::Value,
+    options: &EvaluateFlagsOptions,
+) {
+    if let Some(keys) = options
+        .person_property_keys_known_absent
+        .as_ref()
+        .filter(|keys| !keys.is_empty())
+    {
+        payload["person_property_keys_known_absent"] = serde_json::json!(keys);
+    }
+    if let Some(groups) = options
+        .group_property_keys_known_absent
+        .as_ref()
+        .filter(|groups| !groups.is_empty())
+    {
+        payload["group_property_keys_known_absent"] = serde_json::json!(groups);
+    }
+}
+
 /// Shared policy for combining local and remote flag evaluations. The clients
 /// retain their concrete HTTP and async/blocking boundaries; this state owns
 /// only the runtime-neutral decisions on whether to fetch and how to merge.
@@ -434,11 +487,16 @@ impl EvaluationState {
             .or_insert_with(|| serde_json::json!(self.distinct_id.clone()));
         let groups = self.options.groups.clone().unwrap_or_default();
         let group_properties = self.options.group_properties.clone().unwrap_or_default();
+        let known_absent = KnownAbsentProperties::new(
+            self.options.person_property_keys_known_absent.as_ref(),
+            self.options.group_property_keys_known_absent.as_ref(),
+        );
         let local_results = evaluator.evaluate_all_flags_with_details(
             &self.distinct_id,
             &person_properties,
             &groups,
             &group_properties,
+            &known_absent,
         );
 
         // Pin the gate from the definitions snapshot that produced each local

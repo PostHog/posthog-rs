@@ -1,7 +1,8 @@
 use crate::client::{apply_on_error_hooks, get_default_user_agent, OnErrorHook};
 use crate::feature_flags::{
-    match_feature_flag_with_context, match_feature_flag_with_version, CohortDefinition,
-    EvaluationContext, FeatureFlag, FlagValue, InconclusiveMatchError,
+    match_feature_flag_with_context, match_feature_flag_with_known_absent,
+    match_feature_flag_with_version, CohortDefinition, EvaluationContext, FeatureFlag, FlagValue,
+    InconclusiveMatchError, KnownAbsentProperties,
 };
 use crate::{Error, LocalEvaluationFailure, PostHogError};
 use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH, USER_AGENT};
@@ -1024,6 +1025,7 @@ impl LocalEvaluator {
                     group_properties,
                     &snapshot.group_type_mapping,
                     snapshot.property_matching_version,
+                    &KnownAbsentProperties::default(),
                 );
                 trace!(key, ?result, "Local flag evaluation (simple)");
                 result.map(Some)
@@ -1056,6 +1058,7 @@ impl LocalEvaluator {
             person_properties,
             groups,
             group_properties,
+            &KnownAbsentProperties::default(),
         )
         .into_iter()
         .map(|(key, evaluation)| (key, evaluation.result))
@@ -1068,6 +1071,7 @@ impl LocalEvaluator {
         person_properties: &HashMap<String, serde_json::Value>,
         groups: &HashMap<String, String>,
         group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
+        known_absent: &KnownAbsentProperties,
     ) -> HashMap<String, LocalFlagEvaluation> {
         let mut results = HashMap::new();
 
@@ -1086,7 +1090,8 @@ impl LocalEvaluator {
         };
 
         for flag in snapshot.flags.values() {
-            let result = match_feature_flag_with_context(flag, person_properties, &ctx);
+            let result =
+                match_feature_flag_with_known_absent(flag, person_properties, &ctx, known_absent);
             let payload = result
                 .as_ref()
                 .ok()
@@ -1188,6 +1193,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &KnownAbsentProperties::default(),
         );
         cache.update(definitions(false, json!({"snapshot": "new"}), false));
 

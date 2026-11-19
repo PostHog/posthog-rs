@@ -28,8 +28,8 @@ use crate::{Error, Event};
 
 use super::capture::ImmediateLane;
 use super::common::{
-    extract_flag_details, http_client_or_disable, report_flags_error, DetailedFlagsResponse,
-    EvaluationState, FlagEventHost,
+    add_known_absent_keys, extract_flag_details, http_client_or_disable, report_flags_error,
+    validate_known_absent_keys, DetailedFlagsResponse, EvaluationState, FlagEventHost,
 };
 use super::transport::{Completion, Control, LaneConfig, TransportHandle};
 use super::{CaptureSummary, ClientOptions};
@@ -918,6 +918,8 @@ impl Client {
     /// Returns [`Error::Connection`] or [`Error::Serialization`] when remote
     /// evaluation is required and the `/flags` request fails before any local
     /// results are available.
+    /// Returns [`Error::InvalidArgument`] when a known-absent key list in
+    /// `options` has more than 1000 keys.
     ///
     /// [`Event::with_flags`]: crate::Event::with_flags
     pub fn evaluate_flags<S: Into<String>>(
@@ -930,6 +932,8 @@ impl Client {
         if distinct_id.is_empty() || self.options.is_disabled() {
             return Ok(FeatureFlagEvaluations::empty(host));
         }
+
+        validate_known_absent_keys(&options)?;
 
         if options.flag_keys.as_ref().is_some_and(Vec::is_empty) {
             return Ok(FeatureFlagEvaluations::new(
@@ -1055,6 +1059,7 @@ impl Client {
         if let Some(flag_keys) = &options.flag_keys {
             payload["flag_keys_to_evaluate"] = json!(flag_keys);
         }
+        add_known_absent_keys(&mut payload, options);
 
         let response = self.send_feature_flags_request(&flags_endpoint, &payload)?;
 

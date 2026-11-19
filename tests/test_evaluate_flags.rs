@@ -157,6 +157,114 @@ fn local_definitions_fixture() -> Value {
     })
 }
 
+/// Local definitions with one flag that needs `plan` to be absent and one that
+/// stays inconclusive locally because `region` is never supplied.
+fn known_absent_definitions_fixture() -> Value {
+    json!({
+        "flags": [
+            {
+                "key": "profile-incomplete",
+                "active": true,
+                "filters": {
+                    "groups": [{
+                        "properties": [{"key": "plan", "operator": "is_not_set", "type": "person"}],
+                        "rollout_percentage": 100
+                    }]
+                }
+            },
+            {
+                "key": "regional",
+                "active": true,
+                "filters": {
+                    "groups": [{
+                        "properties": [{"key": "region", "value": "US", "operator": "exact", "type": "person"}],
+                        "rollout_percentage": 100
+                    }]
+                }
+            }
+        ],
+        "group_type_mapping": {"0": "organization"},
+        "cohorts": {}
+    })
+}
+
+fn known_absent_options(flag_keys: &[&str]) -> posthog::EvaluateFlagsOptions {
+    let mut options = posthog::EvaluateFlagsOptions::default();
+    options.flag_keys = Some(flag_keys.iter().map(|key| key.to_string()).collect());
+    options.person_properties = Some(
+        vec![("plan".to_string(), json!("pro"))]
+            .into_iter()
+            .collect(),
+    );
+    options.person_property_keys_known_absent = Some(vec!["plan".to_string()]);
+    options.group_property_keys_known_absent = Some(
+        vec![("organization".to_string(), vec!["tier".to_string()])]
+            .into_iter()
+            .collect(),
+    );
+    options
+}
+
+fn local_evaluation_client_options(base_url: String) -> posthog::ClientOptions {
+    posthog::ClientOptionsBuilder::default()
+        .api_key("test_api_key".to_string())
+        .host(base_url)
+        .secret_key("test_personal_key".to_string())
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(3600)
+        .build()
+        .unwrap()
+}
+
+fn mock_known_absent_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200)
+            .json_body(known_absent_definitions_fixture());
+    })
+}
+
+/// `/flags` mock that only matches a body carrying exactly the known-absent
+/// fields in `expected`, or neither field when `expected` is `None`.
+fn mock_flags_with_known_absent(
+    server: &MockServer,
+    expected: Option<(Value, Value)>,
+) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        when.method(POST).path("/flags/").is_true(move |request| {
+            let Ok(body) = serde_json::from_slice::<Value>(request.body_ref()) else {
+                return false;
+            };
+            let person = body.get("person_property_keys_known_absent").cloned();
+            let groups = body.get("group_property_keys_known_absent").cloned();
+            match &expected {
+                Some((expected_person, expected_groups)) => {
+                    person.as_ref() == Some(expected_person)
+                        && groups.as_ref() == Some(expected_groups)
+                }
+                None => person.is_none() && groups.is_none(),
+            }
+        });
+        then.status(200).json_body(flags_response_fixture());
+    })
+}
+
+fn over_limit_known_absent_options() -> Vec<posthog::EvaluateFlagsOptions> {
+    let too_many: Vec<String> = (0..1001).map(|_| "plan".to_string()).collect();
+    let mut person = posthog::EvaluateFlagsOptions::default();
+    person.person_property_keys_known_absent = Some(too_many.clone());
+    let mut groups = posthog::EvaluateFlagsOptions::default();
+    groups.group_property_keys_known_absent = Some(
+        vec![
+            ("organization".to_string(), vec!["tier".to_string()]),
+            ("project".to_string(), too_many),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    vec![person, groups]
+}
+
 struct FlakyFlagsServer {
     base_url: String,
     attempts: Arc<AtomicUsize>,
@@ -1092,9 +1200,89 @@ mod blocking {
         client.flush();
         capture_mock.assert_calls(1);
     }
-}
 
-// ---------- async ----------
+    #[test]
+    fn known_absent_keys_resolve_locally_without_a_request() {
+        let server = MockServer::start();
+        mock_known_absent_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        let snapshot = client
+            .evaluate_flags("user-1", known_absent_options(&["profile-incomplete"]))
+            .unwrap();
+
+        assert_eq!(
+            snapshot.get_flag("profile-incomplete"),
+            Some(FlagValue::Boolean(true))
+        );
+        flags_mock.assert_calls(0);
+    }
+
+    #[test]
+    fn remote_fallback_sends_known_absent_keys() {
+        let server = MockServer::start();
+        mock_known_absent_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        client
+            .evaluate_flags(
+                "user-1",
+                known_absent_options(&["profile-incomplete", "regional"]),
+            )
+            .unwrap();
+
+        flags_mock.assert_calls(1);
+    }
+
+    #[test]
+    fn remote_request_omits_known_absent_keys_not_provided() {
+        let server = MockServer::start();
+        let flags_mock = mock_flags_with_known_absent(&server, None);
+        let client = create_test_client(server.base_url());
+
+        client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .unwrap();
+        let mut empty = EvaluateFlagsOptions::default();
+        empty.person_property_keys_known_absent = Some(Vec::new());
+        empty.group_property_keys_known_absent = Some(Default::default());
+        client.evaluate_flags("user-1", empty).unwrap();
+
+        flags_mock.assert_calls(2);
+    }
+
+    #[test]
+    fn over_limit_known_absent_keys_fail_without_a_request() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = create_test_client(server.base_url());
+
+        for options in over_limit_known_absent_options() {
+            let error = client.evaluate_flags("user-1", options).err();
+            assert!(
+                matches!(error, Some(posthog::Error::InvalidArgument(_))),
+                "{:?}",
+                error
+            );
+        }
+        let mut at_limit = EvaluateFlagsOptions::default();
+        at_limit.person_property_keys_known_absent = Some(vec!["plan".to_string(); 1000]);
+        client.evaluate_flags("user-1", at_limit).unwrap();
+
+        flags_mock.assert_calls(1);
+    }
+}
 
 #[cfg(feature = "async-client")]
 mod async_tests {
@@ -1575,5 +1763,90 @@ mod async_tests {
         assert!(snapshot.is_enabled("alpha"));
         client.flush().await;
         capture_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn known_absent_keys_resolve_locally_without_a_request() {
+        let server = MockServer::start();
+        mock_known_absent_definitions(&server);
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        let snapshot = client
+            .evaluate_flags("user-1", known_absent_options(&["profile-incomplete"]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot.get_flag("profile-incomplete"),
+            Some(FlagValue::Boolean(true))
+        );
+        flags_mock.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn remote_fallback_sends_known_absent_keys() {
+        let server = MockServer::start();
+        mock_known_absent_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        client
+            .evaluate_flags(
+                "user-1",
+                known_absent_options(&["profile-incomplete", "regional"]),
+            )
+            .await
+            .unwrap();
+
+        flags_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn remote_request_omits_known_absent_keys_not_provided() {
+        let server = MockServer::start();
+        let flags_mock = mock_flags_with_known_absent(&server, None);
+        let client = create_test_client(server.base_url()).await;
+
+        client
+            .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+            .await
+            .unwrap();
+        let mut empty = EvaluateFlagsOptions::default();
+        empty.person_property_keys_known_absent = Some(Vec::new());
+        empty.group_property_keys_known_absent = Some(Default::default());
+        client.evaluate_flags("user-1", empty).await.unwrap();
+
+        flags_mock.assert_calls(2);
+    }
+
+    #[tokio::test]
+    async fn over_limit_known_absent_keys_fail_without_a_request() {
+        let server = MockServer::start();
+        let flags_mock = server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200).json_body(flags_response_fixture());
+        });
+        let client = create_test_client(server.base_url()).await;
+
+        for options in over_limit_known_absent_options() {
+            let error = client.evaluate_flags("user-1", options).await.err();
+            assert!(
+                matches!(error, Some(posthog::Error::InvalidArgument(_))),
+                "{:?}",
+                error
+            );
+        }
+        let mut at_limit = EvaluateFlagsOptions::default();
+        at_limit.person_property_keys_known_absent = Some(vec!["plan".to_string(); 1000]);
+        client.evaluate_flags("user-1", at_limit).await.unwrap();
+
+        flags_mock.assert_calls(1);
     }
 }
