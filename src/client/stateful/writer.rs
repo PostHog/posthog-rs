@@ -379,14 +379,14 @@ impl StateWriter {
             }
             let mut candidate = (*state.snapshot).clone();
             let result = change(&mut candidate);
-            if !candidate.is_valid() {
-                return Err(UpdateError::Invalid);
-            }
             if candidate.same_persisted_state(&state.snapshot) {
                 if candidate != *state.snapshot {
                     state.snapshot = Arc::new(candidate);
                 }
                 return Ok((state.revision, result));
+            }
+            if !candidate.is_valid() {
+                return Err(UpdateError::Invalid);
             }
             let revision = state.revision.checked_add(1).ok_or(UpdateError::Full)?;
             state.snapshot = Arc::new(candidate);
