@@ -55,6 +55,11 @@ while [ "$i" -lt "${#words[@]}" ]; do
     if [ "$word" = "-framework" ]; then
         item="-framework ${words[$((i + 1))]}"
         i=$((i + 2))
+    elif [[ "$word" == /* ]]; then
+        # An MSVC linker option such as /defaultlib:msvcrt. CMake passes items
+        # starting with `-` straight to the linker; MSVC's link accepts either prefix.
+        item="-${word#/}"
+        i=$((i + 1))
     else
         item="$word"
         i=$((i + 1))

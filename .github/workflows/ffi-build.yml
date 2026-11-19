@@ -122,9 +122,10 @@ jobs:
           cl /nologo /std:c++17 /EHsc /W4 /WX tests\c\smoke.cpp /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:smoke-shared.exe || exit /b 1
           copy /y "%OUT%\posthog_ffi.dll" . || exit /b 1
           smoke-shared.exe || exit /b 1
-          rem Static: link the static library and the system libraries it needs.
+          rem Static: Rust builds against the DLL C runtime, so the program must use /MD too.
+          rem The system library list includes linker options such as /defaultlib, so it goes after /link.
           for /f "usebackq tokens=*" %%l in ("%OUT%\native-static-libs.txt") do set "NATIVE=%%l"
-          cl /nologo /std:c++17 /EHsc /W4 /WX tests\c\smoke.cpp /Iinclude "%OUT%\posthog_ffi.lib" %NATIVE% /Fe:smoke-static.exe || exit /b 1
+          cl /nologo /MD /std:c++17 /EHsc /W4 /WX tests\c\smoke.cpp /Iinclude /Fe:smoke-static.exe /link "%OUT%\posthog_ffi.lib" %NATIVE% || exit /b 1
           smoke-static.exe
 
       - name: Package

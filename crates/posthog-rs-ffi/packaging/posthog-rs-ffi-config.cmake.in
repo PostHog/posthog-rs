@@ -34,6 +34,13 @@ if(NOT TARGET posthog-rs-ffi::shared)
         IMPORTED_LINK_INTERFACE_LANGUAGES "C"
         INTERFACE_LINK_LIBRARIES "@NATIVE_LIBS@")
 
+    if(MSVC)
+        # Rust builds the static library against the DLL C runtime (/MD), so
+        # programs linking it must use the same runtime.
+        set_property(TARGET posthog-rs-ffi::static APPEND PROPERTY
+            INTERFACE_COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C,CXX>:/MD>")
+    endif()
+
     add_library(posthog-rs-ffi::posthog-rs-ffi INTERFACE IMPORTED)
     if(POSTHOG_RS_FFI_STATIC)
         set_target_properties(posthog-rs-ffi::posthog-rs-ffi PROPERTIES
