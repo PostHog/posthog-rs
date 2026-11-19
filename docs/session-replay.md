@@ -81,6 +81,24 @@ special invalidation, but ordinary session expiry still applies. Screenshots
 do not extend session activity. Once accepted, work retains its attribution
 through later identity, session and consent changes.
 
+## Replay status on events
+
+With `session-replay` enabled, every captured event except `$snapshot` carries
+the replay status PostHog uses to explain missing recordings:
+
+- `$recording_status`: `active` while recording is started, eligible and has a
+  session; otherwise `disabled`. Frames are never held, so it is never `buffering`.
+- `$sdk_debug_replay_event_trigger_status` and
+  `$sdk_debug_replay_linked_flag_trigger_status`: `trigger_pending` when the
+  project configures that trigger (which prevents recording), otherwise
+  `trigger_disabled`.
+- `$sdk_debug_replay_internal_buffer_length`: frames acquired and not yet
+  delivered.
+
+If the screenshot encoder could not start, events carry only
+`$recording_status: disabled`. A caller-supplied or registered property of the
+same name wins, and `before_send` hooks see these properties.
+
 ## Hooks and encoding
 
 One encoder worker performs JPEG encoding and then runs the existing

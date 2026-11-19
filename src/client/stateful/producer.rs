@@ -153,6 +153,10 @@ pub(crate) struct Producer {
     pub(super) default_opt_out: bool,
     pub(super) send_feature_flag_event: bool,
     pub(super) session_clock: std::sync::Arc<dyn super::sessions::SessionClock>,
+    /// Set once the replay controller starts; empty when the encoder could not start.
+    #[cfg(feature = "session-replay")]
+    pub(super) replay:
+        std::sync::Arc<std::sync::OnceLock<std::sync::Weak<super::replay::Controller>>>,
 }
 
 impl Producer {
@@ -177,6 +181,8 @@ impl Producer {
             default_opt_out: config.opt_out,
             send_feature_flag_event: config.send_feature_flag_event,
             session_clock: std::sync::Arc::new(super::sessions::SystemSessionClock),
+            #[cfg(feature = "session-replay")]
+            replay: Default::default(),
         }
     }
 
@@ -268,6 +274,8 @@ impl Producer {
         } else if lib.and_then(serde_json::Value::as_str) == Some(self.sdk_name.as_str()) {
             event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
         }
+        #[cfg(feature = "session-replay")]
+        self.fill_replay_debug_properties(&mut event, snapshot, session_id);
         event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
         event.insert_prop_default("$is_identified", snapshot.identified.into());
         fill_person_profile_option(&mut event, self.person_profiles.processes(snapshot));
@@ -280,6 +288,30 @@ impl Producer {
             return Err(CaptureOutcome::Invalid);
         }
         Ok(event)
+    }
+}
+
+#[cfg(feature = "session-replay")]
+impl Producer {
+    /// `$snapshot` is replay data, not a report about replay, so it carries none.
+    /// A caller or registered value for the same key wins.
+    fn fill_replay_debug_properties(
+        &self,
+        event: &mut Event,
+        snapshot: &Snapshot,
+        session_id: Option<Uuid>,
+    ) {
+        if event.event_name() == "$snapshot" {
+            return;
+        }
+        match self.replay.get().and_then(std::sync::Weak::upgrade) {
+            Some(replay) => {
+                for (key, value) in replay.debug_properties(snapshot, session_id) {
+                    event.insert_prop_default(key, value);
+                }
+            }
+            None => event.insert_prop_default("$recording_status", "disabled".into()),
+        }
     }
 }
 

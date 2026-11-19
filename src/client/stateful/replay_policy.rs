@@ -43,3 +43,22 @@ pub(super) fn eligible(value: Option<&Value>) -> bool {
     }
     true
 }
+
+/// `$sdk_debug_replay_*_trigger_status` for one trigger kind. This client never
+/// evaluates triggers, so a configured one stays pending and recording stays
+/// off; an unconfigured one is disabled.
+pub(super) fn trigger_status(value: Option<&Value>, name: &str) -> &'static str {
+    let configured = value
+        .and_then(Value::as_object)
+        .and_then(|fields| fields.get(name))
+        .is_some_and(|v| match v {
+            Value::Null => false,
+            Value::Array(items) => !items.is_empty(),
+            _ => true,
+        });
+    if configured {
+        "trigger_pending"
+    } else {
+        "trigger_disabled"
+    }
+}

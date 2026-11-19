@@ -996,3 +996,148 @@ fn frame_unavailable_is_a_standard_error() {
         "invalid frame layout"
     );
 }
+
+type Seen = Arc<Mutex<Vec<(String, std::collections::HashMap<String, Value>)>>>;
+
+fn recording_client(backend: &Backend) -> (Client, Seen) {
+    let seen = Seen::default();
+    let record = seen.clone();
+    let client = backend.client(|config| {
+        config.before_send(move |event| {
+            record
+                .lock()
+                .unwrap()
+                .push((event.event_name().to_owned(), event.properties().clone()));
+            Some(event)
+        });
+    });
+    (client, seen)
+}
+
+/// The replay debug keys on the last hook-visible event with this name.
+fn replay_debug(seen: &Seen, name: &str) -> Value {
+    let seen = seen.lock().unwrap();
+    let (_, properties) = seen.iter().rev().find(|(event, _)| event == name).unwrap();
+    Value::Object(
+        properties
+            .iter()
+            .filter(|(key, _)| {
+                key.starts_with("$recording_status") || key.starts_with("$sdk_debug")
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+fn replay_debug_keys(status: &str, event: &str, linked_flag: &str, buffered: usize) -> Value {
+    json!({
+        "$recording_status": status,
+        "$sdk_debug_replay_event_trigger_status": event,
+        "$sdk_debug_replay_linked_flag_trigger_status": linked_flag,
+        "$sdk_debug_replay_internal_buffer_length": buffered,
+    })
+}
+
+#[test]
+fn events_report_whether_replay_is_recording_and_how_many_frames_are_unsent() {
+    let backend = Backend::new();
+    let (client, seen) = recording_client(&backend);
+    let replay = client.session_replay();
+    client.capture("before");
+    assert_eq!(
+        replay_debug(&seen, "before"),
+        replay_debug_keys("disabled", "trigger_disabled", "trigger_disabled", 0)
+    );
+    replay.start();
+    let held = frame(&replay);
+    client.capture("during");
+    assert_eq!(
+        replay_debug(&seen, "during"),
+        replay_debug_keys("active", "trigger_disabled", "trigger_disabled", 1)
+    );
+    replay.stop();
+    client.capture("after");
+    assert_eq!(
+        replay_debug(&seen, "after")["$recording_status"],
+        json!("disabled")
+    );
+    drop(held);
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn snapshot_events_carry_no_replay_debug_keys() {
+    let backend = Backend::new();
+    let (client, seen) = recording_client(&backend);
+    let replay = client.session_replay();
+    replay.start();
+    assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
+    client.flush_blocking();
+    assert_eq!(replay_debug(&seen, "$snapshot"), json!({}));
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn a_configured_trigger_stays_pending_while_recording_is_off() {
+    let cases = [
+        (
+            json!({"eventTriggers": ["purchase"]}),
+            ("trigger_pending", "trigger_disabled"),
+        ),
+        (
+            json!({"linkedFlag": "replay-flag"}),
+            ("trigger_disabled", "trigger_pending"),
+        ),
+    ];
+    for (recording, (event, linked_flag)) in cases {
+        let backend = Backend::new();
+        *backend.config.lock().unwrap() =
+            json!({"hasFeatureFlags": false, "sessionRecording": recording});
+        let (client, seen) = recording_client(&backend);
+        wait_for_recording_config(&client, recording);
+        client.session_replay().start();
+        client.capture("purchase");
+        assert_eq!(
+            replay_debug(&seen, "purchase"),
+            replay_debug_keys("disabled", event, linked_flag, 0)
+        );
+        client.shutdown_blocking(None);
+    }
+}
+
+#[test]
+fn a_registered_replay_debug_value_wins_over_the_sdk_value() {
+    let backend = Backend::new();
+    let (client, seen) = recording_client(&backend);
+    client.register(std::collections::HashMap::from([(
+        "$recording_status".to_owned(),
+        json!("registered"),
+    )]));
+    client.capture("custom");
+    assert_eq!(
+        replay_debug(&seen, "custom")["$recording_status"],
+        json!("registered")
+    );
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn a_caller_supplied_replay_debug_value_wins_for_that_event_only() {
+    let backend = Backend::new();
+    let (client, seen) = recording_client(&backend);
+    let mut capture = super::super::Capture::new("custom");
+    capture
+        .properties
+        .insert("$recording_status".into(), "caller".into());
+    client.capture(capture);
+    client.capture("next");
+    assert_eq!(
+        replay_debug(&seen, "custom")["$recording_status"],
+        json!("caller")
+    );
+    assert_eq!(
+        replay_debug(&seen, "next")["$recording_status"],
+        json!("disabled")
+    );
+    client.shutdown_blocking(None);
+}

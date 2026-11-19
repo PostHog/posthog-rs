@@ -267,6 +267,40 @@ impl Controller {
         pool.run = pool.run.wrapping_add(1);
         pool.buffers.clear();
     }
+    /// The replay debug keys PostHog reads from every event except `$snapshot`,
+    /// describing the event's own state snapshot and session. This client never
+    /// holds frames, so the status is `active` or `disabled`, never `buffering`.
+    pub(super) fn debug_properties(
+        &self,
+        snapshot: &Snapshot,
+        session_id: Option<Uuid>,
+    ) -> [(&'static str, serde_json::Value); 4] {
+        let (started, in_flight) = {
+            let pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
+            (pool.active, pool.in_flight)
+        };
+        let recording =
+            started && session_id.is_some() && !self.gate.is_closed() && self.allowed(snapshot);
+        let config = snapshot
+            .remote_config
+            .as_ref()
+            .and_then(|c| c.session_recording.as_ref());
+        [
+            (
+                "$recording_status",
+                if recording { "active" } else { "disabled" }.into(),
+            ),
+            (
+                "$sdk_debug_replay_event_trigger_status",
+                policy::trigger_status(config, "eventTriggers").into(),
+            ),
+            (
+                "$sdk_debug_replay_linked_flag_trigger_status",
+                policy::trigger_status(config, "linkedFlag").into(),
+            ),
+            ("$sdk_debug_replay_internal_buffer_length", in_flight.into()),
+        ]
+    }
     fn allowed(&self, snapshot: &Snapshot) -> bool {
         !snapshot.opt_out.unwrap_or(self.default_opt_out)
             && policy::eligible(
