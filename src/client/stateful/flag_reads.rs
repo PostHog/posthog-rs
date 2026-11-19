@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use super::flag_state::{CachedFlag, FlagContext};
 use super::{Client, Snapshot};
+use crate::FlagValue;
 
 /// Inputs that produced a cached flag, not necessarily the latest targeting.
 /// Cloning is cheap: results from one evaluation share a single context.
@@ -160,6 +161,40 @@ impl Client {
             key,
             send_event: None,
         }
+    }
+
+    /// Whether `key` is enabled: true for an enabled flag or a non-empty
+    /// variant, false when it is disabled, missing or not loaded yet, or the
+    /// client is disabled or closed. Reports access like
+    /// [`FeatureFlagLookup::get`]. Use [`Self::feature_flag`] to tell a disabled
+    /// flag from an unavailable one, or to override reporting for one read.
+    #[must_use]
+    pub fn is_feature_enabled(&self, key: &str) -> bool {
+        self.feature_flag(key)
+            .get()
+            .is_some_and(|flag| flag.enabled)
+    }
+
+    /// The flag's value: its variant for a multivariate match, otherwise
+    /// whether it is enabled. None when the flag is unavailable. Reports
+    /// access like [`FeatureFlagLookup::get`].
+    #[must_use]
+    pub fn get_feature_flag(&self, key: &str) -> Option<FlagValue> {
+        let flag = self.feature_flag(key).get()?;
+        Some(match flag.variant {
+            Some(variant) if flag.enabled => FlagValue::String(variant),
+            _ => FlagValue::Boolean(flag.enabled),
+        })
+    }
+
+    /// The flag's decoded payload. Never reports access, as with the server
+    /// client's `get_flag_payload`.
+    #[must_use]
+    pub fn get_feature_flag_payload(&self, key: &str) -> Option<Value> {
+        self.feature_flag(key)
+            .send_event(false)
+            .get()
+            .and_then(|flag| flag.payload)
     }
 
     /// Export all cached rich results without fetching flags or emitting analytics.

@@ -66,7 +66,7 @@ struct Snapshot {
     distinct_id: String,
     identified: bool,
     person_processing: bool,
-    // None follows the configured default. Reset keeps an explicit choice.
+    // None follows the configured default, including after reset.
     #[serde(deserialize_with = "Option::<bool>::deserialize")]
     opt_out: Option<bool>,
     registered: HashMap<String, Value>,
