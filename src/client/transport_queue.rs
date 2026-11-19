@@ -221,6 +221,11 @@ pub(super) fn run(
             }
             due = clock.now();
         }
+        if queue.take_replaced() > 0 && !std::mem::replace(&mut eviction_warned, true) {
+            tracing::warn!(
+                "posthog-rs: event queue is full; dropping the oldest queued event(s) to keep new ones"
+            );
+        }
         if let Some(store) = &mut storage.store {
             if cleanup_due.map_or(true, |at| clock.now() >= at) {
                 removals.retain(|key| {
@@ -368,8 +373,6 @@ pub(super) fn run(
                         }
                     }
                     if head_empty {
-                        // The disk queue drained, so a later overflow warns again.
-                        eviction_warned = false;
                         // A bounded disk head says nothing about later durable
                         // records: resident selection must share its checkpoint.
                         for (id, wire) in queue
@@ -391,6 +394,10 @@ pub(super) fn run(
                             entries.push((token, Entry::Memory(id)));
                             events.push(event);
                         }
+                    }
+                    if head_empty && events.is_empty() {
+                        // The queue drained, so a later overflow warns again.
+                        eviction_warned = false;
                     }
                     let mut body_bytes = 0usize;
                     let keep = events

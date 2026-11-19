@@ -139,6 +139,8 @@ pub(super) struct Queue {
     count: Arc<AtomicUsize>,
     capacity: usize,
     wake: AtomicBool,
+    /// Resident events dropped to admit newer ones since the coordinator last looked.
+    replaced: AtomicUsize,
 }
 impl Queue {
     pub(super) fn new(
@@ -157,6 +159,7 @@ impl Queue {
             count,
             capacity,
             wake: AtomicBool::new(false),
+            replaced: AtomicUsize::new(0),
         })
     }
     pub(super) fn admit(&self, wire: CaptureEvent) -> super::Admission {
@@ -190,6 +193,7 @@ impl Queue {
         while self.count.load(Ordering::Acquire) >= self.capacity || self.budget.available() < bytes
         {
             resident.items.pop_front();
+            self.replaced.fetch_add(1, Ordering::AcqRel);
         }
         let reservation = self
             .budget
@@ -205,6 +209,9 @@ impl Queue {
             count: self.count.clone(),
         }));
         super::Admission::Accepted
+    }
+    pub(super) fn take_replaced(&self) -> usize {
+        self.replaced.swap(0, Ordering::AcqRel)
     }
     pub(super) fn arm(&self) -> bool {
         !self.wake.swap(true, Ordering::AcqRel)
@@ -300,6 +307,23 @@ impl Queue {
 mod queue_tests {
     use super::*;
     use crate::client::transport::{storage_tests::wire, Admission};
+
+    #[test]
+    fn admission_counts_the_resident_events_it_replaces() {
+        let queue = Queue::new(
+            ByteBudget::new(4096),
+            Arc::new(AtomicUsize::new(0)),
+            2,
+            None,
+        );
+        assert_eq!(queue.admit(wire("first")), Admission::Accepted);
+        assert_eq!(queue.admit(wire("second")), Admission::Accepted);
+        assert_eq!(queue.take_replaced(), 0);
+        assert_eq!(queue.admit(wire("third")), Admission::Accepted);
+        assert_eq!(queue.admit(wire("fourth")), Admission::Accepted);
+        assert_eq!(queue.take_replaced(), 2);
+        assert_eq!(queue.take_replaced(), 0);
+    }
 
     #[test]
     fn clearing_reports_how_many_resident_events_were_dropped() {
