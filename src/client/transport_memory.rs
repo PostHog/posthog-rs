@@ -235,12 +235,12 @@ impl Queue {
             false
         }
     }
-    pub(super) fn clear(&self) {
-        self.resident
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .items
-            .clear();
+    /// Drop every resident event and return how many there were.
+    pub(super) fn clear(&self) -> usize {
+        let mut resident = self.resident.lock().unwrap_or_else(|p| p.into_inner());
+        let dropped = resident.items.len();
+        resident.items.clear();
+        dropped
     }
     pub(super) fn persisted(&self, key: u64) {
         let mut resident = self.resident.lock().unwrap_or_else(|p| p.into_inner());
@@ -300,6 +300,17 @@ impl Queue {
 mod queue_tests {
     use super::*;
     use crate::client::transport::{storage_tests::wire, Admission};
+
+    #[test]
+    fn clearing_reports_how_many_resident_events_were_dropped() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let queue = Queue::new(ByteBudget::new(4096), count.clone(), 4, None);
+        assert_eq!(queue.admit(wire("first")), Admission::Accepted);
+        assert_eq!(queue.admit(wire("second")), Admission::Accepted);
+        assert_eq!(queue.clear(), 2);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        assert_eq!(queue.clear(), 0);
+    }
 
     #[test]
     fn retained_memory_is_fifo_and_replacements_have_exact_admission_identity() {

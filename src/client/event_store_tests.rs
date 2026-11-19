@@ -815,7 +815,7 @@ fn head_batch_continues_empty_pages_before_reselecting_eligible_fifo() {
 }
 
 #[test]
-fn head_batch_finishes_preserved_scan_before_reselecting_an_appended_replacement() {
+fn head_batch_continues_a_preserved_scan_into_an_appended_replacement() {
     let directory = TestDirectory::new();
     let mut large = event("preserved");
     large.properties = serde_json::json!({"data": "x".repeat(2048)});
@@ -834,13 +834,8 @@ fn head_batch_finishes_preserved_scan_before_reselecting_an_appended_replacement
     assert!(!store.contains(first).unwrap());
     let last_page = store.head_batch(1, 4096, 4096).unwrap();
     assert!(last_page.events.is_empty() && last_page.advanced);
-    assert!(
-        !last_page.more && !last_page.retry_pending,
-        "completed unreadable scan must yield"
-    );
+    assert!(last_page.more, "the sweep goes on to the appended record");
     assert_eq!(store.recovery_cursor, second.0);
-    let restarted = store.head_batch(1, 4096, 4096).unwrap();
-    assert!(restarted.events.is_empty() && restarted.more);
     let page = store.head_batch(1, 4096, 4096).unwrap();
     assert_eq!(page.events[0].key, replacement);
     assert_eq!(store.count, 2);
@@ -932,4 +927,57 @@ fn bounded_head_rollover_includes_its_checkpoint_but_not_later_appends() {
         later
     );
     assert_eq!(store.count, 4);
+}
+
+// A literal version-1 record, independent of the current serializer: a format
+// change must still recover records written by earlier releases.
+const FINAL_V1_RECORD: &str = r#"{"version":1,"event":{"event":"fixture","uuid":"018e23f4-1234-7000-8000-000000000001","distinct_id":"original-user","timestamp":"2025-01-01T00:00:00.123456Z","session_id":"original-session","window_id":"original-window","options":{"process_person_profile":false},"properties":{"original":{"array":[false,0,null]}}}}"#;
+
+#[test]
+fn final_v1_record_fixture_recovers_the_complete_event() {
+    let directory = TestDirectory::new();
+    drop(directory.open(limits()));
+    fs::write(
+        directory.0.join("events").join(format!("{:020}.json", 1)),
+        FINAL_V1_RECORD,
+    )
+    .unwrap();
+    let mut store = directory.open(limits());
+    let recovered = store.recover(10, 64 * 1024).unwrap();
+    assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+    assert_eq!(recovered.events.len(), 1);
+    let mut expected = event("fixture");
+    expected.uuid = Uuid::parse_str("018e23f4-1234-7000-8000-000000000001").unwrap();
+    assert_eq!(
+        serde_json::to_value(&recovered.events[0].event).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_head_does_not_hide_records_appended_after_it() {
+    use std::os::unix::fs::PermissionsExt;
+    for reads_before_append in 0..4 {
+        let directory = TestDirectory::new();
+        let mut store = directory.open(limits());
+        let blocked = store.put(&event("blocked")).unwrap();
+        // A record the process may not open fails to read without quarantine.
+        let path = store.path(blocked);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        for _ in 0..reads_before_append {
+            assert!(store.head_batch(10, 4096, 4096).unwrap().events.is_empty());
+        }
+
+        let fresh = store.put(&event("fresh")).unwrap();
+        let mut selected = Vec::new();
+        for _ in 0..4 {
+            let page = store.head_batch(10, 4096, 4096).unwrap();
+            selected.extend(page.events.into_iter().map(|record| record.key));
+            if !selected.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(selected, vec![fresh], "{reads_before_append} reads first");
+    }
 }

@@ -189,6 +189,7 @@ pub(super) fn run(
     let mut flushes: Vec<Flush> = Vec::new();
     let mut removals = Vec::new();
     let mut cleanup_due: Option<Instant> = None;
+    let mut eviction_warned = false;
     let mut admitted_since_upload = 0usize;
     loop {
         let end = *deadline.lock().unwrap_or_else(|p| p.into_inner());
@@ -257,6 +258,7 @@ pub(super) fn run(
                         &item.wire,
                         StoreKey(item.id),
                         &options.on_error,
+                        &mut eviction_warned,
                     );
                     if let Some(key) = key {
                         queue.persisted(key.0);
@@ -366,6 +368,8 @@ pub(super) fn run(
                         }
                     }
                     if head_empty {
+                        // The disk queue drained, so a later overflow warns again.
+                        eviction_warned = false;
                         // A bounded disk head says nothing about later durable
                         // records: resident selection must share its checkpoint.
                         for (id, wire) in queue
@@ -546,7 +550,14 @@ pub(super) fn run(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
-    queue.clear();
+    // Resident events at exit were never written to disk: memory fallback, or
+    // staging the store did not reach before shutdown.
+    let dropped = queue.clear();
+    if dropped > 0 {
+        tracing::warn!(
+            "posthog-rs: shutdown stopped delivery; dropping {dropped} event(s) that were held only in memory"
+        );
+    }
     drop(retry);
     drop(completed);
     // No further work can access the event store after the coordinator exits.

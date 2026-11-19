@@ -123,6 +123,11 @@ pub(crate) trait EventStore: Send {
         None
     }
 
+    /// Undelivered records dropped to make room since the last call.
+    fn take_evicted(&mut self) -> usize {
+        0
+    }
+
     /// Revisit the retained FIFO head, including records appended this process.
     fn head(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
         self.recover(count, bytes)
@@ -251,6 +256,7 @@ pub(crate) struct FileEventStore {
     retry_keys: VecDeque<StoreKey>,
     retry_remaining: usize,
     retrying: bool,
+    evicted: usize,
     #[cfg(test)]
     directory_scans: std::cell::Cell<usize>,
     #[cfg(test)]
@@ -289,6 +295,7 @@ impl FileEventStore {
             retry_keys: VecDeque::new(),
             retry_remaining: 0,
             retrying: false,
+            evicted: 0,
             #[cfg(test)]
             directory_scans: std::cell::Cell::new(1),
             #[cfg(test)]
@@ -360,11 +367,13 @@ impl FileEventStore {
         // change an active bounded sweep's limit.
         if !self.continue_head || self.head_limit != limit {
             self.start_head(limit);
-        } else if let Some(limit) = limit {
-            let end = self.last_key.min(limit.0);
+        } else {
+            let end = limit.map_or(self.last_key, |limit| self.last_key.min(limit.0));
             if end > self.recovery_end {
-                // Include newly persisted pre-checkpoint records, never later
-                // arrivals. Existing retry metadata stays owned by this sweep.
+                // Include newly persisted records: a bounded sweep only up to
+                // its checkpoint, an unbounded one all of them, so a record
+                // that keeps failing to read cannot hide later ones. Existing
+                // retry metadata stays owned by this sweep.
                 self.recovery_end = end;
                 self.scan_complete = false;
             }
@@ -562,6 +571,7 @@ impl FileEventStore {
                 io::Error::other("Event store accounting has no reclaimable record")
             })?;
             let length = fs::metadata(&path)?.len();
+            let undelivered = path.extension().and_then(|v| v.to_str()) == Some("json");
             #[cfg(test)]
             if self.fail_eviction.get() {
                 return Err(io::Error::new(
@@ -573,6 +583,9 @@ impl FileEventStore {
             self.forget_index(key);
             self.count = self.count.saturating_sub(1);
             self.bytes = self.bytes.saturating_sub(length);
+            if undelivered {
+                self.evicted = self.evicted.saturating_add(1);
+            }
             self.sync_directory()?;
         }
         Ok(())
@@ -618,6 +631,10 @@ impl EventStore for FileEventStore {
         }
         self.last_key = key.0 - 1;
         self.put(event)
+    }
+
+    fn take_evicted(&mut self) -> usize {
+        std::mem::take(&mut self.evicted)
     }
 
     fn end_key(&self) -> Option<StoreKey> {
