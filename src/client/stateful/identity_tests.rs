@@ -74,9 +74,9 @@ fn overlapping_property_inputs_compare_after_hooks_and_serial_repeats_skip_hooks
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(client.transport.as_ref().unwrap().pending(), 1);
         // The fingerprint remains the Rust input, not the hook-transformed payload.
-        client.set_person_properties(set, HashMap::new());
+        client.set_person_properties(set);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        client.set_person_properties(HashMap::from([("plan".into(), json!("B"))]), HashMap::new());
+        client.set_person_properties(HashMap::from([("plan".into(), json!("B"))]));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(client.transport.as_ref().unwrap().pending(), 2);
     }
@@ -89,7 +89,7 @@ fn reset_scope_does_not_suppress_or_cache_an_old_prepared_property_event() {
     let fingerprint = properties_hash(&set, &HashMap::new());
     let old = client.state.as_ref().unwrap().snapshot();
     client.reset();
-    client.set_person_properties(set.clone(), HashMap::new());
+    client.set_person_properties(set.clone());
     // The new scope has the same fingerprint; an old snapshot must still be
     // admitted, without replacing the new scope's cache with its next update.
     client.capture_person(
@@ -105,7 +105,7 @@ fn reset_scope_does_not_suppress_or_cache_an_old_prepared_property_event() {
         Some(properties_hash(&other, &HashMap::new())),
         true,
     );
-    client.set_person_properties(set, HashMap::new());
+    client.set_person_properties(set);
     assert_eq!(client.transport.as_ref().unwrap().pending(), 3);
     assert_eq!(
         client.state.as_ref().unwrap().snapshot().person_properties,

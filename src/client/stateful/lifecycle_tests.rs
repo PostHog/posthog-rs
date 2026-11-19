@@ -254,7 +254,7 @@ fn capture_screen_and_getters_complete_while_state_io_is_gated() {
         done_tx
             .send((
                 capture_client.capture("nonblocking"),
-                capture_client.screen("screen", Default::default()),
+                capture_client.screen("screen"),
                 capture_client.get_distinct_id(),
                 capture_client.get_anonymous_id(),
             ))

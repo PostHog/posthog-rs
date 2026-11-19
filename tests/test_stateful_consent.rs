@@ -107,10 +107,7 @@ fn toggles_are_immediate_and_blocked_capture_never_runs_hooks() {
     client.opt_out();
     assert!(client.is_opt_out());
     assert_eq!(client.capture("blocked"), CaptureOutcome::OptedOut);
-    assert_eq!(
-        client.screen("blocked", HashMap::new()),
-        CaptureOutcome::OptedOut
-    );
+    assert_eq!(client.screen("blocked"), CaptureOutcome::OptedOut);
     assert_eq!(events.lock().unwrap().len(), 1);
     client.opt_in();
     client.opt_in();
@@ -241,11 +238,11 @@ fn alias_and_profile_creation_are_noops_while_out_and_properties_remain_retryabl
     assert_eq!(events.lock().unwrap()[1].event_name(), "$set");
     client.opt_out();
     let set = HashMap::from([("plan".into(), json!("pro"))]);
-    client.set_person_properties(set.clone(), HashMap::new());
+    client.set_person_properties(set.clone());
     assert_eq!(events.lock().unwrap().len(), 2);
     client.opt_in();
-    client.set_person_properties(set.clone(), HashMap::new());
-    client.set_person_properties(set, HashMap::new());
+    client.set_person_properties(set.clone());
+    client.set_person_properties(set);
     assert_eq!(events.lock().unwrap().len(), 3);
 }
 
