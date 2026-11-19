@@ -103,10 +103,23 @@ fn sdk_name_and_version_fill_as_a_pair() {
         lib(json!({"$lib": "wrapper", "$lib_version": "4.5.6"})),
         (json!("wrapper"), Some(json!("4.5.6")))
     );
-    // This SDK's own name still fills a missing version.
+    // This SDK's own name still fills a missing or unset version, and keeps a
+    // version the caller set.
+    for version in [json!(null), json!(""), json!(7)] {
+        assert_eq!(
+            lib(json!({"$lib": "embedding", "$lib_version": version})),
+            (json!("embedding"), Some(json!("1.2.3"))),
+            "{}",
+            version
+        );
+    }
     assert_eq!(
         lib(json!({"$lib": "embedding"})),
         (json!("embedding"), Some(json!("1.2.3")))
+    );
+    assert_eq!(
+        lib(json!({"$lib": "embedding", "$lib_version": "0.9.0"})),
+        (json!("embedding"), Some(json!("0.9.0")))
     );
 }
 

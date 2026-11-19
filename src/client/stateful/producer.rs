@@ -190,8 +190,11 @@ impl Producer {
         if !crate::event::names_a_library(lib) {
             event.set_prop("$lib", self.sdk_name.clone().into());
             event.set_prop("$lib_version", self.sdk_version.clone().into());
-        } else if lib.and_then(serde_json::Value::as_str) == Some(self.sdk_name.as_str()) {
-            event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
+        } else if lib.and_then(serde_json::Value::as_str) == Some(self.sdk_name.as_str())
+            && !crate::event::names_a_library(event.properties().get("$lib_version"))
+        {
+            // A null, empty or non-string version is unset, as for $lib.
+            event.set_prop("$lib_version", self.sdk_version.clone().into());
         }
         event.insert_prop_default("$device_id", snapshot.anonymous_id.clone().into());
         event.insert_prop_default("$is_identified", false.into());
