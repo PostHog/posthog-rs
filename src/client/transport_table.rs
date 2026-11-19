@@ -96,6 +96,14 @@ impl Table {
         self.disk
     }
 
+    pub(super) fn first_seq(&self) -> Option<u64> {
+        self.entries.front().map(|entry| entry.seq)
+    }
+
+    pub(super) fn last_seq(&self) -> Option<u64> {
+        self.entries.back().map(|entry| entry.seq)
+    }
+
     pub(super) fn get(&self, seq: u64) -> Option<&Entry> {
         self.position(seq).map(|index| &self.entries[index])
     }
