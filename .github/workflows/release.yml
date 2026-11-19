@@ -215,17 +215,8 @@ jobs:
           NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
         run: |
           CHANGELOG_ENTRY=$(awk -v defText="see CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
-          gh release create "$NEW_VERSION" --target main --notes "$CHANGELOG_ENTRY"
-
-      - name: Start the C bindings release
-        if: steps.check-changes.outputs.committed == 'true'
-        env:
-          # A workflow_dispatch from GITHUB_TOKEN still starts a run, and the job's
-          # `actions: write` permission allows it.
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
-        run: gh workflow run release-ffi.yml --ref "$NEW_VERSION" -f version="$NEW_VERSION"
+          # Tag the commit that was just published, not whatever main points to now.
+          gh release create "$NEW_VERSION" --target "$(git rev-parse HEAD)" --notes "$CHANGELOG_ENTRY"
 
       - name: Dispatch posthog upgrade for posthog-rs
         if: steps.check-changes.outputs.committed == 'true'
@@ -243,6 +234,16 @@ jobs:
                  --arg package_version "$PACKAGE_VERSION" \
                  '{ref: $ref, inputs: {package_name: $package_name, package_version: $package_version}}' \
                )"
+
+      - name: Start the C bindings release
+        if: steps.check-changes.outputs.committed == 'true'
+        env:
+          # A workflow_dispatch from GITHUB_TOKEN still starts a run, and the job's
+          # `actions: write` permission allows it.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
+        run: gh workflow run release-ffi.yml --ref "$NEW_VERSION" -f version="$NEW_VERSION"
 
       - name: Send failure event to PostHog
         if: ${{ failure() }}
