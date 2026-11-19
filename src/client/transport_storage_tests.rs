@@ -1221,3 +1221,32 @@ fn shutdown_deadline_releases_memory_but_preserves_unacknowledged_chunks() {
     assert!(directory.records().is_empty());
     handle.shutdown_blocking();
 }
+
+#[test]
+fn appends_that_evict_undelivered_records_warn_once_per_overflow() {
+    let directory = TestDirectory::new();
+    let mut store = FileEventStore::open(
+        StorageDirectory::open(&directory.0).unwrap(),
+        StoreLimits {
+            max_events: 2,
+            max_bytes: 128 * 1024,
+            max_record_bytes: 4096,
+        },
+    )
+    .unwrap();
+    let mut warned = false;
+    let mut append = |name, key| {
+        super::storage_support::append(&mut store, &wire(name), StoreKey(key), &[], &mut warned)
+    };
+    let (_, filling) = crate::client::tests::with_logs(|| {
+        append("first", 1);
+        append("second", 2);
+    });
+    assert!(!filling.contains("WARN"), "{}", filling);
+    let (_, overflowing) = crate::client::tests::with_logs(|| {
+        append("third", 3);
+        append("fourth", 4);
+    });
+    assert_eq!(overflowing.matches("event store is full").count(), 1);
+    assert_eq!(directory.records().len(), 2);
+}
