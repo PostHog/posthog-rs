@@ -156,8 +156,15 @@ impl Client {
     /// Update identity synchronously, then attempt its event through ordinary capture.
     /// A different already-identified ID is ignored: call reset before switching users.
     /// Dropped/full events do not roll back local state or schedule linking-event replay.
+    /// Properties also merge into local flag targeting before hooks, independently
+    /// of analytics dedup/admission. Anonymous identity changes reload flags; same-ID
+    /// promotion reloads only with properties. Identified property updates do not.
     /// Persistence and delivery are asynchronous; this is not an ingestion acknowledgment.
     pub fn identify(&self, input: impl Into<Identify>) {
+        self.identify_with_reload(input, true);
+    }
+
+    fn identify_with_reload(&self, input: impl Into<Identify>, reload: bool) {
         let Some(_guard) = self.identity_guard() else {
             return;
         };
@@ -177,8 +184,15 @@ impl Client {
             let was_anonymous = !state.identified;
             let changed = state.distinct_id != input.distinct_id;
             let old_id = state.distinct_id.clone();
+            // Local targeting is independent of analytics admission and dedup.
+            state.flags.mirror_person(&input.set, &input.set_once);
             if was_anonymous {
                 state.distinct_id = input.distinct_id;
+                if changed {
+                    // Invalidate under the same lock, before bootstrap or ordinary
+                    // identify hooks can observe the new identity.
+                    state.flags.cache = None;
+                }
                 state.identified = true;
                 state.person_processing = true;
                 state.generation = state.generation.wrapping_add(1);
@@ -201,13 +215,21 @@ impl Client {
                     .properties
                     .insert("$anon_distinct_id".into(), old_id.into());
             }
-            Some((event, state.clone(), !was_anonymous))
+            Some((
+                event,
+                state.clone(),
+                was_anonymous && (changed || has_properties),
+                !was_anonymous,
+            ))
         });
         if reset_required {
             tracing::warn!("posthog-rs: reset before identifying a different user");
         }
         match result {
-            Ok((_, Some((event, snapshot, deduplicate)))) => {
+            Ok((_, Some((event, snapshot, refresh, deduplicate)))) => {
+                if reload && refresh {
+                    self.reload_feature_flags();
+                }
                 self.capture_person(event, &snapshot, Some(fingerprint), deduplicate);
             }
             Err(UpdateError::Invalid) => {
@@ -257,7 +279,9 @@ impl Client {
     }
 
     /// Update the current person's properties without identifying. Empty maps are a no-op.
-    /// Only accepted updates are deduplicated. State enablement survives capture rejection.
+    /// Only accepted analytics updates are deduplicated. Local flag targeting merges
+    /// set-once absent keys, then set values, even when analytics is deduplicated or
+    /// rejected. It does not immediately reload flags. State enablement survives rejection.
     pub fn set_person_properties(&self, input: impl Into<PersonProperties>) {
         let Some(_guard) = self.identity_guard() else {
             return;
@@ -272,6 +296,7 @@ impl Client {
         }
         let fingerprint = properties_hash(&set, &set_once);
         let result = self.state.as_ref().unwrap().mutate(|state| {
+            state.flags.mirror_person(&set, &set_once);
             if state.person_properties == Some(fingerprint) {
                 return None;
             }
@@ -320,7 +345,7 @@ impl Client {
             return;
         }
         let id = uuid::Uuid::now_v7().to_string();
-        let _ = self.state.as_ref().unwrap().mutate(|state| {
+        let result = self.state.as_ref().unwrap().mutate(|state| {
             let generation = state.generation.wrapping_add(1);
             let context_revision = state.context_revision.wrapping_add(1);
             let device_id = state.device_id.clone();
@@ -331,6 +356,9 @@ impl Client {
             state.generation = generation;
             state.context_revision = context_revision;
         });
+        if result.is_ok() {
+            self.reload_feature_flags();
+        }
     }
 
     fn capture_person(
@@ -395,7 +423,8 @@ impl Client {
                 state.person_properties = None;
             });
         } else {
-            self.identify(id);
+            // Reconcile setup identity without an intermediate flags request.
+            self.identify_with_reload(id, false);
         }
     }
 }

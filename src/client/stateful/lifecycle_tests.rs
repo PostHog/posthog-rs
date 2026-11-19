@@ -123,6 +123,10 @@ fn client_with_store(
         shutdown_timeout: config.shutdown_timeout,
         shutdown: Some(shutdown),
         producer: Some(Producer::new(config)),
+        flag_loader: Some(super::super::flags::FlagLoader::new(
+            config.transport_options(),
+            config.on_feature_flags.clone(),
+        )),
         state: Some(state),
         transport: Some(
             TransportHandle::spawn_stateful_with_deadline(
@@ -136,6 +140,102 @@ fn client_with_store(
         ),
         closed: AtomicBool::new(false),
     }
+}
+
+#[test]
+fn application_capture_destructor_runs_outside_sdk_state_locks_after_workers_stop() {
+    struct CaptureDrop {
+        access: Arc<Mutex<Option<super::super::writer::StateAccess>>>,
+        entered: mpsc::Sender<ThreadId>,
+        release: mpsc::Receiver<()>,
+    }
+    impl CaptureDrop {
+        fn retain(&self) {}
+    }
+    impl Drop for CaptureDrop {
+        fn drop(&mut self) {
+            let access = self.access.lock().unwrap().take();
+            if let Some(access) = access {
+                assert!(access.snapshot().is_none());
+            }
+            self.entered.send(thread::current().id()).unwrap();
+            self.release.recv_timeout(GATE_WAIT).unwrap();
+        }
+    }
+    let (entered, waiting) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    let access = Arc::new(Mutex::new(None));
+    let captured = CaptureDrop {
+        access: access.clone(),
+        entered,
+        release: gate,
+    };
+    let mut config = config();
+    config.preload_feature_flags = false;
+    config.before_send(move |event| {
+        captured.retain();
+        Some(event)
+    });
+    let client = Client::init_blocking(config);
+    *access.lock().unwrap() = Some(client.state.as_ref().unwrap().access());
+    assert_eq!(
+        client
+            .shutdown_blocking(Some(Duration::from_secs(2)))
+            .delivery,
+        DeliveryOutcome::Stopped
+    );
+    let (returned, done) = mpsc::channel();
+    let dropper = thread::spawn(move || {
+        drop(client);
+        returned.send(()).unwrap();
+    });
+    let caller = dropper.thread().id();
+    let destructor = waiting.recv_timeout(WAIT).unwrap();
+    let waiting_for_application = done.try_recv().is_err();
+    release.send(()).unwrap();
+    dropper.join().unwrap();
+    eprintln!(
+        "application-destructor on_drop_caller={} caller_waiting_for_application={}",
+        destructor == caller,
+        waiting_for_application
+    );
+}
+
+#[test]
+fn shutdown_does_not_wait_for_a_contended_state_mutation() {
+    let mut config = config();
+    config.shutdown_timeout = Duration::from_millis(20);
+    let state = StateWriter::new(
+        Snapshot::anonymous("anonymous".into()),
+        Backend::Memory,
+        WriterOptions::default(),
+        vec![],
+        Arc::new(SystemClock),
+    )
+    .unwrap();
+    let client = client_with_writer(&config, state);
+    let access = client.state.as_ref().unwrap().access();
+    let (entered, waiting) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    let mutation = thread::spawn(move || {
+        access.mutate(|_| {
+            entered.send(()).unwrap();
+            gate.recv_timeout(GATE_WAIT).unwrap();
+        })
+    });
+    waiting.recv_timeout(WAIT).unwrap();
+    let start = Instant::now();
+    let report = client.shutdown_blocking(None);
+    drop(client);
+    let elapsed = start.elapsed();
+    release.send(()).unwrap();
+    mutation.join().unwrap().unwrap();
+    assert_eq!(report.state, PersistenceOutcome::MemoryOnly);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "shutdown waited for state mutation: {:?}",
+        elapsed
+    );
 }
 
 #[cfg(feature = "async-client")]
@@ -355,7 +455,9 @@ fn property_and_group_mutations_complete_while_state_io_is_gated() {
     assert!(after.registered.is_empty() && after.groups.is_empty());
     assert!(after.context_revision > before.context_revision);
     let live = client.state.as_ref().unwrap().snapshot();
-    assert_eq!(live, after);
+    // Flag-load completion can advance independently of the gated state write.
+    assert!(live.same_persisted_state(&after));
+    assert_eq!(live.context_revision, after.context_revision);
     client.shutdown_blocking(None);
     drop(client);
     gate.dropped.recv_timeout(WAIT).unwrap();

@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 fn config() -> Config {
     let mut config = Config::new("phc_test");
+    config.preload_feature_flags = false;
     config.persistence = Persistence::Memory;
     config.host = "http://127.0.0.1:1".into();
     config.bootstrap_anonymous_id = Some("anonymous".into());
@@ -588,15 +589,29 @@ fn current_state_restores_and_future_state_is_preserved() {
 #[test]
 fn state_write_failure_preserves_live_identity_and_retries_the_latest_snapshot() {
     let directory = Directory::new();
-    let client = Client::init_blocking(directory.config());
+    let server = MockServer::start();
+    let flags = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({"featureFlags": {}}));
+    });
+    let config = || {
+        let mut conf = directory.config();
+        conf.host = server.base_url();
+        conf
+    };
+    let client = Client::init_blocking(config());
     client.shutdown_blocking(None);
     drop(client);
     let path = directory.state_path();
     let temporary = path.with_file_name("state.json.tmp");
     std::fs::create_dir(&temporary).unwrap();
-    let mut conf = directory.config();
+    let mut conf = config();
     // Keep state persistence recovery independent of HTTP delivery.
     conf.before_send(|_| None);
+    let (tx, rx) = std::sync::mpsc::channel();
+    conf.on_feature_flags(move |_| {
+        let _ = tx.send(());
+    });
     let client = Client::init_blocking(conf);
     client.identify("A");
     assert_eq!(
@@ -605,13 +620,16 @@ fn state_write_failure_preserves_live_identity_and_retries_the_latest_snapshot()
     );
     assert_eq!(client.get_distinct_id(), "A");
     assert!(client.is_identified());
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("identity flags completion");
+    flags.assert_calls(1);
     std::fs::remove_dir(&temporary).unwrap();
     assert_eq!(
         client.shutdown_blocking(None).state,
         PersistenceOutcome::Persisted
     );
     drop(client);
-    let client = Client::init_blocking(directory.config());
+    let client = Client::init_blocking(config());
     assert_eq!(client.get_distinct_id(), "A");
     assert!(client.is_identified());
     client.shutdown_blocking(None);

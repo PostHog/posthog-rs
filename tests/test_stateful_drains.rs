@@ -14,6 +14,7 @@ use stateful_support::accept_all;
 
 fn config(server: &MockServer) -> Config {
     let mut config = Config::new("phc_test");
+    config.preload_feature_flags = false;
     config.host = server.base_url();
     config.persistence = Persistence::Memory;
     config.flush_interval = Duration::from_secs(3600);

@@ -149,6 +149,18 @@ fn encode_record(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Encode for the state writer. A cache that cannot be read back (for example a
+/// payload nested beyond the JSON decoder's depth limit) is left out rather
+/// than making identity and consent unwritable.
+fn encode_snapshot(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
+    if let Ok(encoded) = encode_record(snapshot) {
+        return Ok(encoded);
+    }
+    let mut mandatory = snapshot.clone();
+    mandatory.flags.cache = None;
+    encode_record(&mandatory)
+}
+
 /// Blocking backend calls belong exclusively to the state-persistence worker.
 pub(super) trait StateStore: Send + 'static {
     fn save(&mut self, snapshot: &Snapshot) -> io::Result<()>;
@@ -264,6 +276,16 @@ impl FileStateStore {
             state.insert("device_id".into(), anonymous);
             rewrite_required = true;
         }
+        if let Some(cache) = state
+            .get_mut("flags")
+            .and_then(|flags| flags.get_mut("cache"))
+        {
+            normalize_optional::<super::flag_state::FlagCache>(
+                cache,
+                |_| true,
+                &mut rewrite_required,
+            );
+        }
         if let Some(session) = state.get_mut("session") {
             normalize_optional::<super::sessions::StoredSession>(
                 session,
@@ -302,7 +324,7 @@ impl FileStateStore {
     /// Only the state writer calls this. A completed replacement is not a
     /// multi-file transaction with event storage or a universal power-loss guarantee.
     pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
-        let encoded = encode_record(snapshot)?;
+        let encoded = encode_snapshot(snapshot)?;
         let temporary = self.directory.path().join("state.json.tmp");
         // The lease and single writer exclude live concurrent writes. A stale
         // temporary is an uncommitted write from a previous process/attempt.

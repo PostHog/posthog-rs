@@ -77,6 +77,7 @@ fn async_shutdown_resumed_inline_by_deadline_notifier_does_not_cross_join() {
     let mut config = config();
     config.host = server.base_url();
     config.flush_at = 1;
+    config.preload_feature_flags = false;
     config.on_error(move |failure| {
         if !matches!(failure, crate::PostHogError::Capture(_)) {
             return;

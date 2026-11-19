@@ -457,3 +457,194 @@ fn state_files_are_private_and_symlink_state_is_not_followed() {
         record(&snapshot)
     );
 }
+
+// Literal final-v1 record: independent of the current Rust serializers.
+const FINAL_V1: &str = r#"{
+  "version":1,
+  "state":{
+    "anonymous_id":"anonymous", "device_id":"device", "distinct_id":"person",
+    "identified":true, "person_processing":true, "opt_out":true,
+    "registered":{"source":"fixture"}, "groups":{"company":"a"},
+    "flags":{
+      "person_properties":{"plan":"pro"},
+      "group_properties":{"company":{"tier":2}},
+      "cache":{
+        "contexts":[{"distinct_id":"person","anonymous_id":"anonymous","device_id":"device",
+          "groups":{"company":"a"},"person_properties":{"plan":"pro"},
+          "group_properties":{"company":{"tier":2}},"disable_geoip":false}],
+        "flags":{"checkout":{
+          "context":0,
+          "revision":0,"partial":false,"request_id":"request","evaluated_at":123,
+          "record":{"enabled":true,"variant":"blue","payload":[null],"id":1,"version":3,
+            "reason":"Matched","locally_evaluated":false,"has_experiment":false,
+            "minimal_flag_called_events":true}
+        }}
+      }
+    },
+    "session":{"id":"018e23f4-1234-7000-8000-000000000001","started_ms":100,"activity_ms":200}
+  }
+}"#;
+
+fn fixture() -> serde_json::Value {
+    serde_json::from_str(FINAL_V1).unwrap()
+}
+
+#[test]
+fn final_v1_fixture_restores_identity_consent_and_flag_and_session_caches() {
+    let decoded = FileStateStore::decode_restored(FINAL_V1.as_bytes()).unwrap();
+    assert!(!decoded.rewrite_required);
+    let mut snapshot = decoded.snapshot;
+    assert_eq!(snapshot.anonymous_id, "anonymous");
+    assert_eq!(snapshot.device_id, "device");
+    assert_eq!(snapshot.distinct_id, "person");
+    assert_eq!(snapshot.opt_out, Some(true));
+    assert_eq!(snapshot.registered["source"], "fixture");
+    assert!(!snapshot.reconcile_flag_cache(false));
+    let cache = snapshot.flags.cache.as_ref().unwrap();
+    assert_eq!(
+        cache.flags["checkout"].record.payload,
+        Some(serde_json::Value::Null)
+    );
+    assert_eq!(
+        cache.flags["checkout"].request_id.as_deref(),
+        Some("request")
+    );
+    assert!(snapshot.session.is_some());
+    let encoded = encode_snapshot(&snapshot).unwrap();
+    assert_eq!(FileStateStore::decode(&encoded).unwrap(), snapshot);
+}
+
+#[test]
+fn additive_unknown_fields_are_tolerated_at_each_persisted_depth() {
+    let expected = FileStateStore::decode_restored(FINAL_V1.as_bytes())
+        .unwrap()
+        .snapshot;
+    for path in [
+        "",
+        "/state",
+        "/state/flags",
+        "/state/flags/cache",
+        "/state/flags/cache/contexts/0",
+        "/state/flags/cache/flags/checkout",
+        "/state/flags/cache/flags/checkout/record",
+        "/state/session",
+    ] {
+        let mut value = fixture();
+        value
+            .pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "additional".into(),
+                serde_json::json!({"nested":[true,null]}),
+            );
+        let decoded =
+            FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(decoded.snapshot, expected, "unknown field at {path}");
+    }
+}
+
+#[test]
+fn optional_sections_recover_independently_without_losing_targeting_or_consent() {
+    let original = FileStateStore::decode_restored(FINAL_V1.as_bytes())
+        .unwrap()
+        .snapshot;
+    for (path, invalid) in [
+        ("/state/flags/cache", serde_json::json!(42)),
+        (
+            "/state/flags/cache/flags/checkout/record/payload",
+            serde_json::json!([1, 2]),
+        ),
+        (
+            "/state/flags/cache/contexts/0/device_id",
+            serde_json::json!(false),
+        ),
+        (
+            "/state/flags/cache/flags/checkout/context",
+            serde_json::json!(1),
+        ),
+        ("/state/session", serde_json::json!(true)),
+        ("/state/session/started_ms", serde_json::json!(201)),
+        (
+            "/state/session/id",
+            serde_json::json!("00000000-0000-0000-0000-000000000000"),
+        ),
+    ] {
+        let mut value = fixture();
+        *value.pointer_mut(path).unwrap() = invalid;
+        let decoded =
+            FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut expected = original.clone();
+        if path.starts_with("/state/flags") {
+            expected.flags.cache = None;
+        }
+        if path.starts_with("/state/session") {
+            expected.session = None;
+        }
+        assert!(decoded.rewrite_required, "{}", path);
+        assert_eq!(decoded.snapshot, expected, "{path}");
+    }
+    let mut value = fixture();
+    value["state"]["flags"]["cache"] = serde_json::json!(false);
+    value["state"]["session"] = serde_json::json!(false);
+    let decoded = FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(decoded.snapshot.flags.cache.is_none());
+    assert!(decoded.snapshot.session.is_none());
+    assert_eq!(
+        decoded.snapshot.flags.person_properties,
+        original.flags.person_properties
+    );
+    assert_eq!(decoded.snapshot.opt_out, Some(true));
+}
+
+#[test]
+fn malformed_mandatory_targeting_and_explicit_device_are_core_corruption() {
+    for (path, invalid) in [
+        ("/state/flags", serde_json::json!(false)),
+        ("/state/flags/person_properties", serde_json::json!([])),
+        ("/state/flags/group_properties", serde_json::json!({" ":{}})),
+        ("/state/device_id", serde_json::json!(" ")),
+        ("/state/device_id", serde_json::json!(false)),
+        ("/state/anonymous_id", serde_json::json!("")),
+    ] {
+        let mut value = fixture();
+        *value.pointer_mut(path).unwrap() = invalid;
+        assert!(
+            matches!(
+                FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()),
+                Err(RestoreFailure::Corrupt(_))
+            ),
+            "{}",
+            path
+        );
+    }
+}
+
+#[test]
+fn missing_device_initializes_from_anonymous_and_requires_rewrite() {
+    let mut value = fixture();
+    value["state"].as_object_mut().unwrap().remove("device_id");
+    let decoded = FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(decoded.rewrite_required);
+    assert_eq!(decoded.snapshot.device_id, "anonymous");
+    assert_eq!(decoded.snapshot.distinct_id, "person");
+    assert_eq!(decoded.snapshot.opt_out, Some(true));
+}
+
+#[test]
+fn additive_fields_still_obey_whole_json_depth_bounds() {
+    let mut value = fixture();
+    let mut deep = serde_json::json!(0);
+    for _ in 0..150 {
+        deep = serde_json::json!({"nested":deep});
+    }
+    value["additional"] = deep;
+    assert!(matches!(
+        FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()),
+        Err(RestoreFailure::Corrupt(_))
+    ));
+}
+
+#[path = "flag_storage_tests.rs"]
+mod flag_tests;
