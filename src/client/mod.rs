@@ -54,9 +54,10 @@ impl CaptureCompression {
 mod blocking;
 mod capture;
 #[cfg(feature = "stateful")]
-#[allow(dead_code)] // Composed by the stateful delivery coordinator.
 mod event_store;
 mod retry;
+#[cfg(feature = "stateful")]
+pub mod stateful;
 pub(crate) use retry::parse_retry_after;
 mod transport;
 #[cfg(not(feature = "async-client"))]
@@ -400,6 +401,12 @@ pub struct ClientOptions {
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
     endpoint_manager: EndpointManager,
+
+    /// `name/version` sent as the capture request's `PostHog-Sdk-Info` and
+    /// `User-Agent`, set by the stateful client from its configured SDK
+    /// identity. `None` sends `posthog-rs/<crate version>`.
+    #[builder(setter(skip))]
+    pub(crate) sdk_info: Option<String>,
 }
 
 /// Resolved client-level default properties for capture requests.

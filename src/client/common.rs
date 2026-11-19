@@ -175,7 +175,7 @@ pub(super) fn preprocess_capture_event(
     apply_before_send_hooks(hooks, event)
 }
 
-fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
+pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
     let mut current = Some(event);
 
     for hook in hooks {
@@ -208,6 +208,27 @@ pub(crate) fn apply_on_error_hooks(hooks: &[OnErrorHook], failure: &PostHogError
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.apply(failure))).is_err() {
             error!("panic in PostHog on_error hook; ignoring");
         }
+    }
+}
+
+/// Report persistence errors without putting backend paths or payloads in logs.
+#[cfg(feature = "stateful")]
+pub(super) fn report_storage_error(
+    hooks: &[OnErrorHook],
+    operation: super::StorageOperation,
+    error: &std::io::Error,
+) {
+    if hooks.is_empty() {
+        tracing::warn!(?operation, kind = ?error.kind(), "posthog-rs: storage operation failed");
+    } else {
+        let error = super::StorageError::from_io(error);
+        apply_on_error_hooks(
+            hooks,
+            &PostHogError::Storage(super::StorageFailure {
+                operation,
+                error: &error,
+            }),
+        );
     }
 }
 
