@@ -77,11 +77,11 @@ fn persistent(
 }
 
 #[test]
-fn durable_events_survive_success_bodies_that_do_not_confirm_delivery() {
+fn durable_events_survive_a_success_body_the_network_cut_off() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    for mode in ["truncated", "timeout", "invalid-json"] {
+    for mode in ["truncated", "timeout"] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let host = format!("http://{}", listener.local_addr().unwrap());
         let (close_tx, close_rx) = mpsc::channel();
@@ -116,16 +116,9 @@ fn durable_events_survive_success_bodies_that_do_not_confirm_delivery() {
                 assert!(count > 0);
                 request.extend_from_slice(&chunk[..count]);
             }
-            let body = if mode == "invalid-json" {
-                "not JSON"
-            } else {
-                "{\"results\":"
-            };
-            let declared = if mode == "invalid-json" {
-                body.len()
-            } else {
-                body.len() + 100
-            };
+            // The body stops short of its declared length.
+            let body = "{\"results\":";
+            let declared = body.len() + 100;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n{body}"
@@ -159,7 +152,7 @@ fn durable_events_survive_success_bodies_that_do_not_confirm_delivery() {
         handle.flush_blocking();
         let _ = close_tx.send(());
         server.join().unwrap();
-        // A truncated or unparseable 2xx did not confirm delivery.
+        // A 2xx body the network cut off is a network error, not a verdict.
         assert_eq!(directory.records().len(), 1, "{mode}");
         assert_eq!(
             handle.pending(),
@@ -182,6 +175,39 @@ fn durable_events_survive_success_bodies_that_do_not_confirm_delivery() {
         assert!(directory.records().is_empty());
         recovered.shutdown_blocking();
     }
+}
+
+#[test]
+fn an_unreadable_success_body_reports_durable_events_lost_without_resending() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let server = MockServer::start();
+    let proxy = server.mock(|when, then| {
+        when.method(POST);
+        then.status(200).body("<html>proxy</html>");
+    });
+    let directory = TestDirectory::new();
+    let failures = Arc::new(AtomicUsize::new(0));
+    let observed = failures.clone();
+    let handle = TransportHandle::spawn_configured(
+        options(server.base_url())
+            .on_error(move |failure| {
+                if matches!(failure, PostHogError::Capture(_)) {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .build()
+            .unwrap(),
+        LaneConfig::analytics(),
+        Arc::new(ManualClock::new()),
+        StorageState::new(Box::new(directory.open()), 64 * 1024),
+    );
+    assert_eq!(handle.enqueue_prepared(wire("lost")), Admission::Accepted);
+    handle.flush_blocking();
+    handle.flush_blocking();
+    proxy.assert_calls(1);
+    assert!(directory.records().is_empty());
+    assert_eq!(failures.load(Ordering::SeqCst), 1);
+    handle.shutdown_blocking();
 }
 
 #[test]
