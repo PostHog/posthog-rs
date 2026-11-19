@@ -552,7 +552,7 @@ fn runtime_free_async_initialization_exposes_synchronous_rich_reads() {
 }
 
 #[test]
-fn shortcut_getters_read_the_cached_value_and_payload() {
+fn lookup_shortcuts_read_the_cached_value_and_payload() {
     let server = MockServer::start();
     server.mock(|when, then| {
         when.path("/flags/");
@@ -566,38 +566,32 @@ fn shortcut_getters_read_the_cached_value_and_payload() {
     });
     let client = Client::init_blocking(config(&server));
     reload(&client);
-    assert!(client.is_feature_enabled("variant"));
-    assert!(client.is_feature_enabled("plain"));
-    assert!(!client.is_feature_enabled("disabled"));
-    assert!(!client.is_feature_enabled("empty"));
-    assert!(!client.is_feature_enabled("missing"));
+    assert!(client.feature_flag("variant").is_enabled());
+    assert!(client.feature_flag("plain").is_enabled());
+    assert!(!client.feature_flag("disabled").is_enabled());
+    assert!(!client.feature_flag("empty").is_enabled());
+    assert!(!client.feature_flag("missing").is_enabled());
     assert_eq!(
-        client.get_feature_flag("variant"),
+        client.feature_flag("variant").value(),
         Some(FlagValue::String("blue".into()))
     );
     assert_eq!(
-        client.get_feature_flag("plain"),
+        client.feature_flag("plain").value(),
         Some(FlagValue::Boolean(true))
     );
     assert_eq!(
-        client.get_feature_flag("disabled"),
+        client.feature_flag("disabled").value(),
         Some(FlagValue::Boolean(false))
     );
     assert_eq!(
-        client.get_feature_flag("empty"),
+        client.feature_flag("empty").value(),
         Some(FlagValue::Boolean(false))
     );
-    assert_eq!(client.get_feature_flag("missing"), None);
-    assert_eq!(
-        client.get_feature_flag_payload("variant"),
-        Some(json!("123"))
-    );
-    assert_eq!(
-        client.get_feature_flag_payload("nullable"),
-        Some(Value::Null)
-    );
-    assert_eq!(client.get_feature_flag_payload("plain"), None);
+    assert_eq!(client.feature_flag("missing").value(), None);
+    assert_eq!(client.feature_flag("variant").payload(), Some(json!("123")));
+    assert_eq!(client.feature_flag("nullable").payload(), Some(Value::Null));
+    assert_eq!(client.feature_flag("plain").payload(), None);
     client.shutdown_blocking(None);
-    assert!(!client.is_feature_enabled("variant"));
-    assert_eq!(client.get_feature_flag("variant"), None);
+    assert!(!client.feature_flag("variant").is_enabled());
+    assert_eq!(client.feature_flag("variant").value(), None);
 }
