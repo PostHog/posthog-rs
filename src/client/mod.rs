@@ -401,6 +401,12 @@ pub struct ClientOptions {
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
     endpoint_manager: EndpointManager,
+
+    /// `name/version` sent as the capture request's `PostHog-Sdk-Info` and
+    /// `User-Agent`, set by the stateful client from its configured SDK
+    /// identity. `None` sends `posthog-rs/<crate version>`.
+    #[builder(setter(skip))]
+    pub(crate) sdk_info: Option<String>,
 }
 
 /// Resolved client-level default properties for capture requests.

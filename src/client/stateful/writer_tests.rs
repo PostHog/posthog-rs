@@ -734,3 +734,26 @@ fn personless_and_stale_same_person_updates_clear_the_fingerprint() {
     writer.admit_person(0, &id, Some([2; 20]), true, || true);
     assert_eq!(writer.snapshot().person_properties, None);
 }
+
+#[test]
+fn shutdown_outcome_waits_for_a_reader_instead_of_reporting_timeout() {
+    let (writer, _calls, _clock) = controlled(vec![]);
+    writer.request_close_before(Instant::now() + Duration::from_secs(5));
+    let end = Instant::now() + Duration::from_secs(5);
+    while !writer.is_stopped() {
+        assert!(Instant::now() < end, "state writer did not stop");
+        thread::yield_now();
+    }
+    assert_eq!(writer.shutdown_outcome(), DrainOutcome::Persisted);
+    let reader = writer.clone();
+    let (held_tx, held_rx) = mpsc::channel();
+    let holder = thread::spawn(move || {
+        let _state = reader.shared.state.lock().unwrap();
+        held_tx.send(()).unwrap();
+        thread::sleep(Duration::from_millis(50));
+    });
+    held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let outcome = writer.shutdown_outcome();
+    holder.join().unwrap();
+    assert_eq!(outcome, DrainOutcome::Persisted);
+}

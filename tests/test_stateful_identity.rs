@@ -22,7 +22,6 @@ fn config() -> Config {
     config.flush_interval = Duration::from_secs(3600);
     config.capture_compression = None;
     config.shutdown_timeout = Duration::ZERO;
-    config.max_capture_attempts = 1;
     config
 }
 

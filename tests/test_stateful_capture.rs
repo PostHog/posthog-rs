@@ -1,5 +1,7 @@
 #![cfg(feature = "stateful")]
 
+mod stateful_support;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -17,7 +19,6 @@ fn config() -> Config {
     config.host = "http://127.0.0.1:1".into();
     config.flush_at = 1000;
     config.capture_compression = None;
-    config.max_capture_attempts = 1;
     config.shutdown_timeout = Duration::ZERO;
     config
 }
@@ -132,7 +133,7 @@ fn invalid_and_filtered_events_never_reach_delivery() {
 }
 
 #[test]
-fn bounded_admission_replaces_oldest_and_recovers_a_failed_byte_reservation() {
+fn an_event_over_the_queue_byte_limit_is_refused_and_later_events_are_accepted() {
     let mut config = config();
     config.max_queue_size = 1;
     config.max_queue_bytes = 1024;
@@ -376,4 +377,54 @@ fn screen_options_reach_the_wire() {
     assert_eq!(client.screen(screen), CaptureOutcome::Dropped);
     assert_eq!(rx.recv().unwrap()["process_person_profile"], true);
     client.shutdown_blocking(None);
+}
+
+#[test]
+fn a_full_queue_drops_the_oldest_event_and_delivers_the_newest() {
+    let server = MockServer::start();
+    let newest = server.mock(|when, then| {
+        when.method(POST)
+            .body_includes("\"event\":\"new\"")
+            .body_excludes("\"event\":\"old\"");
+        then.respond_with(stateful_support::accept_all);
+    });
+    let mut config = config();
+    config.host = server.base_url();
+    config.max_queue_size = 1;
+    config.flush_interval = Duration::from_secs(3600);
+    let client = Client::init_blocking(config);
+    assert!(matches!(
+        client.capture("old"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    assert!(matches!(
+        client.capture("new"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Attempted);
+    client.shutdown_blocking(Some(Duration::from_secs(5)));
+    newest.assert_calls(1);
+}
+
+#[test]
+fn configured_sdk_identity_names_the_capture_request() {
+    let server = MockServer::start();
+    let identified = server.mock(|when, then| {
+        when.method(POST)
+            .header("posthog-sdk-info", "posthog-embedder/9.9.9")
+            .header("user-agent", "posthog-embedder/9.9.9");
+        then.respond_with(stateful_support::accept_all);
+    });
+    let mut config = config();
+    config.host = server.base_url();
+    config.sdk_name = "posthog-embedder".into();
+    config.sdk_version = "9.9.9".into();
+    let client = Client::init_blocking(config);
+    assert!(matches!(
+        client.capture("identified"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Attempted);
+    client.shutdown_blocking(Some(Duration::from_secs(5)));
+    identified.assert_calls(1);
 }

@@ -30,7 +30,9 @@ pub struct Config {
     pub disabled: bool,
     /// Storage selection. Defaults to the OS local application-data directory.
     pub persistence: Persistence,
-    /// Isolates storage for instances using the same host and project. Default: "default".
+    /// Separates the storage of clients that use the same project token. The
+    /// storage namespace is the project token plus this name; the host does not
+    /// change it. Default: "default".
     /// Each persistent namespace has one live owner; see [`Persistence`] for
     /// sharing a client or selecting independent identities.
     pub instance_name: String,
@@ -48,27 +50,33 @@ pub struct Config {
     pub max_batch_size: usize,
     /// Interval between automatic flushes. Default: 10 seconds.
     pub flush_interval: Duration,
-    /// Maximum resident staging, recovery and memory-fallback events. Default: 1,000.
-    /// One additional upload view of this logical queue is bounded separately by
-    /// this count and max_queue_bytes; it is not a second retry backlog.
+    /// Maximum events held in memory, waiting for delivery or for a disk write.
+    /// Default: 1,000.
     ///
-    /// At this limit or `max_queue_bytes`, a new event replaces the oldest
-    /// resident events, which are lost if they were not yet on disk. Capture
-    /// still returns [`CaptureOutcome::Accepted`](super::CaptureOutcome::Accepted);
-    /// it returns [`CaptureOutcome::Full`](super::CaptureOutcome::Full) only when
-    /// no replacement makes room.
+    /// At this limit or `max_queue_bytes`, the oldest events in memory are
+    /// dropped to keep the newest. Capture still returns
+    /// [`CaptureOutcome::Accepted`](super::CaptureOutcome::Accepted).
     pub max_queue_size: usize,
-    /// Maximum serialized event bytes in the resident queue and, separately, its
-    /// one upload view. Not an allocator/process-memory cap. Default: 8 MiB.
-    /// Capture also refuses any single event over 1 MiB, or over this limit if
-    /// it is smaller.
+    /// Maximum serialized event bytes held in memory. Default: 8 MiB. This
+    /// does not cap the process's memory use.
+    ///
+    /// At this limit, the oldest events in memory are dropped to keep the
+    /// newest. Capture returns [`CaptureOutcome::Full`](super::CaptureOutcome::Full)
+    /// for any single event over 1 MiB, or over this limit if it is smaller.
     pub max_queue_bytes: usize,
-    /// Persisted event retention count. Default: 10,000. Newest retention may
-    /// temporarily exceed this by one replacement record while reclaiming old data.
+    /// Maximum events stored on disk. Default: 10,000.
+    ///
+    /// At this limit or `max_stored_bytes`, the oldest stored events are dropped
+    /// to keep the newest. Files the client cannot delete keep counting against
+    /// these limits; while they fill them, new events stay in memory under the
+    /// memory limits.
     pub max_stored_events: usize,
-    /// Persisted event retention bytes. Default: 64 MiB. Replacement may exceed
-    /// this by at most one event. Exact accounting includes that event; no
-    /// further appends occur until reclamation succeeds.
+    /// Maximum serialized event bytes stored on disk. Default: 64 MiB.
+    ///
+    /// At this limit or `max_stored_events`, the oldest stored events are
+    /// dropped to keep the newest. Files the client cannot delete keep counting
+    /// against these limits; while they fill them, new events stay in memory
+    /// under the memory limits.
     pub max_stored_bytes: u64,
     /// How long to wait after a state change before writing client state to
     /// disk. Changes made within the window are written together. Lower values
@@ -83,8 +91,6 @@ pub struct Config {
     /// may retain them indefinitely if it never returns. Arbitrary destructors
     /// of application objects captured by callbacks may block outside this bound.
     pub shutdown_timeout: Duration,
-    /// Attempts per active delivery sequence, including the first. Default: 4.
-    pub max_capture_attempts: u32,
     /// Request compression. Default: gzip; None disables compression.
     pub capture_compression: Option<CaptureCompression>,
     /// Disable server-side GeoIP enrichment. Default: false.
@@ -92,9 +98,12 @@ pub struct Config {
     /// Platform properties cached at initialization. Per-event properties win.
     /// Missing $os/$os_version are discovered once during initialization.
     pub platform_context: HashMap<String, serde_json::Value>,
-    /// Capture-time SDK name. Defaults to posthog-rs; embedding clients may override it.
+    /// SDK name for events' `$lib` and for the `PostHog-Sdk-Info` and
+    /// `User-Agent` headers of capture requests. Defaults to posthog-rs; a
+    /// wrapper SDK sets its own.
     pub sdk_name: String,
-    /// Capture-time SDK version. Defaults to this crate's version.
+    /// SDK version for events' `$lib_version` and for the same headers.
+    /// Defaults to this crate's version.
     pub sdk_version: String,
     pub(super) before_send: Vec<BeforeSendHook>,
     pub(super) on_error: Vec<OnErrorHook>,
@@ -122,7 +131,6 @@ impl Config {
             state_write_delay: Duration::from_millis(250),
             request_timeout: Duration::from_secs(30),
             shutdown_timeout: Duration::from_secs(30),
-            max_capture_attempts: 4,
             capture_compression: Some(CaptureCompression::Gzip),
             disable_geoip: false,
             platform_context: HashMap::new(),
@@ -149,6 +157,12 @@ impl Config {
     /// registration order, after enrichment and outside client-state locks.
     /// Returning None or panicking drops the event. Each mutable hook is
     /// serialized across captures; do not wait for another capture from a hook.
+    ///
+    /// A hook that returns a new [`Event`] instead of the one it received should
+    /// copy that event's options, such as `process_person_profile`; the new
+    /// event does not inherit them. Change capture settings with
+    /// [`Event::insert_option`], not with legacy `$` properties such as
+    /// `$process_person_profile`.
     pub fn before_send<F>(&mut self, hook: F) -> &mut Self
     where
         F: FnMut(Event) -> Option<Event> + Send + 'static,
@@ -213,13 +227,8 @@ impl Config {
         {
             return Some("flush_interval must be at least 1 ms; scheduling durations must not exceed one day");
         }
-        if self.request_timeout.is_zero()
-            || self.request_timeout > MAX_SHUTDOWN_TIMEOUT
-            || self.max_capture_attempts == 0
-        {
-            return Some(
-                "request_timeout must be positive and at most one day, and capture attempts must be positive",
-            );
+        if self.request_timeout.is_zero() || self.request_timeout > MAX_SHUTDOWN_TIMEOUT {
+            return Some("request_timeout must be positive and at most one day");
         }
         if self.bootstrap_anonymous_id.is_some() && self.bootstrap_identified_id.is_some() {
             return Some("configure only one bootstrap identity");
@@ -278,9 +287,9 @@ impl Config {
         options.flush_interval_ms = self.flush_interval.as_millis() as u64;
         options.request_timeout_seconds = self.request_timeout_seconds();
         options.shutdown_timeout_ms = self.shutdown_timeout.as_millis() as u64;
-        options.max_capture_attempts = self.max_capture_attempts;
         options.retry_initial_backoff_ms = RETRY_INITIAL_BACKOFF_MS;
         options.capture_compression = self.capture_compression;
+        options.sdk_info = Some(format!("{}/{}", self.sdk_name, self.sdk_version));
         options.on_error = self.on_error.clone();
         options
     }

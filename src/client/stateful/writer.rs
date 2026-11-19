@@ -538,10 +538,7 @@ impl StateWriter {
             Mode::Unavailable => return DrainOutcome::Unavailable,
             Mode::Persistent => {}
         }
-        let state = match self.shared.try_lock() {
-            Some(state) => state,
-            None => return DrainOutcome::TimedOut,
-        };
+        let state = self.shared.lock();
         state
             .outcome(state.revision)
             .unwrap_or(DrainOutcome::TimedOut)

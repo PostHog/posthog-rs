@@ -14,7 +14,6 @@ fn config() -> Config {
     config.flush_at = 1000;
     config.flush_interval = Duration::from_secs(3600);
     config.shutdown_timeout = Duration::ZERO;
-    config.max_capture_attempts = 1;
     config
 }
 
