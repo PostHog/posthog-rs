@@ -140,12 +140,8 @@ jobs:
         run: ${{ matrix.command }}
 
   ffi:
-    name: C bindings (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: C bindings
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: crates/posthog-rs-ffi
@@ -186,20 +182,6 @@ jobs:
           cbindgen --config cbindgen.toml --output include/posthog.h
           git diff --exit-code include/posthog.h
 
-      - name: Link from C and C++
-        run: |
-          cargo build --locked --release -p posthog-rs-ffi
-          read -ra native_libs <<< "$(cargo rustc --locked --release -p posthog-rs-ffi --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
-            | sed -n 's/.*native-static-libs: //p' | tail -1)"
-          cc -std=c99 -Wall -Wextra -Werror -pedantic examples/capture.c -Iinclude -L../../target/release -lposthog_ffi -o capture
-          c++ -std=c++17 -Wall -Wextra -Werror -pedantic examples/capture.cpp -Iinclude -L../../target/release -lposthog_ffi -o capture-cpp
-          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -L../../target/release -lposthog_ffi -o smoke-shared
-          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude ../../target/release/libposthog_ffi.a "${native_libs[@]}" -o smoke-static
-          c++ -std=c++11 -fshort-enums -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude ../../target/release/libposthog_ffi.a "${native_libs[@]}" -o smoke-short-enums
-          LD_LIBRARY_PATH=../../target/release DYLD_LIBRARY_PATH=../../target/release ./smoke-shared
-          ./smoke-static
-          ./smoke-short-enums
-
   ffi-release-version:
     name: C bindings release version
     if: github.event_name == 'pull_request'
@@ -217,6 +199,7 @@ jobs:
         run: echo "version=$(grep -m1 '^version = ' crates/posthog-rs-ffi/Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
 
   ffi-release-dry-run:
+    # Builds, links and runs the bindings on every release platform, as the release does.
     name: C bindings release build
     needs: ffi-release-version
     uses: ./.github/workflows/ffi-build.yml

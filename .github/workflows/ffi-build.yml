@@ -82,25 +82,49 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: cargo build --locked --release -p posthog-rs-ffi --target "$TARGET"
 
-      - name: Smoke test
+      - name: List the system libraries the static library needs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo rustc --locked --release -p posthog-rs-ffi --lib --target "$TARGET" --crate-type staticlib -- --print native-static-libs 2>&1 \
+            | sed -n 's/.*native-static-libs: //p' | tail -1 | tr -d '\r' > "../../target/$TARGET/release/native-static-libs.txt"
+          cat "../../target/$TARGET/release/native-static-libs.txt"
+
+      - name: Link and run from C and C++
         if: runner.os != 'Windows'
         env:
           TARGET: ${{ matrix.target }}
         run: |
           out="../../target/$TARGET/release"
-          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -L"$out" -lposthog_ffi -o smoke
-          LD_LIBRARY_PATH="$out" DYLD_LIBRARY_PATH="$out" ./smoke
+          read -ra native_libs < "$out/native-static-libs.txt"
+          # The examples need a PostHog project, so they're only built.
+          cc -std=c99 -Wall -Wextra -Werror -pedantic examples/capture.c -Iinclude -L"$out" -lposthog_ffi -o capture
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic examples/capture.cpp -Iinclude -L"$out" -lposthog_ffi -o capture-cpp
+          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -L"$out" -lposthog_ffi -o smoke-shared
+          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude "$out/libposthog_ffi.a" "${native_libs[@]}" -o smoke-static
+          c++ -std=c++11 -fshort-enums -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude "$out/libposthog_ffi.a" "${native_libs[@]}" -o smoke-short-enums
+          LD_LIBRARY_PATH="$out" DYLD_LIBRARY_PATH="$out" ./smoke-shared
+          ./smoke-static
+          ./smoke-short-enums
 
-      - name: Smoke test (Windows)
+      - name: Link and run from C and C++ (Windows)
         if: runner.os == 'Windows'
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          rem Link the DLL's import library. The DLL must sit next to the program.
-          cl /nologo /std:c++17 /EHsc /W4 /WX tests\c\smoke.cpp /Iinclude ..\..\target\x86_64-pc-windows-msvc\release\posthog_ffi.dll.lib /Fe:smoke.exe || exit /b 1
-          copy /y ..\..\target\x86_64-pc-windows-msvc\release\posthog_ffi.dll . || exit /b 1
-          smoke.exe
+          set "OUT=..\..\target\x86_64-pc-windows-msvc\release"
+          rem MSVC has no -fshort-enums, and its enums are always int-sized.
+          cl /nologo /W4 /WX examples\capture.c /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:capture.exe || exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX examples\capture.cpp /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:capture-cpp.exe || exit /b 1
+          rem Shared: link the DLL's import library. The DLL must sit next to the program.
+          cl /nologo /std:c++17 /EHsc /W4 /WX tests\c\smoke.cpp /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:smoke-shared.exe || exit /b 1
+          copy /y "%OUT%\posthog_ffi.dll" . || exit /b 1
+          smoke-shared.exe || exit /b 1
+          rem Static: link the static library and the system libraries it needs.
+          for /f "usebackq tokens=*" %%l in ("%OUT%\native-static-libs.txt") do set "NATIVE=%%l"
+          cl /nologo /std:c++17 /EHsc /W4 /WX tests\c\smoke.cpp /Iinclude "%OUT%\posthog_ffi.lib" %NATIVE% /Fe:smoke-static.exe || exit /b 1
+          smoke-static.exe
 
       - name: Package
         id: package
@@ -110,8 +134,6 @@ jobs:
         run: |
           name="posthog-rs-ffi-$VERSION-$TARGET"
           out="../../target/$TARGET/release"
-          native_libs=$(cargo rustc --locked --release -p posthog-rs-ffi --lib --target "$TARGET" --crate-type staticlib -- --print native-static-libs 2>&1 \
-            | sed -n 's/.*native-static-libs: //p' | tail -1)
 
           mkdir -p "dist/$name/include" "dist/$name/lib" "dist/$name/examples"
           cp include/posthog.h "dist/$name/include/"
@@ -126,7 +148,7 @@ jobs:
             *)
               cp "$out/libposthog_ffi.so" "$out/libposthog_ffi.a" "dist/$name/lib/" ;;
           esac
-          printf '%s\n' "$native_libs" > "dist/$name/lib/native-static-libs.txt"
+          cp "$out/native-static-libs.txt" "dist/$name/lib/"
 
           cd dist
           if [[ "$TARGET" == *windows* ]]; then
