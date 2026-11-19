@@ -198,7 +198,6 @@ impl posthog::stateful::Client
 pub fn posthog::stateful::Client::alias(&self, impl core::convert::Into<posthog::stateful::Alias>)
 pub fn posthog::stateful::Client::create_person_profile(&self)
 pub fn posthog::stateful::Client::identify(&self, impl core::convert::Into<posthog::stateful::Identify>)
-pub fn posthog::stateful::Client::is_identified(&self) -> bool
 pub fn posthog::stateful::Client::reset(&self)
 pub fn posthog::stateful::Client::set_person_properties(&self, impl core::convert::Into<posthog::stateful::PersonProperties>)
 impl posthog::stateful::Client

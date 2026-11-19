@@ -137,17 +137,22 @@ impl From<HashMap<String, Value>> for PersonProperties {
 
 impl Client {
     /// Whether local state is identified. Reads memory only; false when disabled.
-    pub fn is_identified(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_identified(&self) -> bool {
         self.state
             .as_ref()
             .is_some_and(|state| state.snapshot().identified)
     }
 
-    fn identity_guard(&self) -> Option<CaptureGuard> {
-        if self.is_disabled()
-            || self.closed.load(Ordering::Acquire)
-            || self.producer.as_ref()?.person_profiles == PersonProfiles::Never
-        {
+    fn identity_guard(&self, operation: &str) -> Option<CaptureGuard> {
+        if self.is_disabled() || self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        if self.producer.as_ref()?.person_profiles == PersonProfiles::Never {
+            tracing::warn!(
+                "posthog-rs: {} is ignored because person profiles are disabled",
+                operation
+            );
             return None;
         }
         CaptureGuard::enter(self).ok()
@@ -158,7 +163,7 @@ impl Client {
     /// Dropped/full events do not roll back local state or schedule linking-event replay.
     /// Persistence and delivery are asynchronous; this is not an ingestion acknowledgment.
     pub fn identify(&self, input: impl Into<Identify>) {
-        let Some(_guard) = self.identity_guard() else {
+        let Some(_guard) = self.identity_guard("identify") else {
             return;
         };
         let input = input.into();
@@ -170,6 +175,7 @@ impl Client {
         let has_properties = !input.set.is_empty() || !input.set_once.is_empty();
         let deduplicable = surely_processes_person(&input.options);
         let mut reset_required = false;
+        let mut already_identified = false;
         let result = self.state.as_ref().unwrap().mutate(|state| {
             if state.identified && state.distinct_id != input.distinct_id {
                 reset_required = true;
@@ -184,9 +190,10 @@ impl Client {
                 state.person_processing = true;
                 state.generation = state.generation.wrapping_add(1);
                 state.person_properties = None;
-            } else if !has_properties
-                || (deduplicable && state.person_properties == Some(fingerprint))
-            {
+            } else if !has_properties {
+                already_identified = true;
+                return None;
+            } else if deduplicable && state.person_properties == Some(fingerprint) {
                 return None;
             }
             let mut event = person_event(
@@ -209,6 +216,11 @@ impl Client {
         if reset_required {
             tracing::warn!("posthog-rs: reset before identifying a different user");
         }
+        if already_identified {
+            tracing::debug!(
+                "posthog-rs: already identified with this distinct ID; nothing to send"
+            );
+        }
         match result {
             Ok((_, Some((event, snapshot, deduplicate)))) => {
                 self.capture_person(event, &snapshot, Some(fingerprint), deduplicate);
@@ -224,7 +236,7 @@ impl Client {
     /// A blank alias, or one equal to the current distinct ID, is ignored with a
     /// warning, as posthog-js does.
     pub fn alias(&self, input: impl Into<Alias>) {
-        let Some(_guard) = self.identity_guard() else {
+        let Some(_guard) = self.identity_guard("alias") else {
             return;
         };
         let Alias { alias, options } = input.into();
@@ -257,7 +269,7 @@ impl Client {
     /// Update the current person's properties without identifying. Empty maps are a no-op.
     /// Only accepted updates are deduplicated. State enablement survives capture rejection.
     pub fn set_person_properties(&self, input: impl Into<PersonProperties>) {
-        let Some(_guard) = self.identity_guard() else {
+        let Some(_guard) = self.identity_guard("set_person_properties") else {
             return;
         };
         let PersonProperties {
@@ -287,7 +299,7 @@ impl Client {
     /// Enable person processing without identifying, attempting an empty `$set` once.
     /// Already-enabled processing is a no-op, even if its original event was dropped.
     pub fn create_person_profile(&self) {
-        let Some(_guard) = self.identity_guard() else {
+        let Some(_guard) = self.identity_guard("create_person_profile") else {
             return;
         };
         let mode = self.producer.as_ref().unwrap().person_profiles;

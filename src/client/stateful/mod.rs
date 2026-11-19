@@ -1,5 +1,7 @@
 //! A client for applications: it keeps a local anonymous identity and queues
 //! events, and both survive restarts unless you choose memory-only storage.
+//! [`Client::identify`] links it to a known user, [`Client::alias`] links
+//! another ID, and [`Client::reset`] starts a new anonymous identity.
 //!
 //! Create a [`Config`] with your project token and pass it to
 //! [`Client::init_blocking`], or to `Client::init` with the `async-client`
@@ -40,7 +42,10 @@ struct Snapshot {
     device_id: String,
     anonymous_id: String,
     distinct_id: String,
+    // Records written before identity support lack these fields and restore as anonymous.
+    #[serde(default)]
     identified: bool,
+    #[serde(default)]
     person_processing: bool,
     // Process-local bookkeeping shares the same lock as identity, but is not persisted.
     #[serde(skip)]

@@ -346,6 +346,25 @@ fn startup_rewrites_missing_device_and_tolerates_additive_fields() {
 }
 
 #[test]
+fn restores_a_v1_record_written_before_identity_fields() {
+    let directory = Directory::new();
+    fs::create_dir_all(directory.scope()).unwrap();
+    let path = directory.scope().join("state.json");
+    fs::write(&path, br#"{"version":1,"state":{"device_id":"device","anonymous_id":"anonymous","distinct_id":"anonymous"}}"#).unwrap();
+    let client = Client::init_blocking(directory.config());
+    assert_eq!(client.get_anonymous_id(), "anonymous");
+    assert_eq!(client.get_distinct_id(), "anonymous");
+    assert!(!client.is_identified());
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
+    assert_eq!(
+        client.shutdown_blocking(None).delivery,
+        DeliveryOutcome::Stopped
+    );
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(value["state"]["device_id"], "device");
+}
+
+#[test]
 fn namespace_contention_is_enabled_memory_fallback_without_overwriting_owner() {
     let directory = Directory::new();
     let first = Client::init_blocking(directory.config());
