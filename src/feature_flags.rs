@@ -1797,9 +1797,10 @@ fn match_property_with_version(
     property_matching_version: i64,
     known_absent_keys: Option<&HashSet<String>>,
 ) -> Result<bool, InconclusiveMatchError> {
-    // Flag dependency filters are resolved by evaluating the flag, never by
-    // property absence.
-    if !property.key.starts_with("$feature/")
+    // Cohort and flag dependency filters are resolved by membership or by
+    // evaluating the flag, never by property absence.
+    if property.property_type.as_deref() != Some("cohort")
+        && !property.key.starts_with("$feature/")
         && known_absent_keys.is_some_and(|keys| keys.contains(&property.key))
     {
         return match_known_absent_property(property);
@@ -5784,6 +5785,49 @@ mod known_absent_tests {
                 value
             );
         }
+    }
+
+    #[test]
+    fn invalid_regex_on_a_listed_key_does_not_match_as_for_a_supplied_value() {
+        for operator in ["regex", "not_regex"] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "value": "[", "operator": operator, "type": "person"}]),
+            );
+            let supplied = HashMap::from([("plan".to_string(), json!("pro"))]);
+            assert_eq!(
+                evaluate(&flag, &supplied, &KnownAbsentProperties::default()).unwrap(),
+                FlagValue::Boolean(false),
+                "{operator} with a supplied value"
+            );
+            assert_eq!(
+                evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).unwrap(),
+                FlagValue::Boolean(false),
+                "{operator} with a listed key"
+            );
+        }
+    }
+
+    #[test]
+    fn listed_key_does_not_resolve_a_cohort_filter_in_a_flag_dependency() {
+        let dependency = person_flag(
+            "in-cohort",
+            json!([{"key": "id", "value": 1, "operator": "exact", "type": "cohort"}]),
+        );
+        let flags = HashMap::from([(dependency.key.clone(), dependency)]);
+        let flag = person_flag(
+            "dependent",
+            json!([{"key": "$feature/in-cohort", "value": false, "operator": "exact", "type": "flag"}]),
+        );
+
+        assert!(evaluate_with(
+            &flag,
+            &HashMap::new(),
+            &person_keys(&["id"]),
+            &HashMap::new(),
+            &flags
+        )
+        .is_err());
     }
 
     #[test]
