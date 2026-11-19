@@ -479,7 +479,8 @@ impl Client {
     }
 
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
-    /// calls are no-ops. After shutdown, `capture` drops events and
+    /// calls are no-ops. Also stops the local evaluation poller at its next
+    /// tick. After shutdown, `capture` drops events and
     /// [`emails`](Self::emails) refuses requests with `client_closed`. Email
     /// requests already in flight, retries included, get until
     /// `shutdown_timeout_ms` from the start of shutdown to finish. When called
@@ -501,6 +502,9 @@ impl Client {
                 .get()
                 .is_some_and(|transport| transport.on_worker_thread());
         self.email_tracker.close();
+        if let Some(poller) = &self.flag_poller {
+            poller.signal_stop();
+        }
         self.shutdown_transport().await;
         if !called_from_transport_worker {
             self.email_tracker.wait_idle(deadline).await;

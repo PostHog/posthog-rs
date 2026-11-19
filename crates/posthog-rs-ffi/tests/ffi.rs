@@ -524,3 +524,58 @@ fn capture_requests_identify_the_bindings() {
 
     capture.assert();
 }
+
+#[test]
+fn shutdown_stops_flag_requests_and_the_poller() {
+    let server = MockServer::start();
+    let definitions = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200)
+            .json_body(json!({"flags": [], "group_type_mapping": {}, "cohorts": {}}));
+    });
+    let remote = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({"flags": {}}));
+    });
+
+    unsafe {
+        let options = posthog_options_new(c("phc_test").as_ptr());
+        posthog_options_set_host(options, c(&server.base_url()).as_ptr());
+        posthog_options_set_secret_key(options, c("phs_test").as_ptr());
+        posthog_options_set_enable_local_evaluation(options, true);
+        posthog_options_set_poll_interval_seconds(options, 1);
+        posthog_options_set_feature_flags_request_max_retries(options, 0);
+        let client = posthog_client_new(options);
+        posthog_options_free(options);
+        assert!(!client.is_null(), "{:?}", last_error());
+        assert_eq!(definitions.calls(), 1, "initial definitions load");
+
+        assert_eq!(posthog_shutdown(client), PostHogStatus::POSTHOG_STATUS_OK);
+        let definitions_at_shutdown = definitions.calls();
+        let remote_at_shutdown = remote.calls();
+
+        let mut flags = ptr::null_mut();
+        let status = posthog_evaluate_flags(client, c("user-1").as_ptr(), ptr::null(), &mut flags);
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_INVALID_ARGUMENT);
+        assert!(flags.is_null());
+        assert!(last_error().unwrap().contains("shut down"));
+
+        let status = posthog_reload_feature_flags(client);
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_INVALID_ARGUMENT);
+
+        // Longer than the poll interval, so a running poller would have fetched again.
+        std::thread::sleep(std::time::Duration::from_millis(1600));
+        assert_eq!(
+            definitions.calls(),
+            definitions_at_shutdown,
+            "poller kept running"
+        );
+        assert_eq!(
+            remote.calls(),
+            remote_at_shutdown,
+            "flags requested after shutdown"
+        );
+
+        posthog_client_free(client);
+    }
+}

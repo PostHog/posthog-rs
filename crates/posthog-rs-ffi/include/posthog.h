@@ -287,8 +287,14 @@ PostHogStatus posthog_group_identify(const struct PostHogClient *client,
 PostHogStatus posthog_flush(const struct PostHogClient *client);
 
 /**
- * Delivers queued events within the shutdown timeout and stops the client.
- * Later captures are dropped. `posthog_client_free` also shuts down.
+ * Delivers queued events and stops the client, including the local
+ * evaluation poller. Later captures are dropped, and later flag calls return
+ * `POSTHOG_STATUS_INVALID_ARGUMENT` without a network request.
+ * `posthog_client_free` also shuts down.
+ *
+ * `shutdown_timeout_ms` bounds delivering the queue. A capture request
+ * already being sent when shutdown starts runs to completion first, which
+ * can take up to `request_timeout_seconds`.
  */
 PostHogStatus posthog_shutdown(const struct PostHogClient *client);
 

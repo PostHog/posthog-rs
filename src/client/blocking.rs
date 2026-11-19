@@ -426,7 +426,8 @@ impl Client {
     }
 
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
-    /// calls are no-ops. After shutdown, `capture` drops events and
+    /// calls are no-ops. Also stops the local evaluation poller before its next
+    /// fetch. After shutdown, `capture` drops events and
     /// [`emails`](Self::emails) refuses requests with `client_closed`. Email
     /// requests already in flight on other threads, retries included, get
     /// until `shutdown_timeout_ms` from the start of shutdown to finish.
@@ -434,6 +435,9 @@ impl Client {
         let deadline =
             std::time::Instant::now() + Duration::from_millis(self.options.shutdown_timeout_ms);
         self.email_tracker.close();
+        if let Some(poller) = &self.flag_poller {
+            poller.signal_stop();
+        }
         self.close_lanes_blocking();
         self.email_tracker.wait_idle(deadline);
     }

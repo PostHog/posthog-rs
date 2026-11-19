@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::DateTime;
 use posthog::{
@@ -69,6 +70,21 @@ pub struct PostHogOptions {
 /// A PostHog client, created with `posthog_client_new`.
 pub struct PostHogClient {
     client: Client,
+    /// Set by `posthog_shutdown`. Flag calls on a shut-down client fail
+    /// instead of making network requests.
+    closed: AtomicBool,
+}
+
+impl PostHogClient {
+    fn ensure_open(&self) -> Result<(), FfiError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(FfiError::new(
+                PostHogStatus::POSTHOG_STATUS_INVALID_ARGUMENT,
+                "the client is shut down",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// An event to capture, created with `posthog_event_new` or `posthog_event_new_anon`.
@@ -461,6 +477,7 @@ pub unsafe extern "C" fn posthog_client_new(options: *const PostHogOptions) -> *
         })?;
         Ok(PostHogClient {
             client: posthog::client(options),
+            closed: AtomicBool::new(false),
         })
     })
 }
@@ -544,12 +561,20 @@ pub unsafe extern "C" fn posthog_flush(client: *const PostHogClient) -> PostHogS
     })
 }
 
-/// Delivers queued events within the shutdown timeout and stops the client.
-/// Later captures are dropped. `posthog_client_free` also shuts down.
+/// Delivers queued events and stops the client, including the local
+/// evaluation poller. Later captures are dropped, and later flag calls return
+/// `POSTHOG_STATUS_INVALID_ARGUMENT` without a network request.
+/// `posthog_client_free` also shuts down.
+///
+/// `shutdown_timeout_ms` bounds delivering the queue. A capture request
+/// already being sent when shutdown starts runs to completion first, which
+/// can take up to `request_timeout_seconds`.
 #[no_mangle]
 pub unsafe extern "C" fn posthog_shutdown(client: *const PostHogClient) -> PostHogStatus {
     ffi_call(|| {
-        ref_arg(client, "client")?.client.shutdown();
+        let client = ref_arg(client, "client")?;
+        client.closed.store(true, Ordering::Release);
+        client.client.shutdown();
         Ok(())
     })
 }
@@ -808,6 +833,7 @@ pub unsafe extern "C" fn posthog_evaluate_flags(
             return Err(FfiError::null("flags_out"));
         }
         let client = ref_arg(client, "client")?;
+        client.ensure_open()?;
         let distinct_id = str_arg(distinct_id, "distinct_id")?;
         let options_json = if options_json.is_null() {
             None
@@ -827,7 +853,9 @@ pub unsafe extern "C" fn posthog_reload_feature_flags(
     client: *const PostHogClient,
 ) -> PostHogStatus {
     ffi_call(|| {
-        ref_arg(client, "client")?.client.reload_feature_flags()?;
+        let client = ref_arg(client, "client")?;
+        client.ensure_open()?;
+        client.client.reload_feature_flags()?;
         Ok(())
     })
 }

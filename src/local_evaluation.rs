@@ -617,6 +617,14 @@ impl FlagPoller {
         Ok(())
     }
 
+    /// Tell the polling thread to exit without waiting for it. It stops before
+    /// its next fetch. The client's `shutdown` calls this, since it can't take
+    /// the poller mutably.
+    #[cfg_attr(feature = "async-client", allow(dead_code))]
+    pub(crate) fn signal_stop(&self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
+    }
+
     /// Stop the polling thread and wait for it to exit.
     pub fn stop(&mut self) {
         debug!("Stopping flag poller");
@@ -889,6 +897,13 @@ impl AsyncFlagPoller {
     }
 
     /// Stop the polling task.
+    /// Tell the polling task to exit without waiting for it. It stops at its
+    /// next tick. The client's `shutdown` calls this, since it can't take the
+    /// poller mutably.
+    pub(crate) fn signal_stop(&self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
+    }
+
     pub async fn stop(&mut self) {
         debug!("Stopping async flag poller");
         self.stop_signal.store(true, Ordering::Relaxed);
