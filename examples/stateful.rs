@@ -1,6 +1,5 @@
 //! Run with `cargo run --features stateful --example stateful`.
 //! Set POSTHOG_PROJECT_TOKEN; POSTHOG_HOST and POSTHOG_DATA_DIR are optional.
-use std::collections::HashMap;
 use std::time::Duration;
 
 use posthog::stateful::{Capture, Client, Config, Persistence};
@@ -26,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .properties
         .insert("source".into(), json!("rust-example"));
     println!("capture: {:?}", client.capture(event));
-    println!("screen: {:?}", client.screen("Example", HashMap::new()));
+    println!("screen: {:?}", client.screen("Example"));
     println!("flush: {:?}", client.flush_blocking());
     println!(
         "shutdown: {:?}",
