@@ -38,7 +38,7 @@ The bindings report their own version as `$lib_version`, next to `$lib` set to `
 
 Because `posthog-rs-ffi` depends on `posthog`, Sampo also gives `posthog-rs-ffi` a patch release whenever `posthog` is released. Those releases ship the bindings with the new SDK.
 
-Sampo tags each `posthog-rs-ffi` release as `posthog-rs-ffi-v<version>`. The release workflow then creates a GitHub Release for that tag, separate from the `posthog` release and not marked as latest. It attaches these archives:
+Each `posthog-rs-ffi` release is tagged `posthog-rs-ffi-v<version>` and gets its own GitHub Release, separate from the `posthog` release and not marked as latest. The GitHub Release is published only once all of these archives are built, with the archives attached:
 
 - `posthog-rs-ffi-<version>-x86_64-unknown-linux-gnu.tar.gz`
 - `posthog-rs-ffi-<version>-aarch64-unknown-linux-gnu.tar.gz`
@@ -50,13 +50,13 @@ Each archive contains the shared and static libraries, `posthog.h`, the C and C+
 
 All of this runs in [`release.yml`](.github/workflows/release.yml), in the same approved release as `posthog`:
 
-- "Release and publish" bumps whichever packages have changesets, publishes `posthog` and `posthog-rs` only when they changed, and creates the `posthog-rs-ffi` GitHub Release when its version changed.
-- "Build C bindings" builds the `posthog-rs-ffi-v<version>` tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml) and runs the C++ smoke test against each built library.
-- "Attach C bindings to the GitHub Release" checks that all five archives and their checksums are present, then uploads them.
+- "Release and publish" bumps whichever packages have changesets and commits the release. It publishes `posthog` and `posthog-rs` only when their version changed, and pushes the `posthog-rs-ffi-v<version>` tag only when the bindings' version changed. Every tag points at the release commit itself, even if `main` has moved on.
+- "Build C bindings" builds that tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml) and runs the C++ smoke test against each built library.
+- "Publish the C bindings GitHub Release" checks that all five archives and their checksums are present, then publishes the GitHub Release with them attached.
 
-The two C bindings jobs run even if publishing `posthog` fails, as long as the `posthog-rs-ffi` GitHub Release exists. A failure in either sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
+The two C bindings jobs run even if publishing `posthog` fails, as long as the `posthog-rs-ffi` tag exists. A failure in either sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
 
-If a C bindings job fails, use **Re-run failed jobs** on that Release run. It rebuilds from the same tag and replaces any archives already attached. If the build itself needs a fix, release a `posthog-rs-ffi` patch version instead.
+If a C bindings job fails, the tag exists but no GitHub Release is published. Use **Re-run failed jobs** on that Release run. It rebuilds from the same tag and publishes the release, or replaces its archives if it was already published. If the build itself needs a fix, release a `posthog-rs-ffi` patch version instead.
 
 ## Failed or cancelled release
 

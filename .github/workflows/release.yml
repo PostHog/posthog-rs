@@ -188,6 +188,7 @@ jobs:
           fi
 
       - name: Commit release changes
+        id: release-commit
         if: steps.check-changes.outputs.committed == 'true'
         uses: planetscale/ghcommit-action@a6b150b81dca5dd027baa898604418eec9e11465
         with:
@@ -199,12 +200,18 @@ jobs:
 
       # ghcommit-action commits via the GitHub API, so the local working
       # tree still has dirty and staged files. Discard them (already committed remotely)
-      # and pull, otherwise cargo publish fails with "files contain changes
-      # not yet committed".
+      # and check out the release commit itself, otherwise cargo publish fails with
+      # "files contain changes not yet committed". Checking out the exact commit,
+      # rather than pulling main, keeps a later push to main out of the release.
       - name: Sync local repository
         id: sync
         if: steps.check-changes.outputs.committed == 'true'
-        run: git reset --hard && git pull origin main
+        env:
+          RELEASE_SHA: ${{ steps.release-commit.outputs.commit-hash }}
+        run: |
+          git reset --hard
+          git fetch origin "$RELEASE_SHA"
+          git checkout --detach "$RELEASE_SHA"
 
       - name: Publish dry-run
         if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
@@ -255,17 +262,22 @@ jobs:
                  '{ref: $ref, inputs: {package_name: $package_name, package_version: $package_version}}' \
                )"
 
-      - name: Create posthog-rs-ffi GitHub Release
+      - name: Tag the posthog-rs-ffi release
         id: ffi-release
         # Runs even if publishing posthog failed: the release commit is already on main.
+        # The GitHub Release is published later, once every platform archive is built.
         if: ${{ !cancelled() && steps.sync.outcome == 'success' && steps.sampo-release.outputs.ffi_released == 'true' }}
         env:
-          GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
+          GH_TOKEN: ${{ steps.releaser.outputs.token }}
+          GH_REPO: ${{ github.repository }}
           FFI_VERSION: ${{ steps.sampo-release.outputs.ffi_version }}
+          RELEASE_SHA: ${{ steps.release-commit.outputs.commit-hash }}
         run: |
           tag="posthog-rs-ffi-v$FFI_VERSION"
-          notes=$(awk -v defText="see crates/posthog-rs-ffi/CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' crates/posthog-rs-ffi/CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
-          gh release create "$tag" --target "$(git rev-parse HEAD)" --title "posthog-rs-ffi $FFI_VERSION" --notes "$notes" --latest=false
+          # `sampo` tags locally only, so create the remote tag here. A rerun finds it already there.
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$RELEASE_SHA" >/dev/null
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Send failure event to PostHog
@@ -293,7 +305,7 @@ jobs:
   ffi-build:
     name: Build C bindings
     needs: release
-    # The posthog-rs-ffi GitHub Release exists once this output is set, even if a later step failed.
+    # The posthog-rs-ffi tag exists once this output is set, even if a later step failed.
     if: ${{ !cancelled() && needs.release.outputs.ffi_tag != '' }}
     uses: ./.github/workflows/ffi-build.yml
     with:
@@ -301,7 +313,7 @@ jobs:
       release: true
 
   ffi-publish:
-    name: Attach C bindings to the GitHub Release
+    name: Publish the C bindings GitHub Release
     needs: [release, ffi-build]
     if: ${{ !cancelled() && needs.ffi-build.result == 'success' }}
     runs-on: ubuntu-latest
@@ -333,12 +345,27 @@ jobs:
           [ "$missing" -eq 0 ]
           sha256sum -c ./*.sha256
 
-      - name: Upload to the release
+      - name: Checkout the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.release.outputs.ffi_tag }}
+          path: source
+          persist-credentials: false
+
+      - name: Publish the GitHub Release with its archives
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.release.outputs.ffi_tag }}
-        run: gh release upload "$TAG" dist/* --clobber
+          VERSION: ${{ needs.release.outputs.ffi_version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # A rerun after the release was published replaces its archives.
+            gh release upload "$TAG" dist/* --clobber
+            exit 0
+          fi
+          notes=$(awk -v defText="see crates/posthog-rs-ffi/CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' source/crates/posthog-rs-ffi/CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
+          gh release create "$TAG" dist/* --verify-tag --title "posthog-rs-ffi $VERSION" --notes "$notes" --latest=false
 
   notify-released:
     name: Notify Slack - Released
