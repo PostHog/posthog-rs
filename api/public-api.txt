@@ -172,6 +172,15 @@ pub posthog::stateful::PersistenceOutcome::WriteFailed
 pub posthog::stateful::PersonProfiles::Always
 pub posthog::stateful::PersonProfiles::IdentifiedOnly
 pub posthog::stateful::PersonProfiles::Never
+#[non_exhaustive] pub struct posthog::stateful::Alias
+pub posthog::stateful::Alias::alias: alloc::string::String
+pub posthog::stateful::Alias::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+impl posthog::stateful::Alias
+pub fn posthog::stateful::Alias::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::convert::From<&str> for posthog::stateful::Alias
+pub fn posthog::stateful::Alias::from(&str) -> Self
+impl core::convert::From<alloc::string::String> for posthog::stateful::Alias
+pub fn posthog::stateful::Alias::from(alloc::string::String) -> Self
 #[non_exhaustive] pub struct posthog::stateful::Capture
 pub posthog::stateful::Capture::event: alloc::string::String
 pub posthog::stateful::Capture::groups: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
@@ -187,15 +196,15 @@ impl core::convert::From<alloc::string::String> for posthog::stateful::Capture
 pub fn posthog::stateful::Capture::from(alloc::string::String) -> Self
 pub struct posthog::stateful::Client
 impl posthog::stateful::Client
-pub fn posthog::stateful::Client::alias(&self, impl core::convert::Into<alloc::string::String>)
+pub fn posthog::stateful::Client::alias(&self, impl core::convert::Into<posthog::stateful::Alias>)
 pub fn posthog::stateful::Client::create_person_profile(&self)
 pub fn posthog::stateful::Client::identify(&self, impl core::convert::Into<posthog::stateful::Identify>)
 pub fn posthog::stateful::Client::is_identified(&self) -> bool
 pub fn posthog::stateful::Client::reset(&self)
-pub fn posthog::stateful::Client::set_person_properties(&self, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>)
+pub fn posthog::stateful::Client::set_person_properties(&self, impl core::convert::Into<posthog::stateful::PersonProperties>)
 impl posthog::stateful::Client
 pub fn posthog::stateful::Client::capture(&self, impl core::convert::Into<posthog::stateful::Capture>) -> posthog::stateful::CaptureOutcome
-pub fn posthog::stateful::Client::screen(&self, impl core::convert::Into<alloc::string::String>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>) -> posthog::stateful::CaptureOutcome
+pub fn posthog::stateful::Client::screen(&self, impl core::convert::Into<posthog::stateful::Screen>) -> posthog::stateful::CaptureOutcome
 impl posthog::stateful::Client
 pub async fn posthog::stateful::Client::flush(&self) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::flush_blocking(&self) -> posthog::stateful::DrainReport
@@ -253,6 +262,7 @@ pub posthog::stateful::DrainReport::delivery: posthog::stateful::DeliveryOutcome
 pub posthog::stateful::DrainReport::state: posthog::stateful::PersistenceOutcome
 #[non_exhaustive] pub struct posthog::stateful::Identify
 pub posthog::stateful::Identify::distinct_id: alloc::string::String
+pub posthog::stateful::Identify::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub posthog::stateful::Identify::set: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub posthog::stateful::Identify::set_once: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 impl posthog::stateful::Identify
@@ -264,6 +274,24 @@ pub fn posthog::stateful::Identify::from(alloc::string::String) -> Self
 #[non_exhaustive] pub struct posthog::stateful::InitializationFailure
 impl posthog::stateful::InitializationFailure
 pub fn posthog::stateful::InitializationFailure::message(&self) -> &str
+#[non_exhaustive] pub struct posthog::stateful::PersonProperties
+pub posthog::stateful::PersonProperties::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub posthog::stateful::PersonProperties::set: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub posthog::stateful::PersonProperties::set_once: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+impl posthog::stateful::PersonProperties
+pub fn posthog::stateful::PersonProperties::new() -> Self
+impl core::convert::From<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>> for posthog::stateful::PersonProperties
+pub fn posthog::stateful::PersonProperties::from(std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>) -> Self
+#[non_exhaustive] pub struct posthog::stateful::Screen
+pub posthog::stateful::Screen::name: alloc::string::String
+pub posthog::stateful::Screen::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub posthog::stateful::Screen::properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+impl posthog::stateful::Screen
+pub fn posthog::stateful::Screen::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::convert::From<&str> for posthog::stateful::Screen
+pub fn posthog::stateful::Screen::from(&str) -> Self
+impl core::convert::From<alloc::string::String> for posthog::stateful::Screen
+pub fn posthog::stateful::Screen::from(alloc::string::String) -> Self
 pub mod posthog::tower
 pub struct posthog::tower::PostHogLayer
 impl posthog::tower::PostHogLayer

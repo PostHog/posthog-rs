@@ -77,6 +77,70 @@ fn assembly_preserves_rust_precedence_and_captures_identity_time_and_sdk() {
 }
 
 #[test]
+fn sdk_name_and_version_fill_as_a_pair() {
+    let mut config = Config::new("phc_test");
+    config.sdk_name = "embedding".into();
+    config.sdk_version = "1.2.3".into();
+    let producer = Producer::new(&config);
+    let lib = |properties: serde_json::Value| {
+        let mut input = Capture::new("captured");
+        input.properties = serde_json::from_value(properties).unwrap();
+        let wire = producer.prepare(input, &snapshot(), now()).unwrap();
+        (
+            wire.properties["$lib"].clone(),
+            wire.properties.get("$lib_version").cloned(),
+        )
+    };
+    // No caller $lib: both come from this SDK, replacing a stray version.
+    assert_eq!(lib(json!({})), (json!("embedding"), Some(json!("1.2.3"))));
+    assert_eq!(
+        lib(json!({"$lib_version": "9.9.9"})),
+        (json!("embedding"), Some(json!("1.2.3")))
+    );
+    // A wrapper's own $lib never gets this SDK's version.
+    assert_eq!(lib(json!({"$lib": "wrapper"})), (json!("wrapper"), None));
+    assert_eq!(
+        lib(json!({"$lib": "wrapper", "$lib_version": "4.5.6"})),
+        (json!("wrapper"), Some(json!("4.5.6")))
+    );
+    // This SDK's own name still fills a missing version.
+    assert_eq!(
+        lib(json!({"$lib": "embedding"})),
+        (json!("embedding"), Some(json!("1.2.3")))
+    );
+}
+
+#[test]
+fn person_profile_option_then_property_then_mode() {
+    let producer = Producer::new(&Config::new("phc_test"));
+    let resolve = |properties: serde_json::Value, options: serde_json::Value| {
+        let mut input = Capture::new("captured");
+        input.properties = serde_json::from_value(properties).unwrap();
+        input.options = serde_json::from_value(options).unwrap();
+        let wire = producer.prepare(input, &snapshot(), now()).unwrap();
+        (
+            wire.options.get("process_person_profile").cloned(),
+            wire.properties.get("$process_person_profile").cloned(),
+        )
+    };
+    // The mode fills the option only when the caller set neither.
+    assert_eq!(resolve(json!({}), json!({})), (Some(json!(false)), None));
+    // A caller property wins over the mode; the wire carries it as the option.
+    assert_eq!(
+        resolve(json!({"$process_person_profile": true}), json!({})),
+        (Some(json!(true)), None)
+    );
+    // A caller option wins over both.
+    assert_eq!(
+        resolve(
+            json!({"$process_person_profile": true}),
+            json!({"process_person_profile": false})
+        ),
+        (Some(json!(false)), None)
+    );
+}
+
+#[test]
 fn normalization_omits_custom_null_members_but_preserves_slots_and_protocol_payloads() {
     let config = Config::new("phc_test");
     let producer = Producer::new(&config);
@@ -107,7 +171,8 @@ fn normalization_omits_custom_null_members_but_preserves_slots_and_protocol_payl
     }
     assert_eq!(wire.properties["$groups"], json!({"company": null}));
     assert_eq!(wire.options["future_option"], json!({"null": null}));
-    assert_eq!(wire.options["process_person_profile"], false);
+    // A null option counts as unset, so the caller's property wins over the mode.
+    assert_eq!(wire.options["process_person_profile"], true);
     assert!(wire.session_id.is_none());
     assert!(wire.properties.get("missing").is_none());
 }
@@ -142,6 +207,30 @@ fn hooks_see_enrichment_in_order_and_cleanup_does_not_restore_removed_data() {
     assert!(wire.properties.get("hook_null").is_none());
     assert_eq!(wire.properties["hook_array"], json!([null, {}]));
     assert!(!wire.options.contains_key("process_person_profile"));
+}
+
+#[test]
+fn hooks_see_merged_groups_and_can_replace_them() {
+    let mut config = Config::new("phc_test");
+    config.before_send(|mut event| {
+        assert_eq!(
+            event.properties()["$groups"],
+            json!({"company": "typed", "project": "property"})
+        );
+        event.remove_prop("$groups");
+        event.add_group("team", "safe");
+        Some(event)
+    });
+    let mut input = Capture::new("grouped");
+    input.groups.insert("company".into(), "typed".into());
+    input.properties.insert(
+        "$groups".into(),
+        json!({"company": "property", "project": "property"}),
+    );
+    let wire = Producer::new(&config)
+        .prepare(input, &snapshot(), now())
+        .unwrap();
+    assert_eq!(wire.properties["$groups"], json!({"team": "safe"}));
 }
 
 #[test]

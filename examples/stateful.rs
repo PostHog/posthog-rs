@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .properties
         .insert("source".into(), json!("rust-example"));
     println!("capture: {:?}", client.capture(event));
-    println!("screen: {:?}", client.screen("Example", HashMap::new()));
+    println!("screen: {:?}", client.screen("Example"));
     println!("flush: {:?}", client.flush_blocking());
     println!(
         "shutdown: {:?}",

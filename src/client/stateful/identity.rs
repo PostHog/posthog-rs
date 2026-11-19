@@ -47,6 +47,8 @@ pub struct Identify {
     pub set: HashMap<String, Value>,
     /// Person properties to set only if absent.
     pub set_once: HashMap<String, Value>,
+    /// Explicit wire options for the identify event, as on [`Capture::options`].
+    pub options: HashMap<String, Value>,
 }
 
 impl Identify {
@@ -68,6 +70,68 @@ impl From<&str> for Identify {
 impl From<String> for Identify {
     fn from(id: String) -> Self {
         Self::new(id)
+    }
+}
+
+/// Alias input. String shorthand supplies only the alias.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Alias {
+    /// Nonblank ID to link to the current identity.
+    pub alias: String,
+    /// Explicit wire options for the `$create_alias` event, as on [`Capture::options`].
+    pub options: HashMap<String, Value>,
+}
+
+impl Alias {
+    /// Link this ID without options.
+    pub fn new(alias: impl Into<String>) -> Self {
+        Self {
+            alias: alias.into(),
+            ..Self::default()
+        }
+    }
+}
+
+impl From<&str> for Alias {
+    fn from(alias: &str) -> Self {
+        Self::new(alias)
+    }
+}
+
+impl From<String> for Alias {
+    fn from(alias: String) -> Self {
+        Self::new(alias)
+    }
+}
+
+/// Person property update. Start with [`PersonProperties::new`], or pass a map
+/// of properties to set.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct PersonProperties {
+    /// Person properties to set, including null values.
+    pub set: HashMap<String, Value>,
+    /// Person properties to set only if absent.
+    pub set_once: HashMap<String, Value>,
+    /// Explicit wire options for the `$set` event, as on [`Capture::options`].
+    pub options: HashMap<String, Value>,
+}
+
+impl PersonProperties {
+    /// An empty update; fill `set` and `set_once` before passing it.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Map shorthand supplies only the properties to set.
+impl From<HashMap<String, Value>> for PersonProperties {
+    fn from(set: HashMap<String, Value>) -> Self {
+        Self {
+            set,
+            ..Self::default()
+        }
     }
 }
 
@@ -131,6 +195,7 @@ impl Client {
                 input.set,
                 input.set_once,
             );
+            event.options = input.options;
             if was_anonymous && changed {
                 event
                     .properties
@@ -153,23 +218,36 @@ impl Client {
     }
 
     /// Link an alias to the current identity without changing either local ID.
-    pub fn alias(&self, alias: impl Into<String>) {
+    /// A blank alias, or one equal to the current distinct ID, is ignored with a
+    /// warning, as posthog-js does.
+    pub fn alias(&self, input: impl Into<Alias>) {
         let Some(_guard) = self.identity_guard() else {
             return;
         };
-        let alias = alias.into();
+        let Alias { alias, options } = input.into();
         if alias.trim().is_empty() {
+            tracing::warn!("posthog-rs: alias requires a nonblank alias");
             return;
         }
+        let mut aliases_self = false;
         let result = self.state.as_ref().unwrap().mutate(|state| {
             if self.snapshot_opted_out(state) {
+                return None;
+            }
+            if state.distinct_id == alias {
+                aliases_self = true;
                 return None;
             }
             state.person_processing = true;
             Some(state.clone())
         });
+        if aliases_self {
+            tracing::warn!("posthog-rs: alias equals the current distinct ID; nothing to link");
+            return;
+        }
         if let Ok((_, Some(snapshot))) = result {
             let mut event = Capture::new("$create_alias");
+            event.options = options;
             event.properties.insert("alias".into(), alias.into());
             event
                 .properties
@@ -180,14 +258,15 @@ impl Client {
 
     /// Update the current person's properties without identifying. Empty maps are a no-op.
     /// Only accepted updates are deduplicated. State enablement survives capture rejection.
-    pub fn set_person_properties(
-        &self,
-        set: HashMap<String, Value>,
-        set_once: HashMap<String, Value>,
-    ) {
+    pub fn set_person_properties(&self, input: impl Into<PersonProperties>) {
         let Some(_guard) = self.identity_guard() else {
             return;
         };
+        let PersonProperties {
+            set,
+            set_once,
+            options,
+        } = input.into();
         if set.is_empty() && set_once.is_empty() {
             return;
         }
@@ -200,12 +279,9 @@ impl Client {
             Some(state.clone())
         });
         if let Ok((_, Some(snapshot))) = result {
-            self.capture_person(
-                person_event("$set", set, set_once),
-                &snapshot,
-                Some(fingerprint),
-                true,
-            );
+            let mut event = person_event("$set", set, set_once);
+            event.options = options;
+            self.capture_person(event, &snapshot, Some(fingerprint), true);
         }
     }
 
@@ -248,8 +324,12 @@ impl Client {
             let generation = state.generation.wrapping_add(1);
             let context_revision = state.context_revision.wrapping_add(1);
             let device_id = state.device_id.clone();
+            // Consent belongs to the device, not the identity: an opted-out user
+            // stays opted out after logging out.
+            let opt_out = state.opt_out;
             *state = Snapshot::anonymous(id);
             state.device_id = device_id;
+            state.opt_out = opt_out;
             state.generation = generation;
             state.context_revision = context_revision;
         });
@@ -301,8 +381,13 @@ impl Client {
             if current.distinct_id != id {
                 tracing::warn!("posthog-rs: bootstrap differs from the identified user; reset before switching");
             }
-        } else if current.distinct_id == id {
+        } else if current.distinct_id == id
+            || self.producer.as_ref().unwrap().person_profiles == PersonProfiles::Never
+        {
+            // Never sends no identify event, but the install still adopts the
+            // bootstrap ID, as a fresh install does.
             let _ = self.state.as_ref().unwrap().mutate(|state| {
+                state.distinct_id = id.into();
                 state.identified = true;
                 state.person_processing = true;
                 state.generation = state.generation.wrapping_add(1);
