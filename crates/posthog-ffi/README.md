@@ -32,13 +32,20 @@ This builds:
 
 ### Linking
 
-To link the shared library:
+To link the shared library on Linux or macOS:
 
 ```bash
-cc app.c -Ipath/to/include -Lpath/to/target/release -lposthog_ffi
+cc app.c -Ipath/to/include -Lpath/to/lib -lposthog_ffi
 ```
 
 At run time, the loader must find the library. Install it in a system library directory, link with an rpath, or set `LD_LIBRARY_PATH` on Linux or `DYLD_LIBRARY_PATH` on macOS.
+
+On Windows, link the DLL's import library `posthog_ffi.dll.lib`, not `posthog_ffi.lib`, which is the static library. Put `posthog_ffi.dll` next to your executable or in a directory on `PATH`:
+
+```bat
+cl app.c /Ipath\to\include path\to\lib\posthog_ffi.dll.lib
+copy path\to\lib\posthog_ffi.dll .
+```
 
 The static library also needs the system libraries the SDK uses. Print them for your target with:
 

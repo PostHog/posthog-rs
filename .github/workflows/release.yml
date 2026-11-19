@@ -288,14 +288,30 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Check every platform is present
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        working-directory: dist
+        run: |
+          ls -l
+          missing=0
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc; do
+            archive="posthog-ffi-$VERSION-$target.tar.gz"
+            [[ "$target" == *windows* ]] && archive="posthog-ffi-$VERSION-$target.zip"
+            if [ ! -f "$archive" ] || [ ! -f "$archive.sha256" ]; then
+              echo "::error::Missing $archive or its checksum"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
+          sha256sum -c ./*.sha256
+
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.release.outputs.version }}
-        run: |
-          ls -l dist
-          gh release upload "$VERSION" dist/* --clobber
+        run: gh release upload "$VERSION" dist/* --clobber
 
   notify-released:
     name: Notify Slack - Released
