@@ -6,6 +6,38 @@ use serde_json::Value;
 use super::producer::CaptureGuard;
 use super::{Capture, Client, PersonProfiles};
 
+/// Group input for [`Client::group`] and [`Client::group_identify`]. Start with
+/// [`Group::new`], or pass a `(type, key)` pair.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Group {
+    /// Nonblank group type, such as `"company"`.
+    pub group_type: String,
+    /// Nonblank group key.
+    pub group_key: String,
+    /// Group properties, sent under `$group_set`.
+    pub properties: HashMap<String, Value>,
+    /// Explicit wire options for the `$groupidentify` event, as on [`Capture::options`].
+    pub options: HashMap<String, Value>,
+}
+
+impl Group {
+    /// A group without properties or options.
+    pub fn new(group_type: impl Into<String>, group_key: impl Into<String>) -> Self {
+        Self {
+            group_type: group_type.into(),
+            group_key: group_key.into(),
+            ..Self::default()
+        }
+    }
+}
+
+impl<T: Into<String>, K: Into<String>> From<(T, K)> for Group {
+    fn from((group_type, group_key): (T, K)) -> Self {
+        Self::new(group_type, group_key)
+    }
+}
+
 impl Client {
     /// Register owned context for future events without emitting an event. Each
     /// supplied top-level value replaces the stored value; null is not removal.
@@ -48,13 +80,8 @@ impl Client {
     /// properties for the same membership merge without an immediate reload.
     /// Membership is visible before hooks run; rejected events do not roll it back
     /// or schedule replay. Persistence and delivery remain asynchronous.
-    pub fn group(
-        &self,
-        group_type: impl Into<String>,
-        group_key: impl Into<String>,
-        properties: Option<HashMap<String, Value>>,
-    ) {
-        self.capture_group(group_type, group_key, properties.unwrap_or_default(), true);
+    pub fn group(&self, group: impl Into<Group>) {
+        self.capture_group(group, true);
     }
 
     /// Update a group's profile without changing remembered membership. Uses the
@@ -63,13 +90,8 @@ impl Client {
     /// Never, disabled or closed. Rejection does not roll back processing or replay.
     /// Properties mirror into flag targeting only for the remembered key of this
     /// type, without an immediate reload.
-    pub fn group_identify(
-        &self,
-        group_type: impl Into<String>,
-        group_key: impl Into<String>,
-        properties: HashMap<String, Value>,
-    ) {
-        self.capture_group(group_type, group_key, properties, false);
+    pub fn group_identify(&self, group: impl Into<Group>) {
+        self.capture_group(group, false);
     }
 
     /// Remove remembered membership locally without emitting an event or disabling
@@ -93,13 +115,7 @@ impl Client {
         }
     }
 
-    fn capture_group(
-        &self,
-        group_type: impl Into<String>,
-        group_key: impl Into<String>,
-        properties: HashMap<String, Value>,
-        remember: bool,
-    ) {
+    fn capture_group(&self, group: impl Into<Group>, remember: bool) {
         if self.is_disabled()
             || self.closed.load(Ordering::Acquire)
             || self.producer.as_ref().unwrap().person_profiles == PersonProfiles::Never
@@ -109,8 +125,12 @@ impl Client {
         let Ok(_guard) = CaptureGuard::enter(self) else {
             return;
         };
-        let group_type = group_type.into();
-        let group_key = group_key.into();
+        let Group {
+            group_type,
+            group_key,
+            properties,
+            options,
+        } = group.into();
         if group_type.trim().is_empty() || group_key.trim().is_empty() {
             tracing::warn!("posthog-rs: group type and key must be nonblank");
             return;
@@ -143,6 +163,7 @@ impl Client {
                 self.reload_feature_flags();
             }
             let mut event = Capture::new("$groupidentify");
+            event.options = options;
             event
                 .properties
                 .insert("$group_type".into(), group_type.into());

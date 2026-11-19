@@ -552,7 +552,7 @@ fn dedup_survives_reload_group_and_targeting_updates_until_identity_changes() {
     read();
     assert_eq!(reports(), 1);
     client.identify("device"); // Same-ID promotion does not reset reports.
-    complete(&client, || client.group("company", "acme", None));
+    complete(&client, || client.group(("company", "acme")));
     read();
     client.set_person_properties_for_flags(
         HashMap::from([("plan".into(), json!("pro"))]),

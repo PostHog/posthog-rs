@@ -8,7 +8,9 @@ use std::sync::{
 use std::time::Duration;
 
 use httpmock::{Method::POST, MockServer};
-use posthog::stateful::{Client, Config, Identify, Persistence, PersonProfiles};
+use posthog::stateful::{
+    Client, Config, Group, Identify, Persistence, PersonProfiles, PersonProperties,
+};
 use serde_json::{json, Value};
 
 fn properties(value: Value) -> HashMap<String, Value> {
@@ -249,10 +251,12 @@ fn identity_mirroring_merges_set_once_and_set_and_only_anonymous_transitions_rel
         client.identify(input);
         client.identify("different-identified-user");
         client.identify(" ");
-        client.set_person_properties(
-            properties(json!({"later":true})),
-            properties(json!({"keep":"ignored"})),
-        );
+        client.set_person_properties({
+            let mut update = PersonProperties::new();
+            update.set = properties(json!({"later":true}));
+            update.set_once = properties(json!({"keep":"ignored"}));
+            update
+        });
         client.flush_blocking();
         unexpected.assert_calls(0);
         let mut unexpected = unexpected;
@@ -281,10 +285,10 @@ fn analytics_dedup_does_not_prevent_restoring_explicitly_cleared_targeting() {
     });
     let client = Client::init_blocking(conf);
     let set = properties(json!({"plan":"pro"}));
-    client.set_person_properties(set.clone(), HashMap::new());
+    client.set_person_properties(set.clone());
     assert_eq!(hooks.load(Ordering::SeqCst), 1);
     client.reset_person_properties_for_flags(Some(false));
-    client.set_person_properties(set.clone(), HashMap::new());
+    client.set_person_properties(set.clone());
     assert_eq!(hooks.load(Ordering::SeqCst), 1);
     reload(
         &server,
@@ -329,17 +333,37 @@ fn group_mirroring_is_scoped_to_membership_and_only_membership_changes_refresh()
         json!({"company":"a"}),
         json!({"company":{"tier":1}}),
         || {
-            client.group("company", "a", Some(properties(json!({"tier":1}))));
+            client.group({
+                let mut group = Group::new("company", "a");
+                group.properties = properties(json!({"tier":1}));
+                group
+            });
         },
     );
     let mut unexpected = server.mock(|when, then| {
         when.method(POST).path("/flags/");
         then.status(200).json_body(json!({"featureFlags":{}}));
     });
-    client.group("company", "a", Some(properties(json!({"tier":2}))));
-    client.group_identify("company", "other", properties(json!({"wrong":true})));
-    client.group_identify("company", "a", properties(json!({"direct":true})));
-    client.group_identify("absent", "x", properties(json!({"wrong":true})));
+    client.group({
+        let mut group = Group::new("company", "a");
+        group.properties = properties(json!({"tier":2}));
+        group
+    });
+    client.group_identify({
+        let mut group = Group::new("company", "other");
+        group.properties = properties(json!({"wrong":true}));
+        group
+    });
+    client.group_identify({
+        let mut group = Group::new("company", "a");
+        group.properties = properties(json!({"direct":true}));
+        group
+    });
+    client.group_identify({
+        let mut group = Group::new("absent", "x");
+        group.properties = properties(json!({"wrong":true}));
+        group
+    });
     client.remove_group("missing");
     client.flush_blocking();
     unexpected.assert_calls(0);
@@ -361,15 +385,19 @@ fn group_mirroring_is_scoped_to_membership_and_only_membership_changes_refresh()
         json!({"company":"b"}),
         json!({"company":{"new":null}}),
         || {
-            client.group("company", "b", Some(properties(json!({"new":null}))));
+            client.group({
+                let mut group = Group::new("company", "b");
+                group.properties = properties(json!({"new":null}));
+                group
+            });
         },
     );
     client.opt_out();
-    client.group(
-        "company",
-        "ignored",
-        Some(properties(json!({"wrong":true}))),
-    );
+    client.group({
+        let mut group = Group::new("company", "ignored");
+        group.properties = properties(json!({"wrong":true}));
+        group
+    });
     reload(
         &server,
         &client,
@@ -406,7 +434,7 @@ fn mirrored_targeting_is_visible_to_reentrant_hooks_and_survives_event_drop() {
         json!({}),
         json!({}),
         || {
-            client.set_person_properties(properties(json!({"plan":"pro"})), HashMap::new());
+            client.set_person_properties(properties(json!({"plan":"pro"})));
         },
     );
 }
@@ -428,7 +456,7 @@ fn mirrored_targeting_survives_rejected_analytics_without_reloading_automaticall
         client.capture("occupy"),
         CaptureOutcome::Accepted { .. }
     ));
-    client.set_person_properties(properties(json!({"plan":"pro"})), HashMap::new());
+    client.set_person_properties(properties(json!({"plan":"pro"})));
     assert_eq!(client.capture("still-full"), CaptureOutcome::Full);
     let _analytics = server.mock(|when, then| {
         when.method(POST).path("/i/v1/analytics/events");

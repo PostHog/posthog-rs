@@ -316,7 +316,7 @@ fn identity_group_and_reset_changes_clear_cache_and_reject_late_results() {
         server.request();
         match operation {
             0 => client.identify("person"),
-            1 => client.group("company", "new", None),
+            1 => client.group(("company", "new")),
             2 => client.remove_group("company"),
             _ => client.reset(),
         }

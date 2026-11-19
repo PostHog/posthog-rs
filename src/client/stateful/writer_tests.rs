@@ -492,6 +492,28 @@ fn failed_writes_keep_dirty_memory_and_retry_latest_state_without_bypassing_cool
 }
 
 #[test]
+fn a_failed_write_does_not_fail_a_newer_pending_revision() {
+    let (writer, calls, clock) = controlled(Vec::new());
+    let older = replace(&writer, "older");
+    writer.checkpoint();
+    let blocked = call(&calls);
+    assert_eq!(blocked.snapshot.anonymous_id, "older");
+    let newer = replace(&writer, "newer");
+    blocked.finish(Err(io::Error::other("test write failure")));
+    assert_eq!(writer.wait_blocking(older), DrainOutcome::WriteFailed);
+    // The failure covers only the attempted revision: the newer one has not
+    // reached the backend yet and is still pending.
+    assert_eq!(writer.shared.lock().outcome(newer), None);
+    let due = writer.shared.lock().due.unwrap();
+    clock.advance(due.saturating_duration_since(clock.now()));
+    wake_writer(&writer);
+    let retry = call(&calls);
+    assert_eq!(retry.snapshot.anonymous_id, "newer");
+    retry.finish(Ok(()));
+    assert_eq!(writer.wait_blocking(newer), DrainOutcome::Persisted);
+}
+
+#[test]
 fn shutdown_respects_retry_cooldown_and_a_fixed_deadline() {
     let (writer, calls, clock) = controlled_with_options(
         vec![],
