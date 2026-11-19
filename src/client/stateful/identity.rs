@@ -352,12 +352,8 @@ impl Client {
             let sessions = state.sessions.cleared();
             let remote_config = state.remote_config.clone();
             let remote_config_loading = state.remote_config_loading;
-            // Consent belongs to the device, not the identity: an opted-out user
-            // stays opted out after logging out.
-            let opt_out = state.opt_out;
             *state = Snapshot::anonymous(id);
             state.device_id = device_id;
-            state.opt_out = opt_out;
             state.remote_config = remote_config;
             state.remote_config_loading = remote_config_loading;
             state.sessions = sessions;

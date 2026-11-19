@@ -705,3 +705,27 @@ fn missing_flag_reads_report_a_null_response_once() {
     drop(seen);
     client.shutdown_blocking(None);
 }
+
+#[test]
+fn shortcut_getters_report_access_except_for_payloads() {
+    let server = MockServer::start();
+    accept(&server);
+    let mut c = config(&server);
+    let events = observe(&mut c);
+    let client = Client::init_blocking(c);
+    let _ = client.get_feature_flag_payload("b");
+    assert!(events.lock().unwrap().is_empty());
+    assert!(client.is_feature_enabled("a"));
+    assert_eq!(
+        client.get_feature_flag("b"),
+        Some(FlagValue::String("blue".into()))
+    );
+    let seen = events.lock().unwrap();
+    let reported: Vec<_> = seen
+        .iter()
+        .map(|event| event.properties()["$feature_flag"].clone())
+        .collect();
+    assert_eq!(reported, vec![json!("a"), json!("b")]);
+    drop(seen);
+    client.shutdown_blocking(None);
+}

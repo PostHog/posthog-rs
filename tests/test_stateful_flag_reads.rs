@@ -550,3 +550,54 @@ fn runtime_free_async_initialization_exposes_synchronous_rich_reads() {
     });
     requests.assert_calls(0);
 }
+
+#[test]
+fn shortcut_getters_read_the_cached_value_and_payload() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.path("/flags/");
+        then.status(200).json_body(json!({"flags":{
+            "variant":{"key":"variant","enabled":true,"variant":"blue","metadata":{"id":1,"version":1,"payload":"\"123\""}},
+            "nullable":{"key":"nullable","enabled":true,"metadata":{"id":2,"version":1,"payload":"null"}},
+            "plain":{"key":"plain","enabled":true},
+            "disabled":{"key":"disabled","enabled":false},
+            "empty":{"key":"empty","enabled":true,"variant":""}
+        }}));
+    });
+    let client = Client::init_blocking(config(&server));
+    reload(&client);
+    assert!(client.is_feature_enabled("variant"));
+    assert!(client.is_feature_enabled("plain"));
+    assert!(!client.is_feature_enabled("disabled"));
+    assert!(!client.is_feature_enabled("empty"));
+    assert!(!client.is_feature_enabled("missing"));
+    assert_eq!(
+        client.get_feature_flag("variant"),
+        Some(FlagValue::String("blue".into()))
+    );
+    assert_eq!(
+        client.get_feature_flag("plain"),
+        Some(FlagValue::Boolean(true))
+    );
+    assert_eq!(
+        client.get_feature_flag("disabled"),
+        Some(FlagValue::Boolean(false))
+    );
+    assert_eq!(
+        client.get_feature_flag("empty"),
+        Some(FlagValue::Boolean(false))
+    );
+    assert_eq!(client.get_feature_flag("missing"), None);
+    assert_eq!(
+        client.get_feature_flag_payload("variant"),
+        Some(json!("123"))
+    );
+    assert_eq!(
+        client.get_feature_flag_payload("nullable"),
+        Some(Value::Null)
+    );
+    assert_eq!(client.get_feature_flag_payload("plain"), None);
+    client.shutdown_blocking(None);
+    assert!(!client.is_feature_enabled("variant"));
+    assert_eq!(client.get_feature_flag("variant"), None);
+}
