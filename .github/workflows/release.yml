@@ -84,7 +84,7 @@ jobs:
       actions: write
       id-token: write
     outputs:
-      ffi_version: ${{ steps.sampo-release.outputs.ffi_version }}
+      ffi_version: ${{ steps.ffi-pending.outputs.version }}
       ffi_tag: ${{ steps.ffi-release.outputs.tag }}
     steps:
       - name: Notify Slack - Approved
@@ -134,6 +134,18 @@ jobs:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
         run: |
           version_of() { grep -m1 '^version = ' "$1" | sed 's/version = "\(.*\)"/\1/'; }
+          if ! find .sampo/changesets -name '*.md' | grep -q .; then
+            # A rerun after the release commit landed finds the changesets consumed.
+            # Only a posthog-rs-ffi version still waiting for its tag can be finished.
+            ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
+            if [ "$ffi_version" != "0.0.0" ] && ! git ls-remote --exit-code --tags origin "refs/tags/posthog-rs-ffi-v$ffi_version" >/dev/null; then
+              echo "::notice::No changesets left. Finishing the posthog-rs-ffi $ffi_version release."
+              echo "rerun=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::No changesets to release"
+            exit 1
+          fi
           old_version=$(version_of Cargo.toml)
           old_ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
           sampo release
@@ -163,6 +175,7 @@ jobs:
 
       - name: Generate SDK reference
         id: reference
+        if: steps.sampo-release.outputs.rerun != 'true'
         # Best-effort: a failure never blocks the release. Run generate-references.yml to retry.
         continue-on-error: true
         run: |
@@ -262,20 +275,39 @@ jobs:
                  '{ref: $ref, inputs: {package_name: $package_name, package_version: $package_version}}' \
                )"
 
+      - name: Find an untagged posthog-rs-ffi release
+        id: ffi-pending
+        # Runs even if publishing posthog failed: the release commit is already on main.
+        if: ${{ !cancelled() && (steps.sync.outcome == 'success' || steps.sampo-release.outputs.rerun == 'true') }}
+        run: |
+          version=$(grep -m1 '^version = ' crates/posthog-rs-ffi/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if [ "$version" = "0.0.0" ] || git ls-remote --exit-code --tags origin "refs/tags/posthog-rs-ffi-v$version" >/dev/null; then
+            echo "No posthog-rs-ffi release waiting for a tag."
+            exit 0
+          fi
+          # The commit that set this version is the release commit, on a normal run
+          # (HEAD) and on a rerun after it landed.
+          sha=$(git log -1 --format=%H -G"^version = \"$version\"\$" -- crates/posthog-rs-ffi/Cargo.toml)
+          if [ -z "$sha" ]; then
+            echo "::error::No commit set posthog-rs-ffi to $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Tag the posthog-rs-ffi release
         id: ffi-release
-        # Runs even if publishing posthog failed: the release commit is already on main.
         # The GitHub Release is published later, once every platform archive is built.
-        if: ${{ !cancelled() && steps.sync.outcome == 'success' && steps.sampo-release.outputs.ffi_released == 'true' }}
+        if: ${{ !cancelled() && steps.ffi-pending.outputs.version != '' }}
         env:
           GH_TOKEN: ${{ steps.releaser.outputs.token }}
           GH_REPO: ${{ github.repository }}
-          FFI_VERSION: ${{ steps.sampo-release.outputs.ffi_version }}
-          RELEASE_SHA: ${{ steps.release-commit.outputs.commit-hash }}
+          FFI_VERSION: ${{ steps.ffi-pending.outputs.version }}
+          RELEASE_SHA: ${{ steps.ffi-pending.outputs.sha }}
         run: |
           tag="posthog-rs-ffi-v$FFI_VERSION"
-          # `sampo` tags locally only, so create the remote tag here. A rerun finds it
-          # already there, and must not build a tag that points anywhere else.
+          # `sampo` tags locally only, so create the remote tag here. A rerun that
+          # finds it already there must not build a tag that points anywhere else.
           existing=$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk '{print $1}' | tail -1)
           if [ -z "$existing" ]; then
             gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$RELEASE_SHA" >/dev/null
@@ -324,6 +356,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Signed build provenance for the archives, which `gh attestation verify` checks.
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - name: Download archives
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -349,6 +385,13 @@ jobs:
           done
           [ "$missing" -eq 0 ]
           sha256sum -c ./*.sha256
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
 
       - name: Checkout the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

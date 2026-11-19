@@ -170,6 +170,21 @@ jobs:
             "$consumer/pc-static"
           fi
 
+          # Ship the CMake-built program with its shared library to a new folder,
+          # then delete the archive. The program must still find the library there,
+          # so it can't have recorded the archive's path.
+          deploy="$consumer/deploy"
+          mkdir -p "$deploy"
+          smoke=$(find "$consumer/cmake-OFF" -name 'smoke' -o -name 'smoke.exe' | head -1)
+          cp "$smoke" "$deploy/"
+          case "$TARGET" in
+            *windows*) cp "$prefix/lib/posthog_ffi.dll" "$deploy/" ;;
+            *apple*) cp "$prefix/lib/libposthog_ffi.dylib" "$deploy/" ;;
+            *) cp "$prefix/lib/libposthog_ffi.so" "$deploy/" ;;
+          esac
+          rm -rf "$prefix"
+          (cd "$deploy" && LD_LIBRARY_PATH="$deploy" DYLD_LIBRARY_PATH="$deploy" "./$(basename "$smoke")")
+
       - name: Upload archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

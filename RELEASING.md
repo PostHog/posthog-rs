@@ -52,9 +52,11 @@ All of this runs in [`release.yml`](.github/workflows/release.yml), in the same 
 
 - "Release and publish" bumps whichever packages have changesets and commits the release. It publishes `posthog` and `posthog-rs` only when their version changed, and pushes the `posthog-rs-ffi-v<version>` tag only when the bindings' version changed. Every tag points at the release commit itself, even if `main` has moved on.
 - "Build C bindings" builds that tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml). It compiles both examples, runs the C++ smoke test against the shared and static libraries, packages the archive, then unpacks it elsewhere and builds the smoke test through CMake and pkg-config, as a customer would.
-- "Publish the C bindings GitHub Release" checks that all five archives and their checksums are present, then publishes the GitHub Release with them attached.
+- "Publish the C bindings GitHub Release" checks that all five archives and their checksums are present, attests their build provenance with `actions/attest`, then publishes the GitHub Release with them attached.
 
 The two C bindings jobs run even if publishing `posthog` fails, as long as the `posthog-rs-ffi` tag exists. A failure in either sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
+
+If "Release and publish" fails after the release commit lands but before the `posthog-rs-ffi` tag is pushed, **Re-run failed jobs** finishes it. The rerun finds no changesets, finds the bindings' version without a tag, and tags the commit that set that version.
 
 If a C bindings job fails, the tag exists but no GitHub Release is published. Use **Re-run failed jobs** on that Release run. It rebuilds from the same tag and publishes the release. If the release was already published, the rerun leaves its downloads unchanged and fails if they're missing or differ from the new build. If the build itself needs a fix, release a `posthog-rs-ffi` patch version instead.
 

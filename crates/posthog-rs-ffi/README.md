@@ -23,6 +23,12 @@ lib/pkgconfig/                      pkg-config files (Linux and macOS)
 examples/capture.c, capture.cpp
 ```
 
+Each archive has signed build provenance linking it to the release workflow and commit that built it. Check it before use with the [GitHub CLI](https://cli.github.com/):
+
+```bash
+gh attestation verify posthog-rs-ffi-0.1.0-x86_64-unknown-linux-gnu.tar.gz --repo PostHog/posthog-rs
+```
+
 `posthog-rs-ffi` has its own version, independent of the `posthog` crate. Events report it as `$lib_version`.
 
 ## Linking
@@ -160,6 +166,7 @@ Never put a secret key in an application you distribute, such as a desktop app o
 ### Not covered
 
 - **Error tracking:** the bindings don't capture C or C++ crashes. Send your own `$exception` events with `posthog_capture`, or use a crash reporter.
+- **Delivery failures:** `posthog_capture` returns `POSTHOG_STATUS_OK` once the event is queued. If PostHog later rejects the batch, or sending runs out of retries, the event is dropped and the C API doesn't report it. Flag requests run while you wait, so their failures come back as `POSTHOG_STATUS_REQUEST`.
 - **Not in the C API yet:** the SDK's `before_send` and `on_error` hooks, AI events, and transactional email.
 
 ## Development
