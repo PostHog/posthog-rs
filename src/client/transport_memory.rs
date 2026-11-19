@@ -161,6 +161,11 @@ impl Queue {
     }
     pub(super) fn admit(&self, wire: CaptureEvent) -> super::Admission {
         let bytes = super::super::event_store::record_size(&wire);
+        self.admit_measured(wire, bytes)
+    }
+
+    /// Admit an event whose serialized size the caller already measured.
+    pub(super) fn admit_measured(&self, wire: CaptureEvent, bytes: usize) -> super::Admission {
         if bytes > self.budget.limit || self.capacity == 0 {
             return super::Admission::Full;
         }

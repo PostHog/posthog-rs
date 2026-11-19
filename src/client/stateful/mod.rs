@@ -9,6 +9,7 @@ mod initialization;
 mod producer;
 mod properties;
 mod runtime;
+mod sessions;
 mod storage;
 mod writer;
 
@@ -18,6 +19,7 @@ pub use identity::{Alias, Identify, PersonProfiles, PersonProperties};
 pub use producer::{Capture, CaptureOutcome, Screen};
 pub use properties::Group;
 pub use runtime::{Client, DeliveryOutcome, DrainReport, PersistenceOutcome};
+pub use sessions::{SessionMode, SessionPersistence};
 pub use storage::Persistence;
 
 use std::collections::HashMap;
@@ -55,6 +57,10 @@ struct Snapshot {
     opt_out: Option<bool>,
     registered: HashMap<String, Value>,
     groups: HashMap<String, String>,
+    #[serde(deserialize_with = "Option::<sessions::StoredSession>::deserialize")]
+    session: Option<sessions::StoredSession>,
+    #[serde(skip)]
+    sessions: sessions::Sessions,
     #[serde(skip)]
     context_revision: u64,
     // Process-local bookkeeping shares the same lock as identity, but is not persisted.
@@ -75,6 +81,8 @@ impl Snapshot {
             opt_out: None,
             registered: HashMap::new(),
             groups: HashMap::new(),
+            session: None,
+            sessions: sessions::Sessions::default(),
             context_revision: 0,
             generation: 0,
             person_properties: None,
@@ -90,10 +98,15 @@ impl Snapshot {
             && self.opt_out == other.opt_out
             && self.registered == other.registered
             && self.groups == other.groups
+            && self.session == other.session
     }
 
     fn is_valid(&self) -> bool {
         within_depth(self.registered.values())
+            && self
+                .session
+                .as_ref()
+                .map_or(true, sessions::StoredSession::is_valid)
             && !self.device_id.trim().is_empty()
             && !self.anonymous_id.trim().is_empty()
             && !self.distinct_id.trim().is_empty()

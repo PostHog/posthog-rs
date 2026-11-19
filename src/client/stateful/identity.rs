@@ -324,8 +324,10 @@ impl Client {
             let generation = state.generation.wrapping_add(1);
             let context_revision = state.context_revision.wrapping_add(1);
             let device_id = state.device_id.clone();
+            let sessions = state.sessions.cleared();
             *state = Snapshot::anonymous(id);
             state.device_id = device_id;
+            state.sessions = sessions;
             state.generation = generation;
             state.context_revision = context_revision;
         });
@@ -342,14 +344,17 @@ impl Client {
             self.capture_snapshot(event, snapshot);
             return;
         };
-        let Ok(wire) = self.prepare_snapshot(event, snapshot) else {
+        let session = self.prepare_admission_session(snapshot.generation);
+        let Ok(wire) = self.prepare_snapshot(event, snapshot, session) else {
             return;
         };
         let mut admission = None;
-        self.state.as_ref().unwrap().admit_person(
-            snapshot.generation,
-            fingerprint,
-            deduplicate,
+        let now = self.producer.as_ref().unwrap().session_clock.now();
+        // Measure before taking the state lock, so large events do not extend it.
+        let bytes = crate::client::event_store::record_size(&wire);
+        self.state.as_ref().unwrap().admit_capture(
+            session.map(|token| (token, now, false)),
+            Some((snapshot.generation, fingerprint, deduplicate)),
             || {
                 if self.closed.load(Ordering::Acquire) {
                     return false;
@@ -358,7 +363,7 @@ impl Client {
                     .transport
                     .as_ref()
                     .unwrap()
-                    .enqueue_prepared_deferred(wire);
+                    .enqueue_measured_deferred(wire, bytes);
                 let accepted = result.admission == Admission::Accepted;
                 admission = Some(result);
                 accepted
