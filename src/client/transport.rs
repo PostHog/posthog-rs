@@ -39,6 +39,44 @@ use crate::endpoints::Endpoint;
 use crate::error::Error;
 use crate::Event;
 
+#[cfg(feature = "stateful")]
+#[path = "transport_memory.rs"]
+mod memory;
+#[cfg(feature = "stateful")]
+#[path = "transport_queue.rs"]
+mod queue;
+#[cfg(feature = "stateful")]
+#[path = "transport_storage.rs"]
+mod storage_support;
+#[cfg(all(test, feature = "stateful"))]
+#[path = "transport_storage_tests.rs"]
+mod storage_tests;
+
+#[derive(Default)]
+struct StorageState {
+    #[cfg(feature = "stateful")]
+    store: Option<Box<dyn super::event_store::EventStore>>,
+    #[cfg(feature = "stateful")]
+    byte_budget: Option<Arc<memory::ByteBudget>>,
+}
+
+#[cfg(feature = "stateful")]
+impl StorageState {
+    fn new(store: Box<dyn super::event_store::EventStore>, max_queue_bytes: usize) -> Self {
+        Self {
+            store: Some(store),
+            ..Self::memory(max_queue_bytes)
+        }
+    }
+
+    fn memory(max_queue_bytes: usize) -> Self {
+        Self {
+            byte_budget: Some(memory::ByteBudget::new(max_queue_bytes)),
+            ..Self::default()
+        }
+    }
+}
+
 /// Messages sent from producers (`capture`/`flush`/`shutdown`) to the worker.
 pub(crate) enum Control {
     // Boxed so the channel node isn't sized to a whole Event on every flush/
@@ -46,12 +84,26 @@ pub(crate) enum Control {
     Capture {
         event: Box<Event>,
     },
+    /// An event whose context, hooks, and wire conversion are already complete.
+    Prepared {
+        event: Box<DeliveryEvent>,
+    },
     /// A caller-formed historical-migration batch, sent as-is (chunked) on its
     /// own path so the live `Capture` buffer stays non-historical.
     HistoricalBatch {
         events: Vec<Event>,
     },
     Flush(Completion),
+    #[cfg(feature = "stateful")]
+    QueueWake,
+    #[cfg(feature = "stateful")]
+    QueueFlush {
+        completion: Completion,
+        disk: u64,
+        memory: u64,
+    },
+    #[cfg(feature = "stateful")]
+    UploadComplete(Box<queue::AttemptResult>),
     /// Like [`Control::Flush`], but sends the freshly captured live buffer
     /// *before* older held retries. Used by the panic hook so a retry backlog
     /// behind a slow endpoint can't starve the just-enqueued `$exception` within
@@ -63,6 +115,14 @@ pub(crate) enum Control {
     /// due, so interval and backoff timing can be driven without real sleeps.
     #[cfg(test)]
     Tick(Completion),
+}
+
+/// Memory admission only: acceptance does not acknowledge persistence or delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Admission {
+    Accepted,
+    Full,
+    Closed,
 }
 
 /// Completion signal handed to the worker so the caller can wait for a flush or
@@ -128,6 +188,16 @@ pub(crate) struct TransportHandle {
     /// The worker thread's id, so teardown and the panic hook can avoid waiting
     /// for or joining this client's own worker.
     worker_id: Option<std::thread::ThreadId>,
+    #[cfg(all(test, feature = "stateful"))]
+    byte_budget: Option<Arc<memory::ByteBudget>>,
+    #[cfg(feature = "stateful")]
+    queue: Option<Arc<memory::Queue>>,
+    #[cfg(feature = "stateful")]
+    closing_deadline: Arc<Mutex<Option<Instant>>>,
+    #[cfg(feature = "stateful")]
+    owned_workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    #[cfg(feature = "stateful")]
+    drain_timeout: Duration,
 }
 
 /// Name of the analytics worker thread (aids debugging). The panic hook detects
@@ -243,15 +313,129 @@ impl TransportHandle {
         lane: LaneConfig,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        Self::spawn_configured(options, lane, clock, StorageState::default())
+    }
+
+    /// The initialization worker opens the namespace/store first. Ordinary
+    /// captures enter through `enqueue_prepared`; all subsequent storage I/O
+    /// belongs to the transport worker.
+    #[cfg(feature = "stateful")]
+    #[allow(dead_code)] // Composed by the stateful client.
+    pub(crate) fn spawn_persistent(
+        options: ClientOptions,
+        store: Box<dyn super::event_store::EventStore>,
+        max_queue_bytes: usize,
+    ) -> Self {
+        Self::spawn_configured(
+            options,
+            LaneConfig::analytics(),
+            Arc::new(SystemClock),
+            StorageState::new(store, max_queue_bytes),
+        )
+    }
+
+    fn spawn_configured(
+        options: ClientOptions,
+        lane: LaneConfig,
+        clock: Arc<dyn Clock>,
+        storage: StorageState,
+    ) -> Self {
+        Self::spawn_configured_with_startup(options, lane, clock, storage, None)
+    }
+
+    #[cfg(feature = "stateful")]
+    #[allow(dead_code)] // Composed by the stateful client.
+    fn spawn_stateful(
+        options: ClientOptions,
+        store: Option<Box<dyn super::event_store::EventStore>>,
+        max_queue_bytes: usize,
+    ) -> Result<Self, ()> {
+        let storage = store.map_or_else(
+            || StorageState::memory(max_queue_bytes),
+            |store| StorageState::new(store, max_queue_bytes),
+        );
+        let (ready, started) = mpsc::channel();
+        let handle = Self::spawn_configured_with_startup(
+            options,
+            LaneConfig::analytics(),
+            Arc::new(SystemClock),
+            storage,
+            Some(ready),
+        );
+        if matches!(started.recv(), Ok(true)) {
+            Ok(handle)
+        } else {
+            handle.request_close();
+            handle.join();
+            Err(())
+        }
+    }
+
+    fn spawn_configured_with_startup(
+        options: ClientOptions,
+        lane: LaneConfig,
+        clock: Arc<dyn Clock>,
+        _storage: StorageState,
+        _ready: Option<mpsc::Sender<bool>>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<Control>();
         let len = Arc::new(AtomicUsize::new(0));
         let max_queue_size = lane.max_queue_size(&options);
         let endpoint = lane.endpoint;
         let worker_len = len.clone();
         let worker_clock = Arc::clone(&clock);
+        #[cfg(feature = "stateful")]
+        let byte_budget = _storage.byte_budget.clone();
+        #[cfg(feature = "stateful")]
+        let queue = byte_budget.as_ref().map(|budget| {
+            memory::Queue::new(
+                budget.clone(),
+                len.clone(),
+                max_queue_size,
+                _storage
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.end_key())
+                    .map(|key| key.0),
+            )
+        });
+        #[cfg(feature = "stateful")]
+        let worker_queue = queue.clone();
+        #[cfg(feature = "stateful")]
+        let closing_deadline = Arc::new(Mutex::new(None));
+        #[cfg(feature = "stateful")]
+        let worker_deadline = closing_deadline.clone();
+        #[cfg(feature = "stateful")]
+        let owned_workers = Arc::new(Mutex::new(Vec::new()));
+        #[cfg(feature = "stateful")]
+        let worker_owners = owned_workers.clone();
+        #[cfg(feature = "stateful")]
+        let worker_tx = tx.clone();
+        #[cfg(feature = "stateful")]
+        let drain_timeout =
+            Duration::from_millis(options.shutdown_timeout_ms).min(MAX_SHUTDOWN_TIMEOUT);
         let worker = thread::Builder::new()
             .name(lane.thread_name.to_string())
-            .spawn(move || run_worker(options, lane, rx, worker_len, worker_clock))
+            .spawn(move || {
+                #[cfg(feature = "stateful")]
+                if let Some(queue) = worker_queue {
+                    queue::run(
+                        options,
+                        lane,
+                        rx,
+                        worker_len,
+                        worker_clock,
+                        _storage,
+                        queue,
+                        worker_deadline,
+                        worker_owners,
+                        worker_tx,
+                        _ready,
+                    );
+                    return;
+                }
+                run_worker(options, lane, rx, worker_len, worker_clock);
+            })
             .ok();
         let worker_id = worker.as_ref().map(|handle| handle.thread().id());
         Self {
@@ -264,6 +448,16 @@ impl TransportHandle {
             endpoint,
             clock,
             worker_id,
+            #[cfg(all(test, feature = "stateful"))]
+            byte_budget,
+            #[cfg(feature = "stateful")]
+            queue,
+            #[cfg(feature = "stateful")]
+            closing_deadline,
+            #[cfg(feature = "stateful")]
+            owned_workers,
+            #[cfg(feature = "stateful")]
+            drain_timeout,
         }
     }
 
@@ -284,6 +478,50 @@ impl TransportHandle {
         }
         if self.try_reserve() {
             self.send_reserved(event);
+        }
+    }
+
+    /// Admit an already assembled event without request-context enrichment,
+    /// defaults, hooks, or wire conversion. The producer owns those steps.
+    #[allow(dead_code)] // Used by the stateful producer layered above this transport.
+    pub(crate) fn enqueue_prepared(&self, event: CaptureEvent) -> Admission {
+        if self.closed.load(Ordering::Acquire) {
+            return Admission::Closed;
+        }
+        #[cfg(feature = "stateful")]
+        if let Some(queue) = &self.queue {
+            let admission = queue.admit(event);
+            if admission == Admission::Accepted
+                && queue.arm()
+                && self.tx.send(Control::QueueWake).is_err()
+            {
+                self.closed.store(true, Ordering::Release);
+                queue.clear();
+                return Admission::Closed;
+            }
+            if admission == Admission::Accepted && queue.len() == 1 {
+                self.full_warned.store(false, Ordering::Release);
+            }
+            if admission == Admission::Full && !self.full_warned.swap(true, Ordering::AcqRel) {
+                warn!("posthog-rs: event queue byte limit reached; rejecting new event");
+            }
+            return admission;
+        }
+        if !self.try_reserve() {
+            return Admission::Full;
+        }
+        let event = DeliveryEvent::from(event);
+        if self
+            .tx
+            .send(Control::Prepared {
+                event: Box::new(event),
+            })
+            .is_err()
+        {
+            dec_len(&self.len, 1);
+            Admission::Closed
+        } else {
+            Admission::Accepted
         }
     }
 
@@ -366,6 +604,18 @@ impl TransportHandle {
     /// `drain_pending_completions`), and any it doesn't reach are dropped with the
     /// channel — which wakes the caller's wait with a recv error.
     pub(crate) fn send_control(&self, control: Control) -> bool {
+        #[cfg(feature = "stateful")]
+        let control = match (control, &self.queue) {
+            (Control::Flush(completion) | Control::FlushCaptures(completion), Some(queue)) => {
+                let (disk, memory) = queue.checkpoint();
+                Control::QueueFlush {
+                    completion,
+                    disk,
+                    memory,
+                }
+            }
+            (control, _) => control,
+        };
         self.tx.send(control).is_ok()
     }
 
@@ -403,10 +653,46 @@ impl TransportHandle {
     /// as this returns.
     pub(crate) fn request_shutdown(&self, completion: Completion) -> bool {
         if self.begin_close() {
+            #[cfg(feature = "stateful")]
+            if self.queue.is_some() {
+                *self
+                    .closing_deadline
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) =
+                    Some(self.clock.now() + self.drain_timeout);
+            }
             self.send_control(Control::Shutdown(completion))
         } else {
             false
         }
+    }
+
+    #[cfg(all(test, feature = "stateful"))]
+    fn request_close_before(&self, deadline: Instant) {
+        if self.begin_close() {
+            *self
+                .closing_deadline
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(deadline);
+            let _ = self.tx.send(Control::QueueWake);
+            let (tx, _) = mpsc::channel();
+            self.send_control(Control::Shutdown(Completion::Blocking(tx)));
+        }
+    }
+
+    #[cfg(all(test, feature = "stateful"))]
+    fn all_stopped(&self) -> bool {
+        self.worker
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(true, JoinHandle::is_finished)
+            && self
+                .owned_workers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .all(JoinHandle::is_finished)
     }
 
     /// Request shutdown without waiting: used when a lane is spawned by a call
@@ -489,7 +775,18 @@ impl TransportHandle {
     /// must not synchronously wait there; the panic hook also skips capturing to
     /// avoid a self-flush deadlock or recursive `before_send` panic.
     pub(crate) fn on_worker_thread(&self) -> bool {
-        self.worker_id == Some(std::thread::current().id())
+        let id = thread::current().id();
+        #[cfg(feature = "stateful")]
+        if self
+            .owned_workers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|worker| worker.thread().id() == id)
+        {
+            return true;
+        }
+        self.worker_id == Some(id)
     }
 
     /// Test helper: flush + stop + join, mirroring the client's shutdown.
@@ -607,17 +904,70 @@ enum Wake {
     Disconnected,
 }
 
+/// Queue-entry metadata travels with an event through batching and partial
+/// retries but is never serialized into the capture protocol.
+#[derive(serde::Serialize)]
+#[serde(transparent)]
+pub(crate) struct DeliveryEvent {
+    wire: CaptureEvent,
+    #[cfg(feature = "stateful")]
+    #[serde(skip)]
+    store_key: Option<super::event_store::StoreKey>,
+}
+
+impl From<CaptureEvent> for DeliveryEvent {
+    fn from(wire: CaptureEvent) -> Self {
+        Self {
+            wire,
+            #[cfg(feature = "stateful")]
+            store_key: None,
+        }
+    }
+}
+
+impl DeliveryEvent {
+    fn has_store_key(&self) -> bool {
+        #[cfg(feature = "stateful")]
+        {
+            self.store_key.is_some()
+        }
+        #[cfg(not(feature = "stateful"))]
+        {
+            false
+        }
+    }
+}
+
+impl AsRef<CaptureEvent> for DeliveryEvent {
+    fn as_ref(&self) -> &CaptureEvent {
+        &self.wire
+    }
+}
+
+impl AsMut<CaptureEvent> for DeliveryEvent {
+    fn as_mut(&mut self) -> &mut CaptureEvent {
+        &mut self.wire
+    }
+}
+
+/// Producers may supply raw events or an immutable, fully assembled snapshot.
+enum QueuedEvent {
+    Raw(Event),
+    Prepared(DeliveryEvent),
+}
+
 /// The worker's live (non-historical) buffer.
 ///
-/// The analytics lane defers building wire events until send time, so
-/// `before_send` runs as late as possible and the hot path stays as it was.
+/// The analytics lane defers building raw events until send time, so
+/// `before_send` runs as late as possible. Prepared inputs retain their
+/// capture-time snapshot and bypass preprocessing.
 /// The AI lane needs each event's serialized size to place batch boundaries,
 /// so it builds and measures at admission and holds ready-to-send wire events
 /// plus their running byte total.
 enum LiveBuffer {
-    Deferred(Vec<Event>),
+    Deferred(Vec<QueuedEvent>),
     Prepared {
-        events: Vec<CaptureEvent>,
+        events: Vec<DeliveryEvent>,
         bytes: usize,
     },
 }
@@ -643,6 +993,20 @@ impl LiveBuffer {
 
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    fn persisted(&self) -> usize {
+        match self {
+            Self::Deferred(events) => events
+                .iter()
+                .filter(
+                    |event| matches!(event, QueuedEvent::Prepared(event) if event.has_store_key()),
+                )
+                .count(),
+            Self::Prepared { events, .. } => {
+                events.iter().filter(|event| event.has_store_key()).count()
+            }
+        }
     }
 
     fn clear(&mut self) {
@@ -675,7 +1039,7 @@ fn admit_live(
     pipeline: &mut Pipeline,
     buffer: &mut LiveBuffer,
     buffer_since: &mut Option<Instant>,
-    event: Event,
+    event: QueuedEvent,
     flush_at: usize,
     max_batch_size: usize,
 ) {
@@ -788,6 +1152,10 @@ fn run_worker(
         };
 
         match wake {
+            #[cfg(feature = "stateful")]
+            Wake::Msg(Control::QueueWake | Control::UploadComplete(_)) => {}
+            #[cfg(feature = "stateful")]
+            Wake::Msg(Control::QueueFlush { completion, .. }) => completion.signal(),
             Wake::Msg(Control::Capture { event }) => {
                 // `len` is not decremented here: the in-flight counter spans the
                 // whole worker lifecycle (channel + buffer + retries) and is
@@ -796,7 +1164,17 @@ fn run_worker(
                     &mut pipeline,
                     &mut buffer,
                     &mut buffer_since,
-                    *event,
+                    QueuedEvent::Raw(*event),
+                    flush_at,
+                    max_batch_size,
+                );
+            }
+            Wake::Msg(Control::Prepared { event }) => {
+                admit_live(
+                    &mut pipeline,
+                    &mut buffer,
+                    &mut buffer_since,
+                    QueuedEvent::Prepared(*event),
                     flush_at,
                     max_batch_size,
                 );
@@ -831,6 +1209,7 @@ fn run_worker(
                 historical_since = None;
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, None);
                 buffer_since = None;
+
                 completion.signal();
             }
             Wake::Msg(Control::FlushCaptures(completion)) => {
@@ -843,6 +1222,7 @@ fn run_worker(
                 pipeline.flush_retries(None);
                 drain_historical(&mut pipeline, &mut historical, None);
                 historical_since = None;
+
                 completion.signal();
             }
             Wake::Msg(Control::Shutdown(completion)) => {
@@ -857,6 +1237,7 @@ fn run_worker(
                 pipeline.flush_retries(Some(deadline));
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
+
                 completion.signal();
                 // A flush/shutdown that raced in behind this Shutdown is still queued;
                 // signal those completions so their callers don't block forever.
@@ -879,6 +1260,7 @@ fn run_worker(
                 drain_historical(&mut pipeline, &mut historical, Some(deadline));
                 send_buffer(&mut pipeline, &mut buffer, max_batch_size, Some(deadline));
                 pipeline.flush_retries(Some(deadline));
+
                 return;
             }
         }
@@ -898,6 +1280,7 @@ fn run_worker(
             historical_since = None;
         }
         pipeline.attempt_due();
+
         #[cfg(test)]
         if let Some(completion) = tick_completion {
             completion.signal();
@@ -912,10 +1295,14 @@ fn run_worker(
 fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
     while let Ok(control) = rx.try_recv() {
         match control {
+            #[cfg(feature = "stateful")]
+            Control::QueueWake | Control::UploadComplete(_) => {}
+            #[cfg(feature = "stateful")]
+            Control::QueueFlush { completion, .. } => completion.signal(),
             Control::Flush(c) | Control::FlushCaptures(c) | Control::Shutdown(c) => c.signal(),
             #[cfg(test)]
             Control::Tick(c) => c.signal(),
-            Control::Capture { .. } => dec_len(len, 1),
+            Control::Capture { .. } | Control::Prepared { .. } => dec_len(len, 1),
             Control::HistoricalBatch { events } => dec_len(len, events.len()),
         }
     }
@@ -923,9 +1310,9 @@ fn drain_pending_completions(rx: &mpsc::Receiver<Control>, len: &AtomicUsize) {
 
 /// Drain `buffer` into batches of at most `max_batch_size`, FIFO from the front,
 /// attempting each once. `deadline` is `Some` only on the shutdown/disconnect
-/// path: those attempts are final (warn-and-drop on transient failure instead of
-/// scheduling a retry), and once the deadline passes the rest of the buffer is
-/// dropped so teardown can't hang on a slow endpoint.
+/// path: transient failures release memory instead of scheduling another attempt.
+/// Persisted records remain queued on disk. Once the deadline passes the rest of
+/// the buffer is released so teardown can't hang on a slow endpoint.
 fn send_buffer(
     pipeline: &mut Pipeline,
     buffer: &mut LiveBuffer,
@@ -934,11 +1321,7 @@ fn send_buffer(
 ) {
     while !buffer.is_empty() {
         if deadline.is_some_and(|d| pipeline.clock.now() >= d) {
-            warn!(
-                "posthog-rs: shutdown timeout reached; dropping {} buffered event(s) for {}",
-                buffer.len(),
-                pipeline.lane.endpoint
-            );
+            pipeline.warn_shutdown_drop(buffer.len(), buffer.persisted(), "buffered ");
             dec_len(&pipeline.len, buffer.len());
             buffer.clear();
             return;
@@ -948,14 +1331,14 @@ fn send_buffer(
         // own path, so this is always a non-historical send.
         match buffer {
             LiveBuffer::Deferred(events) => {
-                let chunk: Vec<Event> = events.drain(..take).collect();
-                pipeline.send_batch(chunk, false, deadline);
+                let chunk = events.drain(..take).collect();
+                pipeline.send_queued_batch(chunk, false, deadline);
             }
             LiveBuffer::Prepared { events, bytes } => {
                 // A prepared buffer is flushed whole as soon as it reaches the
                 // byte target, so every count-chunk drained here is already
                 // within it (or is a single over-target event on its own).
-                let chunk: Vec<CaptureEvent> = events.drain(..take).collect();
+                let chunk: Vec<DeliveryEvent> = events.drain(..take).collect();
                 if events.is_empty() {
                     *bytes = 0;
                 }
@@ -1021,7 +1404,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 struct RetryBatch {
-    pending: Vec<crate::capture_event::CaptureEvent>,
+    pending: Vec<DeliveryEvent>,
     request_id: Uuid,
     created_at: String,
     final_results: HashMap<Uuid, crate::capture_event::EventResult>,
@@ -1038,6 +1421,10 @@ struct Pipeline {
     clock: Arc<dyn Clock>,
     len: Arc<AtomicUsize>,
     retries: VecDeque<RetryBatch>,
+    #[cfg(feature = "stateful")]
+    persistent_retention: bool,
+    #[cfg(feature = "stateful")]
+    coordinated: bool,
 }
 
 impl Pipeline {
@@ -1057,7 +1444,34 @@ impl Pipeline {
             clock,
             len,
             retries: VecDeque::new(),
+            #[cfg(feature = "stateful")]
+            persistent_retention: false,
+            #[cfg(feature = "stateful")]
+            coordinated: false,
         })
+    }
+
+    fn retry_retention(&self) -> super::capture::RetryRetention {
+        #[cfg(feature = "stateful")]
+        if self.persistent_retention {
+            return super::capture::RetryRetention::Retain;
+        }
+        #[cfg(feature = "stateful")]
+        if self.coordinated {
+            return super::capture::RetryRetention::Bounded;
+        }
+        super::capture::RetryRetention::Discard
+    }
+
+    /// Only disk-backed delivery keeps a sequence past its attempt budget.
+    #[cfg(feature = "stateful")]
+    fn retains_past_attempts(&self) -> bool {
+        self.persistent_retention
+    }
+
+    #[cfg(not(feature = "stateful"))]
+    fn retains_past_attempts(&self) -> bool {
+        false
     }
 
     /// The codec for this lane's request bodies, from the lane's client option.
@@ -1075,12 +1489,29 @@ impl Pipeline {
         historical_migration: bool,
         deadline: Option<Instant>,
     ) {
+        self.send_queued_batch(
+            events.into_iter().map(QueuedEvent::Raw).collect(),
+            historical_migration,
+            deadline,
+        );
+    }
+
+    fn send_queued_batch(
+        &mut self,
+        events: Vec<QueuedEvent>,
+        historical_migration: bool,
+        deadline: Option<Instant>,
+    ) {
         let defaults = self.options.capture_defaults();
         let original = events.len();
-        let processed: Vec<Event> = events
+        let processed: Vec<QueuedEvent> = events
             .into_iter()
-            .filter_map(|event| {
-                preprocess_capture_event(event, &defaults, &self.options.before_send)
+            .filter_map(|event| match event {
+                QueuedEvent::Raw(event) => {
+                    preprocess_capture_event(event, &defaults, &self.options.before_send)
+                        .map(QueuedEvent::Raw)
+                }
+                prepared @ QueuedEvent::Prepared(_) => Some(prepared),
             })
             .collect();
         // Events dropped by before_send are terminal.
@@ -1090,18 +1521,23 @@ impl Pipeline {
         }
         match self.lane.batch_bytes_target {
             Some(target) => {
-                let measured: Vec<(CaptureEvent, usize)> = processed
+                let measured: Vec<(DeliveryEvent, usize)> = processed
                     .into_iter()
-                    .filter_map(|event| self.build_measured(&event))
+                    .filter_map(|event| match event {
+                        QueuedEvent::Raw(event) => self.build_measured(&event),
+                        QueuedEvent::Prepared(wire) => self.measure_prepared(wire),
+                    })
                     .collect();
                 let mut chunks = chunk_by_bytes(measured, target).into_iter();
                 while let Some(chunk) = chunks.next() {
                     if deadline.is_some_and(|d| self.clock.now() >= d) {
-                        let dropped = chunk.len() + chunks.map(|c| c.len()).sum::<usize>();
-                        warn!(
-                            "posthog-rs: shutdown timeout reached; dropping {dropped} event(s) for {}",
-                            self.lane.endpoint
-                        );
+                        let mut dropped = 0;
+                        let mut persisted = 0;
+                        for chunk in std::iter::once(chunk).chain(chunks) {
+                            dropped += chunk.len();
+                            persisted += chunk.iter().filter(|event| event.has_store_key()).count();
+                        }
+                        self.warn_shutdown_drop(dropped, persisted, "");
                         dec_len(&self.len, dropped);
                         return;
                     }
@@ -1109,7 +1545,14 @@ impl Pipeline {
                 }
             }
             None => {
-                let pending = super::capture::build_events_at(&processed, self.clock.now_utc());
+                let now = self.clock.now_utc();
+                let pending = processed
+                    .into_iter()
+                    .map(|event| match event {
+                        QueuedEvent::Raw(event) => build_event_at(&event, now).into(),
+                        QueuedEvent::Prepared(wire) => wire,
+                    })
+                    .collect();
                 self.send_prepared(pending, historical_migration, deadline);
             }
         }
@@ -1118,7 +1561,7 @@ impl Pipeline {
     /// Send already-built wire events as one request (with retries).
     fn send_prepared(
         &mut self,
-        pending: Vec<CaptureEvent>,
+        pending: Vec<DeliveryEvent>,
         historical_migration: bool,
         deadline: Option<Instant>,
     ) {
@@ -1141,7 +1584,11 @@ impl Pipeline {
     /// buffered live event, then build and measure it. `None` means the event was
     /// dropped locally (hook drop or over the lane's ceiling) and its queue slot
     /// released.
-    fn prepare_measured(&self, event: Event) -> Option<(CaptureEvent, usize)> {
+    fn prepare_measured(&self, event: QueuedEvent) -> Option<(DeliveryEvent, usize)> {
+        let event = match event {
+            QueuedEvent::Prepared(wire) => return self.measure_prepared(wire),
+            QueuedEvent::Raw(event) => event,
+        };
         let defaults = self.options.capture_defaults();
         let Some(event) = preprocess_capture_event(event, &defaults, &self.options.before_send)
         else {
@@ -1157,13 +1604,17 @@ impl Pipeline {
     /// size: AI payloads may hold unredacted prompts or media that must never
     /// reach the logs. This is a local drop, so `on_error` does not fire (the
     /// backend would have refused it with `ai_event_too_big` anyway).
-    fn build_measured(&self, event: &Event) -> Option<(CaptureEvent, usize)> {
-        let wire = build_event_at(event, self.clock.now_utc());
+    fn build_measured(&self, event: &Event) -> Option<(DeliveryEvent, usize)> {
+        self.measure_prepared(build_event_at(event, self.clock.now_utc()).into())
+    }
+
+    fn measure_prepared(&self, event: DeliveryEvent) -> Option<(DeliveryEvent, usize)> {
+        let wire = event.as_ref();
         let Some(max) = self.lane.max_event_bytes else {
-            let total = measure_total(&wire);
-            return Some((wire, total));
+            let total = measure_total(wire);
+            return Some((event, total));
         };
-        let size = measure_event(&wire);
+        let size = measure_event(wire);
         if size.properties > max {
             warn!(
                 "posthog-rs: dropping event {:?} for {}: properties are {} bytes, over the {} byte limit",
@@ -1172,12 +1623,15 @@ impl Pipeline {
             dec_len(&self.len, 1);
             return None;
         }
-        Some((wire, size.total))
+        Some((event, size.total))
     }
 
     fn attempt(&mut self, mut batch: RetryBatch, deadline: Option<Instant>) {
         use super::capture::{self, Step};
         use crate::capture_event::{BatchRequestRef, CaptureErrorResponse};
+
+        let retention = self.retry_retention();
+        let retaining = self.retains_past_attempts();
 
         let req = BatchRequestRef {
             created_at: &batch.created_at,
@@ -1223,31 +1677,49 @@ impl Pipeline {
         let mut http_status: Option<u16> = None;
         let mut response_body: Option<String> = None;
         let step = match request.send() {
-            Err(e) => capture::after_transport_error(
+            Err(e) => capture::after_transport_error_with_retention(
                 &self.options,
                 &batch.request_id,
                 batch.attempt,
                 e.to_string(),
+                retention,
             ),
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 http_status = Some(status);
                 let retry_after = capture::parse_retry_after(resp.headers());
-                let text = resp.text().unwrap_or_else(|_| "Unknown error".to_string());
-                let step = capture::after_response(
-                    &self.options,
-                    &batch.request_id,
-                    batch.attempt,
-                    status,
-                    retry_after,
-                    &text,
-                    &mut batch.pending,
-                    &mut batch.final_results,
-                );
-                if !self.options.on_error.is_empty() && !(200..=299).contains(&status) {
-                    response_body = Some(text);
+                match resp.text() {
+                    Err(error)
+                        if retention.retries_unconfirmed_success()
+                            && (200..=299).contains(&status) =>
+                    {
+                        capture::after_transport_error_with_retention(
+                            &self.options,
+                            &batch.request_id,
+                            batch.attempt,
+                            error.to_string(),
+                            retention,
+                        )
+                    }
+                    body => {
+                        let text = body.unwrap_or_else(|_| "Unknown error".to_string());
+                        let step = capture::after_response_with_retention(
+                            &self.options,
+                            &batch.request_id,
+                            batch.attempt,
+                            status,
+                            retry_after,
+                            &text,
+                            &mut batch.pending,
+                            &mut batch.final_results,
+                            retention,
+                        );
+                        if !self.options.on_error.is_empty() && !(200..=299).contains(&status) {
+                            response_body = Some(text);
+                        }
+                        step
+                    }
                 }
-                step
             }
         };
 
@@ -1307,16 +1779,65 @@ impl Pipeline {
                 }
                 dec_len(&self.len, batch.pending.len());
             }
-            Step::Backoff(delay) => {
-                if deadline.is_some() {
-                    warn!(
-                        "posthog-rs: dropping {} undelivered event(s) for {} on shutdown",
-                        batch.pending.len(),
-                        self.lane.endpoint
-                    );
+            Step::Backoff(mut delay) => {
+                if retaining {
+                    // Only permanent verdicts are failures here; pending events
+                    // are retained, not reported as lost at retry exhaustion.
+                    let lost = undelivered_results(&batch.final_results);
+                    if lost > 0 {
+                        if self.options.on_error.is_empty() {
+                            warn!(
+                                "posthog-rs: {lost} event(s) rejected by {}",
+                                self.lane.endpoint
+                            );
+                        } else {
+                            self.fire_capture(
+                                &batch,
+                                Some(&batch.request_id),
+                                None,
+                                http_status,
+                                None,
+                                lost,
+                            );
+                        }
+                    }
+                    batch.final_results.clear();
+                }
+                #[cfg(feature = "stateful")]
+                let stop_retries = deadline.is_some() && !self.coordinated;
+                #[cfg(not(feature = "stateful"))]
+                let stop_retries = deadline.is_some();
+                if stop_retries {
+                    if retaining {
+                        self.warn_retained_shutdown(
+                            batch.pending.len(),
+                            batch
+                                .pending
+                                .iter()
+                                .filter(|event| event.has_store_key())
+                                .count(),
+                            "undelivered ",
+                        );
+                    } else {
+                        warn!(
+                            "posthog-rs: dropping {} undelivered event(s) for {} on shutdown",
+                            batch.pending.len(),
+                            self.lane.endpoint
+                        );
+                    }
                     dec_len(&self.len, batch.pending.len());
                 } else {
-                    batch.attempt += 1;
+                    if retaining && batch.attempt >= self.options.max_capture_attempts.max(1) {
+                        // End this active attempt sequence without deleting its
+                        // records. A later timer/flush can begin the next one.
+                        batch.attempt = 1;
+                        batch.request_id = Uuid::now_v7();
+                        batch.created_at = wire_timestamp(self.clock.now_utc());
+                        delay =
+                            delay.max(Duration::from_millis(self.options.flush_interval_ms.max(1)));
+                    } else {
+                        batch.attempt = batch.attempt.saturating_add(1);
+                    }
                     batch.next_at = self.clock.now() + delay;
                     self.retries.push_back(batch);
                 }
@@ -1340,15 +1861,34 @@ impl Pipeline {
     }
 
     fn flush_retries(&mut self, deadline: Option<Instant>) {
-        // `Some` is the shutdown/disconnect path: attempts are final (drop on
-        // failure), and any batch still pending once the deadline passes is
-        // dropped rather than attempted.
+        // `Some` is the shutdown/disconnect path: release memory on failure or
+        // deadline expiry rather than scheduling another attempt. Persisted
+        // records remain available for the next process.
         for batch in std::mem::take(&mut self.retries) {
-            if deadline.is_some_and(|d| self.clock.now() >= d) {
-                warn!(
-                    "posthog-rs: shutdown timeout reached; dropping {} undelivered event(s) for {}",
+            if self.retains_past_attempts() && self.clock.now() < batch.next_at {
+                if deadline.is_some() {
+                    self.warn_retained_shutdown(
+                        batch.pending.len(),
+                        batch
+                            .pending
+                            .iter()
+                            .filter(|event| event.has_store_key())
+                            .count(),
+                        "undelivered ",
+                    );
+                    dec_len(&self.len, batch.pending.len());
+                } else {
+                    self.retries.push_back(batch);
+                }
+            } else if deadline.is_some_and(|d| self.clock.now() >= d) {
+                self.warn_shutdown_drop(
                     batch.pending.len(),
-                    self.lane.endpoint
+                    batch
+                        .pending
+                        .iter()
+                        .filter(|event| event.has_store_key())
+                        .count(),
+                    "undelivered ",
                 );
                 dec_len(&self.len, batch.pending.len());
             } else {
@@ -1357,8 +1897,29 @@ impl Pipeline {
         }
     }
 
-    /// Fire the `on_error` hooks for a terminal capture outcome. `error` is
-    /// `None` only for a `2xx` whose events weren't persisted after retries.
+    fn warn_shutdown_drop(&self, count: usize, persisted: usize, category: &str) {
+        if !self.retains_past_attempts() {
+            warn!(
+                "posthog-rs: shutdown timeout reached; dropping {count} {category}event(s) for {}",
+                self.lane.endpoint
+            );
+        } else {
+            self.warn_retained_shutdown(count, persisted, category);
+        }
+    }
+
+    fn warn_retained_shutdown(&self, count: usize, persisted: usize, category: &str) {
+        let unconfirmed = count - persisted;
+        if unconfirmed > 0 {
+            warn!("posthog-rs: shutdown stopped delivery for {}; dropping {unconfirmed} {category}event(s) without confirmed persistence; {persisted} persisted event(s) remain on disk", self.lane.endpoint);
+        } else {
+            warn!("posthog-rs: shutdown stopped delivery for {}; releasing {count} {category}event(s) from memory; {persisted} persisted event(s) remain on disk", self.lane.endpoint);
+        }
+    }
+
+    /// Fire the `on_error` hooks for permanent capture losses. `error` is None
+    /// for per-event losses from a 2xx, including losses reported while other
+    /// events remain queued for persistent delivery.
     fn fire_capture(
         &self,
         batch: &RetryBatch,
@@ -1425,12 +1986,12 @@ mod tests {
     /// Test clock with manually advanced virtual time, so interval and backoff
     /// timing are exercised without real sleeps.
     #[derive(Clone)]
-    struct ManualClock {
+    pub(super) struct ManualClock {
         inner: Arc<Mutex<(Instant, DateTime<Utc>)>>,
     }
 
     impl ManualClock {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self::at(Utc::now())
         }
         fn at(wall: DateTime<Utc>) -> Self {
@@ -1438,7 +1999,7 @@ mod tests {
                 inner: Arc::new(Mutex::new((Instant::now(), wall))),
             }
         }
-        fn advance(&self, by: Duration) {
+        pub(super) fn advance(&self, by: Duration) {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.0 += by;
             g.1 += chrono::Duration::from_std(by).expect("test duration fits chrono");
@@ -1463,7 +2024,7 @@ mod tests {
         })
     }
 
-    fn options(base_url: String) -> ClientOptionsBuilder {
+    pub(super) fn options(base_url: String) -> ClientOptionsBuilder {
         let mut builder = ClientOptionsBuilder::default();
         builder
             .api_key("phc_test".to_string())
@@ -1471,6 +2032,356 @@ mod tests {
             .flush_at(100usize)
             .flush_interval_ms(10_000u64);
         builder
+    }
+
+    /// A capture v1 reply that accepts every event in the request, one result
+    /// per uuid, as capture does.
+    #[cfg(feature = "stateful")]
+    pub(super) fn accept_all(request: &httpmock::HttpMockRequest) -> String {
+        use std::io::Read;
+        let raw = request.body_vec();
+        let mut body = Vec::new();
+        if raw.starts_with(&[0x1f, 0x8b]) {
+            flate2::read::GzDecoder::new(raw.as_slice())
+                .read_to_end(&mut body)
+                .unwrap();
+        } else {
+            body = raw;
+        }
+        accept_all_body(&body)
+    }
+
+    /// [`accept_all`] for a raw, uncompressed request body.
+    #[cfg(feature = "stateful")]
+    pub(super) fn accept_all_body(body: &[u8]) -> String {
+        let batch: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let results: serde_json::Map<String, serde_json::Value> = batch["batch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| {
+                (
+                    event["uuid"].as_str().unwrap().to_owned(),
+                    serde_json::json!({"result": "ok"}),
+                )
+            })
+            .collect();
+        serde_json::json!({ "results": results }).to_string()
+    }
+
+    #[test]
+    fn prepared_events_share_capacity_and_retry_without_reprocessing() {
+        let server = MockServer::start();
+        let clock = ManualClock::new();
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&hook_calls);
+        let handle = TransportHandle::spawn_with_clock(
+            options(server.base_url())
+                .max_queue_size(2usize)
+                .before_send(move |mut event| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    event.insert_prop("from_hook", true).unwrap();
+                    Some(event)
+                })
+                .build()
+                .unwrap(),
+            Arc::new(clock.clone()),
+        );
+        let wire = CaptureEvent {
+            event: "prepared".into(),
+            uuid: Uuid::now_v7(),
+            distinct_id: "capture-time-user".into(),
+            timestamp: "2025-01-02T03:04:05.123Z".into(),
+            session_id: Some("capture-time-session".into()),
+            window_id: None,
+            options: std::iter::once(("process_person_profile".into(), serde_json::json!(false)))
+                .collect(),
+            properties: serde_json::json!({"captured": true}),
+            dropped_copies: 0,
+        };
+        let wire_json = serde_json::to_string(&wire).unwrap();
+        let mut fail = server.mock(|when, then| {
+            when.method(POST).body_includes(&wire_json);
+            then.status(503);
+        });
+        let mut raw = Event::new("raw", "server-user");
+        let raw_id = Uuid::now_v7();
+        raw.set_uuid(raw_id);
+        handle.enqueue(raw);
+        assert_eq!(handle.enqueue_prepared(wire.clone()), Admission::Accepted);
+        assert_eq!(handle.enqueue_prepared(wire.clone()), Admission::Full);
+        assert_eq!(handle.pending(), 2);
+        handle.flush_blocking();
+        fail.assert_calls(1);
+        assert_eq!(handle.pending(), 2);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.enqueue_prepared(wire.clone()), Admission::Full);
+
+        fail.delete();
+        let success = server.mock(|when, then| {
+            when.method(POST).body_includes(&wire_json);
+            then.status(200).json_body(serde_json::json!({"results": {
+                (wire.uuid.to_string()): {"result": "ok"},
+                (raw_id.to_string()): {"result": "ok"}
+            }}));
+        });
+        handle.flush_blocking();
+        success.assert_calls(1);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.pending(), 0);
+        handle.shutdown_blocking();
+        assert_eq!(handle.enqueue_prepared(wire), Admission::Closed);
+        assert_eq!(handle.pending(), 0);
+    }
+
+    #[test]
+    fn prepared_events_use_byte_batching_without_hooks() {
+        let server = MockServer::start();
+        let clock = ManualClock::new();
+        let mut lane = LaneConfig::ai();
+        lane.endpoint = Endpoint::Capture;
+        lane.batch_bytes_target = Some(1);
+        let handle = TransportHandle::spawn_lane_with_clock(
+            options(server.base_url())
+                .before_send(|_| panic!("prepared events must bypass hooks"))
+                .build()
+                .unwrap(),
+            lane,
+            Arc::new(clock),
+        );
+        let wire = CaptureEvent::from_event(&Event::new("prepared", "user"));
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .body_includes(serde_json::to_string(&wire).unwrap());
+            then.status(200).json_body(serde_json::json!({"results": {
+                (wire.uuid.to_string()): {"result": "ok"}
+            }}));
+        });
+        assert_eq!(handle.enqueue_prepared(wire), Admission::Accepted);
+        handle.flush_blocking();
+        mock.assert_calls(1);
+        assert_eq!(handle.pending(), 0);
+        handle.shutdown_blocking();
+    }
+
+    #[cfg(feature = "stateful")]
+    #[test]
+    fn durable_verdicts_keep_retryable_entry_identity_after_active_attempt_exhaustion() {
+        use super::super::capture::{after_response_with_retention, RetryRetention, Step};
+        use super::super::event_store::StoreKey;
+
+        let wire = CaptureEvent::from_event(&Event::new("first-copy", "user"));
+        let mut duplicate = wire.clone();
+        duplicate.event = "second-copy".into();
+        let accepted = CaptureEvent::from_event(&Event::new("accepted", "user"));
+        let rejected = CaptureEvent::from_event(&Event::new("rejected", "user"));
+        let tracked = |wire: CaptureEvent, key| {
+            let mut entry = DeliveryEvent::from(wire);
+            entry.store_key = Some(StoreKey(key));
+            entry
+        };
+        let mut pending = vec![
+            tracked(wire.clone(), 1),
+            tracked(duplicate, 2),
+            tracked(accepted.clone(), 3),
+            tracked(rejected.clone(), 4),
+        ];
+        let opts = options("http://localhost".into())
+            .max_capture_attempts(1u32)
+            .build()
+            .unwrap();
+        let body = serde_json::json!({"results": {
+            (wire.uuid.to_string()): {"result": "retry", "duplicates_dropped": 1},
+            (accepted.uuid.to_string()): {"result": "ok"},
+            (rejected.uuid.to_string()): {"result": "drop"}
+        }})
+        .to_string();
+        let mut results = HashMap::new();
+        let step = after_response_with_retention(
+            &opts,
+            &Uuid::now_v7(),
+            1,
+            200,
+            None,
+            &body,
+            &mut pending,
+            &mut results,
+            RetryRetention::Retain,
+        );
+        assert!(matches!(step, Step::Backoff(_)));
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].store_key, Some(StoreKey(1)));
+        assert_eq!(pending[0].wire.event, "first-copy");
+        assert_eq!(results.len(), 2);
+        // Queue metadata must not change any wire field or expose storage keys.
+        assert_eq!(
+            serde_json::to_value(&pending[0]).unwrap(),
+            serde_json::to_value(&wire).unwrap()
+        );
+        let body = serde_json::to_value(crate::capture_event::BatchRequestRef {
+            created_at: "2025-01-01T00:00:00.000Z",
+            historical_migration: None,
+            batch: &pending,
+        })
+        .unwrap();
+        assert_eq!(body["batch"][0], serde_json::to_value(&wire).unwrap());
+
+        let mut server_pending = vec![wire.clone()];
+        let mut server_results = HashMap::new();
+        let step = super::super::capture::after_response(
+            &opts,
+            &Uuid::now_v7(),
+            1,
+            200,
+            None,
+            &serde_json::json!({"results": {(wire.uuid.to_string()): {"result": "retry"}}})
+                .to_string(),
+            &mut server_pending,
+            &mut server_results,
+        );
+        assert!(matches!(step, Step::Done));
+        assert!(server_pending.is_empty());
+        assert_eq!(server_results[&wire.uuid].result, crate::EventStatus::Retry);
+    }
+
+    #[cfg(feature = "stateful")]
+    #[test]
+    fn stateful_delivery_retries_unconfirmed_success_until_its_last_attempt() {
+        use super::super::capture::{after_response_with_retention, RetryRetention, Step};
+        let opts = options("http://localhost".into())
+            .max_capture_attempts(2u32)
+            .build()
+            .unwrap();
+        let confirmed = CaptureEvent::from_event(&Event::new("confirmed", "user"));
+        let missing = CaptureEvent::from_event(&Event::new("missing", "user"));
+        let partial = serde_json::json!({"results": {
+            (confirmed.uuid.to_string()): {"result": "ok"}
+        }})
+        .to_string();
+        for (retention, attempt, malformed, missing_kept) in [
+            // Server delivery trusts any 2xx, as it shipped.
+            (RetryRetention::Discard, 1, "fail", false),
+            // Memory-only stateful delivery retries until its attempts run out.
+            (RetryRetention::Bounded, 1, "backoff", true),
+            (RetryRetention::Bounded, 2, "fail", true),
+            // Disk-backed delivery keeps retrying.
+            (RetryRetention::Retain, 2, "backoff", true),
+        ] {
+            let mut pending = vec![DeliveryEvent::from(missing.clone())];
+            let step = after_response_with_retention(
+                &opts,
+                &Uuid::now_v7(),
+                attempt,
+                200,
+                None,
+                "<html>proxy</html>",
+                &mut pending,
+                &mut HashMap::new(),
+                retention,
+            );
+            let outcome = match step {
+                Step::Backoff(_) => "backoff",
+                Step::Fail(_) => "fail",
+                Step::Done => "done",
+            };
+            assert_eq!(outcome, malformed, "malformed body, attempt {attempt}");
+            assert_eq!(pending.len(), 1);
+
+            let mut pending = vec![
+                DeliveryEvent::from(confirmed.clone()),
+                DeliveryEvent::from(missing.clone()),
+            ];
+            let mut results = HashMap::new();
+            after_response_with_retention(
+                &opts,
+                &Uuid::now_v7(),
+                attempt,
+                200,
+                None,
+                &partial,
+                &mut pending,
+                &mut results,
+                retention,
+            );
+            assert!(results.contains_key(&confirmed.uuid));
+            assert_eq!(
+                pending
+                    .iter()
+                    .any(|event| event.as_ref().uuid == missing.uuid),
+                missing_kept,
+                "missing result, attempt {attempt}"
+            );
+        }
+    }
+
+    #[cfg(feature = "stateful")]
+    #[test]
+    fn durable_retention_keeps_transient_failures_but_not_terminal_protocol_errors() {
+        use super::super::capture::{
+            after_response_with_retention, after_transport_error_with_retention, RetryRetention,
+            Step,
+        };
+        use super::super::event_store::StoreKey;
+        let opts = options("http://localhost".into())
+            .max_capture_attempts(1u32)
+            .build()
+            .unwrap();
+        for (status, body, retryable) in [
+            (404, "not found", true),
+            (408, "timeout", true),
+            (429, "limited", true),
+            (500, "server error", true),
+            (502, "gateway", true),
+            (503, "unavailable", true),
+            (504, "gateway timeout", true),
+            (400, "bad input", false),
+            (401, "invalid key", false),
+            (413, "oversize", false),
+            // A 2xx that capture did not produce cannot confirm delivery.
+            (200, "malformed JSON", true),
+            (200, "{\"results\":{}}", true),
+        ] {
+            let mut entry =
+                DeliveryEvent::from(CaptureEvent::from_event(&Event::new("event", "user")));
+            entry.store_key = Some(StoreKey(42));
+            let mut pending = vec![entry];
+            let step = after_response_with_retention(
+                &opts,
+                &Uuid::now_v7(),
+                1,
+                status,
+                None,
+                body,
+                &mut pending,
+                &mut HashMap::new(),
+                RetryRetention::Retain,
+            );
+            assert_eq!(
+                matches!(step, Step::Backoff(_)),
+                retryable,
+                "status {status}"
+            );
+            assert_eq!(pending[0].store_key, Some(StoreKey(42)));
+        }
+        assert!(matches!(
+            after_transport_error_with_retention(
+                &opts,
+                &Uuid::now_v7(),
+                1,
+                "offline".into(),
+                RetryRetention::Retain,
+            ),
+            Step::Backoff(_)
+        ));
+        assert!(matches!(
+            super::super::capture::after_transport_error(
+                &opts,
+                &Uuid::now_v7(),
+                1,
+                "offline".into(),
+            ),
+            Step::Fail(_)
+        ));
     }
 
     // -- pure helpers --------------------------------------------------------
@@ -2091,7 +3002,12 @@ mod tests {
         let future = Some(clock.now() + Duration::from_secs(60));
 
         let ((), logged) = crate::client::tests::with_logs(|| {
-            send_buffer(&mut pipeline, &mut LiveBuffer::Deferred(events()), 10, past);
+            send_buffer(
+                &mut pipeline,
+                &mut LiveBuffer::Deferred(events().into_iter().map(QueuedEvent::Raw).collect()),
+                10,
+                past,
+            );
             drain_historical(&mut pipeline, &mut VecDeque::from([events()]), past);
             // A 503 on the final drain attempt drops the batch instead of retrying.
             pipeline.send_batch(events(), false, future);
@@ -2561,8 +3477,8 @@ mod tests {
             event
         }
 
-        /// Serialized wire size of `event` as the worker will measure it. Sizes
-        /// are deterministic: the timestamp and uuid are fixed-width.
+        /// Serialized wire size of `event`. Set its timestamp before measuring
+        /// exact byte boundaries: wire timestamps have variable fractional precision.
         fn wire_total(event: &Event, builder: &mut ClientOptionsBuilder) -> usize {
             let opts = builder.build().unwrap();
             let event =
@@ -2774,13 +3690,15 @@ mod tests {
             let server = MockServer::start();
             let mock = path_mock(&server, CAPTURE_AI_PATH);
             let mut builder = options(server.base_url());
-            let size = wire_total(&sized_event("e1", 100), &mut builder);
+            let mut event = sized_event("e1", 100);
+            event.set_timestamp(Utc::now()).unwrap();
+            let size = wire_total(&event, &mut builder);
             let lane = LaneConfig {
                 batch_bytes_target: Some(size),
                 ..plain_ai()
             };
             let handle = spawn(&mut builder, lane);
-            handle.enqueue(sized_event("e1", 100));
+            handle.enqueue(event);
             handle.tick();
             mock.assert_calls(1);
             assert_eq!(handle.pending(), 0);

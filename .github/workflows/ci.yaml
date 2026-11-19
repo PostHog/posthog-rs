@@ -59,6 +59,9 @@ jobs:
       - name: Clippy (mcp)
         run: cargo clippy --tests --features mcp -- -D warnings
 
+      - name: Clippy (stateful)
+        run: cargo clippy --tests --features stateful -- -D warnings
+
   public-api:
     name: Public API
     if: github.event_name == 'pull_request'
@@ -108,6 +111,14 @@ jobs:
             toolchain: "1.78.0"
             cache-key: msrv-blocking-client
             command: cargo check --locked --package posthog --lib --no-default-features --features error-tracking,tls
+          - name: MSRV (stateful, async client)
+            toolchain: "1.78.0"
+            cache-key: msrv-stateful-async
+            command: cargo check --locked --package posthog --lib --features stateful
+          - name: MSRV (stateful, blocking client)
+            toolchain: "1.78.0"
+            cache-key: msrv-stateful-blocking
+            command: cargo check --locked --package posthog --lib --no-default-features --features stateful,error-tracking,tls
           - name: MSRV of the mcp feature
             toolchain: "1.88.0"
             cache-key: msrv-mcp
@@ -167,7 +178,7 @@ jobs:
 
   test:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -175,6 +186,20 @@ jobs:
           - name: Unit test (default features)
             cache-key: default-features
             command: cargo test --verbose
+          - name: Unit test (stateful)
+            cache-key: stateful
+            command: cargo test --locked --features stateful
+          - name: Unit test (stateful, blocking client)
+            cache-key: stateful-blocking
+            command: cargo test --locked --no-default-features --features stateful,error-tracking,tls
+          - name: Stateful storage and transport (macOS)
+            os: macos-latest
+            cache-key: stateful-macos
+            command: 'cargo test --locked --lib --features stateful client::'
+          - name: Stateful storage and transport (Windows)
+            os: windows-latest
+            cache-key: stateful-windows
+            command: 'cargo test --locked --lib --features stateful client::'
           - name: Unit test (workspace)
             cache-key: workspace
             command: cargo test --workspace --verbose

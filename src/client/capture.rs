@@ -71,7 +71,7 @@ impl std::io::Write for CountingWriter {
     }
 }
 
-fn json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+pub(super) fn json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
     let mut w = CountingWriter(0);
     // Serialization of an already-built `CaptureEvent` cannot fail short of an
     // allocation error; a failure here would also fail at send time, where it
@@ -97,12 +97,9 @@ pub(crate) fn measure_total(event: &CaptureEvent) -> usize {
 /// non-empty and the next event would push it past `target`, so an event
 /// larger than the target still ships alone (worst-case body =
 /// `max(target, largest event)`). Order is preserved.
-pub(crate) fn chunk_by_bytes(
-    events: Vec<(CaptureEvent, usize)>,
-    target: usize,
-) -> Vec<Vec<CaptureEvent>> {
-    let mut batches: Vec<Vec<CaptureEvent>> = Vec::new();
-    let mut current: Vec<CaptureEvent> = Vec::new();
+pub(crate) fn chunk_by_bytes<T>(events: Vec<(T, usize)>, target: usize) -> Vec<Vec<T>> {
+    let mut batches: Vec<Vec<T>> = Vec::new();
+    let mut current: Vec<T> = Vec::new();
     let mut current_bytes = 0usize;
     for (event, bytes) in events {
         if !current.is_empty() && current_bytes + bytes > target {
@@ -402,40 +399,43 @@ pub(crate) fn count_results(resp: &CaptureResponse) -> HashMap<(String, Option<S
 /// uuid takes the result and the next `n` copies are terminal drops: neither
 /// resent nor recorded, and counted through the first copy's entry. A kept copy
 /// that is retried carries the count to its final result.
-pub(crate) fn process_batch_response(
-    pending: Vec<CaptureEvent>,
+pub(crate) fn process_batch_response<T: AsRef<CaptureEvent> + AsMut<CaptureEvent>>(
+    pending: Vec<T>,
     results: &HashMap<Uuid, EventResult>,
     final_results: &mut HashMap<Uuid, EventResult>,
     is_final_attempt: bool,
-) -> Vec<CaptureEvent> {
+) -> Vec<T> {
     let mut next = Vec::new();
     // `HashMap::new` does not allocate, so batches without duplicates pay nothing.
     let mut copies_seen: HashMap<Uuid, u32> = HashMap::new();
     for mut v1 in pending {
-        let Some(r) = results.get(&v1.uuid) else {
+        let uuid = v1.as_ref().uuid;
+        let Some(r) = results.get(&uuid) else {
             continue;
         };
         if let Some(dropped) = r.duplicates_dropped {
-            let seen = copies_seen.entry(v1.uuid).or_insert(0);
+            let seen = copies_seen.entry(uuid).or_insert(0);
             *seen = seen.saturating_add(1);
             if (1..=dropped).contains(&(*seen - 1)) {
                 continue;
             }
         }
         if r.result == EventStatus::Retry && !is_final_attempt {
-            v1.dropped_copies = v1
+            let wire = v1.as_mut();
+            wire.dropped_copies = wire
                 .dropped_copies
                 .saturating_add(r.duplicates_dropped.unwrap_or(0));
             next.push(v1);
         } else {
             let mut result = r.clone();
-            if v1.dropped_copies > 0 {
+            if v1.as_ref().dropped_copies > 0 {
                 result.duplicates_dropped = Some(
-                    v1.dropped_copies
+                    v1.as_ref()
+                        .dropped_copies
                         .saturating_add(result.duplicates_dropped.unwrap_or(0)),
                 );
             }
-            final_results.insert(v1.uuid, result);
+            final_results.insert(uuid, result);
         }
     }
     next
@@ -445,13 +445,63 @@ pub(crate) fn process_batch_response(
 // Sans-IO control flow
 // ---------------------------------------------------------------------------
 
+/// How a delivery sequence treats retries. The worker owns when a retained
+/// sequence resumes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetryRetention {
+    /// Server delivery: attempts end at `max_capture_attempts`, and any 2xx ends
+    /// the request.
+    Discard,
+    /// Memory-only stateful delivery: attempts end at `max_capture_attempts`,
+    /// but a 2xx that does not confirm every event is retried.
+    #[cfg(feature = "stateful")]
+    Bounded,
+    /// Disk-backed stateful delivery: running out of attempts is not final, and
+    /// a 2xx that does not confirm every event is retried.
+    #[cfg(feature = "stateful")]
+    Retain,
+}
+
+impl RetryRetention {
+    fn is_final(self, opts: &ClientOptions, attempt: u32) -> bool {
+        #[cfg(feature = "stateful")]
+        if self == Self::Retain {
+            return false;
+        }
+        attempt >= opts.max_capture_attempts
+    }
+
+    /// A stateful queue never treats a 2xx as delivery unless capture
+    /// confirmed each event: something other than capture, such as a proxy,
+    /// may have answered.
+    pub(crate) fn retries_unconfirmed_success(self) -> bool {
+        self != Self::Discard
+    }
+}
+
 pub(crate) fn after_transport_error(
     opts: &ClientOptions,
     request_id: &Uuid,
     attempt: u32,
     err_msg: String,
 ) -> Step {
-    if attempt >= opts.max_capture_attempts {
+    after_transport_error_with_retention(
+        opts,
+        request_id,
+        attempt,
+        err_msg,
+        RetryRetention::Discard,
+    )
+}
+
+pub(crate) fn after_transport_error_with_retention(
+    opts: &ClientOptions,
+    request_id: &Uuid,
+    attempt: u32,
+    err_msg: String,
+    retention: RetryRetention,
+) -> Step {
+    if retention.is_final(opts, attempt) {
         return Step::Fail(Error::Connection(err_msg));
     }
     debug!(
@@ -464,21 +514,50 @@ pub(crate) fn after_transport_error(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn after_response(
+pub(crate) fn after_response<T: AsRef<CaptureEvent> + AsMut<CaptureEvent>>(
     opts: &ClientOptions,
     request_id: &Uuid,
     attempt: u32,
     status: u16,
     retry_after: Option<Duration>,
     body: &str,
-    pending: &mut Vec<CaptureEvent>,
+    pending: &mut Vec<T>,
     final_results: &mut HashMap<Uuid, EventResult>,
+) -> Step {
+    after_response_with_retention(
+        opts,
+        request_id,
+        attempt,
+        status,
+        retry_after,
+        body,
+        pending,
+        final_results,
+        RetryRetention::Discard,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn after_response_with_retention<T: AsRef<CaptureEvent> + AsMut<CaptureEvent>>(
+    opts: &ClientOptions,
+    request_id: &Uuid,
+    attempt: u32,
+    status: u16,
+    retry_after: Option<Duration>,
+    body: &str,
+    pending: &mut Vec<T>,
+    final_results: &mut HashMap<Uuid, EventResult>,
+    retention: RetryRetention,
 ) -> Step {
     // The backend sends exactly 200 today; accept the whole 2xx class so a
     // future 201/202 isn't misclassified as a connection error.
     if (200..=299).contains(&status) {
+        let is_final = retention.is_final(opts, attempt);
         let batch_resp: CaptureResponse = match serde_json::from_str(body) {
             Ok(r) => r,
+            Err(_) if retention.retries_unconfirmed_success() && !is_final => {
+                return Step::Backoff(capture_backoff_duration(opts, attempt, retry_after));
+            }
             Err(e) => return Step::Fail(Error::Serialization(e.to_string())),
         };
 
@@ -492,13 +571,20 @@ pub(crate) fn after_response(
             );
         }
 
-        let is_final = attempt >= opts.max_capture_attempts;
-        let next = process_batch_response(
-            std::mem::take(pending),
-            &batch_resp.results,
-            final_results,
-            is_final,
-        );
+        let mut unconfirmed = Vec::new();
+        let mut confirmed = std::mem::take(pending);
+        if retention.retries_unconfirmed_success() {
+            // Keep events capture did not report on; at the final attempt they
+            // remain pending and are reported as not persisted.
+            let (present, missing) = confirmed
+                .into_iter()
+                .partition(|event| batch_resp.results.contains_key(&event.as_ref().uuid));
+            confirmed = present;
+            unconfirmed = missing;
+        }
+        let mut next =
+            process_batch_response(confirmed, &batch_resp.results, final_results, is_final);
+        next.append(&mut unconfirmed);
         *pending = next;
 
         if pending.is_empty() || is_final {
@@ -520,7 +606,7 @@ pub(crate) fn after_response(
             "Capture request failed, will retry"
         );
 
-        if attempt >= opts.max_capture_attempts {
+        if retention.is_final(opts, attempt) {
             Step::Fail(terminal_response_error(status, body))
         } else {
             Step::Backoff(capture_backoff_duration(opts, attempt, retry_after))
@@ -1580,7 +1666,7 @@ mod tests {
         let batches = chunk_by_bytes(mixed, 2 * s);
         assert_eq!(names(&batches), vec![vec!["a"], vec!["big"], vec!["b"]]);
 
-        assert!(chunk_by_bytes(Vec::new(), s).is_empty());
+        assert!(chunk_by_bytes::<CaptureEvent>(Vec::new(), s).is_empty());
     }
 
     #[test]
