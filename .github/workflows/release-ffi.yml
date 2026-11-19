@@ -1,15 +1,10 @@
 name: "Release C bindings"
 
 # Builds posthog-ffi from a release tag and attaches the archives to that
-# GitHub Release. release.yml calls this after it creates the release. Run it
-# by hand to rebuild the archives for a release.
+# GitHub Release. release.yml starts it on the new tag after each release.
+# To rebuild a release's archives, run it by hand with "Use workflow from"
+# set to the release tag.
 on:
-  workflow_call:
-    inputs:
-      version:
-        description: "posthog version, which is also the GitHub Release tag (for example 1.2.0)"
-        required: true
-        type: string
   workflow_dispatch:
     inputs:
       version:
@@ -25,12 +20,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  check-ref:
+    name: Check the release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the run to start on the release tag
+        env:
+          REF: ${{ github.ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$REF" != "refs/tags/$VERSION" ]; then
+            echo "::error::Run this workflow from the release tag $VERSION, not $REF"
+            exit 1
+          fi
+
   build:
     name: Build
+    needs: check-ref
     uses: ./.github/workflows/ffi-build.yml
     with:
       version: ${{ inputs.version }}
-      ref: refs/tags/${{ inputs.version }}
 
   publish:
     name: Attach to the GitHub Release
@@ -54,3 +63,29 @@ jobs:
         run: |
           ls -l dist
           gh release upload "$VERSION" dist/* --clobber
+
+  notify-failure:
+    name: Report failure
+    needs: [check-ref, build, publish]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send failure event to PostHog
+        uses: PostHog/posthog-github-action@9a6a19d360820ab4d95ecc4a5a7564062c895f84 # v1.3.0
+        with:
+          posthog-token: "${{ secrets.POSTHOG_PROJECT_API_KEY }}"
+          event: "posthog-sdk-github-release-workflow-failure"
+          properties: >-
+            {
+              "commitSha": "${{ github.sha }}",
+              "jobStatus": "failure",
+              "ref": "${{ github.ref }}",
+              "repository": "${{ github.repository }}",
+              "sdk": "posthog-rs",
+              "jobName": "release-ffi",
+              "packageName": "posthog-ffi",
+              "packageVersion": "${{ inputs.version }}",
+              "actionUrl": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "alertText": ":rotating_light: Failed to attach posthog-ffi ${{ inputs.version }} archives to the GitHub Release :rotating_light:",
+              "alertContext": "The C bindings release workflow failed. The crates are already published; rerun this workflow from the release tag."
+            }

@@ -83,9 +83,6 @@ jobs:
       contents: read
       actions: write
       id-token: write
-    outputs:
-      new_version: ${{ steps.sampo-release.outputs.new_version }}
-      released: ${{ steps.check-changes.outputs.committed }}
     steps:
       - name: Notify Slack - Approved
         if: needs.notify-approval-needed.outputs.slack_ts != ''
@@ -220,6 +217,16 @@ jobs:
           CHANGELOG_ENTRY=$(awk -v defText="see CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
           gh release create "$NEW_VERSION" --target main --notes "$CHANGELOG_ENTRY"
 
+      - name: Start the C bindings release
+        if: steps.check-changes.outputs.committed == 'true'
+        env:
+          # A workflow_dispatch from GITHUB_TOKEN still starts a run, and the job's
+          # `actions: write` permission allows it.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
+        run: gh workflow run release-ffi.yml --ref "$NEW_VERSION" -f version="$NEW_VERSION"
+
       - name: Dispatch posthog upgrade for posthog-rs
         if: steps.check-changes.outputs.committed == 'true'
         env:
@@ -258,16 +265,6 @@ jobs:
               "alertText": ":rotating_light: Failed to release posthog-rs@${{ steps.sampo-release.outputs.new_version }} :rotating_light:",
               "alertContext": "The release workflow failed before completion."
             }
-
-  ffi-binaries:
-    name: C bindings
-    needs: release
-    if: needs.release.outputs.released == 'true'
-    permissions:
-      contents: write
-    uses: ./.github/workflows/release-ffi.yml
-    with:
-      version: ${{ needs.release.outputs.new_version }}
 
   notify-released:
     name: Notify Slack - Released

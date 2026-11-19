@@ -1,19 +1,15 @@
 name: "Build C bindings"
 
-# Builds and smoke-tests posthog-ffi for each supported platform, and uploads
-# one archive per platform as a workflow artifact. release-ffi.yml attaches
-# them to a GitHub Release. CI runs it on pull requests without publishing.
+# Builds and smoke-tests posthog-ffi for each supported platform from the
+# commit the run started on, and uploads one archive per platform as a
+# workflow artifact. release-ffi.yml attaches them to a GitHub Release. CI
+# runs it on pull requests without publishing.
 on:
   workflow_call:
     inputs:
       version:
         description: "posthog version used in the archive names"
         required: true
-        type: string
-      ref:
-        description: "Git ref to build. Empty builds the commit that triggered the run."
-        required: false
-        default: ""
         type: string
 
 permissions:
@@ -55,7 +51,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Check the posthog version
@@ -72,11 +67,6 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          if ! command -v rustup >/dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
-          fi
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
           rustup target add "$TARGET"
