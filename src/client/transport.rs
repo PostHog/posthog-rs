@@ -434,6 +434,10 @@ impl TransportHandle {
                     );
                     return;
                 }
+                // Only the coordinator sends to itself. Dropping this copy lets
+                // the channel close when the handle drops without a shutdown.
+                #[cfg(feature = "stateful")]
+                drop(worker_tx);
                 run_worker(options, lane, rx, worker_len, worker_clock);
             })
             .ok();
@@ -2066,6 +2070,26 @@ mod tests {
             })
             .collect();
         serde_json::json!({ "results": results }).to_string()
+    }
+
+    #[test]
+    fn stateless_worker_exits_when_its_handle_drops_without_shutdown() {
+        // A cancelled async constructor drops the handle before any client can
+        // shut it down.
+        let clock = Arc::new(ManualClock::new());
+        let handle = TransportHandle::spawn_with_clock(
+            options("http://localhost".into()).build().unwrap(),
+            clock.clone(),
+        );
+        drop(handle);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&clock) > 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker thread still holds its clock"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
