@@ -1,10 +1,9 @@
-//! Worker-owned, bounded event persistence. Stores contain already prepared wire
-//! events so restoring a record never reruns hooks or changes its attribution.
+//! Event files for the stateful delivery queue. The store keeps no delivery
+//! state: it lists its records once when it opens, then writes, reads and
+//! deletes records by key for the coordinator, which owns ordering, capacity
+//! and retries. Records hold already prepared wire events, so restoring one
+//! never reruns hooks or changes its attribution.
 
-use std::collections::{BinaryHeap, VecDeque};
-
-// Metadata only; larger pre-existing spools retain bounded scan-based recovery.
-const RECOVERY_INDEX_LIMIT: usize = 10_000;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::capture_event::CaptureEvent;
 
-/// Stable queue-entry identity, independent of caller-supplied event UUIDs.
+/// A record's position in the delivery queue: its admission sequence number.
+/// It never depends on the event's UUID or timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct StoreKey(pub(crate) u64);
 
@@ -59,7 +59,7 @@ fn create_directory(path: &Path) -> io::Result<()> {
     builder.create(path)
 }
 
-pub(super) fn open_private(path: &Path, exclusive: bool) -> io::Result<File> {
+pub(crate) fn open_private(path: &Path, exclusive: bool) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true);
     if exclusive {
@@ -75,6 +75,9 @@ pub(super) fn open_private(path: &Path, exclusive: bool) -> io::Result<File> {
     options.open(path)
 }
 
+/// Disk retention for the delivery queue. The coordinator enforces
+/// `max_events` and `max_bytes`; the store refuses any single record over
+/// `max_record_bytes`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StoreLimits {
     pub(crate) max_events: usize,
@@ -82,113 +85,37 @@ pub(crate) struct StoreLimits {
     pub(crate) max_record_bytes: u64,
 }
 
+/// Why a record could not be read.
 #[derive(Debug)]
-pub(crate) struct StoredEvent {
-    pub(crate) key: StoreKey,
-    pub(crate) event: CaptureEvent,
-    /// Serialized record bytes; recovery accounts for envelope overhead too.
-    pub(crate) bytes: u64,
+pub(crate) enum ReadError {
+    /// The read may succeed later, for example after a permission change.
+    Transient(io::Error),
+    /// The record is gone, or it was invalid and moved aside. It will never
+    /// be readable, so the coordinator drops it from the queue.
+    Lost(io::Error),
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct Recovery {
-    pub(crate) events: Vec<StoredEvent>,
-    pub(crate) errors: Vec<io::Error>,
-    pub(crate) more: bool,
-    /// Unreadable records remain eligible on a later recovery pass.
-    pub(crate) retry_pending: bool,
-    /// This recovery pass visited at least one record, including failed reads
-    /// or skipped invalid records. False when blocked by available capacity.
-    pub(crate) advanced: bool,
-}
-
-/// Only the delivery worker calls these methods. Admission never invokes a
-/// backend or waits for a write. Recovery pages contain at most `max_events`
-/// records and `max_bytes` serialized bytes, including record envelopes.
+/// Storage for the delivery queue. Only the coordinator thread calls it, so
+/// admission never waits on disk.
 pub(crate) trait EventStore: Send {
-    fn recover(&mut self, max_events: usize, max_bytes: u64) -> io::Result<Recovery>;
-    fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError>;
-    fn remove(&mut self, key: StoreKey) -> io::Result<()>;
+    fn limits(&self) -> StoreLimits;
 
-    /// Persist using the coordinator's monotonic admission identity.
-    fn put_at(
-        &mut self,
-        event: &CaptureEvent,
-        _key: StoreKey,
-    ) -> Result<StoreKey, StoreWriteError> {
-        self.put(event)
-    }
+    /// The records on disk when the store opened, oldest first, with their
+    /// sizes. The coordinator calls this once.
+    fn take_index(&mut self) -> Vec<(StoreKey, u64)>;
 
-    fn end_key(&self) -> Option<StoreKey> {
-        None
-    }
+    /// The highest key of any record file present at open, queued or not.
+    /// New records must use higher keys.
+    fn last_key(&self) -> StoreKey;
 
-    /// Undelivered records dropped to make room since the last call.
-    fn take_evicted(&mut self) -> usize {
-        0
-    }
+    /// Write `event` under `key` and return the record's size. On error no
+    /// record exists under `key`.
+    fn write(&mut self, key: StoreKey, event: &CaptureEvent) -> io::Result<u64>;
 
-    /// Revisit the retained FIFO head, including records appended this process.
-    fn head(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
-        self.recover(count, bytes)
-    }
+    fn read(&mut self, key: StoreKey) -> Result<CaptureEvent, ReadError>;
 
-    /// Bound a head upload by a soft batch target, allowing one larger record
-    /// within the hard window. Backends may return a smaller page.
-    fn head_batch(&mut self, count: usize, bytes: u64, target: u64) -> io::Result<Recovery> {
-        self.head(count, bytes.min(target))
-    }
-
-    /// Select a fixed flush checkpoint when the backend supports keyed sweeps.
-    fn head_batch_through(
-        &mut self,
-        count: usize,
-        bytes: u64,
-        target: u64,
-        _through: StoreKey,
-    ) -> io::Result<Recovery> {
-        self.head_batch(count, bytes, target)
-    }
-
-    /// Backends that evict must check exact-entry membership before retry.
-    fn contains(&self, _key: StoreKey) -> io::Result<bool> {
-        Ok(true)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct StoreWriteError {
-    pub(crate) key: Option<StoreKey>,
-    pub(crate) error: io::Error,
-}
-
-impl From<io::Error> for StoreWriteError {
-    fn from(error: io::Error) -> Self {
-        Self { key: None, error }
-    }
-}
-
-struct ReadFailure {
-    error: io::Error,
-    retryable: bool,
-}
-
-impl ReadFailure {
-    fn permanent(error: io::Error) -> Self {
-        Self {
-            error,
-            retryable: false,
-        }
-    }
-}
-
-impl From<io::Error> for ReadFailure {
-    fn from(error: io::Error) -> Self {
-        Self {
-            error,
-            retryable: true,
-        }
-    }
+    /// Delete a record. Deleting a missing record succeeds.
+    fn delete(&mut self, key: StoreKey) -> io::Result<()>;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -197,16 +124,16 @@ struct Record<T> {
     event: T,
 }
 
-/// Admission uses the persisted representation too, so a record admitted at
-/// the memory limit can still fit that same recovery window after restart.
+/// Admission measures the persisted representation too, so an event admitted
+/// at a limit still fits that limit when it is written and read back.
 pub(crate) fn record_size(event: &CaptureEvent) -> usize {
     super::capture::json_len(&Record { version: 1, event })
 }
 
 /// Bound serialization before allocating an oversized record buffer.
-pub(super) struct RecordBuffer {
-    pub(super) bytes: Vec<u8>,
-    pub(super) limit: u64,
+pub(crate) struct RecordBuffer {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) limit: u64,
 }
 
 impl Write for RecordBuffer {
@@ -231,38 +158,17 @@ struct Version {
     version: u32,
 }
 
-/// A bounded per-entry spool. Files are ordered by a queue-owned sequence,
-/// not the event timestamp or event UUID. New writes cannot overwrite existing
-/// entries even when a caller reuses an event UUID.
-///
-/// New records replace the oldest records at capacity. A fully written replacement
-/// may exceed limits by one record until eviction succeeds; further appends stop
-/// while that debt (or a pre-existing reduced-limit backlog) remains.
-/// Corrupt/unsupported records are quarantined and count against disk limits.
-/// Acknowledgement removal is idempotent; failure can cause restart duplicates.
+/// One file per record, named by its key: `events/{key:020}.json`. A record
+/// that cannot be decoded is renamed to `.corrupt`, and one from a newer
+/// format to `.unsupported`; neither is read again or counted.
 pub(crate) struct FileEventStore {
     _directory: Arc<StorageDirectory>,
     events_path: PathBuf,
     limits: StoreLimits,
-    count: usize,
-    bytes: u64,
-    last_key: u64,
-    recovery_end: u64,
-    recovery_cursor: u64,
-    continue_head: bool,
-    head_limit: Option<StoreKey>,
-    startup_index: Option<VecDeque<StoreKey>>,
-    scan_complete: bool,
-    retry_keys: VecDeque<StoreKey>,
-    retry_remaining: usize,
-    retrying: bool,
-    evicted: usize,
+    index: Vec<(StoreKey, u64)>,
+    last_key: StoreKey,
     #[cfg(test)]
-    directory_scans: std::cell::Cell<usize>,
-    #[cfg(test)]
-    fail_directory_sync: std::cell::Cell<bool>,
-    #[cfg(test)]
-    fail_eviction: std::cell::Cell<bool>,
+    pub(crate) fail_directory_sync: std::cell::Cell<bool>,
 }
 
 impl FileEventStore {
@@ -279,33 +185,11 @@ impl FileEventStore {
         }
         let events_path = directory.path().join("events");
         create_directory(&events_path)?;
-        let mut store = Self {
-            _directory: directory,
-            events_path,
-            limits,
-            count: 0,
-            bytes: 0,
-            last_key: 0,
-            recovery_end: 0,
-            recovery_cursor: 0,
-            continue_head: false,
-            head_limit: None,
-            startup_index: Some(VecDeque::new()),
-            scan_complete: false,
-            retry_keys: VecDeque::new(),
-            retry_remaining: 0,
-            retrying: false,
-            evicted: 0,
-            #[cfg(test)]
-            directory_scans: std::cell::Cell::new(1),
-            #[cfg(test)]
-            fail_directory_sync: std::cell::Cell::new(false),
-            #[cfg(test)]
-            fail_eviction: std::cell::Cell::new(false),
-        };
-        // Count metadata without collecting directory entries or reading payloads.
-        for entry in fs::read_dir(&store.events_path)? {
+        let mut index = Vec::new();
+        let mut last_key = StoreKey(0);
+        for entry in fs::read_dir(&events_path)? {
             let entry = entry?;
+            // Symbolic links and directories are never records.
             if !entry.file_type()?.is_file() {
                 continue;
             }
@@ -313,177 +197,34 @@ impl FileEventStore {
             let Some(key) = record_key(&path) else {
                 continue;
             };
-            let extension = path.extension().and_then(|value| value.to_str());
-            match extension {
+            match path.extension().and_then(|value| value.to_str()) {
+                // The namespace lease guarantees there is no live writer.
                 Some("tmp") => {
-                    // An exclusive namespace lease guarantees there is no live writer.
                     fs::remove_file(path)?;
+                    continue;
                 }
-                Some("json" | "corrupt" | "unsupported") => {
-                    store.last_key = store.last_key.max(key.0);
-                    store.count = store.count.saturating_add(1);
-                    store.bytes = store.bytes.saturating_add(entry.metadata()?.len());
-                    if extension == Some("json") {
-                        if let Some(index) = &mut store.startup_index {
-                            if index.len() == RECOVERY_INDEX_LIMIT {
-                                store.startup_index = None;
-                            } else {
-                                index.push_back(key);
-                            }
-                        }
+                Some("json") => {
+                    // A record over the current limit stays on disk for a
+                    // later start with a larger limit, but is not queued now.
+                    let size = entry.metadata()?.len();
+                    if size <= limits.max_record_bytes {
+                        index.push((key, size));
                     }
                 }
                 _ => {}
             }
+            last_key = last_key.max(key);
         }
-        if let Some(index) = &mut store.startup_index {
-            index.make_contiguous().sort_unstable();
-        }
-        // Only startup records are recovered. New writes are already in memory.
-        store.recovery_end = store.last_key;
-        Ok(store)
-    }
-
-    fn start_head(&mut self, limit: Option<StoreKey>) {
-        self.recovery_end = limit.map_or(self.last_key, |key| self.last_key.min(key.0));
-        self.head_limit = limit;
-        self.recovery_cursor = 0;
-        self.continue_head = false;
-        self.startup_index = None;
-        self.scan_complete = false;
-        self.retrying = false;
-        self.retry_keys.clear();
-        self.retry_remaining = 0;
-    }
-
-    fn read_head_batch(
-        &mut self,
-        count: usize,
-        bytes: u64,
-        target: u64,
-        limit: Option<StoreKey>,
-    ) -> io::Result<Recovery> {
-        // A different checkpoint starts a new selection; later arrivals do not
-        // change an active bounded sweep's limit.
-        if !self.continue_head || self.head_limit != limit {
-            self.start_head(limit);
-        } else {
-            let end = limit.map_or(self.last_key, |limit| self.last_key.min(limit.0));
-            if end > self.recovery_end {
-                // Include newly persisted records: a bounded sweep only up to
-                // its checkpoint, an unbounded one all of them, so a record
-                // that keeps failing to read cannot hide later ones. Existing
-                // retry metadata stays owned by this sweep.
-                self.recovery_end = end;
-                self.scan_complete = false;
-            }
-        }
-        let mut first = self.recover(count.min(1), bytes)?;
-        let used = first.events.iter().map(|record| record.bytes).sum::<u64>();
-        let remaining = bytes.min(target).saturating_sub(used);
-        if !first.events.is_empty() && first.more && count > 1 && remaining > 0 {
-            let mut rest = self.recover(count - 1, remaining)?;
-            first.events.append(&mut rest.events);
-            first.errors.append(&mut rest.errors);
-            first.more = rest.more;
-            first.retry_pending |= rest.retry_pending;
-            first.advanced |= rest.advanced;
-        }
-        // Empty pages own no upload records: continue their bounded scan rather
-        // than reselecting the same preserved prefix. A returned upload or a
-        // completed scan permits normal retained-head reselection next time.
-        self.continue_head = first.events.is_empty() && (first.more || first.retry_pending);
-        Ok(first)
-    }
-
-    fn read_record(
-        &self,
-        key: StoreKey,
-        max_bytes: u64,
-    ) -> Result<Option<StoredEvent>, ReadFailure> {
-        let path = self.path(key);
-        let length = fs::metadata(&path)?.len();
-        if length > self.limits.max_record_bytes {
-            return Err(ReadFailure::permanent(record_over_limit()));
-        }
-        if length > max_bytes {
-            return Ok(None);
-        }
-        let file = File::open(&path)?;
-        let mut encoded = Vec::new();
-        file.take(self.limits.max_record_bytes + 1)
-            .read_to_end(&mut encoded)?;
-        if encoded.len() as u64 > self.limits.max_record_bytes {
-            return Err(ReadFailure::permanent(record_over_limit()));
-        }
-        if encoded.len() as u64 > max_bytes {
-            return Ok(None);
-        }
-        let version: Version = match serde_json::from_slice(&encoded) {
-            Ok(version) => version,
-            Err(_) => {
-                self.quarantine(key, "corrupt")?;
-                return Err(ReadFailure::permanent(invalid_record()));
-            }
-        };
-        if version.version != 1 {
-            self.quarantine(key, "unsupported")?;
-            return Err(ReadFailure::permanent(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unsupported event store version",
-            )));
-        }
-        let record: Record<CaptureEvent> = match serde_json::from_slice(&encoded) {
-            Ok(record) => record,
-            Err(_) => {
-                self.quarantine(key, "corrupt")?;
-                return Err(ReadFailure::permanent(invalid_record()));
-            }
-        };
-        Ok(Some(StoredEvent {
-            key,
-            event: record.event,
-            bytes: encoded.len() as u64,
-        }))
-    }
-
-    fn recover_retries(&mut self, max_events: usize, max_bytes: u64) -> io::Result<Recovery> {
-        let mut result = Recovery::default();
-        let mut bytes = 0u64;
-        let mut visited = 0;
-        while visited < max_events && self.retry_remaining > 0 {
-            let key = *self.retry_keys.front().expect("pending recovery retry");
-            match self.read_record(key, max_bytes.saturating_sub(bytes)) {
-                Ok(Some(event)) => {
-                    bytes += event.bytes;
-                    result.events.push(event);
-                    self.retry_keys.pop_front();
-                }
-                Ok(None) => break,
-                Err(failure) => {
-                    result.errors.push(failure.error);
-                    self.retry_keys.pop_front();
-                    if failure.retryable {
-                        self.retry_keys.push_back(key);
-                    }
-                }
-            }
-            self.retry_remaining -= 1;
-            visited += 1;
-        }
-        result.more = self.retry_remaining > 0;
-        if self.retry_remaining == 0 {
-            if !self.scan_complete && self.retry_keys.len() < RECOVERY_INDEX_LIMIT {
-                self.retrying = false;
-                result.more = true;
-            }
-            // A forced drain visits each retry at most once. The transport
-            // schedules any still-unreadable keys for a later recovery attempt.
-            self.retry_remaining = self.retry_keys.len();
-        }
-        result.retry_pending = !self.retry_keys.is_empty();
-        result.advanced = visited > 0;
-        Ok(result)
+        index.sort_unstable();
+        Ok(Self {
+            _directory: directory,
+            events_path,
+            limits,
+            index,
+            last_key,
+            #[cfg(test)]
+            fail_directory_sync: std::cell::Cell::new(false),
+        })
     }
 
     fn path(&self, key: StoreKey) -> PathBuf {
@@ -500,102 +241,116 @@ impl FileEventStore {
         Ok(())
     }
 
-    /// Keep at most `limit` oldest eligible names, even for an oversized spool.
-    fn candidates(&self, limit: usize) -> io::Result<(Vec<StoreKey>, usize)> {
-        if let Some(index) = &self.startup_index {
-            return Ok((index.iter().take(limit).copied().collect(), index.len()));
-        }
-        #[cfg(test)]
-        self.directory_scans.set(self.directory_scans.get() + 1);
-        let mut oldest = BinaryHeap::new();
-        let mut eligible: usize = 0;
-        for entry in fs::read_dir(&self.events_path)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|v| v.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(key) = record_key(&path) else {
-                continue;
-            };
-            if key.0 <= self.recovery_cursor || key.0 > self.recovery_end {
-                continue;
-            }
-            eligible = eligible.saturating_add(1);
-            if oldest.len() < limit {
-                oldest.push(key);
-            } else if oldest.peek().is_some_and(|latest| key < *latest) {
-                oldest.pop();
-                oldest.push(key);
-            }
-        }
-        Ok((oldest.into_sorted_vec(), eligible))
-    }
-
-    fn forget_index(&mut self, key: StoreKey) {
-        if let Some(index) = &mut self.startup_index {
-            index.retain(|stored| *stored != key);
-        }
-        self.retry_keys.retain(|stored| *stored != key);
-        self.retry_remaining = self.retry_remaining.min(self.retry_keys.len());
-    }
-
-    fn over_budget(&self) -> bool {
-        self.count > self.limits.max_events || self.bytes > self.limits.max_bytes
-    }
-
-    fn reclaim(&mut self) -> io::Result<()> {
-        while self.over_budget() {
-            let mut oldest: Option<(StoreKey, PathBuf)> = None;
-            for entry in fs::read_dir(&self.events_path)? {
-                let entry = entry?;
-                let path = entry.path();
-                if !entry.file_type()?.is_file()
-                    || !matches!(
-                        path.extension().and_then(|v| v.to_str()),
-                        Some("json" | "corrupt" | "unsupported")
-                    )
-                {
-                    continue;
-                }
-                if let Some(key) = record_key(&path) {
-                    if oldest.as_ref().map_or(true, |(prior, _)| key < *prior) {
-                        oldest = Some((key, path));
-                    }
-                }
-            }
-            let (key, path) = oldest.ok_or_else(|| {
-                io::Error::other("Event store accounting has no reclaimable record")
-            })?;
-            let length = fs::metadata(&path)?.len();
-            let undelivered = path.extension().and_then(|v| v.to_str()) == Some("json");
-            #[cfg(test)]
-            if self.fail_eviction.get() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "test eviction failure",
-                ));
-            }
-            fs::remove_file(path)?;
-            self.forget_index(key);
-            self.count = self.count.saturating_sub(1);
-            self.bytes = self.bytes.saturating_sub(length);
-            if undelivered {
-                self.evicted = self.evicted.saturating_add(1);
-            }
-            self.sync_directory()?;
-        }
-        Ok(())
-    }
-
-    fn quarantine(&self, key: StoreKey, extension: &str) -> Result<(), ReadFailure> {
+    /// Move an unreadable record aside so it is never read or sent again.
+    fn quarantine(&self, key: StoreKey, extension: &str, error: io::Error) -> ReadError {
         let path = self.path(key);
-        fs::rename(&path, path.with_extension(extension))?;
-        // After rename, retrying the original pathname would read a missing file.
-        self.sync_directory().map_err(ReadFailure::permanent)
+        match fs::rename(&path, path.with_extension(extension)) {
+            Ok(()) => ReadError::Lost(error),
+            // Still in place: a later read may move it aside.
+            Err(rename) => ReadError::Transient(rename),
+        }
+    }
+}
+
+impl EventStore for FileEventStore {
+    fn limits(&self) -> StoreLimits {
+        self.limits
+    }
+
+    fn take_index(&mut self) -> Vec<(StoreKey, u64)> {
+        std::mem::take(&mut self.index)
+    }
+
+    fn last_key(&self) -> StoreKey {
+        self.last_key
+    }
+
+    fn write(&mut self, key: StoreKey, event: &CaptureEvent) -> io::Result<u64> {
+        let mut buffer = RecordBuffer {
+            bytes: Vec::new(),
+            limit: self.limits.max_record_bytes,
+        };
+        serde_json::to_writer(&mut buffer, &Record { version: 1, event }).map_err(|error| {
+            if error.is_io() {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Event record exceeds store limit",
+                )
+            } else {
+                invalid_record()
+            }
+        })?;
+        let encoded = buffer.bytes;
+        // Check with the reader's bounded decoder before creating any file:
+        // serialization alone accepts values nested too deeply to read back.
+        let _: Record<CaptureEvent> =
+            serde_json::from_slice(&encoded).map_err(|_| invalid_record())?;
+        let path = self.path(key);
+        let temporary = path.with_extension("tmp");
+        let written = (|| -> io::Result<()> {
+            let mut file = open_private(&temporary, true)?;
+            file.write_all(&encoded)?;
+            file.sync_all()?;
+            // Closing first also permits rename on Windows.
+            drop(file);
+            fs::rename(&temporary, &path)
+        })();
+        if let Err(error) = written {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        // The record is complete and named. A failed directory sync risks it
+        // only on power loss, which the queue cannot do better than here.
+        let _ = self.sync_directory();
+        Ok(encoded.len() as u64)
+    }
+
+    fn read(&mut self, key: StoreKey) -> Result<CaptureEvent, ReadError> {
+        let path = self.path(key);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(ReadError::Lost(error));
+            }
+            Err(error) => return Err(ReadError::Transient(error)),
+        };
+        let mut encoded = Vec::new();
+        if let Err(error) = file
+            .take(self.limits.max_record_bytes + 1)
+            .read_to_end(&mut encoded)
+        {
+            return Err(ReadError::Transient(error));
+        }
+        if encoded.len() as u64 > self.limits.max_record_bytes {
+            // Kept for a later start with a larger limit, as at open.
+            return Err(ReadError::Lost(record_over_limit()));
+        }
+        let version: Version = match serde_json::from_slice(&encoded) {
+            Ok(version) => version,
+            Err(_) => return Err(self.quarantine(key, "corrupt", invalid_record())),
+        };
+        if version.version != 1 {
+            return Err(self.quarantine(
+                key,
+                "unsupported",
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Unsupported event store version",
+                ),
+            ));
+        }
+        match serde_json::from_slice::<Record<CaptureEvent>>(&encoded) {
+            Ok(record) => Ok(record.event),
+            Err(_) => Err(self.quarantine(key, "corrupt", invalid_record())),
+        }
+    }
+
+    fn delete(&mut self, key: StoreKey) -> io::Result<()> {
+        match fs::remove_file(self.path(key)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -618,186 +373,6 @@ fn record_over_limit() -> io::Error {
 fn invalid_record() -> io::Error {
     // serde errors can include invalid field values; do not expose payload data.
     io::Error::new(io::ErrorKind::InvalidData, "Invalid persisted event record")
-}
-
-impl EventStore for FileEventStore {
-    fn put_at(&mut self, event: &CaptureEvent, key: StoreKey) -> Result<StoreKey, StoreWriteError> {
-        if key.0 <= self.last_key {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Event queue identity is not increasing",
-            )
-            .into());
-        }
-        self.last_key = key.0 - 1;
-        self.put(event)
-    }
-
-    fn take_evicted(&mut self) -> usize {
-        std::mem::take(&mut self.evicted)
-    }
-
-    fn end_key(&self) -> Option<StoreKey> {
-        Some(StoreKey(self.last_key))
-    }
-
-    fn head(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
-        self.start_head(None);
-        self.recover(count, bytes)
-    }
-
-    fn head_batch(&mut self, count: usize, bytes: u64, target: u64) -> io::Result<Recovery> {
-        self.read_head_batch(count, bytes, target, None)
-    }
-
-    fn head_batch_through(
-        &mut self,
-        count: usize,
-        bytes: u64,
-        target: u64,
-        through: StoreKey,
-    ) -> io::Result<Recovery> {
-        self.read_head_batch(count, bytes, target, Some(through))
-    }
-
-    fn contains(&self, key: StoreKey) -> io::Result<bool> {
-        match fs::metadata(self.path(key)) {
-            Ok(metadata) => Ok(metadata.is_file()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn recover(&mut self, max_events: usize, max_bytes: u64) -> io::Result<Recovery> {
-        let max_events = max_events.min(self.limits.max_events);
-        let max_bytes = max_bytes.min(self.limits.max_bytes);
-        if max_events == 0 || max_bytes == 0 {
-            return Ok(Recovery {
-                more: !self.scan_complete,
-                retry_pending: !self.retry_keys.is_empty(),
-                ..Recovery::default()
-            });
-        }
-        if self.scan_complete || self.retrying {
-            return self.recover_retries(max_events, max_bytes);
-        }
-        let (candidates, eligible) = self.candidates(max_events)?;
-        let mut result = Recovery::default();
-        let mut bytes = 0u64;
-        let mut visited = 0usize;
-        for key in candidates {
-            match self.read_record(key, max_bytes.saturating_sub(bytes)) {
-                Ok(Some(event)) => {
-                    bytes += event.bytes;
-                    result.events.push(event);
-                }
-                Ok(None) => break,
-                Err(failure) => {
-                    result.errors.push(failure.error);
-                    if failure.retryable {
-                        if self.retry_keys.len() == RECOVERY_INDEX_LIMIT {
-                            // Bounded metadata backpressure: retry existing failures
-                            // before advancing past another unreadable record.
-                            self.retrying = true;
-                            self.retry_remaining = self.retry_keys.len();
-                            break;
-                        }
-                        self.retry_keys.push_back(key);
-                    }
-                }
-            }
-            self.recovery_cursor = key.0;
-            if let Some(index) = &mut self.startup_index {
-                let removed = index.pop_front();
-                debug_assert_eq!(removed, Some(key));
-            }
-            visited += 1;
-        }
-        self.scan_complete = visited == eligible;
-        if self.scan_complete {
-            self.retry_remaining = self.retry_keys.len();
-        }
-        result.more = !self.scan_complete && !self.retrying;
-        result.retry_pending = !self.retry_keys.is_empty();
-        result.advanced = visited > 0;
-        Ok(result)
-    }
-
-    fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
-        let mut buffer = RecordBuffer {
-            bytes: Vec::new(),
-            limit: self.limits.max_record_bytes,
-        };
-        serde_json::to_writer(&mut buffer, &Record { version: 1, event }).map_err(|error| {
-            if error.is_io() {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Event record exceeds store limit",
-                )
-            } else {
-                invalid_record()
-            }
-        })?;
-        let encoded = buffer.bytes;
-        let length = encoded.len() as u64;
-        // Validate with recovery's bounded decoder before creating any file.
-        // Serialization alone also accepts representations too deep to recover.
-        let _: Record<CaptureEvent> =
-            serde_json::from_slice(&encoded).map_err(|_| invalid_record())?;
-        // Settle prior replacement debt before creating another disk record.
-        self.reclaim()?;
-        let key = StoreKey(
-            self.last_key
-                .checked_add(1)
-                .ok_or_else(|| io::Error::other("Event store sequence exhausted"))?,
-        );
-        self.last_key = key.0;
-        let path = self.path(key);
-        let temporary = path.with_extension("tmp");
-        let written = (|| -> io::Result<()> {
-            let mut file = open_private(&temporary, true)?;
-            file.write_all(&encoded)?;
-            file.sync_all()?;
-            // Closing first also permits rename on Windows.
-            drop(file);
-            fs::rename(&temporary, &path)?;
-            Ok(())
-        })();
-        if let Err(error) = written {
-            let _ = fs::remove_file(&temporary);
-            return Err(error.into());
-        }
-        self.count = self.count.saturating_add(1);
-        self.bytes = self.bytes.saturating_add(length);
-        // Even an uncertain directory sync retains the created record's key,
-        // allowing a later delivery acknowledgement to release it normally.
-        let synced = self.sync_directory();
-        let reclaimed = self.reclaim();
-        synced.and(reclaimed).map_err(|error| StoreWriteError {
-            key: Some(key),
-            error,
-        })?;
-        Ok(key)
-    }
-
-    fn remove(&mut self, key: StoreKey) -> io::Result<()> {
-        let path = self.path(key);
-        let length = match fs::metadata(&path) {
-            Ok(metadata) => metadata.len(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        match fs::remove_file(path) {
-            Ok(()) => {
-                self.forget_index(key);
-                self.count = self.count.saturating_sub(1);
-                self.bytes = self.bytes.saturating_sub(length);
-                self.sync_directory()
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -490,6 +490,7 @@ pub fn posthog::Client::evaluate_feature_flag_locally(&self, &posthog::FeatureFl
 pub async fn posthog::Client::evaluate_flags<S: core::convert::Into<alloc::string::String>>(&self, S, posthog::EvaluateFlagsOptions) -> core::result::Result<posthog::FeatureFlagEvaluations, posthog::Error>
 pub async fn posthog::Client::evaluate_flags_with_context(&self, &posthog::RequestContext, posthog::EvaluateFlagsOptions) -> core::result::Result<posthog::FeatureFlagEvaluations, posthog::Error>
 pub async fn posthog::Client::flush(&self)
+pub async fn posthog::Client::get_remote_config_payload<K: core::convert::Into<alloc::string::String>>(&self, K) -> core::result::Result<core::option::Option<serde_json::value::Value>, posthog::Error>
 pub fn posthog::Client::group_identify<T: core::convert::Into<alloc::string::String>, K: core::convert::Into<alloc::string::String>, P: serde_core::ser::Serialize>(&self, T, K, P) -> core::result::Result<(), posthog::Error>
 pub async fn posthog::Client::reload_feature_flags(&self) -> core::result::Result<(), posthog::Error>
 pub async fn posthog::Client::shutdown(&self)

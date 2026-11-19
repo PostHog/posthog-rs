@@ -325,8 +325,10 @@ fn lowered_record_limit_preserves_oversized_head_while_recovery_and_flush_progre
         CaptureOutcome::Accepted { .. }
     ));
     assert_eq!(seed.flush_blocking().state, PersistenceOutcome::Persisted);
+    // A budget shorter than the retry wait stops at once and keeps both records.
     assert_eq!(
-        seed.shutdown_blocking(None).delivery,
+        seed.shutdown_blocking(Some(Duration::from_secs(1)))
+            .delivery,
         DeliveryOutcome::Stopped
     );
     drop(seed);

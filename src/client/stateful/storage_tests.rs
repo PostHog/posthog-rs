@@ -304,9 +304,7 @@ fn corrupt_state_reports_and_allows_replacement_while_event_storage_remains_usab
         .event_store
         .as_mut()
         .unwrap()
-        .recover(10, 4096)
-        .unwrap()
-        .events
+        .take_index()
         .is_empty());
     assert_eq!(
         *errors.lock().unwrap(),
