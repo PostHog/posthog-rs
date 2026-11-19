@@ -535,6 +535,8 @@ fn upload(
     }
     let mut headers = HeaderMap::new();
     for (name, value) in signed {
+        // `insert` panics on a full map, so `try_insert` stays as a backstop
+        // if the cap above ever changes.
         headers
             .try_insert(
                 HeaderName::from_bytes(name.as_bytes()).ok()?,
