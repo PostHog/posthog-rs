@@ -1,9 +1,9 @@
 name: "Build C bindings"
 
 # Builds and smoke-tests posthog-ffi for each supported platform, and uploads
-# one archive per platform as a workflow artifact. release.yml calls it with
-# the published commit and attaches the archives to the GitHub Release. CI
-# calls it on pull requests without a ref, which builds the PR's commit.
+# one archive per platform as a workflow artifact. release.yml calls it for the
+# release tag and attaches the archives to the GitHub Release. CI calls it on
+# pull requests, where it builds the PR's commit.
 on:
   workflow_call:
     inputs:
@@ -11,11 +11,11 @@ on:
         description: "posthog version used in the archive names"
         required: true
         type: string
-      ref:
-        description: "Commit to build. Empty builds the commit that triggered the run."
+      release:
+        description: "Build the release tag named by `version`. Otherwise build the commit that triggered the run."
         required: false
-        default: ""
-        type: string
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -56,7 +56,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.release && format('refs/tags/{0}', inputs.version) || '' }}
           persist-credentials: false
 
       - name: Check the posthog version
@@ -83,19 +83,24 @@ jobs:
         run: cargo build --locked --release --target "$TARGET"
 
       - name: Smoke test
+        if: runner.os != 'Windows'
         env:
           TARGET: ${{ matrix.target }}
         run: |
           out="target/$TARGET/release"
-          if [[ "$TARGET" == *windows* ]]; then
-            # Link the import library. The DLL must sit next to the program.
-            clang++ -std=c++17 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude "$out/posthog_ffi.dll.lib" -o smoke.exe
-            cp "$out/posthog_ffi.dll" .
-            ./smoke.exe
-          else
-            c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -L"$out" -lposthog_ffi -o smoke
-            LD_LIBRARY_PATH="$out" DYLD_LIBRARY_PATH="$out" ./smoke
-          fi
+          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -L"$out" -lposthog_ffi -o smoke
+          LD_LIBRARY_PATH="$out" DYLD_LIBRARY_PATH="$out" ./smoke
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          rem Link the DLL's import library. The DLL must sit next to the program.
+          cl /nologo /std:c++17 /EHsc /W4 /WX tests\c\smoke.cpp /Iinclude target\x86_64-pc-windows-msvc\release\posthog_ffi.dll.lib /Fe:smoke.exe || exit /b 1
+          copy /y target\x86_64-pc-windows-msvc\release\posthog_ffi.dll . || exit /b 1
+          smoke.exe
 
       - name: Package
         id: package

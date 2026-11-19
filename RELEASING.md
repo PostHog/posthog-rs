@@ -38,14 +38,14 @@ Each archive contains the shared and static libraries, `posthog.h`, the C and C+
 
 The bindings are part of the `posthog` release. They share its changeset, version, tag and GitHub Release, so `cargo/posthog` is the only changeset key they need. After "Release and publish" creates the GitHub Release, two more jobs in [`release.yml`](.github/workflows/release.yml) run:
 
-- "Build C bindings" builds the published commit for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml) and runs the C++ smoke test against each built library.
+- "Build C bindings" builds the new release tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml) and runs the C++ smoke test against each built library.
 - "Attach C bindings to the GitHub Release" uploads the archives to the release.
 
 They run even if a later step of "Release and publish" fails, as long as the GitHub Release exists. A failure in either job sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
 
 The release step also updates `crates/posthog-ffi/Cargo.lock` to the new `posthog` version, because the bindings crate has its own workspace and lockfile.
 
-If a C bindings job fails, the crates are still published. Use **Re-run failed jobs** on that Release run. It rebuilds from the same published commit and replaces any archives already attached. If the build itself needs a fix, release a patch version instead.
+If a C bindings job fails, the crates are still published. Use **Re-run failed jobs** on that Release run. It rebuilds from the same release tag and replaces any archives already attached. If the build itself needs a fix, release a patch version instead.
 
 A change that affects only the bindings still needs a changeset for `cargo/posthog` to produce a release, because the bindings ship with each `posthog` release.
 

@@ -271,7 +271,7 @@ jobs:
     uses: ./.github/workflows/ffi-build.yml
     with:
       version: ${{ needs.release.outputs.version }}
-      ref: ${{ needs.release.outputs.sha }}
+      release: true
 
   ffi-publish:
     name: Attach C bindings to the GitHub Release
