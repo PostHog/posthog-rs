@@ -1,9 +1,9 @@
 // Captures events and reads feature flags from C++, with RAII handles and
 // exceptions on top of the C API.
 //
-//   cargo build --release
-//   c++ -std=c++17 examples/capture.cpp -Iinclude -Ltarget/release -lposthog_ffi -o capture-cpp
-//   export LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release
+//   cargo build --release -p posthog-ffi
+//   c++ -std=c++17 examples/capture.cpp -Iinclude -L../../target/release -lposthog_ffi -o capture-cpp
+//   export LD_LIBRARY_PATH=../../target/release DYLD_LIBRARY_PATH=../../target/release
 //   POSTHOG_API_KEY=phc_... ./capture-cpp
 //
 // Optional: POSTHOG_HOST (defaults to US Cloud) and POSTHOG_DISTINCT_ID.

@@ -166,19 +166,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/cbindgen
-            crates/posthog-ffi/target
-          key: ${{ runner.os }}-cargo-ffi-${{ hashFiles('crates/posthog-ffi/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-ffi-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-ffi-
 
       - name: Format
-        run: cargo fmt -- --check
+        run: cargo fmt -p posthog-ffi -- --check
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked -p posthog-ffi --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked -p posthog-ffi
 
       - name: Check the header matches the source
         run: |
@@ -188,15 +188,15 @@ jobs:
 
       - name: Link from C and C++
         run: |
-          cargo build --locked --release
-          read -ra native_libs <<< "$(cargo rustc --locked --release --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
+          cargo build --locked --release -p posthog-ffi
+          read -ra native_libs <<< "$(cargo rustc --locked --release -p posthog-ffi --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
             | sed -n 's/.*native-static-libs: //p' | tail -1)"
-          cc -std=c99 -Wall -Wextra -Werror -pedantic examples/capture.c -Iinclude -Ltarget/release -lposthog_ffi -o capture
-          c++ -std=c++17 -Wall -Wextra -Werror -pedantic examples/capture.cpp -Iinclude -Ltarget/release -lposthog_ffi -o capture-cpp
-          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -Ltarget/release -lposthog_ffi -o smoke-shared
-          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude target/release/libposthog_ffi.a "${native_libs[@]}" -o smoke-static
-          c++ -std=c++11 -fshort-enums -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude target/release/libposthog_ffi.a "${native_libs[@]}" -o smoke-short-enums
-          LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release ./smoke-shared
+          cc -std=c99 -Wall -Wextra -Werror -pedantic examples/capture.c -Iinclude -L../../target/release -lposthog_ffi -o capture
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic examples/capture.cpp -Iinclude -L../../target/release -lposthog_ffi -o capture-cpp
+          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -L../../target/release -lposthog_ffi -o smoke-shared
+          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude ../../target/release/libposthog_ffi.a "${native_libs[@]}" -o smoke-static
+          c++ -std=c++11 -fshort-enums -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude ../../target/release/libposthog_ffi.a "${native_libs[@]}" -o smoke-short-enums
+          LD_LIBRARY_PATH=../../target/release DYLD_LIBRARY_PATH=../../target/release ./smoke-shared
           ./smoke-static
           ./smoke-short-enums
 
@@ -212,9 +212,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Read the posthog version
+      - name: Read the posthog-ffi version
         id: version
-        run: echo "version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(grep -m1 '^version = ' crates/posthog-ffi/Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
 
   ffi-release-dry-run:
     name: C bindings release build
@@ -236,7 +236,7 @@ jobs:
           rustup default 1.78.0
 
       - name: Check
-        run: cargo check --locked --lib --manifest-path crates/posthog-ffi/Cargo.toml
+        run: cargo check --locked -p posthog-ffi --lib
 
   package:
     name: Cargo publish dry run
@@ -276,7 +276,7 @@ jobs:
             command: cargo test --verbose
           - name: Unit test (workspace)
             cache-key: workspace
-            command: cargo test --workspace --verbose
+            command: cargo test --workspace --exclude posthog-ffi --verbose
           - name: Compatibility crate
             cache-key: compatibility-crate
             command: >-

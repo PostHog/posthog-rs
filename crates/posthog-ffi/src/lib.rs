@@ -23,8 +23,14 @@ use serde_json::Value;
 
 const LIB_NAME: &str = "posthog-rs-ffi";
 const SDK_LIB_NAME: &str = "posthog-rs";
+const LIB_VERSION: &str = env!("CARGO_PKG_VERSION");
+const LIB_VERSION_PARTS: [(&str, &str); 3] = [
+    ("$lib_version__major", env!("CARGO_PKG_VERSION_MAJOR")),
+    ("$lib_version__minor", env!("CARGO_PKG_VERSION_MINOR")),
+    ("$lib_version__patch", env!("CARGO_PKG_VERSION_PATCH")),
+];
 const VERSION: &CStr =
-    match CStr::from_bytes_with_nul(concat!(env!("POSTHOG_SDK_VERSION"), "\0").as_bytes()) {
+    match CStr::from_bytes_with_nul(concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes()) {
         Ok(version) => version,
         Err(_) => panic!("version contains a NUL byte"),
     };
@@ -206,16 +212,23 @@ fn into_c_string(value: String) -> Result<*mut c_char, FfiError> {
 }
 
 /// Reports these bindings, rather than the Rust SDK, as the event source.
-/// The SDK fills `$lib` and `$lib_version` before `before_send` hooks run, so
-/// only the name changes and `$lib_version` keeps the SDK version.
-fn apply_lib_name(mut event: Event) -> Option<Event> {
+/// The SDK fills `$lib`, `$lib_version` and its version parts before
+/// `before_send` hooks run. Values the caller set are left alone, because the
+/// SDK only fills `$lib` when it's unset.
+fn apply_lib_identity(mut event: Event) -> Option<Event> {
     if event.properties().get("$lib").and_then(Value::as_str) == Some(SDK_LIB_NAME) {
         let _ = event.insert_prop("$lib", LIB_NAME);
+        let _ = event.insert_prop("$lib_version", LIB_VERSION);
+        for (key, part) in LIB_VERSION_PARTS {
+            if let Ok(part) = part.parse::<u64>() {
+                let _ = event.insert_prop(key, part);
+            }
+        }
     }
     Some(event)
 }
 
-/// Returns the PostHog SDK version as a static, NUL-terminated string.
+/// Returns the version of these bindings as a static, NUL-terminated string.
 #[no_mangle]
 pub extern "C" fn posthog_version() -> *const c_char {
     VERSION.as_ptr()
@@ -472,7 +485,7 @@ pub unsafe extern "C" fn posthog_options_set_secret_key(
 pub unsafe extern "C" fn posthog_client_new(options: *const PostHogOptions) -> *mut PostHogClient {
     ffi_new(|| {
         let mut builder = ref_arg(options, "options")?.builder.clone();
-        builder.before_send(apply_lib_name);
+        builder.before_send(apply_lib_identity);
         let options = builder.build().map_err(|error| {
             FfiError::new(
                 PostHogStatus::POSTHOG_STATUS_INVALID_ARGUMENT,
@@ -987,9 +1000,9 @@ mod tests {
     }
 
     #[test]
-    fn version_matches_sdk() {
+    fn version_matches_crate() {
         let version = unsafe { CStr::from_ptr(posthog_version()) };
-        assert_eq!(version.to_str().unwrap(), env!("POSTHOG_SDK_VERSION"));
+        assert_eq!(version.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

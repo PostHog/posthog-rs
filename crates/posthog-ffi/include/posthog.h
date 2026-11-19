@@ -130,7 +130,7 @@ extern "C" {
 #endif // __cplusplus
 
 /**
- * Returns the PostHog SDK version as a static, NUL-terminated string.
+ * Returns the version of these bindings as a static, NUL-terminated string.
  */
 const char *posthog_version(void);
 

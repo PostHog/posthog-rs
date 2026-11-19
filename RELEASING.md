@@ -26,7 +26,19 @@ You can also trigger a release manually via the workflow's `workflow_dispatch` t
 
 ## C bindings
 
-`crates/posthog-ffi` isn't published to crates.io. Each release attaches prebuilt archives of it to the GitHub Release, built from the same tag and named with the same version as `posthog`:
+`crates/posthog-ffi` is released on its own, with its own version, changesets and changelog (`crates/posthog-ffi/CHANGELOG.md`). It isn't published to crates.io. Use the `cargo/posthog-ffi` changeset key for changes to the bindings:
+
+```md
+---
+cargo/posthog-ffi: minor
+---
+```
+
+The bindings report their own version as `$lib_version`, next to `$lib` set to `posthog-rs-ffi`.
+
+Because `posthog-ffi` depends on `posthog`, Sampo also gives `posthog-ffi` a patch release whenever `posthog` is released. Those releases ship the bindings with the new SDK.
+
+Sampo tags each `posthog-ffi` release as `posthog-ffi-v<version>`. The release workflow then creates a GitHub Release for that tag, separate from the `posthog` release and not marked as latest. It attaches these archives:
 
 - `posthog-ffi-<version>-x86_64-unknown-linux-gnu.tar.gz`
 - `posthog-ffi-<version>-aarch64-unknown-linux-gnu.tar.gz`
@@ -36,18 +48,15 @@ You can also trigger a release manually via the workflow's `workflow_dispatch` t
 
 Each archive contains the shared and static libraries, `posthog.h`, the C and C++ examples, the README, the license, and `lib/native-static-libs.txt`, which lists the system libraries to link with the static library. Each archive has a `.sha256` file next to it.
 
-The bindings are part of the `posthog` release. They share its changeset, version, tag and GitHub Release, so `cargo/posthog` is the only changeset key they need. After "Release and publish" creates the GitHub Release, two more jobs in [`release.yml`](.github/workflows/release.yml) run:
+All of this runs in [`release.yml`](.github/workflows/release.yml), in the same approved release as `posthog`:
 
-- "Build C bindings" builds the new release tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml) and runs the C++ smoke test against each built library.
-- "Attach C bindings to the GitHub Release" uploads the archives to the release.
+- "Release and publish" bumps whichever packages have changesets, publishes `posthog` and `posthog-rs` only when they changed, and creates the `posthog-ffi` GitHub Release when its version changed.
+- "Build C bindings" builds the `posthog-ffi-v<version>` tag for each platform with [`ffi-build.yml`](.github/workflows/ffi-build.yml) and runs the C++ smoke test against each built library.
+- "Attach C bindings to the GitHub Release" checks that all five archives and their checksums are present, then uploads them.
 
-They run even if a later step of "Release and publish" fails, as long as the GitHub Release exists. A failure in either job sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
+The two C bindings jobs run even if publishing `posthog` fails, as long as the `posthog-ffi` GitHub Release exists. A failure in either sends the usual release failure alert to Slack. Pull requests run the same build without uploading, as the "C bindings release build" CI job.
 
-The release step also updates `crates/posthog-ffi/Cargo.lock` to the new `posthog` version, because the bindings crate has its own workspace and lockfile.
-
-If a C bindings job fails, the crates are still published. Use **Re-run failed jobs** on that Release run. It rebuilds from the same release tag and replaces any archives already attached. If the build itself needs a fix, release a patch version instead.
-
-A change that affects only the bindings still needs a changeset for `cargo/posthog` to produce a release, because the bindings ship with each `posthog` release.
+If a C bindings job fails, use **Re-run failed jobs** on that Release run. It rebuilds from the same tag and replaces any archives already attached. If the build itself needs a fix, release a `posthog-ffi` patch version instead.
 
 ## Failed or cancelled release
 

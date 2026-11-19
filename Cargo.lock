@@ -1726,6 +1726,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "posthog-ffi"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "httpmock",
+ "posthog",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "posthog-rs"
 version = "1.2.0"
 dependencies = [

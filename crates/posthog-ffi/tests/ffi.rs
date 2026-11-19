@@ -66,7 +66,13 @@ fn captures_event_with_typed_properties_and_ffi_lib() {
                 && properties["$set"] == json!({"plan": "free"})
                 && properties["$groups"] == json!({"company": "acme"})
                 && properties["$lib"] == "posthog-rs-ffi"
-                && properties["$lib_version"] == env!("POSTHOG_SDK_VERSION")
+                && properties["$lib_version"] == env!("CARGO_PKG_VERSION")
+                && properties["$lib_version__major"]
+                    == env!("CARGO_PKG_VERSION_MAJOR").parse::<u64>().unwrap()
+                && properties["$lib_version__minor"]
+                    == env!("CARGO_PKG_VERSION_MINOR").parse::<u64>().unwrap()
+                && properties["$lib_version__patch"]
+                    == env!("CARGO_PKG_VERSION_PATCH").parse::<u64>().unwrap()
         });
         then.status(200).json_body(json!({"results": {}}));
     });

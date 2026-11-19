@@ -1,5 +1,5 @@
 ---
-cargo/posthog: minor
+cargo/posthog-ffi: minor
 ---
 
-Add C bindings for C and C++ applications. Each release now attaches prebuilt `posthog-ffi` archives for Linux, macOS and Windows to its GitHub Release, with the shared and static libraries, the `posthog.h` header and C and C++ examples. The bindings wrap the blocking client and report events with `$lib` set to `posthog-rs-ffi`.
+Add C bindings for C and C++ applications. Each `posthog-ffi` release attaches prebuilt archives for Linux, macOS and Windows to its GitHub Release, with the shared and static libraries, the `posthog.h` header and C and C++ examples. The bindings wrap the blocking client and report events with `$lib` set to `posthog-rs-ffi` and `$lib_version` set to the `posthog-ffi` version.

@@ -7,28 +7,30 @@ The bindings wrap the SDK's blocking client:
 - **Capture** queues events and returns immediately. A background thread batches, retries and sends them.
 - **Feature flag evaluation** blocks the calling thread while it fetches flags, or evaluates them locally when local evaluation is enabled.
 
-Events report `$lib` as `posthog-rs-ffi`. `$lib_version` is the version of the Rust SDK the bindings are built from.
+Events report `$lib` as `posthog-rs-ffi` and `$lib_version` as the `posthog-ffi` version.
 
 ## Download
 
-Each [posthog-rs release](https://github.com/PostHog/posthog-rs/releases) attaches prebuilt archives for Linux (x86_64 and arm64, glibc 2.35 or newer), macOS (Intel and Apple silicon) and Windows (x86_64, MSVC). The archives are named `posthog-ffi-<version>-<target>`. Each contains the shared and static libraries, `include/posthog.h`, the examples, and `lib/native-static-libs.txt`, which lists the system libraries to link with the static library.
+Prebuilt archives are attached to each [`posthog-ffi` release](https://github.com/PostHog/posthog-rs/releases?q=posthog-ffi), tagged `posthog-ffi-v<version>`. They cover Linux (x86_64 and arm64, glibc 2.35 or newer), macOS (Intel and Apple silicon) and Windows (x86_64, MSVC). The archives are named `posthog-ffi-<version>-<target>`. Each contains the shared and static libraries, `include/posthog.h`, the examples, and `lib/native-static-libs.txt`, which lists the system libraries to link with the static library.
 
-The bindings share the `posthog` crate's version, so `posthog-ffi-1.2.0` wraps `posthog` 1.2.0.
+`posthog-ffi` has its own version, independent of the `posthog` crate. `posthog_version()` returns it, and events report it as `$lib_version`.
 
 ## Build
 
 To build from source, or for another platform, you need Rust 1.78 or newer.
 
+From the repository root:
+
 ```bash
-cd crates/posthog-ffi
-cargo build --release
+cargo build --release -p posthog-ffi
 ```
 
-This builds:
+This builds, in the repository's `target/release` directory:
 
-- `target/release/libposthog_ffi.{so,dylib}` or `posthog_ffi.dll`: the shared library
-- `target/release/libposthog_ffi.a` or `posthog_ffi.lib`: the static library
-- `include/posthog.h`: the header (checked in)
+- `libposthog_ffi.{so,dylib}` or `posthog_ffi.dll`: the shared library
+- `libposthog_ffi.a` or `posthog_ffi.lib`: the static library
+
+The header is checked in at `crates/posthog-ffi/include/posthog.h`.
 
 ### Linking
 
@@ -55,7 +57,7 @@ cargo rustc --release --lib --crate-type staticlib -- --print native-static-libs
 
 On macOS, for example, that is `-framework CoreFoundation -framework Foundation -framework Security -lobjc -liconv`.
 
-To build for another platform, pass `--target`, such as `cargo build --release --target x86_64-pc-windows-msvc`.
+To build for another platform, pass `--target`, such as `cargo build --release -p posthog-ffi --target x86_64-pc-windows-msvc`.
 
 ## Usage
 
@@ -134,4 +136,4 @@ cbindgen --config cbindgen.toml --output include/posthog.h
 
 CI fails if `include/posthog.h` doesn't match the source.
 
-`posthog-ffi` is its own Cargo workspace. In the root workspace, Cargo would enable the SDK's `async-client` feature for every member, and that feature replaces the blocking client the bindings wrap.
+`posthog-ffi` is a member of the repository's Cargo workspace. Build and test it with `-p posthog-ffi` (or from `crates/posthog-ffi`), not with `--workspace`: a workspace-wide build enables the SDK's `async-client` feature, and that replaces the blocking client the bindings wrap.

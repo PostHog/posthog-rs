@@ -84,8 +84,8 @@ jobs:
       actions: write
       id-token: write
     outputs:
-      version: ${{ steps.sampo-release.outputs.new_version }}
-      sha: ${{ steps.github-release.outputs.sha }}
+      ffi_version: ${{ steps.sampo-release.outputs.ffi_version }}
+      ffi_tag: ${{ steps.ffi-release.outputs.tag }}
     steps:
       - name: Notify Slack - Approved
         if: needs.notify-approval-needed.outputs.slack_ts != ''
@@ -133,17 +133,33 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
         run: |
+          version_of() { grep -m1 '^version = ' "$1" | sed 's/version = "\(.*\)"/\1/'; }
+          old_version=$(version_of Cargo.toml)
+          old_ffi_version=$(version_of crates/posthog-ffi/Cargo.toml)
           sampo release
           # Sampo regenerates Cargo.lock, resolving every dependency to its
           # latest version, which can need a newer Rust than the MSRV. Keep the
           # released lock and move only the workspace crates to their new versions.
           git checkout HEAD -- Cargo.lock
           cargo update --workspace
-          # posthog-ffi is its own workspace, so its lock records the posthog
-          # version separately and `--locked` builds fail until it moves too.
-          cargo update --workspace --manifest-path crates/posthog-ffi/Cargo.toml
-          new_version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          new_version=$(version_of Cargo.toml)
+          ffi_version=$(version_of crates/posthog-ffi/Cargo.toml)
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "ffi_version=$ffi_version" >> "$GITHUB_OUTPUT"
+          # posthog-ffi has its own version and changesets, so a release can
+          # bump either package or both.
+          released=()
+          if [ "$new_version" != "$old_version" ]; then
+            echo "posthog_released=true" >> "$GITHUB_OUTPUT"
+            released+=("v$new_version")
+          fi
+          if [ "$ffi_version" != "$old_ffi_version" ]; then
+            echo "ffi_released=true" >> "$GITHUB_OUTPUT"
+            released+=("posthog-ffi v$ffi_version")
+          fi
+          title=$(printf '%s, ' "${released[@]}")
+          title=${title%, }
+          echo "title=${title:-v$new_version}" >> "$GITHUB_OUTPUT"
 
       - name: Generate SDK reference
         id: reference
@@ -175,7 +191,7 @@ jobs:
         if: steps.check-changes.outputs.committed == 'true'
         uses: planetscale/ghcommit-action@a6b150b81dca5dd027baa898604418eec9e11465
         with:
-          commit_message: "chore: Release v${{ steps.sampo-release.outputs.new_version }} [skip ci]"
+          commit_message: "chore: Release ${{ steps.sampo-release.outputs.title }} [skip ci]"
           repo: ${{ github.repository }}
           branch: main
         env:
@@ -186,46 +202,44 @@ jobs:
       # and pull, otherwise cargo publish fails with "files contain changes
       # not yet committed".
       - name: Sync local repository
+        id: sync
         if: steps.check-changes.outputs.committed == 'true'
         run: git reset --hard && git pull origin main
 
       - name: Publish dry-run
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         run: scripts/check-compatibility-crate.sh && cargo publish --workspace --dry-run --locked --package posthog --package posthog-rs
 
       - name: Authenticate with crates.io
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
         id: crates-auth
 
       - name: Configure git identity
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         run: |
           git config user.name "posthog-rs-releaser[bot]"
           git config user.email "posthog-rs-releaser[bot]@users.noreply.github.com"
 
       - name: Publish with Sampo
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: sampo publish
 
       - name: Create GitHub Release
-        id: github-release
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
         run: |
           CHANGELOG_ENTRY=$(awk -v defText="see CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
           # Tag the commit that was just published, not whatever main points to now.
-          sha=$(git rev-parse HEAD)
-          gh release create "$NEW_VERSION" --target "$sha" --notes "$CHANGELOG_ENTRY"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          gh release create "$NEW_VERSION" --target "$(git rev-parse HEAD)" --notes "$CHANGELOG_ENTRY"
 
       - name: Dispatch posthog upgrade for posthog-rs
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         env:
           PACKAGE_VERSION: ${{ steps.sampo-release.outputs.new_version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -240,6 +254,19 @@ jobs:
                  --arg package_version "$PACKAGE_VERSION" \
                  '{ref: $ref, inputs: {package_name: $package_name, package_version: $package_version}}' \
                )"
+
+      - name: Create posthog-ffi GitHub Release
+        id: ffi-release
+        # Runs even if publishing posthog failed: the release commit is already on main.
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' && steps.sampo-release.outputs.ffi_released == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
+          FFI_VERSION: ${{ steps.sampo-release.outputs.ffi_version }}
+        run: |
+          tag="posthog-ffi-v$FFI_VERSION"
+          notes=$(awk -v defText="see crates/posthog-ffi/CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' crates/posthog-ffi/CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
+          gh release create "$tag" --target "$(git rev-parse HEAD)" --title "posthog-ffi $FFI_VERSION" --notes "$notes" --latest=false
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Send failure event to PostHog
         if: ${{ failure() }}
@@ -266,11 +293,11 @@ jobs:
   ffi-build:
     name: Build C bindings
     needs: release
-    # The GitHub Release exists once this output is set, even if a later step failed.
-    if: ${{ !cancelled() && needs.release.outputs.sha != '' }}
+    # The posthog-ffi GitHub Release exists once this output is set, even if a later step failed.
+    if: ${{ !cancelled() && needs.release.outputs.ffi_tag != '' }}
     uses: ./.github/workflows/ffi-build.yml
     with:
-      version: ${{ needs.release.outputs.version }}
+      version: ${{ needs.release.outputs.ffi_version }}
       release: true
 
   ffi-publish:
@@ -290,7 +317,7 @@ jobs:
 
       - name: Check every platform is present
         env:
-          VERSION: ${{ needs.release.outputs.version }}
+          VERSION: ${{ needs.release.outputs.ffi_version }}
         working-directory: dist
         run: |
           ls -l
@@ -310,14 +337,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.release.outputs.version }}
-        run: gh release upload "$VERSION" dist/* --clobber
+          TAG: ${{ needs.release.outputs.ffi_tag }}
+        run: gh release upload "$TAG" dist/* --clobber
 
   notify-released:
     name: Notify Slack - Released
     needs: [check-changesets, notify-approval-needed, release, ffi-publish]
     runs-on: ubuntu-latest
-    if: always() && needs.release.result == 'success' && needs.ffi-publish.result == 'success' && needs.notify-approval-needed.outputs.slack_ts != ''
+    if: >-
+      always() && needs.release.result == 'success' &&
+      (needs.release.outputs.ffi_tag == '' || needs.ffi-publish.result == 'success') &&
+      needs.notify-approval-needed.outputs.slack_ts != ''
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -328,5 +358,5 @@ jobs:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
           thread_ts: ${{ needs.notify-approval-needed.outputs.slack_ts }}
-          message: "🚀 posthog and posthog-rs released successfully, with C bindings attached!"
+          message: "🚀 Release completed successfully!"
           emoji_reaction: "rocket"
