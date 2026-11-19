@@ -120,6 +120,8 @@ pub enum CaptureOutcome {
     Accepted { uuid: Uuid },
     /// Configuration or local startup disabled the client.
     Disabled,
+    /// Collection was opted out when the event's state snapshot was taken.
+    OptedOut,
     /// Client admission is closed or its delivery worker has exited.
     Closed,
     /// The input name or a hook-transformed required field is blank.
@@ -139,6 +141,7 @@ pub(super) struct Producer {
     disable_geoip: bool,
     hooks: Vec<BeforeSendHook>,
     pub(super) person_profiles: PersonProfiles,
+    pub(super) default_opt_out: bool,
 }
 
 impl Producer {
@@ -159,6 +162,7 @@ impl Producer {
             disable_geoip: config.disable_geoip,
             hooks: config.before_send.clone(),
             person_profiles: config.person_profiles,
+            default_opt_out: config.opt_out,
         }
     }
 
@@ -283,11 +287,14 @@ impl Client {
         if self.closed.load(Ordering::Acquire) {
             return CaptureOutcome::Closed;
         }
+        let snapshot = self.state.as_ref().unwrap().snapshot();
+        if self.snapshot_opted_out(&snapshot) {
+            return CaptureOutcome::OptedOut;
+        }
         let _guard = match CaptureGuard::enter(self) {
             Ok(guard) => guard,
             Err(outcome) => return outcome,
         };
-        let snapshot = self.state.as_ref().unwrap().snapshot();
         self.capture_snapshot(input.into(), &snapshot)
     }
 
@@ -313,6 +320,9 @@ impl Client {
     ) -> Result<CaptureEvent, CaptureOutcome> {
         if self.closed.load(Ordering::Acquire) {
             return Err(CaptureOutcome::Closed);
+        }
+        if self.snapshot_opted_out(snapshot) {
+            return Err(CaptureOutcome::OptedOut);
         }
         let wire = self
             .producer

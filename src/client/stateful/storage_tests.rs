@@ -52,6 +52,44 @@ fn record(snapshot: &Snapshot) -> Vec<u8> {
 }
 
 #[test]
+fn consent_choices_round_trip_and_require_a_valid_field() {
+    let mut snapshot = Snapshot::anonymous("anonymous".into());
+    for choice in [None, Some(true), Some(false)] {
+        snapshot.opt_out = choice;
+        let directory = TestDirectory::new();
+        let mut store = FileStateStore::open(directory.lease()).unwrap().store;
+        store.save(&snapshot).unwrap();
+        assert_eq!(store.load().unwrap(), Some(snapshot.clone()));
+    }
+    for consent in [
+        None,
+        Some(serde_json::json!("true")),
+        Some(serde_json::json!(0)),
+    ] {
+        let mut value = serde_json::to_value(StateRecord {
+            version: 1,
+            state: &snapshot,
+        })
+        .unwrap();
+        match consent {
+            Some(consent) => value["state"]["opt_out"] = consent,
+            None => {
+                value["state"].as_object_mut().unwrap().remove("opt_out");
+            }
+        }
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let directory = TestDirectory::new();
+        let lease = directory.lease();
+        let path = directory.path().join("state.json");
+        fs::write(&path, &bytes).unwrap();
+        let opened = FileStateStore::open(lease).unwrap();
+        assert!(opened.snapshot.is_none());
+        assert!(opened.read_error.is_some());
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn namespace_has_stable_byte_encoding_and_zero_padded_hex() {
     for (token, instance, expected) in [
         (
