@@ -55,6 +55,8 @@ inline std::optional<std::string> take(char *value) {
   return std::string(owned.get());
 }
 
+class Flags;
+
 class Event {
  public:
   Event(const std::string &name, const std::string &distinct_id)
@@ -94,6 +96,10 @@ class Event {
           "posthog_event_add_group");
     return *this;
   }
+
+  // Adds `$feature/<key>` and `$active_feature_flags` from a snapshot. The
+  // properties stay on this event for every later capture of it.
+  Event &set_flags(const Flags &flags);
 
   PostHogEvent *get() const { return handle_.get(); }
 
@@ -145,6 +151,11 @@ class Flags {
   std::unique_ptr<PostHogFlags, Deleter<PostHogFlags, posthog_flags_free>> handle_;
 };
 
+inline Event &Event::set_flags(const Flags &flags) {
+  check(posthog_event_set_flags(handle_.get(), flags.get()), "posthog_event_set_flags");
+  return *this;
+}
+
 class Client {
  public:
   Client(const std::string &api_key, const char *host, bool is_server) {
@@ -158,11 +169,6 @@ class Client {
   }
 
   void capture(const Event &event) { check(posthog_capture(handle_.get(), event.get()), "posthog_capture"); }
-
-  void capture(const Event &event, const Flags &flags) {
-    check(posthog_event_set_flags(event.get(), flags.get()), "posthog_event_set_flags");
-    capture(event);
-  }
 
   void alias(const std::string &previous_id, const std::string &distinct_id) {
     check(posthog_alias(handle_.get(), previous_id.c_str(), distinct_id.c_str()), "posthog_alias");
@@ -205,7 +211,12 @@ int main() {
     client.capture(started);
 
     posthog::Flags flags = client.evaluate_flags(distinct_id);
-    std::printf("new-onboarding: %s\n", flags.is_enabled("new-onboarding") ? "on" : "off");
+    const bool onboarding = flags.is_enabled("new-onboarding");
+    std::printf("new-onboarding: %s\n", onboarding ? "on" : "off");
+
+    posthog::Event finished("onboarding_viewed", distinct_id);
+    finished.set_flags(flags.only_accessed());
+    client.capture(finished);
 
     client.flush();
     return 0;
