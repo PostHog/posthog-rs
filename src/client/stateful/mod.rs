@@ -13,7 +13,7 @@ mod writer;
 pub use crate::client::on_error::InitializationFailure;
 pub use config::Config;
 pub use identity::{Identify, PersonProfiles};
-pub use producer::{Capture, CaptureOutcome};
+pub use producer::{Capture, CaptureOutcome, Screen};
 pub use runtime::{Client, DeliveryOutcome, DrainReport, PersistenceOutcome};
 pub use storage::Persistence;
 

@@ -194,7 +194,7 @@ pub fn posthog::stateful::Client::reset(&self)
 pub fn posthog::stateful::Client::set_person_properties(&self, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>)
 impl posthog::stateful::Client
 pub fn posthog::stateful::Client::capture(&self, impl core::convert::Into<posthog::stateful::Capture>) -> posthog::stateful::CaptureOutcome
-pub fn posthog::stateful::Client::screen(&self, impl core::convert::Into<alloc::string::String>, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>) -> posthog::stateful::CaptureOutcome
+pub fn posthog::stateful::Client::screen(&self, impl core::convert::Into<posthog::stateful::Screen>) -> posthog::stateful::CaptureOutcome
 impl posthog::stateful::Client
 pub async fn posthog::stateful::Client::flush(&self) -> posthog::stateful::DrainReport
 pub fn posthog::stateful::Client::flush_blocking(&self) -> posthog::stateful::DrainReport
@@ -252,6 +252,16 @@ pub fn posthog::stateful::Identify::from(alloc::string::String) -> Self
 #[non_exhaustive] pub struct posthog::stateful::InitializationFailure
 impl posthog::stateful::InitializationFailure
 pub fn posthog::stateful::InitializationFailure::message(&self) -> &str
+#[non_exhaustive] pub struct posthog::stateful::Screen
+pub posthog::stateful::Screen::name: alloc::string::String
+pub posthog::stateful::Screen::options: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+pub posthog::stateful::Screen::properties: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
+impl posthog::stateful::Screen
+pub fn posthog::stateful::Screen::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::convert::From<&str> for posthog::stateful::Screen
+pub fn posthog::stateful::Screen::from(&str) -> Self
+impl core::convert::From<alloc::string::String> for posthog::stateful::Screen
+pub fn posthog::stateful::Screen::from(alloc::string::String) -> Self
 pub mod posthog::tower
 pub struct posthog::tower::PostHogLayer
 impl posthog::tower::PostHogLayer

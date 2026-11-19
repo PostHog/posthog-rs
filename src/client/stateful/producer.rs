@@ -64,6 +64,54 @@ impl From<&str> for Capture {
     }
 }
 
+/// A `$screen` event input. Start with [`Screen::new`].
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Screen {
+    /// Nonblank screen name, sent as `$screen_name`.
+    pub name: String,
+    /// Per-event properties. The name wins over a conflicting `$screen_name`.
+    pub properties: HashMap<String, Value>,
+    /// Explicit wire options, as on [`Capture::options`].
+    pub options: HashMap<String, Value>,
+}
+
+impl Screen {
+    /// Create a screen input with default optional fields.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Self::default()
+        }
+    }
+}
+
+impl From<String> for Screen {
+    fn from(name: String) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<&str> for Screen {
+    fn from(name: &str) -> Self {
+        Self::new(name)
+    }
+}
+
+/// The person-profiles mode fills `process_person_profile` only when the caller
+/// set neither the option nor a `$process_person_profile` property, as the
+/// mobile SDKs do: an explicit per-event choice always wins.
+fn fill_person_profile_option(event: &mut crate::Event, process: bool) {
+    if event
+        .properties()
+        .get("$process_person_profile")
+        .is_some_and(|value| !value.is_null())
+    {
+        return;
+    }
+    event.insert_option_default(PROCESS_PERSON_PROFILE_OPT, process.into());
+}
+
 /// Local admission only: acceptance is not a persistence or ingestion acknowledgment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -137,14 +185,18 @@ impl Producer {
         for (key, value) in &self.context {
             event.insert_prop_default(key.clone(), value.clone());
         }
-        event.insert_prop_default("$lib", self.sdk_name.clone().into());
-        event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
+        // Fill $lib and $lib_version as a pair, as the server client does, so a
+        // caller's own $lib never gets this SDK's version.
+        let lib = event.properties().get("$lib");
+        if !crate::event::names_a_library(lib) {
+            event.set_prop("$lib", self.sdk_name.clone().into());
+            event.set_prop("$lib_version", self.sdk_version.clone().into());
+        } else if lib.and_then(serde_json::Value::as_str) == Some(self.sdk_name.as_str()) {
+            event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
+        }
         event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
         event.insert_prop_default("$is_identified", snapshot.identified.into());
-        event.insert_option_default(
-            PROCESS_PERSON_PROFILE_OPT,
-            self.person_profiles.processes(snapshot).into(),
-        );
+        fill_person_profile_option(&mut event, self.person_profiles.processes(snapshot));
         if self.disable_geoip {
             event.insert_prop_default("$geoip_disable", true.into());
         }
@@ -276,24 +328,25 @@ impl Client {
 
     /// Capture `$screen` through the ordinary event pipeline. The explicit name
     /// wins over a conflicting `$screen_name` property before hooks run.
-    pub fn screen(
-        &self,
-        name: impl Into<String>,
-        mut properties: HashMap<String, Value>,
-    ) -> CaptureOutcome {
+    pub fn screen(&self, screen: impl Into<Screen>) -> CaptureOutcome {
         if self.is_disabled() {
             return CaptureOutcome::Disabled;
         }
         if self.closed.load(Ordering::Acquire) {
             return CaptureOutcome::Closed;
         }
-        let name = name.into();
+        let Screen {
+            name,
+            mut properties,
+            options,
+        } = screen.into();
         if name.trim().is_empty() {
             return CaptureOutcome::Invalid;
         }
         properties.insert("$screen_name".into(), name.into());
         let mut event = Capture::new("$screen");
         event.properties = properties;
+        event.options = options;
         self.capture(event)
     }
 }
