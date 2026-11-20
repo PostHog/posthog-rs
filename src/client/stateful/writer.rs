@@ -602,6 +602,28 @@ impl StateWriter {
         }
     }
 
+    /// Like [`Self::wait_blocking`], giving up at `until`.
+    pub(super) fn wait_blocking_until(
+        &self,
+        revision: u64,
+        until: Instant,
+    ) -> Option<DrainOutcome> {
+        if self.on_worker_thread() {
+            return Some(DrainOutcome::Deferred);
+        }
+        let mut state = self.shared.lock();
+        loop {
+            if let Some(outcome) = state.outcome(revision) {
+                return Some(outcome);
+            }
+            let now = self.clock.now();
+            if now >= until {
+                return None;
+            }
+            state = self.shared.wait_timeout(state, until - now);
+        }
+    }
+
     #[cfg(feature = "async-client")]
     pub(super) async fn wait_async(&self, revision: u64) -> DrainOutcome {
         if self.on_worker_thread() {
