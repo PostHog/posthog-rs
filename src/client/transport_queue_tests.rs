@@ -643,6 +643,45 @@ fn a_retry_after_holds_back_the_queue_wide_retry() {
 }
 
 #[test]
+fn a_partial_retry_honors_retry_after() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let harness = spawn(&mut base(&server), None, 64 * 1024);
+    let event = wire("a");
+    let uuid = event.uuid.to_string();
+    let log_in = log.clone();
+    let _partial = server.mock(move |when, then| {
+        when.method(POST).is_true(move |_| {
+            log_in.0.lock().unwrap().push(Received {
+                id: String::new(),
+                attempt: 0,
+                events: Vec::new(),
+            });
+            true
+        });
+        then.status(200)
+            .header("Retry-After", "5")
+            .json_body(json!({"results": {(uuid.clone()): {"result": "retry"}}}));
+    });
+    assert_eq!(harness.handle.enqueue_prepared(event), Admission::Accepted);
+    flush(&harness.handle);
+    assert_eq!(log.all().len(), 1);
+    // Past the longest first wait (1 s x 1.25 jitter), short of Retry-After.
+    harness.clock.advance(Duration::from_millis(1_300));
+    harness.handle.tick();
+    assert_eq!(
+        log.all().len(),
+        1,
+        "a 2xx retry was resent before the server's Retry-After"
+    );
+    harness.clock.advance(Duration::from_millis(3_800));
+    harness.handle.tick();
+    assert_eq!(log.all().len(), 2);
+    harness.handle.request_close_before(harness.clock.now());
+    harness.handle.join();
+}
+
+#[test]
 fn the_backoff_starts_over_after_a_delivered_request() {
     let server = MockServer::start();
     let log = Log::default();
