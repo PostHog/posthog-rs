@@ -287,3 +287,38 @@ fn cancelled_and_concurrent_shutdown_waiters_await_delivery_body_without_blockin
     assert_eq!(client.capture("closed"), CaptureOutcome::Closed);
     rejected.assert_calls(1);
 }
+
+#[test]
+fn drop_writes_pending_state_without_waiting_for_delivery() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST);
+        then.delay(Duration::from_secs(30)).status(200);
+    });
+    let directory = std::env::temp_dir().join(format!("posthog-drop-{}", uuid::Uuid::now_v7()));
+    let mut config = config(&server);
+    config.persistence = Persistence::Directory(directory.clone());
+    config.flush_at = 1;
+    let client = Client::init_blocking(config);
+    let id = client.get_distinct_id();
+    assert!(matches!(
+        client.capture("in-flight"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    let started = std::time::Instant::now();
+    drop(client);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "drop waited for delivery"
+    );
+    let scope = std::fs::read_dir(&directory)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(scope.join("state.json")).unwrap()).unwrap();
+    assert_eq!(state["state"]["distinct_id"], id.as_str());
+    let _ = std::fs::remove_dir_all(directory);
+}
