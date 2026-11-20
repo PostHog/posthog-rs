@@ -184,16 +184,19 @@ jobs:
               fi
             done
             # The crates can be published while their GitHub Release failed or is a draft.
-            if out=$(gh release view "$rust_version" --json isDraft --jq .isDraft 2>&1); then
-              if [ "$out" = true ]; then
-                echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+            # Releases up to 1.3.0 used the bare version as their tag.
+            for tag in "posthog-v$rust_version" "$rust_version"; do
+              if out=$(gh release view "$tag" --json isDraft --jq .isDraft 2>&1); then
+                if [ "$out" = true ]; then
+                  echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+                fi
+                return 0
+              elif [ "$out" != "release not found" ]; then
+                echo "::error::Couldn't look up the $tag release: $out"
+                return 1
               fi
-            elif [ "$out" = "release not found" ]; then
-              echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
-            else
-              echo "::error::Couldn't look up the $rust_version release: $out"
-              return 1
-            fi
+            done
+            echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
           }
           ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
           published=$(ffi_release_published "$ffi_version")
@@ -244,7 +247,7 @@ jobs:
           released=()
           if [ "$new_version" != "$old_version" ]; then
             echo "posthog_released=true" >> "$GITHUB_OUTPUT"
-            released+=("v$new_version")
+            released+=("posthog-v$new_version")
           fi
           if [ -n "$ABANDON_FFI_VERSION" ] && [ "$ffi_version" = "$old_ffi_version" ]; then
             echo "::error::Abandoning posthog-rs-ffi $ABANDON_FFI_VERSION needs a changeset that releases a new posthog-rs-ffi version"
@@ -252,11 +255,11 @@ jobs:
           fi
           if [ "$ffi_version" != "$old_ffi_version" ]; then
             echo "ffi_released=true" >> "$GITHUB_OUTPUT"
-            released+=("posthog-rs-ffi v$ffi_version")
+            released+=("posthog-rs-ffi-v$ffi_version")
           fi
           title=$(printf '%s, ' "${released[@]}")
           title=${title%, }
-          echo "title=${title:-v$new_version}" >> "$GITHUB_OUTPUT"
+          echo "title=${title:-posthog-v$new_version}" >> "$GITHUB_OUTPUT"
 
       - name: Generate SDK reference
         id: reference
@@ -343,7 +346,7 @@ jobs:
         run: |
           CHANGELOG_ENTRY=$(awk -v defText="see CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
           # Tag the commit that was just published, not whatever main points to now.
-          gh release create "$NEW_VERSION" --target "$(git rev-parse HEAD)" --notes "$CHANGELOG_ENTRY"
+          gh release create "posthog-v$NEW_VERSION" --target "$(git rev-parse HEAD)" --title "posthog-v$NEW_VERSION" --notes "$CHANGELOG_ENTRY"
 
       - name: Dispatch posthog upgrade for posthog-rs
         if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
@@ -563,7 +566,7 @@ jobs:
             exit 0
           fi
           notes=$(awk -v defText="see crates/posthog-rs-ffi/CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' source/crates/posthog-rs-ffi/CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
-          gh release create "$TAG" dist/* --verify-tag --title "posthog-rs-ffi $VERSION" --notes "$notes" --latest=false
+          gh release create "$TAG" dist/* --verify-tag --title "$TAG" --notes "$notes" --latest=false
 
   notify-released:
     name: Notify Slack - Released

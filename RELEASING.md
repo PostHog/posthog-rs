@@ -2,7 +2,7 @@
 
 This repository uses [Sampo](https://github.com/bruits/sampo) for versioning, changelogs, and publishing to crates.io.
 
-Starting with 1.0, `posthog` contains the SDK implementation and `posthog-rs` re-exports it. Sampo's fixed package group keeps both versions and the compatibility crate's dependency synchronized. Publishing runs in dependency order. Sampo tags the implementation as `v<version>` and the compatibility crate as `posthog-rs-v<version>`. The GitHub Release continues to use the bare version tag.
+Starting with 1.0, `posthog` contains the SDK implementation and `posthog-rs` re-exports it. Sampo's fixed package group keeps both versions and the compatibility crate's dependency synchronized. Publishing runs in dependency order. Each release is tagged `posthog-v<version>`, and its GitHub Release has the same name. Releases up to 1.3.0 used the bare version as their tag.
 
 Both packages use crates.io Trusted Publishing for the `PostHog/posthog-rs` repository, `release.yml` workflow and `Release` environment.
 
@@ -38,7 +38,7 @@ The bindings report their own version as `$lib_version`, next to `$lib` set to `
 
 Because `posthog-rs-ffi` depends on `posthog`, Sampo also gives `posthog-rs-ffi` a patch release whenever `posthog` is released. Those releases ship the bindings with the new SDK.
 
-Each `posthog-rs-ffi` release is tagged `posthog-rs-ffi-v<version>` and gets its own GitHub Release, separate from the `posthog` release and not marked as latest. The GitHub Release is published only once all of these archives are built, with the archives attached:
+Each `posthog-rs-ffi` release is tagged `posthog-rs-ffi-v<version>` and gets its own GitHub Release with the same name, separate from the `posthog` release and not marked as latest. The GitHub Release is published only once all of these archives are built, with the archives attached:
 
 - `posthog-rs-ffi-<version>-x86_64-unknown-linux-gnu.tar.gz`
 - `posthog-rs-ffi-<version>-aarch64-unknown-linux-gnu.tar.gz`
@@ -79,7 +79,7 @@ If that run commits the new version but fails before publishing it, use **Re-run
 
 ### Known gap: a failed crates.io publish isn't retried
 
-If "Release and publish" commits a new `posthog` version but publishing it to crates.io fails, **Re-run failed jobs** doesn't publish it. The rerun finds no changesets left, or only finishes an unfinished bindings release, and skips the crates.io steps, so `posthog` and `posthog-rs` stay unpublished at the committed version. Publish them by hand from the release commit, then create their tags and GitHub Release:
+If "Release and publish" commits a new `posthog` version but publishing it to crates.io fails, **Re-run failed jobs** doesn't publish it. The rerun finds no changesets left, or only finishes an unfinished bindings release, and skips the crates.io steps, so `posthog` and `posthog-rs` stay unpublished at the committed version. Publish them by hand from the release commit, then create their GitHub Release, tagged and named `posthog-v<version>`:
 
 ```bash
 git checkout <release commit>
