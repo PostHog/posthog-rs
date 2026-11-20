@@ -95,14 +95,6 @@ impl CaptureEvent {
             dropped_copies: 0,
         }
     }
-
-    /// Convert a producer-prepared stateful event after enrichment and hooks.
-    /// Capture-time SDK properties stay with the event through storage/retry;
-    /// missing or hook-removed attribution is not filled again here.
-    #[cfg(feature = "stateful")]
-    pub(crate) fn from_stateful_event_at(event: &Event, now: DateTime<Utc>) -> Self {
-        Self::from_event_at(event, now)
-    }
 }
 
 /// Capture rejects the whole request when one of these fields is not a string,

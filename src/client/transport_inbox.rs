@@ -29,6 +29,13 @@ struct State {
     closed: bool,
 }
 
+impl State {
+    fn take(&mut self) -> Vec<Waiting> {
+        self.bytes = 0;
+        self.waiting.drain(..).collect()
+    }
+}
+
 pub(super) struct Inbox {
     state: Mutex<State>,
     max_events: usize,
@@ -103,9 +110,7 @@ impl Inbox {
 
     /// Take every waiting event, oldest first.
     pub(super) fn drain(&self) -> Vec<Waiting> {
-        let mut state = self.lock();
-        state.bytes = 0;
-        state.waiting.drain(..).collect()
+        self.lock().take()
     }
 
     /// Close the inbox and take every waiting event, oldest first. Later
@@ -113,8 +118,7 @@ impl Inbox {
     pub(super) fn close_and_drain(&self) -> Vec<Waiting> {
         let mut state = self.lock();
         state.closed = true;
-        state.bytes = 0;
-        state.waiting.drain(..).collect()
+        state.take()
     }
 
     pub(super) fn take_dropped(&self) -> usize {
