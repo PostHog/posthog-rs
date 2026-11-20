@@ -158,11 +158,12 @@ fn encode_record(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
 /// rather than making identity and consent unwritable. Remote configuration
 /// that deep is rejected when it is loaded.
 fn encode_snapshot(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
-    encode_record(snapshot).or_else(|_| {
-        let mut mandatory = snapshot.clone();
-        mandatory.flags.cache = None;
-        encode_record(&mandatory)
-    })
+    if let Ok(encoded) = encode_record(snapshot) {
+        return Ok(encoded);
+    }
+    let mut mandatory = snapshot.clone();
+    mandatory.flags.cache = None;
+    encode_record(&mandatory)
 }
 
 /// Blocking backend calls belong exclusively to the state-persistence worker.

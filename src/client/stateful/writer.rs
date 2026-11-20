@@ -832,7 +832,7 @@ fn run_worker(
                 state.in_flight = None;
             }
             match &result {
-                Ok(_) => {
+                Ok(()) => {
                     state.persisted = revision;
                     state.failure = None;
                     state.failures = 0;

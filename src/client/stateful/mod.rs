@@ -62,6 +62,26 @@ use crate::client::transport::remote_config::RemoteConfig;
 /// the few levels the state record adds around application values.
 const MAX_VALUE_DEPTH: usize = 100;
 
+/// Serde for an `Option<Arc<T>>` field, stored as the plain value: immutable
+/// data shared by otherwise independent snapshots.
+mod shared_arc {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub(super) fn serialize<T: Serialize, S: Serializer>(
+        value: &Option<Arc<T>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_deref().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Arc<T>>, D::Error> {
+        Option::<T>::deserialize(deserializer).map(|value| value.map(Arc::new))
+    }
+}
+
 pub(super) fn within_depth<'a>(values: impl IntoIterator<Item = &'a Value>) -> bool {
     fn check(value: &Value, remaining: usize) -> bool {
         match value {
@@ -99,7 +119,7 @@ struct Snapshot {
     #[serde(default)]
     flags: flag_state::FlagState,
     // Records written before remote configuration restore without one.
-    #[serde(default, with = "remote_config::cache_serde")]
+    #[serde(default, with = "shared_arc")]
     remote_config: Option<Arc<RemoteConfig>>,
     #[serde(skip)]
     remote_config_loading: bool,

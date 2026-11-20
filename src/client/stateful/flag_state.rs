@@ -38,7 +38,7 @@ pub(super) struct FlagState {
     pub(super) person_properties: HashMap<String, Value>,
     pub(super) group_properties: HashMap<String, HashMap<String, Value>>,
     // Immutable evaluation data is shared by otherwise independent state snapshots.
-    #[serde(with = "shared_cache")]
+    #[serde(with = "super::shared_arc")]
     pub(super) cache: Option<Arc<FlagCache>>,
 }
 
@@ -224,23 +224,6 @@ impl<'de> Deserialize<'de> for FlagCache {
             flags,
             failed: stored.failed,
         })
-    }
-}
-
-mod shared_cache {
-    use super::*;
-
-    pub(super) fn serialize<S: serde::Serializer>(
-        cache: &Option<Arc<FlagCache>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        cache.as_deref().serialize(serializer)
-    }
-
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<Arc<FlagCache>>, D::Error> {
-        Option::<FlagCache>::deserialize(deserializer).map(|cache| cache.map(Arc::new))
     }
 }
 
