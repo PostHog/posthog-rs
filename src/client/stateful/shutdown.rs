@@ -121,10 +121,14 @@ impl Shutdown {
             .unwrap_or_else(|p| p.into_inner())
     }
     pub(super) fn wait_blocking(&self, done: impl Fn() -> bool) {
-        let selected = self.deadline().unwrap();
+        self.wait_blocking_until(self.deadline().unwrap(), done);
+    }
+    /// Wait until `done` or `bound`, whichever comes first, whatever deadline
+    /// is selected.
+    pub(super) fn wait_blocking_until(&self, bound: Instant, done: impl Fn() -> bool) {
         while !done() {
             let state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
-            let remaining = selected.saturating_duration_since(Instant::now());
+            let remaining = bound.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return;
             }

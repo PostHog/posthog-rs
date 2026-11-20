@@ -8,7 +8,8 @@
 //! return a [`CaptureOutcome`] at once; background workers write to disk and
 //! deliver events in batches. Call [`Client::flush_blocking`] to request
 //! delivery now, and [`Client::shutdown_blocking`] before the app exits.
-//! Dropping the client also shuts it down.
+//! Dropping the client also shuts it down: it does not wait for delivery, but
+//! waits up to about 1 s to write pending state and captured events to disk.
 //!
 //! [`Config::persistence`] selects where state and events are kept: the OS
 //! local application-data directory by default, a directory you choose, or

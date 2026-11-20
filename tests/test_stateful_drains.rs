@@ -1,5 +1,6 @@
 #![cfg(feature = "stateful")]
 
+use std::path::{Path, PathBuf};
 #[cfg(feature = "async-client")]
 use std::sync::Arc;
 use std::time::Duration;
@@ -321,4 +322,107 @@ fn drop_writes_pending_state_without_waiting_for_delivery() {
         serde_json::from_slice(&std::fs::read(scope.join("state.json")).unwrap()).unwrap();
     assert_eq!(state["state"]["distinct_id"], id.as_str());
     let _ = std::fs::remove_dir_all(directory);
+}
+
+/// A persistent client that never sends: the host refuses connections and no
+/// flush is due, so only `Drop` writes captured events.
+fn unsent(directory: &Path) -> Config {
+    let mut config = Config::new("phc_test");
+    config.host = "http://127.0.0.1:9".into();
+    config.persistence = Persistence::Directory(directory.to_path_buf());
+    config.flush_interval = Duration::from_secs(3600);
+    config.flush_at = 1_000;
+    config
+}
+
+fn temporary_directory() -> PathBuf {
+    std::env::temp_dir().join(format!("posthog-drop-{}", uuid::Uuid::now_v7()))
+}
+
+fn stored_events(directory: &Path) -> usize {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|scope| {
+            std::fs::read_dir(scope.unwrap().path().join("events"))
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+#[test]
+fn drop_writes_captured_events_to_disk_before_returning() {
+    let directory = temporary_directory();
+    let client = Client::init_blocking(unsent(&directory));
+    // Save the state first, so Drop has no state write to wait for.
+    client.flush_blocking();
+    for i in 0..50 {
+        assert!(matches!(
+            client.capture(format!("event-{}", i).as_str()),
+            CaptureOutcome::Accepted { .. }
+        ));
+    }
+    drop(client);
+    let stored = stored_events(&directory);
+    let _ = std::fs::remove_dir_all(&directory);
+    assert_eq!(stored, 50);
+}
+
+#[test]
+fn a_client_created_right_after_drop_restores_the_identity() {
+    for _ in 0..10 {
+        let directory = temporary_directory();
+        let client = Client::init_blocking(unsent(&directory));
+        let id = client.get_distinct_id();
+        client.flush_blocking();
+        for i in 0..20 {
+            client.capture(format!("event-{}", i).as_str());
+        }
+        drop(client);
+        let again = Client::init_blocking(unsent(&directory));
+        let restored = again.get_distinct_id();
+        drop(again);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(restored, id);
+    }
+}
+
+#[cfg(feature = "async-client")]
+#[test]
+fn drop_after_a_cancelled_shutdown_does_not_wait_for_its_deadline() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST);
+        then.delay(Duration::from_secs(30)).status(200);
+    });
+    let mut config = config(&server);
+    config.flush_at = 1;
+    config.shutdown_timeout = Duration::from_secs(8);
+    let client = Client::init_blocking(config);
+    assert!(matches!(
+        client.capture("in-flight"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    std::thread::sleep(Duration::from_millis(200));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let waited = tokio::time::timeout(Duration::from_millis(200), client.shutdown(None)).await;
+        assert!(waited.is_err(), "shutdown should still be waiting");
+    });
+    let started = std::time::Instant::now();
+    drop(client);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "drop waited {:?}",
+        elapsed
+    );
 }
