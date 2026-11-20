@@ -65,8 +65,8 @@ fn reexports_stateful_client_and_its_public_entry_points() {
     client.create_person_profile();
     client.register(Default::default());
     client.unregister("key");
-    client.group("company", "example", None);
-    client.group_identify("company", "example", Default::default());
+    client.group(("company", "example"));
+    client.group_identify(("company", "example"));
     client.remove_group("company");
     client.start_session();
     client.session_activity();
