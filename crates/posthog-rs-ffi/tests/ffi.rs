@@ -641,3 +641,56 @@ fn malformed_flags_response_is_a_request_failure() {
         posthog_client_free(client);
     }
 }
+
+#[test]
+fn flag_request_failure_with_local_results_reports_the_failure() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(json!({
+            "flags": [{
+                "key": "local-flag",
+                "active": true,
+                "filters": {"groups": [{"properties": [], "rollout_percentage": 100.0}]}
+            }],
+            "group_type_mapping": {},
+            "cohorts": {}
+        }));
+    });
+    let remote = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(503).body("unavailable");
+    });
+
+    unsafe {
+        let options = posthog_options_new(c("phc_test").as_ptr());
+        posthog_options_set_host(options, c(&server.base_url()).as_ptr());
+        posthog_options_set_secret_key(options, c("phs_test").as_ptr());
+        posthog_options_set_enable_local_evaluation(options, true);
+        posthog_options_set_feature_flags_request_max_retries(options, 0);
+        let client = posthog_client_new(options);
+        posthog_options_free(options);
+        assert!(!client.is_null(), "{:?}", last_error());
+
+        let mut flags = ptr::null_mut();
+        let status = posthog_evaluate_flags(client, c("user-1").as_ptr(), ptr::null(), &mut flags);
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_REQUEST);
+        assert!(
+            last_error().is_some_and(|error| error.contains("503")),
+            "{:?}",
+            last_error()
+        );
+        assert!(
+            !flags.is_null(),
+            "a failed request still returns a snapshot"
+        );
+
+        let mut enabled = false;
+        posthog_flags_is_enabled(flags, c("local-flag").as_ptr(), &mut enabled);
+        assert!(enabled, "the snapshot keeps the locally evaluated flag");
+        posthog_flags_free(flags);
+        posthog_client_free(client);
+    }
+
+    remote.assert_calls(1);
+}

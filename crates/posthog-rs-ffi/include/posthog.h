@@ -252,6 +252,10 @@ PostHogStatus posthog_options_set_secret_key(struct PostHogOptions *options,
 /**
  * Creates a client. The options are copied and can be freed afterwards.
  * Returns `NULL` on error. Free the client with `posthog_client_free`.
+ *
+ * With local evaluation enabled, this blocks while it fetches the first flag
+ * definitions, for up to `request_timeout_seconds`. Avoid creating the client
+ * on a thread that must stay responsive, such as a UI thread.
  */
 struct PostHogClient *posthog_client_new(const struct PostHogOptions *options);
 
@@ -386,8 +390,8 @@ PostHogStatus posthog_event_set_flags(struct PostHogEvent *event, const struct P
  * `posthog_flags_free`.
  *
  * If the flags request fails, this returns `POSTHOG_STATUS_REQUEST` and still
- * writes a snapshot, holding only flags evaluated locally. Reading it returns
- * defaults for the other flags. For any other error, `*flags_out` is `NULL`.
+ * writes a snapshot, holding only flags evaluated locally, whether or not any
+ * resolved. Reading it returns defaults for the other flags. For any other error, `*flags_out` is `NULL`.
  * Free a non-`NULL` snapshot whatever the status.
  *
  * `options_json` may be `NULL` or a JSON object with any of these fields:

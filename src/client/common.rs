@@ -396,6 +396,7 @@ pub(super) struct EvaluationState {
     request_id: Option<String>,
     errors_while_computing: bool,
     quota_limited: bool,
+    request_error: Option<String>,
 }
 
 impl EvaluationState {
@@ -414,6 +415,7 @@ impl EvaluationState {
             request_id: None,
             errors_while_computing: false,
             quota_limited: false,
+            request_error: None,
         };
         state.evaluate_locally(local_evaluator);
         state
@@ -511,6 +513,7 @@ impl EvaluationState {
                     "/flags fetch failed; returning snapshot from local results only"
                 );
                 self.errors_while_computing = true;
+                self.request_error = Some(error.to_string());
                 Ok(())
             }
         }
@@ -520,7 +523,7 @@ impl EvaluationState {
         self,
         host: Arc<dyn FeatureFlagEvaluationsHost>,
     ) -> FeatureFlagEvaluations {
-        FeatureFlagEvaluations::new(
+        let mut evaluations = FeatureFlagEvaluations::new(
             host,
             self.distinct_id,
             self.records,
@@ -530,7 +533,9 @@ impl EvaluationState {
             None,
             self.errors_while_computing,
             self.quota_limited,
-        )
+        );
+        evaluations.request_error = self.request_error;
+        evaluations
     }
 }
 
@@ -783,6 +788,10 @@ mod tests {
         assert_eq!(partial.records.len(), 1);
         assert!(partial.records.contains_key("local"));
         assert!(partial.errors_while_computing);
+        assert_eq!(
+            partial.request_error.as_deref(),
+            Some("Connection Error: remote failed")
+        );
         assert_eq!(partial.request_id, None);
         assert!(!partial.quota_limited);
 

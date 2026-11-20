@@ -462,6 +462,10 @@ pub unsafe extern "C" fn posthog_options_set_secret_key(
 
 /// Creates a client. The options are copied and can be freed afterwards.
 /// Returns `NULL` on error. Free the client with `posthog_client_free`.
+///
+/// With local evaluation enabled, this blocks while it fetches the first flag
+/// definitions, for up to `request_timeout_seconds`. Avoid creating the client
+/// on a thread that must stay responsive, such as a UI thread.
 #[no_mangle]
 pub unsafe extern "C" fn posthog_client_new(options: *const PostHogOptions) -> *mut PostHogClient {
     ffi_new(|| {
@@ -816,8 +820,8 @@ fn evaluate_flags_options(options_json: Option<Value>) -> Result<EvaluateFlagsOp
 /// `posthog_flags_free`.
 ///
 /// If the flags request fails, this returns `POSTHOG_STATUS_REQUEST` and still
-/// writes a snapshot, holding only flags evaluated locally. Reading it returns
-/// defaults for the other flags. For any other error, `*flags_out` is `NULL`.
+/// writes a snapshot, holding only flags evaluated locally, whether or not any
+/// resolved. Reading it returns defaults for the other flags. For any other error, `*flags_out` is `NULL`.
 /// Free a non-`NULL` snapshot whatever the status.
 ///
 /// `options_json` may be `NULL` or a JSON object with any of these fields:
@@ -872,7 +876,14 @@ pub unsafe extern "C" fn posthog_evaluate_flags(
                 ));
             }
         };
+        // Local evaluation resolved some flags but the request still failed. Report
+        // it the same way as a failure with no local results, so callers see one
+        // shape for every outage.
+        let request_error = flags.request_error().map(str::to_string);
         flags_out.write(Box::into_raw(Box::new(PostHogFlags { flags })));
+        if let Some(error) = request_error {
+            return Err(FfiError::new(PostHogStatus::POSTHOG_STATUS_REQUEST, error));
+        }
         Ok(())
     })
 }

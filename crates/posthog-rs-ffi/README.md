@@ -154,7 +154,7 @@ Functions return a `PostHogStatus`, and constructors return `NULL` on error. `po
 }
 ```
 
-Local evaluation is for servers you run. Set a project secret key (`phs_...`) with `posthog_options_set_secret_key` and call `posthog_options_set_enable_local_evaluation(options, true)`.
+Local evaluation is for servers you run. Set a project secret key (`phs_...`) with `posthog_options_set_secret_key` and call `posthog_options_set_enable_local_evaluation(options, true)`. With it enabled, `posthog_client_new` blocks while it fetches the first flag definitions, for up to `request_timeout_seconds`, so don't create the client on a UI thread.
 
 Never put a secret key in an application you distribute, such as a desktop app or CLI. Anyone with the binary or its configuration can extract the key and read your flag definitions. Distributed apps should use only the project API key (`phc_...`), which evaluates flags remotely.
 
