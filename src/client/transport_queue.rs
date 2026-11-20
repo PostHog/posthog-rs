@@ -1,1522 +1,894 @@
-//! Stateful queue coordination. Only this thread accesses event storage; HTTP
-//! owns one bounded upload view and uses the shared response classifier.
+//! The stateful delivery coordinator and its upload executor.
+//!
+//! One coordinator thread owns every delivery decision. It moves admitted
+//! events from the inbox into the [`Table`], writes them to the store, picks
+//! the next request, applies each response, retries, completes flushes, and
+//! makes the one shutdown decision. The executor thread sends each request,
+//! reads capture's verdicts and reports failures through `on_error`, then
+//! hands back which events are done and which to retry. A slow upload or a
+//! slow capture hook never blocks persistence.
+//!
+//! Delivery state lives in one place: an event is queued exactly while it has
+//! an entry in the table. Storage failures follow the iOS and Android queues:
+//! an event whose write fails is dropped, a record that cannot be read is
+//! dropped and its file deleted, and a file that cannot be deleted is left
+//! behind and picked up again after a restart.
 
-use super::*;
-use crate::client::event_store::StoreKey;
+use std::collections::HashMap;
+use std::io::Read;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Entry {
-    Disk(StoreKey),
-    Memory(u64),
+use tracing::warn;
+use uuid::Uuid;
+
+use super::inbox::{Inbox, Waiting};
+use super::table::{Entry, Limits, Table};
+use super::{
+    apply_on_error_hooks, bound_request, dec_len, drain_pending_completions, undelivered_results,
+    undelivered_totals, Clock, Completion, Control, LaneConfig,
+};
+use crate::capture_event::{
+    wire_timestamp, BatchRequestRef, CaptureErrorResponse, CaptureEvent, EventResult,
+};
+use crate::client::capture::{self, Step};
+use crate::client::event_store::{EventStore, StoreKey};
+use crate::client::{CaptureFailure, ClientOptions, PostHogError, StorageOperation};
+use crate::endpoints::Endpoint;
+use crate::error::Error;
+
+/// The largest capture response body read, as in posthog-android. A larger
+/// body is unreadable.
+const MAX_RESPONSE_BODY_BYTES: u64 = 1024 * 1024;
+
+/// One event in a request, tagged with its queue position.
+pub(crate) struct Sending {
+    seq: u64,
+    event: CaptureEvent,
 }
 
-struct View {
-    entries: Vec<(StoreKey, Entry)>,
-    batch: RetryBatch,
+impl AsRef<CaptureEvent> for Sending {
+    fn as_ref(&self) -> &CaptureEvent {
+        &self.event
+    }
 }
 
-pub(crate) struct AttemptResult {
-    view: View,
-    retry: bool,
+impl AsMut<CaptureEvent> for Sending {
+    fn as_mut(&mut self) -> &mut CaptureEvent {
+        &mut self.event
+    }
 }
-struct Flush {
+
+/// A request for the executor to send.
+pub(crate) struct Job {
+    request_id: Uuid,
+    attempt: u32,
+    created_at: String,
+    events: Vec<Sending>,
+}
+
+/// A sent request and what is left of it.
+pub(crate) struct Sent {
+    seqs: Vec<u64>,
+    request_id: Uuid,
+    attempt: u32,
+    created_at: String,
+    verdict: Verdict,
+}
+
+enum Verdict {
+    /// Every event reached a final outcome: delivered, or reported lost.
+    Finished,
+    /// These events, with any duplicate copies capture dropped, are retried
+    /// after `delay`. The rest of the request is finished.
+    Retry {
+        retained: Vec<(u64, u32)>,
+        delay: Duration,
+    },
+}
+
+enum Outcome {
+    /// No response was read: a network error or timeout.
+    Network(String),
+    Response {
+        status: u16,
+        retry_after: Option<Duration>,
+        body: String,
+    },
+    /// The request body could not be built.
+    Unsendable(String),
+}
+
+/// A request waiting to be sent again after a retryable outcome.
+struct Retry {
+    seqs: Vec<u64>,
+    request_id: Uuid,
+    attempt: u32,
+    created_at: String,
+    next_at: Instant,
+}
+
+struct Waiter {
+    /// Covers every event at or below this queue position.
+    through: u64,
     completion: Completion,
-    disk: u64,
-    memory: u64,
-    #[cfg(all(test, feature = "session-replay"))]
-    tick: bool,
-}
-impl Flush {
-    fn new(completion: Completion, disk: u64, memory: u64) -> Self {
-        Self {
-            completion,
-            disk,
-            memory,
-            #[cfg(all(test, feature = "session-replay"))]
-            tick: false,
-        }
-    }
-    #[cfg(test)]
-    fn tick(completion: Completion, disk: u64, memory: u64) -> Self {
-        Self {
-            #[cfg(feature = "session-replay")]
-            tick: true,
-            ..Self::new(completion, disk, memory)
-        }
-    }
-    #[cfg(feature = "session-replay")]
-    fn into_replay_control(self) -> Control {
-        #[cfg(test)]
-        if self.tick {
-            return Control::Tick(self.completion);
-        }
-        Control::Flush(self.completion)
-    }
-    fn precedes(&self, entry: Entry) -> bool {
-        match entry {
-            Entry::Disk(key) => key.0 > self.disk,
-            Entry::Memory(id) => id > self.memory,
-        }
-    }
-}
-enum UploadJob {
-    Analytics(View),
-    #[cfg(feature = "session-replay")]
-    Replay(Control),
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn run(
+pub(super) struct Settings {
+    pub(super) options: ClientOptions,
+    pub(super) lane: LaneConfig,
+    pub(super) memory: Limits,
+}
+
+pub(super) struct Coordinator {
     options: ClientOptions,
-    lane: LaneConfig,
-    rx: mpsc::Receiver<Control>,
-    len: Arc<AtomicUsize>,
+    endpoint: Endpoint,
+    batch_bytes_target: u64,
+    interval: Duration,
+    /// The disk limits with a store, the memory limits without one.
+    limits: Limits,
     clock: Arc<dyn Clock>,
-    mut storage: StorageState,
-    queue: Arc<memory::Queue>,
+    pending: Arc<AtomicUsize>,
+    inbox: Arc<Inbox>,
+    store: Option<Box<dyn EventStore>>,
+    table: Table,
     deadline: Arc<Mutex<Option<Instant>>>,
-    owned_workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    results: mpsc::Sender<Control>,
-    #[cfg(feature = "session-replay")] encoder_running: Arc<AtomicBool>,
-    ready: Option<mpsc::Sender<bool>>,
-) {
-    queue.persisted(
-        storage
-            .store
-            .as_ref()
-            .and_then(|store| store.end_key())
-            .map_or(u64::MAX, |key| key.0),
-    );
-    let (jobs, uploads) = mpsc::sync_channel::<UploadJob>(1);
-    let (startup, started) = mpsc::channel();
-    let batch_bytes_target = lane.batch_bytes_target.unwrap_or(usize::MAX);
-    let executor_options = options.clone();
-    let executor_clock = clock.clone();
-    let executor_deadline = deadline.clone();
-    let persistent = storage.store.is_some();
-    let executor = thread::Builder::new()
-        .name("posthog-upload".into())
-        .spawn(move || {
-            let Some(mut pipeline) = Pipeline::new(
-                &executor_options,
-                lane,
-                executor_clock,
-                Arc::new(AtomicUsize::new(0)),
-            ) else {
-                let _ = startup.send(false);
-                return;
-            };
-            pipeline.persistent_retention = persistent;
-            pipeline.coordinated = true;
-            let _ = pipeline.clock.now();
-            let _ = startup.send(true);
-            loop {
-                let end = *executor_deadline.lock().unwrap_or_else(|p| p.into_inner());
-                #[cfg(not(feature = "session-replay"))]
-                if end.is_some_and(|end| pipeline.clock.now() >= end) {
-                    break;
-                }
-                #[cfg(feature = "session-replay")]
-                if let Some(end) = end {
-                    pipeline.close_delivery(end);
-                }
-                #[cfg(feature = "session-replay")]
-                let next = if end.is_some_and(|end| pipeline.clock.now() >= end) {
-                    None
-                } else {
-                    end.into_iter().chain(pipeline.replay.next_due(end)).min()
-                };
-                #[cfg(not(feature = "session-replay"))]
-                let next = end;
-                let wake = match next {
-                    Some(at) => {
-                        uploads.recv_timeout(at.saturating_duration_since(pipeline.clock.now()))
-                    }
-                    None => uploads
-                        .recv()
-                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-                };
-                let job = match wake {
-                    Ok(job) => job,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        let end = *executor_deadline.lock().unwrap_or_else(|p| p.into_inner());
-                        #[cfg(not(feature = "session-replay"))]
-                        if end.is_some_and(|end| pipeline.clock.now() >= end) {
-                            break;
-                        }
-                        #[cfg(feature = "session-replay")]
-                        pipeline.service_replay(false, end);
-                        continue;
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                };
-                let end = *executor_deadline.lock().unwrap_or_else(|p| p.into_inner());
-                #[cfg(not(feature = "session-replay"))]
-                if end.is_some_and(|end| pipeline.clock.now() >= end) {
-                    break;
-                }
-                #[cfg(feature = "session-replay")]
-                if let Some(end) = end {
-                    pipeline.close_delivery(end);
-                }
-                let mut view = match job {
-                    UploadJob::Analytics(view) => {
-                        if end.is_some_and(|end| pipeline.clock.now() >= end) {
-                            continue;
-                        }
-                        view
-                    }
-                    #[cfg(feature = "session-replay")]
-                    UploadJob::Replay(control) => {
-                        match control {
-                            Control::ReplayFrame(frame) => pipeline.admit_replay(*frame),
-                            Control::ReplayFailure(message) => {
-                                replay::report(&pipeline.options, message, None)
-                            }
-                            Control::DeliveryClosing(end) => pipeline.close_delivery(end),
-                            Control::ReplayShutdownAbandoned => {
-                                pipeline.report_replay_shutdown(None)
-                            }
-                            #[cfg(test)]
-                            Control::Tick(completion) => {
-                                pipeline.service_replay(false, end);
-                                completion.signal();
-                            }
-                            Control::Flush(completion) | Control::FlushCaptures(completion) => {
-                                pipeline.service_replay(true, end);
-                                completion.signal();
-                            }
-                            Control::Shutdown { completion, .. } => {
-                                pipeline.service_replay(true, end);
-                                pipeline.abandon_replay();
-                                completion.signal();
-                                break;
-                            }
-                            _ => {}
-                        }
-                        let end = *executor_deadline.lock().unwrap_or_else(|p| p.into_inner());
-                        pipeline.service_replay(false, end);
-                        let _ = results.send(Control::QueueWake);
-                        continue;
-                    }
-                };
-                pipeline
-                    .len
-                    .store(view.batch.pending.len(), Ordering::Release);
-                let placeholder = RetryBatch {
-                    pending: Vec::new(),
-                    request_id: view.batch.request_id,
-                    created_at: String::new(),
-                    final_results: HashMap::new(),
-                    historical_migration: false,
-                    attempt: 1,
-                    next_at: Instant::now(),
-                };
-                pipeline.attempt(std::mem::replace(&mut view.batch, placeholder), end);
-                let retry = pipeline.retries.pop_front();
-                if let Some(batch) = retry {
-                    view.batch = batch;
-                }
-                if results
-                    .send(Control::UploadComplete(Box::new(AttemptResult {
-                        retry: !view.batch.pending.is_empty(),
-                        view,
-                    })))
-                    .is_err()
-                {
-                    break;
-                }
+    jobs: Option<mpsc::SyncSender<Job>>,
+    /// A request is with the executor.
+    sending: bool,
+    retry: Option<Retry>,
+    /// When the next request is due without a flush or a full batch.
+    due: Option<Instant>,
+    /// The newest queue position when the last request was selected. Entries
+    /// at or below it that remain once it is answered are a backlog.
+    selected_through: u64,
+    waiters: Vec<Waiter>,
+    shutdown: Option<Completion>,
+    capacity_warned: bool,
+    write_failing: bool,
+    /// Duplicate copies capture dropped for an event that is being retried,
+    /// reported when the event reaches its final outcome.
+    copies: HashMap<u64, u32>,
+}
+
+impl Coordinator {
+    /// Build the queue from the records already on disk. Runs on the caller's
+    /// thread, before admission starts, so new events follow the last record.
+    pub(super) fn new(
+        settings: Settings,
+        mut store: Option<Box<dyn EventStore>>,
+        clock: Arc<dyn Clock>,
+        pending: Arc<AtomicUsize>,
+        deadline: Arc<Mutex<Option<Instant>>>,
+    ) -> (Self, Arc<Inbox>) {
+        let mut table = Table::default();
+        let mut last_seq = 0;
+        if let Some(store) = &mut store {
+            // New events follow every record file, so none reuses a key.
+            last_seq = store.last_key().0;
+            for (key, bytes) in store.take_index() {
+                table.push(Entry {
+                    seq: key.0,
+                    bytes,
+                    payload: None,
+                });
             }
-            #[cfg(feature = "session-replay")]
-            pipeline.abandon_replay();
+        }
+        let inbox = Arc::new(Inbox::new(
+            last_seq,
+            settings.memory.events,
+            settings.memory.bytes as usize,
+            pending.clone(),
+        ));
+        let now = clock.now();
+        let interval = Duration::from_millis(settings.options.flush_interval_ms.max(1));
+        let limits = store.as_ref().map_or(settings.memory, |store| {
+            let limits = store.limits();
+            Limits {
+                events: limits.max_events,
+                bytes: limits.max_bytes,
+            }
         });
-    let status = started.recv();
-    if !matches!(status, Ok(true)) {
-        if let Some(ready) = ready {
-            if status.is_ok() {
-                let _ = ready.send(false);
-            }
-        }
-        drop(jobs);
-        if let Ok(executor) = executor {
-            let _ = executor.join();
-        }
-        drain_pending_completions(&rx, &len);
-        return;
+        let coordinator = Self {
+            endpoint: settings.lane.endpoint,
+            batch_bytes_target: settings
+                .lane
+                .batch_bytes_target
+                .unwrap_or(usize::MAX)
+                .min(settings.memory.bytes as usize) as u64,
+            interval,
+            limits,
+            options: settings.options,
+            clock,
+            pending,
+            inbox: inbox.clone(),
+            store,
+            // A backlog from an earlier run is sent at once.
+            due: (!table.is_empty()).then_some(now),
+            selected_through: 0,
+            table,
+            deadline,
+            jobs: None,
+            sending: false,
+            retry: None,
+            waiters: Vec::new(),
+            shutdown: None,
+            capacity_warned: false,
+            write_failing: false,
+            copies: HashMap::new(),
+        };
+        (coordinator, inbox)
     }
-    if let Ok(executor) = executor {
-        owned_workers
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(executor);
-    }
-    if let Some(ready) = ready {
-        let _ = ready.send(true);
-    }
-    let interval = Duration::from_millis(options.flush_interval_ms.max(1));
-    let mut due = if persistent {
-        clock.now()
-    } else {
-        clock.now() + interval
-    };
-    let mut active = false;
-    let mut waiting_for_executor = false;
-    let mut completed: Option<AttemptResult> = None;
-    let mut retry: Option<View> = None;
-    let mut closing = false;
-    let mut flushes: Vec<Flush> = Vec::new();
-    let mut removals = Vec::new();
-    let mut cleanup_due: Option<Instant> = None;
-    let mut admitted_since_upload = 0usize;
-    #[cfg(feature = "session-replay")]
-    let mut replay_pending = VecDeque::new();
-    loop {
-        let end = *deadline.lock().unwrap_or_else(|p| p.into_inner());
-        if end.is_some_and(|end| clock.now() >= end) {
-            break;
-        }
-        #[cfg(feature = "session-replay")]
-        let mut replay_blocked = false;
-        #[cfg(feature = "session-replay")]
-        while let Some(control) = replay_pending.pop_front() {
-            match jobs.try_send(UploadJob::Replay(control)) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(UploadJob::Replay(control))) => {
-                    replay_pending.push_front(control);
-                    replay_blocked = true;
-                    waiting_for_executor = true;
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-        if let Some(result) = completed.take() {
-            active = false;
-            waiting_for_executor = false;
-            let pending: std::collections::HashSet<_> = result
-                .view
-                .batch
-                .pending
-                .iter()
-                .filter_map(|event| event.store_key)
-                .collect();
-            for (token, entry) in &result.view.entries {
-                if !pending.contains(token) {
-                    match entry {
-                        Entry::Disk(key) => removals.push(*key),
-                        Entry::Memory(id) => {
-                            queue.remove(*id);
-                        }
-                    }
-                }
-            }
-            if result.retry {
-                retry = Some(result.view);
-            }
-            due = clock.now();
-        }
-        if let Some(store) = &mut storage.store {
-            if cleanup_due.map_or(true, |at| clock.now() >= at) {
-                removals.retain(|key| {
-                    if deadline
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .is_some_and(|end| clock.now() >= end)
-                    {
-                        return true;
-                    }
-                    !storage_support::acknowledge(store.as_mut(), *key, &options.on_error)
-                });
-                cleanup_due = (!removals.is_empty()).then(|| clock.now() + interval);
-            }
-        }
-        // Persist staged suffix records even while the upload executor is blocked.
-        let stage_end = queue.end();
-        while let Some((item, can_persist)) = if persistent {
-            queue.stage(stage_end)
-        } else {
-            None
-        } {
-            admitted_since_upload = admitted_since_upload.saturating_add(1);
-            if deadline
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .is_some_and(|end| clock.now() >= end)
-            {
+
+    pub(super) fn run(mut self, jobs: mpsc::SyncSender<Job>, rx: mpsc::Receiver<Control>) {
+        self.jobs = Some(jobs);
+        loop {
+            if self.past_deadline() {
                 break;
             }
-            if can_persist && removals.is_empty() {
-                if let Some(store) = &mut storage.store {
-                    let key = storage_support::append(
-                        store.as_mut(),
-                        &item.wire,
-                        StoreKey(item.id),
-                        &options.on_error,
-                    );
-                    if let Some(key) = key {
-                        queue.persisted(key.0);
-                        for flush in &mut flushes {
-                            if item.id <= flush.memory {
-                                flush.disk = flush.disk.max(key.0);
-                            }
-                        }
-                        if !queue.remove(item.id) {
-                            // An evicted in-progress append must never re-enter
-                            // delivery, even when removing its new file fails.
-                            removals.push(key);
-                            cleanup_due = Some(clock.now());
-                        }
-                    }
-                }
+            self.drain_inbox();
+            self.evict_over_capacity();
+            if !self.sending && !self.start_request() {
+                break;
+            }
+            self.complete_waiters();
+            if self.shutdown.is_some() && self.drained() {
+                break;
+            }
+            let message = match self.next_wake() {
+                Some(at) => rx.recv_timeout(at.saturating_duration_since(self.clock.now())),
+                None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            };
+            match message {
+                Ok(control) => self.handle(control),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
-        if deadline
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_some_and(|end| clock.now() >= end)
-        {
-            break;
-        }
-        if !active && removals.is_empty() {
-            if let Some(view) = &mut retry {
-                let entries = &view.entries;
-                view.batch.pending.retain(|event| {
-                    let entry = entries
-                        .iter()
-                        .find(|(key, _)| Some(*key) == event.store_key)
-                        .map(|(_, entry)| *entry);
-                    match entry {
-                        Some(Entry::Memory(id)) => queue.contains(id),
-                        Some(Entry::Disk(key)) => storage
-                            .store
-                            .as_ref()
-                            .is_some_and(|store| store.contains(key).unwrap_or(true)),
-                        None => false,
-                    }
-                });
-                if view.batch.pending.is_empty() {
-                    retry = None;
+        self.finish(&rx);
+    }
+
+    fn handle(&mut self, control: Control) {
+        match control {
+            Control::QueueWake => self.inbox.clear_wake(),
+            Control::Sent(sent) => self.apply(*sent),
+            Control::QueueFlush {
+                completion,
+                through,
+            } => self.waiters.push(Waiter {
+                through,
+                completion,
+            }),
+            Control::Flush(completion) | Control::FlushCaptures(completion) => {
+                self.waiters.push(Waiter {
+                    through: self.inbox.last_seq(),
+                    completion,
+                })
+            }
+            Control::Shutdown(completion) => {
+                let mut deadline = self.deadline.lock().unwrap_or_else(|p| p.into_inner());
+                if deadline.is_none() {
+                    let timeout = Duration::from_millis(self.options.shutdown_timeout_ms)
+                        .min(super::MAX_SHUTDOWN_TIMEOUT);
+                    *deadline = Some(self.clock.now() + timeout);
+                }
+                drop(deadline);
+                if let Some(earlier) = self.shutdown.replace(completion) {
+                    earlier.signal();
                 }
             }
-            let eligible = retry
-                .as_ref()
-                .map_or(true, |view| clock.now() >= view.batch.next_at);
-            if eligible
-                && (closing
-                    || !flushes.is_empty()
-                    || admitted_since_upload >= options.flush_at.max(1)
-                    || queue.len() >= options.flush_at.max(1)
-                    || clock.now() >= due)
-            {
-                // A later waiter must not extend an earlier fixed checkpoint.
-                let through = flushes.iter().map(|flush| flush.disk).min();
-                let memory_through = flushes.iter().map(|flush| flush.memory).min();
-                let mut scanned_more = false;
-                let mut reselect_unbounded = false;
-                let view = retry.take().or_else(|| {
-                    let mut head_empty = true;
-                    let mut events = Vec::new();
-                    let mut entries = Vec::new();
-                    if let Some(store) = &mut storage.store {
-                        reselect_unbounded = through
-                            .zip(store.end_key())
-                            .is_some_and(|(end, key)| key.0 > end);
-                        let count = options.max_batch_size.max(1).min(options.max_queue_size);
-                        let bytes = queue.limit() as u64;
-                        let target = batch_bytes_target.min(queue.limit()) as u64;
-                        let page = match through {
-                            Some(through) => {
-                                store.head_batch_through(count, bytes, target, StoreKey(through))
-                            }
-                            None => store.head_batch(count, bytes, target),
-                        };
-                        match page {
-                            Ok(page) => {
-                                scanned_more = page.events.is_empty() && page.advanced && page.more;
-                                for error in page.errors {
-                                    super::super::common::report_storage_error(
-                                        &options.on_error,
-                                        crate::client::StorageOperation::Read,
-                                        &error,
-                                    );
-                                }
-                                head_empty =
-                                    page.events.is_empty() && !page.more && !page.retry_pending;
-                                for record in page.events {
-                                    let token = StoreKey(events.len() as u64 + 1);
-                                    let mut event = DeliveryEvent::from(record.event);
-                                    event.store_key = Some(token);
-                                    entries.push((token, Entry::Disk(record.key)));
-                                    events.push(event);
-                                }
-                            }
-                            Err(error) => {
-                                super::super::common::report_storage_error(
-                                    &options.on_error,
-                                    crate::client::StorageOperation::Read,
-                                    &error,
-                                );
-                                head_empty = false;
-                            }
-                        }
-                    }
-                    if head_empty {
-                        // A bounded disk head says nothing about later durable
-                        // records: resident selection must share its checkpoint.
-                        for (id, wire) in queue
-                            .view(
-                                options.max_batch_size.max(1),
-                                batch_bytes_target.min(queue.limit()),
-                                persistent,
-                            )
-                            .into_iter()
-                            .take_while(|(id, _)| {
-                                let covered = memory_through.map_or(true, |end| *id <= end);
-                                reselect_unbounded |= !covered;
-                                covered
-                            })
-                        {
-                            let token = StoreKey(events.len() as u64 + 1);
-                            let mut event = DeliveryEvent::from(wire);
-                            event.store_key = Some(token);
-                            entries.push((token, Entry::Memory(id)));
-                            events.push(event);
-                        }
-                    }
-                    let mut body_bytes = 0usize;
-                    let keep = events
-                        .iter()
-                        .take_while(|event| {
-                            let next = measure_total(event.as_ref());
-                            if body_bytes > 0
-                                && next > batch_bytes_target.saturating_sub(body_bytes)
-                            {
-                                return false;
-                            }
-                            body_bytes = body_bytes.saturating_add(next);
-                            true
-                        })
-                        .count();
-                    events.truncate(keep);
-                    entries.truncate(keep);
-                    if events.is_empty() {
-                        return None;
-                    }
-                    Some(View {
-                        entries,
-                        batch: RetryBatch {
-                            pending: events,
-                            request_id: Uuid::now_v7(),
-                            created_at: wire_timestamp(clock.now_utc()),
-                            final_results: HashMap::new(),
-                            historical_migration: false,
-                            attempt: 1,
-                            next_at: clock.now(),
-                        },
-                    })
+            #[cfg(test)]
+            Control::Tick(completion) => {
+                self.due = Some(self.clock.now());
+                self.waiters.push(Waiter {
+                    through: self.inbox.last_seq(),
+                    completion,
                 });
-                if let Some(view) = view {
-                    #[cfg(feature = "session-replay")]
-                    let mut replay_barrier = false;
-                    if let Some((_, first)) = view.entries.iter().find(|(token, _)| {
-                        view.batch
-                            .pending
-                            .first()
-                            .is_some_and(|event| event.store_key == Some(*token))
-                    }) {
-                        let mut index = 0;
-                        while index < flushes.len() {
-                            if flushes[index].precedes(*first) {
-                                let flush = flushes.remove(index);
-                                #[cfg(feature = "session-replay")]
-                                {
-                                    replay_pending.push_back(flush.into_replay_control());
-                                    replay_barrier = true;
-                                }
-                                #[cfg(not(feature = "session-replay"))]
-                                flush.completion.signal();
-                            } else {
-                                index += 1;
-                            }
-                        }
-                    }
-                    #[cfg(feature = "session-replay")]
-                    if replay_barrier {
-                        retry = Some(view);
-                        continue;
-                    }
-                    match jobs.try_send(UploadJob::Analytics(view)) {
-                        Ok(()) => {
-                            active = true;
-                            admitted_since_upload = 0;
-                        }
-                        Err(mpsc::TrySendError::Full(UploadJob::Analytics(view))) => {
-                            retry = Some(view);
-                            waiting_for_executor = true;
-                        }
-                        Err(_) => break,
-                    }
-                } else if scanned_more {
-                    // Continue recovery next turn, after servicing a queued
-                    // control instead of monopolizing the coordinator mailbox.
-                    due = clock.now();
-                } else {
-                    // Only this sweep's waiters are covered; later checkpoints
-                    // require their own bounded selection before completion.
-                    let mut index = 0;
-                    while index < flushes.len() {
-                        if through.is_some_and(|through| flushes[index].disk > through)
-                            || memory_through.is_some_and(|end| flushes[index].memory > end)
-                        {
-                            index += 1;
+            }
+            // The stateless worker's own controls never reach a coordinator.
+            Control::Capture { .. } | Control::HistoricalBatch { .. } => {}
+            Control::Flags(_) => unreachable!("request-worker-only flags"),
+            Control::RemoteConfig(_) => unreachable!("request-worker-only config"),
+            #[cfg(feature = "session-replay")]
+            Control::ReplayFrame(_)
+            | Control::ReplayFailure(_)
+            | Control::ReplayShutdownAbandoned => {
+                unreachable!("replay-lane-only control")
+            }
+            #[cfg(test)]
+            Control::RequestBarrier(_) => unreachable!("request-worker-only barrier"),
+        }
+    }
+
+    fn drain_inbox(&mut self) {
+        let waiting = self.inbox.drain();
+        self.enqueue(waiting);
+    }
+
+    /// Move admitted events into the queue: to disk when there is a store,
+    /// otherwise held in memory. An event whose write fails is dropped.
+    fn enqueue(&mut self, waiting: Vec<Waiting>) {
+        let now = self.clock.now();
+        for waiting in waiting {
+            let entry = if self.store.is_some() {
+                // Written or dropped, the event no longer waits in memory.
+                dec_len(&self.pending, 1);
+                let Some(bytes) = self.write(waiting.seq, &waiting.event) else {
+                    continue;
+                };
+                Entry {
+                    seq: waiting.seq,
+                    bytes,
+                    payload: None,
+                }
+            } else {
+                Entry {
+                    seq: waiting.seq,
+                    bytes: waiting.bytes as u64,
+                    payload: Some(Arc::new(waiting.event)),
+                }
+            };
+            self.table.push(entry);
+            if self.due.is_none() {
+                self.due = Some(now + self.interval);
+            }
+        }
+    }
+
+    /// Write an event to disk and return the record size, or `None` when the
+    /// write failed and the event is dropped.
+    fn write(&mut self, seq: u64, event: &CaptureEvent) -> Option<u64> {
+        match self.store.as_mut()?.write(StoreKey(seq), event) {
+            Ok(bytes) => {
+                self.write_failing = false;
+                Some(bytes)
+            }
+            Err(error) => {
+                // One report per run of failures, not one per event.
+                if !std::mem::replace(&mut self.write_failing, true) {
+                    self.report_storage(StorageOperation::Write, &error);
+                }
+                None
+            }
+        }
+    }
+
+    /// Drop the oldest events over the queue limits, warning once per overflow
+    /// until the queue drains.
+    fn evict_over_capacity(&mut self) {
+        let evicted = self.table.evict(self.limits);
+        let dropped = self.inbox.take_dropped() + evicted.len();
+        self.discard(evicted);
+        if dropped > 0 && !std::mem::replace(&mut self.capacity_warned, true) {
+            warn!(
+                "posthog-rs: event queue for {} is full; dropping the oldest queued event(s) to keep new ones",
+                self.endpoint
+            );
+        }
+    }
+
+    /// Release entries that left the queue: delete their files, or count
+    /// memory-only ones out of the pending total.
+    fn discard(&mut self, entries: Vec<Entry>) {
+        for entry in entries {
+            self.copies.remove(&entry.seq);
+            if entry.on_disk() {
+                self.delete(StoreKey(entry.seq));
+            } else {
+                dec_len(&self.pending, 1);
+            }
+        }
+    }
+
+    /// Delete a record. A file that cannot be deleted is reported and left
+    /// behind; it is sent again after a restart.
+    fn delete(&mut self, key: StoreKey) {
+        let Some(store) = &mut self.store else {
+            return;
+        };
+        if let Err(error) = store.delete(key) {
+            self.report_storage(StorageOperation::Remove, &error);
+        }
+    }
+
+    /// Hand the next request to the executor when one is due. Returns false
+    /// once the executor has stopped.
+    fn start_request(&mut self) -> bool {
+        let now = self.clock.now();
+        if let Some(retry) = &self.retry {
+            if now < retry.next_at {
+                return true;
+            }
+            let retry = self.retry.take().expect("checked above");
+            // A retry keeps its identity only while all its events are queued.
+            if self.table.contains_all(&retry.seqs) {
+                return self.send(retry.seqs.clone(), Some(retry));
+            }
+            self.due = Some(now);
+        }
+        if self.table.is_empty() {
+            self.due = None;
+            return true;
+        }
+        let requested = self.shutdown.is_some()
+            || self
+                .waiters
+                .iter()
+                .any(|waiter| self.table.has_through(waiter.through));
+        let due = self.due.is_some_and(|due| now >= due)
+            || self.table.len() >= self.options.flush_at.max(1);
+        if !requested && !due {
+            return true;
+        }
+        let seqs = self
+            .table
+            .select(self.options.max_batch_size.max(1), self.batch_bytes_target);
+        self.send(seqs, None)
+    }
+
+    /// Send `seqs`, as a new request or as `retry`. Returns false once the
+    /// executor has stopped.
+    fn send(&mut self, seqs: Vec<u64>, retry: Option<Retry>) -> bool {
+        let mut events = Vec::with_capacity(seqs.len());
+        for seq in &seqs {
+            let Some(entry) = self.table.get(*seq) else {
+                continue;
+            };
+            let event = match &entry.payload {
+                Some(payload) => (**payload).clone(),
+                None => {
+                    let read = self
+                        .store
+                        .as_mut()
+                        .expect("an on-disk entry has a store")
+                        .read(StoreKey(*seq));
+                    match read {
+                        Ok(event) => event,
+                        Err(error) => {
+                            // Never sent: dropped from the queue and deleted.
+                            self.report_storage(StorageOperation::Read, &error);
+                            let removed = self.table.remove(&[*seq]);
+                            self.discard(removed);
                             continue;
                         }
-                        let flush = flushes.remove(index);
-                        #[cfg(feature = "session-replay")]
-                        replay_pending.push_back(flush.into_replay_control());
-                        #[cfg(not(feature = "session-replay"))]
-                        flush.completion.signal();
                     }
-                    if closing && flushes.is_empty() {
-                        #[cfg(feature = "session-replay")]
-                        if replay_pending.is_empty() {
-                            break;
-                        }
-                        #[cfg(not(feature = "session-replay"))]
-                        break;
+                }
+            };
+            let mut sending = Sending { seq: *seq, event };
+            if let Some(copies) = self.copies.get(seq) {
+                sending.event.dropped_copies = *copies;
+            }
+            events.push(sending);
+        }
+        if events.is_empty() {
+            // Go on with whatever is still queued. An emptied queue keeps no
+            // due time, so the next event waits for its flush interval.
+            self.due = (!self.table.is_empty()).then(|| self.clock.now());
+            return true;
+        }
+        // A retry keeps its identity only while it sends all its events.
+        let identity = match retry {
+            Some(retry) if events.len() == seqs.len() => {
+                (retry.request_id, retry.attempt, retry.created_at)
+            }
+            _ => (Uuid::now_v7(), 1, wire_timestamp(self.clock.now_utc())),
+        };
+        let (request_id, attempt, created_at) = identity;
+        let job = Job {
+            request_id,
+            attempt,
+            created_at,
+            events,
+        };
+        match self.jobs.as_ref().map(|jobs| jobs.try_send(job)) {
+            Some(Ok(())) => {
+                self.sending = true;
+                // This request uses up the due time: events admitted while it
+                // is out start their own interval.
+                self.due = None;
+                self.selected_through = self.table.last_seq().unwrap_or(0);
+                true
+            }
+            // Only one request is ever outstanding, so the slot is free.
+            Some(Err(mpsc::TrySendError::Full(_))) => unreachable!("one request at a time"),
+            _ => false,
+        }
+    }
+
+    /// Apply the outcome of a request: remove what finished and keep what
+    /// will be retried.
+    fn apply(&mut self, sent: Sent) {
+        self.sending = false;
+        match sent.verdict {
+            Verdict::Finished => self.finish_events(&sent.seqs),
+            Verdict::Retry { retained, delay } => {
+                for (seq, copies) in &retained {
+                    // Capacity may have evicted the event while it was out.
+                    if *copies > 0 && self.table.get(*seq).is_some() {
+                        self.copies.insert(*seq, *copies);
                     }
-                    // Resume the deferred selection against the normal disk
-                    // head, without starting a new cycle for an exhausted head.
-                    due = if !flushes.is_empty() || reselect_unbounded {
-                        clock.now()
-                    } else {
-                        clock.now() + interval
-                    };
                 }
-            } else if !eligible {
-                for flush in flushes.drain(..) {
-                    #[cfg(feature = "session-replay")]
-                    replay_pending.push_back(flush.into_replay_control());
-                    #[cfg(not(feature = "session-replay"))]
-                    flush.completion.signal();
-                }
-                if closing {
-                    #[cfg(feature = "session-replay")]
-                    if replay_pending.is_empty() {
-                        break;
-                    }
-                    #[cfg(not(feature = "session-replay"))]
-                    break;
-                }
+                let retained: Vec<u64> = retained.into_iter().map(|(seq, _)| seq).collect();
+                let done: Vec<u64> = sent
+                    .seqs
+                    .iter()
+                    .copied()
+                    .filter(|seq| !retained.contains(seq))
+                    .collect();
+                self.finish_events(&done);
+                self.retry = Some(Retry {
+                    seqs: retained,
+                    request_id: sent.request_id,
+                    attempt: sent.attempt.saturating_add(1),
+                    created_at: sent.created_at,
+                    next_at: self.clock.now() + delay,
+                });
             }
         }
-        if !active && !removals.is_empty() {
-            for flush in flushes.drain(..) {
-                #[cfg(feature = "session-replay")]
-                replay_pending.push_back(flush.into_replay_control());
-                #[cfg(not(feature = "session-replay"))]
-                flush.completion.signal();
+        // Events that were queued when the request was selected but did not go
+        // in it are a backlog: send them now. This includes events admitted
+        // during a retry wait, once the retry clears.
+        if self.retry.is_none() && self.table.has_through(self.selected_through) {
+            self.due = Some(self.clock.now());
+        }
+    }
+
+    /// Remove events that reached a final outcome.
+    fn finish_events(&mut self, seqs: &[u64]) {
+        let removed = self.table.remove(seqs);
+        self.discard(removed);
+        if self.table.is_empty() {
+            self.capacity_warned = false;
+        }
+    }
+
+    fn complete_waiters(&mut self) {
+        let retrying = self.retry.is_some();
+        let table = &self.table;
+        // A request waiting to be retried has been attempted, and holds back
+        // everything after it. Events in flight stay in the table until their
+        // answer is applied, so a waiter does not complete before them, unless
+        // capacity evicted them first: they are then no longer queued, and a
+        // flush does not wait for them.
+        let (done, waiting): (Vec<_>, Vec<_>) = self
+            .waiters
+            .drain(..)
+            .partition(|waiter| retrying || !table.has_through(waiter.through));
+        self.waiters = waiting;
+        for waiter in done {
+            waiter.completion.signal();
+        }
+    }
+
+    /// Whether shutdown can stop now: nothing is being sent, and nothing more
+    /// can be sent before the deadline.
+    fn drained(&self) -> bool {
+        if self.sending {
+            return false;
+        }
+        match &self.retry {
+            Some(retry) => self
+                .current_deadline()
+                .map_or(true, |end| retry.next_at > end),
+            None => self.table.is_empty(),
+        }
+    }
+
+    fn next_wake(&self) -> Option<Instant> {
+        let next = if self.sending {
+            None
+        } else {
+            match &self.retry {
+                // Nothing else is sent before the retry.
+                Some(retry) => Some(retry.next_at),
+                None if !self.table.is_empty() => self.due,
+                None => None,
             }
-            if closing {
-                #[cfg(feature = "session-replay")]
-                if replay_pending.is_empty() {
-                    break;
-                }
-                #[cfg(not(feature = "session-replay"))]
+        };
+        match (self.current_deadline(), next) {
+            (Some(deadline), Some(next)) => Some(deadline.min(next)),
+            (deadline, next) => deadline.or(next),
+        }
+    }
+
+    fn current_deadline(&self) -> Option<Instant> {
+        *self.deadline.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn past_deadline(&self) -> bool {
+        self.current_deadline()
+            .is_some_and(|end| self.clock.now() >= end)
+    }
+
+    /// Stop: close the inbox and queue its last events, written to disk when
+    /// there is a store, within the queue limits as in normal operation. Then
+    /// report once what delivery could not finish, release storage, and
+    /// signal every waiter.
+    fn finish(mut self, rx: &mpsc::Receiver<Control>) {
+        let waiting = self.inbox.close_and_drain();
+        self.enqueue(waiting);
+        self.evict_over_capacity();
+        let mut on_disk = 0;
+        let mut dropped = 0;
+        for entry in self.table.take_all() {
+            if entry.on_disk() {
+                on_disk += 1;
+            } else {
+                dec_len(&self.pending, 1);
+                dropped += 1;
+            }
+        }
+        if on_disk > 0 || dropped > 0 {
+            let mut parts = Vec::new();
+            if on_disk > 0 {
+                parts.push(format!(
+                    "{on_disk} event(s) stay on disk for the next start"
+                ));
+            }
+            if dropped > 0 {
+                parts.push(format!(
+                    "{dropped} event(s) held only in memory are dropped"
+                ));
+            }
+            warn!(
+                "posthog-rs: delivery to {} stopped before finishing; {}",
+                self.endpoint,
+                parts.join(", ")
+            );
+        }
+        // Release the namespace lease before anyone waiting can reopen it.
+        self.store = None;
+        self.jobs = None;
+        for waiter in self.waiters.drain(..) {
+            waiter.completion.signal();
+        }
+        if let Some(completion) = self.shutdown.take() {
+            completion.signal();
+        }
+        drain_pending_completions(rx, &self.pending);
+    }
+
+    fn report_storage(&self, operation: StorageOperation, error: &std::io::Error) {
+        crate::client::common::report_storage_error(&self.options.on_error, operation, error);
+    }
+}
+
+/// The upload executor: sends one request at a time, reads capture's
+/// verdicts, and reports failures. `on_error` hooks run here, off the
+/// coordinator.
+pub(super) struct Executor {
+    pub(super) http: reqwest::blocking::Client,
+    pub(super) options: ClientOptions,
+    pub(super) lane: LaneConfig,
+    pub(super) clock: Arc<dyn Clock>,
+    pub(super) deadline: Arc<Mutex<Option<Instant>>>,
+}
+
+impl Executor {
+    pub(super) fn run(self, jobs: mpsc::Receiver<Job>, results: mpsc::Sender<Control>) {
+        let url = self.options.endpoints().build_url(self.lane.endpoint);
+        while let Ok(job) = jobs.recv() {
+            let seqs: Vec<u64> = job.events.iter().map(|sending| sending.seq).collect();
+            let (request_id, attempt, created_at) =
+                (job.request_id, job.attempt, job.created_at.clone());
+            // A panic must not strand the coordinator waiting for this answer.
+            let sent =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.attempt(&url, job)))
+                    .unwrap_or_else(|_| Sent {
+                        verdict: Verdict::Retry {
+                            retained: seqs.iter().map(|seq| (*seq, 0)).collect(),
+                            delay: crate::client::retry::capture_backoff_duration(
+                                &self.options,
+                                attempt,
+                                None,
+                            ),
+                        },
+                        seqs,
+                        request_id,
+                        attempt,
+                        created_at,
+                    });
+            if results.send(Control::Sent(Box::new(sent))).is_err() {
                 break;
             }
         }
-        #[cfg(feature = "session-replay")]
-        if !replay_pending.is_empty() && !replay_blocked {
-            continue;
-        }
-        let next = if active || waiting_for_executor {
-            end
-        } else if !removals.is_empty() {
-            cleanup_due.into_iter().chain(end).min()
-        } else {
-            Some(retry.as_ref().map_or(due, |view| view.batch.next_at))
-                .into_iter()
-                .chain(end)
-                .min()
+    }
+
+    fn attempt(&self, url: &str, job: Job) -> Sent {
+        let outcome = self.send(url, &job);
+        let Job {
+            request_id,
+            attempt,
+            created_at,
+            events,
+        } = job;
+        let seqs: Vec<u64> = events.iter().map(|sending| sending.seq).collect();
+        let count = events.len();
+        let mut pending = events;
+        let mut results = HashMap::new();
+        // A client queue has no attempt limit, as the retry-queue spec allows:
+        // an event is retried until it is delivered, evicted by the queue
+        // limits, or left behind at shutdown.
+        let is_final = false;
+        let mut status = None;
+        let mut error_body = None;
+        let step = match outcome {
+            Outcome::Network(message) => capture::transport_error_step(
+                &self.options,
+                &request_id,
+                attempt,
+                message,
+                is_final,
+            ),
+            Outcome::Unsendable(message) => Step::Fail(Error::Serialization(message)),
+            Outcome::Response {
+                status: code,
+                retry_after,
+                body,
+            } => {
+                status = Some(code);
+                let step = capture::response_step(
+                    &self.options,
+                    &request_id,
+                    attempt,
+                    code,
+                    retry_after,
+                    &body,
+                    &mut pending,
+                    &mut results,
+                    is_final,
+                );
+                if !(200..=299).contains(&code) {
+                    error_body = Some(body);
+                }
+                step
+            }
         };
-        let wake = match next {
-            Some(at) => rx.recv_timeout(at.saturating_duration_since(clock.now())),
-            None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        let report = Report {
+            request_id: &request_id,
+            attempt,
+            status,
+            results: &results,
         };
-        match wake {
-            Ok(Control::Flags(_)) => unreachable!("request-worker-only flags"),
-            Ok(Control::RemoteConfig(_)) => unreachable!("request-worker-only config"),
-            #[cfg(test)]
-            Ok(Control::RequestBarrier(_)) => unreachable!("request-worker-only barrier"),
-            Ok(Control::QueueWake) => {
-                queue.clear_wake();
-                waiting_for_executor = false;
+        let endpoint = self.lane.endpoint;
+        let verdict = match step {
+            Step::Done => {
+                let lost = pending.len() + undelivered_results(&results);
+                if lost > 0 {
+                    if self.options.on_error.is_empty() {
+                        warn!(
+                            "posthog-rs: {lost} event(s) not persisted by {endpoint}: {}",
+                            undelivered_totals(&results)
+                        );
+                    } else {
+                        self.report(&report, None, None, lost);
+                    }
+                }
+                Verdict::Finished
             }
-            Ok(Control::UploadComplete(result)) => completed = Some(*result),
-            Ok(Control::Capture { event }) => {
-                dec_len(&len, 1);
-                queue.admit(build_event_at(&event, clock.now_utc()));
+            Step::Fail(error) => {
+                if self.options.on_error.is_empty() {
+                    warn!("posthog-rs: dropping {count} event(s) for {endpoint}: {error}");
+                } else {
+                    let error_response = error_body
+                        .as_deref()
+                        .and_then(|body| serde_json::from_str::<CaptureErrorResponse>(body).ok());
+                    let lost = pending.len() + undelivered_results(&results);
+                    self.report(&report, Some(&error), error_response.as_ref(), lost);
+                }
+                Verdict::Finished
             }
-            Ok(Control::Prepared { event }) => {
-                dec_len(&len, 1);
-                queue.admit(event.wire);
+            Step::Backoff(delay) => {
+                let rejected = undelivered_results(&results);
+                if rejected > 0 {
+                    if self.options.on_error.is_empty() {
+                        warn!("posthog-rs: {rejected} event(s) rejected by {endpoint}");
+                    } else {
+                        self.report(&report, None, None, rejected);
+                    }
+                }
+                Verdict::Retry {
+                    retained: pending
+                        .iter()
+                        .map(|sending| (sending.seq, sending.event.dropped_copies))
+                        .collect(),
+                    delay,
+                }
             }
-            Ok(Control::QueueFlush {
-                completion,
-                disk,
-                memory,
-            }) => flushes.push(Flush::new(completion, disk, memory)),
-            Ok(Control::Flush(completion) | Control::FlushCaptures(completion)) => {
-                let (disk, memory) = queue.checkpoint();
-                flushes.push(Flush::new(completion, disk, memory));
-            }
-            Ok(Control::Shutdown { completion, .. }) => {
-                closing = true;
-                flushes.push(Flush::new(completion, u64::MAX, u64::MAX));
-            }
-            #[cfg(test)]
-            Ok(Control::Tick(completion)) => {
-                due = clock.now();
-                let (disk, memory) = queue.checkpoint();
-                flushes.push(Flush::tick(completion, disk, memory));
-            }
-            #[cfg(feature = "session-replay")]
-            Ok(
-                control @ (Control::ReplayFrame(_)
-                | Control::ReplayFailure(_)
-                | Control::DeliveryClosing(_)
-                | Control::ReplayShutdownAbandoned),
-            ) => {
-                replay_pending.push_back(control);
-            }
-            Ok(Control::HistoricalBatch { events }) => dec_len(&len, events.len()),
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        };
+        Sent {
+            seqs,
+            request_id,
+            attempt,
+            created_at,
+            verdict,
         }
     }
-    queue.clear();
-    drop(retry);
-    drop(completed);
-    // No disk access remains possible. A late encoder/report relay must not
-    // retain the namespace while already-started work finishes.
-    drop(storage);
-    #[cfg(feature = "session-replay")]
-    {
-        for control in replay_pending {
-            let _ = jobs.send(UploadJob::Replay(control));
-        }
-        let end = *deadline.lock().unwrap_or_else(|p| p.into_inner());
-        if !closing && end.is_some_and(|end| clock.now() >= end) {
-            loop {
-                let wake = if encoder_running.load(Ordering::Acquire) {
-                    rx.recv_timeout(Duration::from_millis(2))
-                } else {
-                    rx.try_recv()
-                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-                };
-                match wake {
-                    Ok(Control::Shutdown { completion, .. }) => {
-                        flushes.push(Flush::new(completion, u64::MAX, u64::MAX));
-                        break;
-                    }
-                    Ok(Control::QueueFlush {
-                        completion,
-                        disk,
-                        memory,
-                    }) => flushes.push(Flush::new(completion, disk, memory)),
-                    Ok(
-                        control @ (Control::ReplayFrame(_)
-                        | Control::ReplayFailure(_)
-                        | Control::DeliveryClosing(_)
-                        | Control::ReplayShutdownAbandoned
-                        | Control::Flush(_)
-                        | Control::FlushCaptures(_)),
-                    ) => {
-                        let _ = jobs.send(UploadJob::Replay(control));
-                    }
-                    #[cfg(test)]
-                    Ok(control @ Control::Tick(_)) => {
-                        let _ = jobs.send(UploadJob::Replay(control));
-                    }
-                    Ok(Control::Capture { .. } | Control::Prepared { .. }) => dec_len(&len, 1),
-                    Ok(Control::HistoricalBatch { events }) => dec_len(&len, events.len()),
-                    Ok(_) => {}
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+
+    fn report(
+        &self,
+        report: &Report<'_>,
+        error: Option<&Error>,
+        error_response: Option<&CaptureErrorResponse>,
+        event_count: usize,
+    ) {
+        let failure = PostHogError::Capture(CaptureFailure {
+            endpoint: self.lane.endpoint,
+            error,
+            status: report.status,
+            attempt: report.attempt,
+            event_count,
+            historical_migration: false,
+            request_id: Some(report.request_id),
+            results: report.results,
+            error_response,
+        });
+        apply_on_error_hooks(&self.options.on_error, &failure);
+    }
+
+    fn send(&self, url: &str, job: &Job) -> Outcome {
+        let batch: Vec<&CaptureEvent> = job.events.iter().map(|sending| &sending.event).collect();
+        let request = BatchRequestRef {
+            created_at: &job.created_at,
+            historical_migration: None,
+            batch: &batch,
+        };
+        let payload = match serde_json::to_vec(&request) {
+            Ok(payload) => payload,
+            Err(error) => return Outcome::Unsendable(error.to_string()),
+        };
+        let mut headers = capture::build_headers_at(
+            &self.options,
+            &job.request_id,
+            job.attempt,
+            self.clock.now_utc(),
+        );
+        let body =
+            capture::maybe_compress(self.lane.compression(&self.options), &mut headers, payload);
+        let deadline = *self.deadline.lock().unwrap_or_else(|p| p.into_inner());
+        let request = bound_request(
+            self.http.post(url).headers(headers).body(body),
+            deadline,
+            self.clock.now(),
+            Duration::from_secs(self.options.request_timeout_seconds),
+        );
+        match request.send() {
+            Err(error) => Outcome::Network(error.to_string()),
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let retry_after = capture::parse_retry_after(response.headers());
+                let mut bytes = Vec::new();
+                let read = response
+                    .take(MAX_RESPONSE_BODY_BYTES + 1)
+                    .read_to_end(&mut bytes);
+                // An oversized or cut-off body is unreadable. A success then
+                // has no results to read and is not resent, as the capture
+                // spec requires: capture likely stored its events, and a
+                // resend would store them twice. Any other status is the
+                // answer by itself.
+                let readable = read.is_ok() && bytes.len() as u64 <= MAX_RESPONSE_BODY_BYTES;
+                Outcome::Response {
+                    status,
+                    retry_after,
+                    body: if readable {
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    } else {
+                        String::new()
+                    },
                 }
             }
         }
-        for flush in flushes {
-            let _ = jobs.send(UploadJob::Replay(flush.into_replay_control()));
-        }
-        let (tx, _) = mpsc::channel();
-        let _ = jobs.send(UploadJob::Replay(Control::Shutdown {
-            completion: Completion::Blocking(tx),
-            deadline: end,
-        }));
     }
-    #[cfg(not(feature = "session-replay"))]
-    for flush in flushes {
-        flush.completion.signal();
-    }
-    // Active HTTP and encoder work own their resources, never a caller join.
-    drop(jobs);
-    drain_pending_completions(&rx, &len);
+}
+
+struct Report<'a> {
+    request_id: &'a Uuid,
+    attempt: u32,
+    status: Option<u16>,
+    results: &'a HashMap<Uuid, EventResult>,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::storage_tests::{wire, TestDirectory};
-    use super::*;
-    use crate::client::event_store::{
-        EventStore, FileEventStore, Recovery, StorageDirectory, StoreLimits, StoreWriteError,
-    };
-    use std::io::{self, Read, Write};
-    use std::net::{TcpListener, TcpStream};
-
-    fn request(stream: &mut TcpStream) -> String {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        let mut bytes = Vec::new();
-        let mut buffer = [0; 4096];
-        loop {
-            let read = stream.read(&mut buffer).unwrap();
-            assert_ne!(read, 0);
-            bytes.extend_from_slice(&buffer[..read]);
-            if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
-                let length: usize = headers
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length:").map(str::trim))
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-                if bytes.len() >= end + 4 + length {
-                    return String::from_utf8(bytes[end + 4..].to_vec()).unwrap();
-                }
-            }
-        }
-    }
-    struct Observed {
-        store: FileEventStore,
-        written: mpsc::Sender<String>,
-        first_head: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
-    }
-    impl EventStore for Observed {
-        fn recover(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
-            self.store.recover(count, bytes)
-        }
-        fn head(&mut self, count: usize, bytes: u64) -> io::Result<Recovery> {
-            self.store.head(count, bytes)
-        }
-        fn head_batch(&mut self, count: usize, bytes: u64, target: u64) -> io::Result<Recovery> {
-            if let Some((entered, release)) = self.first_head.take() {
-                entered.send(()).unwrap();
-                release.recv_timeout(Duration::from_secs(5)).unwrap();
-            }
-            self.store.head_batch(count, bytes, target)
-        }
-        fn head_batch_through(
-            &mut self,
-            count: usize,
-            bytes: u64,
-            target: u64,
-            through: StoreKey,
-        ) -> io::Result<Recovery> {
-            self.store.head_batch_through(count, bytes, target, through)
-        }
-        fn end_key(&self) -> Option<StoreKey> {
-            self.store.end_key()
-        }
-        fn contains(&self, key: StoreKey) -> io::Result<bool> {
-            self.store.contains(key)
-        }
-        fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
-            let result = self.store.put(event);
-            if result.is_ok() {
-                self.written.send(event.event.clone()).unwrap();
-            }
-            result
-        }
-        fn put_at(
-            &mut self,
-            event: &CaptureEvent,
-            key: StoreKey,
-        ) -> Result<StoreKey, StoreWriteError> {
-            let result = self.store.put_at(event, key);
-            if result.is_ok() {
-                self.written.send(event.event.clone()).unwrap();
-            }
-            result
-        }
-        fn remove(&mut self, key: StoreKey) -> io::Result<()> {
-            self.store.remove(key)
-        }
-    }
-
-    #[test]
-    fn admission_during_a_head_read_is_uploaded_once_after_staging() {
-        use httpmock::{Method::POST, MockServer};
-
-        let directory = TestDirectory::new();
-        let server = MockServer::start();
-        let (attempted, attempts) = mpsc::channel();
-        let (release_a, a_gate) = mpsc::channel();
-        let a_gate = Mutex::new(Some(a_gate));
-        let a_attempted = attempted.clone();
-        server.mock(|when, then| {
-            when.method(POST).body_includes("\"event\":\"A\"");
-            then.respond_with(move |request: &httpmock::HttpMockRequest| {
-                a_attempted.send("A").unwrap();
-                if let Some(gate) = a_gate.lock().unwrap().take() {
-                    gate.recv_timeout(Duration::from_secs(5)).unwrap();
-                }
-                http::Response::builder()
-                    .status(200)
-                    .body(super::super::tests::accept_all(request))
-                    .unwrap()
-                    .into()
-            });
-        });
-        server.mock(|when, then| {
-            when.method(POST).body_includes("\"event\":\"B\"");
-            then.respond_with(move |request: &httpmock::HttpMockRequest| {
-                attempted.send("B").unwrap();
-                http::Response::builder()
-                    .status(200)
-                    .body(super::super::tests::accept_all(request))
-                    .unwrap()
-                    .into()
-            });
-        });
-        let options = super::super::tests::options(server.base_url())
-            .flush_at(1usize)
-            .max_batch_size(1usize)
-            .build()
-            .unwrap();
-        let (head_entered, head) = mpsc::channel();
-        let (release_head, head_gate) = mpsc::channel();
-        let (written, writes) = mpsc::channel();
-        let store = Observed {
-            store: directory.open(),
-            written,
-            first_head: Some((head_entered, head_gate)),
-        };
-        let handle = TransportHandle::spawn_stateful(options, Some(Box::new(store)), 8192).unwrap();
-        head.recv_timeout(Duration::from_secs(3)).unwrap();
-        // The empty disk head is being read after the coordinator took its
-        // staging snapshot. These two arrivals need a subsequent staging turn.
-        assert_eq!(handle.enqueue_prepared(wire("A")), Admission::Accepted);
-        assert_eq!(handle.enqueue_prepared(wire("B")), Admission::Accepted);
-        let (complete, flushed) = mpsc::channel();
-        assert!(handle.send_control(Control::Flush(Completion::Blocking(complete))));
-        release_head.send(()).unwrap();
-        // Keep A's request open until both writes happen, so a premature
-        // in-memory upload cannot race its own durable duplicate away.
-        assert_eq!(writes.recv_timeout(Duration::from_secs(3)).unwrap(), "A");
-        assert_eq!(writes.recv_timeout(Duration::from_secs(3)).unwrap(), "B");
-        assert!(matches!(flushed.try_recv(), Err(mpsc::TryRecvError::Empty)));
-        release_a.send(()).unwrap();
-        flushed.recv_timeout(Duration::from_secs(3)).unwrap();
-        handle.close_blocking();
-        assert!(directory.records().is_empty());
-        assert_eq!(attempts.try_iter().collect::<Vec<_>>(), ["A", "B"]);
-    }
-
-    fn durable_fallback_checkpoint(checkpoint: &str) {
-        use httpmock::{Method::POST, MockServer};
-
-        let directory = TestDirectory::new();
-        let store = FileEventStore::open(
-            StorageDirectory::open(&directory.0).unwrap(),
-            StoreLimits {
-                max_events: 20,
-                max_bytes: 64 * 1024,
-                max_record_bytes: 1024,
-            },
-        )
-        .unwrap();
-        let server = MockServer::start();
-        let (entered, requests) = mpsc::channel();
-        let (returned, returns) = mpsc::channel();
-        let names = if checkpoint == "C" {
-            vec!["A", "B", "C", "D"]
-        } else {
-            vec!["A", "B", "C"]
-        };
-        let mut releases = HashMap::new();
-        for &name in &names {
-            let (release, gate) = mpsc::channel();
-            releases.insert(name, release);
-            let gate = Mutex::new(gate);
-            let entered = entered.clone();
-            let returned = returned.clone();
-            server.mock(|when, then| {
-                when.method(POST)
-                    .body_includes(format!("\"event\":\"{name}\""));
-                then.respond_with(move |request: &httpmock::HttpMockRequest| {
-                    entered.send(name).unwrap();
-                    gate.lock()
-                        .unwrap()
-                        .recv_timeout(Duration::from_secs(5))
-                        .unwrap();
-                    returned.send(name).unwrap();
-                    http::Response::builder()
-                        .status(200)
-                        .body(super::super::tests::accept_all(request))
-                        .unwrap()
-                        .into()
-                });
-            });
-        }
-        let (written, writes) = mpsc::channel();
-        let (failed, failures) = mpsc::channel();
-        let options = super::super::tests::options(server.base_url())
-            .flush_at(1usize)
-            .max_batch_size(1usize)
-            .max_queue_size(4usize)
-            .max_capture_attempts(1u32)
-            .on_error(move |failure| {
-                if let PostHogError::Storage(error) = failure {
-                    if matches!(error.operation(), crate::client::StorageOperation::Write) {
-                        failed.send(()).unwrap();
-                    }
-                }
-            })
-            .build()
-            .unwrap();
-        let handle = TransportHandle::spawn_stateful(
-            options,
-            Some(Box::new(Observed {
-                store,
-                written,
-                first_head: None,
-            })),
-            8192,
-        )
-        .unwrap();
-        assert_eq!(handle.enqueue_prepared(wire("A")), Admission::Accepted);
-        assert_eq!(writes.recv_timeout(Duration::from_secs(3)).unwrap(), "A");
-        let mut order = vec![requests.recv_timeout(Duration::from_secs(3)).unwrap()];
-        let (complete, flushed) = mpsc::channel();
-        let mut complete = Some(complete);
-        if checkpoint == "A" {
-            assert!(handle.send_control(Control::Flush(Completion::Blocking(
-                complete.take().unwrap()
-            ))));
-        }
-        assert_eq!(handle.enqueue_prepared(wire("B")), Admission::Accepted);
-        assert_eq!(writes.recv_timeout(Duration::from_secs(3)).unwrap(), "B");
-        assert!(directory
-            .0
-            .join("events/00000000000000000002.json")
-            .is_file());
-        if checkpoint == "B" {
-            assert!(handle.send_control(Control::Flush(Completion::Blocking(
-                complete.take().unwrap()
-            ))));
-        }
-        let mut fallback = wire("C");
-        fallback.properties = serde_json::json!({"padding": "x".repeat(2048)});
-        let bytes = crate::client::event_store::record_size(&fallback);
-        assert!(bytes > 1024 && bytes < 8192);
-        assert_eq!(handle.enqueue_prepared(fallback), Admission::Accepted);
-        failures.recv_timeout(Duration::from_secs(3)).unwrap();
-        assert!(!directory
-            .0
-            .join("events/00000000000000000003.json")
-            .exists());
-        let later_completion = if checkpoint == "C" {
-            assert!(handle.send_control(Control::Flush(Completion::Blocking(
-                complete.take().unwrap()
-            ))));
-            assert_eq!(handle.enqueue_prepared(wire("D")), Admission::Accepted);
-            let (complete, completed) = mpsc::channel();
-            assert!(handle.send_control(Control::Flush(Completion::Blocking(complete))));
-            Some(completed)
-        } else {
-            None
-        };
-        let mut checkpoint_completed = None;
-        let mut covered_work_pending = true;
-        let mut later_pending = true;
-        let mut normal_returns = Vec::new();
-        let mut request_progress = Ok(());
-        for index in 0..names.len() {
-            let name = order[index];
-            if name <= checkpoint {
-                covered_work_pending &=
-                    matches!(flushed.try_recv(), Err(mpsc::TryRecvError::Empty));
-            } else if checkpoint_completed.is_none() {
-                checkpoint_completed = Some(flushed.recv_timeout(Duration::from_secs(3)));
-            }
-            if let Some(later) = &later_completion {
-                later_pending &= matches!(later.try_recv(), Err(mpsc::TryRecvError::Empty));
-            }
-            let _ = releases[name].send(());
-            match returns.recv_timeout(Duration::from_secs(3)) {
-                Ok(name) => normal_returns.push(name),
-                Err(error) => {
-                    request_progress = Err(error);
-                    break;
-                }
-            }
-            if index + 1 < names.len() {
-                match requests.recv_timeout(Duration::from_secs(3)) {
-                    Ok(name) => order.push(name),
-                    Err(error) => {
-                        request_progress = Err(error);
-                        break;
-                    }
-                }
-            }
-        }
-        for release in releases.values() {
-            let _ = release.send(());
-        }
-        let completion =
-            checkpoint_completed.unwrap_or_else(|| flushed.recv_timeout(Duration::from_secs(3)));
-        let later_completed =
-            later_completion.map(|later| later.recv_timeout(Duration::from_secs(3)));
-        let (complete, drained) = mpsc::channel();
-        assert!(handle.send_control(Control::Flush(Completion::Blocking(complete))));
-        let drain = drained.recv_timeout(Duration::from_secs(3));
-        handle.request_close_before(Instant::now());
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !handle.all_stopped() {
-            assert!(
-                Instant::now() < deadline,
-                "mixed fallback cleanup did not finish"
-            );
-            thread::yield_now();
-        }
-        handle.join();
-        request_progress.expect("gated requests did not progress after explicit release");
-        completion.expect("checkpoint waited for unrelated gated work");
-        if let Some(later) = later_completed {
-            later.expect("later fallback checkpoint did not complete");
-        }
-        drain.expect("final drain did not complete");
-        assert!(
-            covered_work_pending,
-            "checkpoint skipped its covered fallback"
-        );
-        assert!(
-            later_pending,
-            "earlier exhaustion completed the later checkpoint"
-        );
-        assert_eq!(
-            normal_returns, order,
-            "gated callbacks did not return normally"
-        );
-        assert!(directory.records().is_empty());
-        assert_eq!(order, names, "retained durable/fallback request FIFO");
-    }
-
-    #[test]
-    fn checkpoint_exhaustion_preserves_post_checkpoint_durable_fallback_fifo() {
-        durable_fallback_checkpoint("A");
-    }
-
-    #[test]
-    fn nonempty_checkpoint_selection_preserves_later_fallback_fifo() {
-        durable_fallback_checkpoint("B");
-    }
-
-    #[test]
-    fn checkpoint_attempts_covered_fallback_before_later_resident_work() {
-        durable_fallback_checkpoint("C");
-    }
-
-    #[test]
-    fn memory_only_checkpoints_keep_distinct_resident_watermarks() {
-        use httpmock::{Method::POST, MockServer};
-
-        let server = MockServer::start();
-        let (entered, requests) = mpsc::channel();
-        let (returned, returns) = mpsc::channel();
-        let mut releases = Vec::new();
-        for name in ["A", "B"] {
-            let (release, gate) = mpsc::channel();
-            releases.push(release);
-            let gate = Mutex::new(gate);
-            let entered = entered.clone();
-            let returned = returned.clone();
-            server.mock(|when, then| {
-                when.method(POST)
-                    .body_includes(format!("\"event\":\"{name}\""));
-                then.respond_with(move |request: &httpmock::HttpMockRequest| {
-                    entered.send(name).unwrap();
-                    gate.lock()
-                        .unwrap()
-                        .recv_timeout(Duration::from_secs(5))
-                        .unwrap();
-                    returned.send(name).unwrap();
-                    http::Response::builder()
-                        .status(200)
-                        .body(super::super::tests::accept_all(request))
-                        .unwrap()
-                        .into()
-                });
-            });
-        }
-        let handle = TransportHandle::spawn_stateful(
-            super::super::tests::options(server.base_url())
-                .flush_at(1usize)
-                .max_batch_size(1usize)
-                .build()
-                .unwrap(),
-            None,
-            8192,
-        )
-        .unwrap();
-        assert_eq!(handle.enqueue_prepared(wire("A")), Admission::Accepted);
-        let first = requests.recv_timeout(Duration::from_secs(3)).unwrap();
-        let (complete, first_flush) = mpsc::channel();
-        assert!(handle.send_control(Control::Flush(Completion::Blocking(complete))));
-        assert_eq!(handle.enqueue_prepared(wire("B")), Admission::Accepted);
-        let (complete, second_flush) = mpsc::channel();
-        assert!(handle.send_control(Control::Flush(Completion::Blocking(complete))));
-        releases[0].send(()).unwrap();
-        assert_eq!(returns.recv_timeout(Duration::from_secs(3)).unwrap(), "A");
-        let second = requests.recv_timeout(Duration::from_secs(3)).unwrap();
-        let completed_first = first_flush.recv_timeout(Duration::from_secs(3));
-        let second_pending = matches!(second_flush.try_recv(), Err(mpsc::TryRecvError::Empty));
-        releases[1].send(()).unwrap();
-        assert_eq!(returns.recv_timeout(Duration::from_secs(3)).unwrap(), "B");
-        let completed_second = second_flush.recv_timeout(Duration::from_secs(3));
-        handle.request_close_before(Instant::now());
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !handle.all_stopped() {
-            assert!(
-                Instant::now() < deadline,
-                "resident checkpoint cleanup did not finish"
-            );
-            thread::yield_now();
-        }
-        handle.join();
-        completed_first.expect("earlier resident checkpoint waited for later work");
-        assert!(
-            second_pending,
-            "earlier exhaustion completed a later resident checkpoint"
-        );
-        completed_second.expect("later resident checkpoint did not complete");
-        assert_eq!([first, second], ["A", "B"]);
-    }
-
-    #[derive(Clone, Copy)]
-    enum RolloverCase {
-        Flush,
-        LaterArrival,
-        LaterFlush,
-        Shutdown,
-    }
-
-    fn recovery_flush_rollover(case: RolloverCase) {
-        use httpmock::{Method::POST, MockServer};
-        use std::fs;
-
-        let later_arrival = matches!(case, RolloverCase::LaterArrival | RolloverCase::LaterFlush);
-
-        let directory = TestDirectory::new();
-        let limits = StoreLimits {
-            max_events: 20,
-            max_bytes: 128 * 1024,
-            max_record_bytes: 16 * 1024,
-        };
-        {
-            let mut store =
-                FileEventStore::open(StorageDirectory::open(&directory.0).unwrap(), limits)
-                    .unwrap();
-            let mut oversized = wire("preserved");
-            oversized.properties = serde_json::json!({"padding": "x".repeat(8192)});
-            for _ in 0..3 {
-                store.put(&oversized).unwrap();
-            }
-        }
-        let preserved: Vec<_> = directory
-            .records()
-            .iter()
-            .map(|path| fs::read(path).unwrap())
-            .collect();
-        let store = FileEventStore::open(
-            StorageDirectory::open(&directory.0).unwrap(),
-            StoreLimits {
-                max_record_bytes: 4096,
-                ..limits
-            },
-        )
-        .unwrap();
-        let server = MockServer::start();
-        let (attempted, attempts) = mpsc::channel();
-        server.mock(|when, then| {
-            when.method(POST).body_includes("before-checkpoint");
-            then.respond_with(move |request: &httpmock::HttpMockRequest| {
-                attempted.send(()).unwrap();
-                http::Response::builder()
-                    .status(200)
-                    .body(super::super::tests::accept_all(request))
-                    .unwrap()
-                    .into()
-            });
-        });
-        let (release_later, later_gate) = mpsc::channel();
-        let later_gate = Mutex::new(later_gate);
-        let (later_returned, later_returns) = mpsc::channel();
-        let (later_entered, later_started) = mpsc::channel();
-        server.mock(|when, then| {
-            when.method(POST).body_includes("after-checkpoint");
-            then.respond_with(move |request: &httpmock::HttpMockRequest| {
-                later_entered.send(()).unwrap();
-                later_gate
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(5))
-                    .unwrap();
-                later_returned.send(()).unwrap();
-                http::Response::builder()
-                    .status(200)
-                    .body(super::super::tests::accept_all(request))
-                    .unwrap()
-                    .into()
-            });
-        });
-        let (page_entered, pages) = mpsc::channel();
-        let (release_page, page_gate) = mpsc::channel();
-        let page_gate = Mutex::new(page_gate);
-        let (page_returned, page_returns) = mpsc::channel();
-        let reads = AtomicUsize::new(0);
-        let options = super::super::tests::options(server.base_url())
-            .flush_at(20usize)
-            .flush_interval_ms(3_600_000u64)
-            .max_queue_size(1usize)
-            .max_batch_size(1usize)
-            .on_error(move |failure| {
-                if let PostHogError::Storage(error) = failure {
-                    if matches!(error.operation(), crate::client::StorageOperation::Read) {
-                        let page = reads.fetch_add(1, Ordering::SeqCst) + 1;
-                        if page <= 2 {
-                            page_entered.send(page).unwrap();
-                            page_gate
-                                .lock()
-                                .unwrap()
-                                .recv_timeout(Duration::from_secs(5))
-                                .unwrap();
-                            page_returned.send(page).unwrap();
-                        }
-                    }
-                }
-            })
-            .build()
-            .unwrap();
-        let handle = TransportHandle::spawn_stateful(options, Some(Box::new(store)), 4096).unwrap();
-        assert_eq!(pages.recv_timeout(Duration::from_secs(3)).unwrap(), 1);
-        assert_eq!(
-            handle.enqueue_prepared(wire("before-checkpoint")),
-            Admission::Accepted
-        );
-        let (complete, flushed) = mpsc::channel();
-        if matches!(case, RolloverCase::Shutdown) {
-            assert!(handle.request_shutdown(Completion::Blocking(complete)));
-        } else {
-            assert!(handle.send_control(Control::Flush(Completion::Blocking(complete))));
-        }
-        release_page.send(()).unwrap();
-        assert_eq!(
-            page_returns.recv_timeout(Duration::from_secs(3)).unwrap(),
-            1
-        );
-        assert_eq!(pages.recv_timeout(Duration::from_secs(3)).unwrap(), 2);
-        // QueueWake precedes QueueFlush. The second page is reached only after
-        // the admitted record has been durably staged under its real key.
-        let before = directory.0.join("events/00000000000000000004.json");
-        assert!(before.is_file());
-        if later_arrival {
-            assert_eq!(
-                handle.enqueue_prepared(wire("after-checkpoint")),
-                Admission::Accepted
-            );
-        }
-        let later_completion = if matches!(case, RolloverCase::LaterFlush) {
-            let (complete, completed) = mpsc::channel();
-            assert!(handle.send_control(Control::Flush(Completion::Blocking(complete))));
-            Some(completed)
-        } else {
-            None
-        };
-        release_page.send(()).unwrap();
-        assert_eq!(
-            page_returns.recv_timeout(Duration::from_secs(3)).unwrap(),
-            2
-        );
-        let completion = flushed.recv_timeout(Duration::from_secs(3));
-        let attempted_before_completion = attempts.try_recv().is_ok();
-        let later_attempt = later_completion
-            .as_ref()
-            .map(|_| later_started.recv_timeout(Duration::from_secs(3)));
-        let later_flush_unfinished = later_completion
-            .as_ref()
-            .map_or(true, |completed| completed.try_recv().is_err());
-        let later_unfinished = later_returns.try_recv().is_err();
-        // Preserve the observation before cleanup, including a premature flush.
-        handle.request_close_before(Instant::now());
-        let _ = release_later.send(());
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !handle.all_stopped() {
-            assert!(Instant::now() < deadline, "rollover cleanup did not finish");
-            thread::yield_now();
-        }
-        handle.join();
-        completion.expect("flush did not finish through its fixed checkpoint");
-        assert!(
-            attempted_before_completion,
-            "flush completed before attempting its pre-checkpoint record"
-        );
-        if let Some(later_attempt) = later_attempt {
-            later_attempt.expect("later checkpoint did not reach its own delivery attempt");
-            later_returns
-                .recv_timeout(Duration::from_secs(3))
-                .expect("later request did not return normally after explicit release");
-        }
-        assert!(
-            later_flush_unfinished,
-            "earlier scan completed a later flush checkpoint"
-        );
-        assert!(
-            later_unfinished,
-            "post-checkpoint work unexpectedly finished before release"
-        );
-        assert!(!before.exists());
-        let retained = directory.records();
-        assert_eq!(retained.len(), 3 + usize::from(later_arrival));
-        for (path, original) in retained.iter().zip(&preserved) {
-            assert_eq!(fs::read(path).unwrap(), *original);
-        }
-    }
-
-    #[test]
-    fn flush_rollover_attempts_the_record_appended_after_its_old_scan_started() {
-        recovery_flush_rollover(RolloverCase::Flush);
-    }
-
-    #[test]
-    fn flush_rollover_does_not_wait_for_a_post_checkpoint_arrival() {
-        recovery_flush_rollover(RolloverCase::LaterArrival);
-    }
-
-    #[test]
-    fn flush_rollover_completes_each_checkpoint_independently() {
-        recovery_flush_rollover(RolloverCase::LaterFlush);
-    }
-
-    #[test]
-    fn shutdown_rollover_attempts_admitted_records_before_exiting() {
-        recovery_flush_rollover(RolloverCase::Shutdown);
-    }
-
-    #[test]
-    fn blocked_upload_allows_persistence_exact_eviction_and_fixed_flush_checkpoint() {
-        for status in [200, 503] {
-            let directory = TestDirectory::new();
-            let store = FileEventStore::open(
-                StorageDirectory::open(&directory.0).unwrap(),
-                StoreLimits {
-                    max_events: 1,
-                    max_bytes: 4096,
-                    max_record_bytes: 4096,
-                },
-            )
-            .unwrap();
-            let (written, writes) = mpsc::channel();
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let host = format!("http://{}", listener.local_addr().unwrap());
-            let (entered, upload) = mpsc::channel();
-            let (release, gate) = mpsc::channel();
-            let (finish_second, second_gate) = mpsc::channel();
-            let server = thread::spawn(move || {
-                let (mut first, _) = listener.accept().unwrap();
-                let body = request(&mut first);
-                let reply = if status == 200 {
-                    super::super::tests::accept_all_body(body.as_bytes())
-                } else {
-                    "{}".to_owned()
-                };
-                entered.send(body).unwrap();
-                gate.recv_timeout(Duration::from_secs(3)).unwrap();
-                write!(
-                    first,
-                    "HTTP/1.1 {} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    status,
-                    reply.len(),
-                    reply
-                )
-                .unwrap();
-                drop(first);
-                let (mut second, _) = listener.accept().unwrap();
-                let body = request(&mut second);
-                let reply = super::super::tests::accept_all_body(body.as_bytes());
-                entered.send(body).unwrap();
-                second_gate.recv_timeout(Duration::from_secs(3)).unwrap();
-                write!(
-                    second,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    reply.len(),
-                    reply
-                )
-                .unwrap();
-            });
-            let options = super::super::tests::options(host)
-                .flush_at(1usize)
-                .max_batch_size(1usize)
-                .max_queue_size(1usize)
-                .shutdown_timeout_ms(100u64)
-                .max_capture_attempts(1u32)
-                .build()
-                .unwrap();
-            let handle = TransportHandle::spawn_stateful(
-                options,
-                Some(Box::new(Observed {
-                    store,
-                    written,
-                    first_head: None,
-                })),
-                4096,
-            )
-            .unwrap();
-            let first = wire("evicted-first");
-            let mut second = wire("retained-second");
-            second.uuid = first.uuid;
-            assert_eq!(handle.enqueue_prepared(first), Admission::Accepted);
-            assert_eq!(
-                writes.recv_timeout(Duration::from_secs(3)).unwrap(),
-                "evicted-first"
-            );
-            assert!(upload
-                .recv_timeout(Duration::from_secs(3))
-                .unwrap()
-                .contains("evicted-first"));
-            let (checkpoint, flushed) = mpsc::channel();
-            assert!(handle.send_control(Control::Flush(Completion::Blocking(checkpoint))));
-            assert_eq!(handle.enqueue_prepared(second), Admission::Accepted);
-            let persisted = writes.recv_timeout(Duration::from_secs(3));
-            release.send(()).unwrap();
-            assert_eq!(
-                persisted.unwrap(),
-                "retained-second",
-                "persistence must progress before HTTP release"
-            );
-            let replacement = upload.recv_timeout(Duration::from_secs(3)).unwrap();
-            assert!(replacement.contains("retained-second"));
-            assert!(!replacement.contains("evicted-first"));
-            let completed_checkpoint = flushed.recv_timeout(Duration::from_secs(3));
-            finish_second.send(()).unwrap();
-            completed_checkpoint.expect("flush waited for an upload admitted after its checkpoint");
-            handle.flush_blocking();
-            server.join().unwrap();
-            assert!(directory.records().is_empty());
-            handle.close_blocking();
-        }
-    }
-}
+#[path = "transport_queue_tests.rs"]
+mod tests;

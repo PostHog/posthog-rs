@@ -27,7 +27,6 @@ fn config(server: &MockServer) -> Config {
         ("b".into(), FlagValue::String("blue".into())),
     ]));
     c.bootstrap_feature_flag_payloads = Some(HashMap::from([("a".into(), Value::Null)]));
-    c.max_capture_attempts = 1;
     c.shutdown_timeout = Duration::from_secs(1);
     c
 }

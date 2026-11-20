@@ -2,7 +2,7 @@ use super::*;
 use crate::FlagValue;
 
 #[test]
-fn cached_exports_finish_before_http_and_identity_invalidates_before_latest_response() {
+fn cached_exports_finish_before_http_and_identity_keeps_flags_until_the_latest_response() {
     let server = Server::new(vec![
         (200, json!({"featureFlags":{"obsolete":true}})),
         (
@@ -49,8 +49,9 @@ fn cached_exports_finish_before_http_and_identity_invalidates_before_latest_resp
         before, after_reads,
         "event-free exports must not mutate client state"
     );
-    assert_eq!(after_identify, None);
-    assert_eq!(while_latest_pending, None);
+    // The earlier flags stay until the new identity's response replaces them.
+    assert_eq!(after_identify, Some(expected.clone()));
+    assert_eq!(while_latest_pending, Some(expected));
     assert_eq!(request["distinct_id"], "person");
     let results = client.get_feature_flags().unwrap();
     assert_eq!(results.len(), 1);

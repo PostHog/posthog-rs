@@ -343,7 +343,6 @@ fn failed_uploads_stop_after_the_attempt_limit_and_release_frame_capacity() {
     backend.reply.lock().unwrap().retry_after = Some("1");
     let (tx, rx) = mpsc::channel();
     let client = backend.client(|config| {
-        config.max_capture_attempts = 2;
         config.session_replay.max_frames_in_flight = 1;
         config.on_error(move |error| {
             if let crate::client::PostHogError::Replay(failure) = error {
@@ -357,8 +356,10 @@ fn failed_uploads_stop_after_the_attempt_limit_and_release_frame_capacity() {
     assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
     let uploads = backend.uploads.lock().unwrap();
     let first = uploads.recv_timeout(Duration::from_secs(5)).unwrap();
-    let retried = uploads.recv_timeout(Duration::from_secs(15)).unwrap();
-    assert_eq!(first, retried);
+    for _ in 1..4 {
+        let retried = uploads.recv_timeout(Duration::from_secs(15)).unwrap();
+        assert_eq!(first, retried);
+    }
     let diagnostic = rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(
         diagnostic,

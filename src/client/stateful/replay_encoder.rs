@@ -1,9 +1,6 @@
 //! One bounded-by-admission encoder. Controls cross its FIFO before delivery.
 use std::io;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc, Arc, Mutex,
-};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -15,8 +12,7 @@ use serde_json::json;
 use super::super::producer::{CaptureGuard, Producer};
 use super::super::{Capture, CaptureOutcome};
 use super::{FrameLayout, ReplayConfig, ReplayFrame};
-use crate::client::event_store::RecordBuffer;
-use crate::client::transport::replay::MAX_BODY_BYTES;
+use crate::client::transport::replay::{LimitedBuffer, MAX_BODY_BYTES};
 use crate::client::transport::{Completion, Control};
 use crate::constants::{
     COOKIELESS_MODE_OPT, COOKIELESS_MODE_PROP, DISABLE_SKEW_CORRECTION_OPT, IGNORE_SENT_AT_PROP,
@@ -177,7 +173,7 @@ impl ImageEncoder for Jpeg {
         pixels: &[u8],
         quality: u8,
     ) -> Result<Vec<u8>, &'static str> {
-        let mut output = RecordBuffer {
+        let mut output = LimitedBuffer {
             bytes: Vec::new(),
             limit: (MAX_BODY_BYTES / 4 * 3) as u64,
         };
@@ -202,11 +198,6 @@ pub(crate) struct Gate {
     shutdown_timeout: Duration,
 }
 impl Gate {
-    pub(crate) fn close_deadline(&self, deadline: Option<Instant>) -> Instant {
-        (*self.deadline.lock().unwrap_or_else(|p| p.into_inner()))
-            .or(deadline)
-            .unwrap_or_else(|| Instant::now() + self.shutdown_timeout)
-    }
     pub(crate) fn is_closed(&self) -> bool {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).closed
     }
@@ -227,17 +218,15 @@ impl Gate {
     }
     pub(crate) fn control(&self, control: Control) -> Result<(), Control> {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if state.closed && matches!(control, Control::Shutdown { .. }) {
+        if state.closed && matches!(control, Control::Shutdown(_)) {
             return Err(control);
         }
-        if let Control::Shutdown { deadline, .. } = &control {
+        if matches!(control, Control::Shutdown(_)) {
             state.closed = true;
             self.deadline
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .get_or_insert_with(|| {
-                    deadline.unwrap_or_else(|| Instant::now() + self.shutdown_timeout)
-                });
+                .get_or_insert_with(|| Instant::now() + self.shutdown_timeout);
         }
         state.tx.send(Message::Control(control)).map_err(|e| {
             state.closed = true;
@@ -262,7 +251,6 @@ impl Worker {
         delivery: mpsc::Sender<Control>,
         shutdown_timeout: Duration,
         deadline: Arc<Mutex<Option<Instant>>>,
-        running: Arc<AtomicBool>,
     ) -> io::Result<Self> {
         Self::spawn_with_encoder_and_deadline(
             producer,
@@ -272,7 +260,6 @@ impl Worker {
             shutdown_timeout,
             Box::new(Jpeg),
             deadline,
-            Some(running),
         )
     }
     #[cfg(test)]
@@ -292,7 +279,6 @@ impl Worker {
             shutdown_timeout,
             codec,
             Arc::new(Mutex::new(None)),
-            None,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -304,16 +290,7 @@ impl Worker {
         shutdown_timeout: Duration,
         codec: Box<dyn ImageEncoder>,
         deadline: Arc<Mutex<Option<Instant>>>,
-        running: Option<Arc<AtomicBool>>,
     ) -> io::Result<Self> {
-        struct Running(Option<Arc<AtomicBool>>);
-        impl Drop for Running {
-            fn drop(&mut self) {
-                if let Some(running) = &self.0 {
-                    running.store(false, Ordering::Release);
-                }
-            }
-        }
         let (tx, rx) = mpsc::channel();
         let gate = Arc::new(Gate {
             state: Mutex::new(GateState { tx, closed: false }),
@@ -324,11 +301,10 @@ impl Worker {
         let thread = thread::Builder::new()
             .name("posthog-replay-encoder".into())
             .spawn(move || {
-                let _running = Running(running);
                 while let Ok(message) = rx.recv() {
                     match message {
                         Message::Control(control) => {
-                            let stop = matches!(control, Control::Shutdown { .. });
+                            let stop = matches!(control, Control::Shutdown(_));
                             if delivery.send(control).is_err() || stop {
                                 break;
                             }
@@ -492,7 +468,7 @@ fn encode(
             event.set_prop(property.to_owned(), value);
         }
     }
-    let mut body = RecordBuffer {
+    let mut body = LimitedBuffer {
         bytes: Vec::new(),
         limit: (MAX_BODY_BYTES - 2) as u64,
     };

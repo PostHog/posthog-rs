@@ -1,12 +1,16 @@
-//! Native screenshot delivery on the existing worker, independently of v1 verdicts.
+//! Screenshot delivery on its own lane, as posthog-ios and posthog-android
+//! keep a replay queue beside the event queue. The encoder sends frames,
+//! failures and flush or shutdown barriers here in order; event delivery never
+//! waits on a screenshot upload, nor the reverse.
 use flate2::{write::GzEncoder, Compression};
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use super::{ClientOptions, Pipeline};
+use super::{build_http, ClientOptions, Clock, Control};
 use crate::client::common::apply_on_error_hooks;
-use crate::client::event_store::RecordBuffer;
 use crate::client::on_error::ReplayFailure;
 use crate::client::retry::{capture_backoff_duration, is_retryable_status, parse_retry_after};
 use crate::client::stateful::replay::EncodedFrame;
@@ -14,9 +18,35 @@ use crate::client::PostHogError;
 
 pub(crate) const MAX_BODY_BYTES: usize = 25 * 1024 * 1024;
 const INTERVAL: Duration = Duration::from_secs(1);
+/// Upload attempts per screenshot batch, including the first.
+const MAX_ATTEMPTS: u32 = 4;
+
+/// A buffer that refuses to grow past `limit`, so an oversized image or body
+/// fails before it is allocated.
+pub(crate) struct LimitedBuffer {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) limit: u64,
+}
+
+impl Write for LimitedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.limit.saturating_sub(self.bytes.len() as u64) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Screenshot data exceeds its byte limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Default)]
-pub(super) struct Queue {
+struct Queue {
     waiting: Vec<EncodedFrame>,
     since: Option<Instant>,
     retries: VecDeque<Batch>,
@@ -34,7 +64,7 @@ impl Queue {
         }
         self.waiting.push(frame);
     }
-    pub(super) fn next_due(&self, closing: Option<Instant>) -> Option<Instant> {
+    fn next_due(&self, closing: Option<Instant>) -> Option<Instant> {
         self.since
             .map(|since| since + INTERVAL)
             .into_iter()
@@ -93,15 +123,135 @@ pub(crate) fn report(options: &ClientOptions, message: &'static str, status: Opt
     }
 }
 
-impl Pipeline {
-    pub(super) fn admit_replay(&mut self, frame: EncodedFrame) {
+/// The replay lane's thread. Dropping the handle does not stop it: the
+/// encoder's shutdown barrier does, or the encoder going away.
+pub(crate) struct Lane {
+    tx: mpsc::Sender<Control>,
+    id: ThreadId,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Lane {
+    /// Start the lane. `deadline` is the client's shared shutdown deadline.
+    pub(super) fn spawn(
+        options: ClientOptions,
+        clock: Arc<dyn Clock>,
+        deadline: Arc<Mutex<Option<Instant>>>,
+    ) -> io::Result<Self> {
+        let http = build_http(&options)
+            .ok_or_else(|| io::Error::other("Cannot build the replay HTTP client"))?;
+        let (tx, rx) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("posthog-replay".into())
+            .spawn(move || {
+                Sender {
+                    options,
+                    clock,
+                    http,
+                    replay: Queue::default(),
+                    closing: None,
+                }
+                .run(&rx, &deadline)
+            })?;
+        Ok(Self {
+            tx,
+            id: thread.thread().id(),
+            thread: Mutex::new(Some(thread)),
+        })
+    }
+
+    pub(super) fn sender(&self) -> mpsc::Sender<Control> {
+        self.tx.clone()
+    }
+
+    pub(super) fn on_thread(&self) -> bool {
+        self.id == thread::current().id()
+    }
+
+    pub(super) fn is_stopped(&self) -> bool {
+        self.thread
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(true, JoinHandle::is_finished)
+    }
+
+    pub(super) fn join(&self) {
+        if self.on_thread() {
+            return;
+        }
+        let thread = self.thread.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(thread) = thread {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct Sender {
+    options: ClientOptions,
+    clock: Arc<dyn Clock>,
+    http: reqwest::blocking::Client,
+    replay: Queue,
+    /// The shutdown deadline, once one is selected.
+    closing: Option<Instant>,
+}
+
+impl Sender {
+    fn run(mut self, rx: &mpsc::Receiver<Control>, deadline: &Mutex<Option<Instant>>) {
+        loop {
+            let end = *deadline.lock().unwrap_or_else(|p| p.into_inner());
+            if let (Some(end), None) = (end, self.closing) {
+                self.close_delivery(end);
+            }
+            let message = if end.is_some_and(|end| self.clock.now() >= end) {
+                // Past the deadline: only drain what the encoder still sends.
+                rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            } else {
+                match self.replay.next_due(self.closing) {
+                    Some(due) => rx.recv_timeout(due.saturating_duration_since(self.clock.now())),
+                    // Wake now and then to notice a deadline selected meanwhile.
+                    None => rx.recv_timeout(INTERVAL),
+                }
+            };
+            match message {
+                Ok(Control::ReplayFrame(frame)) => self.admit_replay(*frame),
+                Ok(Control::ReplayFailure(message)) => report(&self.options, message, None),
+                Ok(Control::ReplayShutdownAbandoned) => self.report_replay_shutdown(None),
+                Ok(Control::Flush(completion) | Control::FlushCaptures(completion)) => {
+                    self.service_replay(true, end);
+                    completion.signal();
+                }
+                #[cfg(test)]
+                Ok(Control::Tick(completion)) => {
+                    self.service_replay(false, end);
+                    completion.signal();
+                }
+                Ok(Control::Shutdown(completion)) => {
+                    self.service_replay(true, end);
+                    self.abandon_replay();
+                    completion.signal();
+                    return;
+                }
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => self.service_replay(false, end),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        self.abandon_replay();
+    }
+
+    fn delivery_deadline(&self, deadline: Option<Instant>) -> Option<Instant> {
+        deadline.into_iter().chain(self.closing).min()
+    }
+
+    fn admit_replay(&mut self, frame: EncodedFrame) {
         self.replay.push(frame, self.clock.now());
     }
-    pub(super) fn close_delivery(&mut self, deadline: Instant) {
+    fn close_delivery(&mut self, deadline: Instant) {
         self.closing = Some(self.closing.map_or(deadline, |old| old.min(deadline)));
         self.service_replay(true, Some(deadline));
     }
-    pub(super) fn report_replay_shutdown(&mut self, status: Option<u16>) {
+    fn report_replay_shutdown(&mut self, status: Option<u16>) {
         if !self.replay.shutdown_reported {
             self.replay.shutdown_reported = true;
             report(
@@ -111,7 +261,7 @@ impl Pipeline {
             );
         }
     }
-    pub(super) fn abandon_replay(&mut self) {
+    fn abandon_replay(&mut self) {
         if !self.replay.waiting.is_empty() || !self.replay.retries.is_empty() {
             self.report_replay_shutdown(None);
         }
@@ -119,7 +269,7 @@ impl Pipeline {
         self.replay.retries.clear();
         self.replay.since = None;
     }
-    pub(super) fn service_replay(&mut self, force: bool, deadline: Option<Instant>) {
+    fn service_replay(&mut self, force: bool, deadline: Option<Instant>) {
         let deadline = self.delivery_deadline(deadline);
         if deadline.is_some_and(|end| self.clock.now() >= end) {
             self.abandon_replay();
@@ -162,7 +312,7 @@ impl Pipeline {
         let compressed = self.options.capture_compression.is_some();
         let body = if compressed {
             let mut gzip = GzEncoder::new(
-                RecordBuffer {
+                LimitedBuffer {
                     bytes: Vec::new(),
                     limit: MAX_BODY_BYTES as u64,
                 },
@@ -252,9 +402,11 @@ impl Pipeline {
             _ if deadline.is_some() => self.report_replay_shutdown(status),
             _ => {
                 batch.attempt = batch.attempt.saturating_add(1);
-                // Bounded like event delivery and the mobile SDKs, so a failing
-                // upload cannot hold frame capacity and pause recording forever.
-                if batch.attempt >= self.options.max_capture_attempts {
+                // Unlike the iOS and Android queues, which keep frames on disk,
+                // this lane holds them only in memory: the attempt limit keeps a
+                // failing upload from holding frame capacity and pausing
+                // recording forever.
+                if batch.attempt >= MAX_ATTEMPTS {
                     report(
                         &self.options,
                         "Screenshot upload failed after the maximum attempts",

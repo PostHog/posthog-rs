@@ -79,10 +79,7 @@ impl Worker {
 
     pub(super) fn request_close(&self) {
         let (tx, _) = mpsc::channel();
-        let _ = self.tx.send(Control::Shutdown {
-            completion: Completion::Blocking(tx),
-            deadline: None,
-        });
+        let _ = self.tx.send(Control::Shutdown(Completion::Blocking(tx)));
     }
 
     pub(super) fn is_stopped(&self) -> bool {
@@ -164,7 +161,9 @@ mod tests {
             }))
         );
         entered.recv_timeout(Duration::from_secs(2)).unwrap();
-        transport.enqueue(Event::new("event", "person"));
+        transport.enqueue_prepared(crate::capture_event::CaptureEvent::from_event(&Event::new(
+            "event", "person",
+        )));
         let flushing = transport.clone();
         let (flushed, wait) = mpsc::channel();
         let flush = thread::spawn(move || {
@@ -186,7 +185,9 @@ mod tests {
         let (host, entered, release, server) = blocked_server();
         let transport =
             Arc::new(TransportHandle::spawn_stateful(options(host), None, 4096).unwrap());
-        transport.enqueue(Event::new("event", "person"));
+        transport.enqueue_prepared(crate::capture_event::CaptureEvent::from_event(&Event::new(
+            "event", "person",
+        )));
         entered.recv_timeout(Duration::from_secs(2)).unwrap();
         let config = MockServer::start();
         config.mock(|_, then| {

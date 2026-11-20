@@ -238,6 +238,7 @@ impl Controller {
             .install_replay(
                 producer.clone(),
                 &config.session_replay,
+                config.transport_options(),
                 config.project_token.clone(),
                 config.shutdown_timeout,
             )

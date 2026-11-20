@@ -1,7 +1,7 @@
 //! Bounded flag work on the stateful request worker. Queue one wake token and
 //! replace its pending request; an executing request is never interrupted.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -33,6 +33,9 @@ pub(crate) struct LoadedFlags {
     pub(crate) evaluated_at: Option<i64>,
     pub(crate) partial: bool,
     pub(crate) invalid_payloads: bool,
+    /// Keys whose record was marked `failed`. A failed record supplies no
+    /// value, only a diagnostic for reads that have none.
+    pub(crate) failed: HashSet<String>,
 }
 
 pub(crate) struct Task {
@@ -292,15 +295,19 @@ fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
     }
     let envelope: Envelope =
         serde::Deserialize::deserialize(&value).map_err(|_| LoadError::InvalidResponse)?;
+    let mut failed = HashSet::new();
     if let Some(flags) = value.get_mut("flags") {
         let flags = flags.as_object_mut().ok_or(LoadError::InvalidResponse)?;
-        for detail in flags.values() {
+        for (key, detail) in flags.iter() {
             match detail.get("failed") {
-                Some(Value::Bool(_)) | None => {}
+                Some(Value::Bool(true)) => {
+                    failed.insert(key.clone());
+                }
+                Some(Value::Bool(false)) | None => {}
                 _ => return Err(LoadError::InvalidResponse),
             }
         }
-        flags.retain(|_, detail| detail.get("failed") != Some(&Value::Bool(true)));
+        flags.retain(|key, _| !failed.contains(key));
     }
     let response: FeatureFlagsResponse =
         serde_json::from_value(value).map_err(|_| LoadError::InvalidResponse)?;
@@ -349,6 +356,7 @@ fn decode(bytes: &[u8]) -> Result<LoadedFlags, LoadError> {
         evaluated_at: envelope.evaluated_at,
         partial: envelope.partial || details.errors_while_computing_flags,
         invalid_payloads,
+        failed,
     })
 }
 

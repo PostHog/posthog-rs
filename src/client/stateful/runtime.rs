@@ -56,8 +56,6 @@ impl From<DrainOutcome> for PersistenceOutcome {
 #[non_exhaustive]
 pub enum DeliveryOutcome {
     /// A flush attempt completed; retries or persisted backlog may remain.
-    /// With session-replay, includes preceding submitted encoding and eligible
-    /// screenshot delivery, but not frames held by the host.
     Attempted,
     /// The worker has stopped. Undelivered persisted records may remain.
     Stopped,
@@ -227,7 +225,6 @@ impl Client {
             }
             snapshot
         });
-        let flags_changed = snapshot.reconcile_flag_cache(config.disable_geoip);
         let stored_session = snapshot.session.clone();
         snapshot.sessions = super::sessions::Sessions::restored(
             stored_session.as_ref(),
@@ -240,10 +237,7 @@ impl Client {
         let backend = match restored.state_store {
             Some(store) => Backend::Persistent {
                 store: Box::new(store),
-                restored: was_restored
-                    && !restored.rewrite_required
-                    && !session_changed
-                    && !flags_changed,
+                restored: was_restored && !restored.rewrite_required && !session_changed,
             },
             None if matches!(config.persistence, Persistence::Memory) => Backend::Memory,
             None => Backend::Unavailable,
@@ -553,10 +547,26 @@ impl Client {
     }
 }
 
+/// The longest `Drop` waits for the local state write.
+const DROP_STATE_WRITE_WAIT: Duration = Duration::from_secs(1);
+
+/// Dropping the client does not wait for delivery, as in posthog-ios and
+/// posthog-android: queued events stay on disk for the next start. It does
+/// finish writing pending client state, which those SDKs write as soon as it
+/// changes. Call `shutdown_blocking` to also attempt delivery first.
 impl Drop for Client {
     fn drop(&mut self) {
         let on_worker = self.on_worker_thread();
-        self.shutdown_blocking(None);
+        if !self.disabled
+            && !on_worker
+            && !self.in_capture()
+            && !self.closed.load(Ordering::Acquire)
+        {
+            let state = self.state.as_ref().unwrap();
+            let revision = state.checkpoint();
+            let _ = state.wait_blocking_until(revision, Instant::now() + DROP_STATE_WRITE_WAIT);
+        }
+        self.shutdown_blocking(Some(Duration::ZERO));
         if on_worker {
             // Field destruction must preserve the same no-join rule as explicit
             // shutdown from either worker, not only the state writer's thread.

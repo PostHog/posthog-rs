@@ -813,15 +813,12 @@ fn encoding_errors_and_panics_release_capacity_without_stopping_the_worker() {
         let (tx, _) = mpsc::channel();
         worker
             .gate
-            .control(Control::Shutdown {
-                completion: Completion::Blocking(tx),
-                deadline: Some(Instant::now()),
-            })
+            .control(Control::Shutdown(Completion::Blocking(tx)))
             .ok()
             .unwrap();
         assert!(matches!(
             rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            Control::Shutdown { .. }
+            Control::Shutdown(_)
         ));
         worker.join();
     }
@@ -840,11 +837,12 @@ fn serialization_limits_split_large_pairs_and_reject_oversized_hook_output() {
         )
         .unwrap();
         let encoded = token.finish(bytes);
-        client
-            .transport
-            .as_ref()
+        let _ = replay
+            .0
+            .upgrade()
             .unwrap()
-            .send_control(Control::ReplayFrame(Box::new(encoded)));
+            .gate
+            .control(Control::ReplayFrame(Box::new(encoded)));
     }
     client.flush_blocking();
     assert_eq!(backend.bodies.lock().unwrap().len(), 2);
@@ -949,13 +947,13 @@ fn shutdown_budget_covers_waiting_images_and_encoding_that_finishes_late() {
     rx.recv_timeout(Duration::from_secs(5)).unwrap();
     replay.submit_frame(frame(&replay));
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    // Drive the delivery deadline on its injected clock. Client shutdown uses
+    // Close delivery at a deadline on its injected clock. Client shutdown uses
     // the system clock, independently covered by the public timer regression.
     client
         .transport
         .as_ref()
         .unwrap()
-        .send_control(Control::DeliveryClosing(clock.now()));
+        .request_close_before(clock.now());
     client.transport.as_ref().unwrap().tick();
     let closing = client.clone();
     let shutdown = std::thread::spawn(move || closing.shutdown_blocking(Some(Duration::ZERO)));

@@ -42,6 +42,7 @@ fn with_cache(payload: Option<Value>) -> Snapshot {
                 evaluated_at: Some(123),
             },
         )]),
+        failed: Default::default(),
     }));
     snapshot
 }
@@ -86,32 +87,6 @@ fn writer_mutations_share_unchanged_flag_cache() {
 }
 
 #[test]
-fn reconciling_shared_cache_preserves_retained_snapshots() {
-    let mut encoded = serde_json::to_value(with_cache(Some(json!({"nested": null})))).unwrap();
-    // Give the flag its own, older context.
-    let mut previous = encoded["flags"]["cache"]["contexts"][0].clone();
-    previous["person_properties"]["plan"] = json!("previous-plan");
-    encoded["flags"]["cache"]["contexts"]
-        .as_array_mut()
-        .unwrap()
-        .push(previous);
-    encoded["flags"]["cache"]["flags"]["checkout"]["context"] = json!(1);
-    let before: Snapshot = serde_json::from_value(encoded.clone()).unwrap();
-    let mut restored = before.clone();
-    assert!(restored.reconcile_flag_cache(false));
-    assert!(restored.flags.cache.as_ref().unwrap().flags.is_empty());
-    assert_eq!(serde_json::to_value(&before).unwrap(), encoded);
-
-    let current = with_cache(None);
-    let mut unchanged = current.clone();
-    assert!(!unchanged.reconcile_flag_cache(false));
-    assert!(std::ptr::eq(
-        &current.flags.cache.as_ref().unwrap().flags,
-        &unchanged.flags.cache.as_ref().unwrap().flags,
-    ));
-}
-
-#[test]
 fn cached_records_round_trip_payload_presence_and_per_record_metadata() {
     for payload in [
         None,
@@ -146,18 +121,14 @@ fn optional_cache_codec_failure_isolated_from_mandatory_codec_failure() {
         deep = json!({"nested":deep});
     }
     let mut snapshot = with_cache(Some(deep.clone()));
-    let bytes = encode_snapshot_with_outcome(&snapshot)
-        .map(|(bytes, _)| bytes)
-        .unwrap();
+    let bytes = encode_snapshot(&snapshot).unwrap();
     let restored = FileStateStore::decode(&bytes).unwrap();
     assert!(restored.flags.cache.is_none());
     assert_eq!(restored.distinct_id, "person");
     assert!(snapshot.flags.cache.is_some());
     // Optional omission must not hide invalid mandatory targeting.
     snapshot.flags.person_properties.insert("deep".into(), deep);
-    assert!(encode_snapshot_with_outcome(&snapshot)
-        .map(|(bytes, _)| bytes)
-        .is_err());
+    assert!(encode_snapshot(&snapshot).is_err());
 }
 
 #[test]
@@ -168,13 +139,13 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
         blocked: bool,
     }
     impl StateStore for BlockedStore {
-        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<SaveOutcome> {
+        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<()> {
             if !self.blocked {
                 self.blocked = true;
                 self.entered.send(()).unwrap();
                 self.release.recv().unwrap();
             }
-            Ok(SaveOutcome::default())
+            Ok(())
         }
     }
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -232,9 +203,11 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
 #[test]
 fn current_flag_fields_are_required_and_optional_cache_is_repaired() {
     let valid: Value = serde_json::from_slice(&record(&with_cache(Some(json!(false))))).unwrap();
+    // A record written before feature flags restores with an empty cache.
+    let mut older = valid.clone();
+    older["state"].as_object_mut().unwrap().remove("flags");
+    assert!(FileStateStore::decode(&serde_json::to_vec(&older).unwrap()).is_ok());
     for path in [
-        vec!["remote_config"],
-        vec!["flags"],
         vec!["flags", "person_properties"],
         vec!["flags", "group_properties"],
         vec!["flags", "cache"],
@@ -300,10 +273,11 @@ fn seed_client_cache(directory: &TestDirectory, identified: bool) -> crate::stat
 }
 
 #[test]
-fn bootstrap_reconciles_cache_against_final_identity() {
+fn bootstrap_keeps_the_cache_through_identity_reconciliation() {
     use crate::stateful::{Client, PersistenceOutcome, PersonProfiles};
     for opted_out in [false, true] {
-        for (identified, bootstrap, policy, expected, keep_cache) in [
+        for (identified, bootstrap, policy, expected, same_identity) in [
+            // The cache stays until the new identity's response replaces it.
             (
                 false,
                 "new-person",
@@ -318,14 +292,8 @@ fn bootstrap_reconciles_cache_against_final_identity() {
                 "device",
                 true,
             ),
-            // Never adopts the bootstrap ID locally, without an identify event.
-            (
-                false,
-                "new-person",
-                PersonProfiles::Never,
-                "new-person",
-                false,
-            ),
+            // Never keeps the anonymous user, as identify does nothing there.
+            (false, "new-person", PersonProfiles::Never, "device", true),
             (
                 true,
                 "new-person",
@@ -344,12 +312,13 @@ fn bootstrap_reconciles_cache_against_final_identity() {
             let client = Client::init_blocking(config);
             assert_eq!(client.get_distinct_id(), expected);
             let snapshot = client.state.as_ref().unwrap().snapshot();
-            assert_eq!(snapshot.flags.cache.is_some(), keep_cache,
-                "cache must match final bootstrap identity (out={opted_out}, bootstrap={bootstrap}, expected={expected})");
-            if let Some(cache) = &snapshot.flags.cache {
-                assert_eq!(cache.context, FlagContext::current(&snapshot, false));
-                assert_eq!(checkout_payload(&snapshot), Some(json!("bootstrap-cache")));
-            }
+            let cache = snapshot.flags.cache.as_ref().expect("the cache is kept");
+            assert_eq!(
+                cache.context == FlagContext::current(&snapshot, false),
+                same_identity,
+                "out={opted_out}, bootstrap={bootstrap}, expected={expected}"
+            );
+            assert_eq!(checkout_payload(&snapshot), Some(json!("bootstrap-cache")));
             assert_eq!(
                 client.shutdown_blocking(None).state,
                 PersistenceOutcome::Persisted
@@ -360,19 +329,15 @@ fn bootstrap_reconciles_cache_against_final_identity() {
             )
             .unwrap();
             assert_eq!(disk.distinct_id, expected);
-            assert_eq!(disk.flags.cache.is_some(), keep_cache);
-            assert_eq!(
-                checkout_payload(&disk),
-                keep_cache.then(|| json!("bootstrap-cache"))
-            );
+            assert_eq!(checkout_payload(&disk), Some(json!("bootstrap-cache")));
         }
     }
 }
 
 #[test]
-fn identify_invalidates_changed_identity_cache_before_running_hooks() {
+fn identify_keeps_the_cache_until_the_new_identity_response() {
     use crate::stateful::Client;
-    for (new_id, keep_cache) in [("new-person", false), ("device", true)] {
+    for (new_id, keep_cache) in [("new-person", true), ("device", true)] {
         let directory = TestDirectory::new();
         let mut config = seed_client_cache(&directory, false);
         let holder = Arc::new(Mutex::new(std::sync::Weak::<Client>::new()));
@@ -419,39 +384,6 @@ fn identify_invalidates_changed_identity_cache_before_running_hooks() {
 }
 
 #[test]
-fn cache_restore_requires_exact_evaluation_context_but_ignores_analytics_and_consent() {
-    let original = with_cache(Some(json!("true")));
-    let mut same = original.clone();
-    same.opt_out = Some(true);
-    same.registered.insert("analytics-only".into(), json!(true));
-    assert!(!same.reconcile_flag_cache(false));
-    assert_eq!(same.flags.cache, original.flags.cache);
-    for index in 0..6 {
-        let mut changed = original.clone();
-        match index {
-            0 => changed.distinct_id = "other".into(),
-            1 => changed.anonymous_id = "other-device".into(),
-            2 => {
-                changed.groups.insert("company".into(), "b".into());
-            }
-            3 => {
-                changed
-                    .flags
-                    .person_properties
-                    .insert("plan".into(), json!("free"));
-            }
-            4 => {
-                changed.flags.group_properties.clear();
-            }
-            _ => {}
-        }
-        assert!(changed.reconcile_flag_cache(index == 5));
-        assert!(changed.flags.cache.is_none());
-        assert!(!changed.reconcile_flag_cache(index == 5));
-    }
-}
-
-#[test]
 fn large_flag_sets_persist_each_context_once() {
     let mut snapshot = Snapshot::anonymous("device".into());
     snapshot
@@ -487,11 +419,10 @@ fn large_flag_sets_persist_each_context_once() {
             evaluated_at: None,
             partial: false,
             invalid_payloads: false,
+            failed: Default::default(),
         },
     )));
-    let bytes = encode_snapshot_with_outcome(&snapshot)
-        .map(|(bytes, _)| bytes)
-        .unwrap();
+    let bytes = encode_snapshot(&snapshot).unwrap();
     let encoded: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         encoded["state"]["flags"]["cache"]["contexts"]
