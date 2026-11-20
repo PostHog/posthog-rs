@@ -179,15 +179,19 @@ jobs:
             # This run doesn't publish to crates.io. If the release it's finishing
             # also bumped posthog and that publish failed, say so and fail the run
             # once the bindings are done, rather than report success.
+            # The two crates publish one after the other, so check both.
             rust_version=$(version_of Cargo.toml)
-            status=$(curl -s -o /dev/null -w '%{http_code}' -A "posthog-rs-release (github.com/PostHog/posthog-rs)" \
-              "https://crates.io/api/v1/crates/posthog/$rust_version")
-            if [ "$status" = 404 ]; then
-              echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
-            elif [ "$status" != 200 ]; then
-              echo "::error::Couldn't check whether posthog $rust_version is on crates.io (HTTP $status)"
-              exit 1
-            fi
+            for crate in posthog posthog-rs; do
+              status=$(curl -s -o /dev/null -w '%{http_code}' -A "posthog-rs-release (github.com/PostHog/posthog-rs)" \
+                "https://crates.io/api/v1/crates/$crate/$rust_version")
+              if [ "$status" = 404 ]; then
+                echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+                break
+              elif [ "$status" != 200 ]; then
+                echo "::error::Couldn't check whether $crate $rust_version is on crates.io (HTTP $status)"
+                exit 1
+              fi
+            done
             exit 0
           fi
           if ! find .sampo/changesets -name '*.md' | grep -q .; then
@@ -392,7 +396,7 @@ jobs:
         env:
           RUST_VERSION: ${{ steps.sampo-release.outputs.rust_unpublished }}
         run: |
-          echo "::error::posthog $RUST_VERSION is committed on main but isn't on crates.io, and a rerun doesn't publish it. Publish posthog and posthog-rs by hand from the release commit, as RELEASING.md describes under \"a failed crates.io publish isn't retried\"."
+          echo "::error::posthog or posthog-rs $RUST_VERSION is committed on main but isn't on crates.io, and a rerun doesn't publish it. Publish posthog and posthog-rs by hand from the release commit, as RELEASING.md describes under \"a failed crates.io publish isn't retried\"."
           exit 1
 
       - name: Send failure event to PostHog
@@ -476,6 +480,22 @@ jobs:
           actual=$(git -C source rev-parse HEAD)
           if [ -z "$RELEASE_COMMIT" ] || [ "$actual" != "$RELEASE_COMMIT" ]; then
             echo "::error::Tag $TAG points to $actual, not the release commit $RELEASE_COMMIT"
+            exit 1
+          fi
+
+      - name: Check this version is still the one to publish
+        # An old run's "Re-run failed jobs" reuses that run's outputs. After a
+        # later run abandons the version and releases a new one, it must not
+        # publish the abandoned version.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.ffi_version }}
+        run: |
+          current=$(gh api "repos/$GH_REPO/contents/crates/posthog-rs-ffi/Cargo.toml?ref=main" --jq .content \
+            | base64 -d | grep -m1 '^version = ' | sed 's/version = "\(.*\)"/\1/')
+          if [ "$current" != "$VERSION" ]; then
+            echo "::error::main has posthog-rs-ffi $current now, so $VERSION was abandoned or superseded. Not publishing it."
             exit 1
           fi
 

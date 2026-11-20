@@ -73,7 +73,7 @@ Until a bindings version is published, every Release run tries to finish it, and
 1. Merge the fix with a `cargo/posthog-rs-ffi` changeset, usually a patch.
 2. In the Actions tab, run the **Release** workflow on `main` and set **abandon_ffi_version** to the stuck version, for example `0.1.0`.
 
-That run skips the stuck version and releases the new one, along with any other pending changesets. The abandoned version keeps its tag, but never gets a published GitHub Release. The run fails without releasing anything if the version you enter isn't the unpublished one on `main`, or if no changeset releases a new bindings version.
+That run skips the stuck version and releases the new one, along with any other pending changesets. The abandoned version keeps its tag, but never gets a published GitHub Release, even if someone reruns the old run's jobs: the publish job checks that the version is still the one on `main`. The run fails without releasing anything if the version you enter isn't the unpublished one on `main`, or if no changeset releases a new bindings version.
 
 ### Known gap: a failed crates.io publish isn't retried
 
@@ -85,7 +85,7 @@ cargo publish --locked --package posthog
 cargo publish --locked --package posthog-rs
 ```
 
-When a rerun finishes an unfinished bindings release, it checks crates.io for the committed `posthog` version. If it's missing, the run still finishes the bindings, then fails with this instruction instead of reporting success.
+When a rerun finishes an unfinished bindings release, it checks crates.io for the committed `posthog` and `posthog-rs` versions. If it's missing, the run still finishes the bindings, then fails with this instruction instead of reporting success.
 
 The release workflow should publish the crates itself in this case, as it does for the bindings. That's left for a separate change.
 
