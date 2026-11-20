@@ -62,7 +62,6 @@ fn client_defaults_map_to_shared_delivery_without_changing_server_defaults() {
     assert_eq!(config.max_queue_bytes, 8 * 1024 * 1024);
     assert_eq!(config.max_stored_bytes, 64 * 1024 * 1024);
     assert_eq!(config.max_stored_events, 10_000);
-    assert_eq!(config.event_limits().max_record_bytes, 1024 * 1024);
     assert_eq!(config.state_write_delay, Duration::from_millis(250));
     let options = config.transport_options();
     assert_eq!(

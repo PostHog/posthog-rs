@@ -128,9 +128,6 @@ pub enum CaptureOutcome {
     Dropped,
     /// This thread is already capturing through the same client.
     Reentrant,
-    /// The serialized event is larger than the per-event limit: 1 MiB, or
-    /// `max_queue_bytes` if that is smaller.
-    Full,
 }
 
 pub(super) struct Producer {
@@ -307,7 +304,6 @@ impl Client {
         let uuid = wire.uuid;
         match self.transport.as_ref().unwrap().enqueue_prepared(wire) {
             Admission::Accepted => CaptureOutcome::Accepted { uuid },
-            Admission::Full => CaptureOutcome::Full,
             Admission::Closed => CaptureOutcome::Closed,
         }
     }

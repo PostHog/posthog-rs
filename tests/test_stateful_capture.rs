@@ -133,40 +133,15 @@ fn invalid_and_filtered_events_never_reach_delivery() {
 }
 
 #[test]
-fn an_event_over_the_queue_byte_limit_is_refused_and_later_events_are_accepted() {
+fn an_event_over_the_queue_byte_limit_is_accepted() {
+    // Capture, not the client, decides whether an event is too large.
     let mut config = config();
-    config.max_queue_size = 1;
     config.max_queue_bytes = 1024;
     let client = Client::init_blocking(config);
-    let mut oversized = Capture::new("too-big");
-    oversized
-        .properties
-        .insert("data".into(), "x".repeat(2048).into());
-    assert_eq!(client.capture(oversized), CaptureOutcome::Full);
-    assert!(matches!(
-        client.capture("accepted"),
-        CaptureOutcome::Accepted { .. }
-    ));
-    assert!(matches!(
-        client.capture("new"),
-        CaptureOutcome::Accepted { .. }
-    ));
-    client.shutdown_blocking(None);
-}
-
-#[test]
-fn events_over_the_per_event_limit_are_refused_at_capture() {
-    // The default queue holds 8 MiB; the per-event limit is 1 MiB.
-    let client = Client::init_blocking(config());
-    let mut oversized = Capture::new("too-big");
-    oversized
-        .properties
-        .insert("data".into(), "x".repeat(1024 * 1024).into());
-    assert_eq!(client.capture(oversized), CaptureOutcome::Full);
     let mut large = Capture::new("large");
     large
         .properties
-        .insert("data".into(), "x".repeat(512 * 1024).into());
+        .insert("data".into(), "x".repeat(2048).into());
     assert!(matches!(
         client.capture(large),
         CaptureOutcome::Accepted { .. }

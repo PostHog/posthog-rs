@@ -21,7 +21,7 @@ use super::super::tests::{options, ManualClock};
 use super::super::{Clock, Completion, Control, TransportHandle};
 use crate::capture_event::CaptureEvent;
 use crate::client::event_store::{
-    record_size, EventStore, FileEventStore, ReadError, StorageDirectory, StoreKey, StoreLimits,
+    record_size, EventStore, FileEventStore, StorageDirectory, StoreKey, StoreLimits,
 };
 use crate::client::{ClientOptionsBuilder, PostHogError, StorageOperation};
 use crate::Event;
@@ -41,7 +41,6 @@ impl TestDirectory {
             StoreLimits {
                 max_events,
                 max_bytes: 128 * 1024,
-                max_record_bytes: 4096,
             },
         )
         .unwrap()
@@ -116,12 +115,9 @@ impl EventStore for FaultyStore {
         }
         self.inner.write(key, event)
     }
-    fn read(&mut self, key: StoreKey) -> Result<CaptureEvent, ReadError> {
+    fn read(&mut self, key: StoreKey) -> io::Result<CaptureEvent> {
         if self.faults.reads.lock().unwrap().contains(&key.0) {
-            return Err(ReadError::Transient(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "test read",
-            )));
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "test read"));
         }
         self.inner.read(key)
     }
@@ -223,7 +219,6 @@ fn spawn(
     let handle = TransportHandle::spawn_stateful_with_deadline(
         builder.build().unwrap(),
         store,
-        max_queue_bytes,
         max_queue_bytes,
         deadline.clone(),
         Arc::new(clock.clone()),
@@ -392,40 +387,52 @@ fn read_request(stream: &mut TcpStream) {
 }
 
 #[test]
-fn a_terminal_status_whose_body_is_cut_off_is_reported_lost_and_not_retried() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        read_request(&mut stream);
-        stream
-            .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 100\r\n\r\n{\"type\"")
-            .unwrap();
-        let _ = stream.shutdown(Shutdown::Both);
-    });
-    let directory = TestDirectory::new();
-    let statuses = Arc::new(Mutex::new(Vec::new()));
-    let observed = statuses.clone();
-    let mut builder = options(url);
-    builder
-        .flush_at(100usize)
-        .retry_initial_backoff_ms(1_000u64)
-        .on_error(move |error| {
-            if let PostHogError::Capture(failure) = error {
-                observed.lock().unwrap().push(failure.status());
-            }
+fn a_response_whose_body_is_cut_off_is_reported_lost_and_not_retried() {
+    for (head, status) in [("HTTP/1.1 200 OK", 200), ("HTTP/1.1 401 Unauthorized", 401)] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream);
+            let response = format!("{head}\r\ncontent-length: 100\r\n\r\n{{\"results\"");
+            stream.write_all(response.as_bytes()).unwrap();
+            let _ = stream.shutdown(Shutdown::Both);
+            // A resend would be accepted here; there must be none.
+            listener.set_nonblocking(true).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            listener.accept().is_err()
         });
-    let harness = spawn(&mut builder, Some(Box::new(directory.open(10))), 64 * 1024);
-    admit(&harness.handle, "rejected");
-    flush(&harness.handle);
-    server.join().unwrap();
-    assert_eq!(*statuses.lock().unwrap(), [Some(401)]);
-    assert!(
-        directory.records().is_empty(),
-        "the rejected event is not kept for a retry"
-    );
-    harness.handle.request_close_before(harness.clock.now());
-    harness.handle.join();
+        let directory = TestDirectory::new();
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let observed = statuses.clone();
+        let mut builder = options(url);
+        builder
+            .flush_at(100usize)
+            .retry_initial_backoff_ms(1_000u64)
+            .on_error(move |error| {
+                if let PostHogError::Capture(failure) = error {
+                    observed.lock().unwrap().push(failure.status());
+                }
+            });
+        let harness = spawn(&mut builder, Some(Box::new(directory.open(10))), 64 * 1024);
+        admit(&harness.handle, "cut-off");
+        flush(&harness.handle);
+        harness.clock.advance(Duration::from_secs(60));
+        harness.handle.tick();
+        assert!(
+            server.join().unwrap(),
+            "status {}: the batch was resent",
+            status
+        );
+        assert_eq!(*statuses.lock().unwrap(), [Some(status)]);
+        assert!(
+            directory.records().is_empty(),
+            "status {}: the event is not kept for a retry",
+            status
+        );
+        harness.handle.request_close_before(harness.clock.now());
+        harness.handle.join();
+    }
 }
 
 /// A capture response body just over the read limit, valid JSON when read
@@ -599,7 +606,7 @@ fn delivery_keeps_retrying_past_max_capture_attempts_with_or_without_a_store() {
 // -- storage faults -----------------------------------------------------------
 
 #[test]
-fn a_failed_delete_does_not_hold_up_later_delivery_and_is_retried() {
+fn a_failed_delete_is_reported_and_leaves_the_file_for_the_next_start() {
     let server = MockServer::start();
     let log = Log::default();
     let _ok = delivered(&server, &log);
@@ -622,186 +629,160 @@ fn a_failed_delete_does_not_hold_up_later_delivery_and_is_retried() {
         errors.recv_timeout(Duration::from_secs(5)).unwrap(),
         StorageOperation::Remove
     );
-    assert_eq!(
-        directory.records(),
-        [1],
-        "the delivered file is still there"
-    );
     admit(&harness.handle, "second");
     flush(&harness.handle);
     assert_eq!(log.names(), [names(&["first"]), names(&["second"])]);
-    harness.clock.advance(Duration::from_secs(60));
-    harness.handle.tick();
-    assert!(directory.records().is_empty());
+    assert_eq!(directory.records(), [1], "the file is not deleted again");
     harness.handle.shutdown_blocking();
 }
 
 #[test]
-fn orphan_files_filling_the_disk_quota_keep_new_events_in_memory() {
-    let server = MockServer::start();
-    let log = Log::default();
-    let _ok = delivered(&server, &log);
-    let directory = TestDirectory::new();
-    let faults = Faults::default();
-    faults.deletes.store(usize::MAX, Ordering::Release);
-    let harness = spawn(
-        &mut base(&server),
-        Some(Box::new(FaultyStore {
-            inner: directory.open(2),
-            faults,
-        })),
-        64 * 1024,
-    );
-    for name in ["a", "b", "c", "d"] {
-        admit(&harness.handle, name);
-        flush(&harness.handle);
-    }
-    // "a" and "b" could not be deleted and fill the quota of two files.
-    assert_eq!(directory.records(), [1, 2]);
-    // Cleanup keeps failing; later events are still delivered from memory.
-    harness.clock.advance(Duration::from_secs(60));
-    harness.handle.tick();
-    admit(&harness.handle, "e");
-    flush(&harness.handle);
-    assert_eq!(
-        log.names(),
-        [
-            names(&["a"]),
-            names(&["b"]),
-            names(&["c"]),
-            names(&["d"]),
-            names(&["e"])
-        ]
-    );
-    assert_eq!(directory.records(), [1, 2]);
-    assert_eq!(harness.handle.pending(), 0);
-    harness.handle.request_close_before(harness.clock.now());
-    harness.handle.join();
-}
-
-#[test]
-fn an_orphan_file_keeps_a_record_in_memory_that_would_overfill_the_disk_quota() {
-    let server = MockServer::start();
-    let log = Log::default();
-    let _ok = delivered(&server, &log);
-    let directory = TestDirectory::new();
-    let faults = Faults::default();
-    faults.deletes.store(usize::MAX, Ordering::Release);
-    let store = FileEventStore::open(
-        StorageDirectory::open(&directory.0).unwrap(),
-        StoreLimits {
-            max_events: 10,
-            max_bytes: 1000,
-            max_record_bytes: 1000,
-        },
-    )
-    .unwrap();
-    let harness = spawn(
-        &mut base(&server),
-        Some(Box::new(FaultyStore {
-            inner: store,
-            faults,
-        })),
-        64 * 1024,
-    );
-    for name in ["orphan", "next"] {
-        let event = sized(name, 600);
-        assert_eq!(harness.handle.enqueue_prepared(event), Admission::Accepted);
-        flush(&harness.handle);
-    }
-    assert_eq!(log.names(), [names(&["orphan"]), names(&["next"])]);
-    // Writing "next" next to the 600-byte orphan would take the disk to 1,200
-    // bytes, over its 1,000-byte quota, so it was sent from memory.
-    assert_eq!(directory.records(), [1]);
-    harness.handle.request_close_before(harness.clock.now());
-    harness.handle.join();
-}
-
-#[test]
-fn an_orphan_cleanup_pass_retries_a_bounded_number_of_deletes() {
-    let directory = TestDirectory::new();
-    let clock = ManualClock::new();
-    let (mut coordinator, _inbox, _pending) =
-        idle_coordinator(Box::new(directory.open(10)), &clock, None);
-    let count = super::ORPHAN_RETRIES_PER_PASS as u64 + 6;
-    for key in 1..=count {
-        coordinator.orphans.push_back((StoreKey(key), 10));
-        coordinator.orphan_usage.add(10);
-    }
-    coordinator.orphans_due = Some(clock.now());
-    coordinator.retry_orphans();
-    let left: Vec<u64> = coordinator.orphans.iter().map(|(key, _)| key.0).collect();
-    assert_eq!(left, (count - 5..=count).collect::<Vec<_>>());
-    assert!(coordinator.orphans_due > Some(clock.now()));
-}
-
-#[test]
-fn an_unreadable_record_does_not_hold_up_later_events() {
+fn an_unreadable_record_is_reported_dropped_and_deleted() {
     let server = MockServer::start();
     let log = Log::default();
     let _ok = delivered(&server, &log);
     let directory = TestDirectory::new();
     {
         let mut store = directory.open(10);
-        store.write(StoreKey(1), &wire("blocked")).unwrap();
+        store.write(StoreKey(1), &wire("unreadable")).unwrap();
     }
     let faults = Faults::default();
     faults.reads.lock().unwrap().insert(1);
-    // The next event also misses disk, so it is memory-only behind the record.
-    faults.writes.lock().unwrap().insert("fallback".into());
     let mut builder = base(&server);
     let errors = storage_errors(&mut builder);
     let harness = spawn(
         &mut builder,
         Some(Box::new(FaultyStore {
             inner: directory.open(10),
-            faults: faults.clone(),
+            faults,
         })),
         64 * 1024,
     );
-    admit(&harness.handle, "fallback");
     admit(&harness.handle, "fresh");
     flush(&harness.handle);
-    assert_eq!(log.names().concat(), names(&["fallback", "fresh"]));
-    let mut reported: Vec<_> = errors.try_iter().collect();
-    reported.sort_by_key(|operation| format!("{operation:?}"));
-    assert_eq!(reported, [StorageOperation::Read, StorageOperation::Write]);
-    faults.reads.lock().unwrap().clear();
-    harness.clock.advance(Duration::from_secs(60));
-    harness.handle.tick();
+    assert_eq!(log.names().concat(), names(&["fresh"]));
     assert_eq!(
-        log.names().concat(),
-        names(&["fallback", "fresh", "blocked"])
+        errors.try_iter().collect::<Vec<_>>(),
+        [StorageOperation::Read]
     );
     assert!(directory.records().is_empty());
     harness.handle.shutdown_blocking();
 }
 
 #[test]
-fn a_failed_write_keeps_the_event_in_memory_in_order() {
+fn a_retried_event_that_becomes_unreadable_is_dropped_and_the_rest_go_in_a_new_request() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let directory = TestDirectory::new();
+    let faults = Faults::default();
+    let harness = spawn(
+        &mut base(&server),
+        Some(Box::new(FaultyStore {
+            inner: directory.open(10),
+            faults: faults.clone(),
+        })),
+        64 * 1024,
+    );
+    let mut offline = respond(&server, &log, 503, json!({}));
+    admit(&harness.handle, "a");
+    admit(&harness.handle, "b");
+    flush(&harness.handle);
+    offline.delete();
+    let _ok = delivered(&server, &log);
+    faults.reads.lock().unwrap().insert(1);
+    harness.clock.advance(Duration::from_secs(2));
+    harness.handle.tick();
+    let requests = log.all();
+    assert_eq!(log.names(), [names(&["a", "b"]), names(&["b"])]);
+    assert_ne!(requests[1].id, requests[0].id);
+    assert_eq!(requests[1].attempt, 1);
+    assert!(directory.records().is_empty());
+    harness.handle.shutdown_blocking();
+}
+
+#[test]
+fn an_emptied_queue_keeps_no_due_time_for_the_next_event() {
+    let directory = TestDirectory::new();
+    directory
+        .open(10)
+        .write(StoreKey(1), &wire("unreadable"))
+        .unwrap();
+    let faults = Faults::default();
+    faults.reads.lock().unwrap().insert(1);
+    let clock = ManualClock::new();
+    let store = FaultyStore {
+        inner: directory.open(10),
+        faults,
+    };
+    let (mut coordinator, inbox, _pending) = idle_coordinator(Box::new(store), &clock, None);
+    let (jobs, _sent) = mpsc::sync_channel(1);
+    coordinator.jobs = Some(jobs);
+    // The backlog's only record is unreadable, so it is dropped.
+    assert!(coordinator.start_request());
+    assert!(coordinator.table.is_empty());
+    clock.advance(Duration::from_secs(5));
+    assert_eq!(inbox.admit(wire("newer"), 10), Admission::Accepted);
+    coordinator.drain_inbox();
+    assert!(coordinator.start_request());
+    assert!(
+        !coordinator.sending,
+        "the new event waits for its flush interval"
+    );
+}
+
+#[test]
+fn a_failed_write_drops_the_event_and_reports_the_failure_once() {
     let server = MockServer::start();
     let log = Log::default();
     let _ok = delivered(&server, &log);
     let directory = TestDirectory::new();
     let faults = Faults::default();
-    faults.writes.lock().unwrap().insert("b".into());
+    faults
+        .writes
+        .lock()
+        .unwrap()
+        .extend(["b".to_string(), "c".to_string()]);
+    let mut builder = base(&server);
+    let errors = storage_errors(&mut builder);
     let harness = spawn(
-        &mut base(&server),
+        &mut builder,
         Some(Box::new(FaultyStore {
             inner: directory.open(10),
             faults,
         })),
         64 * 1024,
     );
-    for name in ["a", "b", "c"] {
+    for name in ["a", "b", "c", "d"] {
         admit(&harness.handle, name);
     }
     flush(&harness.handle);
-    assert_eq!(log.names(), [names(&["a", "b", "c"])]);
+    assert_eq!(log.names(), [names(&["a", "d"])]);
+    assert_eq!(
+        errors.try_iter().collect::<Vec<_>>(),
+        [StorageOperation::Write]
+    );
+    assert_eq!(harness.handle.pending(), 0);
     harness.handle.shutdown_blocking();
 }
 
 // -- capacity -----------------------------------------------------------------
+
+#[test]
+fn an_event_larger_than_the_queue_byte_limit_is_accepted_and_sent_alone() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let _ok = delivered(&server, &log);
+    let harness = spawn(&mut base(&server), None, 1024);
+    admit(&harness.handle, "small");
+    assert_eq!(
+        harness.handle.enqueue_prepared(sized("large", 2048)),
+        Admission::Accepted
+    );
+    flush(&harness.handle);
+    // The newest event is kept even when it alone fills the queue.
+    assert_eq!(log.names(), [names(&["large"])]);
+    harness.handle.shutdown_blocking();
+}
 
 #[test]
 fn a_full_memory_queue_keeps_the_newest_events() {
@@ -822,29 +803,6 @@ fn a_full_memory_queue_keeps_the_newest_events() {
     harness.handle.tick();
     assert_eq!(log.names().last().unwrap(), &names(&["b", "c"]));
     harness.handle.shutdown_blocking();
-}
-
-#[test]
-fn an_event_over_the_per_event_limit_is_refused() {
-    let server = MockServer::start();
-    let log = Log::default();
-    let _ok = delivered(&server, &log);
-    let size = record_size(&wire("fits"));
-    let clock = ManualClock::new();
-    let handle = TransportHandle::spawn_stateful_with_deadline(
-        base(&server).build().unwrap(),
-        None,
-        64 * 1024,
-        size,
-        Arc::new(Mutex::new(None)),
-        Arc::new(clock),
-    )
-    .unwrap();
-    let mut large = wire("large");
-    large.properties = json!({"data": "x".repeat(64)});
-    assert_eq!(handle.enqueue_prepared(large), Admission::Full);
-    assert_eq!(handle.enqueue_prepared(wire("fits")), Admission::Accepted);
-    handle.shutdown_blocking();
 }
 
 // -- shutdown -----------------------------------------------------------------
@@ -902,7 +860,6 @@ fn a_dropped_handle_stops_its_threads_without_a_shutdown() {
         base(&server).build().unwrap(),
         None,
         64 * 1024,
-        64 * 1024,
         Arc::new(Mutex::new(None)),
         clock.clone(),
     )
@@ -938,46 +895,6 @@ fn a_closed_handle_refuses_admission_and_flushes_complete() {
 }
 
 // -- regressions --------------------------------------------------------------
-
-#[test]
-fn entries_waiting_out_a_read_failure_do_not_wake_the_coordinator_early() {
-    use super::super::table::Limits;
-    use super::{Coordinator, Settings};
-    let directory = TestDirectory::new();
-    directory
-        .open(10)
-        .write(StoreKey(1), &wire("blocked"))
-        .unwrap();
-    let faults = Faults::default();
-    faults.reads.lock().unwrap().insert(1);
-    let clock = ManualClock::new();
-    let options = options("http://127.0.0.1:1".into()).build().unwrap();
-    let (mut coordinator, _inbox) = Coordinator::new(
-        Settings {
-            lane: super::super::LaneConfig::analytics(),
-            memory: Limits {
-                events: 10,
-                bytes: 64 * 1024,
-            },
-            options,
-        },
-        Some(Box::new(FaultyStore {
-            inner: directory.open(10),
-            faults,
-        })),
-        4096,
-        Arc::new(clock.clone()),
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(Mutex::new(None)),
-    );
-    let (jobs, _sent) = mpsc::sync_channel(1);
-    coordinator.jobs = Some(jobs);
-    // The backlog is due at once, but its only record cannot be read.
-    assert!(coordinator.start_request());
-    assert!(!coordinator.sending);
-    let wake = coordinator.next_wake().expect("the record is retried");
-    assert!(wake > clock.now(), "a past wake time would spin");
-}
 
 #[test]
 fn events_admitted_after_the_deadline_are_still_written_to_disk() {
@@ -1041,64 +958,21 @@ fn new_events_never_reuse_the_key_of_a_record_left_on_disk() {
     let server = MockServer::start();
     let log = Log::default();
     let directory = TestDirectory::new();
-    {
-        let mut store = directory.open(10);
-        let mut large = wire("large");
-        large.properties = json!({"data": "x".repeat(2048)});
-        store.write(StoreKey(2), &large).unwrap();
-    }
-    let small = FileEventStore::open(
-        StorageDirectory::open(&directory.0).unwrap(),
-        StoreLimits {
-            max_events: 10,
-            max_bytes: 128 * 1024,
-            max_record_bytes: 1024,
-        },
-    )
-    .unwrap();
+    directory
+        .open(10)
+        .write(StoreKey(2), &wire("earlier"))
+        .unwrap();
     let _offline = respond(&server, &log, 503, json!({}));
-    let harness = spawn(&mut base(&server), Some(Box::new(small)), 64 * 1024);
+    let harness = spawn(
+        &mut base(&server),
+        Some(Box::new(directory.open(10))),
+        64 * 1024,
+    );
     admit(&harness.handle, "new");
     flush(&harness.handle);
-    // The record over the lowered limit is untouched; the new event follows it.
     assert_eq!(directory.records(), [2, 3]);
     harness.handle.request_close_before(harness.clock.now());
     harness.handle.join();
-}
-
-#[test]
-fn a_retry_waits_for_an_unreadable_event_instead_of_losing_its_identity() {
-    let server = MockServer::start();
-    let log = Log::default();
-    let directory = TestDirectory::new();
-    let faults = Faults::default();
-    let harness = spawn(
-        &mut base(&server),
-        Some(Box::new(FaultyStore {
-            inner: directory.open(10),
-            faults: faults.clone(),
-        })),
-        64 * 1024,
-    );
-    let mut offline = respond(&server, &log, 503, json!({}));
-    admit(&harness.handle, "a");
-    admit(&harness.handle, "b");
-    flush(&harness.handle);
-    offline.delete();
-    let _ok = delivered(&server, &log);
-    faults.reads.lock().unwrap().insert(1);
-    harness.clock.advance(Duration::from_secs(2));
-    harness.handle.tick();
-    assert_eq!(log.all().len(), 1, "nothing is sent while a read fails");
-    faults.reads.lock().unwrap().clear();
-    harness.clock.advance(Duration::from_secs(60));
-    harness.handle.tick();
-    let requests = log.all();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].events, names(&["a", "b"]));
-    assert_eq!(requests[1].id, requests[0].id);
-    assert_eq!(requests[1].attempt, 2);
-    harness.handle.shutdown_blocking();
 }
 
 #[test]
@@ -1300,43 +1174,6 @@ fn events_admitted_during_a_retry_wait_go_in_their_own_request_once_it_clears() 
     harness.handle.shutdown_blocking();
 }
 
-#[test]
-fn a_retry_that_stays_unreadable_gives_way_to_later_events() {
-    let server = MockServer::start();
-    let log = Log::default();
-    let directory = TestDirectory::new();
-    let faults = Faults::default();
-    let harness = spawn(
-        &mut base(&server),
-        Some(Box::new(FaultyStore {
-            inner: directory.open(10),
-            faults: faults.clone(),
-        })),
-        64 * 1024,
-    );
-    let mut offline = respond(&server, &log, 503, json!({}));
-    admit(&harness.handle, "a");
-    flush(&harness.handle);
-    offline.delete();
-    let _ok = delivered(&server, &log);
-    faults.reads.lock().unwrap().insert(1);
-    admit(&harness.handle, "later");
-    for _ in 0..5 {
-        harness.clock.advance(Duration::from_secs(60));
-        harness.handle.tick();
-    }
-    let requests = log.all();
-    assert_eq!(log.names(), [names(&["a"]), names(&["later"])]);
-    assert_ne!(requests[1].id, requests[0].id);
-    assert_eq!(
-        directory.records(),
-        [1],
-        "the unreadable event stays queued"
-    );
-    harness.handle.request_close_before(harness.clock.now());
-    harness.handle.join();
-}
-
 /// A coordinator over `store` that is not running yet, with its inbox and
 /// pending count.
 fn idle_coordinator(
@@ -1358,7 +1195,6 @@ fn idle_coordinator(
             options,
         },
         Some(store),
-        4096,
         Arc::new(clock.clone()),
         pending.clone(),
         Arc::new(Mutex::new(deadline)),
@@ -1385,162 +1221,6 @@ fn read_fault_coordinator(
     idle_coordinator(Box::new(store), clock, None).0
 }
 
-fn retry_answer(seq: u64, delay: Duration) -> super::Sent {
-    super::Sent {
-        seqs: vec![seq],
-        request_id: Uuid::now_v7(),
-        attempt: 1,
-        created_at: String::new(),
-        verdict: super::Verdict::Retry {
-            retained: vec![(seq, 0)],
-            delay,
-        },
-    }
-}
-
-#[test]
-fn a_retry_wait_does_not_spin_once_a_skipped_record_is_readable_again() {
-    let directory = TestDirectory::new();
-    let faults = Faults::default();
-    faults.reads.lock().unwrap().insert(1);
-    let clock = ManualClock::new();
-    let mut coordinator = read_fault_coordinator(
-        &[(1, "unreadable"), (2, "retried")],
-        &faults,
-        &directory,
-        &clock,
-    );
-    let (jobs, _sent) = mpsc::sync_channel(1);
-    coordinator.jobs = Some(jobs);
-    assert!(coordinator.start_request());
-    assert!(coordinator.sending);
-    coordinator.apply(retry_answer(2, Duration::from_secs(30)));
-    clock.advance(Duration::from_secs(15));
-    let wake = coordinator.next_wake().expect("the retry is pending");
-    assert!(
-        wake > clock.now(),
-        "a past wake time spins until the retry is due"
-    );
-}
-
-#[test]
-fn a_record_read_after_a_failure_does_not_spin_its_later_retry_wait() {
-    let directory = TestDirectory::new();
-    let faults = Faults::default();
-    faults.reads.lock().unwrap().insert(1);
-    let clock = ManualClock::new();
-    let mut coordinator = read_fault_coordinator(&[(1, "flaky")], &faults, &directory, &clock);
-    let (jobs, _sent) = mpsc::sync_channel(1);
-    coordinator.jobs = Some(jobs);
-    assert!(coordinator.start_request());
-    assert!(!coordinator.sending, "the only record could not be read");
-    faults.reads.lock().unwrap().clear();
-    clock.advance(Duration::from_secs(11));
-    assert!(coordinator.start_request());
-    assert!(coordinator.sending, "the record is read and sent");
-    coordinator.apply(retry_answer(1, Duration::from_secs(30)));
-    clock.advance(Duration::from_secs(1));
-    let wake = coordinator.next_wake().expect("the retry is pending");
-    assert!(
-        wake > clock.now(),
-        "a stale read time spins for the whole retry wait"
-    );
-}
-
-#[test]
-fn a_record_waiting_out_a_read_failure_does_not_make_newer_events_skip_their_interval() {
-    let server = MockServer::start();
-    let log = Log::default();
-    let slot: Arc<Mutex<Option<Arc<TransportHandle>>>> = Arc::new(Mutex::new(None));
-    let _ok = {
-        let slot = slot.clone();
-        let log = log.clone();
-        server.mock(move |when, then| {
-            when.method(POST).is_true(move |request| {
-                let body: Value = serde_json::from_slice(request.body_ref()).unwrap_or_default();
-                let mut requests = log.0.lock().unwrap();
-                if requests.is_empty() {
-                    if let Some(handle) = slot.lock().unwrap().as_ref() {
-                        let _ = handle.enqueue_prepared(wire("newer"));
-                    }
-                }
-                requests.push(Received {
-                    id: String::new(),
-                    attempt: 0,
-                    events: body["batch"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|event| event["event"].as_str().unwrap_or_default().to_string())
-                        .collect(),
-                });
-                true
-            });
-            then.status(200).json_body(json!({"results": {}}));
-        })
-    };
-    let directory = TestDirectory::new();
-    let faults = Faults::default();
-    faults.reads.lock().unwrap().insert(1);
-    let harness = spawn(
-        &mut base(&server),
-        Some(Box::new(FaultyStore {
-            inner: directory.open(10),
-            faults,
-        })),
-        64 * 1024,
-    );
-    let handle = Arc::new(harness.handle);
-    *slot.lock().unwrap() = Some(handle.clone());
-    admit(&handle, "blocked");
-    admit(&handle, "first");
-    handle.tick();
-    std::thread::sleep(Duration::from_millis(300));
-    *slot.lock().unwrap() = None;
-    handle.request_close_before(harness.clock.now());
-    handle.join();
-    assert_eq!(
-        log.names(),
-        [names(&["first"])],
-        "a newer event skipped its flush interval"
-    );
-}
-
-#[test]
-fn a_record_left_behind_by_a_read_failure_is_sent_once_readable_without_new_traffic() {
-    let directory = TestDirectory::new();
-    let faults = Faults::default();
-    faults.reads.lock().unwrap().insert(1);
-    let clock = ManualClock::new();
-    let mut coordinator =
-        read_fault_coordinator(&[(1, "delayed"), (2, "sent")], &faults, &directory, &clock);
-    let (jobs, sent) = mpsc::sync_channel(1);
-    coordinator.jobs = Some(jobs);
-    assert!(coordinator.start_request());
-    assert!(coordinator.sending, "the readable record goes");
-    sent.try_recv().unwrap();
-    coordinator.apply(super::Sent {
-        seqs: vec![2],
-        request_id: Uuid::now_v7(),
-        attempt: 1,
-        created_at: String::new(),
-        verdict: super::Verdict::Finished,
-    });
-    assert!(coordinator.start_request());
-    assert!(!coordinator.sending, "the delayed record is not ready yet");
-    let wake = coordinator
-        .next_wake()
-        .expect("the delayed record needs a wake");
-    assert!(wake > clock.now());
-    faults.reads.lock().unwrap().clear();
-    clock.advance(wake - clock.now());
-    assert!(coordinator.start_request());
-    assert!(
-        coordinator.sending,
-        "the delayed record is sent once readable, with no new trigger"
-    );
-}
-
 #[test]
 fn a_retry_answer_for_an_event_evicted_in_flight_keeps_no_duplicate_count() {
     use super::super::table::Limits;
@@ -1557,13 +1237,10 @@ fn a_retry_answer_for_an_event_evicted_in_flight_keeps_no_duplicate_count() {
     assert!(coordinator.start_request());
     assert!(coordinator.sending);
     // Capacity evicts the oldest event while its request is out.
-    let evicted = coordinator.table.evict(
-        coordinator.memory_limits,
-        Limits {
-            events: 1,
-            bytes: u64::MAX,
-        },
-    );
+    let evicted = coordinator.table.evict(Limits {
+        events: 1,
+        bytes: u64::MAX,
+    });
     coordinator.discard(evicted);
     coordinator.apply(super::Sent {
         seqs: vec![1, 2],

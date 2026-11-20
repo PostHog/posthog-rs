@@ -143,7 +143,6 @@ pub posthog::stateful::CaptureOutcome::Accepted::uuid: uuid::Uuid
 pub posthog::stateful::CaptureOutcome::Closed
 pub posthog::stateful::CaptureOutcome::Disabled
 pub posthog::stateful::CaptureOutcome::Dropped
-pub posthog::stateful::CaptureOutcome::Full
 pub posthog::stateful::CaptureOutcome::Invalid
 pub posthog::stateful::CaptureOutcome::Reentrant
 #[non_exhaustive] pub enum posthog::stateful::DeliveryOutcome

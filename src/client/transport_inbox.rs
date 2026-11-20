@@ -33,7 +33,6 @@ pub(super) struct Inbox {
     state: Mutex<State>,
     max_events: usize,
     max_bytes: usize,
-    max_event_bytes: usize,
     /// Events dropped to make room since the coordinator last looked.
     dropped: AtomicUsize,
     /// Set when a wake message is already on its way to the coordinator.
@@ -48,7 +47,6 @@ impl Inbox {
         last_seq: u64,
         max_events: usize,
         max_bytes: usize,
-        max_event_bytes: usize,
         pending: Arc<AtomicUsize>,
     ) -> Self {
         Self {
@@ -60,7 +58,6 @@ impl Inbox {
             }),
             max_events: max_events.max(1),
             max_bytes,
-            max_event_bytes: max_event_bytes.min(max_bytes),
             dropped: AtomicUsize::new(0),
             wake: AtomicBool::new(false),
             pending,
@@ -69,15 +66,13 @@ impl Inbox {
 
     /// Admit an event whose serialized record size the caller measured.
     pub(super) fn admit(&self, event: CaptureEvent, bytes: usize) -> Admission {
-        if bytes > self.max_event_bytes {
-            return Admission::Full;
-        }
         let mut state = self.lock();
         if state.closed {
             return Admission::Closed;
         }
+        // Unreachable in practice: queue positions are 64 bits.
         let Some(seq) = state.last_seq.checked_add(1) else {
-            return Admission::Full;
+            return Admission::Closed;
         };
         state.last_seq = seq;
         // Counted before the coordinator can see the event, which it may then
@@ -150,14 +145,8 @@ mod tests {
         CaptureEvent::from_event(&Event::new(name, "user"))
     }
 
-    fn inbox(max_events: usize, max_bytes: usize, max_event_bytes: usize) -> Inbox {
-        Inbox::new(
-            41,
-            max_events,
-            max_bytes,
-            max_event_bytes,
-            Arc::new(AtomicUsize::new(0)),
-        )
+    fn inbox(max_events: usize, max_bytes: usize) -> Inbox {
+        Inbox::new(41, max_events, max_bytes, Arc::new(AtomicUsize::new(0)))
     }
 
     fn names(waiting: &[Waiting]) -> Vec<(u64, &str)> {
@@ -169,7 +158,7 @@ mod tests {
 
     #[test]
     fn admission_follows_the_last_key_on_disk_and_drains_in_order() {
-        let inbox = inbox(10, 1000, 100);
+        let inbox = inbox(10, 1000);
         assert_eq!(inbox.last_seq(), 41);
         assert_eq!(inbox.admit(wire("a"), 10), Admission::Accepted);
         assert_eq!(inbox.admit(wire("b"), 10), Admission::Accepted);
@@ -183,7 +172,7 @@ mod tests {
 
     #[test]
     fn a_full_inbox_drops_its_oldest_events_and_keeps_the_newest() {
-        let inbox = inbox(2, 25, 25);
+        let inbox = inbox(2, 25);
         for name in ["a", "b", "c"] {
             assert_eq!(inbox.admit(wire(name), 10), Admission::Accepted);
         }
@@ -197,19 +186,8 @@ mod tests {
     }
 
     #[test]
-    fn an_event_over_the_per_event_or_byte_limit_is_refused() {
-        let inbox = inbox(10, 50, 100);
-        assert_eq!(inbox.admit(wire("too-big"), 51), Admission::Full);
-        assert_eq!(inbox.admit(wire("fits"), 50), Admission::Accepted);
-        let inbox = self::inbox(10, 1000, 100);
-        assert_eq!(inbox.admit(wire("too-big"), 101), Admission::Full);
-        assert_eq!(inbox.last_seq(), 41, "a refused event takes no position");
-        assert_eq!(inbox.pending.load(Ordering::Acquire), 0);
-    }
-
-    #[test]
     fn the_final_drain_closes_the_inbox_to_later_admissions() {
-        let inbox = inbox(10, 1000, 100);
+        let inbox = inbox(10, 1000);
         assert_eq!(inbox.admit(wire("last"), 10), Admission::Accepted);
         assert_eq!(names(&inbox.close_and_drain()), [(42, "last")]);
         assert_eq!(inbox.admit(wire("late"), 10), Admission::Closed);
@@ -220,7 +198,7 @@ mod tests {
 
     #[test]
     fn only_the_first_admission_after_a_wake_asks_for_another() {
-        let inbox = inbox(10, 1000, 100);
+        let inbox = inbox(10, 1000);
         assert!(inbox.arm());
         assert!(!inbox.arm());
         inbox.clear_wake();

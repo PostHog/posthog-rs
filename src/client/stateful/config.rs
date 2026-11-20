@@ -7,11 +7,6 @@ use crate::client::transport::MAX_SHUTDOWN_TIMEOUT;
 use crate::client::{ClientOptions, OnErrorHook, PostHogError};
 use crate::{BeforeSendHook, CaptureCompression, EndpointManager, Event, DEFAULT_HOST};
 
-/// Largest serialized event the client accepts, roughly the capture endpoint's
-/// own per-event limit. Larger events are refused at capture with
-/// `CaptureOutcome::Full`.
-const MAX_EVENT_BYTES: u64 = 1024 * 1024;
-
 /// A client SDK waits 1 second before its first resend, doubling to the
 /// 30-second ceiling, where a server SDK starts at 100 ms.
 const RETRY_INITIAL_BACKOFF_MS: u64 = 1_000;
@@ -55,22 +50,17 @@ pub struct Config {
     /// does not cap the process's memory use.
     ///
     /// At this limit, the oldest events in memory are dropped to keep the
-    /// newest. Capture returns [`CaptureOutcome::Full`](super::CaptureOutcome::Full)
-    /// for any single event over 1 MiB, or over this limit if it is smaller.
+    /// newest, even when the newest alone is over it.
     pub max_queue_bytes: usize,
     /// Maximum events stored on disk. Default: 10,000.
     ///
     /// At this limit or `max_stored_bytes`, the oldest stored events are dropped
-    /// to keep the newest. Files the client cannot delete keep counting against
-    /// these limits; while they fill them, new events stay in memory under the
-    /// memory limits.
+    /// to keep the newest.
     pub max_stored_events: usize,
     /// Maximum serialized event bytes stored on disk. Default: 64 MiB.
     ///
     /// At this limit or `max_stored_events`, the oldest stored events are
-    /// dropped to keep the newest. Files the client cannot delete keep counting
-    /// against these limits; while they fill them, new events stay in memory
-    /// under the memory limits.
+    /// dropped to keep the newest.
     pub max_stored_bytes: u64,
     /// How long to wait after a state change before writing client state to
     /// disk. Changes made within the window are written together. Lower values
@@ -240,17 +230,10 @@ impl Config {
         }
     }
 
-    /// Largest serialized event capture admits, never larger than the queue.
-    pub(super) fn max_event_bytes(&self) -> usize {
-        (MAX_EVENT_BYTES as usize).min(self.max_queue_bytes)
-    }
-
     pub(super) fn event_limits(&self) -> StoreLimits {
         StoreLimits {
             max_events: self.max_stored_events,
             max_bytes: self.max_stored_bytes,
-            // Never larger than either budget that has to hold the event.
-            max_record_bytes: (self.max_event_bytes() as u64).min(self.max_stored_bytes),
         }
     }
 

@@ -5,7 +5,7 @@
 //! never reruns hooks or changes its attribution.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -75,24 +75,11 @@ pub(crate) fn open_private(path: &Path, exclusive: bool) -> io::Result<File> {
     options.open(path)
 }
 
-/// Disk retention for the delivery queue. The coordinator enforces
-/// `max_events` and `max_bytes`; the store refuses any single record over
-/// `max_record_bytes`.
+/// Disk retention for the delivery queue, enforced by the coordinator.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StoreLimits {
     pub(crate) max_events: usize,
     pub(crate) max_bytes: u64,
-    pub(crate) max_record_bytes: u64,
-}
-
-/// Why a record could not be read.
-#[derive(Debug)]
-pub(crate) enum ReadError {
-    /// The read may succeed later, for example after a permission change.
-    Transient(io::Error),
-    /// The record is gone, or it was invalid and moved aside. It will never
-    /// be readable, so the coordinator drops it from the queue.
-    Lost(io::Error),
 }
 
 /// Storage for the delivery queue. Only the coordinator thread calls it, so
@@ -104,15 +91,17 @@ pub(crate) trait EventStore: Send {
     /// sizes. The coordinator calls this once.
     fn take_index(&mut self) -> Vec<(StoreKey, u64)>;
 
-    /// The highest key of any record file present at open, queued or not.
-    /// New records must use higher keys.
+    /// The highest key of any record file present at open. New records must
+    /// use higher keys.
     fn last_key(&self) -> StoreKey;
 
     /// Write `event` under `key` and return the record's size. On error no
     /// record exists under `key`.
     fn write(&mut self, key: StoreKey, event: &CaptureEvent) -> io::Result<u64>;
 
-    fn read(&mut self, key: StoreKey) -> Result<CaptureEvent, ReadError>;
+    /// Read a record. A record that cannot be read is never sent: the
+    /// coordinator drops it from the queue and deletes its file.
+    fn read(&mut self, key: StoreKey) -> io::Result<CaptureEvent>;
 
     /// Delete a record. Deleting a missing record succeeds.
     fn delete(&mut self, key: StoreKey) -> io::Result<()>;
@@ -124,33 +113,10 @@ struct Record<T> {
     event: T,
 }
 
-/// Admission measures the persisted representation too, so an event admitted
-/// at a limit still fits that limit when it is written and read back.
+/// Admission measures the persisted representation too, so queue byte limits
+/// count what is written to disk.
 pub(crate) fn record_size(event: &CaptureEvent) -> usize {
     super::capture::json_len(&Record { version: 1, event })
-}
-
-/// Bound serialization before allocating an oversized record buffer.
-pub(crate) struct RecordBuffer {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) limit: u64,
-}
-
-impl Write for RecordBuffer {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() as u64 > self.limit.saturating_sub(self.bytes.len() as u64) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Event record exceeds store limit",
-            ));
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 #[derive(Deserialize)]
@@ -158,14 +124,12 @@ struct Version {
     version: u32,
 }
 
-/// One file per record, named by its key: `events/{key:020}.json`. A record
-/// that cannot be decoded is renamed to `.corrupt`, and one from a newer
-/// format to `.unsupported`; neither is read again or counted.
+/// One file per record, named by its key: `events/{key:020}.json`.
 ///
 /// Records are written to a temporary file and renamed, so a process crash
 /// never leaves a partial record. They are not synced to the device, as in
 /// the iOS and Android queues: a record written just before power loss may be
-/// lost, or come back truncated and be moved aside on read.
+/// lost, or come back unreadable and be deleted.
 pub(crate) struct FileEventStore {
     _directory: Arc<StorageDirectory>,
     events_path: PathBuf,
@@ -176,11 +140,7 @@ pub(crate) struct FileEventStore {
 
 impl FileEventStore {
     pub(crate) fn open(directory: Arc<StorageDirectory>, limits: StoreLimits) -> io::Result<Self> {
-        if limits.max_events == 0
-            || limits.max_record_bytes == 0
-            || limits.max_record_bytes > limits.max_bytes
-            || limits.max_record_bytes == u64::MAX
-        {
+        if limits.max_events == 0 || limits.max_bytes == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Invalid event store limits",
@@ -206,14 +166,7 @@ impl FileEventStore {
                     fs::remove_file(path)?;
                     continue;
                 }
-                Some("json") => {
-                    // A record over the current limit stays on disk for a
-                    // later start with a larger limit, but is not queued now.
-                    let size = entry.metadata()?.len();
-                    if size <= limits.max_record_bytes {
-                        index.push((key, size));
-                    }
-                }
+                Some("json") => index.push((key, entry.metadata()?.len())),
                 _ => {}
             }
             last_key = last_key.max(key);
@@ -231,16 +184,6 @@ impl FileEventStore {
     fn path(&self, key: StoreKey) -> PathBuf {
         self.events_path.join(format!("{:020}.json", key.0))
     }
-
-    /// Move an unreadable record aside so it is never read or sent again.
-    fn quarantine(&self, key: StoreKey, extension: &str, error: io::Error) -> ReadError {
-        let path = self.path(key);
-        match fs::rename(&path, path.with_extension(extension)) {
-            Ok(()) => ReadError::Lost(error),
-            // Still in place: a later read may move it aside.
-            Err(rename) => ReadError::Transient(rename),
-        }
-    }
 }
 
 impl EventStore for FileEventStore {
@@ -256,26 +199,11 @@ impl EventStore for FileEventStore {
         self.last_key
     }
 
+    /// An event nested deeper than the reader's limit is written, then fails
+    /// to read and is dropped, as an unreadable record.
     fn write(&mut self, key: StoreKey, event: &CaptureEvent) -> io::Result<u64> {
-        let mut buffer = RecordBuffer {
-            bytes: Vec::new(),
-            limit: self.limits.max_record_bytes,
-        };
-        serde_json::to_writer(&mut buffer, &Record { version: 1, event }).map_err(|error| {
-            if error.is_io() {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Event record exceeds store limit",
-                )
-            } else {
-                invalid_record()
-            }
-        })?;
-        let encoded = buffer.bytes;
-        // Check with the reader's bounded decoder before creating any file:
-        // serialization alone accepts values nested too deeply to read back.
-        let _: Record<CaptureEvent> =
-            serde_json::from_slice(&encoded).map_err(|_| invalid_record())?;
+        let encoded =
+            serde_json::to_vec(&Record { version: 1, event }).map_err(|_| invalid_record())?;
         let path = self.path(key);
         let temporary = path.with_extension("tmp");
         let written = (|| -> io::Result<()> {
@@ -292,44 +220,18 @@ impl EventStore for FileEventStore {
         Ok(encoded.len() as u64)
     }
 
-    fn read(&mut self, key: StoreKey) -> Result<CaptureEvent, ReadError> {
-        let path = self.path(key);
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(ReadError::Lost(error));
-            }
-            Err(error) => return Err(ReadError::Transient(error)),
-        };
-        let mut encoded = Vec::new();
-        if let Err(error) = file
-            .take(self.limits.max_record_bytes + 1)
-            .read_to_end(&mut encoded)
-        {
-            return Err(ReadError::Transient(error));
-        }
-        if encoded.len() as u64 > self.limits.max_record_bytes {
-            // Kept for a later start with a larger limit, as at open.
-            return Err(ReadError::Lost(record_over_limit()));
-        }
-        let version: Version = match serde_json::from_slice(&encoded) {
-            Ok(version) => version,
-            Err(_) => return Err(self.quarantine(key, "corrupt", invalid_record())),
-        };
+    fn read(&mut self, key: StoreKey) -> io::Result<CaptureEvent> {
+        let encoded = fs::read(self.path(key))?;
+        let version: Version = serde_json::from_slice(&encoded).map_err(|_| invalid_record())?;
         if version.version != 1 {
-            return Err(self.quarantine(
-                key,
-                "unsupported",
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Unsupported event store version",
-                ),
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unsupported event store version",
             ));
         }
-        match serde_json::from_slice::<Record<CaptureEvent>>(&encoded) {
-            Ok(record) => Ok(record.event),
-            Err(_) => Err(self.quarantine(key, "corrupt", invalid_record())),
-        }
+        serde_json::from_slice::<Record<CaptureEvent>>(&encoded)
+            .map(|record| record.event)
+            .map_err(|_| invalid_record())
     }
 
     fn delete(&mut self, key: StoreKey) -> io::Result<()> {
@@ -348,13 +250,6 @@ fn record_key(path: &Path) -> Option<StoreKey> {
     }
     let key = name.parse().ok()?;
     (key != 0).then_some(StoreKey(key))
-}
-
-fn record_over_limit() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        "Persisted event exceeds current record limit",
-    )
 }
 
 fn invalid_record() -> io::Error {
