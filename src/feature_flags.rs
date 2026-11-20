@@ -5874,6 +5874,45 @@ mod known_absent_tests {
     }
 
     #[test]
+    fn unsupported_operator_in_a_cohort_leaf_on_a_listed_key_stays_inconclusive() {
+        for negation in [false, true] {
+            let cohorts = HashMap::from([(
+                "1".to_string(),
+                CohortDefinition {
+                    id: "1".to_string(),
+                    properties: json!({
+                        "type": "AND",
+                        "values": [{
+                            "key": "plan",
+                            "value": [1, 2],
+                            "operator": "not_between",
+                            "type": "person",
+                            "negation": negation
+                        }]
+                    }),
+                },
+            )]);
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "id", "value": 1, "operator": "in", "type": "cohort"}]),
+            );
+
+            assert!(
+                evaluate_with(
+                    &flag,
+                    &HashMap::new(),
+                    &person_keys(&["plan"]),
+                    &cohorts,
+                    &HashMap::new()
+                )
+                .is_err(),
+                "not_between with negation {} should stay inconclusive",
+                negation
+            );
+        }
+    }
+
+    #[test]
     fn flag_dependency_evaluates_with_the_same_known_absent_keys() {
         let dependency = person_flag(
             "profile-incomplete",
