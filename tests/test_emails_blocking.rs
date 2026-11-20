@@ -137,6 +137,23 @@ fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
 }
 
 #[test]
+fn an_upload_grant_that_fills_a_header_map_sends_nothing() {
+    let posthog = FakePostHog::start().with_grant_headers_that_fill_a_header_map();
+    let client = client_of(&posthog);
+
+    let error = client.emails().send(invoice()).unwrap_err();
+
+    assert_eq!(error.code(), "api_error");
+    assert!(
+        error.message().contains("without an answer for each file"),
+        "{}",
+        error
+    );
+    assert!(posthog.stored(PDF_SHA256).is_none(), "nothing is uploaded");
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[test]
 fn a_file_store_redirect_is_never_followed() {
     let posthog = FakePostHog::start();
     let elsewhere = FakePostHog::start();

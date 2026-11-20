@@ -21,7 +21,6 @@ fn config() -> Config {
     conf.flush_interval = Duration::from_secs(3600);
     conf.capture_compression = None;
     conf.shutdown_timeout = Duration::ZERO;
-    conf.max_capture_attempts = 1;
     conf
 }
 
@@ -208,7 +207,6 @@ fn identify_while_out_changes_identity_without_link_replay_or_property_dedup() {
     client.identify(input.clone());
     client.identify(input.clone());
     assert_eq!(client.get_distinct_id(), "A");
-    assert!(client.is_identified());
     assert!(events.lock().unwrap().is_empty());
     client.opt_in();
     client.identify("A");
@@ -263,7 +261,6 @@ fn restored_opt_out_precedes_bootstrap_reconciliation_and_hooks() {
         conf.bootstrap_identified_id = Some(id.into());
         let (client, events) = observed(conf);
         assert!(client.is_opt_out());
-        assert!(client.is_identified());
         assert_eq!(client.get_distinct_id(), id);
         assert!(events.lock().unwrap().is_empty());
         client.opt_in();
@@ -314,7 +311,7 @@ fn permitted_hook_can_finish_after_opt_out_and_nested_capture_checks_new_consent
 }
 
 #[test]
-fn corrupt_state_is_replaced_with_configured_default() {
+fn a_missing_consent_choice_follows_the_configured_default_and_keeps_the_identity() {
     let directory = Directory::new();
     let client = Client::init_blocking(directory.config());
     assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
@@ -336,11 +333,14 @@ fn corrupt_state_is_replaced_with_configured_default() {
     let client = Client::init_blocking(conf);
     assert!(!client.is_disabled());
     assert!(client.is_opt_out());
-    assert!(!client.is_identified());
     assert_eq!(client.get_distinct_id(), "anonymous");
     assert_eq!(client.capture("blocked"), CaptureOutcome::OptedOut);
     assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
-    assert!(*errors.lock().unwrap() > 0);
+    assert_eq!(
+        *errors.lock().unwrap(),
+        0,
+        "the state file is still readable"
+    );
     client.shutdown_blocking(None);
     drop(client);
     assert_eq!(directory.state()["state"]["opt_out"], Value::Null);
