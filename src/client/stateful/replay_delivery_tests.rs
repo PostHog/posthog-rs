@@ -167,6 +167,10 @@ fn analytics_deadline_applies_while_encoder_is_blocked() {
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
 
         if closing {
+            // Shutdown takes its deadline from the system clock; move the
+            // manual delivery clock past it so delivery sees it expired, as it
+            // would with one clock.
+            clock.advance(Duration::from_secs(60));
             let other = client.clone();
             let (closed_tx, closed_rx) = mpsc::channel();
             let shutdown = std::thread::spawn(move || {
