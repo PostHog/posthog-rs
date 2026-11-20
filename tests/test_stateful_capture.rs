@@ -333,6 +333,35 @@ fn async_initialization_and_sync_capture_work_without_a_tokio_runtime() {
 }
 
 #[test]
+fn later_events_carry_the_last_screen_name_unless_they_set_one() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut config = config();
+    config.before_send(move |event| {
+        tx.send(event.properties().get("$screen_name").cloned())
+            .unwrap();
+        None
+    });
+    let client = Client::init_blocking(config);
+    assert_eq!(client.capture("before"), CaptureOutcome::Dropped);
+    assert_eq!(client.screen("Home"), CaptureOutcome::Dropped);
+    assert_eq!(client.capture("tap"), CaptureOutcome::Dropped);
+    let mut own = Capture::new("own");
+    own.properties.insert("$screen_name".into(), "Other".into());
+    assert_eq!(client.capture(own), CaptureOutcome::Dropped);
+    let names: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        names,
+        [
+            None,
+            Some(json!("Home")),
+            Some(json!("Home")),
+            Some(json!("Other"))
+        ]
+    );
+    client.shutdown_blocking(None);
+}
+
+#[test]
 fn screen_options_reach_the_wire() {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut config = config();
