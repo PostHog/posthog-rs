@@ -209,9 +209,7 @@ impl Client {
                     .unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
             );
             if let Some(id) = &config.bootstrap_identified_id {
-                snapshot.distinct_id = id.clone();
-                snapshot.identified = true;
-                snapshot.person_processing = true;
+                snapshot.identify_as(id.clone());
             }
             snapshot
         });
