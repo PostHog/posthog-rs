@@ -176,6 +176,18 @@ jobs:
           elif [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
             echo "::notice::Finishing the posthog-rs-ffi $ffi_version release. Changesets on main wait for the next release."
             echo "rerun=true" >> "$GITHUB_OUTPUT"
+            # This run doesn't publish to crates.io. If the release it's finishing
+            # also bumped posthog and that publish failed, say so and fail the run
+            # once the bindings are done, rather than report success.
+            rust_version=$(version_of Cargo.toml)
+            status=$(curl -s -o /dev/null -w '%{http_code}' -A "posthog-rs-release (github.com/PostHog/posthog-rs)" \
+              "https://crates.io/api/v1/crates/posthog/$rust_version")
+            if [ "$status" = 404 ]; then
+              echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+            elif [ "$status" != 200 ]; then
+              echo "::error::Couldn't check whether posthog $rust_version is on crates.io (HTTP $status)"
+              exit 1
+            fi
             exit 0
           fi
           if ! find .sampo/changesets -name '*.md' | grep -q .; then
@@ -375,6 +387,14 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      - name: Fail if posthog is still unpublished
+        if: ${{ !cancelled() && steps.sampo-release.outputs.rust_unpublished != '' }}
+        env:
+          RUST_VERSION: ${{ steps.sampo-release.outputs.rust_unpublished }}
+        run: |
+          echo "::error::posthog $RUST_VERSION is committed on main but isn't on crates.io, and a rerun doesn't publish it. Publish posthog and posthog-rs by hand from the release commit, as RELEASING.md describes under \"a failed crates.io publish isn't retried\"."
+          exit 1
+
       - name: Send failure event to PostHog
         if: ${{ failure() }}
         continue-on-error: true
@@ -473,21 +493,21 @@ jobs:
               gh release upload "$TAG" dist/* --clobber
               gh release edit "$TAG" --draft=false --latest=false
             else
-              # Never change a published release's downloads. Only check they're complete.
-              assets=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+              # Never change a published release's downloads. Only check they're
+              # complete and intact. Rebuilt archives aren't byte-for-byte identical
+              # (tar records timestamps), so check the published archives against
+              # their own published checksums, not against this build.
               mkdir published
-              gh release download "$TAG" --pattern '*.sha256' --dir published
+              gh release download "$TAG" --pattern 'posthog-rs-ffi-*' --dir published
               for sum in dist/*.sha256; do
-                archive=$(basename "$sum" .sha256)
-                if ! grep -qxF "$archive" <<<"$assets"; then
-                  echo "::error::The published release is missing $archive"
+                name=$(basename "$sum")
+                archive=${name%.sha256}
+                if [ ! -f "published/$archive" ] || [ ! -f "published/$name" ]; then
+                  echo "::error::The published release is missing $archive or its checksum"
                   exit 1
                 fi
-                cmp -s "$sum" "published/$(basename "$sum")" || {
-                  echo "::error::The published $archive checksum is missing or differs from this build"
-                  exit 1
-                }
               done
+              (cd published && sha256sum -c ./*.sha256)
             fi
             exit 0
           fi

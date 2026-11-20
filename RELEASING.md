@@ -85,7 +85,9 @@ cargo publish --locked --package posthog
 cargo publish --locked --package posthog-rs
 ```
 
-The release workflow should detect and finish this case on its own, as it does for the bindings. That's left for a separate change.
+When a rerun finishes an unfinished bindings release, it checks crates.io for the committed `posthog` version. If it's missing, the run still finishes the bindings, then fails with this instruction instead of reporting success.
+
+The release workflow should publish the crates itself in this case, as it does for the bindings. That's left for a separate change.
 
 ## Failed or cancelled release
 
