@@ -222,16 +222,24 @@ impl EventStore for FileEventStore {
 
     fn read(&mut self, key: StoreKey) -> io::Result<CaptureEvent> {
         let encoded = fs::read(self.path(key))?;
-        let version: Version = serde_json::from_slice(&encoded).map_err(|_| invalid_record())?;
-        if version.version != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unsupported event store version",
-            ));
+        // One parse for a readable record; only a failure reads the version
+        // alone, to tell a newer format from a corrupt record.
+        let version = match serde_json::from_slice::<Record<CaptureEvent>>(&encoded) {
+            Ok(record) if record.version == 1 => return Ok(record.event),
+            Ok(record) => record.version,
+            Err(_) => {
+                serde_json::from_slice::<Version>(&encoded)
+                    .map_err(|_| invalid_record())?
+                    .version
+            }
+        };
+        if version == 1 {
+            return Err(invalid_record());
         }
-        serde_json::from_slice::<Record<CaptureEvent>>(&encoded)
-            .map(|record| record.event)
-            .map_err(|_| invalid_record())
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Unsupported event store version",
+        ))
     }
 
     fn delete(&mut self, key: StoreKey) -> io::Result<()> {
