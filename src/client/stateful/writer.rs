@@ -87,7 +87,7 @@ impl State {
     fn observe_close(&mut self, deadline: Instant, now: Instant) {
         if self.closing.is_none() {
             self.closing = Some(deadline);
-            Arc::make_mut(&mut self.snapshot).flag_load.reports.clear();
+            Arc::make_mut(&mut Arc::make_mut(&mut self.snapshot).flag_load.reports).clear();
             if self.mode == Mode::Persistent && self.persisted < self.revision && self.failures == 0
             {
                 self.due = Some(now);
@@ -234,7 +234,6 @@ impl Drop for WorkerExit {
 #[derive(Clone)]
 pub(super) struct StateAccess {
     shared: Arc<Shared>,
-    clock: Arc<dyn Clock>,
     options: WriterOptions,
 }
 
@@ -305,7 +304,7 @@ impl StateAccess {
             state.revision = revision;
             if state.mode == Mode::Persistent && state.due.is_none() {
                 state.due =
-                    Some(self.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
+                    Some(self.shared.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
             }
             (revision, result)
         };
@@ -328,7 +327,6 @@ pub(super) struct StateWriter {
     worker: Mutex<Option<JoinHandle<()>>>,
     worker_id: Option<ThreadId>,
     mode: Mode,
-    clock: Arc<dyn Clock>,
     options: WriterOptions,
 }
 
@@ -396,7 +394,6 @@ impl StateWriter {
         });
         let worker = if let Some(store) = store {
             let worker_state = shared.clone();
-            let worker_clock = clock.clone();
             let worker_hooks = hooks.clone();
             match thread::Builder::new()
                 .name("posthog-state".into())
@@ -406,13 +403,7 @@ impl StateWriter {
                         completed: false,
                     };
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_worker(
-                            &worker_state,
-                            store,
-                            &worker_hooks,
-                            worker_clock.as_ref(),
-                            options,
-                        );
+                        run_worker(&worker_state, store, &worker_hooks, options);
                     }));
                     if result.is_err() {
                         // No backend remains after unwinding. Keep live memory usable.
@@ -447,7 +438,6 @@ impl StateWriter {
             worker: Mutex::new(worker),
             worker_id,
             mode,
-            clock,
             options,
         })
     }
@@ -466,7 +456,6 @@ impl StateWriter {
     pub(super) fn access(&self) -> StateAccess {
         StateAccess {
             shared: self.shared.clone(),
-            clock: self.clock.clone(),
             options: self.options,
         }
     }
@@ -504,6 +493,15 @@ impl StateWriter {
         );
     }
 
+    /// After a persisted change, write it once the coalescing delay passes,
+    /// unless a write is already due.
+    fn schedule_write(&self, state: &mut State) {
+        if state.mode == Mode::Persistent && state.due.is_none() {
+            state.due =
+                Some(self.shared.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
+        }
+    }
+
     /// Validate session persistence before callback-free queue admission, then
     /// commit session activity and person bookkeeping in the same queue order.
     pub(super) fn admit_capture(
@@ -515,7 +513,7 @@ impl StateWriter {
         )>,
         person: Option<PersonAdmission<'_>>,
         admit: impl FnOnce() -> bool,
-    ) -> bool {
+    ) {
         let persisted_changed = {
             let mut state = self.shared.lock();
             if state.closing.is_some()
@@ -526,7 +524,7 @@ impl StateWriter {
                     .unwrap_or_else(|p| p.into_inner())
                     .is_some()
             {
-                return false;
+                return;
             }
             let mut candidate = (*state.snapshot).clone();
             if let Some(person) = person {
@@ -535,7 +533,7 @@ impl StateWriter {
                         && person.fingerprint.is_some()
                         && candidate.person_properties == person.fingerprint
                     {
-                        return false;
+                        return;
                     }
                     candidate.person_properties = person.fingerprint;
                 } else if candidate.distinct_id == person.distinct_id {
@@ -551,25 +549,21 @@ impl StateWriter {
             }
             let persisted_changed = !candidate.same_persisted_state(&state.snapshot);
             if persisted_changed && state.revision == u64::MAX {
-                return false;
+                return;
             }
             if !admit() {
-                return false;
+                return;
             }
             state.snapshot = Arc::new(candidate);
             if persisted_changed {
                 state.revision += 1;
-                if state.mode == Mode::Persistent && state.due.is_none() {
-                    state.due =
-                        Some(self.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
-                }
+                self.schedule_write(&mut state);
             }
             persisted_changed
         };
         if persisted_changed {
             self.shared.notify();
         }
-        true
     }
 
     /// Capture one revision to drain, expediting coalescing but not retry cooldown.
@@ -581,7 +575,7 @@ impl StateWriter {
                 && state.persisted < state.revision
                 && state.failures == 0
             {
-                state.due = Some(self.clock.now());
+                state.due = Some(self.shared.clock.now());
             }
             state.revision
         };
@@ -616,7 +610,7 @@ impl StateWriter {
             if let Some(outcome) = state.outcome(revision) {
                 return Some(outcome);
             }
-            let now = self.clock.now();
+            let now = self.shared.clock.now();
             if now >= until {
                 return None;
             }
@@ -656,7 +650,7 @@ impl StateWriter {
     /// Request every client's worker to close before waiting on any of them.
     pub(super) fn request_close(&self) {
         self.request_close_before(
-            self.clock.now() + self.options.shutdown_timeout.min(MAX_SHUTDOWN_TIMEOUT),
+            self.shared.clock.now() + self.options.shutdown_timeout.min(MAX_SHUTDOWN_TIMEOUT),
         );
     }
 
@@ -793,9 +787,9 @@ fn run_worker(
     shared: &Shared,
     mut store: Box<dyn StateStore>,
     hooks: &[OnErrorHook],
-    clock: &dyn Clock,
     options: WriterOptions,
 ) {
+    let clock = shared.clock.as_ref();
     let mut state = shared.lock();
     loop {
         let now = clock.now();

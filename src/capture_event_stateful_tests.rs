@@ -35,7 +35,7 @@ fn stateful_conversion_retains_sdk_properties_and_shares_server_wire_rules() {
     event.insert_option("process_person_profile", true).unwrap();
     event.insert_option("future_option", Value::Null).unwrap();
     let original = event.clone();
-    let wire = CaptureEvent::from_stateful_event_at(&event, now());
+    let wire = CaptureEvent::from_event_at(&event, now());
     assert_eq!(wire.properties["$lib"], "embedded-sdk");
     assert_eq!(wire.properties["$lib_version"], "2.3.4");
     assert_eq!(
@@ -51,10 +51,6 @@ fn stateful_conversion_retains_sdk_properties_and_shares_server_wire_rules() {
     assert_eq!(wire.distinct_id, "identity-at-capture");
     assert_eq!(Some(wire.uuid), event.uuid());
     assert_eq!(
-        serde_json::to_value(wire).unwrap(),
-        serde_json::to_value(CaptureEvent::from_event_at(&event, now())).unwrap()
-    );
-    assert_eq!(
         event, original,
         "conversion must not mutate the producer snapshot"
     );
@@ -64,7 +60,7 @@ fn stateful_conversion_retains_sdk_properties_and_shares_server_wire_rules() {
 fn stateful_conversion_does_not_invent_attribution_or_replace_capture_time() {
     let mut event = Event::new("without-sdk-properties", "anonymous-id");
     event.set_uuid(Uuid::now_v7());
-    let wire = CaptureEvent::from_stateful_event_at(&event, now());
+    let wire = CaptureEvent::from_event_at(&event, now());
     assert_eq!(wire.properties, json!({}));
     assert_eq!(wire.timestamp, "2025-01-01T00:00:00.123456789Z");
     assert_eq!(Some(wire.uuid), event.uuid());
@@ -87,7 +83,7 @@ fn stateful_conversion_preserves_native_hook_attribution_changes_and_removals() 
         .insert_prop("$lib_version", "original-version")
         .unwrap();
     let transformed = hook.apply(event).unwrap();
-    let wire = CaptureEvent::from_stateful_event_at(&transformed, now());
+    let wire = CaptureEvent::from_event_at(&transformed, now());
     assert_eq!(wire.properties, json!({"$lib": "hook-sdk"}));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

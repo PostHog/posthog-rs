@@ -27,6 +27,17 @@ struct Request {
 }
 
 impl Request {
+    /// Reserve the next request for the current targeting.
+    fn reserve(state: &mut super::Snapshot, disable_geoip: bool) -> Option<Self> {
+        let sequence = state.flag_load.request.checked_add(1)?;
+        state.flag_load.request = sequence;
+        Some(Self {
+            context: Arc::new(FlagContext::current(state, disable_geoip)),
+            revision: state.flag_load.revision,
+            sequence,
+        })
+    }
+
     fn payload(&self, api_key: &str) -> Value {
         json!({
             "api_key": api_key,
@@ -82,13 +93,7 @@ impl FlagLoader {
             if expected_request.is_some_and(|expected| state.flag_load.request != expected) {
                 return None;
             }
-            let sequence = state.flag_load.request.checked_add(1)?;
-            state.flag_load.request = sequence;
-            Some(Request {
-                context: Arc::new(FlagContext::current(state, self.options.disable_geoip)),
-                revision: state.flag_load.revision,
-                sequence,
-            })
+            Request::reserve(state, self.options.disable_geoip)
         });
         let Ok((_, Some(request))) = request else {
             return;
@@ -143,13 +148,7 @@ fn install(
             {
                 return None;
             }
-            let sequence = state.flag_load.request.checked_add(1)?;
-            state.flag_load.request = sequence;
-            return Some(Request {
-                context: Arc::new(FlagContext::current(state, disable_geoip)),
-                revision: state.flag_load.revision,
-                sequence,
-            });
+            return Request::reserve(state, disable_geoip);
         }
         let mut completion = FlagCompletion {
             context: request.context.clone(),

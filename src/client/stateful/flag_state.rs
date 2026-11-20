@@ -19,7 +19,8 @@ pub(super) struct FlagLoadState {
     // Reporting context is setup-local, never restored from persisted cache.
     pub(super) bootstrap: Option<Arc<FlagCache>>,
     pub(super) remote_received: bool,
-    pub(super) reports: super::flag_report::ReportTracker,
+    // Shared until a report changes it, so cloning a snapshot stays cheap.
+    pub(super) reports: Arc<super::flag_report::ReportTracker>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,7 +79,7 @@ impl FlagContext {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct FlagCache {
-    pub(super) context: FlagContext,
+    pub(super) context: Arc<FlagContext>,
     pub(super) flags: HashMap<String, CachedFlag>,
     /// Keys whose latest record failed to evaluate. A read with no value for
     /// one reports `evaluation_failed` instead of `flag_missing`.
@@ -95,6 +96,13 @@ pub(super) struct CachedFlag {
     pub(super) record: EvaluatedFlagRecord,
     pub(super) request_id: Option<String>,
     pub(super) evaluated_at: Option<i64>,
+}
+
+impl CachedFlag {
+    /// Whether reads see this flag as enabled: an empty variant is not.
+    pub(super) fn served(&self) -> bool {
+        self.record.enabled && self.record.variant.as_deref() != Some("")
+    }
 }
 
 // On disk each distinct evaluation context is written once. `contexts[0]` is
@@ -137,7 +145,7 @@ struct StoredFlag {
 
 impl Serialize for FlagCache {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut contexts = vec![&self.context];
+        let mut contexts = vec![&*self.context];
         // Flags from one response share an Arc, so each distinct context is
         // compared by value at most once.
         let mut seen: Vec<(*const FlagContext, usize)> = Vec::new();
@@ -188,7 +196,7 @@ impl<'de> Deserialize<'de> for FlagCache {
         let contexts: Vec<Arc<FlagContext>> = stored.contexts.into_iter().map(Arc::new).collect();
         let context = contexts
             .first()
-            .map(|context| (**context).clone())
+            .cloned()
             .ok_or_else(|| serde::de::Error::custom("missing flag cache context"))?;
         let flags = stored
             .flags
@@ -268,7 +276,7 @@ impl FlagCache {
             );
         }
         Self {
-            context: (*context).clone(),
+            context: context.clone(),
             flags,
             failed,
         }
@@ -289,7 +297,7 @@ impl Snapshot {
             self.flag_load.revision = previous.flag_load.revision.checked_add(1)?;
             if self.distinct_id != previous.distinct_id {
                 // Reset may have replaced the snapshot; never rewind reservation tickets.
-                self.flag_load.reports = previous.flag_load.reports.cleared();
+                self.flag_load.reports = Arc::new(previous.flag_load.reports.cleared());
             }
             // The cached flags stay until the new identity's response
             // replaces them, as in posthog-ios, posthog-android and posthog-js.

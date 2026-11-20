@@ -266,14 +266,8 @@ impl Coordinator {
                     completion,
                 })
             }
+            // The handle selects the shared deadline before it sends this.
             Control::Shutdown(completion) => {
-                let mut deadline = self.deadline.lock().unwrap_or_else(|p| p.into_inner());
-                if deadline.is_none() {
-                    let timeout = Duration::from_millis(self.options.shutdown_timeout_ms)
-                        .min(super::MAX_SHUTDOWN_TIMEOUT);
-                    *deadline = Some(self.clock.now() + timeout);
-                }
-                drop(deadline);
                 if let Some(earlier) = self.shutdown.replace(completion) {
                     earlier.signal();
                 }
@@ -320,7 +314,7 @@ impl Coordinator {
                 Entry {
                     seq: waiting.seq,
                     bytes: waiting.bytes as u64,
-                    payload: Some(Arc::new(waiting.event)),
+                    payload: Some(Box::new(waiting.event)),
                 }
             };
             self.table.push(entry);
@@ -667,37 +661,37 @@ impl Executor {
             let (request_id, attempt, created_at) =
                 (job.request_id, job.attempt, job.created_at.clone());
             // A panic must not strand the coordinator waiting for this answer.
-            let sent =
+            let verdict =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.attempt(&url, job)))
-                    .unwrap_or_else(|_| Sent {
-                        verdict: Verdict::Retry {
-                            retained: seqs.iter().map(|seq| (*seq, 0)).collect(),
-                            delay: crate::client::retry::capture_backoff_duration(
-                                &self.options,
-                                attempt,
-                                None,
-                            ),
-                        },
-                        seqs,
-                        request_id,
-                        attempt,
-                        created_at,
+                    .unwrap_or_else(|_| Verdict::Retry {
+                        retained: seqs.iter().map(|seq| (*seq, 0)).collect(),
+                        delay: crate::client::retry::capture_backoff_duration(
+                            &self.options,
+                            attempt,
+                            None,
+                        ),
                     });
+            let sent = Sent {
+                seqs,
+                request_id,
+                attempt,
+                created_at,
+                verdict,
+            };
             if results.send(Control::Sent(Box::new(sent))).is_err() {
                 break;
             }
         }
     }
 
-    fn attempt(&self, url: &str, job: Job) -> Sent {
+    fn attempt(&self, url: &str, job: Job) -> Verdict {
         let outcome = self.send(url, &job);
         let Job {
             request_id,
             attempt,
-            created_at,
             events,
+            ..
         } = job;
-        let seqs: Vec<u64> = events.iter().map(|sending| sending.seq).collect();
         let count = events.len();
         let mut pending = events;
         let mut results = HashMap::new();
@@ -791,13 +785,7 @@ impl Executor {
                 }
             }
         };
-        Sent {
-            seqs,
-            request_id,
-            attempt,
-            created_at,
-            verdict,
-        }
+        verdict
     }
 
     fn report(

@@ -66,11 +66,7 @@ fn consent_choices_round_trip_and_an_unreadable_choice_keeps_the_identity() {
         Some(serde_json::json!("true")),
         Some(serde_json::json!(0)),
     ] {
-        let mut value = serde_json::to_value(StateRecord {
-            version: 1,
-            state: &snapshot,
-        })
-        .unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&record(&snapshot)).unwrap();
         match consent {
             Some(consent) => value["state"]["opt_out"] = consent,
             None => {

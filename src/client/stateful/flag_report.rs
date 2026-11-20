@@ -3,6 +3,7 @@
 //! Reservations share the validated state owner and finish by non-reused ticket.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use sha1::{Digest, Sha1};
 
@@ -90,10 +91,11 @@ struct Reservation<'a> {
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
         let _ = self.client.state.as_ref().unwrap().mutate(|state| {
-            state
-                .flag_load
-                .reports
-                .finish(self.key, self.ticket, self.accepted);
+            Arc::make_mut(&mut state.flag_load.reports).finish(
+                self.key,
+                self.ticket,
+                self.accepted,
+            );
         });
     }
 }
@@ -131,11 +133,10 @@ impl Client {
         };
         let response = flag.map(|flag| flag_value_for(&flag.record));
         let fingerprint = report_key(key, response.as_ref());
-        let ticket = self
-            .state
-            .as_ref()
-            .unwrap()
-            .mutate(|current| current.flag_load.reports.reserve(fingerprint));
+        let ticket =
+            self.state.as_ref().unwrap().mutate(|current| {
+                Arc::make_mut(&mut current.flag_load.reports).reserve(fingerprint)
+            });
         let Ok((_, Some(ticket))) = ticket else {
             return;
         };
@@ -403,7 +404,11 @@ mod tests {
         client.opt_in();
         // Reserve directly to isolate the tracker race from serialized application hooks.
         let (_, new_ticket) = state
-            .mutate(|state| state.flag_load.reports.reserve(fingerprint).unwrap())
+            .mutate(|state| {
+                Arc::make_mut(&mut state.flag_load.reports)
+                    .reserve(fingerprint)
+                    .unwrap()
+            })
             .unwrap();
         assert!(new_ticket > old_ticket);
         release_tx.send(()).unwrap();
@@ -423,10 +428,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         state
             .mutate(|state| {
-                state
-                    .flag_load
-                    .reports
-                    .finish(fingerprint, new_ticket, false)
+                Arc::make_mut(&mut state.flag_load.reports).finish(fingerprint, new_ticket, false)
             })
             .unwrap();
         let _ = client.feature_flag("a").get();
