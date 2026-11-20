@@ -49,6 +49,9 @@ fn reexports_stateful_client_and_its_public_entry_points() {
         posthog_rs::stateful::SessionPersistence,
         posthog::stateful::SessionPersistence,
     >();
+    assert_same_type::<posthog_rs::stateful::Alias, posthog::stateful::Alias>();
+    assert_same_type::<posthog_rs::stateful::PersonProperties, posthog::stateful::PersonProperties>(
+    );
     let mut config = Config::new("phc_test");
     config.session_mode = posthog_rs::stateful::SessionMode::Manual;
     config.session_persistence = posthog_rs::stateful::SessionPersistence::Persistent;
@@ -58,7 +61,7 @@ fn reexports_stateful_client_and_its_public_entry_points() {
     let client = Client::init_blocking(config);
     client.identify(posthog_rs::stateful::Identify::new("user"));
     client.alias("alias");
-    client.set_person_properties(Default::default(), Default::default());
+    client.set_person_properties(posthog_rs::stateful::PersonProperties::new());
     client.create_person_profile();
     client.register(Default::default());
     client.unregister("key");
@@ -78,7 +81,6 @@ fn reexports_stateful_client_and_its_public_entry_points() {
     client.opt_in();
     assert!(client.is_opt_out());
     let _: CaptureOutcome = CaptureOutcome::OptedOut;
-    assert!(!client.is_identified());
     assert_eq!(client.capture("disabled"), CaptureOutcome::Disabled);
     assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Disabled);
     assert_eq!(

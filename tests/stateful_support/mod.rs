@@ -5,8 +5,8 @@ use std::io::Read;
 use httpmock::{HttpMockRequest, HttpMockResponse};
 
 /// A capture v1 reply that accepts every event in the request, one result per
-/// uuid, as capture does. The stateful client retries a 2xx that does not
-/// confirm each event, so capture mocks must answer this way.
+/// uuid, as capture does. The client counts an event that a 2xx reply does not
+/// mention as delivered, so this reply only mirrors capture's shape.
 pub fn accept_all(request: &HttpMockRequest) -> HttpMockResponse {
     let raw = request.body_vec();
     let mut body = Vec::new();

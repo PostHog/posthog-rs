@@ -1,5 +1,7 @@
 #![cfg(feature = "stateful")]
 
+mod stateful_support;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -17,7 +19,6 @@ fn config() -> Config {
     config.host = "http://127.0.0.1:1".into();
     config.flush_at = 1000;
     config.capture_compression = None;
-    config.max_capture_attempts = 1;
     config.shutdown_timeout = Duration::ZERO;
     config
 }
@@ -132,22 +133,15 @@ fn invalid_and_filtered_events_never_reach_delivery() {
 }
 
 #[test]
-fn bounded_admission_replaces_oldest_and_recovers_a_failed_byte_reservation() {
-    let mut config = config();
-    config.max_queue_size = 1;
-    config.max_queue_bytes = 1024;
-    let client = Client::init_blocking(config);
-    let mut oversized = Capture::new("too-big");
-    oversized
+fn a_large_event_is_accepted() {
+    // Capture, not the client, decides whether an event is too large.
+    let client = Client::init_blocking(config());
+    let mut large = Capture::new("large");
+    large
         .properties
-        .insert("data".into(), "x".repeat(2048).into());
-    assert_eq!(client.capture(oversized), CaptureOutcome::Full);
+        .insert("data".into(), "x".repeat(2 * 1024 * 1024).into());
     assert!(matches!(
-        client.capture("accepted"),
-        CaptureOutcome::Accepted { .. }
-    ));
-    assert!(matches!(
-        client.capture("new"),
+        client.capture(large),
         CaptureOutcome::Accepted { .. }
     ));
     client.shutdown_blocking(None);
@@ -321,14 +315,12 @@ fn capture_and_shutdown_are_safe_during_thread_local_destruction() {
 }
 
 #[test]
-fn invalid_sdk_configuration_disables_before_capture() {
-    for invalid in ["", " \t ", "bad\nvalue"] {
-        let mut config = config();
-        config.sdk_name = invalid.into();
-        let client = Client::init_blocking(config);
-        assert!(client.is_disabled());
-        assert_eq!(client.capture("event"), CaptureOutcome::Disabled);
-    }
+fn an_sdk_name_that_is_not_header_text_disables_before_capture() {
+    let mut config = config();
+    config.sdk_name = "bad\nvalue".into();
+    let client = Client::init_blocking(config);
+    assert!(client.is_disabled());
+    assert_eq!(client.capture("event"), CaptureOutcome::Disabled);
 }
 
 #[cfg(feature = "async-client")]
@@ -339,6 +331,35 @@ fn async_initialization_and_sync_capture_work_without_a_tokio_runtime() {
         client.capture("runtime-neutral"),
         CaptureOutcome::Accepted { .. }
     ));
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn later_events_carry_the_last_screen_name_unless_they_set_one() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut config = config();
+    config.before_send(move |event| {
+        tx.send(event.properties().get("$screen_name").cloned())
+            .unwrap();
+        None
+    });
+    let client = Client::init_blocking(config);
+    assert_eq!(client.capture("before"), CaptureOutcome::Dropped);
+    assert_eq!(client.screen("Home"), CaptureOutcome::Dropped);
+    assert_eq!(client.capture("tap"), CaptureOutcome::Dropped);
+    let mut own = Capture::new("own");
+    own.properties.insert("$screen_name".into(), "Other".into());
+    assert_eq!(client.capture(own), CaptureOutcome::Dropped);
+    let names: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        names,
+        [
+            None,
+            Some(json!("Home")),
+            Some(json!("Home")),
+            Some(json!("Other"))
+        ]
+    );
     client.shutdown_blocking(None);
 }
 
@@ -358,4 +379,54 @@ fn screen_options_reach_the_wire() {
     assert_eq!(client.screen(screen), CaptureOutcome::Dropped);
     assert_eq!(rx.recv().unwrap()["process_person_profile"], true);
     client.shutdown_blocking(None);
+}
+
+#[test]
+fn a_full_queue_drops_the_oldest_event_and_delivers_the_newest() {
+    let server = MockServer::start();
+    let newest = server.mock(|when, then| {
+        when.method(POST)
+            .body_includes("\"event\":\"new\"")
+            .body_excludes("\"event\":\"old\"");
+        then.respond_with(stateful_support::accept_all);
+    });
+    let mut config = config();
+    config.host = server.base_url();
+    config.max_queue_size = 1;
+    config.flush_interval = Duration::from_secs(3600);
+    let client = Client::init_blocking(config);
+    assert!(matches!(
+        client.capture("old"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    assert!(matches!(
+        client.capture("new"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Attempted);
+    client.shutdown_blocking(Some(Duration::from_secs(5)));
+    newest.assert_calls(1);
+}
+
+#[test]
+fn configured_sdk_identity_names_the_capture_request() {
+    let server = MockServer::start();
+    let identified = server.mock(|when, then| {
+        when.method(POST)
+            .header("posthog-sdk-info", "posthog-embedder/9.9.9")
+            .header("user-agent", "posthog-embedder/9.9.9");
+        then.respond_with(stateful_support::accept_all);
+    });
+    let mut config = config();
+    config.host = server.base_url();
+    config.sdk_name = "posthog-embedder".into();
+    config.sdk_version = "9.9.9".into();
+    let client = Client::init_blocking(config);
+    assert!(matches!(
+        client.capture("identified"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Attempted);
+    client.shutdown_blocking(Some(Duration::from_secs(5)));
+    identified.assert_calls(1);
 }

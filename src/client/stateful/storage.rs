@@ -30,6 +30,10 @@ use crate::client::{OnErrorHook, StorageOperation};
 #[non_exhaustive]
 pub enum Persistence {
     /// OS local application-data directory, with a project/instance namespace.
+    /// The directory is per user, not per application: applications that use
+    /// the same project token and instance name share one identity and queue.
+    /// Use [`Persistence::Directory`] with an application-specific root to
+    /// keep them apart.
     #[default]
     Automatic,
     /// Application-supplied root, with the same namespace isolation.

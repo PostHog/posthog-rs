@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use httpmock::{HttpMockRequest, HttpMockResponse, MockServer};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
 
 pub const TEMPLATE_ID: &str = "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b";
@@ -202,6 +203,9 @@ enum Grants {
     /// With more headers than a header map can hold, as a malformed or
     /// compromised upload route could send.
     WithTooManyHeaders,
+    /// With exactly as many headers as a header map holds, which leaves no
+    /// room for the headers the HTTP client adds to the upload.
+    FillingTheHeaderMap,
 }
 
 impl FakePostHog {
@@ -284,6 +288,12 @@ impl FakePostHog {
     /// Grants with more headers than a header map can hold.
     pub fn with_too_many_grant_headers(self) -> Self {
         self.state.lock().unwrap().grants = Grants::WithTooManyHeaders;
+        self
+    }
+
+    /// Grants whose headers fill a header map exactly.
+    pub fn with_grant_headers_that_fill_a_header_map(self) -> Self {
+        self.state.lock().unwrap().grants = Grants::FillingTheHeaderMap;
         self
     }
 
@@ -447,6 +457,19 @@ fn django_error(status: u16, kind: &str, code: &str, detail: &str, attr: Option<
     )
 }
 
+/// How many entries a header map takes before it refuses the next one.
+fn header_map_capacity() -> usize {
+    let mut map = HeaderMap::new();
+    while map
+        .try_insert(
+            HeaderName::from_bytes(format!("{:x}", map.len()).as_bytes()).unwrap(),
+            HeaderValue::from_static(""),
+        )
+        .is_ok()
+    {}
+    map.len()
+}
+
 fn upload_slot(state: &FakeState, file: &serde_json::Value) -> serde_json::Value {
     let sha256 = file["sha256"].as_str().unwrap_or_default();
     if state.versions.contains_key(sha256) {
@@ -470,6 +493,12 @@ fn upload_slot(state: &FakeState, file: &serde_json::Value) -> serde_json::Value
         // One more than the 32,768 entries a header map holds.
         let extra = headers.as_object_mut().unwrap();
         for index in 0..32_767 {
+            extra.insert(format!("{index:x}"), serde_json::json!(""));
+        }
+    }
+    if state.grants == Grants::FillingTheHeaderMap {
+        let extra = headers.as_object_mut().unwrap();
+        for index in 0..header_map_capacity() - extra.len() {
             extra.insert(format!("{index:x}"), serde_json::json!(""));
         }
     }

@@ -1,5 +1,22 @@
-//! Memory-first client state. Filesystem access belongs to initialization and
-//! the state-persistence worker, never ordinary capture or state access.
+//! A client for applications: it keeps a local anonymous identity and queues
+//! events, and both survive restarts unless you choose memory-only storage.
+//! [`Client::identify`] links it to a known user, [`Client::alias`] links
+//! another ID, and [`Client::reset`] starts a new anonymous identity.
+//!
+//! Create a [`Config`] with your project token and pass it to
+//! [`Client::init_blocking`], or to `Client::init` with the `async-client`
+//! feature. Initialization restores the saved identity and queued events and
+//! never waits for the network. [`Client::capture`] and [`Client::screen`]
+//! return a [`CaptureOutcome`] at once; background workers write to disk and
+//! deliver events in batches. Call [`Client::flush_blocking`] to request
+//! delivery now, and [`Client::shutdown_blocking`] before the app exits.
+//! Dropping the client also shuts it down.
+//!
+//! [`Config::persistence`] selects where state and events are kept: the OS
+//! local application-data directory by default, a directory you choose, or
+//! memory only. See [`Persistence`].
+//!
+//! A complete program is in `examples/stateful.rs`.
 
 mod config;
 mod consent;
@@ -50,14 +67,25 @@ struct Snapshot {
     device_id: String,
     anonymous_id: String,
     distinct_id: String,
+    // Records written before identity support lack these fields and restore as anonymous.
+    #[serde(default)]
     identified: bool,
+    #[serde(default)]
     person_processing: bool,
-    // None follows the configured default, including after reset.
-    #[serde(deserialize_with = "Option::<bool>::deserialize")]
+    // None follows the configured default, including after reset. A missing
+    // or unreadable value is None, so it never discards the identity.
+    #[serde(default, deserialize_with = "lenient_bool")]
     opt_out: Option<bool>,
+    // Records written before registered properties and groups lack them.
+    #[serde(default)]
     registered: HashMap<String, Value>,
+    #[serde(default)]
     groups: HashMap<String, String>,
-    #[serde(deserialize_with = "Option::<sessions::StoredSession>::deserialize")]
+    // Records written before sessions lack this field and restore without one.
+    #[serde(
+        default,
+        deserialize_with = "Option::<sessions::StoredSession>::deserialize"
+    )]
     session: Option<sessions::StoredSession>,
     #[serde(skip)]
     sessions: sessions::Sessions,
@@ -68,6 +96,13 @@ struct Snapshot {
     generation: u64,
     #[serde(skip)]
     person_properties: Option<[u8; 20]>,
+}
+
+/// A boolean, or None for any other value, as the other SDKs read consent.
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?.as_bool())
 }
 
 impl Snapshot {

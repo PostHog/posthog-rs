@@ -105,10 +105,23 @@ fn sdk_name_and_version_fill_as_a_pair() {
         lib(json!({"$lib": "wrapper", "$lib_version": "4.5.6"})),
         (json!("wrapper"), Some(json!("4.5.6")))
     );
-    // This SDK's own name still fills a missing version.
+    // This SDK's own name still fills a missing or unset version, and keeps a
+    // version the caller set.
+    for version in [json!(null), json!(""), json!(7)] {
+        assert_eq!(
+            lib(json!({"$lib": "embedding", "$lib_version": version})),
+            (json!("embedding"), Some(json!("1.2.3"))),
+            "{}",
+            version
+        );
+    }
     assert_eq!(
         lib(json!({"$lib": "embedding"})),
         (json!("embedding"), Some(json!("1.2.3")))
+    );
+    assert_eq!(
+        lib(json!({"$lib": "embedding", "$lib_version": "0.9.0"})),
+        (json!("embedding"), Some(json!("0.9.0")))
     );
 }
 
@@ -441,4 +454,23 @@ fn unspecified_uuid_is_fresh_per_capture_and_explicit_time_is_kept() {
     assert_eq!(first.uuid.get_version_num(), 7);
     assert_eq!(first.timestamp, "2024-01-01T00:00:00.000Z");
     assert_eq!(first.timestamp, second.timestamp);
+}
+
+#[test]
+fn a_registered_process_person_profile_never_reaches_identity_events() {
+    // Identity calls turn person processing on before sending their event.
+    let mut state = snapshot();
+    state.person_processing = true;
+    state.registered = HashMap::from([("$process_person_profile".into(), json!(false))]);
+    let producer = Producer::new(&Config::new("phc_test"));
+    let ordinary = producer
+        .prepare(Capture::new("ordinary"), &state, now(), None)
+        .unwrap();
+    assert_eq!(ordinary.options["process_person_profile"], false);
+    for name in super::IDENTITY_EVENTS {
+        let wire = producer
+            .prepare(Capture::new(name), &state, now(), None)
+            .unwrap();
+        assert_eq!(wire.options["process_person_profile"], true, "{}", name);
+    }
 }
