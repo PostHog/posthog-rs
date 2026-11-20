@@ -477,7 +477,7 @@ fn partial_and_complete_results_update_rich_exports_as_one_cache() {
 }
 
 #[test]
-fn restored_cache_exports_match_and_suppressed_targeting_retains_only_live_results() {
+fn restored_cache_exports_match_and_survive_a_targeting_change_and_restart() {
     let server = MockServer::start();
     let requests = server.mock(|when, then| {
         when.path_not("/array/phc_test/config");
@@ -511,12 +511,10 @@ fn restored_cache_exports_match_and_suppressed_targeting_retains_only_live_resul
         posthog::stateful::PersistenceOutcome::Persisted
     );
     drop(client);
+    // The other SDKs restore their whole cache, so an offline launch still
+    // has flags after a targeting change.
     let client = Client::init_blocking(make_config());
-    assert_eq!(
-        client.get_feature_flags(),
-        None,
-        "restart rejects stale producing context"
-    );
+    assert_eq!(client.get_feature_flags(), expected);
     client.shutdown_blocking(None);
     drop(client);
     requests.assert_calls(0);

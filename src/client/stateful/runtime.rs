@@ -211,7 +211,6 @@ impl Client {
             }
             snapshot
         });
-        let flags_changed = snapshot.reconcile_flag_cache(config.disable_geoip);
         let stored_session = snapshot.session.clone();
         snapshot.sessions = super::sessions::Sessions::restored(
             stored_session.as_ref(),
@@ -224,10 +223,7 @@ impl Client {
         let backend = match restored.state_store {
             Some(store) => Backend::Persistent {
                 store: Box::new(store),
-                restored: was_restored
-                    && !restored.rewrite_required
-                    && !session_changed
-                    && !flags_changed,
+                restored: was_restored && !restored.rewrite_required && !session_changed,
             },
             None if matches!(config.persistence, Persistence::Memory) => Backend::Memory,
             None => Backend::Unavailable,

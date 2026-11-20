@@ -489,13 +489,12 @@ fn fixture() -> serde_json::Value {
 fn final_v1_fixture_restores_identity_consent_and_flag_and_session_caches() {
     let decoded = FileStateStore::decode_restored(FINAL_V1.as_bytes()).unwrap();
     assert!(!decoded.rewrite_required);
-    let mut snapshot = decoded.snapshot;
+    let snapshot = decoded.snapshot;
     assert_eq!(snapshot.anonymous_id, "anonymous");
     assert_eq!(snapshot.device_id, "device");
     assert_eq!(snapshot.distinct_id, "person");
     assert_eq!(snapshot.opt_out, Some(true));
     assert_eq!(snapshot.registered["source"], "fixture");
-    assert!(!snapshot.reconcile_flag_cache(false));
     let cache = snapshot.flags.cache.as_ref().unwrap();
     assert_eq!(
         cache.flags["checkout"].record.payload,

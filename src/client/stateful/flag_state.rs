@@ -270,33 +270,12 @@ impl Snapshot {
                 // Reset may have replaced the snapshot; never rewind reservation tickets.
                 self.flag_load.reports = previous.flag_load.reports.cleared();
             }
+            // The cached flags stay until the new identity's response
+            // replaces them, as in posthog-ios, posthog-android and posthog-js.
             if identity_changed {
-                self.flags.cache = None;
                 self.flag_load.completed = None;
             }
         }
         Some(())
-    }
-
-    /// Initialization restores only exact request-context matches. In-process
-    /// property-only stale reads are a separate policy from restart hydration.
-    pub(super) fn reconcile_flag_cache(&mut self, disable_geoip: bool) -> bool {
-        let context = FlagContext::current(self, disable_geoip);
-        let Some(cache) = self.flags.cache.as_mut() else {
-            return false;
-        };
-        if cache.context != context {
-            self.flags.cache = None;
-            return true;
-        }
-        // A partial response can retain records evaluated with older targeting.
-        // They may be served in-process, but never hydrated as current on restart.
-        if cache.flags.values().all(|flag| *flag.context == context) {
-            return false;
-        }
-        Arc::make_mut(cache)
-            .flags
-            .retain(|_, flag| *flag.context == context);
-        true
     }
 }

@@ -195,11 +195,6 @@ impl Client {
             state.flags.mirror_person(&input.set, &input.set_once);
             if was_anonymous {
                 state.distinct_id = input.distinct_id;
-                if changed {
-                    // Invalidate under the same lock, before bootstrap or ordinary
-                    // identify hooks can observe the new identity.
-                    state.flags.cache = None;
-                }
                 state.identified = true;
                 state.person_processing = true;
                 state.generation = state.generation.wrapping_add(1);

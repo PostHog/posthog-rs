@@ -131,15 +131,11 @@ impl Client {
         };
         let response = flag.map(|flag| flag_value_for(&flag.record));
         let fingerprint = report_key(key, response.as_ref());
-        let ticket = self.state.as_ref().unwrap().mutate(|current| {
-            if current.flag_load.revision != snapshot.flag_load.revision
-                || current.flag_load.request != snapshot.flag_load.request
-                || current.flag_load.completed != snapshot.flag_load.completed
-            {
-                return None;
-            }
-            current.flag_load.reports.reserve(fingerprint)
-        });
+        let ticket = self
+            .state
+            .as_ref()
+            .unwrap()
+            .mutate(|current| current.flag_load.reports.reserve(fingerprint));
         let Ok((_, Some(ticket))) = ticket else {
             return;
         };
