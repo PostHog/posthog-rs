@@ -127,18 +127,18 @@ pub(crate) fn report(options: &ClientOptions, message: &'static str, status: Opt
 /// The replay lane's thread. Dropping the handle does not stop it: the
 /// encoder's shutdown barrier does, or the encoder going away.
 pub(crate) struct Lane {
-    tx: mpsc::Sender<Control>,
     id: ThreadId,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Lane {
-    /// Start the lane. `deadline` is the client's shared shutdown deadline.
+    /// Start the lane and return the sender to feed it, which only the
+    /// encoder holds. `deadline` is the client's shared shutdown deadline.
     pub(super) fn spawn(
         options: ClientOptions,
         clock: Arc<dyn Clock>,
         deadline: Arc<Mutex<Option<Instant>>>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, mpsc::Sender<Control>)> {
         let http = build_http(&options)
             .ok_or_else(|| io::Error::other("Cannot build the replay HTTP client"))?;
         let (tx, rx) = mpsc::channel();
@@ -154,15 +154,13 @@ impl Lane {
                 }
                 .run(&rx, &deadline)
             })?;
-        Ok(Self {
+        Ok((
+            Self {
+                id: thread.thread().id(),
+                thread: Mutex::new(Some(thread)),
+            },
             tx,
-            id: thread.thread().id(),
-            thread: Mutex::new(Some(thread)),
-        })
-    }
-
-    pub(super) fn sender(&self) -> mpsc::Sender<Control> {
-        self.tx.clone()
+        ))
     }
 
     pub(super) fn on_thread(&self) -> bool {
@@ -200,20 +198,21 @@ struct Sender {
 impl Sender {
     fn run(mut self, rx: &mpsc::Receiver<Control>, deadline: &Mutex<Option<Instant>>) {
         loop {
-            let end = *deadline.lock().unwrap_or_else(|p| p.into_inner());
-            if let (Some(end), None) = (end, self.closing) {
-                self.close_delivery(end);
-            }
-            let message = if end.is_some_and(|end| self.clock.now() >= end) {
+            let end = self.observe_deadline(deadline);
+            let due = if end.is_some_and(|end| self.clock.now() >= end) {
                 // Past the deadline: only drain what the encoder still sends.
-                rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                None
             } else {
-                match self.replay.next_due(self.closing) {
-                    Some(due) => rx.recv_timeout(due.saturating_duration_since(self.clock.now())),
-                    // Wake now and then to notice a deadline selected meanwhile.
-                    None => rx.recv_timeout(INTERVAL),
-                }
+                self.replay.next_due(self.closing)
             };
+            let message = match due {
+                Some(due) => rx.recv_timeout(due.saturating_duration_since(self.clock.now())),
+                // Nothing is due: wait for the encoder. Every close sends its
+                // shutdown barrier, and the encoder going away ends the lane.
+                None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            };
+            // A deadline selected while waiting applies to this message.
+            let end = self.observe_deadline(deadline);
             match message {
                 Ok(Control::ReplayFrame(frame)) => self.admit_replay(*frame),
                 Ok(Control::ReplayFailure(message)) => report(&self.options, message, None),
@@ -239,6 +238,16 @@ impl Sender {
             }
         }
         self.abandon_replay();
+    }
+
+    /// Read the shared shutdown deadline, closing delivery the first time one
+    /// is selected.
+    fn observe_deadline(&mut self, deadline: &Mutex<Option<Instant>>) -> Option<Instant> {
+        let end = *deadline.lock().unwrap_or_else(|p| p.into_inner());
+        if let (Some(end), None) = (end, self.closing) {
+            self.close_delivery(end);
+        }
+        end
     }
 
     fn delivery_deadline(&self, deadline: Option<Instant>) -> Option<Instant> {
@@ -338,6 +347,7 @@ impl Sender {
             timeout.min(end.saturating_duration_since(self.clock.now()))
         });
         if timeout.is_zero() {
+            self.report_replay_shutdown(None);
             return;
         }
         let request = self

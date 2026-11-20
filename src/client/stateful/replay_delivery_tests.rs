@@ -535,3 +535,48 @@ fn shutdown_reports_cooldown_abandonment_without_bypassing_retry_after() {
         0
     );
 }
+
+#[test]
+fn zero_budget_shutdown_of_an_idle_lane_sends_nothing() {
+    let backend = Backend::new();
+    let client = backend.client(|_| {});
+    let replay = client.session_replay();
+    replay.start();
+    assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
+    // The encoder finishes and the lane holds one waiting frame, idle.
+    std::thread::sleep(Duration::from_millis(300));
+    client.shutdown_blocking(Some(Duration::ZERO));
+    wait_for_delivery_stop(&client);
+    assert!(
+        backend.bodies.lock().unwrap().is_empty(),
+        "zero-budget shutdown uploaded {} screenshot request(s)",
+        backend.bodies.lock().unwrap().len()
+    );
+}
+
+#[test]
+fn short_budget_shutdown_of_an_idle_lane_bounds_the_upload() {
+    let backend = Backend::new();
+    let client = backend.client(|config| {
+        config.request_timeout = Duration::from_secs(10);
+    });
+    backend.server.reset();
+    let _stalled = backend.server.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/s/");
+        then.status(200).delay(Duration::from_secs(3));
+    });
+    let replay = client.session_replay();
+    replay.start();
+    assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
+    std::thread::sleep(Duration::from_millis(300));
+    let start = Instant::now();
+    let report = client.shutdown_blocking(Some(Duration::from_millis(250)));
+    wait_for_delivery_stop(&client);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "lane stopped after {:?}; report {:?}",
+        elapsed,
+        report.delivery
+    );
+}

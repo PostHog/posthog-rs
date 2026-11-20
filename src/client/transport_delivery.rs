@@ -59,7 +59,7 @@ pub(super) struct Delivery {
 #[cfg(feature = "session-replay")]
 struct Replay {
     encoder: Arc<crate::client::stateful::replay::encoder::Worker>,
-    lane: super::replay::Lane,
+    lane: Arc<super::replay::Lane>,
 }
 
 impl Delivery {
@@ -116,11 +116,14 @@ impl Delivery {
             requests.join();
         }
         // The encoder stops first: the lane stops at its shutdown barrier.
+        // Join outside the lock, which client calls from their hooks take.
         #[cfg(feature = "session-replay")]
-        self.replay(|replay| {
-            replay.encoder.join();
-            replay.lane.join();
-        });
+        if let Some((encoder, lane)) =
+            self.replay(|replay| (replay.encoder.clone(), replay.lane.clone()))
+        {
+            encoder.join();
+            lane.join();
+        }
     }
 
     pub(super) fn on_request_worker(&self) -> bool {
@@ -458,13 +461,14 @@ impl TransportHandle {
             .delivery
             .as_ref()
             .ok_or_else(|| std::io::Error::other("Replay needs stateful delivery"))?;
-        let lane =
+        let (lane, sender) =
             super::replay::Lane::spawn(options, self.clock.clone(), delivery.deadline.clone())?;
+        let lane = Arc::new(lane);
         let encoder = Arc::new(crate::client::stateful::replay::encoder::Worker::spawn(
             producer,
             config,
             token,
-            lane.sender(),
+            sender,
             shutdown_timeout,
             delivery.deadline.clone(),
         )?);

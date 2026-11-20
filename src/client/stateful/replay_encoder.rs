@@ -218,7 +218,9 @@ impl Gate {
     }
     pub(crate) fn control(&self, control: Control) -> Result<(), Control> {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if state.closed && matches!(control, Control::Shutdown(_)) {
+        // After the shutdown barrier nothing else reaches the lane, so a later
+        // control comes back for its caller to complete.
+        if state.closed {
             return Err(control);
         }
         if matches!(control, Control::Shutdown(_)) {
