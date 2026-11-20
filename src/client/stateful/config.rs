@@ -71,9 +71,9 @@ pub struct Config {
     /// Timeout per network request. Default: 10 seconds. Sub-second precision is
     /// rounded up to whole seconds.
     pub request_timeout: Duration,
-    /// Default SDK-controlled shutdown/Drop waiting budget. Default: 30 seconds.
-    /// The first shutdown selects one deadline; later calls and Drop cannot
-    /// extend it. Already-started work owns its resources until completion and
+    /// Default SDK-controlled shutdown waiting budget. Default: 30 seconds.
+    /// The first shutdown selects one deadline; later calls cannot extend it.
+    /// Dropping the client does not wait for delivery. Already-started work owns its resources until completion and
     /// may retain them indefinitely if it never returns. Arbitrary destructors
     /// of application objects captured by callbacks may block outside this bound.
     pub shutdown_timeout: Duration,
