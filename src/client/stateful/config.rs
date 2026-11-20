@@ -1,20 +1,25 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::{Persistence, PersonProfiles, SessionMode, SessionPersistence, Snapshot};
+use super::{Persistence, PersonProfiles, SessionMode, SessionPersistence};
 use crate::client::event_store::StoreLimits;
 use crate::client::transport::MAX_SHUTDOWN_TIMEOUT;
 use crate::client::{ClientOptions, OnErrorHook, PostHogError};
 use crate::{BeforeSendHook, CaptureCompression, EndpointManager, Event, DEFAULT_HOST};
 
-/// Largest serialized event the client accepts, roughly the capture endpoint's
-/// own per-event limit. Larger events are rejected at capture.
-const MAX_EVENT_BYTES: u64 = 1024 * 1024;
+/// A client SDK waits 1 second before its first resend, doubling to the
+/// 30-second ceiling, where a server SDK starts at 100 ms.
+const RETRY_INITIAL_BACKOFF_MS: u64 = 1_000;
+
+/// The request timeout of the iOS, Android and posthog-js clients.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Configuration for a stateful client. Start with [`Config::new`].
 ///
-/// Invalid configuration reports an initialization diagnostic and disables the
-/// client. Storage failures instead preserve enabled, memory-backed operation.
+/// Out-of-range settings are clamped and an invalid host falls back to the
+/// default host, as in the other PostHog SDKs. A missing or invalid project
+/// token reports an initialization diagnostic and disables the client. Storage
+/// failures instead preserve enabled, memory-backed operation.
 #[non_exhaustive]
 pub struct Config {
     /// Project token, trimmed during initialization. Never use a personal API key.
@@ -35,7 +40,9 @@ pub struct Config {
     /// Session restart continuity. Default: Memory. Persistent uses the configured
     /// state store; it does not override Persistence::Memory.
     pub session_persistence: SessionPersistence,
-    /// Isolates storage for instances using the same host and project. Default: "default".
+    /// Separates the storage of clients that use the same project token. The
+    /// storage namespace is the project token plus this name; the host does not
+    /// change it. Default: "default".
     /// Each persistent namespace has one live owner; see [`Persistence`] for
     /// sharing a client or selecting independent identities.
     pub instance_name: String,
@@ -67,25 +74,20 @@ pub struct Config {
     pub max_batch_size: usize,
     /// Interval between automatic flushes. Default: 10 seconds.
     pub flush_interval: Duration,
-    /// Maximum resident staging, recovery and memory-fallback events. Default: 1,000.
-    /// One additional upload view of this logical queue is bounded separately by
-    /// this count and max_queue_bytes; it is not a second retry backlog.
+    /// Maximum events queued for delivery: on disk, or in memory with
+    /// [`Persistence::Memory`]. Default: 1,000. At this limit the oldest events
+    /// are dropped to keep the newest; capture still returns
+    /// [`CaptureOutcome::Accepted`](super::CaptureOutcome::Accepted).
     pub max_queue_size: usize,
-    /// Maximum serialized event bytes in the resident queue and, separately, its
-    /// one upload view. Not an allocator/process-memory cap. Default: 8 MiB.
-    pub max_queue_bytes: usize,
-    /// Persisted event retention count. Default: 10,000. Newest retention may
-    /// temporarily exceed this by one replacement record while reclaiming old data.
-    pub max_stored_events: usize,
-    /// Persisted event retention bytes. Default: 64 MiB. Replacement may exceed
-    /// this by at most one event. Exact accounting includes that event; no
-    /// further appends occur until reclamation succeeds.
-    pub max_stored_bytes: u64,
+    /// Serialized event bytes held in memory: the queue with
+    /// [`Persistence::Memory`], otherwise events not yet written to disk.
+    pub(crate) max_queue_bytes: usize,
+    /// Serialized event bytes stored on disk.
+    pub(crate) max_stored_bytes: u64,
     /// How long to wait after a state change before writing client state to
-    /// disk. Changes made within the window are written together. Lower values
-    /// lose less on a crash; higher values write less often. Default: 250 ms.
-    pub state_write_delay: Duration,
-    /// Timeout per network request. Default: 30 seconds. Sub-second precision is
+    /// disk, so changes made close together are written once.
+    pub(crate) state_write_delay: Duration,
+    /// Timeout per network request. Default: 10 seconds. Sub-second precision is
     /// rounded up to whole seconds.
     pub request_timeout: Duration,
     /// Default SDK-controlled shutdown/Drop waiting budget. Default: 30 seconds.
@@ -94,8 +96,6 @@ pub struct Config {
     /// may retain them indefinitely if it never returns. Arbitrary destructors
     /// of application objects captured by callbacks may block outside this bound.
     pub shutdown_timeout: Duration,
-    /// Attempts per active delivery sequence, including the first. Default: 4.
-    pub max_capture_attempts: u32,
     /// Request compression. Default: gzip; None disables compression.
     pub capture_compression: Option<CaptureCompression>,
     /// Disable server-side GeoIP enrichment. Default: false.
@@ -103,9 +103,12 @@ pub struct Config {
     /// Platform properties cached at initialization. Per-event and registered properties win.
     /// Missing $os/$os_version are discovered once during initialization.
     pub platform_context: HashMap<String, serde_json::Value>,
-    /// Capture-time SDK name. Defaults to posthog-rs; embedding clients may override it.
+    /// SDK name for events' `$lib` and for the `PostHog-Sdk-Info` and
+    /// `User-Agent` headers of capture requests. Defaults to posthog-rs; a
+    /// wrapper SDK sets its own.
     pub sdk_name: String,
-    /// Capture-time SDK version. Defaults to this crate's version.
+    /// SDK version for events' `$lib_version` and for the same headers.
+    /// Defaults to this crate's version.
     pub sdk_version: String,
     pub(super) before_send: Vec<BeforeSendHook>,
     pub(super) on_error: Vec<OnErrorHook>,
@@ -136,12 +139,10 @@ impl Config {
             flush_interval: Duration::from_secs(10),
             max_queue_size: 1_000,
             max_queue_bytes: 8 * 1024 * 1024,
-            max_stored_events: 10_000,
             max_stored_bytes: 64 * 1024 * 1024,
             state_write_delay: Duration::from_millis(250),
-            request_timeout: Duration::from_secs(30),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             shutdown_timeout: Duration::from_secs(30),
-            max_capture_attempts: 4,
             capture_compression: Some(CaptureCompression::Gzip),
             disable_geoip: false,
             platform_context: HashMap::new(),
@@ -181,6 +182,12 @@ impl Config {
     /// registration order, after enrichment and outside client-state locks.
     /// Returning None or panicking drops the event. Each mutable hook is
     /// serialized across captures; do not wait for another capture from a hook.
+    ///
+    /// A hook that returns a new [`Event`] instead of the one it received should
+    /// copy that event's options, such as `process_person_profile`; the new
+    /// event does not inherit them. Change capture settings with
+    /// [`Event::insert_option`], not with legacy `$` properties such as
+    /// `$process_person_profile`.
     pub fn before_send<F>(&mut self, hook: F) -> &mut Self
     where
         F: FnMut(Event) -> Option<Event> + Send + 'static,
@@ -189,15 +196,46 @@ impl Config {
         self
     }
 
+    /// Trim and clamp settings as the other PostHog SDKs do, rather than
+    /// disabling the client for them.
     pub(super) fn normalize(&mut self) {
         self.project_token = self.project_token.trim().into();
         self.sdk_name = self.sdk_name.trim().into();
+        if self.sdk_name.is_empty() {
+            self.sdk_name = crate::client::SDK_USERAGENT_NAME.into();
+        }
         self.sdk_version = self.sdk_version.trim().into();
+        if self.sdk_version.is_empty() {
+            self.sdk_version = crate::client::CRATE_VERSION.into();
+        }
         self.host = self.host.trim().into();
-        if self.host.is_empty() {
+        if !valid_host(&self.host) {
+            if !self.host.is_empty() {
+                tracing::warn!("posthog-rs: invalid host; using {DEFAULT_HOST}");
+            }
             self.host = DEFAULT_HOST.into();
         }
         self.host = EndpointManager::determine_server_host(&self.host);
+        // A blank bootstrap ID is ignored, as in the other PostHog SDKs.
+        for id in [
+            &mut self.bootstrap_anonymous_id,
+            &mut self.bootstrap_identified_id,
+        ] {
+            if id.as_deref().is_some_and(|id| id.trim().is_empty()) {
+                *id = None;
+            }
+        }
+        self.flush_at = self.flush_at.max(1);
+        self.max_batch_size = self.max_batch_size.max(1);
+        self.max_queue_size = self.max_queue_size.max(1);
+        self.flush_interval = self
+            .flush_interval
+            .clamp(Duration::from_millis(1), MAX_SHUTDOWN_TIMEOUT);
+        self.shutdown_timeout = self.shutdown_timeout.min(MAX_SHUTDOWN_TIMEOUT);
+        if self.request_timeout.is_zero() {
+            self.request_timeout = DEFAULT_REQUEST_TIMEOUT;
+        }
+        self.request_timeout = self.request_timeout.min(MAX_SHUTDOWN_TIMEOUT);
     }
 
     pub(super) fn invalid_reason(&self) -> Option<&'static str> {
@@ -212,64 +250,16 @@ impl Config {
         {
             return Some("project_token contains invalid header characters");
         }
-        if !reqwest::Url::parse(&self.host).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-        }) {
-            return Some("host must be an HTTP(S) URL without credentials, query or fragment");
-        }
-        if self.sdk_name.is_empty()
-            || self.sdk_version.is_empty()
-            || reqwest::header::HeaderValue::from_str(&format!(
-                "{}/{}",
-                self.sdk_name, self.sdk_version
-            ))
-            .is_err()
+        if reqwest::header::HeaderValue::from_str(&format!(
+            "{}/{}",
+            self.sdk_name, self.sdk_version
+        ))
+        .is_err()
         {
-            return Some("SDK name and version must be nonblank and valid header text");
-        }
-        if self.flush_at == 0 || self.max_batch_size == 0 || self.max_queue_size == 0 {
-            return Some("flush_at, max_batch_size and max_queue_size must be positive");
-        }
-        if self.max_queue_bytes == 0 || self.max_stored_events == 0 || self.max_stored_bytes == 0 {
-            return Some("event byte and storage count limits must be positive");
-        }
-        if self.flush_interval.as_millis() == 0
-            || self.flush_interval > MAX_SHUTDOWN_TIMEOUT
-            || self.state_write_delay > MAX_SHUTDOWN_TIMEOUT
-            || self.shutdown_timeout > MAX_SHUTDOWN_TIMEOUT
-        {
-            return Some("flush_interval must be at least 1 ms; scheduling durations must not exceed one day");
-        }
-        if self.request_timeout.is_zero()
-            || self.request_timeout > MAX_SHUTDOWN_TIMEOUT
-            || self.max_capture_attempts == 0
-        {
-            return Some(
-                "request_timeout must be positive and at most one day, and capture attempts must be positive",
-            );
+            return Some("SDK name and version must be valid header text");
         }
         if self.bootstrap_anonymous_id.is_some() && self.bootstrap_identified_id.is_some() {
             return Some("configure only one bootstrap identity");
-        }
-        if let Some(id) = &self.bootstrap_identified_id {
-            let mut snapshot = Snapshot::anonymous(uuid::Uuid::nil().to_string());
-            snapshot.distinct_id = id.clone();
-            snapshot.identified = true;
-            snapshot.person_processing = true;
-            if !snapshot.is_valid() {
-                return Some("bootstrap_identified_id must be nonblank");
-            }
-        }
-        if let Some(id) = &self.bootstrap_anonymous_id {
-            let snapshot = Snapshot::anonymous(id.clone());
-            if !snapshot.is_valid() {
-                return Some("bootstrap_anonymous_id must be nonblank");
-            }
         }
         None
     }
@@ -285,12 +275,8 @@ impl Config {
 
     pub(super) fn event_limits(&self) -> StoreLimits {
         StoreLimits {
-            max_events: self.max_stored_events,
+            max_events: self.max_queue_size,
             max_bytes: self.max_stored_bytes,
-            // Never larger than either budget that has to hold the event.
-            max_record_bytes: MAX_EVENT_BYTES
-                .min(self.max_queue_bytes as u64)
-                .min(self.max_stored_bytes),
         }
     }
 
@@ -307,9 +293,22 @@ impl Config {
         options.flush_interval_ms = self.flush_interval.as_millis() as u64;
         options.request_timeout_seconds = self.request_timeout_seconds();
         options.shutdown_timeout_ms = self.shutdown_timeout.as_millis() as u64;
-        options.max_capture_attempts = self.max_capture_attempts;
+        options.retry_initial_backoff_ms = RETRY_INITIAL_BACKOFF_MS;
         options.capture_compression = self.capture_compression;
+        options.sdk_info = Some(format!("{}/{}", self.sdk_name, self.sdk_version));
         options.on_error = self.on_error.clone();
         options
     }
+}
+
+/// An HTTP(S) URL with a host and no credentials, query or fragment.
+fn valid_host(host: &str) -> bool {
+    reqwest::Url::parse(host).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
 }

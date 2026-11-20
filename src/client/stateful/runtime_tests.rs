@@ -62,9 +62,9 @@ fn client_defaults_map_to_shared_delivery_without_changing_server_defaults() {
     assert_eq!(config.host, "https://eu.i.posthog.com");
     assert_eq!(config.max_queue_bytes, 8 * 1024 * 1024);
     assert_eq!(config.max_stored_bytes, 64 * 1024 * 1024);
-    assert_eq!(config.max_stored_events, 10_000);
-    assert_eq!(config.event_limits().max_record_bytes, 1024 * 1024);
+    assert_eq!(config.event_limits().max_events, 1_000);
     assert_eq!(config.state_write_delay, Duration::from_millis(250));
+    assert_eq!(config.request_timeout, Duration::from_secs(10));
     let options = config.transport_options();
     assert_eq!(
         (
@@ -75,6 +75,13 @@ fn client_defaults_map_to_shared_delivery_without_changing_server_defaults() {
         (20, 100, 1_000)
     );
     assert_eq!(options.flush_interval_ms, 10_000);
+    assert_eq!(
+        (
+            options.retry_initial_backoff_ms,
+            options.retry_max_backoff_ms
+        ),
+        (1_000, 30_000)
+    );
     assert_eq!(
         options.capture_compression,
         Some(crate::CaptureCompression::Gzip)
@@ -139,29 +146,52 @@ fn explicitly_disabled_client_is_quiet_and_error_hook_panic_is_isolated() {
 }
 
 #[test]
-fn incoherent_limits_disable_before_creating_storage() {
-    let changes: &[fn(&mut Config)] = &[
-        |c| c.flush_at = 0,
-        |c| c.max_batch_size = 0,
-        |c| c.max_queue_bytes = 0,
-        |c| c.max_stored_bytes = 0,
-        |c| c.max_stored_events = 0,
-        |c| c.flush_interval = Duration::ZERO,
-        |c| c.shutdown_timeout = Duration::MAX,
-        |c| c.state_write_delay = Duration::MAX,
-        |c| c.request_timeout = Duration::ZERO,
-        |c| c.max_capture_attempts = 0,
-        |c| c.bootstrap_anonymous_id = Some(" ".into()),
-        |c| c.host = "file:///tmp/events".into(),
-        |c| c.host = "https://name:password@example.test".into(),
-    ];
-    for change in changes {
-        let directory = Directory::new();
-        let mut config = directory.config();
-        change(&mut config);
-        let client = Client::init_blocking(config);
-        assert!(client.is_disabled());
-        assert!(!directory.0.exists());
+fn out_of_range_settings_are_clamped_instead_of_disabling_the_client() {
+    let mut config = Config::new("phc_test");
+    config.flush_at = 0;
+    config.max_batch_size = 0;
+    config.max_queue_size = 0;
+    config.flush_interval = Duration::ZERO;
+    config.shutdown_timeout = Duration::MAX;
+    config.request_timeout = Duration::ZERO;
+    config.bootstrap_anonymous_id = Some(" ".into());
+    config.sdk_name = " ".into();
+    config.normalize();
+    assert_eq!(config.bootstrap_anonymous_id, None);
+    let mut identified = Config::new("phc_test");
+    identified.bootstrap_identified_id = Some(" ".into());
+    identified.normalize();
+    assert_eq!(identified.bootstrap_identified_id, None);
+    assert!(config.invalid_reason().is_none());
+    assert_eq!(
+        (
+            config.flush_at,
+            config.max_batch_size,
+            config.max_queue_size
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(config.flush_interval, Duration::from_millis(1));
+    assert_eq!(
+        config.shutdown_timeout,
+        crate::client::transport::MAX_SHUTDOWN_TIMEOUT
+    );
+    assert_eq!(config.request_timeout, Duration::from_secs(10));
+    assert_eq!(config.sdk_name, crate::client::SDK_USERAGENT_NAME);
+}
+
+#[test]
+fn an_invalid_host_falls_back_to_the_default_host() {
+    for host in [
+        "",
+        "file:///tmp/events",
+        "https://name:password@example.test",
+    ] {
+        let mut config = Config::new("phc_test");
+        config.host = host.into();
+        config.normalize();
+        assert!(config.invalid_reason().is_none());
+        assert_eq!(config.host, "https://us.i.posthog.com", "host {:?}", host);
     }
 }
 
@@ -228,7 +258,8 @@ fn host_changes_share_identity_queue_and_single_owner_scope() {
     let config = || {
         let mut config = directory.config();
         config.flush_interval = Duration::from_secs(3600);
-        config.max_capture_attempts = 1;
+        // The hosts refuse connections; don't wait out retries at shutdown.
+        config.shutdown_timeout = Duration::from_millis(200);
         config
     };
     let client = Client::init_blocking(config());
@@ -255,14 +286,10 @@ fn host_changes_share_identity_queue_and_single_owner_scope() {
         let scope = super::namespace(&next.project_token, &next.instance_name);
         let mut storage =
             super::RestoredStorage::open(&next.persistence, &scope, next.event_limits(), &[]);
-        let recovered = storage
-            .event_store
-            .as_mut()
-            .unwrap()
-            .recover(10, next.max_stored_bytes)
-            .unwrap();
-        assert_eq!(recovered.events.len(), 1);
-        assert!(recovered.errors.is_empty());
+        let store = storage.event_store.as_mut().unwrap();
+        let index = store.take_index();
+        assert_eq!(index.len(), 1);
+        assert!(store.read(index[0].0).is_ok());
     }
     let restored = Client::init_blocking(next);
     assert_eq!(restored.get_anonymous_id(), id);
@@ -377,6 +404,25 @@ fn startup_rewrites_invalid_optional_flags_and_session_without_mutation() {
 }
 
 #[test]
+fn restores_a_v1_record_written_before_identity_fields() {
+    let directory = Directory::new();
+    fs::create_dir_all(directory.scope()).unwrap();
+    let path = directory.scope().join("state.json");
+    fs::write(&path, br#"{"version":1,"state":{"device_id":"device","anonymous_id":"anonymous","distinct_id":"anonymous"}}"#).unwrap();
+    let client = Client::init_blocking(directory.config());
+    assert_eq!(client.get_anonymous_id(), "anonymous");
+    assert_eq!(client.get_distinct_id(), "anonymous");
+    assert!(!client.is_identified());
+    assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
+    assert_eq!(
+        client.shutdown_blocking(None).delivery,
+        DeliveryOutcome::Stopped
+    );
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(value["state"]["device_id"], "device");
+}
+
+#[test]
 fn namespace_contention_is_enabled_memory_fallback_without_overwriting_owner() {
     let directory = Directory::new();
     let first = Client::init_blocking(directory.config());
@@ -424,9 +470,10 @@ fn shutdown_from_delivery_callback_defers_then_external_shutdown_joins_both_work
     )
     .unwrap();
     store
-        .put(&crate::capture_event::CaptureEvent::from_event(
-            &crate::Event::new("old", "old-user"),
-        ))
+        .write(
+            crate::client::event_store::StoreKey(1),
+            &crate::capture_event::CaptureEvent::from_event(&crate::Event::new("old", "old-user")),
+        )
         .unwrap();
     drop(store);
     let path = fs::read_dir(directory.scope().join("events"))

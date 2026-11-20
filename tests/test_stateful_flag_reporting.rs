@@ -31,7 +31,6 @@ fn config(server: &MockServer) -> Config {
     c.capture_compression = None;
     c.flush_at = 1000;
     c.flush_interval = Duration::from_secs(3600);
-    c.max_capture_attempts = 1;
     c.shutdown_timeout = Duration::from_secs(1);
     c
 }
@@ -379,33 +378,6 @@ fn dropped_and_panicking_hooks_release_reservations() {
         );
     }
     assert_eq!(calls.load(Ordering::SeqCst), 3);
-}
-
-#[test]
-fn rejected_admission_does_not_commit_a_report() {
-    let server = MockServer::start();
-    accept(&server);
-    let mut c = config(&server);
-    c.max_queue_bytes = 2048;
-    let events = observe(&mut c);
-    let attempts = AtomicUsize::new(0);
-    c.before_send(move |mut event| {
-        if event.properties()["$feature_flag"] == "b" && attempts.fetch_add(1, Ordering::SeqCst) < 2
-        {
-            event.insert_prop("oversized", "x".repeat(4096)).unwrap();
-        }
-        Some(event)
-    });
-    let client = Client::init_blocking(c);
-    let _ = client.feature_flag("a").get();
-    for _ in 0..2 {
-        let _ = client.feature_flag("b").get();
-    }
-    assert_eq!(events.lock().unwrap().len(), 3);
-    client.flush_blocking();
-    let _ = client.feature_flag("b").get();
-    let _ = client.feature_flag("b").get();
-    assert_eq!(events.lock().unwrap().len(), 4);
 }
 
 #[test]

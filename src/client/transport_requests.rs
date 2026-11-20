@@ -78,10 +78,7 @@ impl Worker {
 
     pub(super) fn request_close(&self) {
         let (tx, _) = mpsc::channel();
-        let _ = self.tx.send(Control::Shutdown {
-            completion: Completion::Blocking(tx),
-            deadline: None,
-        });
+        let _ = self.tx.send(Control::Shutdown(Completion::Blocking(tx)));
     }
 
     pub(super) fn is_stopped(&self) -> bool {

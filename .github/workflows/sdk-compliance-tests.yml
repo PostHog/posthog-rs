@@ -50,7 +50,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull test harness
-        run: docker pull ghcr.io/posthog/sdk-test-harness:1.32.0@sha256:7eb6c62e2241ddd48a2dfb326652e7933cd2fe26e0ffcad98cd385d603b4eb82
+        run: docker pull ghcr.io/posthog/sdk-test-harness:1.33.0@sha256:c501156720c1f5a4daab18eabd6bd29507c340e8260c26d7bd7c87acac582c2f
 
       - name: Build SDK adapter
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -81,7 +81,7 @@ jobs:
             --name test-harness \
             --network test-network \
             -v "${GITHUB_WORKSPACE}/report:/report" \
-            ghcr.io/posthog/sdk-test-harness:1.32.0@sha256:7eb6c62e2241ddd48a2dfb326652e7933cd2fe26e0ffcad98cd385d603b4eb82 \
+            ghcr.io/posthog/sdk-test-harness:1.33.0@sha256:c501156720c1f5a4daab18eabd6bd29507c340e8260c26d7bd7c87acac582c2f \
             run \
             --adapter-url http://sdk-adapter:8080 \
             --mock-url http://test-harness:8081 \

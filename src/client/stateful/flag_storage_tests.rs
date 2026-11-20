@@ -228,8 +228,11 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
 #[test]
 fn current_flag_fields_are_required_and_optional_cache_is_repaired() {
     let valid: Value = serde_json::from_slice(&record(&with_cache(Some(json!(false))))).unwrap();
+    // A record written before feature flags restores with an empty cache.
+    let mut older = valid.clone();
+    older["state"].as_object_mut().unwrap().remove("flags");
+    assert!(FileStateStore::decode(&serde_json::to_vec(&older).unwrap()).is_ok());
     for path in [
-        vec!["flags"],
         vec!["flags", "person_properties"],
         vec!["flags", "group_properties"],
         vec!["flags", "cache"],
@@ -313,14 +316,8 @@ fn bootstrap_reconciles_cache_against_final_identity() {
                 "device",
                 true,
             ),
-            // Never adopts the bootstrap ID locally, without an identify event.
-            (
-                false,
-                "new-person",
-                PersonProfiles::Never,
-                "new-person",
-                false,
-            ),
+            // Never keeps the anonymous user, as identify does nothing there.
+            (false, "new-person", PersonProfiles::Never, "device", true),
             (
                 true,
                 "new-person",

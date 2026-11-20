@@ -352,7 +352,7 @@ impl Event {
 
     /// Capture this as a group event.
     ///
-    /// See <https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events>.
+    /// See <https://posthog.com/docs/product-analytics/group-analytics#link-events-to-groups>.
     ///
     /// # Parameters
     ///

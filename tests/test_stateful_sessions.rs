@@ -21,7 +21,6 @@ fn config() -> Config {
     config.flush_at = 1000;
     config.flush_interval = Duration::from_secs(3600);
     config.shutdown_timeout = Duration::ZERO;
-    config.max_capture_attempts = 1;
     config.capture_compression = None;
     config
 }
@@ -424,24 +423,7 @@ fn capture_racing_reset_keeps_coherent_pre_hook_identity_and_session() {
 }
 
 #[test]
-fn full_admission_does_not_create_activity_and_recovery_keeps_original_session() {
-    let mut conf = config();
-    conf.max_queue_size = 1;
-    conf.max_queue_bytes = 2048;
-    let client = Client::init_blocking(conf);
-    assert!(matches!(
-        client.capture("first"),
-        CaptureOutcome::Accepted { .. }
-    ));
-    client.end_session();
-    let mut too_large = Capture::new("full");
-    too_large
-        .properties
-        .insert("data".into(), "x".repeat(4096).into());
-    assert_eq!(client.capture(too_large), CaptureOutcome::Full);
-    assert_eq!(client.peek_session_id(), None);
-    client.shutdown_blocking(None);
-
+fn recovery_sends_queued_events_with_their_original_session() {
     let directory = Directory::new();
     let server = MockServer::start();
     let mut reject = server.mock(|when, then| {

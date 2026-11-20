@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -16,6 +17,17 @@ use crate::{BeforeSendHook, Event};
 #[cfg(test)]
 #[path = "producer_tests.rs"]
 mod tests;
+
+/// Events that create or change a person or group. A registered
+/// `$process_person_profile` is not sent with them.
+const IDENTITY_EVENTS: [&str; 6] = [
+    "$identify",
+    "$create_alias",
+    "$merge_dangerously",
+    "$groupidentify",
+    "$set",
+    "$set_once",
+];
 
 /// An event input whose identity comes from the stateful client.
 /// Start with [`Capture::new`] and set optional fields before capture.
@@ -131,8 +143,6 @@ pub enum CaptureOutcome {
     Dropped,
     /// This thread is already capturing through the same client.
     Reentrant,
-    /// The resident count or serialized-byte budget refused the event.
-    Full,
 }
 
 #[derive(Clone, Copy)]
@@ -151,6 +161,10 @@ pub(super) struct Producer {
     pub(super) default_opt_out: bool,
     pub(super) send_feature_flag_event: bool,
     pub(super) session_clock: std::sync::Arc<dyn super::sessions::SessionClock>,
+    /// The last screen name passed to `screen`, added to later events as
+    /// `$screen_name`. Kept in memory only, as in posthog-ios and
+    /// posthog-android.
+    last_screen: Mutex<Option<String>>,
 }
 
 impl Producer {
@@ -174,7 +188,24 @@ impl Producer {
             default_opt_out: config.opt_out,
             send_feature_flag_event: config.send_feature_flag_event,
             session_clock: std::sync::Arc::new(super::sessions::SystemSessionClock),
+            last_screen: Mutex::new(None),
         }
+    }
+
+    fn set_last_screen(&self, name: Option<String>) {
+        *self.last_screen.lock().unwrap_or_else(|p| p.into_inner()) = name;
+    }
+
+    /// Reset forgets the last screen, as in posthog-ios and posthog-android.
+    pub(super) fn clear_last_screen(&self) {
+        self.set_last_screen(None);
+    }
+
+    fn last_screen(&self) -> Option<String> {
+        self.last_screen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     #[cfg(test)]
@@ -210,7 +241,14 @@ impl Producer {
         );
         event.ensure_timestamp(now);
         event.ensure_uuid();
+        let identity_event = IDENTITY_EVENTS.contains(&event.event_name());
         for (key, value) in &snapshot.registered {
+            // A registered false would make PostHog drop or ignore an identity
+            // event, so it never reaches one (capture spec), as in posthog-ios
+            // and posthog-android.
+            if identity_event && key == "$process_person_profile" {
+                continue;
+            }
             event.insert_prop_default(key.clone(), value.clone());
         }
         if !snapshot.groups.is_empty() {
@@ -237,8 +275,14 @@ impl Producer {
         if !crate::event::names_a_library(lib) {
             event.set_prop("$lib", self.sdk_name.clone().into());
             event.set_prop("$lib_version", self.sdk_version.clone().into());
-        } else if lib.and_then(serde_json::Value::as_str) == Some(self.sdk_name.as_str()) {
-            event.insert_prop_default("$lib_version", self.sdk_version.clone().into());
+        } else if lib.and_then(serde_json::Value::as_str) == Some(self.sdk_name.as_str())
+            && !crate::event::names_a_library(event.properties().get("$lib_version"))
+        {
+            // A null, empty or non-string version is unset, as for $lib.
+            event.set_prop("$lib_version", self.sdk_version.clone().into());
+        }
+        if let Some(screen) = self.last_screen() {
+            event.insert_prop_default("$screen_name", screen.into());
         }
         event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
         event.insert_prop_default("$is_identified", snapshot.identified.into());
@@ -363,11 +407,7 @@ impl Client {
             (snapshot.clone(), session)
         });
         let Ok((_, (snapshot, session))) = snapshot else {
-            return if self.closed.load(Ordering::Acquire) {
-                CaptureOutcome::Closed
-            } else {
-                CaptureOutcome::Full
-            };
+            return CaptureOutcome::Closed;
         };
         self.capture_with_session(input, &snapshot, session, true, CapturePolicy::Standard)
     }
@@ -453,9 +493,10 @@ impl Client {
     ) -> CaptureOutcome {
         let uuid = wire.uuid;
         let now = self.producer.as_ref().unwrap().session_clock.now();
-        let mut admission = None;
-        // Measure before taking the state lock, so large events do not extend it.
+        // Measure before taking the state lock, so large events do not extend
+        // it. Admission runs no user code, so it may run under the lock.
         let bytes = crate::client::event_store::record_size(&wire);
+        let mut admission = None;
         self.state.as_ref().unwrap().admit_capture(
             session.map(|token| (token, now, activity)),
             None,
@@ -464,17 +505,15 @@ impl Client {
                     .transport
                     .as_ref()
                     .unwrap()
-                    .enqueue_measured_deferred(wire, bytes);
-                let accepted = result.admission == Admission::Accepted;
+                    .enqueue_measured(wire, bytes);
                 admission = Some(result);
-                accepted
+                result == Admission::Accepted
             },
         );
-        match admission.map(|result| result.report()) {
+        match admission {
             Some(Admission::Accepted) => CaptureOutcome::Accepted { uuid },
-            Some(Admission::Closed) => CaptureOutcome::Closed,
-            _ if self.closed.load(Ordering::Acquire) => CaptureOutcome::Closed,
-            _ => CaptureOutcome::Full,
+            // Not admitted: the client is closing.
+            _ => CaptureOutcome::Closed,
         }
     }
 
@@ -520,7 +559,8 @@ impl Client {
     }
 
     /// Capture `$screen` through the ordinary event pipeline. The explicit name
-    /// wins over a conflicting `$screen_name` property before hooks run.
+    /// wins over a conflicting `$screen_name` property before hooks run. Later
+    /// events carry the name as `$screen_name` unless they set their own.
     pub fn screen(&self, screen: impl Into<Screen>) -> CaptureOutcome {
         if self.is_disabled() {
             return CaptureOutcome::Disabled;
@@ -536,6 +576,10 @@ impl Client {
         if name.trim().is_empty() {
             return CaptureOutcome::Invalid;
         }
+        self.producer
+            .as_ref()
+            .unwrap()
+            .set_last_screen(Some(name.clone()));
         properties.insert("$screen_name".into(), name.into());
         let mut event = Capture::new("$screen");
         event.properties = properties;

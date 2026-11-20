@@ -26,7 +26,6 @@ fn config() -> Config {
     conf.flush_interval = Duration::from_secs(3600);
     conf.capture_compression = None;
     conf.shutdown_timeout = Duration::ZERO;
-    conf.max_capture_attempts = 1;
     conf
 }
 
@@ -96,8 +95,8 @@ fn direct_group_identify_enables_processing_without_membership_or_identification
     client.group_identify(("company", "a"));
     client.group_identify(("company", "a"));
     client.capture("after");
-    assert!(!client.is_identified());
     let seen = events.lock().unwrap();
+    assert_eq!(seen.last().unwrap().properties()["$is_identified"], false);
     assert_eq!(seen.len(), 3);
     for event in seen.iter() {
         assert_eq!(event.options()["process_person_profile"], true);
@@ -154,8 +153,8 @@ fn groups_emit_every_call_and_direct_identify_does_not_replace_membership() {
     client.capture("after-remove");
     client.group(("team", "new"));
     client.capture("replacement");
-    assert!(!client.is_identified());
     let seen = events.lock().unwrap();
+    assert_eq!(seen.last().unwrap().properties()["$is_identified"], false);
     assert_eq!(seen.len(), 9);
     for event in &seen[..5] {
         assert_eq!(event.event_name(), "$groupidentify");
@@ -360,7 +359,6 @@ fn invalid_current_records_use_configured_fallback_and_allow_replacement() {
         let (client, events) = observed(conf);
         assert!(!client.is_disabled());
         assert_eq!(client.get_distinct_id(), "fallback-id");
-        assert!(!client.is_identified());
         assert!(client.is_opt_out());
         assert_eq!(client.capture("private"), CaptureOutcome::OptedOut);
         assert!(events.lock().unwrap().is_empty());
@@ -384,7 +382,6 @@ fn invalid_current_records_use_configured_fallback_and_allow_replacement() {
         );
         let (client, events) = observed(directory.config());
         assert_eq!(client.get_distinct_id(), "fallback-id");
-        assert!(!client.is_identified());
         assert!(!client.is_opt_out());
         client.capture("restored replacement");
         {
@@ -401,45 +398,6 @@ fn invalid_current_records_use_configured_fallback_and_allow_replacement() {
             PersistenceOutcome::Persisted
         );
     }
-}
-
-#[test]
-fn oversized_group_event_keeps_context_without_replay() {
-    let server = MockServer::start();
-    let request = server.mock(|when, then| {
-        when.method(POST)
-            .path("/i/v1/analytics/events")
-            .body_includes("\"event\":\"occupy\"");
-        then.status(200);
-    });
-    let mut conf = config();
-    conf.host = server.base_url();
-    conf.max_queue_size = 1;
-    conf.max_queue_bytes = 4096;
-    conf.flush_at = 1000;
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let events = seen.clone();
-    conf.before_send(move |mut event| {
-        if matches!(event.event_name(), "$groupidentify" | "still-full") {
-            event.insert_prop("padding", "x".repeat(8192)).unwrap();
-        }
-        events.lock().unwrap().push(event.clone());
-        Some(event)
-    });
-    let client = Client::init_blocking(conf);
-    assert!(matches!(
-        client.capture("occupy"),
-        CaptureOutcome::Accepted { .. }
-    ));
-    client.group(("company", "a"));
-    assert_eq!(client.capture("still-full"), CaptureOutcome::Full);
-    client.flush_blocking();
-    request.assert_calls(1);
-    client.flush_blocking();
-    request.assert_calls(1);
-    let events = seen.lock().unwrap();
-    assert_eq!(events[2].properties()["$groups"], json!({"company":"a"}));
-    assert_eq!(events[2].options()["process_person_profile"], true);
 }
 
 #[test]

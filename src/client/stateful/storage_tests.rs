@@ -39,7 +39,6 @@ fn limits() -> StoreLimits {
     StoreLimits {
         max_events: 10,
         max_bytes: 64 * 1024,
-        max_record_bytes: 4096,
     }
 }
 
@@ -52,7 +51,7 @@ fn record(snapshot: &Snapshot) -> Vec<u8> {
 }
 
 #[test]
-fn consent_choices_round_trip_and_require_a_valid_field() {
+fn consent_choices_round_trip_and_an_unreadable_choice_keeps_the_identity() {
     let mut snapshot = Snapshot::anonymous("anonymous".into());
     for choice in [None, Some(true), Some(false)] {
         snapshot.opt_out = choice;
@@ -61,6 +60,7 @@ fn consent_choices_round_trip_and_require_a_valid_field() {
         store.save(&snapshot).unwrap();
         assert_eq!(store.load().unwrap(), Some(snapshot.clone()));
     }
+    snapshot.opt_out = None;
     for consent in [
         None,
         Some(serde_json::json!("true")),
@@ -77,15 +77,17 @@ fn consent_choices_round_trip_and_require_a_valid_field() {
                 value["state"].as_object_mut().unwrap().remove("opt_out");
             }
         }
-        let bytes = serde_json::to_vec(&value).unwrap();
         let directory = TestDirectory::new();
         let lease = directory.lease();
-        let path = directory.path().join("state.json");
-        fs::write(&path, &bytes).unwrap();
+        fs::write(
+            directory.path().join("state.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
         let opened = FileStateStore::open(lease).unwrap();
-        assert!(opened.snapshot.is_none());
-        assert!(opened.read_error.is_some());
-        assert_eq!(fs::read(path).unwrap(), bytes);
+        // The configured default applies, as when no choice was made.
+        assert_eq!(opened.snapshot, Some(snapshot.clone()));
+        assert!(opened.read_error.is_none());
     }
 }
 
@@ -186,7 +188,7 @@ fn fresh_state_roundtrips_and_atomic_replacement_keeps_latest_snapshot() {
 }
 
 #[test]
-fn context_record_roundtrips_and_rejects_invalid_schema() {
+fn context_record_roundtrips_and_rejects_invalid_schema_but_not_missing_fields() {
     let mut snapshot = Snapshot::anonymous("anonymous".into());
     snapshot.registered = serde_json::from_value(serde_json::json!({
         "number": 1.0_f64 / 3.0, "null": null, "array": [null, {"nested":false}]
@@ -199,19 +201,15 @@ fn context_record_roundtrips_and_rejects_invalid_schema() {
     assert_eq!(store.load().unwrap(), Some(snapshot.clone()));
     let bytes = fs::read(directory.path().join("state.json")).unwrap();
     for field in ["registered", "groups"] {
-        for malformed in [
-            None,
-            Some(serde_json::json!([])),
-            Some(serde_json::Value::Null),
-        ] {
+        for malformed in [serde_json::json!([]), serde_json::Value::Null] {
             let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            if let Some(malformed) = malformed {
-                value["state"][field] = malformed;
-            } else {
-                value["state"].as_object_mut().unwrap().remove(field);
-            }
+            value["state"][field] = malformed;
             assert!(FileStateStore::decode(&serde_json::to_vec(&value).unwrap()).is_err());
         }
+        // A record written before the field existed restores it empty.
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["state"].as_object_mut().unwrap().remove(field);
+        assert!(FileStateStore::decode(&serde_json::to_vec(&value).unwrap()).is_ok());
     }
 }
 
@@ -372,9 +370,7 @@ fn corrupt_state_reports_and_allows_replacement_while_event_storage_remains_usab
         .event_store
         .as_mut()
         .unwrap()
-        .recover(10, 4096)
-        .unwrap()
-        .events
+        .take_index()
         .is_empty());
     assert_eq!(
         *errors.lock().unwrap(),

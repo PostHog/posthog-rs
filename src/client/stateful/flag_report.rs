@@ -309,7 +309,6 @@ mod tests {
         config.persistence = super::super::Persistence::Memory;
         config.host = server.base_url();
         config.preload_feature_flags = false;
-        config.max_capture_attempts = 1;
         config.bootstrap_feature_flags =
             Some(HashMap::from([("a".into(), FlagValue::Boolean(true))]));
         let client = Client::init_blocking(config);
