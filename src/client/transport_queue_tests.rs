@@ -569,6 +569,46 @@ fn a_retry_whose_events_left_the_queue_starts_a_new_request() {
     harness.handle.shutdown_blocking();
 }
 
+/// Drive `rounds` 1.3 s ticks against an always-503 server, admitting one new
+/// event before each tick, and return the attempts the server saw.
+fn backoff_attempts(max_queue_size: usize, rounds: usize) -> Vec<u32> {
+    let server = MockServer::start();
+    let log = Log::default();
+    let mut builder = base(&server);
+    builder.max_queue_size(max_queue_size);
+    let harness = spawn(&mut builder, None, 64 * 1024);
+    let _offline = respond(&server, &log, 503, json!({}));
+    admit(&harness.handle, "a");
+    admit(&harness.handle, "b");
+    flush(&harness.handle);
+    for round in 0..rounds {
+        admit(&harness.handle, &format!("new-{}", round));
+        // Past the longest first wait (1 s x 1.25 jitter), short of the
+        // shortest second wait (2 s x 0.75 jitter).
+        harness.clock.advance(Duration::from_millis(1_300));
+        harness.handle.tick();
+    }
+    let attempts = log.all().iter().map(|request| request.attempt).collect();
+    harness.handle.request_close_before(harness.clock.now());
+    harness.handle.join();
+    attempts
+}
+
+#[test]
+fn the_backoff_keeps_growing_when_capacity_evicts_a_retried_event() {
+    // Without eviction the waits double: fewer than five requests.
+    assert!(backoff_attempts(100, 4).len() < 5);
+    // Eviction drops the retry identity (new attempt-1 requests) but must
+    // not reset the wait.
+    let attempts = backoff_attempts(2, 4);
+    assert!(attempts.len() < 5, "the backoff reset: {:?}", attempts);
+    assert!(
+        attempts.iter().all(|attempt| *attempt == 1),
+        "{:?}",
+        attempts
+    );
+}
+
 #[test]
 fn delivery_keeps_retrying_past_max_capture_attempts_with_or_without_a_store() {
     for persistent in [false, true] {
@@ -1249,7 +1289,7 @@ fn a_retry_answer_for_an_event_evicted_in_flight_keeps_no_duplicate_count() {
         created_at: String::new(),
         verdict: super::Verdict::Retry {
             retained: vec![(1, 2), (2, 3)],
-            delay: Duration::from_secs(1),
+            retry_after: None,
         },
     });
     assert_eq!(coordinator.copies.keys().copied().collect::<Vec<_>>(), [2]);
