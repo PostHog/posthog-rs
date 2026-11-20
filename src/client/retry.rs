@@ -282,9 +282,13 @@ mod tests {
     fn feature_flags_timeout_error_is_retryable() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        let (release, waiting) = std::sync::mpsc::channel();
         let server = thread::spawn(move || {
-            let (_stream, _) = listener.accept().unwrap();
-            thread::sleep(Duration::from_millis(100));
+            let (stream, _) = listener.accept().unwrap();
+            // Hold the connection until the client observes its timeout, rather
+            // than racing a timed server disconnect against a loaded executor.
+            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            drop(stream);
         });
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -292,11 +296,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let err = client.get(url).send().unwrap_err();
-
+        let response = client.get(url).send();
+        release.send(()).unwrap();
+        server.join().unwrap();
+        let err = response.unwrap_err();
         assert!(err.is_timeout());
         assert!(is_retryable_feature_flags_error(&err));
-        server.join().unwrap();
     }
 
     #[test]
