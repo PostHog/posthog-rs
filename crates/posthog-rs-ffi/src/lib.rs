@@ -850,39 +850,19 @@ pub unsafe extern "C" fn posthog_evaluate_flags(
             Some(json_arg(options_json, "options_json")?)
         };
         let options = evaluate_flags_options(options_json)?;
-        let flags = match client.client.evaluate_flags(distinct_id, options.clone()) {
-            Ok(flags) => flags,
-            Err(error) => {
-                // The request failed before any flag resolved. Still hand back a
-                // snapshot for this user, with whatever local evaluation resolved,
-                // so reads return defaults and report missing flags. Local-only
-                // evaluation makes no second request.
-                let mut local_only = options;
-                local_only.only_evaluate_locally = true;
-                // `evaluate_flags` only fails when its request fails, and a
-                // local-only evaluation makes none. If that ever changes, this
-                // panics, which `ffi_call` returns as POSTHOG_STATUS_PANIC with no
-                // snapshot, so POSTHOG_STATUS_REQUEST always comes with one.
-                let flags = client
-                    .client
-                    .evaluate_flags(distinct_id, local_only)
-                    .expect("a local-only flag evaluation makes no request and can't fail");
-                flags_out.write(Box::into_raw(Box::new(PostHogFlags { flags })));
-                // The inputs were already checked, so this is the server's fault,
-                // even for a response that doesn't parse.
-                return Err(FfiError::new(
-                    PostHogStatus::POSTHOG_STATUS_REQUEST,
-                    error.to_string(),
-                ));
-            }
-        };
-        // Local evaluation resolved some flags but the request still failed. Report
-        // it the same way as a failure with no local results, so callers see one
-        // shape for every outage.
-        let request_error = flags.request_error().map(str::to_string);
+        // A failed request still comes with a snapshot of the flags evaluated
+        // locally, so reads return defaults and their events report the failure.
+        let (flags, request_error) = client
+            .client
+            .evaluate_flags_with_request_error(distinct_id, options);
         flags_out.write(Box::into_raw(Box::new(PostHogFlags { flags })));
         if let Some(error) = request_error {
-            return Err(FfiError::new(PostHogStatus::POSTHOG_STATUS_REQUEST, error));
+            // The inputs were already checked, so this is the server's fault,
+            // even for a response that doesn't parse.
+            return Err(FfiError::new(
+                PostHogStatus::POSTHOG_STATUS_REQUEST,
+                error.to_string(),
+            ));
         }
         Ok(())
     })

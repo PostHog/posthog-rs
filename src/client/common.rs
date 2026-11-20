@@ -396,7 +396,6 @@ pub(super) struct EvaluationState {
     request_id: Option<String>,
     errors_while_computing: bool,
     quota_limited: bool,
-    request_error: Option<String>,
 }
 
 impl EvaluationState {
@@ -415,7 +414,6 @@ impl EvaluationState {
             request_id: None,
             errors_while_computing: false,
             quota_limited: false,
-            request_error: None,
         };
         state.evaluate_locally(local_evaluator);
         state
@@ -485,10 +483,25 @@ impl EvaluationState {
         &self.options
     }
 
+    #[cfg_attr(not(feature = "async-client"), allow(dead_code))]
     pub(super) fn apply_remote_result(
         &mut self,
         result: Result<DetailedFlagsResponse, Error>,
     ) -> Result<(), Error> {
+        match self.record_remote_result(result) {
+            Some(error) if self.records.is_empty() => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Applies the `/flags` result and returns its error, if any. Unlike
+    /// [`Self::apply_remote_result`], a failure with no local results still
+    /// leaves a usable state, marked with `errors_while_computing`, so its
+    /// `$feature_flag_called` events report the failure.
+    pub(super) fn record_remote_result(
+        &mut self,
+        result: Result<DetailedFlagsResponse, Error>,
+    ) -> Option<Error> {
         match result {
             Ok(response) => {
                 self.request_id = response.request_id;
@@ -503,9 +516,8 @@ impl EvaluationState {
                         remote_record_from_detail(detail, minimal_flag_called_events)
                     });
                 }
-                Ok(())
+                None
             }
-            Err(error) if self.records.is_empty() => Err(error),
             Err(error) => {
                 debug!(
                     error = error.to_string(),
@@ -513,8 +525,7 @@ impl EvaluationState {
                     "/flags fetch failed; returning snapshot from local results only"
                 );
                 self.errors_while_computing = true;
-                self.request_error = Some(error.to_string());
-                Ok(())
+                Some(error)
             }
         }
     }
@@ -523,7 +534,7 @@ impl EvaluationState {
         self,
         host: Arc<dyn FeatureFlagEvaluationsHost>,
     ) -> FeatureFlagEvaluations {
-        let mut evaluations = FeatureFlagEvaluations::new(
+        FeatureFlagEvaluations::new(
             host,
             self.distinct_id,
             self.records,
@@ -533,9 +544,7 @@ impl EvaluationState {
             None,
             self.errors_while_computing,
             self.quota_limited,
-        );
-        evaluations.request_error = self.request_error;
-        evaluations
+        )
     }
 }
 
@@ -788,10 +797,6 @@ mod tests {
         assert_eq!(partial.records.len(), 1);
         assert!(partial.records.contains_key("local"));
         assert!(partial.errors_while_computing);
-        assert_eq!(
-            partial.request_error.as_deref(),
-            Some("Connection Error: remote failed")
-        );
         assert_eq!(partial.request_id, None);
         assert!(!partial.quota_limited);
 
@@ -800,6 +805,19 @@ mod tests {
         assert!(empty
             .apply_remote_result(Err(Error::Connection("remote failed".to_string())))
             .is_err());
+    }
+
+    #[test]
+    fn record_remote_result_keeps_a_usable_state_on_failure() {
+        let mut empty =
+            EvaluationState::new("user-1".to_string(), EvaluateFlagsOptions::default(), None);
+        let error = empty.record_remote_result(Err(Error::Connection("remote failed".to_string())));
+        assert!(matches!(error, Some(Error::Connection(_))));
+        assert!(empty.records.is_empty());
+        assert!(
+            empty.errors_while_computing,
+            "events from this snapshot report the failure"
+        );
     }
 
     fn flag_params(

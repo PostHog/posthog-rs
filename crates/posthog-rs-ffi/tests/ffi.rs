@@ -315,7 +315,10 @@ fn flag_request_failure_still_returns_a_readable_snapshot() {
                 && called[0]["properties"]["$feature_flag"] == "beta"
                 && called[0]["properties"]["$feature_flag_error"]
                     .as_str()
-                    .is_some_and(|error| error.contains("flag_missing"))
+                    .is_some_and(|error| {
+                        error.contains("flag_missing")
+                            && error.contains("errors_while_computing_flags")
+                    })
         });
         then.status(200).json_body(json!({"results": {}}));
     });

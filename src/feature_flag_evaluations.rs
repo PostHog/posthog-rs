@@ -125,9 +125,6 @@ pub struct FeatureFlagEvaluations {
     evaluated_at: Option<i64>,
     errors_while_computing: bool,
     quota_limited: bool,
-    /// The `/flags` request error when the snapshot holds only local results
-    /// because that request failed.
-    pub(crate) request_error: Option<String>,
     accessed: Mutex<HashSet<String>>,
     pub(crate) request_context: crate::RequestContext,
 }
@@ -155,7 +152,6 @@ impl FeatureFlagEvaluations {
             evaluated_at,
             errors_while_computing,
             quota_limited,
-            request_error: None,
             accessed: Mutex::new(HashSet::new()),
             request_context: crate::RequestContext::current().unwrap_or_default(),
         }
@@ -221,16 +217,6 @@ impl FeatureFlagEvaluations {
     #[must_use]
     pub fn get_flag_payload(&self, key: &str) -> Option<Value> {
         self.flags.get(key).and_then(|f| f.payload.clone())
-    }
-
-    /// The error from the `/flags` request when it failed and the snapshot holds
-    /// only flags evaluated locally. `None` when the request succeeded or wasn't
-    /// made. For SDKs built on this one, such as the C bindings, which report the
-    /// failure alongside the snapshot. Not part of the supported API.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn request_error(&self) -> Option<&str> {
-        self.request_error.as_deref()
     }
 
     /// All flag keys present in this snapshot.
@@ -321,7 +307,6 @@ impl FeatureFlagEvaluations {
             evaluated_at: self.evaluated_at,
             errors_while_computing: self.errors_while_computing,
             quota_limited: self.quota_limited,
-            request_error: self.request_error.clone(),
             accessed: Mutex::new(self.snapshot_accessed()),
             request_context: self.request_context.clone(),
         }

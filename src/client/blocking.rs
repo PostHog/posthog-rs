@@ -1014,14 +1014,31 @@ impl Client {
         distinct_id: S,
         options: EvaluateFlagsOptions,
     ) -> Result<FeatureFlagEvaluations, Error> {
+        match self.evaluate_flags_with_request_error(distinct_id, options) {
+            (flags, Some(error)) if flags.keys().is_empty() => Err(error),
+            (flags, _) => Ok(flags),
+        }
+    }
+
+    /// Like [`Client::evaluate_flags`], but always returns a snapshot, with the
+    /// `/flags` request error alongside it when that request failed. The snapshot
+    /// then holds only locally evaluated flags, and its `$feature_flag_called`
+    /// events report the failure. For SDKs built on this one, such as the C
+    /// bindings. Not part of the supported API.
+    #[doc(hidden)]
+    pub fn evaluate_flags_with_request_error<S: Into<String>>(
+        &self,
+        distinct_id: S,
+        options: EvaluateFlagsOptions,
+    ) -> (FeatureFlagEvaluations, Option<Error>) {
         let distinct_id: String = distinct_id.into();
         let host = self.flag_event_host();
         if distinct_id.is_empty() || self.options.is_disabled() {
-            return Ok(FeatureFlagEvaluations::empty(host));
+            return (FeatureFlagEvaluations::empty(host), None);
         }
 
         if options.flag_keys.as_ref().is_some_and(Vec::is_empty) {
-            return Ok(FeatureFlagEvaluations::new(
+            let flags = FeatureFlagEvaluations::new(
                 host,
                 distinct_id,
                 HashMap::new(),
@@ -1031,16 +1048,18 @@ impl Client {
                 None,
                 false,
                 false,
-            ));
+            );
+            return (flags, None);
         }
 
         let mut state = EvaluationState::new(distinct_id, options, self.local_evaluator.as_ref());
+        let mut request_error = None;
         if state.should_fetch_remote(self.options.local_evaluation_only) {
             let response = self.fetch_flag_details(state.distinct_id(), state.options());
-            state.apply_remote_result(response)?;
+            request_error = state.record_remote_result(response);
         }
 
-        Ok(state.into_evaluations(host))
+        (state.into_evaluations(host), request_error)
     }
 
     fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {
