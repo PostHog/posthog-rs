@@ -273,22 +273,28 @@ impl Controller {
     /// The replay debug keys PostHog reads from every event except `$snapshot`,
     /// describing the event's own state snapshot and session. This client never
     /// holds frames, so the status is `active` or `disabled`, never `buffering`.
+    /// While replay is intentionally off (not started, stopped, opted out, or
+    /// turned off by remote config) only `$recording_status: disabled` is
+    /// attached, as the debug-properties spec requires.
     pub(super) fn debug_properties(
         &self,
         snapshot: &Snapshot,
         session_id: Option<Uuid>,
-    ) -> [(&'static str, serde_json::Value); 4] {
+    ) -> Vec<(&'static str, serde_json::Value)> {
         let (started, in_flight) = {
             let pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
             (pool.active, pool.in_flight)
         };
-        let recording =
-            started && session_id.is_some() && !self.gate.is_closed() && self.allowed(snapshot);
         let config = snapshot
             .remote_config
             .as_ref()
             .and_then(|c| c.session_recording.as_ref());
-        [
+        let opted_out = snapshot.opt_out.unwrap_or(self.default_opt_out);
+        if !started || opted_out || config == Some(&serde_json::Value::Bool(false)) {
+            return vec![("$recording_status", "disabled".into())];
+        }
+        let recording = session_id.is_some() && !self.gate.is_closed() && self.allowed(snapshot);
+        vec![
             (
                 "$recording_status",
                 if recording { "active" } else { "disabled" }.into(),

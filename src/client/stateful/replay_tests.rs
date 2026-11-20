@@ -1055,10 +1055,11 @@ fn events_report_whether_replay_is_recording_and_how_many_frames_are_unsent() {
     let backend = Backend::new();
     let (client, seen) = recording_client(&backend);
     let replay = client.session_replay();
+    // Not started yet: replay is intentionally off, so only the status shows.
     client.capture("before");
     assert_eq!(
         replay_debug(&seen, "before"),
-        replay_debug_keys("disabled", "trigger_disabled", "trigger_disabled", 0)
+        json!({"$recording_status": "disabled"})
     );
     replay.start();
     let held = frame(&replay);
@@ -1070,10 +1071,25 @@ fn events_report_whether_replay_is_recording_and_how_many_frames_are_unsent() {
     replay.stop();
     client.capture("after");
     assert_eq!(
-        replay_debug(&seen, "after")["$recording_status"],
-        json!("disabled")
+        replay_debug(&seen, "after"),
+        json!({"$recording_status": "disabled"})
     );
     drop(held);
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn remotely_disabled_replay_attaches_only_the_disabled_status() {
+    let backend = Backend::new();
+    *backend.config.lock().unwrap() = json!({"hasFeatureFlags": false, "sessionRecording": false});
+    let (client, seen) = recording_client(&backend);
+    wait_for_recording_config(&client, json!(false));
+    client.session_replay().start();
+    client.capture("off");
+    assert_eq!(
+        replay_debug(&seen, "off"),
+        json!({"$recording_status": "disabled"})
+    );
     client.shutdown_blocking(None);
 }
 
