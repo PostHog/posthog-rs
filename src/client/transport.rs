@@ -66,7 +66,7 @@ mod table;
 use delivery::Delivery;
 #[cfg(feature = "stateful")]
 #[allow(unused_imports)] // Used by the stateful client layered above.
-pub(crate) use delivery::{Admission, PreparedAdmission, StartupFailure};
+pub(crate) use delivery::{Admission, StartupFailure};
 
 /// Messages sent from producers (`capture`/`flush`/`shutdown`) to the worker.
 pub(crate) enum Control {
