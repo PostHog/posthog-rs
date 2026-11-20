@@ -303,13 +303,15 @@ impl Client {
 
     /// Enable person processing without identifying, attempting an empty `$set` once.
     /// Already-enabled processing is a no-op, even if its original event was dropped.
+    /// While opted out, processing is still enabled but no event is sent, as in
+    /// posthog-js.
     pub fn create_person_profile(&self) {
         let Some(_guard) = self.identity_guard("create_person_profile") else {
             return;
         };
         let mode = self.producer.as_ref().unwrap().person_profiles;
         let result = self.state.as_ref().unwrap().mutate(|state| {
-            if self.snapshot_opted_out(state) || mode.processes(state) {
+            if mode.processes(state) {
                 return None;
             }
             state.person_processing = true;

@@ -220,12 +220,11 @@ fn identify_while_out_changes_identity_without_link_replay_or_property_dedup() {
 }
 
 #[test]
-fn alias_and_profile_creation_are_noops_while_out_and_properties_remain_retryable() {
+fn alias_is_a_noop_while_out_and_properties_remain_retryable() {
     let mut conf = config();
     conf.opt_out = true;
     let (client, events) = observed(conf);
     client.alias("alias");
-    client.create_person_profile();
     client.opt_in();
     accepted(client.capture("still-anonymous"));
     assert_eq!(
@@ -242,6 +241,22 @@ fn alias_and_profile_creation_are_noops_while_out_and_properties_remain_retryabl
     client.set_person_properties(set.clone());
     client.set_person_properties(set);
     assert_eq!(events.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn profile_creation_while_out_turns_processing_on_without_an_event() {
+    let mut conf = config();
+    conf.opt_out = true;
+    let (client, events) = observed(conf);
+    client.create_person_profile();
+    assert!(events.lock().unwrap().is_empty());
+    client.opt_in();
+    accepted(client.capture("processed"));
+    // Processing is already on, so no $set follows.
+    client.create_person_profile();
+    let seen = events.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].options()["process_person_profile"], true);
 }
 
 #[test]
