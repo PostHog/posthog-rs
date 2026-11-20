@@ -547,9 +547,9 @@ impl ClientOptionsBuilder {
     /// persistent delivery, it also receives storage read, write, and removal
     /// errors. A failed write drops that event (reported once per run of
     /// failures). A record that cannot be read is dropped and its file
-    /// deleted. An event can be delivered again after restart when removing
-    /// its delivered record failed, or when shutdown stopped while it was
-    /// being sent.
+    /// deleted. An event whose record could not be removed after it left the
+    /// queue (delivered, reported lost, evicted, or unreadable) can come back
+    /// after a restart, as can an event in flight at shutdown.
     /// Multiple hooks fire in registration order.
     ///
     /// # Observability only — never emit from the hook

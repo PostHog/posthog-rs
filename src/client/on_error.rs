@@ -104,8 +104,9 @@ pub enum StorageOperation {
 ///
 /// For client state, a failed write does not roll back the in-memory state.
 /// For queued events, a failed write leaves no record and the event is
-/// dropped. A delivered event whose record could not be removed, or an event
-/// in flight at shutdown, can be delivered again after restart.
+/// dropped. An event whose record could not be removed after it left the
+/// queue (delivered, reported lost, evicted, or unreadable) can come back
+/// after a restart, as can an event in flight at shutdown.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct StorageFailure<'a> {
