@@ -205,10 +205,7 @@ pub posthog::stateful::Config::flush_interval: core::time::Duration
 pub posthog::stateful::Config::host: alloc::string::String
 pub posthog::stateful::Config::instance_name: alloc::string::String
 pub posthog::stateful::Config::max_batch_size: usize
-pub posthog::stateful::Config::max_queue_bytes: usize
 pub posthog::stateful::Config::max_queue_size: usize
-pub posthog::stateful::Config::max_stored_bytes: u64
-pub posthog::stateful::Config::max_stored_events: usize
 pub posthog::stateful::Config::persistence: posthog::stateful::Persistence
 pub posthog::stateful::Config::platform_context: std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>
 pub posthog::stateful::Config::project_token: alloc::string::String
@@ -216,7 +213,6 @@ pub posthog::stateful::Config::request_timeout: core::time::Duration
 pub posthog::stateful::Config::sdk_name: alloc::string::String
 pub posthog::stateful::Config::sdk_version: alloc::string::String
 pub posthog::stateful::Config::shutdown_timeout: core::time::Duration
-pub posthog::stateful::Config::state_write_delay: core::time::Duration
 impl posthog::stateful::Config
 pub fn posthog::stateful::Config::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog::Event) -> core::option::Option<posthog::Event> + core::marker::Send + 'static
 pub fn posthog::stateful::Config::new(impl core::convert::Into<alloc::string::String>) -> Self

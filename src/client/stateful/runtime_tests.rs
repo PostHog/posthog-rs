@@ -61,8 +61,9 @@ fn client_defaults_map_to_shared_delivery_without_changing_server_defaults() {
     assert_eq!(config.host, "https://eu.i.posthog.com");
     assert_eq!(config.max_queue_bytes, 8 * 1024 * 1024);
     assert_eq!(config.max_stored_bytes, 64 * 1024 * 1024);
-    assert_eq!(config.max_stored_events, 10_000);
+    assert_eq!(config.event_limits().max_events, 1_000);
     assert_eq!(config.state_write_delay, Duration::from_millis(250));
+    assert_eq!(config.request_timeout, Duration::from_secs(10));
     let options = config.transport_options();
     assert_eq!(
         (
@@ -144,28 +145,48 @@ fn explicitly_disabled_client_is_quiet_and_error_hook_panic_is_isolated() {
 }
 
 #[test]
-fn incoherent_limits_disable_before_creating_storage() {
-    let changes: &[fn(&mut Config)] = &[
-        |c| c.flush_at = 0,
-        |c| c.max_batch_size = 0,
-        |c| c.max_queue_bytes = 0,
-        |c| c.max_stored_bytes = 0,
-        |c| c.max_stored_events = 0,
-        |c| c.flush_interval = Duration::ZERO,
-        |c| c.shutdown_timeout = Duration::MAX,
-        |c| c.state_write_delay = Duration::MAX,
-        |c| c.request_timeout = Duration::ZERO,
-        |c| c.bootstrap_anonymous_id = Some(" ".into()),
-        |c| c.host = "file:///tmp/events".into(),
-        |c| c.host = "https://name:password@example.test".into(),
-    ];
-    for change in changes {
-        let directory = Directory::new();
-        let mut config = directory.config();
-        change(&mut config);
-        let client = Client::init_blocking(config);
-        assert!(client.is_disabled());
-        assert!(!directory.0.exists());
+fn out_of_range_settings_are_clamped_instead_of_disabling_the_client() {
+    let mut config = Config::new("phc_test");
+    config.flush_at = 0;
+    config.max_batch_size = 0;
+    config.max_queue_size = 0;
+    config.flush_interval = Duration::ZERO;
+    config.shutdown_timeout = Duration::MAX;
+    config.request_timeout = Duration::ZERO;
+    config.bootstrap_anonymous_id = Some(" ".into());
+    config.sdk_name = " ".into();
+    config.normalize();
+    assert!(config.invalid_reason().is_none());
+    assert_eq!(
+        (
+            config.flush_at,
+            config.max_batch_size,
+            config.max_queue_size
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(config.flush_interval, Duration::from_millis(1));
+    assert_eq!(
+        config.shutdown_timeout,
+        crate::client::transport::MAX_SHUTDOWN_TIMEOUT
+    );
+    assert_eq!(config.request_timeout, Duration::from_secs(10));
+    assert_eq!(config.bootstrap_anonymous_id, None);
+    assert_eq!(config.sdk_name, crate::client::SDK_USERAGENT_NAME);
+}
+
+#[test]
+fn an_invalid_host_falls_back_to_the_default_host() {
+    for host in [
+        "",
+        "file:///tmp/events",
+        "https://name:password@example.test",
+    ] {
+        let mut config = Config::new("phc_test");
+        config.host = host.into();
+        config.normalize();
+        assert!(config.invalid_reason().is_none());
+        assert_eq!(config.host, "https://us.i.posthog.com", "host {:?}", host);
     }
 }
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::{Persistence, Snapshot};
+use super::Persistence;
 use crate::client::event_store::StoreLimits;
 use crate::client::transport::MAX_SHUTDOWN_TIMEOUT;
 use crate::client::{ClientOptions, OnErrorHook, PostHogError};
@@ -11,10 +11,15 @@ use crate::{BeforeSendHook, CaptureCompression, EndpointManager, Event, DEFAULT_
 /// 30-second ceiling, where a server SDK starts at 100 ms.
 const RETRY_INITIAL_BACKOFF_MS: u64 = 1_000;
 
+/// The request timeout of the iOS, Android and posthog-js clients.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Configuration for a stateful client. Start with [`Config::new`].
 ///
-/// Invalid configuration reports an initialization diagnostic and disables the
-/// client. Storage failures instead preserve enabled, memory-backed operation.
+/// Out-of-range settings are clamped and an invalid host falls back to the
+/// default host, as in the other PostHog SDKs. A missing or invalid project
+/// token reports an initialization diagnostic and disables the client. Storage
+/// failures instead preserve enabled, memory-backed operation.
 #[non_exhaustive]
 pub struct Config {
     /// Project token, trimmed during initialization. Never use a personal API key.
@@ -39,34 +44,20 @@ pub struct Config {
     pub max_batch_size: usize,
     /// Interval between automatic flushes. Default: 10 seconds.
     pub flush_interval: Duration,
-    /// Maximum events held in memory, waiting for delivery or for a disk write.
-    /// Default: 1,000.
-    ///
-    /// At this limit or `max_queue_bytes`, the oldest events in memory are
-    /// dropped to keep the newest. Capture still returns
+    /// Maximum events queued for delivery: on disk, or in memory with
+    /// [`Persistence::Memory`]. Default: 1,000. At this limit the oldest events
+    /// are dropped to keep the newest; capture still returns
     /// [`CaptureOutcome::Accepted`](super::CaptureOutcome::Accepted).
     pub max_queue_size: usize,
-    /// Maximum serialized event bytes held in memory. Default: 8 MiB. This
-    /// does not cap the process's memory use.
-    ///
-    /// At this limit, the oldest events in memory are dropped to keep the
-    /// newest, even when the newest alone is over it.
-    pub max_queue_bytes: usize,
-    /// Maximum events stored on disk. Default: 10,000.
-    ///
-    /// At this limit or `max_stored_bytes`, the oldest stored events are dropped
-    /// to keep the newest.
-    pub max_stored_events: usize,
-    /// Maximum serialized event bytes stored on disk. Default: 64 MiB.
-    ///
-    /// At this limit or `max_stored_events`, the oldest stored events are
-    /// dropped to keep the newest.
-    pub max_stored_bytes: u64,
+    /// Serialized event bytes held in memory: the queue with
+    /// [`Persistence::Memory`], otherwise events not yet written to disk.
+    pub(crate) max_queue_bytes: usize,
+    /// Serialized event bytes stored on disk.
+    pub(crate) max_stored_bytes: u64,
     /// How long to wait after a state change before writing client state to
-    /// disk. Changes made within the window are written together. Lower values
-    /// lose less on a crash; higher values write less often. Default: 250 ms.
-    pub state_write_delay: Duration,
-    /// Timeout per network request. Default: 30 seconds. Sub-second precision is
+    /// disk, so changes made close together are written once.
+    pub(crate) state_write_delay: Duration,
+    /// Timeout per network request. Default: 10 seconds. Sub-second precision is
     /// rounded up to whole seconds.
     pub request_timeout: Duration,
     /// Default SDK-controlled shutdown/Drop waiting budget. Default: 30 seconds.
@@ -108,10 +99,9 @@ impl Config {
             flush_interval: Duration::from_secs(10),
             max_queue_size: 1_000,
             max_queue_bytes: 8 * 1024 * 1024,
-            max_stored_events: 10_000,
             max_stored_bytes: 64 * 1024 * 1024,
             state_write_delay: Duration::from_millis(250),
-            request_timeout: Duration::from_secs(30),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             shutdown_timeout: Duration::from_secs(30),
             capture_compression: Some(CaptureCompression::Gzip),
             disable_geoip: false,
@@ -153,15 +143,44 @@ impl Config {
         self
     }
 
+    /// Trim and clamp settings as the other PostHog SDKs do, rather than
+    /// disabling the client for them.
     pub(super) fn normalize(&mut self) {
         self.project_token = self.project_token.trim().into();
         self.sdk_name = self.sdk_name.trim().into();
+        if self.sdk_name.is_empty() {
+            self.sdk_name = crate::client::SDK_USERAGENT_NAME.into();
+        }
         self.sdk_version = self.sdk_version.trim().into();
+        if self.sdk_version.is_empty() {
+            self.sdk_version = crate::client::CRATE_VERSION.into();
+        }
         self.host = self.host.trim().into();
-        if self.host.is_empty() {
+        if !valid_host(&self.host) {
+            if !self.host.is_empty() {
+                tracing::warn!("posthog-rs: invalid host; using {DEFAULT_HOST}");
+            }
             self.host = DEFAULT_HOST.into();
         }
         self.host = EndpointManager::determine_server_host(&self.host);
+        if self
+            .bootstrap_anonymous_id
+            .as_deref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            self.bootstrap_anonymous_id = None;
+        }
+        self.flush_at = self.flush_at.max(1);
+        self.max_batch_size = self.max_batch_size.max(1);
+        self.max_queue_size = self.max_queue_size.max(1);
+        self.flush_interval = self
+            .flush_interval
+            .clamp(Duration::from_millis(1), MAX_SHUTDOWN_TIMEOUT);
+        self.shutdown_timeout = self.shutdown_timeout.min(MAX_SHUTDOWN_TIMEOUT);
+        if self.request_timeout.is_zero() {
+            self.request_timeout = DEFAULT_REQUEST_TIMEOUT;
+        }
+        self.request_timeout = self.request_timeout.min(MAX_SHUTDOWN_TIMEOUT);
     }
 
     pub(super) fn invalid_reason(&self) -> Option<&'static str> {
@@ -176,47 +195,13 @@ impl Config {
         {
             return Some("project_token contains invalid header characters");
         }
-        if !reqwest::Url::parse(&self.host).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-        }) {
-            return Some("host must be an HTTP(S) URL without credentials, query or fragment");
-        }
-        if self.sdk_name.is_empty()
-            || self.sdk_version.is_empty()
-            || reqwest::header::HeaderValue::from_str(&format!(
-                "{}/{}",
-                self.sdk_name, self.sdk_version
-            ))
-            .is_err()
+        if reqwest::header::HeaderValue::from_str(&format!(
+            "{}/{}",
+            self.sdk_name, self.sdk_version
+        ))
+        .is_err()
         {
-            return Some("SDK name and version must be nonblank and valid header text");
-        }
-        if self.flush_at == 0 || self.max_batch_size == 0 || self.max_queue_size == 0 {
-            return Some("flush_at, max_batch_size and max_queue_size must be positive");
-        }
-        if self.max_queue_bytes == 0 || self.max_stored_events == 0 || self.max_stored_bytes == 0 {
-            return Some("event byte and storage count limits must be positive");
-        }
-        if self.flush_interval.as_millis() == 0
-            || self.flush_interval > MAX_SHUTDOWN_TIMEOUT
-            || self.state_write_delay > MAX_SHUTDOWN_TIMEOUT
-            || self.shutdown_timeout > MAX_SHUTDOWN_TIMEOUT
-        {
-            return Some("flush_interval must be at least 1 ms; scheduling durations must not exceed one day");
-        }
-        if self.request_timeout.is_zero() || self.request_timeout > MAX_SHUTDOWN_TIMEOUT {
-            return Some("request_timeout must be positive and at most one day");
-        }
-        if let Some(id) = &self.bootstrap_anonymous_id {
-            let snapshot = Snapshot::anonymous(id.clone());
-            if !snapshot.is_valid() {
-                return Some("bootstrap_anonymous_id must be nonblank");
-            }
+            return Some("SDK name and version must be valid header text");
         }
         None
     }
@@ -232,7 +217,7 @@ impl Config {
 
     pub(super) fn event_limits(&self) -> StoreLimits {
         StoreLimits {
-            max_events: self.max_stored_events,
+            max_events: self.max_queue_size,
             max_bytes: self.max_stored_bytes,
         }
     }
@@ -256,4 +241,16 @@ impl Config {
         options.on_error = self.on_error.clone();
         options
     }
+}
+
+/// An HTTP(S) URL with a host and no credentials, query or fragment.
+fn valid_host(host: &str) -> bool {
+    reqwest::Url::parse(host).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
 }
