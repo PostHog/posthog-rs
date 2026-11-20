@@ -3,7 +3,6 @@ version = 1
 
 [git]
 default_branch = "main"
-short_tags = "posthog"    # Use v1.2.3 for the implementation crate
 
 [github]
 repository = "posthog/posthog-rs"

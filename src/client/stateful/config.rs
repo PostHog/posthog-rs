@@ -195,15 +195,18 @@ impl Config {
         {
             return Some("project_token contains invalid header characters");
         }
-        if reqwest::header::HeaderValue::from_str(&self.sdk_info()).is_err() {
+        if reqwest::header::HeaderValue::from_str(&self.sdk_identity().user_agent()).is_err() {
             return Some("SDK name and version must be valid header text");
         }
         None
     }
 
-    /// The `name/version` sent in the `PostHog-Sdk-Info` and `User-Agent` headers.
-    fn sdk_info(&self) -> String {
-        format!("{}/{}", self.sdk_name, self.sdk_version)
+    /// The SDK the requests name in the `PostHog-Sdk-Info` and `User-Agent` headers.
+    fn sdk_identity(&self) -> crate::client::SdkIdentity {
+        crate::client::SdkIdentity {
+            name: self.sdk_name.clone().into(),
+            version: self.sdk_version.clone().into(),
+        }
     }
 
     pub(super) fn request_timeout_seconds(&self) -> u64 {
@@ -237,7 +240,7 @@ impl Config {
         options.shutdown_timeout_ms = self.shutdown_timeout.as_millis() as u64;
         options.retry_initial_backoff_ms = RETRY_INITIAL_BACKOFF_MS;
         options.capture_compression = self.capture_compression;
-        options.sdk_info = Some(self.sdk_info());
+        options.sdk_identity = self.sdk_identity();
         options.on_error = self.on_error.clone();
         options
     }

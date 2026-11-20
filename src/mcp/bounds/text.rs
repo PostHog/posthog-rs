@@ -9,6 +9,10 @@ pub(crate) fn truncate(text: &str, limit: usize) -> String {
     if !exceeds(text, limit) {
         return text.to_string();
     }
+    mark_cut(text, limit)
+}
+
+fn mark_cut(text: &str, limit: usize) -> String {
     let marker_length = TRUNCATION_MARKER.len();
     if limit < marker_length {
         return TRUNCATION_MARKER[..limit].to_string();
@@ -17,27 +21,32 @@ pub(crate) fn truncate(text: &str, limit: usize) -> String {
 }
 
 /// Redacts `text` with `pass` at a cost bounded by `limit`, then cuts it to
-/// `limit`. When the scan cut removed text, the last margin of what was
-/// scanned is dropped too: a match split by that cut could otherwise slide
-/// under the limit after an earlier redaction shortened the text.
+/// `limit`. When the scan cut removed text, only the common prefix with the
+/// redacted first `limit` characters is kept, marked as cut: each result holds
+/// raw the match its own cut split, and the other redacts or omits it.
 pub(crate) fn bounded_text(text: &str, limit: usize, pass: TextPass) -> String {
     if is_binary(text) {
         return truncate(BINARY_PLACEHOLDER, limit);
     }
-    let scan_limit = limit + REDACTION_SCAN_MARGIN;
-    let scanned = prefix(text, scan_limit);
+    let scanned = prefix(text, limit + REDACTION_SCAN_MARGIN);
     let redacted = pass.apply(scanned);
-    let scan_cut_text = scanned.len() < text.len();
-    let final_limit = if scan_cut_text {
-        let without_margin = redacted
-            .chars()
-            .count()
-            .saturating_sub(REDACTION_SCAN_MARGIN);
-        limit.min(without_margin)
-    } else {
-        limit
-    };
-    truncate(&redacted, final_limit)
+    if scanned.len() == text.len() {
+        return truncate(&redacted, limit);
+    }
+    let redacted_head = pass.apply(prefix(text, limit));
+    let kept = common_prefix(&redacted, &redacted_head);
+    if kept.is_empty() {
+        return kept;
+    }
+    mark_cut(&kept, limit)
+}
+
+fn common_prefix(left: &str, right: &str) -> String {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(character, _)| character)
+        .collect()
 }
 
 /// Like [`bounded_text`], for a value that must not be blank: `None` when
@@ -85,6 +94,18 @@ mod tests {
         let bounded = bounded_text(&text, 2_048, TextPass::FreeText);
         assert!(!bounded.contains("alice"));
         assert!(!bounded.contains("ttt"));
+    }
+
+    #[test]
+    fn a_redaction_inside_the_margin_keeps_the_start() {
+        let link = format!(
+            "https://acme.s3.amazonaws.com/q3.pdf?token={}&X-Amz-Signature=abc123",
+            "A".repeat(1_300)
+        );
+        assert_eq!(
+            bounded_text(&link, 256, TextPass::Name),
+            "https://acme.s3.amazonaws.com/q3.pdf?token=%5Bredacted%5D..."
+        );
     }
 
     #[test]

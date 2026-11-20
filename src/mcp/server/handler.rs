@@ -42,8 +42,8 @@ impl<H: ServerHandler> ServerHandler for Instrumented<H> {
         if let Some(tool) = self.inner.get_tool(name) {
             return Some(self.injected_tool(&tool));
         }
-        if self.is_virtual_tool(name) {
-            return self.advertised_virtual_tool();
+        if let Some(tool) = self.virtual_tool(name) {
+            return self.advertised_virtual_tool(tool);
         }
         None
     }

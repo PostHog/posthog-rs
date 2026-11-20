@@ -14,7 +14,6 @@ use serde_json::json;
 use tracing::trace;
 use tracing::{instrument, warn};
 
-use super::get_default_user_agent;
 use crate::emails::{EmailTracker, Emails};
 use crate::endpoints::Endpoint;
 #[cfg(feature = "error-tracking")]
@@ -107,6 +106,7 @@ pub fn client<C: Into<ClientOptions>>(options: C) -> Client {
                     options.blocking_http_client.clone(),
                 );
                 poller.set_on_error(options.on_error.clone());
+                poller.set_user_agent(options.sdk_identity.user_agent());
                 poller.start();
 
                 (Some(LocalEvaluator::new(cache)), Some(poller))
@@ -426,7 +426,8 @@ impl Client {
     }
 
     /// Flush, stop the background worker, and join it. Idempotent: subsequent
-    /// calls are no-ops. After shutdown, `capture` drops events and
+    /// calls are no-ops. Also stops the local evaluation poller before its next
+    /// fetch. After shutdown, `capture` drops events and
     /// [`emails`](Self::emails) refuses requests with `client_closed`. Email
     /// requests already in flight on other threads, retries included, get
     /// until `shutdown_timeout_ms` from the start of shutdown to finish.
@@ -434,6 +435,9 @@ impl Client {
         let deadline =
             std::time::Instant::now() + Duration::from_millis(self.options.shutdown_timeout_ms);
         self.email_tracker.close();
+        if let Some(poller) = &self.flag_poller {
+            poller.signal_stop();
+        }
         self.close_lanes_blocking();
         self.email_tracker.wait_idle(deadline);
     }
@@ -885,7 +889,7 @@ impl Client {
             .http()?
             .get(url)
             .header(AUTHORIZATION, authorization_header(secret_key)?)
-            .header(USER_AGENT, get_default_user_agent());
+            .header(USER_AGENT, self.options.sdk_identity.user_agent());
         let response = self
             .flags_request_timeout(request)
             .send()
@@ -1010,14 +1014,31 @@ impl Client {
         distinct_id: S,
         options: EvaluateFlagsOptions,
     ) -> Result<FeatureFlagEvaluations, Error> {
+        match self.evaluate_flags_with_request_error(distinct_id, options) {
+            (flags, Some(error)) if flags.keys().is_empty() => Err(error),
+            (flags, _) => Ok(flags),
+        }
+    }
+
+    /// Like [`Client::evaluate_flags`], but always returns a snapshot, with the
+    /// `/flags` request error alongside it when that request failed. The snapshot
+    /// then holds only locally evaluated flags, and its `$feature_flag_called`
+    /// events report the failure. For SDKs built on this one, such as the C
+    /// bindings. Not part of the supported API.
+    #[doc(hidden)]
+    pub fn evaluate_flags_with_request_error<S: Into<String>>(
+        &self,
+        distinct_id: S,
+        options: EvaluateFlagsOptions,
+    ) -> (FeatureFlagEvaluations, Option<Error>) {
         let distinct_id: String = distinct_id.into();
         let host = self.flag_event_host();
         if distinct_id.is_empty() || self.options.is_disabled() {
-            return Ok(FeatureFlagEvaluations::empty(host));
+            return (FeatureFlagEvaluations::empty(host), None);
         }
 
         if options.flag_keys.as_ref().is_some_and(Vec::is_empty) {
-            return Ok(FeatureFlagEvaluations::new(
+            let flags = FeatureFlagEvaluations::new(
                 host,
                 distinct_id,
                 HashMap::new(),
@@ -1027,16 +1048,18 @@ impl Client {
                 None,
                 false,
                 false,
-            ));
+            );
+            return (flags, None);
         }
 
         let mut state = EvaluationState::new(distinct_id, options, self.local_evaluator.as_ref());
+        let mut request_error = None;
         if state.should_fetch_remote(self.options.local_evaluation_only) {
             let response = self.fetch_flag_details(state.distinct_id(), state.options());
-            state.apply_remote_result(response)?;
+            request_error = state.record_remote_result(response);
         }
 
-        Ok(state.into_evaluations(host))
+        (state.into_evaluations(host), request_error)
     }
 
     fn flag_event_host(&self) -> Arc<dyn FeatureFlagEvaluationsHost> {
@@ -1061,7 +1084,7 @@ impl Client {
                 .http()?
                 .post(flags_endpoint)
                 .header(CONTENT_TYPE, "application/json")
-                .header(USER_AGENT, get_default_user_agent())
+                .header(USER_AGENT, self.options.sdk_identity.user_agent())
                 .json(payload);
             let request = self.flags_request_timeout(request);
             #[cfg(feature = "test-harness")]
