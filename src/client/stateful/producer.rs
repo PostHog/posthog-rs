@@ -170,6 +170,11 @@ impl Producer {
         *self.last_screen.lock().unwrap_or_else(|p| p.into_inner()) = name;
     }
 
+    /// Reset forgets the last screen, as in posthog-ios and posthog-android.
+    pub(super) fn clear_last_screen(&self) {
+        self.set_last_screen(None);
+    }
+
     fn last_screen(&self) -> Option<String> {
         self.last_screen
             .lock()

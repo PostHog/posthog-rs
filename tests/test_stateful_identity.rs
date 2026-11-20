@@ -838,7 +838,7 @@ fn set_once_changes_are_not_deduplicated_away() {
 }
 
 #[test]
-fn never_mode_bootstrap_switches_a_restored_anonymous_install_without_an_event() {
+fn never_mode_bootstrap_keeps_a_restored_anonymous_install() {
     let directory = Directory::new();
     let client = Client::init_blocking(directory.config());
     close_before_reopen(client);
@@ -847,12 +847,22 @@ fn never_mode_bootstrap_switches_a_restored_anonymous_install_without_an_event()
     conf.bootstrap_identified_id = Some("seed".into());
     conf.person_profiles = PersonProfiles::Never;
     let (client, events) = observed(conf);
-    assert_eq!(client.get_distinct_id(), "seed");
-    assert_eq!(client.get_anonymous_id(), "anonymous");
+    assert_eq!(client.get_distinct_id(), "anonymous");
     assert!(events.lock().unwrap().is_empty());
-    assert_eq!(
-        client.shutdown_blocking(None).state,
-        PersistenceOutcome::Persisted
-    );
-    assert!(directory.identified());
+    client.shutdown_blocking(None);
+    assert!(!directory.identified());
+}
+
+#[test]
+fn reset_forgets_the_last_screen_name() {
+    let (client, events) = observed(config());
+    client.screen("Home");
+    client.reset();
+    client.capture("after reset");
+    let seen = events.lock().unwrap();
+    let after = seen.last().unwrap();
+    assert_eq!(after.event_name(), "after reset");
+    assert!(after.properties().get("$screen_name").is_none());
+    drop(seen);
+    client.shutdown_blocking(None);
 }

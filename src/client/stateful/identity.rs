@@ -234,7 +234,7 @@ impl Client {
 
     /// Link an alias to the current identity without changing either local ID.
     /// A blank alias, or one equal to the current distinct ID, is ignored with a
-    /// warning, as posthog-js does.
+    /// warning.
     pub fn alias(&self, input: impl Into<Alias>) {
         let Some(_guard) = self.identity_guard("alias") else {
             return;
@@ -335,6 +335,7 @@ impl Client {
             state.device_id = device_id;
             state.generation = generation;
         });
+        self.producer.as_ref().unwrap().clear_last_screen();
     }
 
     fn capture_person(
@@ -374,11 +375,7 @@ impl Client {
             if current.distinct_id != id {
                 tracing::warn!("posthog-rs: bootstrap differs from the identified user; reset before switching");
             }
-        } else if current.distinct_id == id
-            || self.producer.as_ref().unwrap().person_profiles == PersonProfiles::Never
-        {
-            // Never sends no identify event, but the install still adopts the
-            // bootstrap ID, as a fresh install does.
+        } else if current.distinct_id == id {
             let _ = self.state.as_ref().unwrap().mutate(|state| {
                 state.distinct_id = id.into();
                 state.identified = true;
@@ -387,6 +384,8 @@ impl Client {
                 state.person_properties = None;
             });
         } else {
+            // As in posthog-ios, posthog-android and posthog-js: identify does
+            // nothing with person profiles off, so the anonymous user stays.
             self.identify(id);
         }
     }

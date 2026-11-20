@@ -156,6 +156,11 @@ fn out_of_range_settings_are_clamped_instead_of_disabling_the_client() {
     config.bootstrap_anonymous_id = Some(" ".into());
     config.sdk_name = " ".into();
     config.normalize();
+    assert_eq!(config.bootstrap_anonymous_id, None);
+    let mut identified = Config::new("phc_test");
+    identified.bootstrap_identified_id = Some(" ".into());
+    identified.normalize();
+    assert_eq!(identified.bootstrap_identified_id, None);
     assert!(config.invalid_reason().is_none());
     assert_eq!(
         (
@@ -171,7 +176,6 @@ fn out_of_range_settings_are_clamped_instead_of_disabling_the_client() {
         crate::client::transport::MAX_SHUTDOWN_TIMEOUT
     );
     assert_eq!(config.request_timeout, Duration::from_secs(10));
-    assert_eq!(config.bootstrap_anonymous_id, None);
     assert_eq!(config.sdk_name, crate::client::SDK_USERAGENT_NAME);
 }
 

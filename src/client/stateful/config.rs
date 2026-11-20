@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::{Persistence, PersonProfiles, Snapshot};
+use super::{Persistence, PersonProfiles};
 use crate::client::event_store::StoreLimits;
 use crate::client::transport::MAX_SHUTDOWN_TIMEOUT;
 use crate::client::{ClientOptions, OnErrorHook, PostHogError};
@@ -171,12 +171,14 @@ impl Config {
             self.host = DEFAULT_HOST.into();
         }
         self.host = EndpointManager::determine_server_host(&self.host);
-        if self
-            .bootstrap_anonymous_id
-            .as_deref()
-            .is_some_and(|id| id.trim().is_empty())
-        {
-            self.bootstrap_anonymous_id = None;
+        // A blank bootstrap ID is ignored, as in the other PostHog SDKs.
+        for id in [
+            &mut self.bootstrap_anonymous_id,
+            &mut self.bootstrap_identified_id,
+        ] {
+            if id.as_deref().is_some_and(|id| id.trim().is_empty()) {
+                *id = None;
+            }
         }
         self.flush_at = self.flush_at.max(1);
         self.max_batch_size = self.max_batch_size.max(1);
@@ -213,15 +215,6 @@ impl Config {
         }
         if self.bootstrap_anonymous_id.is_some() && self.bootstrap_identified_id.is_some() {
             return Some("configure only one bootstrap identity");
-        }
-        if let Some(id) = &self.bootstrap_identified_id {
-            let mut snapshot = Snapshot::anonymous(uuid::Uuid::nil().to_string());
-            snapshot.distinct_id = id.clone();
-            snapshot.identified = true;
-            snapshot.person_processing = true;
-            if !snapshot.is_valid() {
-                return Some("bootstrap_identified_id must be nonblank");
-            }
         }
         None
     }
