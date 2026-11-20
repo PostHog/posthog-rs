@@ -192,6 +192,15 @@ jobs:
                 exit 1
               fi
             done
+            # The crates can be published while their GitHub Release failed.
+            if ! out=$(gh release view "$rust_version" --json tagName 2>&1); then
+              if [ "$out" = "release not found" ]; then
+                echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+              else
+                echo "::error::Couldn't look up the $rust_version release: $out"
+                exit 1
+              fi
+            fi
             exit 0
           fi
           if ! find .sampo/changesets -name '*.md' | grep -q .; then
@@ -391,12 +400,12 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Fail if posthog is still unpublished
+      - name: Fail if the posthog release is unfinished
         if: ${{ !cancelled() && steps.sampo-release.outputs.rust_unpublished != '' }}
         env:
           RUST_VERSION: ${{ steps.sampo-release.outputs.rust_unpublished }}
         run: |
-          echo "::error::posthog or posthog-rs $RUST_VERSION is committed on main but isn't on crates.io, and a rerun doesn't publish it. Publish posthog and posthog-rs by hand from the release commit, as RELEASING.md describes under \"a failed crates.io publish isn't retried\"."
+          echo "::error::The posthog $RUST_VERSION release is unfinished: posthog or posthog-rs isn't on crates.io, or its GitHub Release is missing, and a rerun doesn't finish it. Publish posthog and posthog-rs by hand from the release commit, as RELEASING.md describes under \"a failed crates.io publish isn't retried\"."
           exit 1
 
       - name: Send failure event to PostHog

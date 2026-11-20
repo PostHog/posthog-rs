@@ -855,9 +855,15 @@ pub unsafe extern "C" fn posthog_evaluate_flags(
                 // evaluation makes no second request.
                 let mut local_only = options;
                 local_only.only_evaluate_locally = true;
-                if let Ok(flags) = client.client.evaluate_flags(distinct_id, local_only) {
-                    flags_out.write(Box::into_raw(Box::new(PostHogFlags { flags })));
-                }
+                // `evaluate_flags` only fails when its request fails, and a
+                // local-only evaluation makes none. If that ever changes, this
+                // panics, which `ffi_call` returns as POSTHOG_STATUS_PANIC with no
+                // snapshot, so POSTHOG_STATUS_REQUEST always comes with one.
+                let flags = client
+                    .client
+                    .evaluate_flags(distinct_id, local_only)
+                    .expect("a local-only flag evaluation makes no request and can't fail");
+                flags_out.write(Box::into_raw(Box::new(PostHogFlags { flags })));
                 // The inputs were already checked, so this is the server's fault,
                 // even for a response that doesn't parse.
                 return Err(FfiError::new(
