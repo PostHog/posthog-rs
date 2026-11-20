@@ -71,6 +71,26 @@ use crate::client::transport::remote_config::RemoteConfig;
 /// the few levels the state record adds around application values.
 const MAX_VALUE_DEPTH: usize = 100;
 
+/// Serde for an `Option<Arc<T>>` field, stored as the plain value: immutable
+/// data shared by otherwise independent snapshots.
+mod shared_arc {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub(super) fn serialize<T: Serialize, S: Serializer>(
+        value: &Option<Arc<T>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_deref().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Arc<T>>, D::Error> {
+        Option::<T>::deserialize(deserializer).map(|value| value.map(Arc::new))
+    }
+}
+
 pub(super) fn within_depth<'a>(values: impl IntoIterator<Item = &'a Value>) -> bool {
     fn check(value: &Value, remaining: usize) -> bool {
         match value {
@@ -108,22 +128,17 @@ struct Snapshot {
     #[serde(default)]
     flags: flag_state::FlagState,
     // Records written before remote configuration restore without one.
-    #[serde(default, with = "remote_config::cache_serde")]
+    #[serde(default, with = "shared_arc")]
     remote_config: Option<Arc<RemoteConfig>>,
     #[serde(skip)]
     remote_config_loading: bool,
     #[serde(skip)]
     flag_load: flag_state::FlagLoadState,
     // Records written before sessions lack this field and restore without one.
-    #[serde(
-        default,
-        deserialize_with = "Option::<sessions::StoredSession>::deserialize"
-    )]
+    #[serde(default)]
     session: Option<sessions::StoredSession>,
     #[serde(skip)]
     sessions: sessions::Sessions,
-    #[serde(skip)]
-    context_revision: u64,
     // Process-local bookkeeping shares the same lock as identity, but is not persisted.
     #[serde(skip)]
     generation: u64,
@@ -142,6 +157,15 @@ fn lenient_bool<'de, D: serde::Deserializer<'de>>(
 }
 
 impl Snapshot {
+    /// Become the identified person `id`, with person processing on.
+    fn identify_as(&mut self, id: String) {
+        self.distinct_id = id;
+        self.identified = true;
+        self.person_processing = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.person_properties = None;
+    }
+
     fn anonymous(id: String) -> Self {
         Self {
             device_id: id.clone(),
@@ -158,7 +182,6 @@ impl Snapshot {
             flag_load: flag_state::FlagLoadState::default(),
             session: None,
             sessions: sessions::Sessions::default(),
-            context_revision: 0,
             generation: 0,
             #[cfg(feature = "session-replay")]
             replay_consent_generation: 0,

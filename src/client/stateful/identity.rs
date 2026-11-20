@@ -8,6 +8,7 @@ use super::producer::CaptureGuard;
 use super::writer::{PersonAdmission, UpdateError};
 use super::{Capture, Client, Snapshot};
 use crate::client::transport::Admission;
+use crate::constants::PROCESS_PERSON_PROFILE_OPT;
 
 #[cfg(test)]
 #[path = "identity_tests.rs"]
@@ -144,7 +145,7 @@ impl Client {
             .is_some_and(|state| state.snapshot().identified)
     }
 
-    fn identity_guard(&self, operation: &str) -> Option<CaptureGuard> {
+    pub(super) fn identity_guard(&self, operation: &str) -> Option<CaptureGuard> {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return None;
         }
@@ -180,7 +181,7 @@ impl Client {
         }
         let fingerprint = properties_hash(&input.set, &input.set_once);
         let has_properties = !input.set.is_empty() || !input.set_once.is_empty();
-        let deduplicable = surely_processes_person(&input.options);
+        let deduplicable = surely_processes_person(input.options.get(PROCESS_PERSON_PROFILE_OPT));
         let mut reset_required = false;
         let mut already_identified = false;
         let result = self.state.as_ref().unwrap().mutate(|state| {
@@ -189,16 +190,15 @@ impl Client {
                 return None;
             }
             let was_anonymous = !state.identified;
-            let changed = state.distinct_id != input.distinct_id;
-            let old_id = state.distinct_id.clone();
+            // Set only when an anonymous user becomes a different person.
+            let anon_distinct_id = (was_anonymous && state.distinct_id != input.distinct_id)
+                .then(|| state.distinct_id.clone());
+            // A new person, or the first properties for one, retargets flags.
+            let refresh = was_anonymous && (anon_distinct_id.is_some() || has_properties);
             // Local targeting is independent of analytics admission and dedup.
             state.flags.mirror_person(&input.set, &input.set_once);
             if was_anonymous {
-                state.distinct_id = input.distinct_id;
-                state.identified = true;
-                state.person_processing = true;
-                state.generation = state.generation.wrapping_add(1);
-                state.person_properties = None;
+                state.identify_as(input.distinct_id);
             } else if !has_properties {
                 already_identified = true;
                 return None;
@@ -206,7 +206,7 @@ impl Client {
                 return None;
             }
             let mut event = person_event(
-                if was_anonymous && changed {
+                if anon_distinct_id.is_some() {
                     "$identify"
                 } else {
                     "$set"
@@ -215,17 +215,12 @@ impl Client {
                 input.set_once,
             );
             event.options = input.options;
-            if was_anonymous && changed {
+            if let Some(old_id) = anon_distinct_id {
                 event
                     .properties
                     .insert("$anon_distinct_id".into(), old_id.into());
             }
-            Some((
-                event,
-                state.clone(),
-                was_anonymous && (changed || has_properties),
-                !was_anonymous,
-            ))
+            Some((event, state.clone(), refresh, !was_anonymous))
         });
         if reset_required {
             tracing::warn!("posthog-rs: reset before identifying a different user");
@@ -305,7 +300,7 @@ impl Client {
             return;
         }
         let fingerprint = properties_hash(&set, &set_once);
-        let deduplicable = surely_processes_person(&options);
+        let deduplicable = surely_processes_person(options.get(PROCESS_PERSON_PROFILE_OPT));
         let result = self.state.as_ref().unwrap().mutate(|state| {
             state.flags.mirror_person(&set, &set_once);
             if deduplicable && state.person_properties == Some(fingerprint) {
@@ -360,7 +355,6 @@ impl Client {
         let id = uuid::Uuid::now_v7().to_string();
         let result = self.state.as_ref().unwrap().mutate(|state| {
             let generation = state.generation.wrapping_add(1);
-            let context_revision = state.context_revision.wrapping_add(1);
             let device_id = state.device_id.clone();
             let sessions = state.sessions.cleared();
             let remote_config = state.remote_config.clone();
@@ -371,7 +365,6 @@ impl Client {
             state.remote_config_loading = remote_config_loading;
             state.sessions = sessions;
             state.generation = generation;
-            state.context_revision = context_revision;
         });
         self.producer.as_ref().unwrap().clear_last_screen();
         if result.is_ok() {
@@ -396,8 +389,9 @@ impl Client {
         };
         // Read the setting as sent, after hooks: an update that may be
         // personless neither checks nor records the hash, and clears it.
-        let fingerprint = surely_processes_person(&wire.options).then_some(fingerprint);
-        let now = self.producer.as_ref().unwrap().session_clock.now();
+        let fingerprint = surely_processes_person(wire.options.get(PROCESS_PERSON_PROFILE_OPT))
+            .then_some(fingerprint);
+        let now = self.session_now();
         // Measure before taking the state lock, so large events do not extend
         // it. Admission runs no user code, so it may run under the lock.
         let bytes = crate::client::event_store::record_size(&wire);
@@ -428,13 +422,11 @@ impl Client {
                 tracing::warn!("posthog-rs: bootstrap differs from the identified user; reset before switching");
             }
         } else if current.distinct_id == id {
-            let _ = self.state.as_ref().unwrap().mutate(|state| {
-                state.distinct_id = id.into();
-                state.identified = true;
-                state.person_processing = true;
-                state.generation = state.generation.wrapping_add(1);
-                state.person_properties = None;
-            });
+            let _ = self
+                .state
+                .as_ref()
+                .unwrap()
+                .mutate(|state| state.identify_as(id.into()));
         } else {
             // As in posthog-ios, posthog-android and posthog-js: identify does
             // nothing with person profiles off, so the anonymous user stays.
@@ -447,13 +439,8 @@ impl Client {
 /// Whether an update surely processes the person: its `process_person_profile`
 /// option is missing, null or `true`. Only such updates check or record the
 /// person-properties hash. Any other value is left for PostHog to read.
-fn surely_processes_person<'a>(options: impl IntoIterator<Item = (&'a String, &'a Value)>) -> bool {
-    options
-        .into_iter()
-        .find(|(key, _)| *key == "process_person_profile")
-        .map_or(true, |(_, value)| {
-            matches!(value, Value::Null | Value::Bool(true))
-        })
+fn surely_processes_person(setting: Option<&Value>) -> bool {
+    matches!(setting, None | Some(Value::Null | Value::Bool(true)))
 }
 
 fn person_event(

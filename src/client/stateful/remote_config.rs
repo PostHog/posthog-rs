@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::flag_state::{FlagCache, FlagCompletion, FlagContext};
 use super::Client;
-use crate::client::transport::{flags::LoadedFlags, remote_config};
+use crate::client::transport::remote_config;
 
 impl Client {
     pub(super) fn load_remote_config(&self, preload_flags: bool) {
@@ -60,19 +60,11 @@ impl Client {
                                 })
                                 .cloned()
                                 .or_else(|| {
-                                    Some(Arc::new(FlagCache::updated(
-                                        None,
-                                        context.clone(),
-                                        state.flag_load.revision,
-                                        LoadedFlags {
-                                            records: HashMap::new(),
-                                            request_id: None,
-                                            evaluated_at: None,
-                                            partial: false,
-                                            invalid_payloads: false,
-                                            failed: Default::default(),
-                                        },
-                                    )))
+                                    Some(Arc::new(FlagCache {
+                                        context: context.clone(),
+                                        flags: HashMap::new(),
+                                        failed: Default::default(),
+                                    }))
                                 });
                             state.flag_load.completed = Some(FlagCompletion {
                                 context,
@@ -119,22 +111,3 @@ impl Client {
 #[cfg(test)]
 #[path = "remote_config_tests.rs"]
 mod tests;
-
-pub(super) mod cache_serde {
-    use crate::client::transport::remote_config::RemoteConfig;
-    use serde::{Deserialize, Serialize};
-    use std::sync::Arc;
-
-    pub(crate) fn serialize<S: serde::Serializer>(
-        value: &Option<Arc<RemoteConfig>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        value.as_deref().serialize(serializer)
-    }
-
-    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<Arc<RemoteConfig>>, D::Error> {
-        Option::<RemoteConfig>::deserialize(deserializer).map(|config| config.map(Arc::new))
-    }
-}

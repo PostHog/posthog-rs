@@ -23,10 +23,14 @@ impl RemoteConfig {
     /// state and read back.
     pub(crate) fn valid(&self) -> bool {
         self.session_recording.as_ref().map_or(true, |value| {
-            (value.is_boolean() || value.is_object())
-                && crate::client::stateful::within_depth([value])
+            supported_recording(value) && crate::client::stateful::within_depth([value])
         })
     }
+}
+
+/// The shapes `sessionRecording` takes: on/off, or a settings object.
+fn supported_recording(value: &Value) -> bool {
+    value.is_boolean() || value.is_object()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +74,7 @@ fn decode(bytes: &[u8]) -> Result<RemoteConfig, LoadError> {
         } else {
             object
                 .get("sessionRecording")
-                .filter(|value| value.is_boolean() || value.is_object())
+                .filter(|value| supported_recording(value))
                 .cloned()
         },
     };
@@ -114,18 +118,16 @@ impl Task {
         let follow_up =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.complete)(result)));
         match follow_up {
-            Ok(Some(task)) => {
-                // A flags completion may continue with one follow-up for newer
-                // targeting; it only exists when no newer request was made.
-                let mut next = Some(task);
-                while let Some(task) = next.take() {
+            // A flags completion may continue with one follow-up for newer
+            // targeting; it only exists when no newer request was made.
+            Ok(mut next) => {
+                while let Some(task) = next {
                     if closed.load(std::sync::atomic::Ordering::Acquire) {
                         break;
                     }
                     next = task.run(http, options);
                 }
             }
-            Ok(_) => {}
             Err(_) => tracing::warn!("posthog-rs: remote config completion panicked"),
         }
     }

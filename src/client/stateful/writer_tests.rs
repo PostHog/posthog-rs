@@ -31,6 +31,7 @@ fn memory_close_clears_report_tracking_when_contended_mutation_releases_state() 
         .snapshot()
         .flag_load
         .reports
+        .as_ref()
         .clone();
     let before = expected.clone();
     expected.clear();
@@ -69,7 +70,7 @@ fn memory_close_clears_report_tracking_when_contended_mutation_releases_state() 
         .state
         .try_lock()
         .unwrap();
-    assert_eq!(state.snapshot.flag_load.reports, expected);
+    assert_eq!(*state.snapshot.flag_load.reports, expected);
     assert!(state.closing.is_some());
 }
 
@@ -612,7 +613,6 @@ fn process_local_bookkeeping_updates_do_not_advance_persisted_revision() {
     assert_eq!(
         writer.update(|state| {
             state.generation = 1;
-            state.context_revision = 2;
             state.person_properties = Some([3; 20]);
         }),
         Ok(1)
@@ -620,7 +620,6 @@ fn process_local_bookkeeping_updates_do_not_advance_persisted_revision() {
     let current = writer.snapshot();
     assert!(current.same_persisted_state(&original));
     assert_eq!(current.generation, 1);
-    assert_eq!(current.context_revision, 2);
     assert_eq!(current.person_properties, Some([3; 20]));
     assert_eq!(writer.checkpoint(), 1);
     assert_eq!(writer.wait_blocking(1), DrainOutcome::MemoryOnly);

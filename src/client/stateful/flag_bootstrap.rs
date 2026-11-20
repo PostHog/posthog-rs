@@ -37,11 +37,12 @@ fn bootstrap_cache(
     let mut records = HashMap::new();
     // Unserved/orphan payloads are ignored.
     for (key, value) in values {
-        match value {
+        let variant = match value {
             FlagValue::Boolean(false) => continue,
             FlagValue::String(variant) if variant.is_empty() => continue,
-            _ => {}
-        }
+            FlagValue::String(variant) => Some(variant.clone()),
+            FlagValue::Boolean(true) => None,
+        };
         let payload = config
             .bootstrap_feature_flag_payloads
             .as_ref()
@@ -50,10 +51,7 @@ fn bootstrap_cache(
             key.clone(),
             EvaluatedFlagRecord {
                 enabled: true,
-                variant: match value {
-                    FlagValue::String(variant) => Some(variant.clone()),
-                    FlagValue::Boolean(_) => None,
-                },
+                variant,
                 payload: payload.cloned(),
                 id: None,
                 version: None,

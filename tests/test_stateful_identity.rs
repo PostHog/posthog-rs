@@ -26,23 +26,24 @@ fn config() -> Config {
     config
 }
 
-fn observed(mut config: Config) -> (Client, Arc<Mutex<Vec<Event>>>) {
+/// Record every event the client sends through `before_send`.
+fn record_events(config: &mut Config) -> Arc<Mutex<Vec<Event>>> {
     let events = Arc::new(Mutex::new(Vec::new()));
     let seen = events.clone();
     config.before_send(move |event| {
         seen.lock().unwrap().push(event.clone());
         Some(event)
     });
+    events
+}
+
+fn observed(mut config: Config) -> (Client, Arc<Mutex<Vec<Event>>>) {
+    let events = record_events(&mut config);
     (Client::init_blocking(config), events)
 }
 
 fn properties(value: Value) -> HashMap<String, Value> {
-    value
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
+    serde_json::from_value(value).unwrap()
 }
 
 /// Captures a probe event and returns the `$is_identified` value it was sent with.
@@ -524,13 +525,8 @@ async fn async_reset_and_restart_keep_device_separate_from_anonymous_getter() {
         close_before_reopen_async(client).await.state,
         PersistenceOutcome::Persisted
     );
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let seen = events.clone();
     let mut conf = directory.config();
-    conf.before_send(move |event| {
-        seen.lock().unwrap().push(event.clone());
-        Some(event)
-    });
+    let events = record_events(&mut conf);
     let client = Client::init(conf).await;
     assert_eq!(client.get_anonymous_id(), anonymous);
     client.capture("after-restart");
@@ -731,13 +727,8 @@ fn wire_events_retain_pre_reset_identity_and_person_payloads() {
 #[test]
 fn async_initialization_exposes_the_same_synchronous_identity_api() {
     futures::executor::block_on(async {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let seen = events.clone();
         let mut conf = config();
-        conf.before_send(move |event| {
-            seen.lock().unwrap().push(event.clone());
-            Some(event)
-        });
+        let events = record_events(&mut conf);
         let client = Client::init(conf).await;
         client.identify("A");
         assert_eq!(

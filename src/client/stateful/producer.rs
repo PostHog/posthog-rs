@@ -241,7 +241,7 @@ impl Producer {
             event.mark_minimal_flag_called();
             event.apply_minimal_flag_called_allowlist();
         }
-        let mut wire = CaptureEvent::from_stateful_event_at(&event, now);
+        let mut wire = CaptureEvent::from_event_at(&event, now);
         normalize_custom_properties(
             &mut wire.properties,
             matches!(policy, CapturePolicy::FlagCalled { .. }),
@@ -307,18 +307,8 @@ impl Producer {
         if let Some(id) = session_id {
             event.insert_prop_default("$session_id", id.to_string().into());
         }
-        // Fill $lib and $lib_version as a pair, as the server client does, so a
-        // caller's own $lib never gets this SDK's version.
-        let lib = event.properties().get("$lib");
-        if !crate::event::names_a_library(lib) {
-            event.set_prop("$lib", self.sdk_name.clone().into());
-            event.set_prop("$lib_version", self.sdk_version.clone().into());
-        } else if lib.and_then(serde_json::Value::as_str) == Some(self.sdk_name.as_str())
-            && !crate::event::names_a_library(event.properties().get("$lib_version"))
-        {
-            // A null, empty or non-string version is unset, as for $lib.
-            event.set_prop("$lib_version", self.sdk_version.clone().into());
-        }
+        // Paired as the server client pairs them.
+        crate::client::common::fill_sdk_identity(&mut event, &self.sdk_name, &self.sdk_version);
         if shared {
             if let Some(screen) = self.last_screen() {
                 event.insert_prop_default("$screen_name", screen.into());
@@ -468,7 +458,7 @@ impl Client {
         }
         let snapshot = self.state.as_ref().unwrap().mutate(|snapshot| {
             let opted_out = self.snapshot_opted_out(snapshot);
-            let now = self.producer.as_ref().unwrap().session_clock.now();
+            let now = self.session_now();
             let session = (!opted_out).then(|| snapshot.sessions.prepare_admission(now));
             (snapshot.clone(), session)
         });
@@ -492,7 +482,7 @@ impl Client {
         &self,
         generation: u64,
     ) -> Option<super::sessions::AdmissionSession> {
-        let now = self.producer.as_ref().unwrap().session_clock.now();
+        let now = self.session_now();
         self.state
             .as_ref()
             .unwrap()
@@ -510,18 +500,8 @@ impl Client {
         snapshot: &Snapshot,
         minimal: bool,
     ) -> CaptureOutcome {
-        self.capture_snapshot_with_policy(input, snapshot, CapturePolicy::FlagCalled { minimal })
-    }
-
-    fn capture_snapshot_with_policy(
-        &self,
-        input: Capture,
-        snapshot: &Snapshot,
-        policy: CapturePolicy,
-    ) -> CaptureOutcome {
-        let session_id = snapshot
-            .sessions
-            .active_id(self.producer.as_ref().unwrap().session_clock.now());
+        let session_id = snapshot.sessions.active_id(self.session_now());
+        let policy = CapturePolicy::FlagCalled { minimal };
         let wire = match self.prepare_with_session(input, snapshot, session_id, policy) {
             Ok(wire) => wire,
             Err(outcome) => return outcome,
@@ -558,7 +538,7 @@ impl Client {
         activity: bool,
     ) -> CaptureOutcome {
         let uuid = wire.uuid;
-        let now = self.producer.as_ref().unwrap().session_clock.now();
+        let now = self.session_now();
         // Measure before taking the state lock, so large events do not extend
         // it. Admission runs no user code, so it may run under the lock.
         let bytes = crate::client::event_store::record_size(&wire);

@@ -48,9 +48,7 @@ impl StoredSession {
             && self.id.get_variant() == uuid::Variant::RFC4122
             && self.started_ms <= self.activity_ms
     }
-}
 
-impl StoredSession {
     /// Wall-clock expiry, as in the other stateful SDKs. A clock moved backwards
     /// never expires a session early.
     fn expired(&self, now: SessionTime) -> bool {
@@ -140,12 +138,20 @@ impl Sessions {
     }
 
     pub(super) fn cleared(&self) -> Self {
-        Self {
-            live: None,
-            provisional: None,
-            epoch: self.epoch.wrapping_add(1),
-            ..self.clone()
-        }
+        let mut sessions = self.clone();
+        sessions.end();
+        sessions
+    }
+
+    /// Make admissions prepared before now commit nothing.
+    fn invalidate_admissions(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.provisional = None;
+    }
+
+    fn end(&mut self) {
+        self.invalidate_admissions();
+        self.live = None;
     }
 
     pub(super) fn stored(&self) -> Option<StoredSession> {
@@ -208,8 +214,7 @@ impl Sessions {
     }
 
     fn start(&mut self, now: SessionTime) {
-        self.epoch = self.epoch.wrapping_add(1);
-        self.provisional = None;
+        self.invalidate_admissions();
         self.live = Some(Self::new_live(now));
     }
 
@@ -232,18 +237,13 @@ impl Sessions {
 
     fn apply(&mut self, operation: Operation, now: SessionTime, opted_out: bool) {
         match operation {
-            Operation::End => {
-                self.epoch = self.epoch.wrapping_add(1);
-                self.provisional = None;
-                self.live = None;
-            }
+            Operation::End => self.end(),
             Operation::Background(background) => {
                 if self.background == background {
                     return;
                 }
                 self.background = background;
-                self.epoch = self.epoch.wrapping_add(1);
-                self.provisional = None;
+                self.invalidate_admissions();
                 if opted_out || self.mode == SessionMode::Manual {
                     return;
                 }
@@ -281,6 +281,11 @@ impl Snapshot {
 }
 
 impl Client {
+    /// The time sessions are measured on.
+    pub(super) fn session_now(&self) -> SessionTime {
+        self.producer.as_ref().unwrap().session_clock.now()
+    }
+
     fn session_operation(&self, operation: Operation) -> Option<Uuid> {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return None;
@@ -289,7 +294,7 @@ impl Client {
             .as_ref()
             .unwrap()
             .mutate(|snapshot| {
-                let now = self.producer.as_ref().unwrap().session_clock.now();
+                let now = self.session_now();
                 let opted_out = self.snapshot_opted_out(snapshot);
                 snapshot.session_operation(operation, now, opted_out);
                 snapshot.sessions.active_id(now)
