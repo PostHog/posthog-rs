@@ -1,11 +1,5 @@
 # posthog-rs
 
-## 1.3.0 — 2026-11-20
-
-### Patch changes
-
-- Updated dependencies: posthog@1.3.0
-
 ## 1.2.1 — 2026-11-19
 
 ### Patch changes
