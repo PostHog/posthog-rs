@@ -610,6 +610,75 @@ fn the_backoff_keeps_growing_when_capacity_evicts_a_retried_event() {
 }
 
 #[test]
+fn a_retry_after_holds_back_the_queue_wide_retry() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let harness = spawn(&mut base(&server), None, 64 * 1024);
+    let log_in = log.clone();
+    let _busy = server.mock(move |when, then| {
+        when.method(POST).is_true(move |_| {
+            log_in.0.lock().unwrap().push(Received {
+                id: String::new(),
+                attempt: 0,
+                events: Vec::new(),
+            });
+            true
+        });
+        then.status(503)
+            .header("Retry-After", "5")
+            .json_body(json!({}));
+    });
+    admit(&harness.handle, "a");
+    flush(&harness.handle);
+    assert_eq!(log.all().len(), 1);
+    // Past the longest first wait (1 s x 1.25 jitter), short of Retry-After.
+    harness.clock.advance(Duration::from_millis(1_300));
+    harness.handle.tick();
+    assert_eq!(log.all().len(), 1, "resent before the server's Retry-After");
+    harness.clock.advance(Duration::from_millis(3_800));
+    harness.handle.tick();
+    assert_eq!(log.all().len(), 2);
+    harness.handle.request_close_before(harness.clock.now());
+    harness.handle.join();
+}
+
+#[test]
+fn the_backoff_starts_over_after_a_delivered_request() {
+    let server = MockServer::start();
+    let log = Log::default();
+    let harness = spawn(&mut base(&server), None, 64 * 1024);
+    let mut offline = respond(&server, &log, 503, json!({}));
+    admit(&harness.handle, "a");
+    flush(&harness.handle);
+    // Three failures grow the wait to 4 s (x0.75..1.25 jitter).
+    harness.clock.advance(Duration::from_millis(1_300));
+    harness.handle.tick();
+    harness.clock.advance(Duration::from_millis(2_600));
+    harness.handle.tick();
+    assert_eq!(log.all().len(), 3);
+    offline.delete();
+    let mut online = delivered(&server, &log);
+    harness.clock.advance(Duration::from_millis(5_100));
+    harness.handle.tick();
+    assert_eq!(log.all().len(), 4);
+    online.delete();
+    let _offline = respond(&server, &log, 503, json!({}));
+    admit(&harness.handle, "b");
+    flush(&harness.handle);
+    assert_eq!(log.all().len(), 5);
+    // A fresh failure waits the first 1 s again.
+    harness.clock.advance(Duration::from_millis(1_300));
+    harness.handle.tick();
+    assert_eq!(
+        log.all().len(),
+        6,
+        "the backoff did not start over after a delivered request"
+    );
+    harness.handle.request_close_before(harness.clock.now());
+    harness.handle.join();
+}
+
+#[test]
 fn delivery_keeps_retrying_past_max_capture_attempts_with_or_without_a_store() {
     for persistent in [false, true] {
         let server = MockServer::start();
