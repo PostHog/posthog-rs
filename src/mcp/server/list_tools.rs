@@ -30,7 +30,7 @@ impl<H: ServerHandler> Instrumented<H> {
             .map(|tool| self.injected_tool(tool))
             .collect();
         if first_page {
-            advertised.extend(self.virtual_tool_for_listing(&page.tools));
+            advertised.extend(self.virtual_tools_for_listing(&page.tools));
         }
         page.tools = advertised;
 

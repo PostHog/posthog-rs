@@ -68,9 +68,11 @@ pub struct Config {
     pub request_timeout: Duration,
     /// Default SDK-controlled shutdown waiting budget. Default: 30 seconds.
     /// The first shutdown selects one deadline; later calls cannot extend it.
-    /// Dropping the client does not wait for delivery. Already-started work owns its resources until completion and
-    /// may retain them indefinitely if it never returns. Arbitrary destructors
-    /// of application objects captured by callbacks may block outside this bound.
+    /// Dropping the client does not wait for delivery or for this deadline; it
+    /// waits up to about 1 s for local writes. Already-started work owns its
+    /// resources until completion and may retain them indefinitely if it never
+    /// returns. Arbitrary destructors of application objects captured by
+    /// callbacks may block outside this bound.
     pub shutdown_timeout: Duration,
     /// Request compression. Default: gzip; None disables compression.
     pub capture_compression: Option<CaptureCompression>,
@@ -81,7 +83,9 @@ pub struct Config {
     pub platform_context: HashMap<String, serde_json::Value>,
     /// SDK name for events' `$lib` and for the `PostHog-Sdk-Info` and
     /// `User-Agent` headers of capture requests. Defaults to posthog-rs; a
-    /// wrapper SDK sets its own.
+    /// wrapper SDK sets its own. A blank name or version uses its default. If
+    /// the name or version is not valid header text, the client uses both
+    /// defaults.
     pub sdk_name: String,
     /// SDK version for events' `$lib_version` and for the same headers.
     /// Defaults to this crate's version.
@@ -163,6 +167,13 @@ impl Config {
         if self.sdk_version.is_empty() {
             self.sdk_version = crate::client::CRATE_VERSION.into();
         }
+        if reqwest::header::HeaderValue::from_str(&self.sdk_identity().user_agent()).is_err() {
+            tracing::warn!(
+                "posthog-rs: sdk_name or sdk_version is not valid header text; using the defaults"
+            );
+            self.sdk_name = crate::client::SDK_USERAGENT_NAME.into();
+            self.sdk_version = crate::client::CRATE_VERSION.into();
+        }
         self.host = self.host.trim().into();
         if !valid_host(&self.host) {
             if !self.host.is_empty() {
@@ -205,18 +216,18 @@ impl Config {
         {
             return Some("project_token contains invalid header characters");
         }
-        if reqwest::header::HeaderValue::from_str(&self.sdk_info()).is_err() {
-            return Some("SDK name and version must be valid header text");
-        }
         if self.bootstrap_anonymous_id.is_some() && self.bootstrap_identified_id.is_some() {
             return Some("configure only one bootstrap identity");
         }
         None
     }
 
-    /// The `name/version` sent in the `PostHog-Sdk-Info` and `User-Agent` headers.
-    fn sdk_info(&self) -> String {
-        format!("{}/{}", self.sdk_name, self.sdk_version)
+    /// The SDK the requests name in the `PostHog-Sdk-Info` and `User-Agent` headers.
+    fn sdk_identity(&self) -> crate::client::SdkIdentity {
+        crate::client::SdkIdentity {
+            name: self.sdk_name.clone().into(),
+            version: self.sdk_version.clone().into(),
+        }
     }
 
     pub(super) fn request_timeout_seconds(&self) -> u64 {
@@ -250,7 +261,7 @@ impl Config {
         options.shutdown_timeout_ms = self.shutdown_timeout.as_millis() as u64;
         options.retry_initial_backoff_ms = RETRY_INITIAL_BACKOFF_MS;
         options.capture_compression = self.capture_compression;
-        options.sdk_info = Some(self.sdk_info());
+        options.sdk_identity = self.sdk_identity();
         options.on_error = self.on_error.clone();
         options
     }

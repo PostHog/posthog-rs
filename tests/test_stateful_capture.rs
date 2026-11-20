@@ -313,12 +313,33 @@ fn capture_and_shutdown_are_safe_during_thread_local_destruction() {
 }
 
 #[test]
-fn an_sdk_name_that_is_not_header_text_disables_before_capture() {
+fn an_sdk_name_that_is_not_header_text_falls_back_to_the_default_identity() {
+    let server = MockServer::start();
+    let sdk_info = format!("posthog-rs/{}", env!("CARGO_PKG_VERSION"));
+    let fallback = server.mock(|when, then| {
+        when.method(POST)
+            .header("posthog-sdk-info", sdk_info.as_str())
+            .header("user-agent", sdk_info.as_str())
+            .body_includes("\"$lib\":\"posthog-rs\"")
+            .body_includes(format!(
+                "\"$lib_version\":\"{}\"",
+                env!("CARGO_PKG_VERSION")
+            ));
+        then.respond_with(stateful_support::accept_all);
+    });
     let mut config = config();
+    config.host = server.base_url();
     config.sdk_name = "bad\nvalue".into();
+    config.sdk_version = "9.9.9".into();
     let client = Client::init_blocking(config);
-    assert!(client.is_disabled());
-    assert_eq!(client.capture("event"), CaptureOutcome::Disabled);
+    assert!(!client.is_disabled());
+    assert!(matches!(
+        client.capture("event"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    assert_eq!(client.flush_blocking().delivery, DeliveryOutcome::Attempted);
+    client.shutdown_blocking(Some(Duration::from_secs(5)));
+    fallback.assert_calls(1);
 }
 
 #[cfg(feature = "async-client")]
