@@ -300,11 +300,11 @@ fn corrupt_state_is_replaced_but_future_state_is_preserved() {
     for (original, recoverable) in [
         (b"not json".as_slice(), true),
         (
-            br#"{"version":1,"state":{"anonymous_id":"private","distinct_id":17,"identified":false,"person_processing":false,"opt_out":null,"registered":{},"groups":{}}}"#.as_slice(),
+            br#"{"version":1,"state":{"anonymous_id":"private","distinct_id":17,"identified":false,"person_processing":false}}"#.as_slice(),
             true,
         ),
         (
-            br#"{"version":1,"state":{"anonymous_id":"","distinct_id":"private","identified":false,"person_processing":false,"opt_out":null,"registered":{},"groups":{}}}"#.as_slice(),
+            br#"{"version":1,"state":{"anonymous_id":"","distinct_id":"private","identified":false,"person_processing":false}}"#.as_slice(),
             true,
         ),
         (b"{\"version\":99,\"state\":{}}".as_slice(), false),

@@ -5,7 +5,6 @@
 //! sent. Without one every entry holds its payload in memory.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 
 use crate::capture_event::CaptureEvent;
 
@@ -13,7 +12,7 @@ pub(super) struct Entry {
     pub(super) seq: u64,
     pub(super) bytes: u64,
     /// `Some` without a store, `None` for an event on disk.
-    pub(super) payload: Option<Arc<CaptureEvent>>,
+    pub(super) payload: Option<Box<CaptureEvent>>,
 }
 
 impl Entry {

@@ -243,18 +243,8 @@ impl Producer {
         for (key, value) in &self.context {
             event.insert_prop_default(key.clone(), value.clone());
         }
-        // Fill $lib and $lib_version as a pair, as the server client does, so a
-        // caller's own $lib never gets this SDK's version.
-        let lib = event.properties().get("$lib");
-        if !crate::event::names_a_library(lib) {
-            event.set_prop("$lib", self.sdk_name.clone().into());
-            event.set_prop("$lib_version", self.sdk_version.clone().into());
-        } else if lib.and_then(serde_json::Value::as_str) == Some(self.sdk_name.as_str())
-            && !crate::event::names_a_library(event.properties().get("$lib_version"))
-        {
-            // A null, empty or non-string version is unset, as for $lib.
-            event.set_prop("$lib_version", self.sdk_version.clone().into());
-        }
+        // Paired as the server client pairs them.
+        crate::client::common::fill_sdk_identity(&mut event, &self.sdk_name, &self.sdk_version);
         if let Some(screen) = self.last_screen() {
             event.insert_prop_default("$screen_name", screen.into());
         }
@@ -269,7 +259,7 @@ impl Producer {
         if event.event_name().trim().is_empty() || event.distinct_id().trim().is_empty() {
             return Err(CaptureOutcome::Invalid);
         }
-        let mut wire = CaptureEvent::from_stateful_event_at(&event, now);
+        let mut wire = CaptureEvent::from_event_at(&event, now);
         normalize_custom_properties(&mut wire.properties);
         Ok(wire)
     }
