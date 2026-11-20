@@ -1,7 +1,7 @@
 [package]
 name = "posthog"
 license = "MIT"
-version = "1.2.0"
+version = "1.2.1"
 authors = ["PostHog <engineering@posthog.com>"]
 description = "The official Rust SDK for PostHog (https://posthog.com/)."
 repository = "https://github.com/posthog/posthog-rs"
@@ -43,7 +43,6 @@ rmcp = { version = "3.7", default-features = false, features = [
     "server",
 ], optional = true }
 url = { version = "2.5", optional = true }
-fancy-regex = { version = "0.20", optional = true }
 base64 = { version = "0.23", optional = true }
 futures-util = { version = "0.3", default-features = false, features = [
     "std",
@@ -91,7 +90,6 @@ mcp = [
     "dep:rmcp",
     "dep:http",
     "dep:url",
-    "dep:fancy-regex",
     "dep:base64",
     "dep:futures-util",
 ]
