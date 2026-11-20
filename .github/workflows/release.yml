@@ -453,11 +453,17 @@ jobs:
               gh release edit "$TAG" --draft=false --latest=false
             else
               # Never change a published release's downloads. Only check they're complete.
+              assets=$(gh release view "$TAG" --json assets --jq '.assets[].name')
               mkdir published
               gh release download "$TAG" --pattern '*.sha256' --dir published
               for sum in dist/*.sha256; do
+                archive=$(basename "$sum" .sha256)
+                if ! grep -qxF "$archive" <<<"$assets"; then
+                  echo "::error::The published release is missing $archive"
+                  exit 1
+                fi
                 cmp -s "$sum" "published/$(basename "$sum")" || {
-                  echo "::error::The published $(basename "$sum" .sha256) is missing or differs from this build"
+                  echo "::error::The published $archive checksum is missing or differs from this build"
                   exit 1
                 }
               done
