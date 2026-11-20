@@ -42,6 +42,7 @@ fn with_cache(payload: Option<Value>) -> Snapshot {
                 evaluated_at: Some(123),
             },
         )]),
+        failed: Default::default(),
     }));
     snapshot
 }
@@ -418,6 +419,7 @@ fn large_flag_sets_persist_each_context_once() {
             evaluated_at: None,
             partial: false,
             invalid_payloads: false,
+            failed: Default::default(),
         },
     )));
     let bytes = encode_snapshot(&snapshot).unwrap();

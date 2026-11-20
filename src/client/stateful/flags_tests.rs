@@ -148,6 +148,7 @@ fn loaded(records: HashMap<String, EvaluatedFlagRecord>, partial: bool) -> flags
         evaluated_at: Some(1),
         partial,
         invalid_payloads: false,
+        failed: Default::default(),
     }
 }
 

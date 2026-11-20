@@ -154,6 +154,12 @@ impl Client {
             flag.and_then(|flag| flag.evaluated_at),
             flag.is_some_and(|flag| flag.partial),
             false,
+            flag.is_none()
+                && snapshot
+                    .flags
+                    .cache
+                    .as_ref()
+                    .is_some_and(|cache| cache.failed.contains(key)),
         );
         if let Some(bootstrap) = snapshot
             .flag_load

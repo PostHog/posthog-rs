@@ -708,3 +708,39 @@ fn lookup_shortcuts_report_access_but_payload_reads_only_when_asked() {
     assert_eq!(reported().last(), Some(&json!("missing")));
     client.shutdown_blocking(None);
 }
+
+#[test]
+fn a_failed_flag_reports_evaluation_failed_and_a_healthy_sibling_does_not() {
+    let server = MockServer::start();
+    accept(&server);
+    server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({"flags": {
+            "checkout": {"key": "checkout", "enabled": false, "failed": true},
+            "beta-ui": {"key": "beta-ui", "enabled": false}
+        }}));
+    });
+    let mut c = config(&server);
+    c.bootstrap_feature_flags = None;
+    c.bootstrap_feature_flag_payloads = None;
+    let events = observe(&mut c);
+    let client = Client::init_blocking(c);
+    reload(&client);
+    assert_eq!(client.feature_flag("checkout").get(), None);
+    assert!(client.feature_flag("beta-ui").get().is_some());
+    let events = events.lock().unwrap();
+    let error = |key: &str| {
+        let event = events
+            .iter()
+            .find(|event| event.properties()["$feature_flag"] == key)
+            .unwrap();
+        event.properties().get("$feature_flag_error").cloned()
+    };
+    assert_eq!(error("checkout"), Some(json!("evaluation_failed")));
+    assert_eq!(error("beta-ui"), None);
+    let checkout = events
+        .iter()
+        .find(|event| event.properties()["$feature_flag"] == "checkout")
+        .unwrap();
+    assert_eq!(checkout.properties()["$feature_flag_response"], Value::Null);
+}

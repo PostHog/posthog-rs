@@ -74,6 +74,7 @@ fn bootstrap_cache(
             evaluated_at: None,
             partial: false,
             invalid_payloads: false,
+            failed: Default::default(),
         },
     )
 }
