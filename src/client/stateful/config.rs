@@ -245,15 +245,15 @@ impl Config {
             self.request_timeout = DEFAULT_REQUEST_TIMEOUT;
         }
         self.request_timeout = self.request_timeout.min(MAX_SHUTDOWN_TIMEOUT);
+        #[cfg(feature = "session-replay")]
+        {
+            let replay = &mut self.session_replay;
+            replay.jpeg_quality = replay.jpeg_quality.clamp(1, 100);
+            replay.max_frames_in_flight = replay.max_frames_in_flight.max(1);
+        }
     }
 
     pub(super) fn invalid_reason(&self) -> Option<&'static str> {
-        #[cfg(feature = "session-replay")]
-        if !(1..=100).contains(&self.session_replay.jpeg_quality)
-            || self.session_replay.max_frames_in_flight == 0
-        {
-            return Some("replay JPEG quality must be 1..=100 and frame capacity must be positive");
-        }
         if self.project_token.is_empty() {
             return Some("project_token is empty; supply a project token to enable the client");
         }

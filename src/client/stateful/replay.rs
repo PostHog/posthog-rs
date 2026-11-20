@@ -21,9 +21,9 @@ mod policy;
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct ReplayConfig {
-    /// JPEG quality, 1..=100. Default: 65.
+    /// JPEG quality, 1..=100; values outside are clamped. Default: 65.
     pub jpeg_quality: u8,
-    /// Frames from acquisition through delivery/retries. Default: 2.
+    /// Frames from acquisition through delivery/retries, at least 1. Default: 2.
     pub max_frames_in_flight: usize,
 }
 impl Default for ReplayConfig {

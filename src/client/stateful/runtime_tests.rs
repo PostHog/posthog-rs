@@ -603,3 +603,18 @@ fn async_initialization_works_without_tokio_and_matches_blocking_restoration() {
     let disabled = futures::executor::block_on(Client::init(Config::new("")));
     assert!(disabled.is_disabled());
 }
+
+#[cfg(feature = "session-replay")]
+#[test]
+fn out_of_range_replay_settings_are_clamped_instead_of_disabling_the_client() {
+    let mut config = Config::new("phc_test");
+    config.session_replay.jpeg_quality = 0;
+    config.session_replay.max_frames_in_flight = 0;
+    config.normalize();
+    assert!(config.invalid_reason().is_none());
+    assert_eq!(config.session_replay.jpeg_quality, 1);
+    assert_eq!(config.session_replay.max_frames_in_flight, 1);
+    config.session_replay.jpeg_quality = 200;
+    config.normalize();
+    assert_eq!(config.session_replay.jpeg_quality, 100);
+}
