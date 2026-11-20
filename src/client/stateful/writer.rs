@@ -314,6 +314,15 @@ impl StateAccess {
     }
 }
 
+/// Person bookkeeping for an identity event being admitted. A `None`
+/// fingerprint is an update that may be personless.
+pub(super) struct PersonAdmission<'a> {
+    pub(super) generation: u64,
+    pub(super) distinct_id: &'a str,
+    pub(super) fingerprint: Option<[u8; 20]>,
+    pub(super) deduplicate: bool,
+}
+
 pub(super) struct StateWriter {
     shared: Arc<Shared>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -472,15 +481,27 @@ impl StateWriter {
     /// Compare, admit, and commit process-local person bookkeeping in queue order.
     /// `admit` must not run hooks, tracing subscribers, or application wakers.
     /// Fingerprints are not persisted, so this cannot schedule a writer notification.
+    /// `None` is an update that may be personless: it never matches, and once
+    /// admitted it clears the stored fingerprint.
     #[cfg(test)]
     pub(super) fn admit_person(
         &self,
         generation: u64,
-        fingerprint: [u8; 20],
+        distinct_id: &str,
+        fingerprint: Option<[u8; 20]>,
         deduplicate: bool,
         admit: impl FnOnce() -> bool,
     ) {
-        self.admit_capture(None, Some((generation, fingerprint, deduplicate)), admit);
+        self.admit_capture(
+            None,
+            Some(PersonAdmission {
+                generation,
+                distinct_id,
+                fingerprint,
+                deduplicate,
+            }),
+            admit,
+        );
     }
 
     /// Validate session persistence before callback-free queue admission, then
@@ -492,7 +513,7 @@ impl StateWriter {
             super::sessions::SessionTime,
             bool,
         )>,
-        person: Option<(u64, [u8; 20], bool)>,
+        person: Option<PersonAdmission<'_>>,
         admit: impl FnOnce() -> bool,
     ) -> bool {
         let persisted_changed = {
@@ -508,12 +529,20 @@ impl StateWriter {
                 return false;
             }
             let mut candidate = (*state.snapshot).clone();
-            if let Some((generation, fingerprint, deduplicate)) = person {
-                if candidate.generation == generation {
-                    if deduplicate && candidate.person_properties == Some(fingerprint) {
+            if let Some(person) = person {
+                if candidate.generation == person.generation {
+                    if person.deduplicate
+                        && person.fingerprint.is_some()
+                        && candidate.person_properties == person.fingerprint
+                    {
                         return false;
                     }
-                    candidate.person_properties = Some(fingerprint);
+                    candidate.person_properties = person.fingerprint;
+                } else if candidate.distinct_id == person.distinct_id {
+                    // An update prepared before a newer identity change for the
+                    // same ID is now the latest for that person, so the newer
+                    // fingerprint no longer describes what PostHog last received.
+                    candidate.person_properties = None;
                 }
             }
             if let Some((token, now, activity)) = session {
@@ -570,6 +599,28 @@ impl StateWriter {
                 return outcome;
             }
             state = self.shared.wait(state);
+        }
+    }
+
+    /// Like [`Self::wait_blocking`], giving up at `until`.
+    pub(super) fn wait_blocking_until(
+        &self,
+        revision: u64,
+        until: Instant,
+    ) -> Option<DrainOutcome> {
+        if self.on_worker_thread() {
+            return Some(DrainOutcome::Deferred);
+        }
+        let mut state = self.shared.lock();
+        loop {
+            if let Some(outcome) = state.outcome(revision) {
+                return Some(outcome);
+            }
+            let now = self.clock.now();
+            if now >= until {
+                return None;
+            }
+            state = self.shared.wait_timeout(state, until - now);
         }
     }
 
@@ -645,10 +696,7 @@ impl StateWriter {
             Mode::Unavailable => return DrainOutcome::Unavailable,
             Mode::Persistent => {}
         }
-        let state = match self.shared.try_lock() {
-            Some(state) => state,
-            None => return DrainOutcome::TimedOut,
-        };
+        let state = self.shared.lock();
         state
             .outcome(state.revision)
             .unwrap_or(DrainOutcome::TimedOut)

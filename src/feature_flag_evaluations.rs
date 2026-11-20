@@ -237,6 +237,10 @@ impl FeatureFlagEvaluations {
     ///
     /// This call does **not** count as an access and does **not** fire any
     /// event, matching the behavior documented for server-side SDKs.
+    ///
+    /// Flag evaluation through `/flags` does not return a remote config flag that
+    /// has an encrypted payload. Read it with
+    /// [`Client::get_remote_config_payload`](crate::Client::get_remote_config_payload).
     #[must_use]
     pub fn get_flag_payload(&self, key: &str) -> Option<Value> {
         self.flags.get(key).and_then(|f| f.payload.clone())
@@ -357,6 +361,7 @@ impl FeatureFlagEvaluations {
             self.evaluated_at,
             self.errors_while_computing,
             self.quota_limited,
+            false,
         );
 
         // Minimize iff the gate pinned on this flag's record is on AND the flag
@@ -380,6 +385,7 @@ impl FeatureFlagEvaluations {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn flag_called_properties(
     key: &str,
     flag: Option<&EvaluatedFlagRecord>,
@@ -388,6 +394,7 @@ pub(crate) fn flag_called_properties(
     evaluated_at: Option<i64>,
     errors_while_computing: bool,
     quota_limited: bool,
+    failed: bool,
 ) -> HashMap<String, Value> {
     let mut props: HashMap<String, Value> = HashMap::new();
     props.insert("$feature_flag".into(), json!(key));
@@ -441,8 +448,9 @@ pub(crate) fn flag_called_properties(
 
     // Comma-joined `$feature_flag_error` matching the single-flag path's
     // granularity: response-level errors (errors-while-computing,
-    // quota-limited) combine with per-flag errors (flag-missing) so
-    // consumers can filter by type.
+    // quota-limited) combine with per-flag errors (evaluation-failed or
+    // flag-missing) so consumers can filter by type. A flag whose record
+    // failed has no value but is not missing.
     let mut errors: Vec<&str> = Vec::new();
     if errors_while_computing {
         errors.push("errors_while_computing_flags");
@@ -451,7 +459,11 @@ pub(crate) fn flag_called_properties(
         errors.push("quota_limited");
     }
     if flag.is_none() {
-        errors.push("flag_missing");
+        errors.push(if failed {
+            "evaluation_failed"
+        } else {
+            "flag_missing"
+        });
     }
     if !errors.is_empty() {
         props.insert("$feature_flag_error".into(), json!(errors.join(",")));

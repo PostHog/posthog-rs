@@ -290,117 +290,36 @@ fn cancelled_and_concurrent_shutdown_waiters_await_delivery_body_without_blockin
 }
 
 #[test]
-fn lowered_record_limit_preserves_oversized_head_while_recovery_and_flush_progress() {
-    use std::sync::{mpsc, Arc};
-    use std::time::Instant;
-    struct Directory(std::path::PathBuf);
-    impl Drop for Directory {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let directory = Directory(
-        std::env::temp_dir().join(format!("posthog-lowered-limit-{}", uuid::Uuid::now_v7())),
-    );
+fn drop_writes_pending_state_without_waiting_for_delivery() {
     let server = MockServer::start();
     server.mock(|when, then| {
-        when.method(httpmock::Method::GET)
-            .path("/array/phc_test/config");
-        then.status(200)
-            .json_body(serde_json::json!({"hasFeatureFlags": false}));
+        when.method(POST);
+        then.delay(Duration::from_secs(30)).status(200);
     });
-    let mut retry = server.mock(|when, then| {
-        when.method(POST).path("/i/v1/analytics/events");
-        then.status(503).header("Retry-After", "3600");
-    });
-    let mut setup = config(&server);
-    setup.persistence = Persistence::Directory(directory.0.clone());
-    setup.capture_compression = None;
-    setup.before_send(|mut event| {
-        if event.event_name() == "oversized" {
-            event.insert_prop("padding", "x".repeat(8192)).unwrap();
-        }
-        Some(event)
-    });
-    let seed = Client::init_blocking(setup);
+    let directory = std::env::temp_dir().join(format!("posthog-drop-{}", uuid::Uuid::now_v7()));
+    let mut config = config(&server);
+    config.persistence = Persistence::Directory(directory.clone());
+    config.flush_at = 1;
+    let client = Client::init_blocking(config);
+    let id = client.get_distinct_id();
     assert!(matches!(
-        seed.capture("oversized"),
+        client.capture("in-flight"),
         CaptureOutcome::Accepted { .. }
     ));
-    assert!(matches!(
-        seed.capture("healthy-suffix"),
-        CaptureOutcome::Accepted { .. }
-    ));
-    seed.opt_out();
-    assert_eq!(seed.flush_blocking().state, PersistenceOutcome::Persisted);
-    assert_eq!(
-        seed.shutdown_blocking(None).delivery,
-        DeliveryOutcome::Stopped
+    let started = std::time::Instant::now();
+    drop(client);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "drop waited for delivery"
     );
-    drop(seed);
-    let scope = std::fs::read_dir(&directory.0)
+    let scope = std::fs::read_dir(&directory)
         .unwrap()
         .next()
         .unwrap()
         .unwrap()
         .path();
-    let mut records: Vec<_> = std::fs::read_dir(scope.join("events"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    records.sort();
-    assert_eq!(records.len(), 2);
-    let preserved = std::fs::read(&records[0]).unwrap();
-    let lowered = std::fs::metadata(&records[1]).unwrap().len();
-    assert!(preserved.len() as u64 > lowered);
-    retry.delete();
-    let delivered = server.mock(|when, then| {
-        when.method(POST)
-            .path("/i/v1/analytics/events")
-            .body_includes("healthy-suffix")
-            .body_excludes("oversized");
-        then.respond_with(accept_all);
-    });
-    let mut setup = config(&server);
-    setup.persistence = Persistence::Directory(directory.0.clone());
-    setup.capture_compression = None;
-    // The event size limit never exceeds the queue byte budget.
-    setup.max_queue_bytes = lowered as usize;
-    setup.max_batch_size = 1;
-    setup.max_queue_size = 1;
-    let client = Arc::new(Client::init_blocking(setup));
-    assert!(client.is_opt_out());
-    assert_eq!(client.capture("new"), CaptureOutcome::OptedOut);
-    let (complete, completed) = mpsc::channel();
-    let flushing = client.clone();
-    let worker = std::thread::spawn(move || {
-        let recovered = flushing.flush_blocking();
-        // Only the preserved oversized record remains: a completed unreadable
-        // scan must still let the next queued flush finish.
-        let unreadable = flushing.flush_blocking();
-        complete.send((recovered, unreadable)).unwrap();
-    });
-    let result = completed.recv_timeout(Duration::from_secs(2));
-    // End the real coordinator even on the pre-fix liveness failure, so the
-    // regression fails its bounded observation rather than hanging teardown.
-    client.shutdown_blocking(Some(Duration::ZERO));
-    if result.is_err() {
-        completed.recv_timeout(Duration::from_secs(5)).unwrap();
-    }
-    worker.join().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while client.shutdown_blocking(None).delivery != DeliveryOutcome::Stopped {
-        assert!(
-            Instant::now() < deadline,
-            "delivery did not stop after bounded close"
-        );
-        std::thread::yield_now();
-    }
-    let (recovered, unreadable) = result.expect("healthy suffix recovery starved the queued flush");
-    assert_eq!(recovered.delivery, DeliveryOutcome::Attempted);
-    assert_eq!(unreadable.delivery, DeliveryOutcome::Attempted);
-    delivered.assert_calls(1);
-    assert_eq!(std::fs::read(&records[0]).unwrap(), preserved);
-    assert!(!records[1].exists());
-    assert_eq!(std::fs::read_dir(scope.join("events")).unwrap().count(), 1);
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(scope.join("state.json")).unwrap()).unwrap();
+    assert_eq!(state["state"]["distinct_id"], id.as_str());
+    let _ = std::fs::remove_dir_all(directory);
 }

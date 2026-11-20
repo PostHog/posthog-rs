@@ -59,9 +59,9 @@ impl OnErrorHook {
     }
 }
 
-/// A delivery, network, or storage failure, passed by reference to each
-/// registered `on_error` hook. A storage failure does not necessarily prevent
-/// delivery: events may still be sent from memory.
+/// A delivery, network, storage, or initialization failure, passed by
+/// reference to each registered `on_error` hook. A storage failure does not
+/// necessarily prevent delivery: events may still be sent from memory.
 ///
 /// `#[non_exhaustive]`: new variants may be added as more surfaces gain hook
 /// coverage, so a `match` must include a wildcard arm.

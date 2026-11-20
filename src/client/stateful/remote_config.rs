@@ -70,6 +70,7 @@ impl Client {
                                             evaluated_at: None,
                                             partial: false,
                                             invalid_payloads: false,
+                                            failed: Default::default(),
                                         },
                                     )))
                                 });

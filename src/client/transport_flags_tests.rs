@@ -1,5 +1,4 @@
 use super::*;
-use crate::client::transport::storage_tests::wire;
 use crate::client::transport::{Admission, TransportHandle};
 use crate::client::ClientOptionsBuilder;
 use httpmock::{Method::POST, MockServer};
@@ -8,6 +7,10 @@ use std::sync::mpsc;
 use std::thread;
 
 const WAIT: Duration = Duration::from_secs(5);
+
+fn wire(name: &str) -> crate::capture_event::CaptureEvent {
+    crate::capture_event::CaptureEvent::from_event(&crate::Event::new(name, "user"))
+}
 
 fn options(host: String) -> ClientOptions {
     ClientOptionsBuilder::default()
@@ -371,10 +374,7 @@ fn close_discards_pending_but_allows_active_completion_and_reentrant_shutdown() 
     done_rx.recv_timeout(WAIT).unwrap();
     // begin_close is the split lifecycle primitive; explicitly send its control.
     let (tx, rx) = mpsc::channel();
-    handle.send_control(Control::Shutdown {
-        completion: super::super::Completion::Blocking(tx),
-        deadline: None,
-    });
+    handle.send_control(Control::Shutdown(super::super::Completion::Blocking(tx)));
     rx.recv_timeout(WAIT).unwrap();
     handle.join();
     assert!(pending_rx.try_recv().is_err());

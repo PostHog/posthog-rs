@@ -131,15 +131,11 @@ impl Client {
         };
         let response = flag.map(|flag| flag_value_for(&flag.record));
         let fingerprint = report_key(key, response.as_ref());
-        let ticket = self.state.as_ref().unwrap().mutate(|current| {
-            if current.flag_load.revision != snapshot.flag_load.revision
-                || current.flag_load.request != snapshot.flag_load.request
-                || current.flag_load.completed != snapshot.flag_load.completed
-            {
-                return None;
-            }
-            current.flag_load.reports.reserve(fingerprint)
-        });
+        let ticket = self
+            .state
+            .as_ref()
+            .unwrap()
+            .mutate(|current| current.flag_load.reports.reserve(fingerprint));
         let Ok((_, Some(ticket))) = ticket else {
             return;
         };
@@ -158,6 +154,12 @@ impl Client {
             flag.and_then(|flag| flag.evaluated_at),
             flag.is_some_and(|flag| flag.partial),
             false,
+            flag.is_none()
+                && snapshot
+                    .flags
+                    .cache
+                    .as_ref()
+                    .is_some_and(|cache| cache.failed.contains(key)),
         );
         if let Some(bootstrap) = snapshot
             .flag_load
@@ -309,7 +311,6 @@ mod tests {
         config.persistence = super::super::Persistence::Memory;
         config.host = server.base_url();
         config.preload_feature_flags = false;
-        config.max_capture_attempts = 1;
         config.bootstrap_feature_flags =
             Some(HashMap::from([("a".into(), FlagValue::Boolean(true))]));
         let client = Client::init_blocking(config);

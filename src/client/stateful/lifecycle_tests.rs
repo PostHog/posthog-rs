@@ -610,9 +610,7 @@ fn expired_sdk_shutdown_and_immediate_drop_do_not_rejoin_blocked_storage() {
 #[test]
 fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads() {
     use crate::capture_event::CaptureEvent;
-    use crate::client::event_store::{
-        EventStore, FileEventStore, Recovery, StoreKey, StoreLimits, StoreWriteError,
-    };
+    use crate::client::event_store::{EventStore, FileEventStore, StoreKey, StoreLimits};
     struct Events {
         inner: Option<FileEventStore>,
         entered: mpsc::Sender<()>,
@@ -620,32 +618,25 @@ fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads()
         dropped: mpsc::Sender<()>,
     }
     impl EventStore for Events {
-        fn recover(&mut self, n: usize, b: u64) -> io::Result<Recovery> {
-            self.inner.as_mut().unwrap().recover(n, b)
+        fn limits(&self) -> StoreLimits {
+            self.inner.as_ref().unwrap().limits()
         }
-        fn head(&mut self, n: usize, b: u64) -> io::Result<Recovery> {
-            self.inner.as_mut().unwrap().head(n, b)
+        fn take_index(&mut self) -> Vec<(StoreKey, u64)> {
+            self.inner.as_mut().unwrap().take_index()
         }
-        fn end_key(&self) -> Option<StoreKey> {
-            self.inner.as_ref().unwrap().end_key()
+        fn last_key(&self) -> StoreKey {
+            self.inner.as_ref().unwrap().last_key()
         }
-        fn contains(&self, key: StoreKey) -> io::Result<bool> {
-            self.inner.as_ref().unwrap().contains(key)
-        }
-        fn put(&mut self, event: &CaptureEvent) -> Result<StoreKey, StoreWriteError> {
-            self.inner.as_mut().unwrap().put(event)
-        }
-        fn put_at(
-            &mut self,
-            event: &CaptureEvent,
-            key: StoreKey,
-        ) -> Result<StoreKey, StoreWriteError> {
+        fn write(&mut self, key: StoreKey, event: &CaptureEvent) -> io::Result<u64> {
             self.entered.send(()).unwrap();
             self.release.recv_timeout(GATE_WAIT).unwrap();
-            self.inner.as_mut().unwrap().put_at(event, key)
+            self.inner.as_mut().unwrap().write(key, event)
         }
-        fn remove(&mut self, key: StoreKey) -> io::Result<()> {
-            self.inner.as_mut().unwrap().remove(key)
+        fn read(&mut self, key: StoreKey) -> io::Result<CaptureEvent> {
+            self.inner.as_mut().unwrap().read(key)
+        }
+        fn delete(&mut self, key: StoreKey) -> io::Result<()> {
+            self.inner.as_mut().unwrap().delete(key)
         }
     }
     impl Drop for Events {
@@ -679,7 +670,6 @@ fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads()
         StoreLimits {
             max_events: 10,
             max_bytes: 64 * 1024,
-            max_record_bytes: 4096,
         },
     )
     .unwrap();
@@ -756,7 +746,6 @@ fn request_only_work_does_not_keep_event_storage_leased_after_delivery_stops() {
         StoreLimits {
             max_events: 10,
             max_bytes: 64 * 1024,
-            max_record_bytes: 4096,
         },
     )
     .unwrap();

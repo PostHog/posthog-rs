@@ -13,6 +13,7 @@ mod local_payload_test_support;
 #[cfg(test)]
 mod minimal_gate_test_support;
 mod on_error;
+mod remote_config_payload;
 mod summary;
 
 pub(crate) use common::apply_on_error_hooks;
@@ -400,6 +401,12 @@ pub struct ClientOptions {
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
     endpoint_manager: EndpointManager,
+
+    /// `name/version` sent as the capture request's `PostHog-Sdk-Info` and
+    /// `User-Agent`, set by the stateful client from its configured SDK
+    /// identity. `None` sends `posthog-rs/<crate version>`.
+    #[builder(setter(skip))]
+    pub(crate) sdk_info: Option<String>,
 }
 
 /// Resolved client-level default properties for capture requests.
@@ -513,8 +520,9 @@ impl ClientOptionsBuilder {
     /// failed remote `/flags` request, or failed local-evaluation poll. With
     /// persistent delivery, it also receives recoverable storage read, write,
     /// and removal errors. A storage error does not imply delivery failed: a
-    /// failed write still permits bounded memory-backed delivery. A partial write
-    /// can leave a record on disk and cause duplicate delivery after restart.
+    /// failed write still permits bounded memory-backed delivery. An event can
+    /// be delivered again after restart when removing its delivered record
+    /// failed, or when shutdown stopped while it was being sent.
     /// Multiple hooks fire in registration order.
     ///
     /// # Observability only — never emit from the hook
@@ -531,10 +539,9 @@ impl ClientOptionsBuilder {
     /// reject/exhaustion, serialization failures, and worker storage errors (the
     /// caller now owns those signals). Shutdown-timeout, queue-full, and
     /// `before_send` drops, and retryable failures that shutdown stops from being
-    /// retried, keep their WARN logs and do **not** fire the hook. With finite
-    /// server retries, a batch that has used all `max_capture_attempts` still
-    /// fires it. Persistent delivery instead retains retryable work for another
-    /// attempt sequence; exhausting a sequence does not fire a terminal failure.
+    /// retried, keep their WARN logs and do **not** fire the hook. A batch that
+    /// has used all `max_capture_attempts` still fires it. Stateful delivery
+    /// has no attempt limit, so its retryable failures never fire it.
     /// The existing `/flags` and poller WARN logs are unaffected.
     pub fn on_error<F>(&mut self, hook: F) -> &mut Self
     where

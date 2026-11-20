@@ -1,7 +1,7 @@
 //! Persisted targeting and optional result data share the client-state owner.
 //! Cached results carry their producing context, never an inferred current user.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,9 @@ impl FlagContext {
 pub(super) struct FlagCache {
     pub(super) context: FlagContext,
     pub(super) flags: HashMap<String, CachedFlag>,
+    /// Keys whose latest record failed to evaluate. A read with no value for
+    /// one reports `evaluation_failed` instead of `flag_missing`.
+    pub(super) failed: HashSet<String>,
 }
 
 /// Reporting metadata belongs to each retained record: a partial response cannot
@@ -100,6 +103,8 @@ pub(super) struct CachedFlag {
 struct StoredCacheRef<'a> {
     contexts: Vec<&'a FlagContext>,
     flags: HashMap<&'a str, StoredFlagRef<'a>>,
+    #[serde(skip_serializing_if = "HashSet::is_empty")]
+    failed: &'a HashSet<String>,
 }
 
 #[derive(Serialize)]
@@ -116,6 +121,8 @@ struct StoredFlagRef<'a> {
 struct StoredCache {
     contexts: Vec<FlagContext>,
     flags: HashMap<String, StoredFlag>,
+    #[serde(default)]
+    failed: HashSet<String>,
 }
 
 #[derive(Deserialize)]
@@ -166,7 +173,12 @@ impl Serialize for FlagCache {
                 )
             })
             .collect();
-        StoredCacheRef { contexts, flags }.serialize(serializer)
+        StoredCacheRef {
+            contexts,
+            flags,
+            failed: &self.failed,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -199,7 +211,11 @@ impl<'de> Deserialize<'de> for FlagCache {
                 ))
             })
             .collect::<Result<_, D::Error>>()?;
-        Ok(Self { context, flags })
+        Ok(Self {
+            context,
+            flags,
+            failed: stored.failed,
+        })
     }
 }
 
@@ -227,14 +243,18 @@ impl FlagCache {
         revision: u64,
         loaded: LoadedFlags,
     ) -> Self {
-        let mut flags = if loaded.partial {
+        let (mut flags, mut failed) = if loaded.partial {
             previous
-                .map(|cache| cache.flags.clone())
+                .map(|cache| (cache.flags.clone(), cache.failed.clone()))
                 .unwrap_or_default()
         } else {
-            HashMap::new()
+            Default::default()
         };
+        // A partial response keeps an earlier value for a failed key, as
+        // posthog-ios does: the failure is only a diagnostic.
+        failed.extend(loaded.failed);
         for (key, record) in loaded.records {
+            failed.remove(&key);
             flags.insert(
                 key,
                 CachedFlag {
@@ -250,6 +270,7 @@ impl FlagCache {
         Self {
             context: (*context).clone(),
             flags,
+            failed,
         }
     }
 }
@@ -270,33 +291,12 @@ impl Snapshot {
                 // Reset may have replaced the snapshot; never rewind reservation tickets.
                 self.flag_load.reports = previous.flag_load.reports.cleared();
             }
+            // The cached flags stay until the new identity's response
+            // replaces them, as in posthog-ios, posthog-android and posthog-js.
             if identity_changed {
-                self.flags.cache = None;
                 self.flag_load.completed = None;
             }
         }
         Some(())
-    }
-
-    /// Initialization restores only exact request-context matches. In-process
-    /// property-only stale reads are a separate policy from restart hydration.
-    pub(super) fn reconcile_flag_cache(&mut self, disable_geoip: bool) -> bool {
-        let context = FlagContext::current(self, disable_geoip);
-        let Some(cache) = self.flags.cache.as_mut() else {
-            return false;
-        };
-        if cache.context != context {
-            self.flags.cache = None;
-            return true;
-        }
-        // A partial response can retain records evaluated with older targeting.
-        // They may be served in-process, but never hydrated as current on restart.
-        if cache.flags.values().all(|flag| *flag.context == context) {
-            return false;
-        }
-        Arc::make_mut(cache)
-            .flags
-            .retain(|_, flag| *flag.context == context);
-        true
     }
 }

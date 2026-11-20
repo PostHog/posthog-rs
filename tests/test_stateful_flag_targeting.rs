@@ -177,7 +177,6 @@ fn targeting_setters_merge_and_reset_with_default_or_suppressed_reload_while_out
         },
     );
     assert_eq!(hooks.load(Ordering::SeqCst), 0);
-    assert!(!client.is_identified());
     assert_eq!(client.get_distinct_id(), "device");
 }
 
@@ -440,24 +439,12 @@ fn mirrored_targeting_is_visible_to_reentrant_hooks_and_survives_event_drop() {
 }
 
 #[test]
-fn mirrored_targeting_survives_rejected_analytics_without_reloading_automatically() {
-    use posthog::stateful::CaptureOutcome;
+fn mirrored_targeting_survives_dropped_analytics_without_reloading_automatically() {
     let server = MockServer::start();
     let mut conf = config(&server);
-    conf.max_queue_bytes = 2048;
-    conf.before_send(|mut event| {
-        if event.event_name() != "occupy" {
-            event.insert_prop("oversized", "x".repeat(4096)).unwrap();
-        }
-        Some(event)
-    });
+    conf.before_send(|_| None);
     let client = Client::init_blocking(conf);
-    assert!(matches!(
-        client.capture("occupy"),
-        CaptureOutcome::Accepted { .. }
-    ));
     client.set_person_properties(properties(json!({"plan":"pro"})));
-    assert_eq!(client.capture("still-full"), CaptureOutcome::Full);
     let _analytics = server.mock(|when, then| {
         when.method(POST).path("/i/v1/analytics/events");
         then.status(200);

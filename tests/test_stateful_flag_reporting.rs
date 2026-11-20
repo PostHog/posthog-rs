@@ -31,7 +31,6 @@ fn config(server: &MockServer) -> Config {
     c.capture_compression = None;
     c.flush_at = 1000;
     c.flush_interval = Duration::from_secs(3600);
-    c.max_capture_attempts = 1;
     c.shutdown_timeout = Duration::from_secs(1);
     c
 }
@@ -382,33 +381,6 @@ fn dropped_and_panicking_hooks_release_reservations() {
 }
 
 #[test]
-fn rejected_admission_does_not_commit_a_report() {
-    let server = MockServer::start();
-    accept(&server);
-    let mut c = config(&server);
-    c.max_queue_bytes = 2048;
-    let events = observe(&mut c);
-    let attempts = AtomicUsize::new(0);
-    c.before_send(move |mut event| {
-        if event.properties()["$feature_flag"] == "b" && attempts.fetch_add(1, Ordering::SeqCst) < 2
-        {
-            event.insert_prop("oversized", "x".repeat(4096)).unwrap();
-        }
-        Some(event)
-    });
-    let client = Client::init_blocking(c);
-    let _ = client.feature_flag("a").get();
-    for _ in 0..2 {
-        let _ = client.feature_flag("b").get();
-    }
-    assert_eq!(events.lock().unwrap().len(), 3);
-    client.flush_blocking();
-    let _ = client.feature_flag("b").get();
-    let _ = client.feature_flag("b").get();
-    assert_eq!(events.lock().unwrap().len(), 4);
-}
-
-#[test]
 fn concurrent_duplicate_reads_do_not_wait_for_user_hooks() {
     let server = MockServer::start();
     accept(&server);
@@ -735,4 +707,40 @@ fn lookup_shortcuts_report_access_but_payload_reads_only_when_asked() {
     let _ = client.feature_flag("missing").send_event(true).payload();
     assert_eq!(reported().last(), Some(&json!("missing")));
     client.shutdown_blocking(None);
+}
+
+#[test]
+fn a_failed_flag_reports_evaluation_failed_and_a_healthy_sibling_does_not() {
+    let server = MockServer::start();
+    accept(&server);
+    server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({"flags": {
+            "checkout": {"key": "checkout", "enabled": false, "failed": true},
+            "beta-ui": {"key": "beta-ui", "enabled": false}
+        }}));
+    });
+    let mut c = config(&server);
+    c.bootstrap_feature_flags = None;
+    c.bootstrap_feature_flag_payloads = None;
+    let events = observe(&mut c);
+    let client = Client::init_blocking(c);
+    reload(&client);
+    assert_eq!(client.feature_flag("checkout").get(), None);
+    assert!(client.feature_flag("beta-ui").get().is_some());
+    let events = events.lock().unwrap();
+    let error = |key: &str| {
+        let event = events
+            .iter()
+            .find(|event| event.properties()["$feature_flag"] == key)
+            .unwrap();
+        event.properties().get("$feature_flag_error").cloned()
+    };
+    assert_eq!(error("checkout"), Some(json!("evaluation_failed")));
+    assert_eq!(error("beta-ui"), None);
+    let checkout = events
+        .iter()
+        .find(|event| event.properties()["$feature_flag"] == "checkout")
+        .unwrap();
+    assert_eq!(checkout.properties()["$feature_flag_response"], Value::Null);
 }

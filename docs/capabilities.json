@@ -11,6 +11,7 @@
   "Client::evaluate_flags": "evaluate-flags",
   "Client::evaluate_flags_with_context": "evaluate-flags",
   "Client::flush": "flush",
+  "Client::get_remote_config_payload": "get-remote-config-payload",
   "Client::group_identify": "group-identify",
   "Client::shutdown": "shutdown",
   "Event::new": "capture",

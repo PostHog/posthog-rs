@@ -148,6 +148,7 @@ fn loaded(records: HashMap<String, EvaluatedFlagRecord>, partial: bool) -> flags
         evaluated_at: Some(1),
         partial,
         invalid_payloads: false,
+        failed: Default::default(),
     }
 }
 
@@ -286,7 +287,7 @@ fn group_targeting_change_in_flight_continues_with_a_follow_up_request() {
 }
 
 #[test]
-fn identity_group_and_reset_changes_clear_cache_and_reject_late_results() {
+fn identity_and_group_changes_keep_the_cache_until_replaced_and_reject_late_results() {
     for operation in 0..4 {
         let server = Server::new(vec![
             (200, json!({"featureFlags":{"obsolete":true}})),
@@ -330,9 +331,15 @@ fn identity_group_and_reset_changes_clear_cache_and_reject_late_results() {
         server.finish();
         assert_eq!(current["distinct_id"], before_release.distinct_id);
         assert_eq!(current["groups"], json!(before_release.groups));
-        assert!(after_obsolete.flags.cache.is_none());
+        // The late response is not applied. The earlier flags stay until the
+        // current one replaces them, except after reset, which clears them.
+        assert!(!after_obsolete
+            .flags
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.flags.contains_key("obsolete")));
         assert!(after_obsolete.flag_load.completed.is_none());
-        assert!(before_release.flags.cache.is_none());
+        assert_eq!(before_release.flags.cache.is_none(), operation == 3);
         if operation != 0 {
             assert!(!before_release
                 .flags
@@ -417,7 +424,7 @@ fn concurrent_reloads_keep_only_latest_requested_context_and_active_result_is_ob
 }
 
 #[test]
-fn partial_merge_preserves_record_provenance_and_restore_filters_stale_records() {
+fn partial_merge_preserves_record_provenance_through_a_restart() {
     let server = Server::new(vec![
         (
             200,
@@ -475,12 +482,12 @@ fn partial_merge_preserves_record_provenance_and_restore_filters_stale_records()
     assert!(cache.flags["b"].partial);
     assert_eq!(cache.flags["b"].context.person_properties["plan"], "pro");
     assert_eq!(cache.flags["b"].revision, 1);
-    let mut restored: Snapshot =
+    // A restart restores every cached record, as the other SDKs do.
+    let restored: Snapshot =
         serde_json::from_slice(&serde_json::to_vec(second.as_ref()).unwrap()).unwrap();
     assert_eq!(restored.flag_load.revision, 0);
-    assert!(restored.reconcile_flag_cache(false));
     let restored = restored.flags.cache.as_ref().unwrap();
-    assert!(!restored.flags.contains_key("a"));
+    assert_eq!(restored.flags["a"], cache.flags["a"]);
     assert_eq!(restored.flags["b"], cache.flags["b"]);
     client.reload_feature_flags();
     server.request();
@@ -695,7 +702,7 @@ fn returning_to_the_original_targeting_does_not_revive_an_obsolete_response() {
 }
 
 #[test]
-fn public_restart_hydrates_only_records_matching_persisted_targeting() {
+fn public_restart_restores_every_cached_record() {
     let path = std::env::temp_dir().join(format!("posthog-flag-restore-{}", uuid::Uuid::now_v7()));
     let server = Server::new(vec![
         (
@@ -754,7 +761,10 @@ fn public_restart_hydrates_only_records_matching_persisted_targeting() {
     let restored = Client::init_blocking(make_config());
     let snapshot = restored.state.as_ref().unwrap().snapshot();
     let cache = snapshot.flags.cache.as_ref().unwrap();
-    assert_eq!(cache.flags.len(), 1);
+    // Records evaluated with older targeting are restored too, as the other
+    // SDKs restore their whole cache.
+    assert_eq!(cache.flags.len(), 2);
+    assert!(cache.flags["old"].record.enabled);
     assert!(!cache.flags["fresh"].record.enabled);
     assert_eq!(cache.flags["fresh"].record.payload, Some(Value::Null));
     assert_eq!(cache.flags["fresh"].request_id.as_deref(), Some("second"));
@@ -940,7 +950,8 @@ fn preload_uses_restored_targeting_after_identified_bootstrap_reconciliation() {
     assert_eq!(request["$anon_distinct_id"], "device");
     assert_eq!(request["$device_id"], "device");
     assert_eq!(request["person_properties"], json!({"plan":"pro"}));
-    assert!(before.flags.cache.is_none());
+    // The restored flags stay until the identified user's response arrives.
+    assert!(before.flags.cache.is_some());
     assert_eq!(before.flag_load.request, 1);
     assert!(client
         .state
