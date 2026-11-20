@@ -9,7 +9,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use super::{build_http, ClientOptions, Clock, Control};
+use super::{build_http, finished, ClientOptions, Clock, Control};
 use crate::client::common::apply_on_error_hooks;
 use crate::client::on_error::ReplayFailure;
 use crate::client::retry::{capture_backoff_duration, is_retryable_status, parse_retry_after};
@@ -107,6 +107,21 @@ impl Queue {
         ready
     }
 }
+/// Whether a response body says recordings are over quota.
+fn quota_limited(body: &[u8]) -> bool {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    ["quotaLimited", "quota_limited"].iter().any(|key| {
+        body.get(key).is_some_and(|quota| {
+            quota.as_bool() == Some(true)
+                || quota
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|v| v.as_str() == Some("recordings")))
+        })
+    })
+}
+
 fn same_context(a: &EncodedFrame, b: &EncodedFrame) -> bool {
     a.attribution.distinct_id == b.attribution.distinct_id
         && a.attribution.session_id == b.attribution.session_id
@@ -150,7 +165,7 @@ impl Lane {
                     clock,
                     http,
                     replay: Queue::default(),
-                    closing: None,
+                    closing: false,
                 }
                 .run(&rx, &deadline)
             })?;
@@ -168,11 +183,7 @@ impl Lane {
     }
 
     pub(super) fn is_stopped(&self) -> bool {
-        self.thread
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map_or(true, JoinHandle::is_finished)
+        finished(&self.thread)
     }
 
     pub(super) fn join(&self) {
@@ -191,8 +202,8 @@ struct Sender {
     clock: Arc<dyn Clock>,
     http: reqwest::blocking::Client,
     replay: Queue,
-    /// The shutdown deadline, once one is selected.
-    closing: Option<Instant>,
+    /// Whether a shutdown deadline has been observed and delivery closed.
+    closing: bool,
 }
 
 impl Sender {
@@ -203,7 +214,7 @@ impl Sender {
                 // Past the deadline: only drain what the encoder still sends.
                 None
             } else {
-                self.replay.next_due(self.closing)
+                self.replay.next_due(end)
             };
             let message = match due {
                 Some(due) => rx.recv_timeout(due.saturating_duration_since(self.clock.now())),
@@ -214,7 +225,7 @@ impl Sender {
             // A deadline selected while waiting applies to this message.
             let end = self.observe_deadline(deadline);
             match message {
-                Ok(Control::ReplayFrame(frame)) => self.admit_replay(*frame),
+                Ok(Control::ReplayFrame(frame)) => self.replay.push(*frame, self.clock.now()),
                 Ok(Control::ReplayFailure(message)) => report(&self.options, message, None),
                 Ok(Control::ReplayShutdownAbandoned) => self.report_replay_shutdown(None),
                 Ok(Control::Flush(completion) | Control::FlushCaptures(completion)) => {
@@ -240,27 +251,17 @@ impl Sender {
         self.abandon_replay();
     }
 
-    /// Read the shared shutdown deadline, closing delivery the first time one
-    /// is selected.
+    /// Read the shared shutdown deadline, which is selected once and never
+    /// changes, closing delivery the first time it is seen.
     fn observe_deadline(&mut self, deadline: &Mutex<Option<Instant>>) -> Option<Instant> {
         let end = *deadline.lock().unwrap_or_else(|p| p.into_inner());
-        if let (Some(end), None) = (end, self.closing) {
-            self.close_delivery(end);
+        if end.is_some() && !self.closing {
+            self.closing = true;
+            self.service_replay(true, end);
         }
         end
     }
 
-    fn delivery_deadline(&self, deadline: Option<Instant>) -> Option<Instant> {
-        deadline.into_iter().chain(self.closing).min()
-    }
-
-    fn admit_replay(&mut self, frame: EncodedFrame) {
-        self.replay.push(frame, self.clock.now());
-    }
-    fn close_delivery(&mut self, deadline: Instant) {
-        self.closing = Some(self.closing.map_or(deadline, |old| old.min(deadline)));
-        self.service_replay(true, Some(deadline));
-    }
     fn report_replay_shutdown(&mut self, status: Option<u16>) {
         if !self.replay.shutdown_reported {
             self.replay.shutdown_reported = true;
@@ -280,7 +281,6 @@ impl Sender {
         self.replay.since = None;
     }
     fn service_replay(&mut self, force: bool, deadline: Option<Instant>) {
-        let deadline = self.delivery_deadline(deadline);
         if deadline.is_some_and(|end| self.clock.now() >= end) {
             self.abandon_replay();
             return;
@@ -295,10 +295,14 @@ impl Sender {
             self.report_replay_shutdown(None);
             return;
         }
-        let length = batch.frames.iter().try_fold(1usize, |n, frame| {
-            n.checked_add(frame.bytes.len())?.checked_add(1)
-        });
-        if length.is_none() || length.is_some_and(|n| n > MAX_BODY_BYTES) {
+        let length = batch
+            .frames
+            .iter()
+            .try_fold(1usize, |n, frame| {
+                n.checked_add(frame.bytes.len())?.checked_add(1)
+            })
+            .filter(|&n| n <= MAX_BODY_BYTES);
+        let Some(length) = length else {
             if batch.frames.len() > 1 {
                 self.split_replay(batch, deadline);
             } else {
@@ -309,8 +313,8 @@ impl Sender {
                 );
             }
             return;
-        }
-        let mut body = Vec::with_capacity(length.unwrap());
+        };
+        let mut body = Vec::with_capacity(length);
         body.push(b'[');
         for (i, frame) in batch.frames.iter().enumerate() {
             if i != 0 {
@@ -381,27 +385,14 @@ impl Sender {
                     // A failed optional body cannot turn a known rejection into
                     // an unknown transport failure. Successful bodies may carry quota state.
                     (!(200..=299).contains(&status)).then_some(status)
+                } else if quota_limited(&bytes) {
+                    report(
+                        &self.options,
+                        "Screenshot upload rejected by recording quota",
+                        Some(status),
+                    );
+                    return;
                 } else {
-                    let quota = serde_json::from_slice::<serde_json::Value>(&bytes)
-                        .ok()
-                        .is_some_and(|v| {
-                            ["quotaLimited", "quota_limited"].iter().any(|key| {
-                                v.get(key).is_some_and(|q| {
-                                    q.as_bool() == Some(true)
-                                        || q.as_array().is_some_and(|values| {
-                                            values.iter().any(|v| v.as_str() == Some("recordings"))
-                                        })
-                                })
-                            })
-                        });
-                    if quota {
-                        report(
-                            &self.options,
-                            "Screenshot upload rejected by recording quota",
-                            Some(status),
-                        );
-                        return;
-                    }
                     Some(status)
                 }
             }

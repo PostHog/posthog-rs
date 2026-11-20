@@ -172,16 +172,22 @@ impl ReplayFrame {
 impl Drop for ReplayFrame {
     fn drop(&mut self) {
         if let Some(permit) = &self.permit {
-            let mut pool = permit.pool.lock().unwrap_or_else(|p| p.into_inner());
-            if pool.active && pool.run == self.run {
-                pool.buffers.push(std::mem::take(&mut self.pixels));
-            }
+            permit.recycle(self.run, &mut self.pixels);
         }
     }
 }
 
 pub(crate) struct Permit {
     pool: Arc<Mutex<Pool>>,
+}
+impl Permit {
+    /// Return a frame's pixel buffer for reuse while its recording run lasts.
+    fn recycle(&self, run: u64, pixels: &mut Vec<u8>) {
+        let mut pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
+        if pool.active && pool.run == run {
+            pool.buffers.push(std::mem::take(pixels));
+        }
+    }
 }
 impl Drop for Permit {
     fn drop(&mut self) {
@@ -285,12 +291,8 @@ impl Controller {
             let pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
             (pool.active, pool.in_flight)
         };
-        let config = snapshot
-            .remote_config
-            .as_ref()
-            .and_then(|c| c.session_recording.as_ref());
-        let opted_out = snapshot.opt_out.unwrap_or(self.default_opt_out);
-        if !started || opted_out || config == Some(&serde_json::Value::Bool(false)) {
+        let config = recording_config(snapshot);
+        if !started || self.opted_out(snapshot) || config == Some(&serde_json::Value::Bool(false)) {
             return vec![("$recording_status", "disabled".into())];
         }
         let recording = session_id.is_some() && !self.gate.is_closed() && self.allowed(snapshot);
@@ -311,14 +313,19 @@ impl Controller {
         ]
     }
     fn allowed(&self, snapshot: &Snapshot) -> bool {
-        !snapshot.opt_out.unwrap_or(self.default_opt_out)
-            && policy::eligible(
-                snapshot
-                    .remote_config
-                    .as_ref()
-                    .and_then(|c| c.session_recording.as_ref()),
-            )
+        !self.opted_out(snapshot) && policy::eligible(recording_config(snapshot))
     }
+    fn opted_out(&self, snapshot: &Snapshot) -> bool {
+        snapshot.opt_out.unwrap_or(self.default_opt_out)
+    }
+}
+
+/// The remote `sessionRecording` settings `snapshot` was taken under.
+fn recording_config(snapshot: &Snapshot) -> Option<&serde_json::Value> {
+    snapshot
+        .remote_config
+        .as_ref()
+        .and_then(|c| c.session_recording.as_ref())
 }
 
 impl Client {
@@ -341,8 +348,7 @@ impl SessionReplay {
         if controller
             .state
             .mutate(|snapshot| {
-                let opted_out = snapshot.opt_out.unwrap_or(controller.default_opt_out);
-                if !opted_out && snapshot.sessions.active_id(now).is_none() {
+                if !controller.opted_out(snapshot) && snapshot.sessions.active_id(now).is_none() {
                     snapshot.session_operation(Operation::End, now, false);
                     snapshot.session_operation(Operation::Start, now, false);
                 }
@@ -391,7 +397,7 @@ impl SessionReplay {
             return Err(FrameUnavailable::Closed);
         }
         let snapshot = c.state.snapshot().ok_or(FrameUnavailable::Closed)?;
-        if snapshot.opt_out.unwrap_or(c.default_opt_out) {
+        if c.opted_out(&snapshot) {
             return Err(FrameUnavailable::OptedOut);
         }
         if !c.allowed(&snapshot) {
@@ -430,12 +436,7 @@ impl SessionReplay {
             timestamp: Utc::now(),
             uuid: Uuid::now_v7(),
             sequence,
-            endpoint: policy::endpoint(
-                snapshot
-                    .remote_config
-                    .as_ref()
-                    .and_then(|c| c.session_recording.as_ref()),
-            ),
+            endpoint: policy::endpoint(recording_config(&snapshot)),
             generation: snapshot.generation,
             consent_generation: snapshot.replay_consent_generation,
         };
@@ -468,7 +469,7 @@ impl SessionReplay {
         let Some(snapshot) = c.state.snapshot() else {
             return SubmitOutcome::Closed;
         };
-        if snapshot.opt_out.unwrap_or(c.default_opt_out)
+        if c.opted_out(&snapshot)
             || snapshot.generation != frame.attribution.generation
             || snapshot.distinct_id != frame.attribution.distinct_id
             || snapshot.replay_consent_generation != frame.attribution.consent_generation
@@ -490,12 +491,7 @@ impl ReplayFrame {
     pub(super) fn finish(mut self, bytes: Vec<u8>) -> EncodedFrame {
         // Return raw capacity without releasing the end-to-end reservation.
         let permit = self.permit.take().unwrap();
-        {
-            let mut pool = permit.pool.lock().unwrap_or_else(|p| p.into_inner());
-            if pool.active && pool.run == self.run {
-                pool.buffers.push(std::mem::take(&mut self.pixels));
-            }
-        }
+        permit.recycle(self.run, &mut self.pixels);
         EncodedFrame {
             bytes,
             attribution: self.attribution.clone(),

@@ -163,10 +163,10 @@ pub(crate) struct Producer {
     pub(super) default_opt_out: bool,
     pub(super) send_feature_flag_event: bool,
     pub(super) session_clock: std::sync::Arc<dyn super::sessions::SessionClock>,
-    /// Set once the replay controller starts; empty when the encoder could not start.
+    /// The replay controller, once it starts; None when the encoder could not
+    /// start, and in the encoder's own copy, which only assembles `$snapshot`.
     #[cfg(feature = "session-replay")]
-    pub(super) replay:
-        std::sync::Arc<std::sync::OnceLock<std::sync::Weak<super::replay::Controller>>>,
+    pub(super) replay: Option<std::sync::Weak<super::replay::Controller>>,
     /// The last screen name passed to `screen`, added to later events as
     /// `$screen_name`. Kept in memory only, as in posthog-ios and
     /// posthog-android.
@@ -196,7 +196,7 @@ impl Producer {
             send_feature_flag_event: config.send_feature_flag_event,
             session_clock: std::sync::Arc::new(super::sessions::SystemSessionClock),
             #[cfg(feature = "session-replay")]
-            replay: Default::default(),
+            replay: None,
             last_screen: std::sync::Arc::new(Mutex::new(None)),
         }
     }
@@ -279,30 +279,8 @@ impl Producer {
         // SDK's name, as in posthog-ios and posthog-android: no registered
         // properties, groups, device context or person state.
         let shared = event.event_name() != "$snapshot";
-        let identity_event = IDENTITY_EVENTS.contains(&event.event_name());
-        for (key, value) in snapshot.registered.iter().filter(|_| shared) {
-            // A registered false would make PostHog drop or ignore an identity
-            // event, so it never reaches one (capture spec), as in posthog-ios
-            // and posthog-android.
-            if identity_event && key == "$process_person_profile" {
-                continue;
-            }
-            event.insert_prop_default(key.clone(), value.clone());
-        }
-        if shared && !snapshot.groups.is_empty() {
-            event.insert_prop_default(
-                "$groups",
-                Value::Object(
-                    snapshot
-                        .groups
-                        .iter()
-                        .map(|(kind, key)| (kind.clone(), key.clone().into()))
-                        .collect(),
-                ),
-            );
-        }
-        for (key, value) in self.context.iter().filter(|_| shared) {
-            event.insert_prop_default(key.clone(), value.clone());
+        if shared {
+            self.fill_shared_context(&mut event, snapshot);
         }
         if let Some(id) = session_id {
             event.insert_prop_default("$session_id", id.to_string().into());
@@ -329,6 +307,36 @@ impl Producer {
         }
         Ok(event)
     }
+
+    /// Registered properties, groups and device context, which every event
+    /// but `$snapshot` carries.
+    fn fill_shared_context(&self, event: &mut Event, snapshot: &Snapshot) {
+        let identity_event = IDENTITY_EVENTS.contains(&event.event_name());
+        for (key, value) in &snapshot.registered {
+            // A registered false would make PostHog drop or ignore an identity
+            // event, so it never reaches one (capture spec), as in posthog-ios
+            // and posthog-android.
+            if identity_event && key == "$process_person_profile" {
+                continue;
+            }
+            event.insert_prop_default(key.clone(), value.clone());
+        }
+        if !snapshot.groups.is_empty() {
+            event.insert_prop_default(
+                "$groups",
+                Value::Object(
+                    snapshot
+                        .groups
+                        .iter()
+                        .map(|(kind, key)| (kind.clone(), key.clone().into()))
+                        .collect(),
+                ),
+            );
+        }
+        for (key, value) in &self.context {
+            event.insert_prop_default(key.clone(), value.clone());
+        }
+    }
 }
 
 #[cfg(feature = "session-replay")]
@@ -341,7 +349,7 @@ impl Producer {
         snapshot: &Snapshot,
         session_id: Option<Uuid>,
     ) {
-        match self.replay.get().and_then(std::sync::Weak::upgrade) {
+        match self.replay.as_ref().and_then(std::sync::Weak::upgrade) {
             Some(replay) => {
                 for (key, value) in replay.debug_properties(snapshot, session_id) {
                     event.insert_prop_default(key, value);

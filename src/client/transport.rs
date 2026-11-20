@@ -130,6 +130,16 @@ pub(crate) enum Control {
     ReplayShutdownAbandoned,
 }
 
+/// Whether the thread held in `handle` has finished, or was already joined.
+#[cfg(feature = "stateful")]
+pub(crate) fn finished(handle: &Mutex<Option<JoinHandle<()>>>) -> bool {
+    handle
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map_or(true, JoinHandle::is_finished)
+}
+
 /// Completion signal handed to the worker so the caller can wait for a flush or
 /// shutdown to finish. The worker calls [`Completion::signal`] without needing a
 /// runtime — `oneshot::Sender::send` and `mpsc::Sender::send` are both runtime-free.

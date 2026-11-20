@@ -811,6 +811,7 @@ fn encoding_errors_and_panics_release_capacity_without_stopping_the_worker() {
             tx,
             Duration::from_secs(2),
             Box::new(Broken(panic)),
+            Default::default(),
         )
         .unwrap();
         for _ in 0..2 {

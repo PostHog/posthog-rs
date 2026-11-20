@@ -292,12 +292,12 @@ impl Client {
             }
         };
         #[cfg(feature = "session-replay")]
+        let mut producer = producer;
+        #[cfg(feature = "session-replay")]
         let replay = super::replay::Controller::new(&state, &transport, &producer, &config);
         #[cfg(feature = "session-replay")]
         match &replay {
-            Some(replay) => {
-                let _ = producer.replay.set(Arc::downgrade(replay));
-            }
+            Some(replay) => producer.replay = Some(Arc::downgrade(replay)),
             None => crate::client::transport::replay::report(
                 &config.transport_options(),
                 "Screenshot encoder could not start; analytics remains enabled",

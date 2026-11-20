@@ -13,7 +13,8 @@ use super::table::Limits;
 #[cfg(test)]
 use super::SystemClock;
 use super::{
-    build_http, Clock, Completion, Control, LaneConfig, TransportHandle, MAX_SHUTDOWN_TIMEOUT,
+    build_http, finished, Clock, Completion, Control, LaneConfig, TransportHandle,
+    MAX_SHUTDOWN_TIMEOUT,
 };
 use crate::capture_event::CaptureEvent;
 use crate::client::event_store::EventStore;
@@ -169,15 +170,6 @@ impl Delivery {
     fn executor_stopped(&self) -> bool {
         finished(&self.executor)
     }
-}
-
-/// Whether the thread held in `handle` has finished, or was already joined.
-fn finished(handle: &Mutex<Option<JoinHandle<()>>>) -> bool {
-    handle
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .as_ref()
-        .map_or(true, JoinHandle::is_finished)
 }
 
 /// The name of the thread that sends stateful delivery requests.

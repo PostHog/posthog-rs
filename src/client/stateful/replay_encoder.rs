@@ -13,7 +13,7 @@ use super::super::producer::{CaptureGuard, Producer};
 use super::super::{Capture, CaptureOutcome};
 use super::{FrameLayout, ReplayConfig, ReplayFrame};
 use crate::client::transport::replay::{LimitedBuffer, MAX_BODY_BYTES};
-use crate::client::transport::{Completion, Control};
+use crate::client::transport::{finished, Completion, Control};
 use crate::constants::{
     COOKIELESS_MODE_OPT, COOKIELESS_MODE_PROP, DISABLE_SKEW_CORRECTION_OPT, IGNORE_SENT_AT_PROP,
 };
@@ -254,7 +254,7 @@ impl Worker {
         shutdown_timeout: Duration,
         deadline: Arc<Mutex<Option<Instant>>>,
     ) -> io::Result<Self> {
-        Self::spawn_with_encoder_and_deadline(
+        Self::spawn_with_encoder(
             producer,
             config,
             token,
@@ -264,27 +264,8 @@ impl Worker {
             deadline,
         )
     }
-    #[cfg(test)]
-    pub(super) fn spawn_with_encoder(
-        producer: Producer,
-        config: &ReplayConfig,
-        token: String,
-        delivery: mpsc::Sender<Control>,
-        shutdown_timeout: Duration,
-        codec: Box<dyn ImageEncoder>,
-    ) -> io::Result<Self> {
-        Self::spawn_with_encoder_and_deadline(
-            producer,
-            config,
-            token,
-            delivery,
-            shutdown_timeout,
-            codec,
-            Arc::new(Mutex::new(None)),
-        )
-    }
     #[allow(clippy::too_many_arguments)]
-    fn spawn_with_encoder_and_deadline(
+    pub(super) fn spawn_with_encoder(
         producer: Producer,
         config: &ReplayConfig,
         token: String,
@@ -303,6 +284,12 @@ impl Worker {
         let thread = thread::Builder::new()
             .name("posthog-replay-encoder".into())
             .spawn(move || {
+                let expired = || {
+                    deadline
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .is_some_and(|end| Instant::now() >= end)
+                };
                 while let Ok(message) = rx.recv() {
                     match message {
                         Message::Control(control) => {
@@ -312,11 +299,7 @@ impl Worker {
                             }
                         }
                         Message::Frame(frame, flush) => {
-                            if deadline
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner())
-                                .is_some_and(|end| Instant::now() >= end)
-                            {
+                            if expired() {
                                 let _ = delivery.send(Control::ReplayShutdownAbandoned);
                                 continue;
                             }
@@ -324,10 +307,7 @@ impl Worker {
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     encode(*frame, &producer, &token, quality, codec.as_ref())
                                 }));
-                            let expired = deadline
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner())
-                                .is_some_and(|end| Instant::now() >= end);
+                            let expired = expired();
                             let control = match result {
                                 Ok(Ok(Some(_))) if expired => {
                                     Some(Control::ReplayShutdownAbandoned)
@@ -369,11 +349,7 @@ impl Worker {
         self.id == thread::current().id()
     }
     pub(crate) fn is_stopped(&self) -> bool {
-        self.thread
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map_or(true, std::thread::JoinHandle::is_finished)
+        finished(&self.thread)
     }
     pub(crate) fn join(&self) {
         if self.on_worker_thread() {
@@ -402,6 +378,8 @@ fn encode(
     codec: &dyn ImageEncoder,
 ) -> Result<Option<super::EncodedFrame>, &'static str> {
     let jpeg = codec.encode(frame.layout, &frame.pixels, quality)?;
+    let mut image = String::from("data:image/jpeg;base64,");
+    STANDARD.encode_string(jpeg, &mut image);
     let timestamp = frame.attribution.timestamp;
     let session = frame.attribution.session_id.to_string();
     let window = frame.attribution.window_id.to_string();
@@ -420,7 +398,7 @@ fn encode(
             {"type":4,"timestamp":timestamp.timestamp_millis(),"data":{"width":frame.layout.width,"height":frame.layout.height}},
             {"type":2,"timestamp":timestamp.timestamp_millis(),"data":{"initialOffset":{"top":0,"left":0},"wireframes":[{
                 "id":SCREENSHOT_ID,"x":0,"y":0,"width":frame.layout.width,"height":frame.layout.height,"type":"screenshot",
-                "base64":format!("data:image/jpeg;base64,{}", STANDARD.encode(jpeg))
+                "base64":image
             }]}}
         ])),
     ]);
