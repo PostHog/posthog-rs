@@ -197,6 +197,15 @@ jobs:
           }
           ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
           published=$(ffi_release_published "$ffi_version")
+          if [ -n "$ABANDON_FFI_VERSION" ] && [ "$ABANDON_FFI_VERSION" != "$ffi_version" ] \
+            && [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
+            # main already has another unpublished version, so the abandonment was
+            # applied: a rerun of an abandon run whose release commit landed but
+            # whose release didn't finish. Finish that version instead. A typo in
+            # the input lands here too, which is safe: finishing never skips a release.
+            echo "::notice::posthog-rs-ffi $ABANDON_FFI_VERSION is no longer the version on main. Finishing the posthog-rs-ffi $ffi_version release instead."
+            ABANDON_FFI_VERSION=""
+          fi
           if [ -n "$ABANDON_FFI_VERSION" ]; then
             # Only the exact unfinished version can be abandoned, so a typo can't
             # skip recovery of the wrong one.
