@@ -64,7 +64,16 @@ If anything fails after the release commit lands, use **Re-run failed jobs** on 
 
 Changesets that landed in the meantime stay on `main` and go out in the next Release run, once the unfinished bindings release is published. A new changeset push starts that run.
 
-Once the GitHub Release is published, a rerun has nothing to do. Its downloads never change. If the build itself needs a fix, release a `posthog-rs-ffi` patch version instead.
+Once the GitHub Release is published, a rerun has nothing to do. Its downloads never change.
+
+### When an unpublished bindings release can't build
+
+Until a bindings version is published, every Release run tries to finish it, and releases nothing else. If its tagged code can't build, give up on that version and release the fix as a new one:
+
+1. Merge the fix with a `cargo/posthog-rs-ffi` changeset, usually a patch.
+2. In the Actions tab, run the **Release** workflow on `main` and set **abandon_ffi_version** to the stuck version, for example `0.1.0`.
+
+That run skips the stuck version and releases the new one, along with any other pending changesets. The abandoned version keeps its tag, but never gets a published GitHub Release. The run fails without releasing anything if the version you enter isn't the unpublished one on `main`, or if no changeset releases a new bindings version.
 
 ### Known gap: a failed crates.io publish isn't retried
 

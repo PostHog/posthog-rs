@@ -6,6 +6,14 @@ on:
     paths:
       - '.sampo/changesets/*.md'
   workflow_dispatch:
+    inputs:
+      abandon_ffi_version:
+        description: >-
+          Unpublished posthog-rs-ffi version to give up on, for example 0.1.0, when its
+          build can't succeed. This run releases a new version instead, so main needs
+          a changeset with the fix. Leave empty for a normal release.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -135,6 +143,7 @@ jobs:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           GH_TOKEN: ${{ steps.releaser.outputs.token }}
           GH_REPO: ${{ github.repository }}
+          ABANDON_FFI_VERSION: ${{ inputs.abandon_ffi_version }}
         run: |
           version_of() { grep -m1 '^version = ' "$1" | sed 's/version = "\(.*\)"/\1/'; }
           # Finish an earlier run's posthog-rs-ffi release first. Its release commit
@@ -156,7 +165,15 @@ jobs:
           }
           ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
           published=$(ffi_release_published "$ffi_version")
-          if [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
+          if [ -n "$ABANDON_FFI_VERSION" ]; then
+            # Only the exact unfinished version can be abandoned, so a typo can't
+            # skip recovery of the wrong one.
+            if [ "$ABANDON_FFI_VERSION" != "$ffi_version" ] || [ "$published" = true ] || [ "$ffi_version" = "0.0.0" ]; then
+              echo "::error::posthog-rs-ffi $ABANDON_FFI_VERSION isn't the unpublished version on main ($ffi_version, published: $published)"
+              exit 1
+            fi
+            echo "::warning::Abandoning posthog-rs-ffi $ffi_version. It stays unpublished, and this run releases a new version."
+          elif [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
             echo "::notice::Finishing the posthog-rs-ffi $ffi_version release. Changesets on main wait for the next release."
             echo "rerun=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -183,6 +200,10 @@ jobs:
           if [ "$new_version" != "$old_version" ]; then
             echo "posthog_released=true" >> "$GITHUB_OUTPUT"
             released+=("v$new_version")
+          fi
+          if [ -n "$ABANDON_FFI_VERSION" ] && [ "$ffi_version" = "$old_ffi_version" ]; then
+            echo "::error::Abandoning posthog-rs-ffi $ABANDON_FFI_VERSION needs a changeset that releases a new posthog-rs-ffi version"
+            exit 1
           fi
           if [ "$ffi_version" != "$old_ffi_version" ]; then
             echo "ffi_released=true" >> "$GITHUB_OUTPUT"
