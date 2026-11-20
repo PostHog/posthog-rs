@@ -82,10 +82,7 @@ struct Snapshot {
     #[serde(default)]
     groups: HashMap<String, String>,
     // Records written before sessions lack this field and restore without one.
-    #[serde(
-        default,
-        deserialize_with = "Option::<sessions::StoredSession>::deserialize"
-    )]
+    #[serde(default)]
     session: Option<sessions::StoredSession>,
     #[serde(skip)]
     sessions: sessions::Sessions,

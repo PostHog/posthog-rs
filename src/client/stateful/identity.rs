@@ -367,7 +367,7 @@ impl Client {
         // personless neither checks nor records the hash, and clears it.
         let fingerprint = surely_processes_person(wire.options.get(PROCESS_PERSON_PROFILE_OPT))
             .then_some(fingerprint);
-        let now = self.producer.as_ref().unwrap().session_clock.now();
+        let now = self.session_now();
         // Measure before taking the state lock, so large events do not extend
         // it. Admission runs no user code, so it may run under the lock.
         let bytes = crate::client::event_store::record_size(&wire);

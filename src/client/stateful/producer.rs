@@ -357,7 +357,7 @@ impl Client {
         }
         let snapshot = self.state.as_ref().unwrap().mutate(|snapshot| {
             let opted_out = self.snapshot_opted_out(snapshot);
-            let now = self.producer.as_ref().unwrap().session_clock.now();
+            let now = self.session_now();
             let session = (!opted_out).then(|| snapshot.sessions.prepare_admission(now));
             (snapshot.clone(), session)
         });
@@ -381,7 +381,7 @@ impl Client {
         &self,
         generation: u64,
     ) -> Option<super::sessions::AdmissionSession> {
-        let now = self.producer.as_ref().unwrap().session_clock.now();
+        let now = self.session_now();
         self.state
             .as_ref()
             .unwrap()
@@ -417,7 +417,7 @@ impl Client {
         activity: bool,
     ) -> CaptureOutcome {
         let uuid = wire.uuid;
-        let now = self.producer.as_ref().unwrap().session_clock.now();
+        let now = self.session_now();
         // Measure before taking the state lock, so large events do not extend
         // it. Admission runs no user code, so it may run under the lock.
         let bytes = crate::client::event_store::record_size(&wire);

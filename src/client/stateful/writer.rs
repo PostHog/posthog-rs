@@ -393,10 +393,7 @@ impl StateWriter {
             let revision = state.revision.checked_add(1).ok_or(UpdateError::Full)?;
             state.snapshot = Arc::new(candidate);
             state.revision = revision;
-            if state.mode == Mode::Persistent && state.due.is_none() {
-                state.due =
-                    Some(self.shared.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
-            }
+            self.schedule_write(&mut state);
             (revision, result)
         };
         self.shared.notify();
@@ -429,6 +426,15 @@ impl StateWriter {
         );
     }
 
+    /// After a persisted change, write it once the coalescing delay passes,
+    /// unless a write is already due.
+    fn schedule_write(&self, state: &mut State) {
+        if state.mode == Mode::Persistent && state.due.is_none() {
+            state.due =
+                Some(self.shared.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
+        }
+    }
+
     /// Validate session persistence before callback-free queue admission, then
     /// commit session activity and person bookkeeping in the same queue order.
     pub(super) fn admit_capture(
@@ -440,7 +446,7 @@ impl StateWriter {
         )>,
         person: Option<PersonAdmission<'_>>,
         admit: impl FnOnce() -> bool,
-    ) -> bool {
+    ) {
         let persisted_changed = {
             let mut state = self.shared.lock();
             if state.closing.is_some()
@@ -451,7 +457,7 @@ impl StateWriter {
                     .unwrap_or_else(|p| p.into_inner())
                     .is_some()
             {
-                return false;
+                return;
             }
             let mut candidate = (*state.snapshot).clone();
             if let Some(person) = person {
@@ -460,7 +466,7 @@ impl StateWriter {
                         && person.fingerprint.is_some()
                         && candidate.person_properties == person.fingerprint
                     {
-                        return false;
+                        return;
                     }
                     candidate.person_properties = person.fingerprint;
                 } else if candidate.distinct_id == person.distinct_id {
@@ -476,26 +482,21 @@ impl StateWriter {
             }
             let persisted_changed = !candidate.same_persisted_state(&state.snapshot);
             if persisted_changed && state.revision == u64::MAX {
-                return false;
+                return;
             }
             if !admit() {
-                return false;
+                return;
             }
             state.snapshot = Arc::new(candidate);
             if persisted_changed {
                 state.revision += 1;
-                if state.mode == Mode::Persistent && state.due.is_none() {
-                    state.due = Some(
-                        self.shared.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT),
-                    );
-                }
+                self.schedule_write(&mut state);
             }
             persisted_changed
         };
         if persisted_changed {
             self.shared.notify();
         }
-        true
     }
 
     /// Capture one revision to drain, expediting coalescing but not retry cooldown.
