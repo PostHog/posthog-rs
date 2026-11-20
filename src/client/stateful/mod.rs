@@ -67,6 +67,15 @@ fn lenient_bool<'de, D: serde::Deserializer<'de>>(
 }
 
 impl Snapshot {
+    /// Become the identified person `id`, with person processing on.
+    fn identify_as(&mut self, id: String) {
+        self.distinct_id = id;
+        self.identified = true;
+        self.person_processing = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.person_properties = None;
+    }
+
     fn anonymous(id: String) -> Self {
         Self {
             device_id: id.clone(),
