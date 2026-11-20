@@ -19,10 +19,13 @@ pub(crate) struct RemoteConfig {
 }
 
 impl RemoteConfig {
+    /// A boolean or object, nested shallowly enough to be saved with client
+    /// state and read back.
     pub(crate) fn valid(&self) -> bool {
-        self.session_recording
-            .as_ref()
-            .map_or(true, |value| value.is_boolean() || value.is_object())
+        self.session_recording.as_ref().map_or(true, |value| {
+            (value.is_boolean() || value.is_object())
+                && crate::client::stateful::within_depth([value])
+        })
     }
 }
 
@@ -463,5 +466,24 @@ mod tests {
         }
         assert_eq!(decode(b"[]"), Err(LoadError::InvalidResponse));
         assert_eq!(decode(b"broken"), Err(LoadError::InvalidResponse));
+    }
+
+    #[test]
+    fn session_recording_too_deep_to_save_is_rejected_when_loaded() {
+        let nested = |depth: usize| {
+            let mut value = serde_json::json!({"leaf": true});
+            for _ in 0..depth {
+                value = serde_json::json!({ "nested": value });
+            }
+            value
+        };
+        let response = |depth| {
+            serde_json::to_vec(&serde_json::json!({"sessionRecording": nested(depth)})).unwrap()
+        };
+        assert!(decode(&response(10)).is_ok());
+        assert_eq!(
+            decode(&response(120)).unwrap_err(),
+            LoadError::InvalidResponse
+        );
     }
 }

@@ -6,7 +6,7 @@ use std::thread::{self, ThreadId};
 use std::time::Duration;
 
 use crate::client::event_store::StorageDirectory;
-use crate::client::stateful::storage::{FileStateStore, SaveOutcome, StateStore};
+use crate::client::stateful::storage::{FileStateStore, StateStore};
 use crate::client::transport::Admission;
 use crate::{Event, PostHogError};
 use httpmock::{Method::POST, MockServer};
@@ -41,7 +41,7 @@ struct GatedStore {
 }
 
 impl StateStore for GatedStore {
-    fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome> {
+    fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
         self.entered.send(()).unwrap();
         self.release
             .recv_timeout(GATE_WAIT)

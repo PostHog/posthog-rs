@@ -121,18 +121,14 @@ fn optional_cache_codec_failure_isolated_from_mandatory_codec_failure() {
         deep = json!({"nested":deep});
     }
     let mut snapshot = with_cache(Some(deep.clone()));
-    let bytes = encode_snapshot_with_outcome(&snapshot)
-        .map(|(bytes, _)| bytes)
-        .unwrap();
+    let bytes = encode_snapshot(&snapshot).unwrap();
     let restored = FileStateStore::decode(&bytes).unwrap();
     assert!(restored.flags.cache.is_none());
     assert_eq!(restored.distinct_id, "person");
     assert!(snapshot.flags.cache.is_some());
     // Optional omission must not hide invalid mandatory targeting.
     snapshot.flags.person_properties.insert("deep".into(), deep);
-    assert!(encode_snapshot_with_outcome(&snapshot)
-        .map(|(bytes, _)| bytes)
-        .is_err());
+    assert!(encode_snapshot(&snapshot).is_err());
 }
 
 #[test]
@@ -143,13 +139,13 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
         blocked: bool,
     }
     impl StateStore for BlockedStore {
-        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<SaveOutcome> {
+        fn save(&mut self, _snapshot: &Snapshot) -> io::Result<()> {
             if !self.blocked {
                 self.blocked = true;
                 self.entered.send(()).unwrap();
                 self.release.recv().unwrap();
             }
-            Ok(SaveOutcome::default())
+            Ok(())
         }
     }
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -426,9 +422,7 @@ fn large_flag_sets_persist_each_context_once() {
             failed: Default::default(),
         },
     )));
-    let bytes = encode_snapshot_with_outcome(&snapshot)
-        .map(|(bytes, _)| bytes)
-        .unwrap();
+    let bytes = encode_snapshot(&snapshot).unwrap();
     let encoded: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         encoded["state"]["flags"]["cache"]["contexts"]

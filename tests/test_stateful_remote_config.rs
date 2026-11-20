@@ -77,7 +77,9 @@ fn config_completes_while_durable_recovery_is_blocked_and_shutdown_is_bounded() 
     assert_eq!(flushed.delivery, DeliveryOutcome::Attempted);
     // A budget shorter than the retry wait stops without resending.
     assert_eq!(
-        client.shutdown_blocking(Some(Duration::from_secs(1))).delivery,
+        client
+            .shutdown_blocking(Some(Duration::from_secs(1)))
+            .delivery,
         DeliveryOutcome::Stopped
     );
     drop(client);

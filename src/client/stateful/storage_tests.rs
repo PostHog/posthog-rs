@@ -507,9 +507,7 @@ fn final_v1_fixture_restores_identity_consent_and_all_caches() {
     );
     assert!(snapshot.remote_config.is_some());
     assert!(snapshot.session.is_some());
-    let encoded = encode_snapshot_with_outcome(&snapshot)
-        .map(|(bytes, _)| bytes)
-        .unwrap();
+    let encoded = encode_snapshot(&snapshot).unwrap();
     assert_eq!(FileStateStore::decode(&encoded).unwrap(), snapshot);
     let written: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(

@@ -153,45 +153,25 @@ fn encode_record(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Encode for the state writer. A cache that cannot be read back (for example a
-/// payload nested beyond the JSON decoder's depth limit) is left out rather
-/// than making identity and consent unwritable.
-fn encode_snapshot_with_outcome(snapshot: &Snapshot) -> io::Result<(Vec<u8>, SaveOutcome)> {
-    if let Ok(encoded) = encode_record(snapshot) {
-        return Ok((encoded, SaveOutcome::default()));
-    }
-    let mut mandatory = snapshot.clone();
-    mandatory.flags.cache = None;
-    if let Ok(encoded) = encode_record(&mandatory) {
-        return Ok((encoded, SaveOutcome::default()));
-    }
-    mandatory.remote_config = None;
-    mandatory.flags.cache = snapshot.flags.cache.clone();
-    let bytes = encode_record(&mandatory).or_else(|_| {
+/// Encode for the state writer. A flag cache that cannot be read back (for
+/// example a payload nested beyond the JSON decoder's depth limit) is left out
+/// rather than making identity and consent unwritable. Remote configuration
+/// that deep is rejected when it is loaded.
+fn encode_snapshot(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
+    encode_record(snapshot).or_else(|_| {
+        let mut mandatory = snapshot.clone();
         mandatory.flags.cache = None;
         encode_record(&mandatory)
-    })?;
-    Ok((
-        bytes,
-        SaveOutcome {
-            remote_config_omitted: snapshot.remote_config.is_some(),
-        },
-    ))
-}
-
-/// A successful mandatory-state write may omit optional remote configuration.
-#[derive(Debug, Default)]
-pub(super) struct SaveOutcome {
-    pub(super) remote_config_omitted: bool,
+    })
 }
 
 /// Blocking backend calls belong exclusively to the state-persistence worker.
 pub(super) trait StateStore: Send + 'static {
-    fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome>;
+    fn save(&mut self, snapshot: &Snapshot) -> io::Result<()>;
 }
 
 impl StateStore for FileStateStore {
-    fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome> {
+    fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
         FileStateStore::save(self, snapshot)
     }
 }
@@ -354,8 +334,8 @@ impl FileStateStore {
 
     /// Only the state writer calls this. A completed replacement is not a
     /// multi-file transaction with event storage or a universal power-loss guarantee.
-    pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<SaveOutcome> {
-        let (encoded, outcome) = encode_snapshot_with_outcome(snapshot)?;
+    pub(super) fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
+        let encoded = encode_snapshot(snapshot)?;
         let temporary = self.directory.path().join("state.json.tmp");
         // The lease and single writer exclude live concurrent writes. A stale
         // temporary is an uncommitted write from a previous process/attempt.
@@ -373,7 +353,7 @@ impl FileStateStore {
         if result.is_err() {
             let _ = fs::remove_file(temporary);
         }
-        result.map(|()| outcome)
+        result
     }
 }
 
