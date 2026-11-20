@@ -133,40 +133,13 @@ fn invalid_and_filtered_events_never_reach_delivery() {
 }
 
 #[test]
-fn an_event_over_the_queue_byte_limit_is_refused_and_later_events_are_accepted() {
-    let mut config = config();
-    config.max_queue_size = 1;
-    config.max_queue_bytes = 1024;
-    let client = Client::init_blocking(config);
-    let mut oversized = Capture::new("too-big");
-    oversized
-        .properties
-        .insert("data".into(), "x".repeat(2048).into());
-    assert_eq!(client.capture(oversized), CaptureOutcome::Full);
-    assert!(matches!(
-        client.capture("accepted"),
-        CaptureOutcome::Accepted { .. }
-    ));
-    assert!(matches!(
-        client.capture("new"),
-        CaptureOutcome::Accepted { .. }
-    ));
-    client.shutdown_blocking(None);
-}
-
-#[test]
-fn events_over_the_per_event_limit_are_refused_at_capture() {
-    // The default queue holds 8 MiB; the per-event limit is 1 MiB.
+fn a_large_event_is_accepted() {
+    // Capture, not the client, decides whether an event is too large.
     let client = Client::init_blocking(config());
-    let mut oversized = Capture::new("too-big");
-    oversized
-        .properties
-        .insert("data".into(), "x".repeat(1024 * 1024).into());
-    assert_eq!(client.capture(oversized), CaptureOutcome::Full);
     let mut large = Capture::new("large");
     large
         .properties
-        .insert("data".into(), "x".repeat(512 * 1024).into());
+        .insert("data".into(), "x".repeat(2 * 1024 * 1024).into());
     assert!(matches!(
         client.capture(large),
         CaptureOutcome::Accepted { .. }
@@ -340,14 +313,12 @@ fn capture_and_shutdown_are_safe_during_thread_local_destruction() {
 }
 
 #[test]
-fn invalid_sdk_configuration_disables_before_capture() {
-    for invalid in ["", " \t ", "bad\nvalue"] {
-        let mut config = config();
-        config.sdk_name = invalid.into();
-        let client = Client::init_blocking(config);
-        assert!(client.is_disabled());
-        assert_eq!(client.capture("event"), CaptureOutcome::Disabled);
-    }
+fn an_sdk_name_that_is_not_header_text_disables_before_capture() {
+    let mut config = config();
+    config.sdk_name = "bad\nvalue".into();
+    let client = Client::init_blocking(config);
+    assert!(client.is_disabled());
+    assert_eq!(client.capture("event"), CaptureOutcome::Disabled);
 }
 
 #[cfg(feature = "async-client")]
@@ -358,6 +329,35 @@ fn async_initialization_and_sync_capture_work_without_a_tokio_runtime() {
         client.capture("runtime-neutral"),
         CaptureOutcome::Accepted { .. }
     ));
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn later_events_carry_the_last_screen_name_unless_they_set_one() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut config = config();
+    config.before_send(move |event| {
+        tx.send(event.properties().get("$screen_name").cloned())
+            .unwrap();
+        None
+    });
+    let client = Client::init_blocking(config);
+    assert_eq!(client.capture("before"), CaptureOutcome::Dropped);
+    assert_eq!(client.screen("Home"), CaptureOutcome::Dropped);
+    assert_eq!(client.capture("tap"), CaptureOutcome::Dropped);
+    let mut own = Capture::new("own");
+    own.properties.insert("$screen_name".into(), "Other".into());
+    assert_eq!(client.capture(own), CaptureOutcome::Dropped);
+    let names: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        names,
+        [
+            None,
+            Some(json!("Home")),
+            Some(json!("Home")),
+            Some(json!("Other"))
+        ]
+    );
     client.shutdown_blocking(None);
 }
 

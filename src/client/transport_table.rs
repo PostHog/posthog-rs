@@ -1,34 +1,24 @@
 //! The stateful delivery queue: one ordered entry per queued event, owned by
-//! the coordinator thread. It is the only record of what is queued, in every
-//! persistence mode.
+//! the coordinator thread. It is the only record of what is queued.
 //!
-//! An entry is either on disk (no payload in memory; read back when sent) or
-//! memory-only (its payload stays here): memory-only persistence, or an event
-//! whose disk write failed. Both kinds share one order, so a failed write never
-//! reorders delivery.
+//! With a store every entry is on disk and its payload is read back when it is
+//! sent. Without one every entry holds its payload in memory.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::capture_event::CaptureEvent;
 
 pub(super) struct Entry {
     pub(super) seq: u64,
     pub(super) bytes: u64,
-    /// `Some` for a memory-only entry, `None` once the event is on disk.
+    /// `Some` without a store, `None` for an event on disk.
     pub(super) payload: Option<Arc<CaptureEvent>>,
-    /// Set after a transient read failure: not selectable before this time.
-    pub(super) read_after: Option<Instant>,
 }
 
 impl Entry {
     pub(super) fn on_disk(&self) -> bool {
         self.payload.is_none()
-    }
-
-    fn ready(&self, now: Instant) -> bool {
-        self.read_after.map_or(true, |after| now >= after)
     }
 }
 
@@ -41,37 +31,7 @@ pub(super) struct Limits {
 #[derive(Default)]
 pub(super) struct Table {
     entries: VecDeque<Entry>,
-    memory: Usage,
-    disk: Usage,
-}
-
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Usage {
-    events: usize,
     bytes: u64,
-}
-
-impl Usage {
-    pub(super) fn add(&mut self, bytes: u64) {
-        self.events += 1;
-        self.bytes += bytes;
-    }
-
-    pub(super) fn remove(&mut self, bytes: u64) {
-        self.events -= 1;
-        self.bytes -= bytes;
-    }
-
-    pub(super) fn plus(self, other: Usage) -> Usage {
-        Usage {
-            events: self.events + other.events,
-            bytes: self.bytes + other.bytes,
-        }
-    }
-
-    pub(super) fn over(&self, limits: Limits) -> bool {
-        self.events > limits.events || self.bytes > limits.bytes
-    }
 }
 
 impl Table {
@@ -81,7 +41,7 @@ impl Table {
             .entries
             .back()
             .map_or(true, |last| last.seq < entry.seq));
-        self.usage_mut(&entry).add(entry.bytes);
+        self.bytes += entry.bytes;
         self.entries.push_back(entry);
     }
 
@@ -93,19 +53,6 @@ impl Table {
         self.entries.is_empty()
     }
 
-    #[cfg(test)]
-    fn memory(&self) -> Usage {
-        self.memory
-    }
-
-    pub(super) fn disk(&self) -> Usage {
-        self.disk
-    }
-
-    pub(super) fn first_seq(&self) -> Option<u64> {
-        self.entries.front().map(|entry| entry.seq)
-    }
-
     pub(super) fn last_seq(&self) -> Option<u64> {
         self.entries.back().map(|entry| entry.seq)
     }
@@ -114,21 +61,15 @@ impl Table {
         self.position(seq).map(|index| &self.entries[index])
     }
 
-    pub(super) fn delay_read(&mut self, seq: u64, until: Instant) {
-        if let Some(index) = self.position(seq) {
-            self.entries[index].read_after = Some(until);
-        }
-    }
-
-    /// Make an entry ready again once a read of it succeeds.
-    pub(super) fn clear_read_delay(&mut self, seq: u64) {
-        if let Some(index) = self.position(seq) {
-            self.entries[index].read_after = None;
-        }
-    }
-
     pub(super) fn contains_all(&self, seqs: &[u64]) -> bool {
         seqs.iter().all(|seq| self.position(*seq).is_some())
+    }
+
+    /// Whether any entry at or below `through` is queued.
+    pub(super) fn has_through(&self, through: u64) -> bool {
+        self.entries
+            .front()
+            .is_some_and(|entry| entry.seq <= through)
     }
 
     /// Remove the given entries, returning the ones that were queued.
@@ -137,42 +78,33 @@ impl Table {
         for seq in seqs {
             if let Some(index) = self.position(*seq) {
                 let entry = self.entries.remove(index).expect("position is in range");
-                self.usage_mut(&entry).remove(entry.bytes);
+                self.bytes -= entry.bytes;
                 removed.push(entry);
             }
         }
         removed
     }
 
-    /// Remove the oldest memory-only entries over `memory` and the oldest
-    /// on-disk entries over `disk`. The newest entry of each kind is kept.
-    pub(super) fn evict(&mut self, memory: Limits, disk: Limits) -> Vec<Entry> {
+    /// Remove the oldest entries while over `limits`. The newest entry is kept
+    /// even when it alone is over the byte limit.
+    pub(super) fn evict(&mut self, limits: Limits) -> Vec<Entry> {
         let mut evicted = Vec::new();
-        for on_disk in [false, true] {
-            let limits = if on_disk { disk } else { memory };
-            while {
-                let usage = if on_disk { self.disk } else { self.memory };
-                usage.events > 1 && usage.over(limits)
-            } {
-                let index = self
-                    .entries
-                    .iter()
-                    .position(|entry| entry.on_disk() == on_disk)
-                    .expect("usage counts a matching entry");
-                let entry = self.entries.remove(index).expect("position is in range");
-                self.usage_mut(&entry).remove(entry.bytes);
-                evicted.push(entry);
-            }
+        while self.entries.len() > 1
+            && (self.entries.len() > limits.events || self.bytes > limits.bytes)
+        {
+            let entry = self.entries.pop_front().expect("more than one entry");
+            self.bytes -= entry.bytes;
+            evicted.push(entry);
         }
         evicted
     }
 
-    /// The oldest entries ready to send, in order: at most `max_events`, and
-    /// within `target_bytes` except that the first entry is always included.
-    pub(super) fn select(&self, max_events: usize, target_bytes: u64, now: Instant) -> Vec<u64> {
+    /// The oldest entries, in order: at most `max_events`, and within
+    /// `target_bytes` except that the first entry is always included.
+    pub(super) fn select(&self, max_events: usize, target_bytes: u64) -> Vec<u64> {
         let mut selected = Vec::new();
         let mut bytes = 0u64;
-        for entry in self.entries.iter().filter(|entry| entry.ready(now)) {
+        for entry in &self.entries {
             if selected.len() >= max_events
                 || (!selected.is_empty() && bytes + entry.bytes > target_bytes)
             {
@@ -184,59 +116,9 @@ impl Table {
         selected
     }
 
-    /// Whether any entry at or below `through` is ready to send.
-    pub(super) fn ready_through(&self, through: u64, now: Instant) -> bool {
-        self.entries
-            .iter()
-            .take_while(|entry| entry.seq <= through)
-            .any(|entry| entry.ready(now))
-    }
-
-    /// The earliest time an entry waiting after a read failure becomes ready.
-    pub(super) fn next_read(&self) -> Option<Instant> {
-        self.entries
-            .iter()
-            .filter_map(|entry| entry.read_after)
-            .min()
-    }
-
-    /// The earliest time later than `now` that an entry waiting after a read
-    /// failure becomes ready.
-    pub(super) fn next_read_after(&self, now: Instant) -> Option<Instant> {
-        self.entries
-            .iter()
-            .filter_map(|entry| entry.read_after)
-            .filter(|after| *after > now)
-            .min()
-    }
-
-    /// The memory-only entries' sequence numbers, sizes and events, oldest
-    /// first.
-    pub(super) fn memory_entries(&self) -> Vec<(u64, u64, Arc<CaptureEvent>)> {
-        self.entries
-            .iter()
-            .filter_map(|entry| Some((entry.seq, entry.bytes, entry.payload.clone()?)))
-            .collect()
-    }
-
-    /// Record that a memory-only entry was written to disk as `bytes`.
-    pub(super) fn mark_on_disk(&mut self, seq: u64, bytes: u64) {
-        let Some(index) = self.position(seq) else {
-            return;
-        };
-        let entry = &mut self.entries[index];
-        if entry.payload.take().is_none() {
-            return;
-        }
-        self.memory.remove(entry.bytes);
-        entry.bytes = bytes;
-        self.disk.add(bytes);
-    }
-
     /// Remove every entry, for shutdown.
     pub(super) fn take_all(&mut self) -> Vec<Entry> {
-        self.memory = Usage::default();
-        self.disk = Usage::default();
+        self.bytes = 0;
         self.entries.drain(..).collect()
     }
 
@@ -245,39 +127,17 @@ impl Table {
             .binary_search_by_key(&seq, |entry| entry.seq)
             .ok()
     }
-
-    fn usage_mut(&mut self, entry: &Entry) -> &mut Usage {
-        if entry.on_disk() {
-            &mut self.disk
-        } else {
-            &mut self.memory
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Event;
-    use std::time::Duration;
 
-    fn memory(seq: u64, bytes: u64) -> Entry {
-        Entry {
-            seq,
-            bytes,
-            payload: Some(Arc::new(CaptureEvent::from_event(&Event::new(
-                "event", "user",
-            )))),
-            read_after: None,
-        }
-    }
-
-    fn disk(seq: u64, bytes: u64) -> Entry {
+    fn entry(seq: u64, bytes: u64) -> Entry {
         Entry {
             seq,
             bytes,
             payload: None,
-            read_after: None,
         }
     }
 
@@ -290,131 +150,47 @@ mod tests {
     }
 
     #[test]
-    fn memory_and_disk_entries_share_one_order_and_separate_usage() {
-        let mut table = Table::default();
-        table.push(disk(1, 10));
-        table.push(memory(2, 20));
-        table.push(disk(3, 30));
-        assert_eq!(table.select(10, 1000, Instant::now()), [1, 2, 3]);
-        assert_eq!(
-            table.memory(),
-            Usage {
-                events: 1,
-                bytes: 20
-            }
-        );
-        assert_eq!(
-            table.disk(),
-            Usage {
-                events: 2,
-                bytes: 40
-            }
-        );
-        assert!(!table.get(2).unwrap().on_disk());
-        assert!(table.get(3).unwrap().on_disk());
-    }
-
-    #[test]
-    fn selection_takes_the_oldest_ready_entries_within_count_and_byte_targets() {
+    fn selection_takes_the_oldest_entries_within_count_and_byte_targets() {
         let mut table = Table::default();
         for seq in 1..=5 {
-            table.push(disk(seq, 10));
+            table.push(entry(seq, 10));
         }
-        let now = Instant::now();
-        assert_eq!(table.select(2, 1000, now), [1, 2]);
-        assert_eq!(table.select(10, 25, now), [1, 2]);
+        assert_eq!(table.select(2, 1000), [1, 2]);
+        assert_eq!(table.select(10, 25), [1, 2]);
         // An entry larger than the target still goes, alone.
-        assert_eq!(table.select(10, 5, now), [1]);
-        table.delay_read(1, now + Duration::from_secs(1));
-        assert_eq!(table.select(2, 1000, now), [2, 3]);
-        assert_eq!(table.next_read(), Some(now + Duration::from_secs(1)));
-        assert_eq!(table.select(2, 1000, now + Duration::from_secs(1)), [1, 2]);
+        assert_eq!(table.select(10, 5), [1]);
     }
 
     #[test]
-    fn ready_through_ignores_later_and_delayed_entries() {
+    fn has_through_looks_only_at_entries_at_or_below_the_position() {
         let mut table = Table::default();
-        table.push(disk(1, 10));
-        table.push(disk(5, 10));
-        let now = Instant::now();
-        assert!(table.ready_through(1, now));
-        table.delay_read(1, now + Duration::from_secs(1));
-        assert!(!table.ready_through(4, now));
-        assert!(table.ready_through(5, now));
+        table.push(entry(5, 10));
+        assert!(!table.has_through(4));
+        assert!(table.has_through(5));
     }
 
     #[test]
-    fn the_next_read_time_skips_past_and_cleared_delays() {
+    fn eviction_drops_the_oldest_and_keeps_the_newest() {
         let mut table = Table::default();
-        for seq in 1..=3 {
-            table.push(disk(seq, 10));
+        for seq in 1..=4 {
+            table.push(entry(seq, 10));
         }
-        let now = Instant::now();
-        table.delay_read(1, now + Duration::from_secs(1));
-        table.delay_read(2, now + Duration::from_secs(3));
-        let later = now + Duration::from_secs(2);
-        assert_eq!(
-            table.next_read_after(later),
-            Some(now + Duration::from_secs(3))
-        );
-        table.clear_read_delay(2);
-        assert_eq!(table.next_read_after(later), None);
-    }
-
-    #[test]
-    fn eviction_drops_the_oldest_of_each_kind_and_keeps_the_newest() {
-        let mut table = Table::default();
-        table.push(disk(1, 10));
-        table.push(memory(2, 10));
-        table.push(disk(3, 10));
-        table.push(memory(4, 10));
-        table.push(disk(5, 10));
-        let evicted = table.evict(limits(1, 1000), limits(2, 1000));
-        assert_eq!(seqs(&evicted), [2, 1]);
-        assert_eq!(table.select(10, 1000, Instant::now()), [3, 4, 5]);
+        assert_eq!(seqs(&table.evict(limits(2, 1000))), [1, 2]);
+        assert_eq!(table.select(10, 1000), [3, 4]);
         // A single entry over the byte limit stays.
-        let evicted = table.evict(limits(10, 5), limits(10, 5));
-        assert_eq!(seqs(&evicted), [3]);
-        assert_eq!(table.select(10, 1000, Instant::now()), [4, 5]);
-    }
-
-    #[test]
-    fn an_entry_written_to_disk_moves_its_usage_from_memory_to_disk() {
-        let mut table = Table::default();
-        table.push(disk(1, 10));
-        table.push(memory(2, 20));
-        assert_eq!(
-            table
-                .memory_entries()
-                .iter()
-                .map(|(seq, _, _)| *seq)
-                .collect::<Vec<_>>(),
-            [2]
-        );
-        table.mark_on_disk(2, 25);
-        assert!(table.get(2).unwrap().on_disk());
-        assert!(table.memory_entries().is_empty());
-        assert_eq!(table.memory(), Usage::default());
-        assert_eq!(
-            table.disk(),
-            Usage {
-                events: 2,
-                bytes: 35
-            }
-        );
+        assert_eq!(seqs(&table.evict(limits(10, 5))), [3]);
+        assert_eq!(table.select(10, 1000), [4]);
     }
 
     #[test]
     fn removal_reports_only_queued_entries_and_membership_follows_it() {
         let mut table = Table::default();
-        table.push(disk(1, 10));
-        table.push(memory(2, 10));
+        table.push(entry(1, 10));
+        table.push(entry(2, 10));
         assert!(table.contains_all(&[1, 2]));
         assert_eq!(seqs(&table.remove(&[2, 9])), [2]);
         assert!(!table.contains_all(&[1, 2]));
-        assert_eq!(table.memory(), Usage::default());
         assert_eq!(seqs(&table.take_all()), [1]);
         assert!(table.is_empty());
-        assert_eq!(table.disk(), Usage::default());
     }
 }

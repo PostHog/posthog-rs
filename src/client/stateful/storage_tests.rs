@@ -39,7 +39,6 @@ fn limits() -> StoreLimits {
     StoreLimits {
         max_events: 10,
         max_bytes: 64 * 1024,
-        max_record_bytes: 4096,
     }
 }
 

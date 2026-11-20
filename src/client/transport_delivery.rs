@@ -7,8 +7,6 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use tracing::warn;
-
 use super::inbox::Inbox;
 use super::queue::{Coordinator, Executor, Settings};
 use super::table::Limits;
@@ -26,8 +24,6 @@ use crate::client::ClientOptions;
 pub(crate) enum Admission {
     /// Queued. Delivery and persistence happen in the background.
     Accepted,
-    /// Larger than the per-event limit.
-    Full,
     /// The client is closed or its delivery stopped.
     Closed,
 }
@@ -44,32 +40,6 @@ pub(crate) enum StartupFailure {
     WorkerStopped,
 }
 
-/// An admission result whose diagnostic is reported later. Admission itself
-/// never runs user code, so callers may admit while holding SDK locks and
-/// report after releasing them: a tracing subscriber is user code.
-#[must_use]
-pub(crate) struct PreparedAdmission {
-    pub(crate) admission: Admission,
-    too_large: Option<usize>,
-}
-
-impl PreparedAdmission {
-    fn new(admission: Admission) -> Self {
-        Self {
-            admission,
-            too_large: None,
-        }
-    }
-
-    /// Log any diagnostic and return the admission result.
-    pub(crate) fn report(self) -> Admission {
-        if let Some(bytes) = self.too_large {
-            warn!("posthog-rs: dropping an event of {bytes} bytes, over the per-event size limit");
-        }
-        self.admission
-    }
-}
-
 pub(super) struct Delivery {
     pub(super) inbox: Arc<Inbox>,
     /// The shutdown deadline. The first caller to select one wins.
@@ -77,8 +47,6 @@ pub(super) struct Delivery {
     pub(super) drain_timeout: Duration,
     executor: Mutex<Option<JoinHandle<()>>>,
     pub(super) executor_id: Option<ThreadId>,
-    /// Latches the oversized-event warning until an event is accepted again.
-    too_large_warned: AtomicBool,
 }
 
 impl Delivery {
@@ -125,19 +93,10 @@ impl TransportHandle {
         options: ClientOptions,
         store: Option<Box<dyn EventStore>>,
         max_queue_bytes: usize,
-        max_event_bytes: usize,
         deadline: Arc<Mutex<Option<Instant>>>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, StartupFailure> {
-        Self::spawn_stateful_with(
-            options,
-            store,
-            max_queue_bytes,
-            max_event_bytes,
-            deadline,
-            clock,
-            build_http,
-        )
+        Self::spawn_stateful_with(options, store, max_queue_bytes, deadline, clock, build_http)
     }
 
     /// [`Self::spawn_stateful_with_deadline`] with the HTTP client builder as
@@ -146,7 +105,6 @@ impl TransportHandle {
         options: ClientOptions,
         store: Option<Box<dyn EventStore>>,
         max_queue_bytes: usize,
-        max_event_bytes: usize,
         deadline: Arc<Mutex<Option<Instant>>>,
         clock: Arc<dyn Clock>,
         build_http: fn(&ClientOptions) -> Option<reqwest::blocking::Client>,
@@ -166,7 +124,6 @@ impl TransportHandle {
         let (coordinator, inbox) = Coordinator::new(
             settings,
             store,
-            max_event_bytes,
             clock.clone(),
             pending.clone(),
             deadline.clone(),
@@ -238,7 +195,6 @@ impl TransportHandle {
                     .min(MAX_SHUTDOWN_TIMEOUT),
                 executor: Mutex::new(Some(executor)),
                 executor_id,
-                too_large_warned: AtomicBool::new(false),
             }),
         })
     }
@@ -254,55 +210,34 @@ impl TransportHandle {
             options,
             store,
             max_queue_bytes,
-            max_queue_bytes,
             Arc::new(Mutex::new(None)),
             Arc::new(SystemClock),
         )
     }
 
-    /// Admit an event whose serialized record size the caller measured before
-    /// taking any SDK lock. Runs no user code.
-    pub(crate) fn enqueue_measured_deferred(
-        &self,
-        event: CaptureEvent,
-        bytes: usize,
-    ) -> PreparedAdmission {
+    /// Admit an event. Measuring it is the only work done before the inbox's
+    /// short lock, and no user code runs, so callers may admit while holding
+    /// SDK locks.
+    pub(crate) fn enqueue_prepared(&self, event: CaptureEvent) -> Admission {
         let Some(delivery) = &self.delivery else {
-            return PreparedAdmission::new(Admission::Closed);
+            return Admission::Closed;
         };
         if self.is_closed() {
-            return PreparedAdmission::new(Admission::Closed);
+            return Admission::Closed;
         }
-        match delivery.inbox.admit(event, bytes) {
-            Admission::Accepted => {
-                if delivery.inbox.arm() && self.tx.send(Control::QueueWake).is_err() {
-                    // Delivery already stopped: nothing will take the event.
-                    self.closed.store(true, Ordering::Release);
-                    let stranded = delivery.inbox.drain().len();
-                    super::dec_len(&self.len, stranded);
-                    return PreparedAdmission::new(Admission::Closed);
-                }
-                delivery.too_large_warned.store(false, Ordering::Release);
-                PreparedAdmission::new(Admission::Accepted)
-            }
-            refused => PreparedAdmission {
-                admission: refused,
-                too_large: (refused == Admission::Full
-                    && !delivery.too_large_warned.swap(true, Ordering::AcqRel))
-                .then_some(bytes),
-            },
-        }
-    }
-
-    /// Like [`Self::enqueue_measured_deferred`], measuring the event here.
-    pub(crate) fn enqueue_prepared_deferred(&self, event: CaptureEvent) -> PreparedAdmission {
         let bytes = record_size(&event);
-        self.enqueue_measured_deferred(event, bytes)
-    }
-
-    /// Admit an event and report any diagnostic at once.
-    pub(crate) fn enqueue_prepared(&self, event: CaptureEvent) -> Admission {
-        self.enqueue_prepared_deferred(event).report()
+        let admission = delivery.inbox.admit(event, bytes);
+        if admission == Admission::Accepted
+            && delivery.inbox.arm()
+            && self.tx.send(Control::QueueWake).is_err()
+        {
+            // Delivery already stopped: nothing will take the event.
+            self.closed.store(true, Ordering::Release);
+            let stranded = delivery.inbox.drain().len();
+            super::dec_len(&self.len, stranded);
+            return Admission::Closed;
+        }
+        admission
     }
 
     /// Close and stop delivery by `deadline` without waiting. An earlier

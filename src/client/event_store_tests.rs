@@ -32,7 +32,6 @@ fn limits() -> StoreLimits {
     StoreLimits {
         max_events: 10,
         max_bytes: 64 * 1024,
-        max_record_bytes: 4096,
     }
 }
 
@@ -108,14 +107,17 @@ fn restart_indexes_records_in_key_order_and_reads_the_complete_event() {
 
     store.delete(StoreKey(3)).unwrap();
     store.delete(StoreKey(3)).unwrap();
-    assert!(matches!(store.read(StoreKey(3)), Err(ReadError::Lost(_))));
+    assert_eq!(
+        store.read(StoreKey(3)).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
     drop(store);
     let index = directory.open(limits()).take_index();
     assert_eq!(index, vec![(StoreKey(7), second_size)]);
 }
 
 #[test]
-fn nested_records_roundtrip_up_to_the_read_depth_limit() {
+fn nested_records_read_back_up_to_the_read_depth_limit() {
     // The record and event envelopes add two levels to the property depth.
     for (depth, supported) in [(4, true), (125, true), (126, false), (130, false)] {
         let directory = TestDirectory::new();
@@ -126,15 +128,14 @@ fn nested_records_roundtrip_up_to_the_read_depth_limit() {
         }
         original.properties = properties;
         let mut store = directory.open(limits());
-        let written = store.write(StoreKey(1), &original);
+        store.write(StoreKey(1), &original).unwrap();
+        let read = store.read(StoreKey(1));
         if supported {
-            written.unwrap();
-            assert_eq!(json(&store.read(StoreKey(1)).unwrap()), json(&original));
+            assert_eq!(json(&read.unwrap()), json(&original));
         } else {
-            let error = written.unwrap_err();
+            let error = read.unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             assert_eq!(error.to_string(), "Invalid persisted event record");
-            assert_eq!(fs::read_dir(directory.events()).unwrap().count(), 0);
         }
     }
 }
@@ -161,56 +162,7 @@ fn computed_floats_survive_a_restart() {
 }
 
 #[test]
-fn a_record_over_the_limit_is_refused_without_a_file() {
-    let directory = TestDirectory::new();
-    let mut store = directory.open(limits());
-    let mut oversized = event("oversized");
-    oversized.properties = serde_json::json!({"large": "x".repeat(4096)});
-    assert_eq!(
-        store.write(StoreKey(1), &oversized).unwrap_err().kind(),
-        io::ErrorKind::InvalidInput
-    );
-    assert_eq!(fs::read_dir(directory.events()).unwrap().count(), 0);
-    assert!(store.write(StoreKey(1), &event("fits")).is_ok());
-}
-
-#[test]
-fn a_record_over_a_lowered_limit_stays_on_disk_without_being_read() {
-    let directory = TestDirectory::new();
-    let path = directory.events().join(format!("{:020}.json", 1));
-    let mut large = event("large");
-    large.properties = serde_json::json!({"large": "x".repeat(2048)});
-    let size = directory.open(limits()).write(StoreKey(1), &large).unwrap();
-    let lowered = StoreLimits {
-        max_record_bytes: size - 1,
-        ..limits()
-    };
-    let mut store = directory.open(lowered);
-    assert!(store.take_index().is_empty());
-    assert!(matches!(store.read(StoreKey(1)), Err(ReadError::Lost(_))));
-    assert!(path.exists());
-    drop(store);
-    let mut store = directory.open(limits());
-    assert_eq!(store.take_index(), vec![(StoreKey(1), size)]);
-    assert_eq!(json(&store.read(StoreKey(1)).unwrap()), json(&large));
-}
-
-#[test]
-fn oversized_files_are_not_read_into_memory() {
-    let directory = TestDirectory::new();
-    drop(directory.open(limits()));
-    let path = directory.events().join(format!("{:020}.json", 1));
-    File::create(&path)
-        .unwrap()
-        .set_len(100 * 1024 * 1024)
-        .unwrap();
-    let mut store = directory.open(limits());
-    assert!(store.take_index().is_empty());
-    assert!(matches!(store.read(StoreKey(1)), Err(ReadError::Lost(_))));
-}
-
-#[test]
-fn corrupt_and_future_records_move_aside_without_payload_diagnostics() {
+fn corrupt_and_future_records_fail_to_read_without_payload_diagnostics() {
     let directory = TestDirectory::new();
     drop(directory.open(limits()));
     let events = directory.events();
@@ -227,33 +179,10 @@ fn corrupt_and_future_records_move_aside_without_payload_diagnostics() {
     let mut store = directory.open(limits());
     assert_eq!(store.take_index().len(), 2);
     for key in [1, 2] {
-        match store.read(StoreKey(key)) {
-            Err(ReadError::Lost(error)) => assert!(!error.to_string().contains("secret")),
-            other => panic!("record {}: {:?}", key, other),
-        }
+        let error = store.read(StoreKey(key)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!error.to_string().contains("secret"));
     }
-    assert!(events.join("00000000000000000001.corrupt").exists());
-    assert!(events.join("00000000000000000002.unsupported").exists());
-    drop(store);
-    assert!(directory.open(limits()).take_index().is_empty());
-}
-
-#[cfg(unix)]
-#[test]
-fn a_record_the_process_cannot_open_is_a_transient_failure() {
-    use std::os::unix::fs::PermissionsExt;
-    let directory = TestDirectory::new();
-    let mut store = directory.open(limits());
-    store.write(StoreKey(1), &event("blocked")).unwrap();
-    let path = directory.events().join(format!("{:020}.json", 1));
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
-    assert!(matches!(
-        store.read(StoreKey(1)),
-        Err(ReadError::Transient(_))
-    ));
-    assert!(path.exists());
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(store.read(StoreKey(1)).is_ok());
 }
 
 #[test]
@@ -302,11 +231,7 @@ fn invalid_limits_fail_before_creating_an_event_spool() {
             ..limits()
         },
         StoreLimits {
-            max_record_bytes: 0,
-            ..limits()
-        },
-        StoreLimits {
-            max_bytes: 1,
+            max_bytes: 0,
             ..limits()
         },
     ] {

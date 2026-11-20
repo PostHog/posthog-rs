@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use httpmock::{Method::POST, MockServer};
 use posthog::stateful::{
-    Alias, Capture, CaptureOutcome, Client, Config, DeliveryOutcome, DrainReport, Identify,
-    Persistence, PersistenceOutcome, PersonProfiles, PersonProperties,
+    Alias, Capture, Client, Config, DeliveryOutcome, DrainReport, Identify, Persistence,
+    PersistenceOutcome, PersonProfiles, PersonProperties,
 };
 use posthog::Event;
 use serde_json::{json, Value};
@@ -225,44 +225,6 @@ fn rejected_identify_keeps_identity_without_replaying_link_and_properties_remain
     client.identify(input.clone());
     client.identify(input);
     assert_eq!(*attempts.lock().unwrap(), ["$identify", "$set", "$set"]);
-}
-
-#[test]
-fn oversized_identity_event_keeps_identity_and_rejected_properties_remain_retryable() {
-    let server = MockServer::start();
-    let request = server.mock(|when, then| {
-        when.method(POST).path("/i/v1/analytics/events");
-        then.status(200);
-    });
-    let mut conf = config();
-    conf.host = server.base_url();
-    conf.max_queue_size = 1;
-    conf.max_queue_bytes = 4096;
-    conf.before_send(|mut event| {
-        if event.event_name() == "$identify" {
-            event.insert_prop("padding", "x".repeat(8192)).unwrap();
-        }
-        Some(event)
-    });
-    let (client, events) = observed(conf);
-    assert!(matches!(
-        client.capture("occupy"),
-        CaptureOutcome::Accepted { .. }
-    ));
-    let mut input = Identify::new("A");
-    input.set = properties(json!({"name":"Ada"}));
-    client.identify(input.clone());
-    assert_eq!(client.get_distinct_id(), "A");
-    client.flush_blocking();
-    client.identify(input.clone());
-    client.identify(input);
-    client.flush_blocking();
-    request.assert_calls(2);
-    let seen = events.lock().unwrap();
-    assert_eq!(
-        seen.iter().map(Event::event_name).collect::<Vec<_>>(),
-        ["occupy", "$identify", "$set"]
-    );
 }
 
 #[test]
@@ -769,74 +731,6 @@ fn async_initialization_exposes_the_same_synchronous_identity_api() {
         assert!(!probe_identified(&client, &events));
         client.shutdown(Some(Duration::ZERO)).await;
     });
-}
-
-#[test]
-fn person_admission_size_warnings_can_read_and_reset_client_state() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tracing_subscriber::prelude::*;
-
-    struct ResetOnWarning {
-        client: Weak<Client>,
-        calls: Arc<AtomicUsize>,
-    }
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ResetOnWarning {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _context: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if *event.metadata().level() == tracing::Level::WARN {
-                let client = self.client.upgrade().unwrap();
-                assert_eq!(client.get_distinct_id(), "anonymous");
-                client.reset();
-                self.calls.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-    }
-
-    keep_callsites_shared();
-    for byte_limit in [false, true] {
-        let mut conf = config();
-        if byte_limit {
-            conf.max_queue_bytes = 1;
-        } else {
-            conf.max_queue_bytes = 4096;
-            conf.before_send(|mut event| {
-                if event.event_name() == "$set" {
-                    event.insert_prop("padding", "x".repeat(8192)).unwrap();
-                }
-                Some(event)
-            });
-        }
-        let client = Arc::new(Client::init_blocking(conf));
-        assert!(!client.is_disabled());
-        if !byte_limit {
-            assert!(matches!(
-                client.capture("occupy"),
-                CaptureOutcome::Accepted { .. }
-            ));
-        }
-        let calls = Arc::new(AtomicUsize::new(0));
-        let subscriber = tracing_subscriber::registry().with(ResetOnWarning {
-            client: Arc::downgrade(&client),
-            calls: calls.clone(),
-        });
-        let producer = client.clone();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            tracing::subscriber::with_default(subscriber, || {
-                producer.set_person_properties(properties(json!({"plan":"A"})));
-            });
-            done_tx.send(()).unwrap();
-        });
-        done_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("admission rejection tracing held the person admission lock");
-        worker.join().unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_ne!(client.get_distinct_id(), "anonymous");
-    }
 }
 
 #[test]

@@ -354,31 +354,18 @@ impl Client {
         // Read the setting as sent, after hooks: an update that may be
         // personless neither checks nor records the hash, and clears it.
         let fingerprint = surely_processes_person(&wire.options).then_some(fingerprint);
-        let mut admission = None;
+        // Admission runs no user code, so it may run under the state lock.
         self.state.as_ref().unwrap().admit_person(
             snapshot.generation,
             &snapshot.distinct_id,
             fingerprint,
             deduplicate,
             || {
-                if self.closed.load(Ordering::Acquire) {
-                    return false;
-                }
-                let result = self
-                    .transport
-                    .as_ref()
-                    .unwrap()
-                    .enqueue_prepared_deferred(wire);
-                let accepted = result.admission == Admission::Accepted;
-                admission = Some(result);
-                accepted
+                !self.closed.load(Ordering::Acquire)
+                    && self.transport.as_ref().unwrap().enqueue_prepared(wire)
+                        == Admission::Accepted
             },
         );
-        // Full-queue tracing subscribers may inspect/reset state. No SDK lock
-        // may be held while reporting the already-final admission result.
-        if let Some(admission) = admission {
-            admission.report();
-        }
     }
 
     pub(super) fn reconcile_identified_bootstrap(&self, id: &str) {

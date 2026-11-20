@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -128,9 +129,6 @@ pub enum CaptureOutcome {
     Dropped,
     /// This thread is already capturing through the same client.
     Reentrant,
-    /// The serialized event is larger than the per-event limit: 1 MiB, or
-    /// `max_queue_bytes` if that is smaller.
-    Full,
 }
 
 pub(super) struct Producer {
@@ -140,6 +138,10 @@ pub(super) struct Producer {
     disable_geoip: bool,
     hooks: Vec<BeforeSendHook>,
     pub(super) person_profiles: PersonProfiles,
+    /// The last screen name passed to `screen`, added to later events as
+    /// `$screen_name`. Kept in memory only, as in posthog-ios and
+    /// posthog-android.
+    last_screen: Mutex<Option<String>>,
 }
 
 impl Producer {
@@ -160,7 +162,19 @@ impl Producer {
             disable_geoip: config.disable_geoip,
             hooks: config.before_send.clone(),
             person_profiles: config.person_profiles,
+            last_screen: Mutex::new(None),
         }
+    }
+
+    fn set_last_screen(&self, name: Option<String>) {
+        *self.last_screen.lock().unwrap_or_else(|p| p.into_inner()) = name;
+    }
+
+    fn last_screen(&self) -> Option<String> {
+        self.last_screen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     fn prepare(
@@ -197,6 +211,9 @@ impl Producer {
         {
             // A null, empty or non-string version is unset, as for $lib.
             event.set_prop("$lib_version", self.sdk_version.clone().into());
+        }
+        if let Some(screen) = self.last_screen() {
+            event.insert_prop_default("$screen_name", screen.into());
         }
         event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
         event.insert_prop_default("$is_identified", snapshot.identified.into());
@@ -304,7 +321,6 @@ impl Client {
         let uuid = wire.uuid;
         match self.transport.as_ref().unwrap().enqueue_prepared(wire) {
             Admission::Accepted => CaptureOutcome::Accepted { uuid },
-            Admission::Full => CaptureOutcome::Full,
             Admission::Closed => CaptureOutcome::Closed,
         }
     }
@@ -331,7 +347,8 @@ impl Client {
     }
 
     /// Capture `$screen` through the ordinary event pipeline. The explicit name
-    /// wins over a conflicting `$screen_name` property before hooks run.
+    /// wins over a conflicting `$screen_name` property before hooks run. Later
+    /// events carry the name as `$screen_name` unless they set their own.
     pub fn screen(&self, screen: impl Into<Screen>) -> CaptureOutcome {
         if self.is_disabled() {
             return CaptureOutcome::Disabled;
@@ -347,6 +364,10 @@ impl Client {
         if name.trim().is_empty() {
             return CaptureOutcome::Invalid;
         }
+        self.producer
+            .as_ref()
+            .unwrap()
+            .set_last_screen(Some(name.clone()));
         properties.insert("$screen_name".into(), name.into());
         let mut event = Capture::new("$screen");
         event.properties = properties;

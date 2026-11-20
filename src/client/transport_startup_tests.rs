@@ -15,7 +15,7 @@ use super::tests::options;
 use super::{SystemClock, TransportHandle};
 use crate::capture_event::CaptureEvent;
 use crate::client::event_store::{
-    record_size, EventStore, FileEventStore, ReadError, StorageDirectory, StoreKey, StoreLimits,
+    record_size, EventStore, FileEventStore, StorageDirectory, StoreKey, StoreLimits,
 };
 use crate::client::ClientOptions;
 use crate::Event;
@@ -35,7 +35,6 @@ impl TestDirectory {
             StoreLimits {
                 max_events: 20,
                 max_bytes: 128 * 1024,
-                max_record_bytes: 4096,
             },
         )
         .unwrap()
@@ -59,7 +58,6 @@ fn spawn_with(
     TransportHandle::spawn_stateful_with(
         options("http://127.0.0.1:1".into()).build().unwrap(),
         Some(Box::new(store)),
-        4096,
         4096,
         Arc::new(Mutex::new(None)),
         Arc::new(SystemClock),
@@ -120,7 +118,7 @@ impl EventStore for GatedRead {
     fn write(&mut self, key: StoreKey, event: &CaptureEvent) -> io::Result<u64> {
         self.inner.write(key, event)
     }
-    fn read(&mut self, key: StoreKey) -> Result<CaptureEvent, ReadError> {
+    fn read(&mut self, key: StoreKey) -> io::Result<CaptureEvent> {
         if let Some(entered) = self.entered.take() {
             entered.send(()).unwrap();
             self.release.recv_timeout(WAIT).unwrap();

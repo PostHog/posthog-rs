@@ -129,7 +129,6 @@ fn client_with_store(
                 config.transport_options(),
                 store,
                 config.max_queue_bytes,
-                config.max_event_bytes(),
                 deadline,
                 Arc::new(SystemClock),
             )
@@ -383,9 +382,7 @@ fn expired_sdk_shutdown_and_immediate_drop_do_not_rejoin_blocked_storage() {
 #[test]
 fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads() {
     use crate::capture_event::CaptureEvent;
-    use crate::client::event_store::{
-        EventStore, FileEventStore, ReadError, StoreKey, StoreLimits,
-    };
+    use crate::client::event_store::{EventStore, FileEventStore, StoreKey, StoreLimits};
     struct Events {
         inner: Option<FileEventStore>,
         entered: mpsc::Sender<()>,
@@ -407,7 +404,7 @@ fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads()
             self.release.recv_timeout(GATE_WAIT).unwrap();
             self.inner.as_mut().unwrap().write(key, event)
         }
-        fn read(&mut self, key: StoreKey) -> Result<CaptureEvent, ReadError> {
+        fn read(&mut self, key: StoreKey) -> io::Result<CaptureEvent> {
             self.inner.as_mut().unwrap().read(key)
         }
         fn delete(&mut self, key: StoreKey) -> io::Result<()> {
@@ -445,7 +442,6 @@ fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads()
         StoreLimits {
             max_events: 10,
             max_bytes: 64 * 1024,
-            max_record_bytes: 4096,
         },
     )
     .unwrap();
