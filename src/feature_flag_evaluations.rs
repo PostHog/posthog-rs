@@ -86,6 +86,28 @@ pub struct EvaluateFlagsOptions {
     /// Group properties used by group-targeted or mixed-targeting flags, keyed
     /// first by group type and then by property name.
     pub group_properties: Option<HashMap<String, HashMap<String, Value>>>,
+    /// Person property keys known to be absent for this evaluation. Local
+    /// evaluation treats a listed key as absent even when `person_properties`
+    /// holds a value for it: `is_not_set` and the negated operators (`is_not`,
+    /// `not_icontains`, `not_starts_with`, `not_ends_with`, `not_regex`) match,
+    /// and every other supported operator doesn't. Operators this SDK doesn't
+    /// support stay inconclusive. A malformed filter value gives the same result
+    /// as it does for a supplied value. Keys starting with
+    /// `__posthog_person_metadata__` are ignored locally. The list is also sent
+    /// as `person_property_keys_known_absent` when the `/flags` request is made.
+    ///
+    /// At most 1000 keys, counting duplicates. A longer list makes
+    /// [`Client::evaluate_flags`](crate::Client::evaluate_flags) return
+    /// [`Error::InvalidArgument`](crate::Error::InvalidArgument) without
+    /// evaluating or sending anything; the list is never truncated.
+    pub person_property_keys_known_absent: Option<Vec<String>>,
+    /// Group property keys known to be absent for this evaluation, keyed by
+    /// group type. Keys listed for one group type only apply to that group type.
+    /// Otherwise these follow
+    /// [`person_property_keys_known_absent`](Self::person_property_keys_known_absent),
+    /// including the limit of 1000 keys per group type. Sent as
+    /// `group_property_keys_known_absent` when the `/flags` request is made.
+    pub group_property_keys_known_absent: Option<HashMap<String, Vec<String>>>,
     /// When `true`, skip the remote `/flags` request and return only locally
     /// evaluated results. If local evaluation is not configured, the snapshot is
     /// empty.

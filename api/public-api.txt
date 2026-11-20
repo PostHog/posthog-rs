@@ -508,9 +508,11 @@ pub fn posthog::ErrorTrackingOptionsBuilder::default() -> Self
 pub posthog::EvaluateFlagsOptions::disable_geoip: core::option::Option<bool>
 pub posthog::EvaluateFlagsOptions::flag_keys: core::option::Option<alloc::vec::Vec<alloc::string::String>>
 pub posthog::EvaluateFlagsOptions::group_properties: core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>>
+pub posthog::EvaluateFlagsOptions::group_property_keys_known_absent: core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>>>
 pub posthog::EvaluateFlagsOptions::groups: core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
 pub posthog::EvaluateFlagsOptions::only_evaluate_locally: bool
 pub posthog::EvaluateFlagsOptions::person_properties: core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, serde_json::value::Value>>
+pub posthog::EvaluateFlagsOptions::person_property_keys_known_absent: core::option::Option<alloc::vec::Vec<alloc::string::String>>
 pub struct posthog::EvaluationContext<'a>
 pub posthog::EvaluationContext::cohorts: &'a std::collections::hash::map::HashMap<alloc::string::String, posthog::CohortDefinition>
 pub posthog::EvaluationContext::distinct_id: &'a str

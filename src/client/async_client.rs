@@ -28,8 +28,8 @@ use crate::{Error, Event};
 
 use super::capture::ImmediateLane;
 use super::common::{
-    extract_flag_details, http_client_or_disable, report_flags_error, DetailedFlagsResponse,
-    EvaluationState, FlagEventHost,
+    add_known_absent_keys, extract_flag_details, http_client_or_disable, report_flags_error,
+    validate_known_absent_keys, DetailedFlagsResponse, EvaluationState, FlagEventHost,
 };
 use super::remote_config_payload::{
     authorization_header, decode_remote_config_payload, reject_unsendable_key,
@@ -1107,6 +1107,8 @@ impl Client {
     /// Returns [`Error::Connection`] or [`Error::Serialization`] when remote
     /// evaluation is required and the `/flags` request fails before any local
     /// results are available.
+    /// Returns [`Error::InvalidArgument`] when a known-absent key list in
+    /// `options` has more than 1000 keys.
     ///
     /// [`Event::with_flags`]: crate::Event::with_flags
     pub async fn evaluate_flags<S: Into<String>>(
@@ -1116,6 +1118,7 @@ impl Client {
     ) -> Result<FeatureFlagEvaluations, Error> {
         let distinct_id: String = distinct_id.into();
         let host = self.flag_event_host();
+        validate_known_absent_keys(&options)?;
         if distinct_id.is_empty() || self.options.is_disabled() {
             return Ok(FeatureFlagEvaluations::empty(host));
         }
@@ -1246,6 +1249,7 @@ impl Client {
         if let Some(flag_keys) = &options.flag_keys {
             payload["flag_keys_to_evaluate"] = json!(flag_keys);
         }
+        add_known_absent_keys(&mut payload, options);
 
         let response = self
             .send_feature_flags_request(&flags_endpoint, &payload)
