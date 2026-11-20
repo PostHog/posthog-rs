@@ -540,15 +540,16 @@ impl ClientOptionsBuilder {
         self
     }
 
-    /// Add a hook for terminal network failures and recoverable storage errors.
+    /// Add a hook for terminal network failures and storage errors.
     ///
     /// The hook receives a [`PostHogError`] once per terminal capture failure,
     /// failed remote `/flags` request, or failed local-evaluation poll. With
-    /// persistent delivery, it also receives recoverable storage read, write,
-    /// and removal errors. A storage error does not imply delivery failed: a
-    /// failed write still permits bounded memory-backed delivery. An event can
-    /// be delivered again after restart when removing its delivered record
-    /// failed, or when shutdown stopped while it was being sent.
+    /// persistent delivery, it also receives storage read, write, and removal
+    /// errors. A failed write drops that event (reported once per run of
+    /// failures). A record that cannot be read is dropped and its file
+    /// deleted. An event can be delivered again after restart when removing
+    /// its delivered record failed, or when shutdown stopped while it was
+    /// being sent.
     /// Multiple hooks fire in registration order.
     ///
     /// # Observability only — never emit from the hook
