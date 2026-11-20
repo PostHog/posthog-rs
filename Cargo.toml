@@ -43,7 +43,6 @@ rmcp = { version = "3.7", default-features = false, features = [
     "server",
 ], optional = true }
 url = { version = "2.5", optional = true }
-fancy-regex = { version = "0.20", optional = true }
 base64 = { version = "0.23", optional = true }
 futures-util = { version = "0.3", default-features = false, features = [
     "std",
@@ -91,7 +90,6 @@ mcp = [
     "dep:rmcp",
     "dep:http",
     "dep:url",
-    "dep:fancy-regex",
     "dep:base64",
     "dep:futures-util",
 ]

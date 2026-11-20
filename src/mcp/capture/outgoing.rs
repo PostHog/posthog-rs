@@ -3,14 +3,15 @@ use serde_json::{Map, Value};
 
 use super::context::EventContext;
 use crate::client::CRATE_VERSION;
-use crate::constants::{LEGACY_OPTION_PROPERTIES, PROCESS_PERSON_PROFILE_OPT};
+use crate::constants::PROCESS_PERSON_PROFILE_OPT;
 use crate::mcp::bounds::fit_event_size;
 use crate::mcp::contract::properties as key;
 use crate::mcp::contract::{INTERFACE, LIB_NAME};
-use crate::{Event, RequestContext};
+use crate::Event;
 
-const ALWAYS_REQUIRED: [&str; 7] = [
+const ALWAYS_REQUIRED: [&str; 8] = [
     key::INTERFACE,
+    key::SERVER_BUILD,
     key::LIB,
     key::LIB_VERSION,
     key::SESSION_ID,
@@ -29,11 +30,8 @@ pub(crate) struct OutgoingEvent {
     /// turn person processing back on.
     personless: bool,
     pub(crate) properties: Map<String, Value>,
+    host_properties: Map<String, Value>,
     options: Map<String, Value>,
-    request_context: Option<RequestContext>,
-    /// The properties [`Self::bounded`] kept, so the event can be fitted again
-    /// once the request context adds its own.
-    kept: Option<Vec<&'static str>>,
 }
 
 impl OutgoingEvent {
@@ -47,9 +45,8 @@ impl OutgoingEvent {
             timestamp: context.timestamp,
             personless: context.identity.is_none(),
             properties,
+            host_properties: context.host_properties.clone(),
             options: context.options.clone(),
-            request_context: context.request_context.clone(),
-            kept: None,
         }
     }
 
@@ -68,16 +65,14 @@ impl OutgoingEvent {
     }
 
     /// Fits the event within the byte bound, keeping `required` and the
-    /// properties every MCP event needs.
-    pub(crate) fn bounded(mut self, required: &[&'static str]) -> Self {
-        let mut kept: Vec<&'static str> = ALWAYS_REQUIRED.to_vec();
+    /// properties every MCP event needs. The host's request context fills in
+    /// what the event lacks, here rather than at capture, so the size bound and
+    /// redaction cover it. It takes only the room MCP's own properties leave,
+    /// and never a name MCP set.
+    pub(crate) fn bounded(mut self, required: &[&str]) -> Self {
+        let mut kept: Vec<&str> = ALWAYS_REQUIRED.to_vec();
         kept.extend_from_slice(required);
-        // A legacy option property, such as a `$process_person_profile: false`
-        // from the request context, becomes an option only when the event is
-        // sent, so dropping it to fit would lose the caller's choice.
-        kept.extend(legacy_option_properties());
-        fit_event_size(&mut self.properties, &kept);
-        self.kept = Some(kept);
+        fit_event_size(&mut self.properties, &kept, &self.host_properties);
         self
     }
 
@@ -93,44 +88,8 @@ impl OutgoingEvent {
             let _ = event.insert_option(PROCESS_PERSON_PROFILE_OPT, false);
         }
         let _ = event.set_timestamp(self.timestamp);
-        // Applied before the MCP `before_send` rather than at enqueue, so what the hook returns is sent.
-        if let Some(context) = RequestContext::current().or(self.request_context) {
-            context.apply_to_event(&mut event);
-            if let Some(kept) = &self.kept {
-                fit_to_bound(&mut event, kept);
-            }
-        }
+        event.request_context_applied = true;
         event
-    }
-}
-
-/// The legacy properties that set an event option.
-fn legacy_option_properties() -> impl Iterator<Item = &'static str> {
-    LEGACY_OPTION_PROPERTIES.iter().map(|&(prop, _)| prop)
-}
-
-/// Fits an event whose request context added properties after
-/// [`OutgoingEvent::bounded`], keeping the same required properties.
-fn fit_to_bound(event: &mut Event, kept: &[&str]) {
-    let mut properties: Map<String, Value> = event
-        .properties()
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect();
-    fit_event_size(&mut properties, kept);
-    let removed: Vec<String> = event
-        .properties()
-        .keys()
-        .filter(|name| !properties.contains_key(*name))
-        .cloned()
-        .collect();
-    for name in removed {
-        event.remove_prop(&name);
-    }
-    for (name, value) in properties {
-        if event.properties().get(&name) != Some(&value) {
-            let _ = event.insert_prop(name, value);
-        }
     }
 }
 
@@ -148,9 +107,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::constants::PROCESS_PERSON_PROFILE_OPT;
+    use crate::constants::PROCESS_PERSON_PROFILE_PROP;
+    use crate::mcp::capture::{host_options, host_properties};
     use crate::mcp::contract::events::{TOOLS_LIST, TOOL_CALL};
-    use crate::mcp::contract::limits::MAX_EVENT_BYTES;
+    use crate::mcp::contract::limits::MAX_PAYLOAD_STRING_LENGTH;
     use crate::mcp::contract::properties::LISTED_TOOL_NAMES;
     use crate::mcp::Identity;
     use crate::RequestContext;
@@ -163,8 +123,9 @@ mod tests {
             identity,
             client: Default::default(),
             server: Default::default(),
+            server_build: None,
+            host_properties: Map::new(),
             options: Map::new(),
-            request_context: None,
         }
     }
 
@@ -172,102 +133,50 @@ mod tests {
         event.options().get(PROCESS_PERSON_PROFILE_OPT)
     }
 
-    fn request(option: bool) -> RequestContext {
-        RequestContext::new()
-            .distinct_id("context-user")
-            .property("route", "/mcp")
-            .unwrap()
-            .option(PROCESS_PERSON_PROFILE_OPT, option)
-            .unwrap()
-    }
-
-    fn converted(identity: Option<Identity>, request: Option<RequestContext>) -> Event {
+    /// An event of a call whose options ask for person processing.
+    fn converted(identity: Option<Identity>, process_person_profile: bool) -> Event {
         let mut context = context(identity);
-        context.request_context = request;
+        context.options.insert(
+            PROCESS_PERSON_PROFILE_OPT.to_string(),
+            json!(process_person_profile),
+        );
         OutgoingEvent::new(TOOL_CALL, &context).into_posthog_event()
     }
 
     #[test]
-    fn an_anonymous_event_stays_personless_under_a_request_context() {
-        let event = converted(None, Some(request(true)));
+    fn an_anonymous_event_stays_personless_whatever_its_options_say() {
+        let event = converted(None, true);
         assert_eq!(person_processing(&event), Some(&json!(false)));
         assert_eq!(event.distinct_id(), "ses_1");
-        assert_eq!(event.properties()["route"], "/mcp");
-        assert!(!event.properties().contains_key("$process_person_profile"));
+        assert!(!event.properties().contains_key(PROCESS_PERSON_PROFILE_PROP));
     }
 
     #[test]
-    fn an_identified_event_keeps_its_identity_and_takes_the_context_options() {
-        let event = converted(Some(Identity::new("user-1")), Some(request(false)));
+    fn host_options_read_legacy_option_properties_and_options_win() {
+        let legacy = || {
+            RequestContext::new()
+                .property(PROCESS_PERSON_PROFILE_PROP, false)
+                .unwrap()
+        };
+        let cases = [
+            (RequestContext::new(), None),
+            (legacy(), Some(json!(false))),
+            (
+                legacy().option(PROCESS_PERSON_PROFILE_OPT, true).unwrap(),
+                Some(json!(true)),
+            ),
+        ];
+        for (host, expected) in cases {
+            let options = host_options(&host);
+            assert_eq!(options.get(PROCESS_PERSON_PROFILE_OPT), expected.as_ref());
+        }
+    }
+
+    #[test]
+    fn an_identified_event_keeps_its_identity_and_takes_its_options() {
+        let event = converted(Some(Identity::new("user-1")), false);
         assert_eq!(event.distinct_id(), "user-1");
         assert_eq!(person_processing(&event), Some(&json!(false)));
-        assert_eq!(event.properties()["route"], "/mcp");
-    }
-
-    #[tokio::test]
-    async fn a_scoped_context_wins_over_the_http_requests() {
-        let scoped = RequestContext::new().property("route", "/scoped").unwrap();
-        let event = scoped
-            .scope(async { converted(None, Some(request(true))) })
-            .await;
-        assert_eq!(event.properties()["route"], "/scoped");
-        assert_eq!(person_processing(&event), Some(&json!(false)));
-    }
-
-    #[test]
-    fn a_large_request_context_property_stays_within_the_bound() {
-        let mut context = context(None);
-        context.request_context = Some(
-            RequestContext::new()
-                .property("request_note", "x".repeat(200 * 1024))
-                .unwrap(),
-        );
-        let event = OutgoingEvent::new(TOOL_CALL, &context)
-            .bounded(&[])
-            .into_posthog_event();
-        let bytes = serde_json::to_vec(event.properties()).unwrap().len();
-        assert!(bytes <= MAX_EVENT_BYTES, "{} bytes", bytes);
-        assert_eq!(event.properties()[key::INTERFACE], INTERFACE);
-        assert_eq!(event.properties()[key::LIB], LIB_NAME);
-    }
-
-    #[test]
-    fn fitting_drops_an_optional_legacy_opt_out_unless_it_is_kept() {
-        // Over the bound with a required list and a legacy opt-out as the only
-        // optional property: unkept, the opt-out is dropped first; kept, the
-        // list is trimmed instead.
-        let over_bound = || {
-            let names: Vec<String> = (0..3_000).map(|index| format!("{index:058}")).collect();
-            let mut event = Event::new("$mcp_tools_list", "user-1");
-            event.insert_prop(LISTED_TOOL_NAMES, names).unwrap();
-            event.insert_prop("$process_person_profile", false).unwrap();
-            event
-        };
-        let mut required: Vec<&'static str> = ALWAYS_REQUIRED.to_vec();
-        required.push(LISTED_TOOL_NAMES);
-
-        let mut unkept = over_bound();
-        fit_to_bound(&mut unkept, &required);
-        assert!(!unkept.properties().contains_key("$process_person_profile"));
-
-        let mut kept = over_bound();
-        required.extend(legacy_option_properties());
-        fit_to_bound(&mut kept, &required);
-        assert_eq!(
-            kept.properties().get("$process_person_profile"),
-            Some(&json!(false))
-        );
-        let bytes = serde_json::to_vec(kept.properties()).unwrap().len();
-        assert!(bytes <= MAX_EVENT_BYTES, "{} bytes", bytes);
-    }
-
-    #[test]
-    fn bounded_treats_legacy_option_properties_as_required() {
-        let event = OutgoingEvent::new(TOOL_CALL, &context(None)).bounded(&[]);
-        let kept = event.kept.as_ref().unwrap();
-        for prop in legacy_option_properties() {
-            assert!(kept.contains(&prop), "{} not kept", prop);
-        }
     }
 
     #[test]
@@ -280,5 +189,131 @@ mod tests {
         assert_eq!(event.properties[key::INTERFACE], INTERFACE);
         assert_eq!(event.properties[key::LIB], LIB_NAME);
         assert_eq!(event.properties[key::LIB_VERSION], CRATE_VERSION);
+    }
+
+    #[test]
+    fn host_properties_are_bounded_with_the_event() {
+        let mut context = context(None);
+        let host = RequestContext::new()
+            .session_id("ses_host")
+            .property("tenant", "t".repeat(200_000))
+            .unwrap();
+        context.host_properties = host_properties(&host);
+        let event = OutgoingEvent::new(TOOLS_LIST, &context).bounded(&[]);
+
+        assert_eq!(event.properties[key::SESSION_ID], "ses_1");
+        assert!(event.properties.contains_key("tenant"));
+        let size = serde_json::to_vec(&event.properties).unwrap().len();
+        let limits = crate::mcp::contract::limits::MAX_EVENT_BYTES
+            - crate::mcp::contract::limits::HOST_PROPERTIES_HEADROOM;
+        assert!(size <= limits, "{}", size);
+        assert!(event.into_posthog_event().request_context_applied);
+    }
+
+    #[test]
+    fn host_properties_are_redacted_and_leave_identity_to_mcp() {
+        let mut context = context(None);
+        context.identity = Some(Identity::new("user-1").with_property("plan", "pro"));
+        let host = json!({
+            "authorization": "Bearer secret",
+            "nested": { "password": "hunter2", "region": "eu" },
+            "diagnostic": r#"upstream returned {"password":"hunter2"}"#,
+            "last_error": "github said 401 for ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "$request_path": "/v1/charges/sk_live_abcdefghijklmnop1234",
+            "tenant": "Acme_Corp_Production_Workspace",
+            "$process_person_profile": false,
+            "$set": { "plan": "free" },
+            "$groups": { "company": "other" },
+            "$mcp_intent": "host text",
+        });
+        let host = host
+            .as_object()
+            .unwrap()
+            .iter()
+            .fold(RequestContext::new(), |host, (name, value)| {
+                host.property(name.as_str(), value).unwrap()
+            });
+        context.host_properties = host_properties(&host);
+
+        let event = OutgoingEvent::new(TOOLS_LIST, &context).bounded(&[]);
+
+        let properties = &event.properties;
+        assert_eq!(properties["authorization"], "[redacted]");
+        assert_eq!(
+            properties["nested"],
+            json!({ "password": "[redacted]", "region": "eu" })
+        );
+        assert_eq!(
+            properties["diagnostic"],
+            r#"upstream returned {"password":"[redacted]"}"#
+        );
+        assert_eq!(properties["last_error"], "github said 401 for [redacted]");
+        assert_eq!(properties["$request_path"], "[redacted]");
+        assert_eq!(properties["tenant"], "Acme_Corp_Production_Workspace");
+        assert!(!properties.contains_key(PROCESS_PERSON_PROFILE_PROP));
+        assert_eq!(
+            host_options(&host).get(PROCESS_PERSON_PROFILE_OPT),
+            Some(&json!(false))
+        );
+        assert_eq!(properties[key::SET], json!({ "plan": "pro" }));
+        assert!(!properties.contains_key(key::GROUPS));
+        assert!(!properties.contains_key("$mcp_intent"));
+    }
+
+    #[test]
+    fn host_properties_keep_every_name_and_bound_each_value() {
+        let host = (0..150).fold(RequestContext::new(), |host, index| {
+            host.property(format!("p{index:03}"), "small").unwrap()
+        });
+        let host = host.property("zz_tenant", "word ".repeat(20_000)).unwrap();
+
+        let kept = host_properties(&host);
+
+        assert_eq!(kept.len(), 151);
+        assert!(!kept.contains_key("..."));
+        let tenant = kept["zz_tenant"].as_str().unwrap();
+        assert_eq!(tenant.len(), MAX_PAYLOAD_STRING_LENGTH);
+    }
+
+    #[test]
+    fn host_properties_give_way_to_mcp_payloads() {
+        let mut context = context(None);
+        let host = (0..4_000).fold(RequestContext::new(), |host, index| {
+            host.property(format!("k{index:04}"), "v".repeat(40))
+                .unwrap()
+        });
+        context.host_properties = host_properties(&host);
+        let mut event = OutgoingEvent::new(TOOLS_LIST, &context);
+        event.set(key::PARAMETERS, json!({ "q": "hello" }));
+        event.set(key::RESPONSE, json!({ "a": "world" }));
+
+        let event = event.bounded(&[]);
+
+        assert_eq!(event.properties[key::PARAMETERS], json!({ "q": "hello" }));
+        assert_eq!(event.properties[key::RESPONSE], json!({ "a": "world" }));
+        assert!(event.properties.contains_key("k0000"));
+        let size = serde_json::to_vec(&event.properties).unwrap().len();
+        let limit = crate::mcp::contract::limits::MAX_EVENT_BYTES
+            - crate::mcp::contract::limits::HOST_PROPERTIES_HEADROOM;
+        assert!(size <= limit, "{}", size);
+    }
+
+    #[test]
+    fn a_call_keeps_no_more_host_properties_than_one_event_holds() {
+        let host = (0..20_000).fold(RequestContext::new(), |host, index| {
+            host.property(format!("k{index:05}"), "v".repeat(40))
+                .unwrap()
+        });
+
+        let kept = host_properties(&host);
+
+        assert!(kept.contains_key("k00000"));
+        assert!(kept.len() < 20_000, "{}", kept.len());
+        let size = serde_json::to_vec(&kept).unwrap().len();
+        assert!(
+            size <= crate::mcp::contract::limits::MAX_EVENT_BYTES,
+            "{}",
+            size
+        );
     }
 }
