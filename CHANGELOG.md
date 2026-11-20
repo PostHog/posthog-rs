@@ -1,5 +1,17 @@
 # posthog-rs
 
+## 1.2.1 — 2026-11-19
+
+### Patch changes
+
+- [770e1dd](https://github.com/posthog/posthog-rs/commit/770e1dd8a9cb460dfbc4e12d22ec7015107cd77d) Fail an email send with files, instead of panicking, when the upload route answers with more signed headers than an upload needs. — Thanks @eli-r-ph!
+
+## 1.2.0 — 2026-11-19
+
+### Minor changes
+
+- [2f87ed4](https://github.com/posthog/posthog-rs/commit/2f87ed43b0615f2ae45a2df54ec3c8d008c659e7) `Client::get_remote_config_payload(flag_key)` reads the payload of a remote config feature flag, with no distinct ID. It works with the async and the blocking client, and needs the `secret_key` option. A failed request or a non-2xx status returns an `Error`, and a flag with no payload returns `Ok(None)`. — Thanks @ioannisj!
+
 ## 1.1.3 — 2026-11-18
 
 ### Patch changes

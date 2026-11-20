@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use httpmock::{Method::POST, MockServer};
 use posthog::stateful::{
-    Alias, Capture, CaptureOutcome, Client, Config, Identify, Persistence, PersistenceOutcome,
-    PersonProfiles, PersonProperties,
+    Alias, Capture, Client, Config, DeliveryOutcome, DrainReport, Identify, Persistence,
+    PersistenceOutcome, PersonProfiles, PersonProperties,
 };
 use posthog::Event;
 use serde_json::{json, Value};
@@ -22,7 +22,6 @@ fn config() -> Config {
     config.flush_interval = Duration::from_secs(3600);
     config.capture_compression = None;
     config.shutdown_timeout = Duration::ZERO;
-    config.max_capture_attempts = 1;
     config
 }
 
@@ -45,15 +44,22 @@ fn properties(value: Value) -> HashMap<String, Value> {
         .collect()
 }
 
+/// Captures a probe event and returns the `$is_identified` value it was sent with.
+fn probe_identified(client: &Client, events: &Mutex<Vec<Event>>) -> bool {
+    client.capture("identity probe");
+    let seen = events.lock().unwrap();
+    let probe = seen.last().unwrap();
+    assert_eq!(probe.event_name(), "identity probe");
+    probe.properties()["$is_identified"].as_bool().unwrap()
+}
+
 #[test]
 fn identity_table_and_reset_preserve_device_across_reset() {
     let (client, events) = observed(config());
-    assert!(!client.is_identified());
     client.identify("  ");
     assert_eq!(client.get_distinct_id(), "anonymous");
     assert!(events.lock().unwrap().is_empty());
     client.identify("A");
-    assert!(client.is_identified());
     assert_eq!(client.get_distinct_id(), "A");
     assert_eq!(client.get_anonymous_id(), "anonymous");
     client.identify("A");
@@ -80,10 +86,10 @@ fn identity_table_and_reset_preserve_device_across_reset() {
     let fresh = client.get_distinct_id();
     assert_eq!(fresh, client.get_anonymous_id());
     assert_ne!(fresh, "anonymous");
-    assert!(!client.is_identified());
     assert_eq!(events.lock().unwrap().len(), 2);
     client.identify("B");
     assert_eq!(client.get_distinct_id(), "B");
+    assert_eq!(events.lock().unwrap()[2].event_name(), "$identify");
     assert_eq!(
         events.lock().unwrap()[2].properties()["$anon_distinct_id"],
         fresh
@@ -100,6 +106,10 @@ fn identity_table_and_reset_preserve_device_across_reset() {
         events.lock().unwrap().last().unwrap().properties()["$device_id"],
         "anonymous"
     );
+    assert_eq!(
+        events.lock().unwrap().last().unwrap().properties()["$is_identified"],
+        false
+    );
 }
 
 #[test]
@@ -111,7 +121,6 @@ fn same_anonymous_id_promotes_once_even_if_properties_were_cached() {
     input.set = set;
     client.identify(input.clone());
     client.identify(input);
-    assert!(client.is_identified());
     let seen = events.lock().unwrap();
     assert_eq!(seen.len(), 2);
     assert!(seen.iter().all(|event| event.event_name() == "$set"));
@@ -138,13 +147,18 @@ fn profile_modes_and_explicit_capture_options_keep_rust_precedence() {
         client.create_person_profile();
         client.alias("alias");
         assert_eq!(client.get_distinct_id(), "anonymous");
-        assert!(!client.is_identified());
+        // The probe is not a person event, so the counts below are unchanged.
+        assert!(!probe_identified(&client, &events));
         client.set_person_properties(properties(json!({"a":1})));
         client.identify("A");
         client.capture("after");
         let seen = events.lock().unwrap();
         assert_eq!(
             seen.last().unwrap().options()["process_person_profile"],
+            mode != PersonProfiles::Never
+        );
+        assert_eq!(
+            seen.last().unwrap().properties()["$is_identified"],
             mode != PersonProfiles::Never
         );
         assert_eq!(
@@ -164,7 +178,6 @@ fn profile_modes_and_explicit_capture_options_keep_rust_precedence() {
             }
         );
         drop(seen);
-        assert_eq!(client.is_identified(), mode != PersonProfiles::Never);
         let mut explicit = Capture::new("override");
         explicit
             .properties
@@ -205,50 +218,13 @@ fn rejected_identify_keeps_identity_without_replaying_link_and_properties_remain
     input.set = properties(json!({"name":"Ada"}));
     client.identify(input.clone());
     assert_eq!(client.get_distinct_id(), "A");
-    assert!(client.is_identified());
     client.identify("A");
+    // A repeat with no properties sends nothing only while still identified.
+    assert_eq!(attempts.lock().unwrap().len(), 1);
     client.identify(input.clone());
     client.identify(input.clone());
     client.identify(input);
     assert_eq!(*attempts.lock().unwrap(), ["$identify", "$set", "$set"]);
-}
-
-#[test]
-fn oversized_identity_event_keeps_identity_and_rejected_properties_remain_retryable() {
-    let server = MockServer::start();
-    let request = server.mock(|when, then| {
-        when.method(POST).path("/i/v1/analytics/events");
-        then.status(200);
-    });
-    let mut conf = config();
-    conf.host = server.base_url();
-    conf.max_queue_size = 1;
-    conf.max_queue_bytes = 4096;
-    conf.before_send(|mut event| {
-        if event.event_name() == "$identify" {
-            event.insert_prop("padding", "x".repeat(8192)).unwrap();
-        }
-        Some(event)
-    });
-    let (client, events) = observed(conf);
-    assert!(matches!(
-        client.capture("occupy"),
-        CaptureOutcome::Accepted { .. }
-    ));
-    let mut input = Identify::new("A");
-    input.set = properties(json!({"name":"Ada"}));
-    client.identify(input.clone());
-    assert_eq!(client.get_distinct_id(), "A");
-    client.flush_blocking();
-    client.identify(input.clone());
-    client.identify(input);
-    client.flush_blocking();
-    request.assert_calls(2);
-    let seen = events.lock().unwrap();
-    assert_eq!(
-        seen.iter().map(Event::event_name).collect::<Vec<_>>(),
-        ["occupy", "$identify", "$set"]
-    );
 }
 
 #[test]
@@ -268,8 +244,11 @@ fn reset_in_hook_keeps_outer_snapshot_and_reentrant_identify_cannot_mutate() {
     let hook_holder = holder.clone();
     let mut conf = config();
     conf.before_send(move |event| {
+        if event.event_name() != "$identify" {
+            return Some(event);
+        }
         let client = hook_holder.lock().unwrap().upgrade().unwrap();
-        assert!(client.is_identified());
+        assert_eq!(event.properties()["$is_identified"], true);
         assert_eq!(client.get_distinct_id(), "A");
         client.identify("B");
         assert_eq!(client.get_distinct_id(), "A");
@@ -277,10 +256,11 @@ fn reset_in_hook_keeps_outer_snapshot_and_reentrant_identify_cannot_mutate() {
         assert_eq!(event.distinct_id(), "A");
         Some(event)
     });
-    let client = Arc::new(Client::init_blocking(conf));
+    let (client, events) = observed(conf);
+    let client = Arc::new(client);
     *holder.lock().unwrap() = Arc::downgrade(&client);
     client.identify("A");
-    assert!(!client.is_identified());
+    assert!(!probe_identified(&client, &events));
     assert_ne!(client.get_distinct_id(), "A");
 }
 
@@ -319,40 +299,93 @@ fn slow_hook_does_not_block_reset_or_poison_new_generation_dedup() {
     assert_eq!(seen[1].properties()["$is_identified"], false);
 }
 
-#[test]
-fn rejected_identity_updates_report_sanitized_reasons() {
-    #[derive(Clone)]
-    struct Recorder(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Recorder {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+#[derive(Clone)]
+struct Recorder(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for Recorder {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
     }
-    let (client, events) = observed(config());
-    let original = client.get_distinct_id();
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Keeps a second dispatch alive for the whole test process. With a single
+/// dispatch, tracing-core registers a new callsite against the registering
+/// thread's default, so a thread without a recorder could hide a log line from
+/// a thread that has one.
+fn keep_callsites_shared() {
+    static REGISTRATION: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    REGISTRATION.get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
+}
+
+/// Records this thread's log output at `level` and above while the guard lives.
+fn record_logs(level: tracing::Level) -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+    keep_callsites_shared();
     let output = Arc::new(Mutex::new(Vec::new()));
     let sink = output.clone();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
         .with_ansi(false)
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(level)
         .with_writer(move || Recorder(sink.clone()))
         .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    (output, tracing::subscriber::set_default(subscriber))
+}
+
+#[test]
+fn rejected_identity_updates_report_sanitized_reasons() {
+    let (client, events) = observed(config());
+    let original = client.get_distinct_id();
+    let (output, _guard) = record_logs(tracing::Level::WARN);
     client.identify(" \t");
     assert_eq!(client.get_distinct_id(), original);
-    assert!(!client.is_identified());
     assert!(events.lock().unwrap().is_empty());
+    assert!(!probe_identified(&client, &events));
     let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
     assert!(logs.contains("identity update requires a nonblank distinct ID"));
     output.lock().unwrap().clear();
     client.shutdown_blocking(None);
     client.identify(" \t");
     assert!(output.lock().unwrap().is_empty());
+}
+
+#[test]
+fn ignored_identity_updates_are_logged_without_values() {
+    let mut conf = config();
+    conf.person_profiles = PersonProfiles::Never;
+    let (client, events) = observed(conf);
+    let (output, guard) = record_logs(tracing::Level::WARN);
+    let mut input = Identify::new("private-user");
+    input.set = properties(json!({"private-key":"private-value"}));
+    client.identify(input);
+    client.alias("private-alias");
+    client.set_person_properties(properties(json!({"private-key":"private-value"})));
+    client.create_person_profile();
+    assert!(events.lock().unwrap().is_empty());
+    let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    for operation in [
+        "identify",
+        "alias",
+        "set_person_properties",
+        "create_person_profile",
+    ] {
+        let message = format!("{operation} is ignored because person profiles are disabled");
+        assert!(logs.contains(&message), "missing log: {}", message);
+    }
+    assert!(!logs.contains("private"));
+    drop(guard);
+
+    let (client, events) = observed(config());
+    let (output, _guard) = record_logs(tracing::Level::DEBUG);
+    client.identify("private-user");
+    output.lock().unwrap().clear();
+    client.identify("private-user");
+    assert_eq!(events.lock().unwrap().len(), 1);
+    let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("already identified with this distinct ID; nothing to send"));
+    assert!(!logs.contains("private"));
 }
 
 #[test]
@@ -370,23 +403,37 @@ fn disabled_and_closed_mutations_do_nothing() {
     client.create_person_profile();
     client.set_person_properties(properties(json!({"a":1})));
     client.reset();
-    assert!(!client.is_identified());
     assert!(events.lock().unwrap().is_empty());
 }
 
-struct Directory(std::path::PathBuf);
+struct Directory {
+    path: std::path::PathBuf,
+    // Accepts deliveries so shutdown can drain instead of retrying a refused host.
+    server: MockServer,
+}
 impl Directory {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("posthog-identity-{}", Uuid::now_v7())))
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200);
+        });
+        Self {
+            path: std::env::temp_dir().join(format!("posthog-identity-{}", Uuid::now_v7())),
+            server,
+        }
     }
     fn config(&self) -> Config {
         let mut conf = config();
-        conf.persistence = Persistence::Directory(self.0.clone());
-        conf.shutdown_timeout = Duration::from_secs(1);
+        conf.persistence = Persistence::Directory(self.path.clone());
+        conf.host = self.server.base_url();
+        // Shutdown returns once the workers stop; the deadline only bounds the
+        // wait. A loaded runner must not expire it before storage is released.
+        conf.shutdown_timeout = Duration::from_secs(30);
         conf
     }
     fn state_path(&self) -> std::path::PathBuf {
-        std::fs::read_dir(&self.0)
+        std::fs::read_dir(&self.path)
             .unwrap()
             .next()
             .unwrap()
@@ -394,11 +441,33 @@ impl Directory {
             .path()
             .join("state.json")
     }
+    /// The persisted `identified` flag. Read it only after a shutdown that persisted state.
+    fn identified(&self) -> bool {
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(self.state_path()).unwrap()).unwrap();
+        state["state"]["identified"].as_bool().unwrap()
+    }
 }
 impl Drop for Directory {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// Shuts down a client whose storage is opened again. The client releases its
+/// storage only after delivery stops, so a reopen after a timed-out shutdown
+/// falls back to memory.
+fn close_before_reopen(client: Client) -> DrainReport {
+    let report = client.shutdown_blocking(None);
+    assert_eq!(report.delivery, DeliveryOutcome::Stopped);
+    report
+}
+
+#[cfg(feature = "async-client")]
+async fn close_before_reopen_async(client: Client) -> DrainReport {
+    let report = client.shutdown(None).await;
+    assert_eq!(report.delivery, DeliveryOutcome::Stopped);
+    report
 }
 
 #[test]
@@ -408,30 +477,31 @@ fn identified_state_and_profile_enablement_survive_restart_reset_does_not_reboot
     conf.bootstrap_anonymous_id = None;
     conf.bootstrap_identified_id = Some("seed".into());
     let client = Client::init_blocking(conf);
-    assert!(client.is_identified());
     assert_eq!(client.get_distinct_id(), "seed");
     assert_ne!(client.get_anonymous_id(), "seed");
     let device = client.get_anonymous_id();
     assert_eq!(
-        client.shutdown_blocking(None).state,
+        close_before_reopen(client).state,
         PersistenceOutcome::Persisted
     );
-    drop(client);
-    let client = Client::init_blocking(directory.config());
-    assert!(client.is_identified());
+    assert!(directory.identified());
+    let (client, events) = observed(directory.config());
+    assert!(probe_identified(&client, &events));
     assert_eq!(client.get_distinct_id(), "seed");
     assert_eq!(client.get_anonymous_id(), device);
     client.reset();
     let fresh = client.get_distinct_id();
     assert_ne!(fresh, "seed");
-    assert!(!client.is_identified());
     client.create_person_profile();
-    client.shutdown_blocking(None);
-    drop(client);
+    close_before_reopen(client);
+    assert!(!directory.identified());
     let (client, events) = observed(directory.config());
     assert_eq!(client.get_distinct_id(), fresh);
-    assert!(!client.is_identified());
     client.capture("restored-profile");
+    assert_eq!(
+        events.lock().unwrap()[0].properties()["$is_identified"],
+        false
+    );
     assert_eq!(events.lock().unwrap()[0].properties()["$device_id"], device);
     assert_eq!(
         events.lock().unwrap()[0].options()["process_person_profile"],
@@ -450,10 +520,9 @@ async fn async_reset_and_restart_keep_device_separate_from_anonymous_getter() {
     let anonymous = client.get_anonymous_id();
     assert_ne!(anonymous, "anonymous");
     assert_eq!(
-        client.shutdown(None).await.state,
+        close_before_reopen_async(client).await.state,
         PersistenceOutcome::Persisted
     );
-    drop(client);
     let events = Arc::new(Mutex::new(Vec::new()));
     let seen = events.clone();
     let mut conf = directory.config();
@@ -475,8 +544,7 @@ async fn async_reset_and_restart_keep_device_separate_from_anonymous_getter() {
 fn identified_bootstrap_reconciles_anonymous_but_preserves_a_different_identified_user() {
     let directory = Directory::new();
     let client = Client::init_blocking(directory.config());
-    client.shutdown_blocking(None);
-    drop(client);
+    close_before_reopen(client);
     let mut conf = directory.config();
     conf.bootstrap_anonymous_id = None;
     conf.bootstrap_identified_id = Some("A".into());
@@ -484,8 +552,7 @@ fn identified_bootstrap_reconciles_anonymous_but_preserves_a_different_identifie
     assert_eq!(client.get_distinct_id(), "A");
     assert_eq!(client.get_anonymous_id(), "anonymous");
     assert_eq!(events.lock().unwrap()[0].event_name(), "$identify");
-    client.shutdown_blocking(None);
-    drop(client);
+    close_before_reopen(client);
     let mut conf = directory.config();
     conf.bootstrap_anonymous_id = None;
     conf.bootstrap_identified_id = Some("B".into());
@@ -500,14 +567,12 @@ fn matching_bootstrap_upgrades_without_an_event_and_never_gates_reconciliation()
     for mode in [PersonProfiles::IdentifiedOnly, PersonProfiles::Never] {
         let directory = Directory::new();
         let client = Client::init_blocking(directory.config());
-        client.shutdown_blocking(None);
-        drop(client);
+        close_before_reopen(client);
         let mut conf = directory.config();
         conf.bootstrap_anonymous_id = None;
         conf.bootstrap_identified_id = Some("anonymous".into());
         conf.person_profiles = mode;
         let (client, events) = observed(conf);
-        assert!(client.is_identified());
         assert_eq!(client.get_distinct_id(), "anonymous");
         assert_eq!(client.get_anonymous_id(), "anonymous");
         assert!(events.lock().unwrap().is_empty());
@@ -520,12 +585,11 @@ fn matching_bootstrap_upgrades_without_an_event_and_never_gates_reconciliation()
             events.lock().unwrap()[0].options()["process_person_profile"],
             mode != PersonProfiles::Never
         );
-        client.shutdown_blocking(None);
-        drop(client);
+        close_before_reopen(client);
         let mut restored = directory.config();
         restored.person_profiles = mode;
-        let client = Client::init_blocking(restored);
-        assert!(client.is_identified());
+        let (client, events) = observed(restored);
+        assert!(probe_identified(&client, &events));
         assert_eq!(client.get_distinct_id(), "anonymous");
         assert_eq!(client.get_anonymous_id(), "anonymous");
         client.shutdown_blocking(None);
@@ -535,8 +599,11 @@ fn matching_bootstrap_upgrades_without_an_event_and_never_gates_reconciliation()
     fresh_never.bootstrap_identified_id = Some("seed".into());
     fresh_never.person_profiles = PersonProfiles::Never;
     let (client, events) = observed(fresh_never);
-    assert!(client.is_identified());
     client.capture("seeded");
+    assert_eq!(
+        events.lock().unwrap()[0].properties()["$is_identified"],
+        true
+    );
     assert_eq!(
         events.lock().unwrap()[0].options()["process_person_profile"],
         false
@@ -560,19 +627,18 @@ fn current_state_restores_and_future_state_is_preserved() {
     let directory = Directory::new();
     let client = Client::init_blocking(directory.config());
     assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
-    client.shutdown_blocking(None);
-    drop(client);
+    close_before_reopen(client);
     let path = directory.state_path();
     let client = Client::init_blocking(directory.config());
     assert_eq!(client.get_distinct_id(), "anonymous");
-    assert!(!client.is_identified());
     client.identify("A");
     assert_eq!(client.flush_blocking().state, PersistenceOutcome::Persisted);
-    client.shutdown_blocking(None);
-    drop(client);
+    close_before_reopen(client);
     let state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(state["version"], 1);
     assert_eq!(state["state"]["identified"], true);
+    // Identify switched users, so the restored state was anonymous.
+    assert_eq!(state["state"]["distinct_id"], "A");
     assert_eq!(state["state"]["anonymous_id"], "anonymous");
     assert!(state["state"].get("person_properties").is_none());
     let bytes = br#"{"version":99,"state":{}}"#;
@@ -589,8 +655,7 @@ fn current_state_restores_and_future_state_is_preserved() {
 fn state_write_failure_preserves_live_identity_and_retries_the_latest_snapshot() {
     let directory = Directory::new();
     let client = Client::init_blocking(directory.config());
-    client.shutdown_blocking(None);
-    drop(client);
+    close_before_reopen(client);
     let path = directory.state_path();
     let temporary = path.with_file_name("state.json.tmp");
     std::fs::create_dir(&temporary).unwrap();
@@ -604,16 +669,15 @@ fn state_write_failure_preserves_live_identity_and_retries_the_latest_snapshot()
         PersistenceOutcome::WriteFailed
     );
     assert_eq!(client.get_distinct_id(), "A");
-    assert!(client.is_identified());
     std::fs::remove_dir(&temporary).unwrap();
     assert_eq!(
-        client.shutdown_blocking(None).state,
+        close_before_reopen(client).state,
         PersistenceOutcome::Persisted
     );
-    drop(client);
-    let client = Client::init_blocking(directory.config());
+    assert!(directory.identified());
+    let (client, events) = observed(directory.config());
     assert_eq!(client.get_distinct_id(), "A");
-    assert!(client.is_identified());
+    assert!(probe_identified(&client, &events));
     client.shutdown_blocking(None);
 }
 
@@ -649,85 +713,24 @@ fn wire_events_retain_pre_reset_identity_and_person_payloads() {
 #[test]
 fn async_initialization_exposes_the_same_synchronous_identity_api() {
     futures::executor::block_on(async {
-        let client = Client::init(config()).await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let mut conf = config();
+        conf.before_send(move |event| {
+            seen.lock().unwrap().push(event.clone());
+            Some(event)
+        });
+        let client = Client::init(conf).await;
         client.identify("A");
-        assert!(client.is_identified());
+        assert_eq!(
+            events.lock().unwrap()[0].properties()["$is_identified"],
+            true
+        );
         assert_eq!(client.get_distinct_id(), "A");
         client.reset();
-        assert!(!client.is_identified());
+        assert!(!probe_identified(&client, &events));
         client.shutdown(Some(Duration::ZERO)).await;
     });
-}
-
-#[test]
-fn person_admission_size_warnings_can_read_and_reset_client_state() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tracing_subscriber::prelude::*;
-
-    struct ResetOnWarning {
-        client: Weak<Client>,
-        calls: Arc<AtomicUsize>,
-    }
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ResetOnWarning {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _context: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if *event.metadata().level() == tracing::Level::WARN {
-                let client = self.client.upgrade().unwrap();
-                assert_eq!(client.get_distinct_id(), "anonymous");
-                client.reset();
-                self.calls.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-    }
-
-    // Keep a second dispatch alive: tracing-core's single-dispatch fast path
-    // registers new callsites against the registering thread's default. Other
-    // producer threads may first reach the shared warning without our observer.
-    let _registration = tracing::Dispatch::new(tracing_subscriber::registry());
-    for byte_limit in [false, true] {
-        let mut conf = config();
-        if byte_limit {
-            conf.max_queue_bytes = 1;
-        } else {
-            conf.max_queue_bytes = 4096;
-            conf.before_send(|mut event| {
-                if event.event_name() == "$set" {
-                    event.insert_prop("padding", "x".repeat(8192)).unwrap();
-                }
-                Some(event)
-            });
-        }
-        let client = Arc::new(Client::init_blocking(conf));
-        assert!(!client.is_disabled());
-        if !byte_limit {
-            assert!(matches!(
-                client.capture("occupy"),
-                CaptureOutcome::Accepted { .. }
-            ));
-        }
-        let calls = Arc::new(AtomicUsize::new(0));
-        let subscriber = tracing_subscriber::registry().with(ResetOnWarning {
-            client: Arc::downgrade(&client),
-            calls: calls.clone(),
-        });
-        let producer = client.clone();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            tracing::subscriber::with_default(subscriber, || {
-                producer.set_person_properties(properties(json!({"plan":"A"})));
-            });
-            done_tx.send(()).unwrap();
-        });
-        done_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("admission rejection tracing held the person admission lock");
-        worker.join().unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_ne!(client.get_distinct_id(), "anonymous");
-    }
 }
 
 #[test]
@@ -781,9 +784,9 @@ fn alias_and_person_properties_each_enable_anonymous_processing() {
         client.capture("after");
         assert_eq!(client.get_distinct_id(), "anonymous");
         assert_eq!(client.get_anonymous_id(), "anonymous");
-        assert!(!client.is_identified());
         let seen = events.lock().unwrap();
         assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].properties()["$is_identified"], false);
         for event in seen.iter() {
             assert_eq!(
                 event.options()["process_person_profile"],
@@ -835,19 +838,31 @@ fn set_once_changes_are_not_deduplicated_away() {
 }
 
 #[test]
-fn never_mode_bootstrap_switches_a_restored_anonymous_install_without_an_event() {
+fn never_mode_bootstrap_keeps_a_restored_anonymous_install() {
     let directory = Directory::new();
     let client = Client::init_blocking(directory.config());
-    client.shutdown_blocking(None);
-    drop(client);
+    close_before_reopen(client);
     let mut conf = directory.config();
     conf.bootstrap_anonymous_id = None;
     conf.bootstrap_identified_id = Some("seed".into());
     conf.person_profiles = PersonProfiles::Never;
     let (client, events) = observed(conf);
-    assert!(client.is_identified());
-    assert_eq!(client.get_distinct_id(), "seed");
-    assert_eq!(client.get_anonymous_id(), "anonymous");
+    assert_eq!(client.get_distinct_id(), "anonymous");
     assert!(events.lock().unwrap().is_empty());
+    client.shutdown_blocking(None);
+    assert!(!directory.identified());
+}
+
+#[test]
+fn reset_forgets_the_last_screen_name() {
+    let (client, events) = observed(config());
+    client.screen("Home");
+    client.reset();
+    client.capture("after reset");
+    let seen = events.lock().unwrap();
+    let after = seen.last().unwrap();
+    assert_eq!(after.event_name(), "after reset");
+    assert!(after.properties().get("$screen_name").is_none());
+    drop(seen);
     client.shutdown_blocking(None);
 }

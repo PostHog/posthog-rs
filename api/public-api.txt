@@ -143,7 +143,6 @@ pub posthog::stateful::CaptureOutcome::Accepted::uuid: uuid::Uuid
 pub posthog::stateful::CaptureOutcome::Closed
 pub posthog::stateful::CaptureOutcome::Disabled
 pub posthog::stateful::CaptureOutcome::Dropped
-pub posthog::stateful::CaptureOutcome::Full
 pub posthog::stateful::CaptureOutcome::Invalid
 pub posthog::stateful::CaptureOutcome::OptedOut
 pub posthog::stateful::CaptureOutcome::Reentrant
@@ -199,7 +198,6 @@ impl posthog::stateful::Client
 pub fn posthog::stateful::Client::alias(&self, impl core::convert::Into<posthog::stateful::Alias>)
 pub fn posthog::stateful::Client::create_person_profile(&self)
 pub fn posthog::stateful::Client::identify(&self, impl core::convert::Into<posthog::stateful::Identify>)
-pub fn posthog::stateful::Client::is_identified(&self) -> bool
 pub fn posthog::stateful::Client::reset(&self)
 pub fn posthog::stateful::Client::set_person_properties(&self, impl core::convert::Into<posthog::stateful::PersonProperties>)
 impl posthog::stateful::Client
@@ -238,11 +236,7 @@ pub posthog::stateful::Config::flush_interval: core::time::Duration
 pub posthog::stateful::Config::host: alloc::string::String
 pub posthog::stateful::Config::instance_name: alloc::string::String
 pub posthog::stateful::Config::max_batch_size: usize
-pub posthog::stateful::Config::max_capture_attempts: u32
-pub posthog::stateful::Config::max_queue_bytes: usize
 pub posthog::stateful::Config::max_queue_size: usize
-pub posthog::stateful::Config::max_stored_bytes: u64
-pub posthog::stateful::Config::max_stored_events: usize
 pub posthog::stateful::Config::opt_out: bool
 pub posthog::stateful::Config::persistence: posthog::stateful::Persistence
 pub posthog::stateful::Config::person_profiles: posthog::stateful::PersonProfiles
@@ -252,7 +246,6 @@ pub posthog::stateful::Config::request_timeout: core::time::Duration
 pub posthog::stateful::Config::sdk_name: alloc::string::String
 pub posthog::stateful::Config::sdk_version: alloc::string::String
 pub posthog::stateful::Config::shutdown_timeout: core::time::Duration
-pub posthog::stateful::Config::state_write_delay: core::time::Duration
 impl posthog::stateful::Config
 pub fn posthog::stateful::Config::before_send<F>(&mut self, F) -> &mut Self where F: core::ops::function::FnMut(posthog::Event) -> core::option::Option<posthog::Event> + core::marker::Send + 'static
 pub fn posthog::stateful::Config::new(impl core::convert::Into<alloc::string::String>) -> Self
@@ -511,6 +504,7 @@ pub fn posthog::Client::evaluate_feature_flag_locally(&self, &posthog::FeatureFl
 pub async fn posthog::Client::evaluate_flags<S: core::convert::Into<alloc::string::String>>(&self, S, posthog::EvaluateFlagsOptions) -> core::result::Result<posthog::FeatureFlagEvaluations, posthog::Error>
 pub async fn posthog::Client::evaluate_flags_with_context(&self, &posthog::RequestContext, posthog::EvaluateFlagsOptions) -> core::result::Result<posthog::FeatureFlagEvaluations, posthog::Error>
 pub async fn posthog::Client::flush(&self)
+pub async fn posthog::Client::get_remote_config_payload<K: core::convert::Into<alloc::string::String>>(&self, K) -> core::result::Result<core::option::Option<serde_json::value::Value>, posthog::Error>
 pub fn posthog::Client::group_identify<T: core::convert::Into<alloc::string::String>, K: core::convert::Into<alloc::string::String>, P: serde_core::ser::Serialize>(&self, T, K, P) -> core::result::Result<(), posthog::Error>
 pub async fn posthog::Client::reload_feature_flags(&self) -> core::result::Result<(), posthog::Error>
 pub async fn posthog::Client::shutdown(&self)

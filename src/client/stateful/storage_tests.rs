@@ -39,7 +39,6 @@ fn limits() -> StoreLimits {
     StoreLimits {
         max_events: 10,
         max_bytes: 64 * 1024,
-        max_record_bytes: 4096,
     }
 }
 
@@ -52,7 +51,7 @@ fn record(snapshot: &Snapshot) -> Vec<u8> {
 }
 
 #[test]
-fn consent_choices_round_trip_and_require_a_valid_field() {
+fn consent_choices_round_trip_and_an_unreadable_choice_keeps_the_identity() {
     let mut snapshot = Snapshot::anonymous("anonymous".into());
     for choice in [None, Some(true), Some(false)] {
         snapshot.opt_out = choice;
@@ -61,6 +60,7 @@ fn consent_choices_round_trip_and_require_a_valid_field() {
         store.save(&snapshot).unwrap();
         assert_eq!(store.load().unwrap(), Some(snapshot.clone()));
     }
+    snapshot.opt_out = None;
     for consent in [
         None,
         Some(serde_json::json!("true")),
@@ -77,15 +77,17 @@ fn consent_choices_round_trip_and_require_a_valid_field() {
                 value["state"].as_object_mut().unwrap().remove("opt_out");
             }
         }
-        let bytes = serde_json::to_vec(&value).unwrap();
         let directory = TestDirectory::new();
         let lease = directory.lease();
-        let path = directory.path().join("state.json");
-        fs::write(&path, &bytes).unwrap();
+        fs::write(
+            directory.path().join("state.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
         let opened = FileStateStore::open(lease).unwrap();
-        assert!(opened.snapshot.is_none());
-        assert!(opened.read_error.is_some());
-        assert_eq!(fs::read(path).unwrap(), bytes);
+        // The configured default applies, as when no choice was made.
+        assert_eq!(opened.snapshot, Some(snapshot.clone()));
+        assert!(opened.read_error.is_none());
     }
 }
 
@@ -372,9 +374,7 @@ fn corrupt_state_reports_and_allows_replacement_while_event_storage_remains_usab
         .event_store
         .as_mut()
         .unwrap()
-        .recover(10, 4096)
-        .unwrap()
-        .events
+        .take_index()
         .is_empty());
     assert_eq!(
         *errors.lock().unwrap(),
