@@ -1,5 +1,15 @@
 # posthog-rs
 
+## 1.3.0 — 2026-11-20
+
+### Minor changes
+
+- [cc4ce9b](https://github.com/posthog/posthog-rs/commit/cc4ce9bedd3fcd5523588ea9fcf5df5be9c5579d) MCP analytics (experimental): add `McpOptionsBuilder::server_build`, which sends `$mcp_server_build` on every event, and the opt-in `send_feedback` virtual tool (`McpOptionsBuilder::feedback_tool`), which sends `$mcp_feedback`. Hosts can replace its description, declare extra report fields (`feedback_field`, `required_feedback_field`), and handle each report with an async `on_feedback` that may replace the reply. MCP events now redact the host's request context properties and fit them within the event size bound. The `mcp` feature no longer depends on `fancy-regex`. Object keys in `$mcp_parameters` and `$mcp_response` now get the token, URL, JSON member and known key format redaction, so a key that holds a signed URL no longer carries its signature, and number, object or array feedback extras are sanitized as free text, keys and numbers included. — Thanks @lucasheriques!
+
+### Patch changes
+
+- [e424052](https://github.com/posthog/posthog-rs/commit/e42405262c7f55f306d0c5ebac391d3b6d113c08) `Client::shutdown` now also stops the local evaluation poller, so a shut-down client no longer fetches flag definitions in the background. — Thanks @marandaneto!
+
 ## 1.2.1 — 2026-11-19
 
 ### Patch changes
