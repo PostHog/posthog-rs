@@ -66,6 +66,18 @@ Changesets that landed in the meantime stay on `main` and go out in the next Rel
 
 Once the GitHub Release is published, a rerun has nothing to do. Its downloads never change. If the build itself needs a fix, release a `posthog-rs-ffi` patch version instead.
 
+### Known gap: a failed crates.io publish isn't retried
+
+If "Release and publish" commits a new `posthog` version but publishing it to crates.io fails, **Re-run failed jobs** doesn't publish it. The rerun finds no changesets left, or only finishes an unfinished bindings release, and skips the crates.io steps, so `posthog` and `posthog-rs` stay unpublished at the committed version. Publish them by hand from the release commit, then create their tags and GitHub Release:
+
+```bash
+git checkout <release commit>
+cargo publish --locked --package posthog
+cargo publish --locked --package posthog-rs
+```
+
+The release workflow should detect and finish this case on its own, as it does for the bindings. That's left for a separate change.
+
 ## Failed or cancelled release
 
 The independent [release failure notification workflow](.github/workflows/release-failure-notification.yml) checks every completed `main` release attempt and posts to the release approvals Slack channel if a job failed, timed out, or was cancelled. It also alerts when the "Release and publish" job never ran in a failed run, which is what happens when GitHub Actions dies mid-run. It only acts on runs that a push or a manual dispatch started in this repository.
