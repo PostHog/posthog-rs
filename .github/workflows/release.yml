@@ -297,7 +297,7 @@ jobs:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
 
       # ghcommit-action commits via the GitHub API, so the local working
-      # tree still has dirty and staged files. Discard them (already committed remotely)
+      # tree still has dirty, staged, and untracked files. Discard them (already committed remotely)
       # and check out the release commit itself, otherwise cargo publish fails with
       # "files contain changes not yet committed". Checking out the exact commit,
       # rather than pulling main, keeps a later push to main out of the release.
@@ -308,6 +308,8 @@ jobs:
           RELEASE_SHA: ${{ steps.release-commit.outputs.commit-hash }}
         run: |
           git reset --hard
+          # Untracked files the release commit adds, such as a new CHANGELOG.md, block the checkout.
+          git clean -fd
           git fetch origin "$RELEASE_SHA"
           git checkout --detach "$RELEASE_SHA"
 
