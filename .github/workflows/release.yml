@@ -163,6 +163,38 @@ jobs:
               return 1
             fi
           }
+          # Checks the committed posthog version is fully released: both crates on
+          # crates.io and a published GitHub Release. Runs that finish or abandon a
+          # bindings release skip the posthog publish steps, so they must not report
+          # success over an unfinished posthog release. Records it for a later step,
+          # which fails the run once the bindings work is done.
+          check_posthog_release() {
+            local rust_version crate status out
+            rust_version=$(version_of Cargo.toml)
+            # The two crates publish one after the other, so check both.
+            for crate in posthog posthog-rs; do
+              status=$(curl -s -o /dev/null -w '%{http_code}' -A "posthog-rs-release (github.com/PostHog/posthog-rs)" \
+                "https://crates.io/api/v1/crates/$crate/$rust_version")
+              if [ "$status" = 404 ]; then
+                echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+                return 0
+              elif [ "$status" != 200 ]; then
+                echo "::error::Couldn't check whether $crate $rust_version is on crates.io (HTTP $status)"
+                return 1
+              fi
+            done
+            # The crates can be published while their GitHub Release failed or is a draft.
+            if out=$(gh release view "$rust_version" --json isDraft --jq .isDraft 2>&1); then
+              if [ "$out" = true ]; then
+                echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+              fi
+            elif [ "$out" = "release not found" ]; then
+              echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Couldn't look up the $rust_version release: $out"
+              return 1
+            fi
+          }
           ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
           published=$(ffi_release_published "$ffi_version")
           if [ -n "$ABANDON_FFI_VERSION" ]; then
@@ -173,34 +205,13 @@ jobs:
               exit 1
             fi
             echo "::warning::Abandoning posthog-rs-ffi $ffi_version. It stays unpublished, and this run releases a new version."
+            # Abandoning the bindings must not hide an unfinished posthog release
+            # from the same failed run.
+            check_posthog_release
           elif [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
             echo "::notice::Finishing the posthog-rs-ffi $ffi_version release. Changesets on main wait for the next release."
             echo "rerun=true" >> "$GITHUB_OUTPUT"
-            # This run doesn't publish to crates.io. If the release it's finishing
-            # also bumped posthog and that publish failed, say so and fail the run
-            # once the bindings are done, rather than report success.
-            # The two crates publish one after the other, so check both.
-            rust_version=$(version_of Cargo.toml)
-            for crate in posthog posthog-rs; do
-              status=$(curl -s -o /dev/null -w '%{http_code}' -A "posthog-rs-release (github.com/PostHog/posthog-rs)" \
-                "https://crates.io/api/v1/crates/$crate/$rust_version")
-              if [ "$status" = 404 ]; then
-                echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
-                break
-              elif [ "$status" != 200 ]; then
-                echo "::error::Couldn't check whether $crate $rust_version is on crates.io (HTTP $status)"
-                exit 1
-              fi
-            done
-            # The crates can be published while their GitHub Release failed.
-            if ! out=$(gh release view "$rust_version" --json tagName 2>&1); then
-              if [ "$out" = "release not found" ]; then
-                echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
-              else
-                echo "::error::Couldn't look up the $rust_version release: $out"
-                exit 1
-              fi
-            fi
+            check_posthog_release
             exit 0
           fi
           if ! find .sampo/changesets -name '*.md' | grep -q .; then
