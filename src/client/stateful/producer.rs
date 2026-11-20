@@ -18,6 +18,17 @@ use crate::{BeforeSendHook, Event};
 #[path = "producer_tests.rs"]
 mod tests;
 
+/// Events that create or change a person or group. A registered
+/// `$process_person_profile` is not sent with them.
+const IDENTITY_EVENTS: [&str; 6] = [
+    "$identify",
+    "$create_alias",
+    "$merge_dangerously",
+    "$groupidentify",
+    "$set",
+    "$set_once",
+];
+
 /// An event input whose identity comes from the stateful client.
 /// Start with [`Capture::new`] and set optional fields before capture.
 #[derive(Debug, Clone, Default)]
@@ -207,7 +218,14 @@ impl Producer {
         );
         event.ensure_timestamp(now);
         event.ensure_uuid();
+        let identity_event = IDENTITY_EVENTS.contains(&event.event_name());
         for (key, value) in &snapshot.registered {
+            // A registered false would make PostHog drop or ignore an identity
+            // event, so it never reaches one (capture spec), as in posthog-ios
+            // and posthog-android.
+            if identity_event && key == "$process_person_profile" {
+                continue;
+            }
             event.insert_prop_default(key.clone(), value.clone());
         }
         if !snapshot.groups.is_empty() {

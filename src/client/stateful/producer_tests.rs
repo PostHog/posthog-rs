@@ -449,3 +449,20 @@ fn unspecified_uuid_is_fresh_per_capture_and_explicit_time_is_kept() {
     assert_eq!(first.timestamp, "2024-01-01T00:00:00.000Z");
     assert_eq!(first.timestamp, second.timestamp);
 }
+
+#[test]
+fn a_registered_process_person_profile_never_reaches_identity_events() {
+    // Identity calls turn person processing on before sending their event.
+    let mut state = snapshot();
+    state.person_processing = true;
+    state.registered = HashMap::from([("$process_person_profile".into(), json!(false))]);
+    let producer = Producer::new(&Config::new("phc_test"));
+    let ordinary = producer
+        .prepare(Capture::new("ordinary"), &state, now())
+        .unwrap();
+    assert_eq!(ordinary.options["process_person_profile"], false);
+    for name in super::IDENTITY_EVENTS {
+        let wire = producer.prepare(Capture::new(name), &state, now()).unwrap();
+        assert_eq!(wire.options["process_person_profile"], true, "{}", name);
+    }
+}
