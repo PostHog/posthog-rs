@@ -858,7 +858,12 @@ pub unsafe extern "C" fn posthog_evaluate_flags(
                 if let Ok(flags) = client.client.evaluate_flags(distinct_id, local_only) {
                     flags_out.write(Box::into_raw(Box::new(PostHogFlags { flags })));
                 }
-                return Err(error.into());
+                // The inputs were already checked, so this is the server's fault,
+                // even for a response that doesn't parse.
+                return Err(FfiError::new(
+                    PostHogStatus::POSTHOG_STATUS_REQUEST,
+                    error.to_string(),
+                ));
             }
         };
         flags_out.write(Box::into_raw(Box::new(PostHogFlags { flags })));

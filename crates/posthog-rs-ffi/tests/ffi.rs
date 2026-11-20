@@ -614,3 +614,30 @@ fn shutdown_stops_flag_requests_and_the_poller() {
         posthog_client_free(client);
     }
 }
+
+#[test]
+fn malformed_flags_response_is_a_request_failure() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body("{not json");
+    });
+
+    unsafe {
+        let client = new_client(&server);
+        let mut flags = ptr::null_mut();
+        let status = posthog_evaluate_flags(client, c("user-1").as_ptr(), ptr::null(), &mut flags);
+        assert_eq!(status, PostHogStatus::POSTHOG_STATUS_REQUEST);
+        assert!(
+            !flags.is_null(),
+            "a failed request still returns a snapshot"
+        );
+        let mut enabled = true;
+        posthog_flags_is_enabled(flags, c("beta").as_ptr(), &mut enabled);
+        assert!(!enabled);
+        posthog_flags_free(flags);
+        posthog_client_free(client);
+    }
+}
