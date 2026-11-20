@@ -1173,3 +1173,34 @@ fn uploads_go_to_the_remote_endpoint() {
     custom.assert_calls(1);
     assert!(backend.bodies.lock().unwrap().is_empty());
 }
+
+#[test]
+fn snapshot_events_carry_only_replay_and_sdk_properties() {
+    let backend = Backend::new();
+    let (client, seen) = recording_client(&backend);
+    let mut registered = std::collections::HashMap::new();
+    registered.insert("plan".to_string(), json!("pro"));
+    client.register(registered);
+    client.group(("company", "acme"));
+    client.screen("Home");
+    let replay = client.session_replay();
+    replay.start();
+    assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
+    client.flush_blocking();
+    let seen = seen.lock().unwrap();
+    let (_, properties) = seen.iter().find(|(name, _)| name == "$snapshot").unwrap();
+    for absent in [
+        "plan",
+        "$groups",
+        "$os",
+        "$screen_name",
+        "$device_id",
+        "$is_identified",
+        "$recording_status",
+    ] {
+        assert!(!properties.contains_key(absent), "{}", absent);
+    }
+    assert_eq!(properties["$lib"], "posthog-rs");
+    assert!(properties.contains_key("$session_id"));
+    assert!(properties.contains_key("$snapshot_data"));
+}

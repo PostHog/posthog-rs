@@ -275,8 +275,12 @@ impl Producer {
         );
         event.ensure_timestamp(now);
         event.ensure_uuid();
+        // A screenshot carries only its own properties, its session and the
+        // SDK's name, as in posthog-ios and posthog-android: no registered
+        // properties, groups, device context or person state.
+        let shared = event.event_name() != "$snapshot";
         let identity_event = IDENTITY_EVENTS.contains(&event.event_name());
-        for (key, value) in &snapshot.registered {
+        for (key, value) in snapshot.registered.iter().filter(|_| shared) {
             // A registered false would make PostHog drop or ignore an identity
             // event, so it never reaches one (capture spec), as in posthog-ios
             // and posthog-android.
@@ -285,7 +289,7 @@ impl Producer {
             }
             event.insert_prop_default(key.clone(), value.clone());
         }
-        if !snapshot.groups.is_empty() {
+        if shared && !snapshot.groups.is_empty() {
             event.insert_prop_default(
                 "$groups",
                 Value::Object(
@@ -297,7 +301,7 @@ impl Producer {
                 ),
             );
         }
-        for (key, value) in &self.context {
+        for (key, value) in self.context.iter().filter(|_| shared) {
             event.insert_prop_default(key.clone(), value.clone());
         }
         if let Some(id) = session_id {
@@ -315,17 +319,19 @@ impl Producer {
             // A null, empty or non-string version is unset, as for $lib.
             event.set_prop("$lib_version", self.sdk_version.clone().into());
         }
-        if let Some(screen) = self.last_screen() {
-            event.insert_prop_default("$screen_name", screen.into());
+        if shared {
+            if let Some(screen) = self.last_screen() {
+                event.insert_prop_default("$screen_name", screen.into());
+            }
+            #[cfg(feature = "session-replay")]
+            self.fill_replay_debug_properties(&mut event, snapshot, session_id);
+            event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
+            event.insert_prop_default("$is_identified", snapshot.identified.into());
+            if self.disable_geoip {
+                event.insert_prop_default("$geoip_disable", true.into());
+            }
         }
-        #[cfg(feature = "session-replay")]
-        self.fill_replay_debug_properties(&mut event, snapshot, session_id);
-        event.insert_prop_default("$device_id", snapshot.device_id.clone().into());
-        event.insert_prop_default("$is_identified", snapshot.identified.into());
         fill_person_profile_option(&mut event, self.person_profiles.processes(snapshot));
-        if self.disable_geoip {
-            event.insert_prop_default("$geoip_disable", true.into());
-        }
         event.merge_groups_into_properties();
         let event = apply_before_send_hooks(&self.hooks, event).ok_or(CaptureOutcome::Dropped)?;
         if event.event_name().trim().is_empty() || event.distinct_id().trim().is_empty() {
@@ -337,17 +343,14 @@ impl Producer {
 
 #[cfg(feature = "session-replay")]
 impl Producer {
-    /// `$snapshot` is replay data, not a report about replay, so it carries none.
-    /// A caller or registered value for the same key wins.
+    /// The replay debug keys for every event but `$snapshot`, which is replay
+    /// data, not a report about replay. A caller or registered value wins.
     fn fill_replay_debug_properties(
         &self,
         event: &mut Event,
         snapshot: &Snapshot,
         session_id: Option<Uuid>,
     ) {
-        if event.event_name() == "$snapshot" {
-            return;
-        }
         match self.replay.get().and_then(std::sync::Weak::upgrade) {
             Some(replay) => {
                 for (key, value) in replay.debug_properties(snapshot, session_id) {
