@@ -76,15 +76,13 @@ impl Task {
     fn run(self, http: &reqwest::blocking::Client, options: &ClientOptions) -> Option<Task> {
         let endpoint = options.endpoints().build_url(Endpoint::Flags);
         let result = fetch(http, options, &endpoint, &self.body);
-        if let Err(error) = &result {
-            report(options, &endpoint, self.distinct_id.as_deref(), *error);
-        } else if result.as_ref().is_ok_and(|loaded| loaded.invalid_payloads) {
-            report(
-                options,
-                &endpoint,
-                self.distinct_id.as_deref(),
-                LoadError::InvalidResponse,
-            );
+        let failure = match &result {
+            Err(error) => Some(*error),
+            Ok(loaded) if loaded.invalid_payloads => Some(LoadError::InvalidResponse),
+            Ok(_) => None,
+        };
+        if let Some(error) = failure {
+            report(options, &endpoint, self.distinct_id.as_deref(), error);
         }
         // Completion invokes state integration and application notifications, never
         // under the slot lock. A callback panic cannot terminate event delivery.

@@ -31,7 +31,7 @@ impl FeatureFlagsUpdate {
         let cache = snapshot.flags.cache.as_ref();
         let context = completion
             .map(|value| value.context.clone())
-            .or_else(|| cache.map(|cache| Arc::new(cache.context.clone())))?;
+            .or_else(|| cache.map(|cache| cache.context.clone()))?;
         let error = completion.and_then(|value| value.error);
         let partial = completion.is_some_and(|value| value.partial);
         let invalid_payloads = completion.is_some_and(|value| value.invalid_payloads);
@@ -40,10 +40,8 @@ impl FeatureFlagsUpdate {
                 cache
                     .flags
                     .iter()
-                    .filter_map(|(key, flag)| {
-                        let result = FeatureFlagResult::from_cached(key, flag);
-                        result.enabled.then(|| (key.clone(), result))
-                    })
+                    .filter(|(_, flag)| flag.served())
+                    .map(|(key, flag)| (key.clone(), FeatureFlagResult::from_cached(key, flag)))
                     .collect()
             }),
             context: FeatureFlagContext::new(context),

@@ -434,18 +434,8 @@ impl Client {
         snapshot: &Snapshot,
         minimal: bool,
     ) -> CaptureOutcome {
-        self.capture_snapshot_with_policy(input, snapshot, CapturePolicy::FlagCalled { minimal })
-    }
-
-    fn capture_snapshot_with_policy(
-        &self,
-        input: Capture,
-        snapshot: &Snapshot,
-        policy: CapturePolicy,
-    ) -> CaptureOutcome {
-        let session_id = snapshot
-            .sessions
-            .active_id(self.producer.as_ref().unwrap().session_clock.now());
+        let session_id = snapshot.sessions.active_id(self.session_now());
+        let policy = CapturePolicy::FlagCalled { minimal };
         let wire = match self.prepare_with_session(input, snapshot, session_id, policy) {
             Ok(wire) => wire,
             Err(outcome) => return outcome,

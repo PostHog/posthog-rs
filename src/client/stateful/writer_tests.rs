@@ -31,6 +31,7 @@ fn memory_close_clears_report_tracking_when_contended_mutation_releases_state() 
         .snapshot()
         .flag_load
         .reports
+        .as_ref()
         .clone();
     let before = expected.clone();
     expected.clear();
@@ -69,7 +70,7 @@ fn memory_close_clears_report_tracking_when_contended_mutation_releases_state() 
         .state
         .try_lock()
         .unwrap();
-    assert_eq!(state.snapshot.flag_load.reports, expected);
+    assert_eq!(*state.snapshot.flag_load.reports, expected);
     assert!(state.closing.is_some());
 }
 

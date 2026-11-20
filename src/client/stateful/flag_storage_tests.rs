@@ -20,7 +20,7 @@ fn with_cache(payload: Option<Value>) -> Snapshot {
         .group_properties
         .insert("company".into(), HashMap::from([("tier".into(), json!(2))]));
     snapshot.flags.cache = Some(Arc::new(FlagCache {
-        context: FlagContext::current(&snapshot, false),
+        context: Arc::new(FlagContext::current(&snapshot, false)),
         flags: HashMap::from([(
             "checkout".into(),
             CachedFlag {
@@ -258,8 +258,8 @@ fn seed_client_cache(directory: &TestDirectory, identified: bool) -> crate::stat
     }
     let context = FlagContext::current(&snapshot, config.disable_geoip);
     let cache = Arc::make_mut(snapshot.flags.cache.as_mut().unwrap());
-    cache.context = context.clone();
     let context = Arc::new(context);
+    cache.context = context.clone();
     for flag in cache.flags.values_mut() {
         flag.context = context.clone();
     }
@@ -314,7 +314,7 @@ fn bootstrap_keeps_the_cache_through_identity_reconciliation() {
             let snapshot = client.state.as_ref().unwrap().snapshot();
             let cache = snapshot.flags.cache.as_ref().expect("the cache is kept");
             assert_eq!(
-                cache.context == FlagContext::current(&snapshot, false),
+                *cache.context == FlagContext::current(&snapshot, false),
                 same_identity,
                 "out={opted_out}, bootstrap={bootstrap}, expected={expected}"
             );

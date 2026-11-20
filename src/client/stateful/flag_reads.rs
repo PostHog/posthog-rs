@@ -70,7 +70,7 @@ impl FeatureFlagResult {
     pub(super) fn from_cached(key: &str, flag: &CachedFlag) -> Self {
         Self {
             key: key.into(),
-            enabled: flag.record.enabled && flag.record.variant.as_deref() != Some(""),
+            enabled: flag.served(),
             variant: if flag.record.enabled {
                 flag.record.variant.clone()
             } else {

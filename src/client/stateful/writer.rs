@@ -87,7 +87,7 @@ impl State {
     fn observe_close(&mut self, deadline: Instant, now: Instant) {
         if self.closing.is_none() {
             self.closing = Some(deadline);
-            Arc::make_mut(&mut self.snapshot).flag_load.reports.clear();
+            Arc::make_mut(&mut Arc::make_mut(&mut self.snapshot).flag_load.reports).clear();
             if self.mode == Mode::Persistent && self.persisted < self.revision && self.failures == 0
             {
                 self.due = Some(now);
