@@ -188,7 +188,7 @@ fn fresh_state_roundtrips_and_atomic_replacement_keeps_latest_snapshot() {
 }
 
 #[test]
-fn context_record_roundtrips_and_rejects_invalid_schema() {
+fn context_record_roundtrips_and_rejects_invalid_schema_but_not_missing_fields() {
     let mut snapshot = Snapshot::anonymous("anonymous".into());
     snapshot.registered = serde_json::from_value(serde_json::json!({
         "number": 1.0_f64 / 3.0, "null": null, "array": [null, {"nested":false}]
@@ -201,19 +201,15 @@ fn context_record_roundtrips_and_rejects_invalid_schema() {
     assert_eq!(store.load().unwrap(), Some(snapshot.clone()));
     let bytes = fs::read(directory.path().join("state.json")).unwrap();
     for field in ["registered", "groups"] {
-        for malformed in [
-            None,
-            Some(serde_json::json!([])),
-            Some(serde_json::Value::Null),
-        ] {
+        for malformed in [serde_json::json!([]), serde_json::Value::Null] {
             let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            if let Some(malformed) = malformed {
-                value["state"][field] = malformed;
-            } else {
-                value["state"].as_object_mut().unwrap().remove(field);
-            }
+            value["state"][field] = malformed;
             assert!(FileStateStore::decode(&serde_json::to_vec(&value).unwrap()).is_err());
         }
+        // A record written before the field existed restores it empty.
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["state"].as_object_mut().unwrap().remove(field);
+        assert!(FileStateStore::decode(&serde_json::to_vec(&value).unwrap()).is_ok());
     }
 }
 

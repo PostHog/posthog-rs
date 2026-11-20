@@ -74,7 +74,10 @@ struct Snapshot {
     // or unreadable value is None, so it never discards the identity.
     #[serde(default, deserialize_with = "lenient_bool")]
     opt_out: Option<bool>,
+    // Records written before registered properties and groups lack them.
+    #[serde(default)]
     registered: HashMap<String, Value>,
+    #[serde(default)]
     groups: HashMap<String, String>,
     #[serde(skip)]
     context_revision: u64,
