@@ -233,7 +233,6 @@ pub(super) struct StateWriter {
     worker: Mutex<Option<JoinHandle<()>>>,
     worker_id: Option<ThreadId>,
     mode: Mode,
-    clock: Arc<dyn Clock>,
     options: WriterOptions,
 }
 
@@ -301,7 +300,6 @@ impl StateWriter {
         });
         let worker = if let Some(store) = store {
             let worker_state = shared.clone();
-            let worker_clock = clock.clone();
             let worker_hooks = hooks.clone();
             match thread::Builder::new()
                 .name("posthog-state".into())
@@ -311,13 +309,7 @@ impl StateWriter {
                         completed: false,
                     };
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_worker(
-                            &worker_state,
-                            store,
-                            &worker_hooks,
-                            worker_clock.as_ref(),
-                            options,
-                        );
+                        run_worker(&worker_state, store, &worker_hooks, options);
                     }));
                     if result.is_err() {
                         // No backend remains after unwinding. Keep live memory usable.
@@ -352,7 +344,6 @@ impl StateWriter {
             worker: Mutex::new(worker),
             worker_id,
             mode,
-            clock,
             options,
         })
     }
@@ -383,7 +374,7 @@ impl StateWriter {
             state.revision = revision;
             if state.mode == Mode::Persistent && state.due.is_none() {
                 state.due =
-                    Some(self.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
+                    Some(self.shared.clock.now() + self.options.coalesce.min(MAX_SHUTDOWN_TIMEOUT));
             }
             revision
         };
@@ -400,7 +391,7 @@ impl StateWriter {
                 && state.persisted < state.revision
                 && state.failures == 0
             {
-                state.due = Some(self.clock.now());
+                state.due = Some(self.shared.clock.now());
             }
             state.revision
         };
@@ -435,7 +426,7 @@ impl StateWriter {
             if let Some(outcome) = state.outcome(revision) {
                 return Some(outcome);
             }
-            let now = self.clock.now();
+            let now = self.shared.clock.now();
             if now >= until {
                 return None;
             }
@@ -475,7 +466,7 @@ impl StateWriter {
     /// Request every client's worker to close before waiting on any of them.
     pub(super) fn request_close(&self) {
         self.request_close_before(
-            self.clock.now() + self.options.shutdown_timeout.min(MAX_SHUTDOWN_TIMEOUT),
+            self.shared.clock.now() + self.options.shutdown_timeout.min(MAX_SHUTDOWN_TIMEOUT),
         );
     }
 
@@ -612,9 +603,9 @@ fn run_worker(
     shared: &Shared,
     mut store: Box<dyn StateStore>,
     hooks: &[OnErrorHook],
-    clock: &dyn Clock,
     options: WriterOptions,
 ) {
+    let clock = shared.clock.as_ref();
     let mut state = shared.lock();
     loop {
         let now = clock.now();

@@ -94,6 +94,13 @@ impl DrainReport {
             delivery: DeliveryOutcome::Deferred,
         }
     }
+
+    fn closed() -> Self {
+        Self {
+            state: PersistenceOutcome::NotRequested,
+            delivery: DeliveryOutcome::Closed,
+        }
+    }
 }
 
 /// A memory-first client whose initialization has finished.
@@ -331,17 +338,14 @@ impl Client {
             return DrainReport::disabled();
         }
         if self.closed.load(Ordering::Acquire) {
-            return DrainReport {
-                state: PersistenceOutcome::NotRequested,
-                delivery: DeliveryOutcome::Closed,
-            };
+            return DrainReport::closed();
         }
         let state = self.state.as_ref().unwrap();
         let transport = self.transport.as_ref().unwrap();
         let revision = state.checkpoint();
         let (tx, rx) = mpsc::channel();
         let sent = transport.send_control(Control::Flush(Completion::Blocking(tx)));
-        if self.on_worker_thread() || self.in_capture() {
+        if self.must_defer_drain() {
             return DrainReport::deferred();
         }
         DrainReport {
@@ -363,17 +367,14 @@ impl Client {
             return DrainReport::disabled();
         }
         if self.closed.load(Ordering::Acquire) {
-            return DrainReport {
-                state: PersistenceOutcome::NotRequested,
-                delivery: DeliveryOutcome::Closed,
-            };
+            return DrainReport::closed();
         }
         let state = self.state.as_ref().unwrap();
         let transport = self.transport.as_ref().unwrap();
         let revision = state.checkpoint();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let sent = transport.send_control(Control::Flush(Completion::Async(tx)));
-        if self.on_worker_thread() || self.in_capture() {
+        if self.must_defer_drain() {
             return DrainReport::deferred();
         }
         DrainReport {
@@ -382,6 +383,31 @@ impl Client {
                 DeliveryOutcome::Attempted
             } else {
                 DeliveryOutcome::Unavailable
+            },
+        }
+    }
+
+    /// A drain from a client worker or a capture hook only requests its work:
+    /// waiting there would block the work it waits for.
+    fn must_defer_drain(&self) -> bool {
+        self.on_worker_thread() || self.in_capture()
+    }
+
+    fn workers_stopped(&self) -> bool {
+        self.transport.as_ref().unwrap().all_stopped() && self.state.as_ref().unwrap().is_stopped()
+    }
+
+    /// Report a shutdown once its wait ends, completing it if every worker stopped.
+    fn finish_shutdown(&self) -> DrainReport {
+        if self.workers_stopped() {
+            self.shutdown.as_ref().unwrap().complete();
+        }
+        DrainReport {
+            state: self.state.as_ref().unwrap().shutdown_outcome().into(),
+            delivery: if self.transport.as_ref().unwrap().all_stopped() {
+                DeliveryOutcome::Stopped
+            } else {
+                DeliveryOutcome::TimedOut
             },
         }
     }
@@ -415,26 +441,14 @@ impl Client {
             return DrainReport::disabled();
         }
         self.request_shutdown(timeout);
-        let transport = self.transport.as_ref().unwrap();
-        let state = self.state.as_ref().unwrap();
-        if self.on_worker_thread() || self.in_capture() {
+        if self.must_defer_drain() {
             return DrainReport::deferred();
         }
         self.shutdown
             .as_ref()
             .unwrap()
-            .wait_blocking(|| transport.all_stopped() && state.is_stopped());
-        if transport.all_stopped() && state.is_stopped() {
-            self.shutdown.as_ref().unwrap().complete();
-        }
-        DrainReport {
-            state: state.shutdown_outcome().into(),
-            delivery: if transport.all_stopped() {
-                DeliveryOutcome::Stopped
-            } else {
-                DeliveryOutcome::TimedOut
-            },
-        }
+            .wait_blocking(|| self.workers_stopped());
+        self.finish_shutdown()
     }
 
     /// Runtime-independent async shutdown with the same deadline and application
@@ -446,30 +460,18 @@ impl Client {
             return DrainReport::disabled();
         }
         self.request_shutdown(timeout);
-        if self.on_worker_thread() || self.in_capture() {
+        if self.must_defer_drain() {
             return DrainReport::deferred();
         }
-        let transport = self.transport.as_ref().unwrap();
-        let state = self.state.as_ref().unwrap();
         self.shutdown
             .as_ref()
             .unwrap()
-            .wait_async(|| transport.all_stopped() && state.is_stopped())
+            .wait_async(|| self.workers_stopped())
             .await;
         if self.on_worker_thread() {
             return DrainReport::deferred();
         }
-        if transport.all_stopped() && state.is_stopped() {
-            self.shutdown.as_ref().unwrap().complete();
-        }
-        DrainReport {
-            state: state.shutdown_outcome().into(),
-            delivery: if transport.all_stopped() {
-                DeliveryOutcome::Stopped
-            } else {
-                DeliveryOutcome::TimedOut
-            },
-        }
+        self.finish_shutdown()
     }
 }
 

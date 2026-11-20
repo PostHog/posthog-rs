@@ -148,11 +148,6 @@ impl Shutdown {
 }
 impl Drop for Shutdown {
     fn drop(&mut self) {
-        self.shared
-            .state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .abandoned = true;
-        self.shared.changed.notify_all();
+        self.complete();
     }
 }
