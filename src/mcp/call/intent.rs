@@ -69,9 +69,10 @@ mod tests {
     }
 
     #[test]
-    fn an_intent_redacted_away_entirely_is_omitted() {
+    fn a_long_intent_keeps_its_start_with_the_credential_redacted() {
         let text = format!("see https://x.io/?token={}", "t".repeat(4_000));
-        assert_eq!(Intent::new(&text, FROM_CONTEXT_ARGUMENT), None);
+        let intent = Intent::new(&text, FROM_CONTEXT_ARGUMENT).expect("intent");
+        assert_eq!(intent.text, "see https://x.io/?token=%5Bredacted%5D...");
     }
 
     #[test]
