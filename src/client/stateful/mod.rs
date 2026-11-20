@@ -97,15 +97,10 @@ struct Snapshot {
     #[serde(skip)]
     flag_load: flag_state::FlagLoadState,
     // Records written before sessions lack this field and restore without one.
-    #[serde(
-        default,
-        deserialize_with = "Option::<sessions::StoredSession>::deserialize"
-    )]
+    #[serde(default)]
     session: Option<sessions::StoredSession>,
     #[serde(skip)]
     sessions: sessions::Sessions,
-    #[serde(skip)]
-    context_revision: u64,
     // Process-local bookkeeping shares the same lock as identity, but is not persisted.
     #[serde(skip)]
     generation: u64,
@@ -121,6 +116,15 @@ fn lenient_bool<'de, D: serde::Deserializer<'de>>(
 }
 
 impl Snapshot {
+    /// Become the identified person `id`, with person processing on.
+    fn identify_as(&mut self, id: String) {
+        self.distinct_id = id;
+        self.identified = true;
+        self.person_processing = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.person_properties = None;
+    }
+
     fn anonymous(id: String) -> Self {
         Self {
             device_id: id.clone(),
@@ -135,7 +139,6 @@ impl Snapshot {
             flag_load: flag_state::FlagLoadState::default(),
             session: None,
             sessions: sessions::Sessions::default(),
-            context_revision: 0,
             generation: 0,
             person_properties: None,
         }

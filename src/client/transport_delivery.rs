@@ -95,12 +95,17 @@ impl Delivery {
     }
 
     fn executor_stopped(&self) -> bool {
-        self.executor
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map_or(true, JoinHandle::is_finished)
+        finished(&self.executor)
     }
+}
+
+/// Whether the thread held in `handle` has finished, or was already joined.
+fn finished(handle: &Mutex<Option<JoinHandle<()>>>) -> bool {
+    handle
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map_or(true, JoinHandle::is_finished)
 }
 
 /// The name of the thread that sends stateful delivery requests.
@@ -140,7 +145,7 @@ impl TransportHandle {
             options: options.clone(),
             lane: lane.clone(),
             memory: Limits {
-                events: max_queue_size.max(1),
+                events: max_queue_size,
                 bytes: max_queue_bytes as u64,
             },
         };
@@ -346,13 +351,7 @@ impl TransportHandle {
 
     /// Event delivery has stopped.
     pub(crate) fn delivery_stopped(&self) -> bool {
-        let worker_stopped = self
-            .worker
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map_or(true, JoinHandle::is_finished);
-        worker_stopped
+        finished(&self.worker)
             && self
                 .delivery
                 .as_ref()

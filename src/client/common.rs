@@ -78,20 +78,30 @@ fn lib_version_parts() -> Option<[u64; 3]> {
 ///
 /// The `__major/minor/patch` parts are written whenever the SDK writes
 /// `$lib_version`, and only then, so they always match it.
-fn apply_sdk_identity(event: &mut Event) {
+/// Fill `$lib` and `$lib_version` as a pair, so a caller's own `$lib` never
+/// gets this SDK's version: both when `$lib` is unset, only the version when
+/// `$lib` names this SDK without one. Returns whether the version was written.
+pub(super) fn fill_sdk_identity(event: &mut Event, name: &str, version: &str) -> bool {
     let properties = event.properties();
     let lib = properties.get(LIB_PROP);
     let fill_lib = !names_a_library(lib);
     if !fill_lib
-        && (lib.and_then(serde_json::Value::as_str) != Some(SDK_USERAGENT_NAME)
+        && (lib.and_then(serde_json::Value::as_str) != Some(name)
             || names_a_library(properties.get(LIB_VERSION_PROP)))
     {
-        return;
+        return false;
     }
     if fill_lib {
-        event.set_prop(LIB_PROP, SDK_USERAGENT_NAME.into());
+        event.set_prop(LIB_PROP, name.into());
     }
-    event.set_prop(LIB_VERSION_PROP, CRATE_VERSION.into());
+    event.set_prop(LIB_VERSION_PROP, version.into());
+    true
+}
+
+fn apply_sdk_identity(event: &mut Event) {
+    if !fill_sdk_identity(event, SDK_USERAGENT_NAME, CRATE_VERSION) {
+        return;
+    }
     if let Some(parts) = lib_version_parts() {
         for (key, part) in LIB_VERSION_PART_PROPS.iter().zip(parts.iter()) {
             event.set_prop(*key, (*part).into());
