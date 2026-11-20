@@ -208,6 +208,8 @@ pub(crate) struct Attribution {
     pub(crate) timestamp: DateTime<Utc>,
     pub(crate) uuid: Uuid,
     pub(crate) sequence: u64,
+    /// The upload path from the remote config this frame was recorded under.
+    pub(crate) endpoint: String,
     generation: u64,
     consent_generation: u64,
 }
@@ -422,6 +424,12 @@ impl SessionReplay {
             timestamp: Utc::now(),
             uuid: Uuid::now_v7(),
             sequence,
+            endpoint: policy::endpoint(
+                snapshot
+                    .remote_config
+                    .as_ref()
+                    .and_then(|c| c.session_recording.as_ref()),
+            ),
             generation: snapshot.generation,
             consent_generation: snapshot.replay_consent_generation,
         };

@@ -209,6 +209,13 @@ fn remote_policy_neutral_controls_and_unsupported_restrictions() {
         json!(true),
         json!({}),
         json!({"version":1,"sampleRate":"1.0","linkedFlag":null,"minimumDurationMilliseconds":0,"eventTriggers":[],"urlTriggers":[],"urlBlocklist":[],"endpoint":"/s/","futureSetting":true}),
+        // Browser-only fields, which iOS and Android ignore too.
+        json!({"urlTriggers":[{"url":".*"}]}),
+        json!({"urlBlocklist":[{"url":".*"}]}),
+        json!({"version":2,"triggerGroups":[{"sampleRate":"1"}]}),
+        json!({"triggerGroups":[{}]}),
+        json!({"endpoint":"/custom/"}),
+        json!({"endpoint":"https://other.example/s/"}),
     ] {
         assert!(policy::eligible(Some(&value)), "{}", value);
     }
@@ -222,17 +229,24 @@ fn remote_policy_neutral_controls_and_unsupported_restrictions() {
         json!({"sampleRate":"broken"}),
         json!({"minimumDurationMilliseconds":1}),
         json!({"eventTriggers":["open"]}),
-        json!({"urlTriggers":[{"url":".*"}]}),
-        json!({"urlBlocklist":[{"url":".*"}]}),
-        json!({"version":2,"triggerGroups":[{"sampleRate":"1"}]}),
-        json!({"triggerGroups":[{}]}),
         json!({"triggerMatchType":"unknown"}),
-        json!({"endpoint":"https://other.example/s/"}),
         json!({"enabled":false}),
     ] {
         assert!(!policy::eligible(Some(&value)), "{}", value);
     }
     assert!(!policy::eligible(None));
+}
+
+#[test]
+fn screenshots_post_to_the_remote_endpoint_path() {
+    for (value, path) in [
+        (json!({"endpoint":"/custom/"}), "/custom/"),
+        (json!({}), "/s/"),
+        (json!(true), "/s/"),
+        (json!({"endpoint":"https://other.example/s/"}), "/s/"),
+    ] {
+        assert_eq!(policy::endpoint(Some(&value)), path, "{}", value);
+    }
 }
 
 #[test]
@@ -1138,4 +1152,24 @@ fn a_caller_supplied_replay_debug_value_wins_for_that_event_only() {
         json!("disabled")
     );
     client.shutdown_blocking(None);
+}
+
+#[test]
+fn uploads_go_to_the_remote_endpoint() {
+    let backend = Backend::new();
+    *backend.config.lock().unwrap() =
+        json!({"hasFeatureFlags":false,"sessionRecording":{"endpoint":"/custom/"}});
+    let custom = backend.server.mock(|when, then| {
+        when.method(POST).path("/custom/");
+        then.status(200);
+    });
+    let client = backend.client(|_| {});
+    let replay = client.session_replay();
+    replay.start();
+    for _ in 0..2 {
+        assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
+    }
+    client.flush_blocking();
+    custom.assert_calls(1);
+    assert!(backend.bodies.lock().unwrap().is_empty());
 }

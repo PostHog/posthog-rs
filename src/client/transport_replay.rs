@@ -110,6 +110,7 @@ impl Queue {
 fn same_context(a: &EncodedFrame, b: &EncodedFrame) -> bool {
     a.attribution.distinct_id == b.attribution.distinct_id
         && a.attribution.session_id == b.attribution.session_id
+        && a.attribution.endpoint == b.attribution.endpoint
 }
 
 pub(crate) fn report(options: &ClientOptions, message: &'static str, status: Option<u16>) {
@@ -341,7 +342,11 @@ impl Sender {
         }
         let request = self
             .http
-            .post(format!("{}/s/", self.options.endpoints().base_host()))
+            .post(format!(
+                "{}{}",
+                self.options.endpoints().base_host(),
+                batch.frames[0].attribution.endpoint
+            ))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(
                 reqwest::header::USER_AGENT,

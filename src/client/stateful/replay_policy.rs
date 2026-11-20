@@ -1,5 +1,19 @@
 //! Manual recording permits only remotely enabled, unrestricted configurations.
+//! Like posthog-ios and posthog-android, it ignores the browser-only fields:
+//! URL triggers and blocklists, trigger groups and the config version.
 use serde_json::Value;
+
+/// The upload path from remote config, which the other SDKs post to, or
+/// `/s/` when it names none.
+pub(super) fn endpoint(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_object)
+        .and_then(|fields| fields.get("endpoint"))
+        .and_then(Value::as_str)
+        .filter(|path| path.starts_with('/'))
+        .unwrap_or("/s/")
+        .to_owned()
+}
 
 pub(super) fn eligible(value: Option<&Value>) -> bool {
     let Some(value) = value else { return false };
@@ -10,16 +24,7 @@ pub(super) fn eligible(value: Option<&Value>) -> bool {
         return false;
     };
     let optional = |name: &str| fields.get(name).filter(|v| !v.is_null());
-    if optional("version").is_some_and(|v| v.as_u64() != Some(1)) {
-        return false;
-    }
-    if optional("triggerGroups").is_some_and(|v| !v.as_array().is_some_and(Vec::is_empty)) {
-        return false;
-    }
     if optional("enabled").is_some_and(|v| v.as_bool() != Some(true)) {
-        return false;
-    }
-    if optional("endpoint").is_some_and(|v| v.as_str() != Some("/s/")) {
         return false;
     }
     if optional("linkedFlag").is_some() {
@@ -33,10 +38,8 @@ pub(super) fn eligible(value: Option<&Value>) -> bool {
     if optional("minimumDurationMilliseconds").is_some_and(|v| v.as_f64() != Some(0.0)) {
         return false;
     }
-    for name in ["eventTriggers", "urlTriggers", "urlBlocklist"] {
-        if optional(name).is_some_and(|v| !v.as_array().is_some_and(Vec::is_empty)) {
-            return false;
-        }
+    if optional("eventTriggers").is_some_and(|v| !v.as_array().is_some_and(Vec::is_empty)) {
+        return false;
     }
     if optional("triggerMatchType").is_some_and(|v| !matches!(v.as_str(), Some("all" | "any"))) {
         return false;
