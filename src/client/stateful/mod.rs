@@ -79,8 +79,6 @@ struct Snapshot {
     registered: HashMap<String, Value>,
     #[serde(default)]
     groups: HashMap<String, String>,
-    #[serde(skip)]
-    context_revision: u64,
     // Process-local bookkeeping shares the same lock as identity, but is not persisted.
     #[serde(skip)]
     generation: u64,
@@ -115,7 +113,6 @@ impl Snapshot {
             opt_out: None,
             registered: HashMap::new(),
             groups: HashMap::new(),
-            context_revision: 0,
             generation: 0,
             person_properties: None,
         }

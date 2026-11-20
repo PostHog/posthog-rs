@@ -387,7 +387,6 @@ fn process_local_bookkeeping_updates_do_not_advance_persisted_revision() {
     assert_eq!(
         writer.update(|state| {
             state.generation = 1;
-            state.context_revision = 2;
             state.person_properties = Some([3; 20]);
         }),
         Ok(1)
@@ -395,7 +394,6 @@ fn process_local_bookkeeping_updates_do_not_advance_persisted_revision() {
     let current = writer.snapshot();
     assert!(current.same_persisted_state(&original));
     assert_eq!(current.generation, 1);
-    assert_eq!(current.context_revision, 2);
     assert_eq!(current.person_properties, Some([3; 20]));
     assert_eq!(writer.checkpoint(), 1);
     assert_eq!(writer.wait_blocking(1), DrainOutcome::MemoryOnly);

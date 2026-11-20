@@ -3,8 +3,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
-use super::producer::CaptureGuard;
-use super::{Capture, Client, PersonProfiles};
+use super::{Capture, Client};
 
 /// Group input for [`Client::group`] and [`Client::group_identify`]. Start with
 /// [`Group::new`], or pass a `(type, key)` pair.
@@ -46,30 +45,14 @@ impl Client {
     /// 100 levels deep is rejected as a whole.
     /// Memory changes immediately; persistence is asynchronous.
     pub fn register(&self, properties: HashMap<String, Value>) {
-        if self.is_disabled() || self.closed.load(Ordering::Acquire) {
-            return;
-        }
-        let _ = self.state.as_ref().unwrap().mutate(|state| {
-            if properties
-                .iter()
-                .any(|(key, value)| state.registered.get(key) != Some(value))
-            {
-                state.registered.extend(properties);
-                state.context_revision = state.context_revision.wrapping_add(1);
-            }
-        });
+        self.change_context(|state| state.registered.extend(properties));
     }
 
     /// Remove one registered property locally, including while opted out.
     /// Already captured events are unchanged; a missing key is a no-op.
     pub fn unregister(&self, key: &str) {
-        if self.is_disabled() || self.closed.load(Ordering::Acquire) {
-            return;
-        }
-        let _ = self.state.as_ref().unwrap().mutate(|state| {
-            if state.registered.remove(key).is_some() {
-                state.context_revision = state.context_revision.wrapping_add(1);
-            }
+        self.change_context(|state| {
+            state.registered.remove(key);
         });
     }
 
@@ -94,24 +77,23 @@ impl Client {
     /// person processing. Available while opted out or configured with Never.
     /// Disabled/closed clients no-op; already captured events are unchanged.
     pub fn remove_group(&self, group_type: &str) {
-        if self.is_disabled() || self.closed.load(Ordering::Acquire) {
-            return;
-        }
-        let _ = self.state.as_ref().unwrap().mutate(|state| {
-            if state.groups.remove(group_type).is_some() {
-                state.context_revision = state.context_revision.wrapping_add(1);
-            }
+        self.change_context(|state| {
+            state.groups.remove(group_type);
         });
     }
 
-    fn capture_group(&self, group: impl Into<Group>, remember: bool) {
-        if self.is_disabled()
-            || self.closed.load(Ordering::Acquire)
-            || self.producer.as_ref().unwrap().person_profiles == PersonProfiles::Never
-        {
+    /// Change registered properties or groups locally. An unchanged state is
+    /// not written again.
+    fn change_context(&self, change: impl FnOnce(&mut super::Snapshot)) {
+        if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return;
         }
-        let Ok(_guard) = CaptureGuard::enter(self) else {
+        let _ = self.state.as_ref().unwrap().mutate(change);
+    }
+
+    fn capture_group(&self, group: impl Into<Group>, remember: bool) {
+        let Some(_guard) = self.identity_guard(if remember { "group" } else { "group_identify" })
+        else {
             return;
         };
         let Group {
@@ -129,9 +111,8 @@ impl Client {
                 return None;
             }
             state.person_processing = true;
-            if remember && state.groups.get(&group_type) != Some(&group_key) {
+            if remember {
                 state.groups.insert(group_type.clone(), group_key.clone());
-                state.context_revision = state.context_revision.wrapping_add(1);
             }
             Some(state.clone())
         });

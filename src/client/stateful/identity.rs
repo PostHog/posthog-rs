@@ -145,7 +145,7 @@ impl Client {
             .is_some_and(|state| state.snapshot().identified)
     }
 
-    fn identity_guard(&self, operation: &str) -> Option<CaptureGuard> {
+    pub(super) fn identity_guard(&self, operation: &str) -> Option<CaptureGuard> {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return None;
         }
@@ -338,12 +338,10 @@ impl Client {
         let id = uuid::Uuid::now_v7().to_string();
         let _ = self.state.as_ref().unwrap().mutate(|state| {
             let generation = state.generation.wrapping_add(1);
-            let context_revision = state.context_revision.wrapping_add(1);
             let device_id = state.device_id.clone();
             *state = Snapshot::anonymous(id);
             state.device_id = device_id;
             state.generation = generation;
-            state.context_revision = context_revision;
         });
         self.producer.as_ref().unwrap().clear_last_screen();
     }

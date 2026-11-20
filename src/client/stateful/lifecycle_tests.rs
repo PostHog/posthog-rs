@@ -353,7 +353,6 @@ fn property_and_group_mutations_complete_while_state_io_is_gated() {
     assert_eq!(before.groups["company"], "old");
     assert!(before.person_processing);
     assert!(after.registered.is_empty() && after.groups.is_empty());
-    assert!(after.context_revision > before.context_revision);
     let live = client.state.as_ref().unwrap().snapshot();
     assert_eq!(live, after);
     client.shutdown_blocking(None);
