@@ -6,6 +6,14 @@ on:
     paths:
       - '.sampo/changesets/*.md'
   workflow_dispatch:
+    inputs:
+      abandon_ffi_version:
+        description: >-
+          Unpublished posthog-rs-ffi version to give up on, for example 0.1.0, when its
+          build can't succeed. This run releases a new version instead, so main needs
+          a changeset with the fix. Leave empty for a normal release.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -83,6 +91,10 @@ jobs:
       contents: read
       actions: write
       id-token: write
+    outputs:
+      ffi_version: ${{ steps.ffi-pending.outputs.version }}
+      ffi_tag: ${{ steps.ffi-release.outputs.tag }}
+      ffi_sha: ${{ steps.ffi-pending.outputs.sha }}
     steps:
       - name: Notify Slack - Approved
         if: needs.notify-approval-needed.outputs.slack_ts != ''
@@ -129,18 +141,126 @@ jobs:
         id: sampo-release
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
+          GH_TOKEN: ${{ steps.releaser.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          ABANDON_FFI_VERSION: ${{ inputs.abandon_ffi_version }}
         run: |
+          version_of() { grep -m1 '^version = ' "$1" | sed 's/version = "\(.*\)"/\1/'; }
+          # Finish an earlier run's posthog-rs-ffi release first. Its release commit
+          # is on main, but its GitHub Release isn't published, so a step failed after
+          # the commit landed. Recover that version, and leave any changesets that
+          # landed since for the next release.
+          # Prints true or false. Fails on any lookup error other than "release not
+          # found", so an outage isn't mistaken for an unpublished release.
+          ffi_release_published() {
+            local out
+            if out=$(gh release view "posthog-rs-ffi-v$1" --json isDraft --jq '.isDraft == false' 2>&1); then
+              echo "$out"
+            elif [ "$out" = "release not found" ]; then
+              echo false
+            else
+              echo "::error::Couldn't look up the posthog-rs-ffi-v$1 release: $out" >&2
+              return 1
+            fi
+          }
+          # Checks the committed posthog version is fully released: both crates on
+          # crates.io and a published GitHub Release. Runs that finish or abandon a
+          # bindings release skip the posthog publish steps, so they must not report
+          # success over an unfinished posthog release. Records it for a later step,
+          # which fails the run once the bindings work is done.
+          check_posthog_release() {
+            local rust_version crate status out
+            rust_version=$(version_of Cargo.toml)
+            # The two crates publish one after the other, so check both.
+            for crate in posthog posthog-rs; do
+              status=$(curl -s -o /dev/null -w '%{http_code}' -A "posthog-rs-release (github.com/PostHog/posthog-rs)" \
+                "https://crates.io/api/v1/crates/$crate/$rust_version")
+              if [ "$status" = 404 ]; then
+                echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+                return 0
+              elif [ "$status" != 200 ]; then
+                echo "::error::Couldn't check whether $crate $rust_version is on crates.io (HTTP $status)"
+                return 1
+              fi
+            done
+            # The crates can be published while their GitHub Release failed or is a draft.
+            if out=$(gh release view "$rust_version" --json isDraft --jq .isDraft 2>&1); then
+              if [ "$out" = true ]; then
+                echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+              fi
+            elif [ "$out" = "release not found" ]; then
+              echo "rust_unpublished=$rust_version" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Couldn't look up the $rust_version release: $out"
+              return 1
+            fi
+          }
+          ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
+          published=$(ffi_release_published "$ffi_version")
+          if [ -n "$ABANDON_FFI_VERSION" ] && [ "$ABANDON_FFI_VERSION" != "$ffi_version" ] \
+            && [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
+            # main already has another unpublished version, so the abandonment was
+            # applied: a rerun of an abandon run whose release commit landed but
+            # whose release didn't finish. Finish that version instead. A typo in
+            # the input lands here too, which is safe: finishing never skips a release.
+            echo "::notice::posthog-rs-ffi $ABANDON_FFI_VERSION is no longer the version on main. Finishing the posthog-rs-ffi $ffi_version release instead."
+            ABANDON_FFI_VERSION=""
+          fi
+          if [ -n "$ABANDON_FFI_VERSION" ]; then
+            # Only the exact unfinished version can be abandoned, so a typo can't
+            # skip recovery of the wrong one.
+            if [ "$ABANDON_FFI_VERSION" != "$ffi_version" ] || [ "$published" = true ] || [ "$ffi_version" = "0.0.0" ]; then
+              echo "::error::posthog-rs-ffi $ABANDON_FFI_VERSION isn't the unpublished version on main ($ffi_version, published: $published)"
+              exit 1
+            fi
+            echo "::warning::Abandoning posthog-rs-ffi $ffi_version. It stays unpublished, and this run releases a new version."
+            # Abandoning the bindings must not hide an unfinished posthog release
+            # from the same failed run.
+            check_posthog_release
+          elif [ "$ffi_version" != "0.0.0" ] && [ "$published" != true ]; then
+            echo "::notice::Finishing the posthog-rs-ffi $ffi_version release. Changesets on main wait for the next release."
+            echo "rerun=true" >> "$GITHUB_OUTPUT"
+            check_posthog_release
+            exit 0
+          fi
+          if ! find .sampo/changesets -name '*.md' | grep -q .; then
+            echo "::error::No changesets to release"
+            exit 1
+          fi
+          old_version=$(version_of Cargo.toml)
+          old_ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
           sampo release
           # Sampo regenerates Cargo.lock, resolving every dependency to its
           # latest version, which can need a newer Rust than the MSRV. Keep the
           # released lock and move only the workspace crates to their new versions.
           git checkout HEAD -- Cargo.lock
           cargo update --workspace
-          new_version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          new_version=$(version_of Cargo.toml)
+          ffi_version=$(version_of crates/posthog-rs-ffi/Cargo.toml)
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "ffi_version=$ffi_version" >> "$GITHUB_OUTPUT"
+          # posthog-rs-ffi has its own version and changesets, so a release can
+          # bump either package or both.
+          released=()
+          if [ "$new_version" != "$old_version" ]; then
+            echo "posthog_released=true" >> "$GITHUB_OUTPUT"
+            released+=("v$new_version")
+          fi
+          if [ -n "$ABANDON_FFI_VERSION" ] && [ "$ffi_version" = "$old_ffi_version" ]; then
+            echo "::error::Abandoning posthog-rs-ffi $ABANDON_FFI_VERSION needs a changeset that releases a new posthog-rs-ffi version"
+            exit 1
+          fi
+          if [ "$ffi_version" != "$old_ffi_version" ]; then
+            echo "ffi_released=true" >> "$GITHUB_OUTPUT"
+            released+=("posthog-rs-ffi v$ffi_version")
+          fi
+          title=$(printf '%s, ' "${released[@]}")
+          title=${title%, }
+          echo "title=${title:-v$new_version}" >> "$GITHUB_OUTPUT"
 
       - name: Generate SDK reference
         id: reference
+        if: steps.sampo-release.outputs.rerun != 'true'
         # Best-effort: a failure never blocks the release. Run generate-references.yml to retry.
         continue-on-error: true
         run: |
@@ -166,10 +286,11 @@ jobs:
           fi
 
       - name: Commit release changes
+        id: release-commit
         if: steps.check-changes.outputs.committed == 'true'
         uses: planetscale/ghcommit-action@a6b150b81dca5dd027baa898604418eec9e11465
         with:
-          commit_message: "chore: Release v${{ steps.sampo-release.outputs.new_version }} [skip ci]"
+          commit_message: "chore: Release ${{ steps.sampo-release.outputs.title }} [skip ci]"
           repo: ${{ github.repository }}
           branch: main
         env:
@@ -177,45 +298,53 @@ jobs:
 
       # ghcommit-action commits via the GitHub API, so the local working
       # tree still has dirty and staged files. Discard them (already committed remotely)
-      # and pull, otherwise cargo publish fails with "files contain changes
-      # not yet committed".
+      # and check out the release commit itself, otherwise cargo publish fails with
+      # "files contain changes not yet committed". Checking out the exact commit,
+      # rather than pulling main, keeps a later push to main out of the release.
       - name: Sync local repository
+        id: sync
         if: steps.check-changes.outputs.committed == 'true'
-        run: git reset --hard && git pull origin main
+        env:
+          RELEASE_SHA: ${{ steps.release-commit.outputs.commit-hash }}
+        run: |
+          git reset --hard
+          git fetch origin "$RELEASE_SHA"
+          git checkout --detach "$RELEASE_SHA"
 
       - name: Publish dry-run
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         run: scripts/check-compatibility-crate.sh && cargo publish --workspace --dry-run --locked --package posthog --package posthog-rs
 
       - name: Authenticate with crates.io
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
         id: crates-auth
 
       - name: Configure git identity
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         run: |
           git config user.name "posthog-rs-releaser[bot]"
           git config user.email "posthog-rs-releaser[bot]@users.noreply.github.com"
 
       - name: Publish with Sampo
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: sampo publish
 
       - name: Create GitHub Release
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}
           NEW_VERSION: ${{ steps.sampo-release.outputs.new_version }}
         run: |
           CHANGELOG_ENTRY=$(awk -v defText="see CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
-          gh release create "$NEW_VERSION" --target main --notes "$CHANGELOG_ENTRY"
+          # Tag the commit that was just published, not whatever main points to now.
+          gh release create "$NEW_VERSION" --target "$(git rev-parse HEAD)" --notes "$CHANGELOG_ENTRY"
 
       - name: Dispatch posthog upgrade for posthog-rs
-        if: steps.check-changes.outputs.committed == 'true'
+        if: steps.check-changes.outputs.committed == 'true' && steps.sampo-release.outputs.posthog_released == 'true'
         env:
           PACKAGE_VERSION: ${{ steps.sampo-release.outputs.new_version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -230,6 +359,74 @@ jobs:
                  --arg package_version "$PACKAGE_VERSION" \
                  '{ref: $ref, inputs: {package_name: $package_name, package_version: $package_version}}' \
                )"
+
+      - name: Find an unpublished posthog-rs-ffi release
+        id: ffi-pending
+        # Runs even if publishing posthog failed: the release commit is already on main.
+        if: ${{ !cancelled() && (steps.sync.outcome == 'success' || steps.sampo-release.outputs.rerun == 'true') }}
+        env:
+          # The releaser token can see draft releases, which `github.token` can't.
+          GH_TOKEN: ${{ steps.releaser.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Prints true or false. Fails on any lookup error other than "release not
+          # found", so an outage isn't mistaken for an unpublished release.
+          ffi_release_published() {
+            local out
+            if out=$(gh release view "posthog-rs-ffi-v$1" --json isDraft --jq '.isDraft == false' 2>&1); then
+              echo "$out"
+            elif [ "$out" = "release not found" ]; then
+              echo false
+            else
+              echo "::error::Couldn't look up the posthog-rs-ffi-v$1 release: $out" >&2
+              return 1
+            fi
+          }
+          version=$(grep -m1 '^version = ' crates/posthog-rs-ffi/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          published=$(ffi_release_published "$version")
+          if [ "$version" = "0.0.0" ] || [ "$published" = true ]; then
+            echo "No posthog-rs-ffi release waiting to be published."
+            exit 0
+          fi
+          # The commit that set this version is the release commit, on a normal run
+          # (HEAD) and on a rerun after it landed.
+          sha=$(git log -1 --format=%H -G"^version = \"$version\"\$" -- crates/posthog-rs-ffi/Cargo.toml)
+          if [ -z "$sha" ]; then
+            echo "::error::No commit set posthog-rs-ffi to $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the posthog-rs-ffi release
+        id: ffi-release
+        # The GitHub Release is published later, once every platform archive is built.
+        if: ${{ !cancelled() && steps.ffi-pending.outputs.version != '' }}
+        env:
+          GH_TOKEN: ${{ steps.releaser.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          FFI_VERSION: ${{ steps.ffi-pending.outputs.version }}
+          RELEASE_SHA: ${{ steps.ffi-pending.outputs.sha }}
+        run: |
+          tag="posthog-rs-ffi-v$FFI_VERSION"
+          # `sampo` tags locally only, so create the remote tag here. A rerun that
+          # finds it already there must not build a tag that points anywhere else.
+          existing=$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk '{print $1}' | tail -1)
+          if [ -z "$existing" ]; then
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$RELEASE_SHA" >/dev/null
+          elif [ "$existing" != "$RELEASE_SHA" ]; then
+            echo "::error::Tag $tag points to $existing, not the release commit $RELEASE_SHA"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if the posthog release is unfinished
+        if: ${{ !cancelled() && steps.sampo-release.outputs.rust_unpublished != '' }}
+        env:
+          RUST_VERSION: ${{ steps.sampo-release.outputs.rust_unpublished }}
+        run: |
+          echo "::error::The posthog $RUST_VERSION release is unfinished: posthog or posthog-rs isn't on crates.io, or its GitHub Release is missing, and a rerun doesn't finish it. Publish posthog and posthog-rs by hand from the release commit, as RELEASING.md describes under \"a failed crates.io publish isn't retried\"."
+          exit 1
 
       - name: Send failure event to PostHog
         if: ${{ failure() }}
@@ -253,11 +450,127 @@ jobs:
               "alertContext": "The release workflow failed before completion."
             }
 
+  ffi-build:
+    name: Build C bindings
+    needs: release
+    # The posthog-rs-ffi tag exists once this output is set, even if a later step failed.
+    if: ${{ !cancelled() && needs.release.outputs.ffi_tag != '' }}
+    uses: ./.github/workflows/ffi-build.yml
+    with:
+      version: ${{ needs.release.outputs.ffi_version }}
+      release: true
+      release-commit: ${{ needs.release.outputs.ffi_sha }}
+
+  ffi-publish:
+    name: Publish the C bindings GitHub Release
+    needs: [release, ffi-build]
+    if: ${{ !cancelled() && needs.ffi-build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: posthog-rs-ffi-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check every platform is present
+        env:
+          VERSION: ${{ needs.release.outputs.ffi_version }}
+        working-directory: dist
+        run: |
+          ls -l
+          missing=0
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc; do
+            archive="posthog-rs-ffi-$VERSION-$target.tar.gz"
+            [[ "$target" == *windows* ]] && archive="posthog-rs-ffi-$VERSION-$target.zip"
+            if [ ! -f "$archive" ] || [ ! -f "$archive.sha256" ]; then
+              echo "::error::Missing $archive or its checksum"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
+          sha256sum -c ./*.sha256
+
+      - name: Checkout the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.release.outputs.ffi_tag }}
+          path: source
+          persist-credentials: false
+
+      - name: Check the tag still points to the release commit
+        env:
+          RELEASE_COMMIT: ${{ needs.release.outputs.ffi_sha }}
+          TAG: ${{ needs.release.outputs.ffi_tag }}
+        run: |
+          actual=$(git -C source rev-parse HEAD)
+          if [ -z "$RELEASE_COMMIT" ] || [ "$actual" != "$RELEASE_COMMIT" ]; then
+            echo "::error::Tag $TAG points to $actual, not the release commit $RELEASE_COMMIT"
+            exit 1
+          fi
+
+      - name: Check this version is still the one to publish
+        # An old run's "Re-run failed jobs" reuses that run's outputs. After a
+        # later run abandons the version and releases a new one, it must not
+        # publish the abandoned version.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.ffi_version }}
+        run: |
+          current=$(gh api "repos/$GH_REPO/contents/crates/posthog-rs-ffi/Cargo.toml?ref=main" --jq .content \
+            | base64 -d | grep -m1 '^version = ' | sed 's/version = "\(.*\)"/\1/')
+          if [ "$current" != "$VERSION" ]; then
+            echo "::error::main has posthog-rs-ffi $current now, so $VERSION was abandoned or superseded. Not publishing it."
+            exit 1
+          fi
+
+      - name: Publish the GitHub Release with its archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release.outputs.ffi_tag }}
+          VERSION: ${{ needs.release.outputs.ffi_version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ]; then
+              # `gh release create` uploads to a draft first, so an interrupted
+              # run can leave one behind. Finish it.
+              gh release upload "$TAG" dist/* --clobber
+              gh release edit "$TAG" --draft=false --latest=false
+            else
+              # Never change a published release's downloads. Only check they're
+              # complete and intact. Rebuilt archives aren't byte-for-byte identical
+              # (tar records timestamps), so check the published archives against
+              # their own published checksums, not against this build.
+              mkdir published
+              gh release download "$TAG" --pattern 'posthog-rs-ffi-*' --dir published
+              for sum in dist/*.sha256; do
+                name=$(basename "$sum")
+                archive=${name%.sha256}
+                if [ ! -f "published/$archive" ] || [ ! -f "published/$name" ]; then
+                  echo "::error::The published release is missing $archive or its checksum"
+                  exit 1
+                fi
+              done
+              (cd published && sha256sum -c ./*.sha256)
+            fi
+            exit 0
+          fi
+          notes=$(awk -v defText="see crates/posthog-rs-ffi/CHANGELOG.md" '/^## /{if (flag) exit; flag=1; next} flag; END{if (!flag) print defText}' source/crates/posthog-rs-ffi/CHANGELOG.md | sed '/[^[:space:]]/,$!d' | tac | sed '/[^[:space:]]/,$!d' | tac)
+          gh release create "$TAG" dist/* --verify-tag --title "posthog-rs-ffi $VERSION" --notes "$notes" --latest=false
+
   notify-released:
     name: Notify Slack - Released
-    needs: [check-changesets, notify-approval-needed, release]
+    needs: [check-changesets, notify-approval-needed, release, ffi-publish]
     runs-on: ubuntu-latest
-    if: always() && needs.release.result == 'success' && needs.notify-approval-needed.outputs.slack_ts != ''
+    if: >-
+      always() && needs.release.result == 'success' &&
+      (needs.release.outputs.ffi_tag == '' || needs.ffi-publish.result == 'success') &&
+      needs.notify-approval-needed.outputs.slack_ts != ''
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -268,5 +581,5 @@ jobs:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
           thread_ts: ${{ needs.notify-approval-needed.outputs.slack_ts }}
-          message: "🚀 posthog and posthog-rs released successfully!"
+          message: "🚀 Release completed successfully!"
           emoji_reaction: "rocket"

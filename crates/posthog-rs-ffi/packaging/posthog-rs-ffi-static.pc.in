@@ -1,0 +1,9 @@
+prefix=${pcfiledir}/../..
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: posthog-rs-ffi-static
+Description: C bindings for the PostHog Rust SDK (static library)
+Version: @VERSION@
+Cflags: -I${includedir}
+Libs: ${libdir}/libposthog_ffi.a @NATIVE_LIBS@

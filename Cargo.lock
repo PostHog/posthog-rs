@@ -1706,6 +1706,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "posthog-rs-ffi"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "httpmock",
+ "posthog",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
