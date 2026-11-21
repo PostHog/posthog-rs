@@ -175,6 +175,8 @@ impl Client {
     /// A different already-identified ID is ignored: call reset before switching users.
     /// Dropped/full events do not roll back local state or schedule linking-event replay.
     /// Persistence and delivery are asynchronous; this is not an ingestion acknowledgment.
+    /// While opted out, the identity still changes, but no `$identify` or `$set`
+    /// event is sent, now or after opt-in.
     pub fn identify(&self, input: impl Into<Identify>) {
         let Some(_guard) = self.identity_guard("identify") else {
             return;
@@ -244,7 +246,8 @@ impl Client {
 
     /// Link an alias to the current identity without changing either local ID.
     /// A blank alias, or one equal to the current distinct ID, is ignored with a
-    /// warning.
+    /// warning. While opted out, alias does nothing and does not enable person
+    /// processing (as in posthog-ios and the alias spec).
     pub fn alias(&self, input: impl Into<Alias>) {
         let Some(_guard) = self.identity_guard("alias") else {
             return;
