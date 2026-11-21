@@ -176,6 +176,13 @@ pub(super) struct OpenedStateStore {
     read_error: Option<io::Error>,
 }
 
+/// A restored snapshot, and whether restoring normalized it so that it differs
+/// from the stored record.
+struct DecodedSnapshot {
+    snapshot: Snapshot,
+    rewrite_required: bool,
+}
+
 // Only bounded, readable current-format corruption permits replacement. Access
 // failures and explicit future versions must not be inferred from io::ErrorKind.
 #[derive(Debug)]
@@ -190,8 +197,10 @@ impl FileStateStore {
         match store.restore() {
             Ok(restored) => Ok(OpenedStateStore {
                 store,
-                rewrite_required: restored.as_ref().is_some_and(|(_, rewrite)| *rewrite),
-                snapshot: restored.map(|(snapshot, _)| snapshot),
+                rewrite_required: restored
+                    .as_ref()
+                    .is_some_and(|state| state.rewrite_required),
+                snapshot: restored.map(|state| state.snapshot),
                 read_error: None,
             }),
             Err(RestoreFailure::Corrupt(error)) => Ok(OpenedStateStore {
@@ -208,9 +217,7 @@ impl FileStateStore {
         self.directory.path().join("state.json")
     }
 
-    /// The stored snapshot, and whether restoring normalized it so that it
-    /// differs from the record.
-    fn restore(&self) -> Result<Option<(Snapshot, bool)>, RestoreFailure> {
+    fn restore(&self) -> Result<Option<DecodedSnapshot>, RestoreFailure> {
         let path = self.path();
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -231,13 +238,13 @@ impl FileStateStore {
     #[cfg(test)]
     fn load(&self) -> io::Result<Option<Snapshot>> {
         self.restore()
-            .map(|restored| restored.map(|(snapshot, _)| snapshot))
+            .map(|restored| restored.map(|state| state.snapshot))
             .map_err(|error| match error {
                 RestoreFailure::Corrupt(error) | RestoreFailure::Unavailable(error) => error,
             })
     }
 
-    fn decode_restored(encoded: &[u8]) -> Result<(Snapshot, bool), RestoreFailure> {
+    fn decode_restored(encoded: &[u8]) -> Result<DecodedSnapshot, RestoreFailure> {
         let record: serde_json::Value = serde_json::from_slice(encoded)
             .map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
         // Inspect the explicit version before interpreting any state fields.
@@ -267,7 +274,10 @@ impl FileStateStore {
         if !snapshot.is_valid() {
             return Err(RestoreFailure::Corrupt(invalid_state()));
         }
-        Ok((snapshot, rewrite_required))
+        Ok(DecodedSnapshot {
+            snapshot,
+            rewrite_required,
+        })
     }
 
     fn decode(encoded: &[u8]) -> io::Result<Snapshot> {
