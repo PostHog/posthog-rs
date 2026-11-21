@@ -13,6 +13,10 @@
 //! Dropping the client also shuts it down: it does not wait for delivery, but
 //! waits up to about 1 s to write pending state and captured events to disk.
 //!
+//! [`Client::opt_out`] stops new events and [`Client::opt_in`] resumes them;
+//! the choice is saved with the identity. [`Config::opt_out`] sets the default
+//! when no choice is saved, including after [`Client::reset`].
+//!
 //! [`Config::persistence`] selects where state and events are kept: the OS
 //! local application-data directory by default, a directory you choose, or
 //! memory only. See [`Persistence`].
