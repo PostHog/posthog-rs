@@ -260,9 +260,12 @@ fn reset_in_hook_keeps_outer_snapshot_and_reentrant_identify_cannot_mutate() {
     let (client, events) = observed(conf);
     let client = Arc::new(client);
     *holder.lock().unwrap() = Arc::downgrade(&client);
+    let (output, _guard) = record_logs(tracing::Level::WARN);
     client.identify("A");
     assert!(!probe_identified(&client, &events));
     assert_ne!(client.get_distinct_id(), "A");
+    let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("identify is ignored inside a before_send hook"));
 }
 
 #[test]
