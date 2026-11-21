@@ -50,7 +50,7 @@ impl Worker {
                             let _ = tx.send(());
                         }
                         Control::Flags(slot) => slot.run(&http, &options),
-                        Control::RemoteConfig(task) => task.run(&http, &options, &closed),
+                        Control::RemoteConfig(task) => task.run(&http, &options, &slot),
                         _ => break,
                     }
                 }
@@ -267,5 +267,62 @@ mod tests {
         server.join().unwrap();
         transport.join();
         flags.assert_calls(0);
+    }
+
+    /// Runs a flags task whose completion schedules a newer request and then
+    /// returns a follow-up. Returns the `(first, newer, follow-up)` call counts.
+    fn superseded_follow_up_calls(through_startup_chain: bool) -> (usize, usize, usize) {
+        let server = MockServer::start();
+        let mock = |id: &'static str| {
+            server.mock(|when, then| {
+                when.method(POST)
+                    .json_body_includes(serde_json::json!({"distinct_id": id}).to_string());
+                then.status(200)
+                    .json_body(serde_json::json!({"featureFlags": {}}));
+            })
+        };
+        let (first, newer, follow_up) = (mock("first"), mock("newer"), mock("follow-up"));
+        server.mock(|when, then| {
+            when.path("/array/t/config");
+            then.status(200).json_body(serde_json::json!({}));
+        });
+        let transport = Arc::new(
+            TransportHandle::spawn_stateful(options(server.base_url()), None, 4096).unwrap(),
+        );
+        let enqueuer = transport.clone();
+        let task =
+            flags::Task::with_follow_up(&serde_json::json!({"distinct_id": "first"}), move |_| {
+                assert!(enqueuer.schedule_flags(flags::Task::new(
+                    &serde_json::json!({"distinct_id": "newer"}),
+                    |_| {}
+                )));
+                Some(flags::Task::new(
+                    &serde_json::json!({"distinct_id": "follow-up"}),
+                    |_| {},
+                ))
+            });
+        if through_startup_chain {
+            assert!(transport.schedule_remote_config(remote_config::Task::new(
+                server.url("/array/t/config"),
+                move |_| Some(task)
+            )));
+        } else {
+            assert!(transport.schedule_flags(task));
+        }
+        transport.request_barrier();
+        transport.request_barrier();
+        let calls = (first.calls(), newer.calls(), follow_up.calls());
+        transport.close_blocking();
+        calls
+    }
+
+    #[test]
+    fn slot_drops_a_follow_up_superseded_by_a_newer_request() {
+        assert_eq!(superseded_follow_up_calls(false), (1, 1, 0));
+    }
+
+    #[test]
+    fn startup_chain_drops_a_follow_up_superseded_by_a_newer_request() {
+        assert_eq!(superseded_follow_up_calls(true), (1, 1, 0));
     }
 }

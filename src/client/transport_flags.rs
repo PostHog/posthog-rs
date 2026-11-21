@@ -75,7 +75,7 @@ impl Task {
 
     /// Runs the request and its completion. A request abandoned because
     /// `closed` became true runs neither its completion nor a diagnostic.
-    pub(crate) fn run(
+    fn run(
         self,
         http: &reqwest::blocking::Client,
         options: &ClientOptions,
@@ -170,7 +170,23 @@ impl Slot {
             }
             pending.task.take()
         };
-        let mut next = task;
+        if let Some(task) = task {
+            self.run_chain(task, http, options);
+        }
+    }
+
+    /// Run a task and its follow-ups under this slot's closure and supersede
+    /// rules. The startup remote-config completion uses this for its flags task.
+    pub(crate) fn run_chain(
+        &self,
+        task: Task,
+        http: &reqwest::blocking::Client,
+        options: &ClientOptions,
+    ) {
+        if self.is_closed() {
+            return;
+        }
+        let mut next = Some(task);
         while let Some(task) = next.take() {
             let Some(follow_up) = task.run(http, options, &|| self.is_closed()) else {
                 break;
