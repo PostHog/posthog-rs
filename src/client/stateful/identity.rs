@@ -320,7 +320,9 @@ impl Client {
         }
     }
 
-    /// Start a fresh anonymous identity, preserving the device ID. Emits no event
+    /// Start a fresh anonymous identity, preserving the device ID. Clears the
+    /// identified and person-processing state, and the last screen name, so
+    /// `$screen_name` is no longer added until the next `screen`. Emits no event
     /// and preserves queued events. Setup bootstrap is not reapplied. A hook may reset:
     /// its already-snapshotted outer event retains the old identity.
     pub fn reset(&self) {
