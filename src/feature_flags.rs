@@ -298,6 +298,21 @@ pub struct FeatureFlagFilters {
     /// `false`, which preserves the legacy fall-through behavior.
     #[serde(default)]
     pub early_exit: bool,
+    /// Marks an early-access feature flag. When `true`, the person property
+    /// `$feature_enrollment/<flag key>` decides the flag before its release
+    /// conditions: `true` or `"true"` is enrolled and any other value is opted
+    /// out. Without the property the flag is inconclusive.
+    #[serde(default, deserialize_with = "deserialize_null_as_false")]
+    pub feature_enrollment: bool,
+}
+
+/// Reads a JSON `null` as `false`, so a definition that sends
+/// `"feature_enrollment": null` keeps ordinary targeting.
+fn deserialize_null_as_false<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
 }
 
 /// A single condition group within a feature flag's targeting rules.
@@ -966,6 +981,12 @@ where
         return Ok(FlagValue::Boolean(false));
     }
 
+    // Enrollment is a person property, so it is read from the person
+    // properties on group-aggregated flags too, before any group is resolved.
+    if flag.filters.feature_enrollment {
+        return match_feature_enrollment(flag, person_properties);
+    }
+
     let flag_aggregation = flag.filters.aggregation_group_type_index;
 
     let mut is_inconclusive = false;
@@ -1039,6 +1060,25 @@ where
     }
 
     Ok(FlagValue::Boolean(false))
+}
+
+/// An early-access feature flag returns the person's enrollment at once:
+/// `true` or `"true"` means enrolled, and any other value that was passed,
+/// `null` included, means opted out. Without the enrollment property the flag
+/// can't be resolved locally.
+fn match_feature_enrollment(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    let enrollment_key = format!("$feature_enrollment/{}", flag.key);
+    match person_properties.get(&enrollment_key) {
+        None => Err(InconclusiveMatchError::new(&format!(
+            "Flag has feature enrollment and '{enrollment_key}' was not passed"
+        ))),
+        Some(serde_json::Value::Bool(enrolled)) => Ok(FlagValue::Boolean(*enrolled)),
+        Some(serde_json::Value::String(enrolled)) => Ok(FlagValue::Boolean(enrolled == "true")),
+        Some(_) => Ok(FlagValue::Boolean(false)),
+    }
 }
 
 /// Match a property with additional context for cohorts and flag dependencies.
@@ -1972,6 +2012,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
 
@@ -2142,6 +2183,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
 
@@ -2195,6 +2237,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
 
@@ -2228,6 +2271,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
 
@@ -2527,6 +2571,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
 
@@ -3555,6 +3600,7 @@ mod tests {
                     payloads: HashMap::new(),
                     aggregation_group_type_index: None,
                     early_exit: false,
+                    feature_enrollment: false,
                 },
             },
         );
@@ -3597,6 +3643,7 @@ mod tests {
                     payloads: HashMap::new(),
                     aggregation_group_type_index: None,
                     early_exit: false,
+                    feature_enrollment: false,
                 },
             },
         );
@@ -3655,6 +3702,7 @@ mod tests {
                     payloads: HashMap::new(),
                     aggregation_group_type_index: None,
                     early_exit: false,
+                    feature_enrollment: false,
                 },
             },
         );
@@ -4617,6 +4665,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
         let properties = HashMap::from([("audience".to_string(), json!("matched"))]);
@@ -4687,6 +4736,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: Some(0),
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
         let person_properties = HashMap::from([("plan".to_string(), json!("free"))]);
@@ -4768,6 +4818,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
         let empty_cohorts = HashMap::new();
@@ -4821,6 +4872,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
         let dependent = FeatureFlag {
@@ -4843,6 +4895,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
         let flags = HashMap::from([("prerequisite".to_string(), prerequisite)]);
@@ -4864,6 +4917,174 @@ mod tests {
             match_feature_flag_with_context(&dependent, &HashMap::new(), &ctx).unwrap(),
             FlagValue::Boolean(true)
         );
+    }
+
+    // ==================== Tests for feature enrollment ====================
+
+    // Early-access features: the person's opt-in in `$feature_enrollment/<flag key>`
+    // decides the flag before release conditions (sdk-specs
+    // local-feature-flag-evaluator, local-feature-flag-enrollment.feature).
+
+    const ENROLLMENT_KEY: &str = "$feature_enrollment/beta-feature";
+
+    fn enrollment_flag(rollout: f64) -> FeatureFlag {
+        serde_json::from_value(json!({
+            "key": "beta-feature",
+            "active": true,
+            "filters": {
+                "feature_enrollment": true,
+                "groups": [{"properties": [], "rollout_percentage": rollout}]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn evaluate_enrollment(
+        flag: &FeatureFlag,
+        person_properties: HashMap<String, serde_json::Value>,
+    ) -> Result<FlagValue, InconclusiveMatchError> {
+        match_feature_flag(
+            flag,
+            "user-123",
+            &person_properties,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+    }
+
+    fn enrollment(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        HashMap::from([(ENROLLMENT_KEY.to_string(), value)])
+    }
+
+    #[test]
+    fn feature_enrollment_values_decide_before_release_conditions() {
+        let cases = [
+            (json!(true), 0.0, true),
+            (json!("true"), 0.0, true),
+            (json!(false), 100.0, false),
+            (json!("false"), 100.0, false),
+            (json!(1), 100.0, false),
+            (json!(0), 100.0, false),
+            (json!(null), 100.0, false),
+            (json!("True"), 100.0, false),
+            (json!(""), 100.0, false),
+            (json!([]), 100.0, false),
+            (json!({}), 100.0, false),
+        ];
+        for (value, rollout, expected) in cases {
+            let result = evaluate_enrollment(&enrollment_flag(rollout), enrollment(value.clone()));
+            assert_eq!(
+                result.unwrap(),
+                FlagValue::Boolean(expected),
+                "enrollment {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn feature_enrollment_missing_is_inconclusive() {
+        let result = evaluate_enrollment(&enrollment_flag(100.0), HashMap::new());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn feature_enrollment_keeps_inactive_flag_off() {
+        let mut flag = enrollment_flag(100.0);
+        flag.active = false;
+        assert_eq!(
+            evaluate_enrollment(&flag, enrollment(json!(true))).unwrap(),
+            FlagValue::Boolean(false)
+        );
+        assert_eq!(
+            evaluate_enrollment(&flag, HashMap::new()).unwrap(),
+            FlagValue::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn feature_enrollment_false_or_null_keeps_ordinary_targeting() {
+        for marker in [json!(false), json!(null)] {
+            let flag: FeatureFlag = serde_json::from_value(json!({
+                "key": "beta-feature",
+                "active": true,
+                "filters": {
+                    "feature_enrollment": marker,
+                    "groups": [{"properties": [], "rollout_percentage": 100}]
+                }
+            }))
+            .unwrap();
+            assert!(!flag.filters.feature_enrollment);
+            assert_eq!(
+                evaluate_enrollment(&flag, HashMap::new()).unwrap(),
+                FlagValue::Boolean(true)
+            );
+        }
+    }
+
+    #[test]
+    fn feature_enrollment_skips_release_conditions_it_cannot_evaluate() {
+        // A filter on a missing person property would be inconclusive, but enrollment
+        // decides the flag before release conditions are read.
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "beta-feature",
+            "active": true,
+            "filters": {
+                "feature_enrollment": true,
+                "groups": [{
+                    "properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}],
+                    "rollout_percentage": 100
+                }]
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            evaluate_enrollment(&flag, enrollment(json!(true))).unwrap(),
+            FlagValue::Boolean(true)
+        );
+        assert_eq!(
+            evaluate_enrollment(&flag, enrollment(json!(false))).unwrap(),
+            FlagValue::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn feature_enrollment_on_group_flag_reads_person_properties() {
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "beta-feature",
+            "active": true,
+            "filters": {
+                "feature_enrollment": true,
+                "aggregation_group_type_index": 0,
+                "groups": [{"properties": [], "rollout_percentage": 0}]
+            }
+        }))
+        .unwrap();
+        let group_type_mapping = HashMap::from([("0".to_string(), "company".to_string())]);
+
+        // No group context: the person's enrollment still decides.
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &enrollment(json!(true)),
+            &HashMap::new(),
+            &HashMap::new(),
+            &group_type_mapping,
+        );
+        assert_eq!(result.unwrap(), FlagValue::Boolean(true));
+
+        // Group properties can't turn the person's opt-out into enrollment.
+        let groups = HashMap::from([("company".to_string(), "acme".to_string())]);
+        let group_properties = HashMap::from([("company".to_string(), enrollment(json!(true)))]);
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &enrollment(json!(false)),
+            &groups,
+            &group_properties,
+            &group_type_mapping,
+        );
+        assert_eq!(result.unwrap(), FlagValue::Boolean(false));
     }
 
     // ==================== Tests for early_exit ====================
@@ -4899,6 +5120,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit,
+                feature_enrollment: false,
             },
         }
     }
@@ -5021,6 +5243,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: true,
+                feature_enrollment: false,
             },
         };
 
@@ -5103,6 +5326,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: true,
+                feature_enrollment: false,
             },
         };
 
