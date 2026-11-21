@@ -16,6 +16,8 @@ pub(super) struct FlagLoadState {
     pub(super) revision: u64,
     pub(super) request: u64,
     pub(super) completed: Option<FlagCompletion>,
+    // Changes when flag targeting is set directly, not mirrored from analytics.
+    pub(super) targeting: u64,
     // Reporting context is setup-local, never restored from persisted cache.
     pub(super) bootstrap: Option<Arc<FlagCache>>,
     pub(super) remote_received: bool,

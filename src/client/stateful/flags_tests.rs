@@ -227,7 +227,7 @@ fn public_reload_sends_exact_current_context_while_opted_out() {
 }
 
 #[test]
-fn property_change_in_flight_continues_with_a_follow_up_request() {
+fn property_change_in_flight_installs_the_response_and_follows_up() {
     let server = Server::new(vec![
         (200, json!({"featureFlags":{"obsolete":true}})),
         (200, json!({"featureFlags":{"current":true}})),
@@ -238,10 +238,14 @@ fn property_change_in_flight_continues_with_a_follow_up_request() {
     server.request();
     client.set_person_properties_for_flags(HashMap::from([("plan".into(), json!(2))]), Some(false));
     server.respond();
-    // The response for the old targeting is discarded; the load continues with
-    // a follow-up for the current targeting instead of being lost.
+    // The response for the old targeting is installed, and the load continues
+    // with a follow-up for the current targeting instead of being lost.
     let follow_up = server.request();
     assert_eq!(follow_up["person_properties"]["plan"], json!(2));
+    let first = client.state.as_ref().unwrap().snapshot();
+    let first = first.flags.cache.as_ref().unwrap();
+    assert!(first.flags.contains_key("obsolete"));
+    assert!(first.context.person_properties.is_empty());
     server.respond();
     client.transport.as_ref().unwrap().request_barrier();
     server.finish();
@@ -255,7 +259,31 @@ fn property_change_in_flight_continues_with_a_follow_up_request() {
 }
 
 #[test]
-fn group_targeting_change_in_flight_continues_with_a_follow_up_request() {
+fn analytics_person_properties_in_flight_start_no_follow_up_request() {
+    let server = Server::new(vec![(200, json!({"featureFlags":{"first":true}}))]);
+    let client = Client::init_blocking(config(&server.host));
+    client.reload_feature_flags();
+    server.request();
+    client.set_person_properties(HashMap::from([("plan".into(), json!("pro"))]));
+    server.respond();
+    // The fixture stops listening, so a follow-up could not go unnoticed.
+    server.finish();
+    client.transport.as_ref().unwrap().request_barrier();
+    let state = client.state.as_ref().unwrap().snapshot();
+    // As in posthog-ios and posthog-android, the next load uses the new targeting.
+    assert_eq!(state.flags.person_properties["plan"], json!("pro"));
+    assert!(state
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("first"));
+    assert_eq!(state.flag_load.request, 1);
+}
+
+#[test]
+fn group_targeting_change_in_flight_installs_the_response_and_follows_up() {
     let server = Server::new(vec![
         (200, json!({"featureFlags":{"obsolete":true}})),
         (200, json!({"featureFlags":{"current":true}})),
@@ -270,10 +298,18 @@ fn group_targeting_change_in_flight_continues_with_a_follow_up_request() {
         Some(false),
     );
     server.respond();
-    // The response for the old targeting is discarded; the load continues with
-    // a follow-up for the current targeting instead of being lost.
+    // The response for the old targeting is installed, and the load continues
+    // with a follow-up for the current targeting instead of being lost.
     let follow_up = server.request();
     assert_eq!(follow_up["group_properties"]["company"]["tier"], json!(2));
+    let first = client.state.as_ref().unwrap().snapshot();
+    assert!(first
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("obsolete"));
     server.respond();
     client.transport.as_ref().unwrap().request_barrier();
     server.finish();
@@ -355,7 +391,7 @@ fn identity_and_group_changes_keep_the_cache_until_replaced_and_reject_late_resu
 }
 
 #[test]
-fn concurrent_reloads_keep_only_latest_requested_context_and_active_result_is_obsolete() {
+fn concurrent_reloads_keep_only_latest_requested_context_and_install_the_active_result() {
     let server = Server::new(vec![
         (
             200,
@@ -407,13 +443,19 @@ fn concurrent_reloads_keep_only_latest_requested_context_and_active_result_is_ob
     client.reload_feature_flags();
     server.respond();
     let latest = server.request();
-    // Active response is obsolete even before the pending response completes.
+    // The active response is installed for its own context before the pending
+    // request for the latest context runs.
     let before_release = client.state.as_ref().unwrap().snapshot();
     server.respond();
     client.transport.as_ref().unwrap().request_barrier();
     server.finish();
-    assert!(before_release.flags.cache.is_none());
-    assert!(before_release.flag_load.completed.is_none());
+    let active = before_release.flags.cache.as_ref().unwrap();
+    assert_eq!(active.flags["obsolete"].request_id.as_deref(), Some("old"));
+    assert!(active.context.person_properties.is_empty());
+    assert_eq!(
+        before_release.flag_load.completed.as_ref().unwrap().request,
+        1
+    );
     assert_eq!(latest["person_properties"]["version"], "latest");
     let state = client.state.as_ref().unwrap().snapshot();
     assert_eq!(state.flag_load.request, 102);
@@ -636,7 +678,7 @@ fn flag_load_revision_changes_only_with_effective_context_and_rejected_mutations
 }
 
 #[test]
-fn refresh_sequence_and_reset_revision_each_prevent_obsolete_installation() {
+fn a_queued_refresh_installs_the_active_response_and_reset_discards_it() {
     for reset in [false, true] {
         let server = Server::new(vec![
             (200, json!({"featureFlags":{"old":true}})),
@@ -665,8 +707,17 @@ fn refresh_sequence_and_reset_revision_each_prevent_obsolete_installation() {
         server.respond();
         client.transport.as_ref().unwrap().request_barrier();
         server.finish();
-        assert!(intermediate.flags.cache.is_none());
-        assert!(intermediate.flag_load.completed.is_none());
+        // Reset changes the identity, so its earlier response never installs.
+        // A refresh for the same identity still installs the active response.
+        assert_eq!(
+            intermediate
+                .flags
+                .cache
+                .as_ref()
+                .is_some_and(|cache| cache.flags.contains_key("old")),
+            !reset
+        );
+        assert_eq!(intermediate.flag_load.completed.is_some(), !reset);
         let cache = client
             .state
             .as_ref()
@@ -682,8 +733,11 @@ fn refresh_sequence_and_reset_revision_each_prevent_obsolete_installation() {
 }
 
 #[test]
-fn returning_to_the_original_targeting_does_not_revive_an_obsolete_response() {
-    let server = Server::new(vec![(200, json!({"featureFlags":{"old":true}}))]);
+fn a_targeting_change_reverted_in_flight_installs_the_response() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"old":true}})),
+        (200, json!({"featureFlags":{"new":true}})),
+    ]);
     let client = Client::init_blocking(config(&server.host));
     client.reload_feature_flags();
     server.request();
@@ -694,10 +748,29 @@ fn returning_to_the_original_targeting_does_not_revive_an_obsolete_response() {
     );
     client.reset_person_properties_for_flags(Some(false));
     server.respond();
+    // The revision moved, so a follow-up runs even though the targeting matches again.
+    let follow_up = server.request();
+    assert_eq!(follow_up["person_properties"], json!({}));
+    assert!(writer
+        .snapshot()
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("old"));
+    server.respond();
     client.transport.as_ref().unwrap().request_barrier();
     server.finish();
     assert_eq!(writer.snapshot().flag_load.revision, 2);
-    assert!(writer.snapshot().flags.cache.is_none());
+    assert!(writer
+        .snapshot()
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("new"));
 }
 
 #[test]
@@ -995,4 +1068,96 @@ fn preload_failure_reports_without_disabling_the_ready_client() {
             .error,
         Some(flags::LoadError::Http(503))
     );
+}
+
+#[test]
+fn targeting_change_in_flight_installs_the_completed_response_then_follows_up() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"first":true}})),
+        (200, json!({"featureFlags":{"second":true}})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    {
+        let seen = seen.clone();
+        client.on_feature_flags(move |update| {
+            let mut keys: Vec<_> = update
+                .flags
+                .as_ref()
+                .map(|f| f.keys().cloned().collect())
+                .unwrap_or_default();
+            keys.sort();
+            seen.lock().unwrap().push(keys);
+        });
+    }
+    client.reload_feature_flags();
+    server.request();
+    client
+        .set_person_properties_for_flags(HashMap::from([("level".into(), json!(1))]), Some(false));
+    server.respond();
+    let follow_up = server.request();
+    assert_eq!(follow_up["person_properties"]["level"], json!(1));
+    let first = client.state.as_ref().unwrap().snapshot();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    let after = client.state.as_ref().unwrap().snapshot();
+    assert!(after
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("second"));
+    let first_cache = first
+        .flags
+        .cache
+        .as_ref()
+        .expect("the completed /flags response was discarded");
+    assert!(first_cache.flags.contains_key("first"));
+    // The installed result names the targeting that produced it.
+    assert!(first_cache.flags["first"]
+        .context
+        .person_properties
+        .is_empty());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![vec!["first".to_string()], vec!["second".to_string()]]
+    );
+}
+
+#[test]
+fn reload_in_flight_installs_the_completed_response_before_the_pending_one() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"first":true}})),
+        (200, json!({"featureFlags":{"second":true}})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    client.reload_feature_flags();
+    server.request();
+    client.set_person_properties_for_flags(HashMap::from([("level".into(), json!(1))]), None);
+    server.respond();
+    let pending = server.request();
+    assert_eq!(pending["person_properties"]["level"], json!(1));
+    let first = client.state.as_ref().unwrap().snapshot();
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    assert!(
+        first
+            .flags
+            .cache
+            .as_ref()
+            .is_some_and(|c| c.flags.contains_key("first")),
+        "the completed /flags response was discarded because a reload was queued"
+    );
+    let after = client.state.as_ref().unwrap().snapshot();
+    assert!(after
+        .flags
+        .cache
+        .as_ref()
+        .unwrap()
+        .flags
+        .contains_key("second"));
+    assert_eq!(after.flag_load.request, 2);
 }

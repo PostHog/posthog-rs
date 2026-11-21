@@ -67,8 +67,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("screen: {:?}", client.screen("Example"));
     println!("flush: {:?}", client.flush_blocking());
     if let Ok(key) = std::env::var("POSTHOG_FLAG_KEY") {
-        // Cached read only: None is unavailable, not false. A known value reports
-        // access unless consent disallows it. Shutdown drains that event too.
+        // Cached read only: None is unavailable, not false. Every read reports
+        // access (a missing flag as `flag_missing`) unless consent disallows it
+        // or `send_event(false)` is set. Shutdown drains that event too.
         let result = client.feature_flag(&key).get();
         println!("cached flag {key}: {result:?}");
         println!(
