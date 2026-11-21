@@ -18,7 +18,7 @@ use crate::Event;
 use tracing::{debug, error, warn};
 
 use super::transport::TransportHandle;
-use super::{CRATE_VERSION, SDK_USERAGENT_NAME};
+use super::SdkIdentity;
 use crate::constants::{LIB_PROP, LIB_VERSION_PART_PROPS, LIB_VERSION_PROP};
 use crate::event::names_a_library;
 
@@ -54,33 +54,39 @@ fn apply_runtime_context(event: &mut Event) {
     );
 }
 
-/// The crate version as `[major, minor, patch]`, for the
+/// A version as `[major, minor, patch]`, for the
 /// `$lib_version__major/minor/patch` properties. `None` if it doesn't parse.
-fn lib_version_parts() -> Option<[u64; 3]> {
-    static PARTS: OnceLock<Option<[u64; 3]>> = OnceLock::new();
-    *PARTS.get_or_init(|| {
-        Some([
-            env!("CARGO_PKG_VERSION_MAJOR").parse().ok()?,
-            env!("CARGO_PKG_VERSION_MINOR").parse().ok()?,
-            env!("CARGO_PKG_VERSION_PATCH").parse().ok()?,
-        ])
-    })
+fn lib_version_parts(version: &str) -> Option<[u64; 3]> {
+    let core = version.split(['-', '+']).next()?;
+    let mut parts = core.split('.').map(|part| part.parse().ok());
+    let parsed = [parts.next()??, parts.next()??, parts.next()??];
+    parts.next().is_none().then_some(parsed)
 }
 
-/// Fills `$lib` and `$lib_version` as a pair with the identity the
-/// `posthog-sdk-info` header names, after every other layer and before the
-/// hooks. Only a non-empty string counts as set.
+/// Fills `$lib` and `$lib_version` and their `__major/minor/patch` parts
+/// with the identity the `posthog-sdk-info` header names, after every other
+/// layer and before the hooks. The parts are written whenever the SDK writes
+/// `$lib_version`, and only then, so they always match it.
+fn apply_sdk_identity(event: &mut Event, identity: &SdkIdentity) {
+    if !fill_sdk_identity(event, &identity.name, &identity.version) {
+        return;
+    }
+    if let Some(parts) = lib_version_parts(&identity.version) {
+        for (key, part) in LIB_VERSION_PART_PROPS.iter().zip(parts.iter()) {
+            event.set_prop(*key, (*part).into());
+        }
+    }
+}
+
+/// Fills `$lib` and `$lib_version` as a pair. Only a non-empty string counts
+/// as set.
 ///
 /// - No `$lib`: both get the SDK's values, replacing a lone `$lib_version`.
-/// - `$lib` is `posthog-rs` with no `$lib_version`: the version is filled.
+/// - `$lib` is the SDK's name with no `$lib_version`: the version is filled.
 /// - Any other `$lib`: both are left as they are, so another library's name
-///   never gets this crate's version.
+///   never gets this SDK's version.
 ///
-/// The `__major/minor/patch` parts are written whenever the SDK writes
-/// `$lib_version`, and only then, so they always match it.
-/// Fill `$lib` and `$lib_version` as a pair, so a caller's own `$lib` never
-/// gets this SDK's version: both when `$lib` is unset, only the version when
-/// `$lib` names this SDK without one. Returns whether the version was written.
+/// Returns whether the version was written.
 pub(super) fn fill_sdk_identity(event: &mut Event, name: &str, version: &str) -> bool {
     let properties = event.properties();
     let lib = properties.get(LIB_PROP);
@@ -96,17 +102,6 @@ pub(super) fn fill_sdk_identity(event: &mut Event, name: &str, version: &str) ->
     }
     event.set_prop(LIB_VERSION_PROP, version.into());
     true
-}
-
-fn apply_sdk_identity(event: &mut Event) {
-    if !fill_sdk_identity(event, SDK_USERAGENT_NAME, CRATE_VERSION) {
-        return;
-    }
-    if let Some(parts) = lib_version_parts() {
-        for (key, part) in LIB_VERSION_PART_PROPS.iter().zip(parts.iter()) {
-            event.set_prop(*key, (*part).into());
-        }
-    }
 }
 
 fn flag_event_dedup_cache() -> FlagEventDedupCache {
@@ -177,7 +172,7 @@ pub(super) fn preprocess_capture_event(
     apply_capture_defaults(&mut event, defaults);
     event.merge_groups_into_properties();
     // After every other fill, so the pair rule sees the final `$lib`.
-    apply_sdk_identity(&mut event);
+    apply_sdk_identity(&mut event, &defaults.identity);
     // Trims after every SDK fill and before the hooks, so properties a hook
     // adds to a minimized `$feature_flag_called` event are sent.
     event.apply_minimal_flag_called_allowlist();
@@ -518,10 +513,25 @@ impl EvaluationState {
         &self.options
     }
 
+    #[cfg_attr(not(feature = "async-client"), allow(dead_code))]
     pub(super) fn apply_remote_result(
         &mut self,
         result: Result<DetailedFlagsResponse, Error>,
     ) -> Result<(), Error> {
+        match self.record_remote_result(result) {
+            Some(error) if self.records.is_empty() => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Applies the `/flags` result and returns its error, if any. Unlike
+    /// [`Self::apply_remote_result`], a failure with no local results still
+    /// leaves a usable state, marked with `errors_while_computing`, so its
+    /// `$feature_flag_called` events report the failure.
+    pub(super) fn record_remote_result(
+        &mut self,
+        result: Result<DetailedFlagsResponse, Error>,
+    ) -> Option<Error> {
         match result {
             Ok(response) => {
                 self.request_id = response.request_id;
@@ -536,9 +546,8 @@ impl EvaluationState {
                         remote_record_from_detail(detail, minimal_flag_called_events)
                     });
                 }
-                Ok(())
+                None
             }
-            Err(error) if self.records.is_empty() => Err(error),
             Err(error) => {
                 debug!(
                     error = error.to_string(),
@@ -546,7 +555,7 @@ impl EvaluationState {
                     "/flags fetch failed; returning snapshot from local results only"
                 );
                 self.errors_while_computing = true;
-                Ok(())
+                Some(error)
             }
         }
     }
@@ -666,6 +675,7 @@ mod tests {
         CaptureDefaults {
             disable_geoip,
             is_server,
+            identity: SdkIdentity::DEFAULT,
         }
     }
 
@@ -825,6 +835,19 @@ mod tests {
         assert!(empty
             .apply_remote_result(Err(Error::Connection("remote failed".to_string())))
             .is_err());
+    }
+
+    #[test]
+    fn record_remote_result_keeps_a_usable_state_on_failure() {
+        let mut empty =
+            EvaluationState::new("user-1".to_string(), EvaluateFlagsOptions::default(), None);
+        let error = empty.record_remote_result(Err(Error::Connection("remote failed".to_string())));
+        assert!(matches!(error, Some(Error::Connection(_))));
+        assert!(empty.records.is_empty());
+        assert!(
+            empty.errors_while_computing,
+            "events from this snapshot report the failure"
+        );
     }
 
     fn flag_params(
@@ -987,7 +1010,7 @@ mod tests {
     fn sdk_version_parts_are_the_crate_version_as_numbers() {
         let mut event = Event::new("test", "user-1");
 
-        apply_sdk_identity(&mut event);
+        apply_sdk_identity(&mut event, &SdkIdentity::DEFAULT);
 
         let expected: Vec<serde_json::Value> = [
             env!("CARGO_PKG_VERSION_MAJOR"),
@@ -1004,21 +1027,31 @@ mod tests {
     }
 
     #[test]
+    fn lib_version_parts_parse_semver_cores_only() {
+        assert_eq!(lib_version_parts("1.2.3"), Some([1, 2, 3]));
+        assert_eq!(lib_version_parts("0.1.0-beta.1"), Some([0, 1, 0]));
+        assert_eq!(lib_version_parts("1.2.3+build"), Some([1, 2, 3]));
+        assert_eq!(lib_version_parts("1.2"), None);
+        assert_eq!(lib_version_parts("1.2.3.4"), None);
+        assert_eq!(lib_version_parts("x.y.z"), None);
+    }
+
+    #[test]
     fn sdk_version_parts_replace_the_callers_only_with_the_sdk_version() {
         // The SDK writes `$lib_version`, so its parts replace the caller's.
         let mut filled = Event::new("test", "user-1");
         filled.insert_prop("$lib_version", "9.9.9").unwrap();
         filled.insert_prop("$lib_version__major", 9u64).unwrap();
-        apply_sdk_identity(&mut filled);
+        apply_sdk_identity(&mut filled, &SdkIdentity::DEFAULT);
         let mut sdk = Event::new("test", "user-1");
-        apply_sdk_identity(&mut sdk);
+        apply_sdk_identity(&mut sdk, &SdkIdentity::DEFAULT);
         assert_eq!(version_parts(&filled), version_parts(&sdk));
 
         // The caller named the library, so its parts stay and none are added.
         let mut kept = Event::new("test", "user-1");
         kept.insert_prop("$lib", "custom-lib").unwrap();
         kept.insert_prop("$lib_version__major", 9u64).unwrap();
-        apply_sdk_identity(&mut kept);
+        apply_sdk_identity(&mut kept, &SdkIdentity::DEFAULT);
         assert_eq!(version_parts(&kept), vec![Some(&json!(9)), None, None]);
     }
 

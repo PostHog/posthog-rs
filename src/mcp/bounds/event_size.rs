@@ -3,7 +3,8 @@
 //! properties, largest first. The error message is cut, never dropped, and a
 //! required list, such as a listing's tool names, loses entries from its end
 //! only as a last resort. Each entry's size is measured once and updated as it
-//! shrinks.
+//! shrinks. Filler, such as the host's request context, comes last: it takes
+//! only the room the event's own properties leave.
 
 use std::collections::HashMap;
 
@@ -18,28 +19,14 @@ const SHRINK_CAPS: [usize; 4] = [4_096, 1_024, 256, 64];
 const LAST_RESORT_CAP: usize = 256;
 const BUDGET: usize = MAX_EVENT_BYTES - HOST_PROPERTIES_HEADROOM;
 
-pub(crate) fn fit_event_size(properties: &mut Map<String, Value>, required: &[&str]) {
+pub(crate) fn fit_event_size(
+    properties: &mut Map<String, Value>,
+    required: &[&str],
+    filler: &Map<String, Value>,
+) {
     let mut sized = SizedProperties::measure(properties);
-    if sized.fits() {
-        return;
-    }
-    for key in PAYLOADS {
-        if sized.shrink_or_drop(key) {
-            return;
-        }
-    }
-    for key in sized.optional_keys_largest_first(required) {
-        if sized.shrink_or_drop(&key) {
-            return;
-        }
-    }
-    sized.replace_strings(ERROR_MESSAGE, LAST_RESORT_CAP);
-    for key in required {
-        if sized.fits() {
-            return;
-        }
-        sized.drop_trailing_entries(key);
-    }
+    sized.fit(required);
+    sized.fill(filler);
 }
 
 struct SizedProperties<'a> {
@@ -59,6 +46,41 @@ impl<'a> SizedProperties<'a> {
             properties,
             entry_sizes,
             total,
+        }
+    }
+
+    fn fit(&mut self, required: &[&str]) {
+        if self.fits() {
+            return;
+        }
+        for key in PAYLOADS {
+            if self.shrink_or_drop(key) {
+                return;
+            }
+        }
+        for key in self.optional_keys_largest_first(required) {
+            if self.shrink_or_drop(&key) {
+                return;
+            }
+        }
+        self.replace_strings(ERROR_MESSAGE, LAST_RESORT_CAP);
+        for key in required {
+            if self.fits() {
+                return;
+            }
+            self.drop_trailing_entries(key);
+        }
+    }
+
+    /// Adds the filler's entries the event lacks, in order, while they fit.
+    fn fill(&mut self, filler: &Map<String, Value>) {
+        for (key, value) in filler {
+            let size = entry_size(key, value);
+            if self.properties.contains_key(key) || self.total + size > BUDGET {
+                continue;
+            }
+            self.properties.insert(key.clone(), value.clone());
+            self.update(key, Some(size));
         }
     }
 
@@ -185,7 +207,7 @@ mod tests {
             TOOL_DESCRIPTION: "exports",
             RESPONSE: { "content": [{ "type": "text", "text": huge }] },
         }));
-        fit_event_size(&mut map, &[TOOL_NAME]);
+        fit_event_size(&mut map, &[TOOL_NAME], &Map::new());
         assert!(serialized_size(&map) <= BUDGET);
         assert_eq!(map[TOOL_DESCRIPTION], "exports");
         assert!(map[RESPONSE]["content"][0]["text"].as_str().is_some());
@@ -198,7 +220,7 @@ mod tests {
             ERROR_MESSAGE: "e".repeat(60_000),
             TOOL_DESCRIPTION: "d".repeat(60_000),
         }));
-        fit_event_size(&mut map, &[TOOL_NAME]);
+        fit_event_size(&mut map, &[TOOL_NAME], &Map::new());
         assert!(serialized_size(&map) <= BUDGET);
         assert!(map.contains_key(TOOL_NAME));
         assert!(map.contains_key(ERROR_MESSAGE));
@@ -210,7 +232,7 @@ mod tests {
             .map(|index| Value::from(format!("tool_number_{index:05}")))
             .collect();
         let mut map = properties(json!({ LISTED_TOOL_NAMES: names }));
-        fit_event_size(&mut map, &[LISTED_TOOL_NAMES]);
+        fit_event_size(&mut map, &[LISTED_TOOL_NAMES], &Map::new());
         assert!(serialized_size(&map) <= BUDGET);
         let kept = map[LISTED_TOOL_NAMES].as_array().expect("names");
         assert!(kept.len() > 1_000);

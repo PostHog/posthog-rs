@@ -412,8 +412,9 @@ fn expired_sdk_shutdown_and_immediate_drop_do_not_rejoin_blocked_storage() {
     let dropping = Instant::now();
     drop(client);
     let dropped = dropping.elapsed();
+    // Drop waits for blocked local writes only up to its own budget.
     assert!(
-        dropped < Duration::from_secs(1),
+        dropped < DROP_LOCAL_WRITE_WAIT + Duration::from_millis(500),
         "Drop rejoined unfinished I/O"
     );
     assert!(StorageDirectory::open(&directory.0).is_err());
@@ -519,7 +520,8 @@ fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads()
     release.send(()).unwrap();
     done.recv_timeout(WAIT).unwrap();
     assert!(still_owned);
-    assert!(elapsed < Duration::from_secs(1));
+    // Drop waits for the blocked event write only up to its own budget.
+    assert!(elapsed < DROP_LOCAL_WRITE_WAIT + Duration::from_millis(500));
     drop(StorageDirectory::open(&directory.0).unwrap());
     upload.assert_calls(0);
     assert_eq!(

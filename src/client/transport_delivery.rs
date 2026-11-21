@@ -264,6 +264,13 @@ impl TransportHandle {
         }
     }
 
+    /// Whether the coordinator has finished: admitted events are written to
+    /// disk and storage is released. The executor may still be sending.
+    /// Never waits.
+    pub(crate) fn coordinator_stopped(&self) -> bool {
+        finished(&self.worker)
+    }
+
     /// Whether every delivery thread has finished. Never waits.
     pub(crate) fn all_stopped(&self) -> bool {
         finished(&self.worker)

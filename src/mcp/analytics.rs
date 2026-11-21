@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 
 use super::call::RequestScope;
-use super::capture::{Delivery, EventContext, OutgoingEvent};
+use super::capture::{self, Delivery, EventContext, OutgoingEvent};
 use super::contract::arguments::{CONTEXT_DESCRIPTION, LLM_MODEL_DESCRIPTION};
 use super::identity::Identity;
 use super::options::McpOptions;
@@ -13,8 +13,8 @@ use super::session::{derive_session_id, new_session_id, ResolvedSession};
 use super::tools::catalog::ToolCatalog;
 use super::tools::injection::ArgumentInjection;
 use super::tools::ownership::ArgumentFlags;
-use super::tools::virtual_tools::MISSING_CAPABILITY_TOOL;
-use crate::Client;
+use super::tools::virtual_tools::VirtualTool;
+use crate::{Client, RequestContext};
 
 /// MCP analytics for one server: its options, what it learned about the
 /// server's tools, and the PostHog client its events go through. Clones share
@@ -100,25 +100,33 @@ impl Core {
             Some(handle) => derive_session_id(handle),
             None => session.session_id.unwrap_or_else(new_session_id),
         };
+        let (host_properties, host_options) = host_context(scope);
+        let mut options = self.event_options(scope, request);
+        for (name, value) in host_options {
+            options.entry(name).or_insert(value);
+        }
         EventContext {
             timestamp: scope.timestamp,
             session_id,
             conversation_id,
             identity: self.identify(request),
-            options: self.event_options(scope, request),
+            options,
             client: scope.client_identity(session.token_client.as_ref()),
             server: scope.server.clone(),
-            request_context: scope.request_context(),
+            server_build: self.options.server_build.clone(),
+            host_properties,
         }
     }
 
-    pub(crate) fn missing_capability_tool(&self) -> Option<&str> {
-        let name = self.options.missing_capability_tool.as_deref()?.trim();
-        Some(if name.is_empty() {
-            MISSING_CAPABILITY_TOOL
-        } else {
-            name
-        })
+    /// The name a virtual tool is advertised under, when it is enabled.
+    pub(crate) fn virtual_tool_name(&self, tool: VirtualTool) -> Option<&str> {
+        tool.name(self.options.virtual_tool_name(tool))
+    }
+
+    /// The enabled virtual tool advertised under `name`.
+    pub(crate) fn virtual_tool(&self, name: &str) -> Option<VirtualTool> {
+        IntoIterator::into_iter(VirtualTool::ALL)
+            .find(|tool| self.virtual_tool_name(*tool) == Some(name))
     }
 
     /// Options set on the call win over the callback's, and a `null` sets nothing.
@@ -161,4 +169,17 @@ impl Core {
             }
         }
     }
+}
+
+/// What the host's request context adds to the call's events: its
+/// properties, and its capture options, which the call's own options override.
+/// The context in scope wins, for a manual API call made inside the host's
+/// handler; else the one its HTTP layer attached to the request, since `rmcp`
+/// serves each request on a task of its own.
+fn host_context(scope: &RequestScope<'_>) -> (Map<String, Value>, Map<String, Value>) {
+    let read =
+        |host: &RequestContext| (capture::host_properties(host), capture::host_options(host));
+    RequestContext::with_current(read)
+        .or_else(|| scope.request_context().as_ref().map(read))
+        .unwrap_or_default()
 }
