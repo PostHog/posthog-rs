@@ -331,7 +331,7 @@ fn admitted_passive_helpers_create_and_rotate_without_extending_idle() {
     client.capture("first");
     *clock.0.lock().unwrap() = later(now, IDLE / 2);
     client.group(("company", "a"));
-    assert_eq!(client.session_id(), Some(original));
+    assert_eq!(client.get_session_id(), Some(original));
     *clock.0.lock().unwrap() = later(now, IDLE);
     client.group(("company", "a"));
     let next = client.peek_session_id().unwrap();
@@ -361,7 +361,7 @@ fn wall_time_rotates_at_idle_and_max_age_in_memory_and_persistent_modes() {
                 config.session_persistence = persistence;
                 let mut client = Client::init_blocking(config);
                 client.producer.as_mut().unwrap().session_clock = clock.clone();
-                let original = client.session_id();
+                let original = client.get_session_id();
                 if limit == MAX_AGE {
                     // Keep idle below 30 minutes until the final interval.
                     for minute in 1..(24 * 60) {
@@ -370,7 +370,7 @@ fn wall_time_rotates_at_idle_and_max_age_in_memory_and_persistent_modes() {
                     }
                 }
                 *clock.0.lock().unwrap() = later(now, boundary);
-                assert_eq!(client.session_id() == original, boundary < limit);
+                assert_eq!(client.get_session_id() == original, boundary < limit);
                 let snapshot = client.state.as_ref().unwrap().snapshot();
                 assert_eq!(
                     snapshot.session.is_some(),
@@ -445,7 +445,7 @@ fn dropped_capture_after_idle_previews_without_committing_in_both_modes() {
         });
         let mut client = Client::init_blocking(config);
         client.producer.as_mut().unwrap().session_clock = clock.clone();
-        let original = client.session_id();
+        let original = client.get_session_id();
         *clock.0.lock().unwrap() = later(now, IDLE);
         assert_eq!(
             client.capture("resumed"),
@@ -513,10 +513,56 @@ fn helper_events_from_before_a_reset_do_not_join_the_next_session() {
     let client = Client::init_blocking(config);
     let before_reset = client.state.as_ref().unwrap().snapshot();
     client.reset();
-    let next_session = client.session_id();
+    let next_session = client.get_session_id();
     assert!(next_session.is_some());
     client.capture_snapshot(super::super::Capture::new("old-user"), &before_reset);
     let seen = events.lock().unwrap();
     assert_eq!(seen.len(), 1);
     assert!(!seen[0].properties().contains_key("$session_id"));
+}
+
+#[test]
+fn session_calls_between_prepare_and_commit_keep_the_events_session() {
+    for operation in [
+        || Operation::Maintain,
+        || Operation::Activity,
+        || Operation::Start,
+    ] {
+        let now = time();
+        // First event after idle.
+        let mut sessions = active(now);
+        let resumed = later(now, IDLE);
+        let event = sessions.prepare_admission(resumed);
+        sessions.apply(operation(), resumed, false);
+        sessions.commit_admission(event, resumed, true);
+        assert_eq!(sessions.active_id(resumed), event.id);
+        // First event of the process.
+        let mut sessions = Sessions::default();
+        let event = sessions.prepare_admission(now);
+        sessions.apply(operation(), now, false);
+        sessions.commit_admission(event, now, true);
+        assert_eq!(sessions.active_id(now), event.id);
+    }
+}
+
+#[test]
+fn expired_provisional_session_is_not_adopted() {
+    let now = time();
+    let mut sessions = Sessions::default();
+    let stale = sessions.prepare_admission(now);
+    let resumed = later(now, IDLE);
+    sessions.apply(Operation::Maintain, resumed, false);
+    assert!(sessions.active_id(resumed).is_some());
+    assert_ne!(sessions.active_id(resumed), stale.id);
+}
+
+#[test]
+fn activity_touches_an_adopted_session() {
+    let now = time();
+    let mut sessions = Sessions::default();
+    let event = sessions.prepare_admission(now);
+    let touched = later(now, IDLE / 2);
+    sessions.apply(Operation::Activity, touched, false);
+    assert_eq!(sessions.active_id(touched), event.id);
+    assert_eq!(sessions.live.as_ref().unwrap().activity_ms, touched.wall_ms);
 }
