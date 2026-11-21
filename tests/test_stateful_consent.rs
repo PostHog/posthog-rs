@@ -445,3 +445,21 @@ fn async_initialization_and_drains_resolve_consent_without_an_application_runtim
     let client = Client::init_blocking(directory.config());
     assert!(!client.is_opt_out());
 }
+
+#[test]
+fn screen_while_opted_out_does_not_change_the_screen_name_on_later_events() {
+    let (client, events) = observed(config());
+    accepted(client.screen("Home"));
+    client.opt_out();
+    assert_eq!(client.screen("Private"), CaptureOutcome::OptedOut);
+    client.opt_in();
+    accepted(client.capture("after"));
+    let seen = events.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].event_name(), "after");
+    assert_eq!(
+        seen[1].properties()["$screen_name"],
+        "Home",
+        "a screen() call refused as OptedOut changed the screen name on a later event"
+    );
+}
