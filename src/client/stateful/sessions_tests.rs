@@ -563,3 +563,67 @@ fn activity_touches_an_adopted_session() {
     assert_eq!(sessions.active_id(touched), event.id);
     assert_eq!(sessions.live.as_ref().unwrap().activity_ms, touched.wall_ms);
 }
+
+#[test]
+fn adopting_a_dropped_captures_session_records_the_call_time() {
+    for operation in [|| Operation::Maintain, || Operation::Start] {
+        let now = time();
+        let mut sessions = Sessions::default();
+        let dropped = sessions.prepare_admission(now);
+        let call = later(now, IDLE - Duration::from_secs(60));
+        sessions.apply(operation(), call, false);
+        assert_eq!(sessions.active_id(call), dropped.id);
+        assert_eq!(sessions.live.as_ref().unwrap().activity_ms, call.wall_ms);
+        // The adopted session stays valid for a full idle period from the call.
+        let next = later(call, IDLE / 3);
+        assert_eq!(sessions.active_id(next), dropped.id);
+    }
+}
+
+fn filtering_client(clock: Arc<TestClock>) -> (Client, Arc<Mutex<Vec<crate::Event>>>) {
+    let mut config = super::super::Config::new("phc_test");
+    config.persistence = super::super::Persistence::Memory;
+    config.host = "http://127.0.0.1:1".into();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = events.clone();
+    config.before_send(move |event| {
+        if event.event_name() != "filtered" {
+            seen.lock().unwrap().push(event.clone());
+        }
+        None
+    });
+    let mut client = Client::init_blocking(config);
+    client.producer.as_mut().unwrap().session_clock = clock;
+    (client, events)
+}
+
+#[test]
+fn getter_id_stays_stable_within_idle_after_a_filtered_first_capture() {
+    let now = time();
+    let clock = Arc::new(TestClock(Mutex::new(now)));
+    let (client, _) = filtering_client(clock.clone());
+    assert_eq!(
+        client.capture("filtered"),
+        super::super::CaptureOutcome::Dropped
+    );
+    *clock.0.lock().unwrap() = later(now, Duration::from_secs(25 * 60));
+    let first = client.get_session_id();
+    assert!(first.is_some());
+    *clock.0.lock().unwrap() = later(now, Duration::from_secs(35 * 60));
+    assert_eq!(client.get_session_id(), first);
+}
+
+#[test]
+fn started_session_is_used_by_the_next_capture_after_a_filtered_first_capture() {
+    let now = time();
+    let clock = Arc::new(TestClock(Mutex::new(now)));
+    let (client, events) = filtering_client(clock.clone());
+    client.capture("filtered");
+    *clock.0.lock().unwrap() = later(now, Duration::from_secs(29 * 60));
+    client.start_session();
+    let started = client.peek_session_id().unwrap();
+    *clock.0.lock().unwrap() = later(now, Duration::from_secs(30 * 60));
+    client.capture("kept");
+    let seen = events.lock().unwrap();
+    assert_eq!(seen[0].properties()["$session_id"], started.to_string());
+}
