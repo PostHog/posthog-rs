@@ -484,8 +484,8 @@ const DROP_LOCAL_WRITE_WAIT: Duration = Duration::from_secs(1);
 /// posthog-android: queued events stay on disk for the next start. It waits up
 /// to about 1 s for local writes only: pending client state, which those SDKs
 /// write as soon as it changes, and events already captured, which it writes
-/// to disk before releasing storage. It does not wait for an earlier
-/// shutdown's deadline. An upload already in flight finishes in the
+/// to disk before releasing storage. It ends an earlier shutdown's deadline at
+/// once instead of waiting for it. An upload already in flight finishes in the
 /// background. Call `shutdown_blocking` to also attempt delivery first.
 impl Drop for Client {
     fn drop(&mut self) {
@@ -501,6 +501,14 @@ impl Drop for Client {
             let _ = state.wait_blocking_until(revision, budget);
         }
         self.request_shutdown(Some(Duration::ZERO));
+        // An earlier shutdown may have selected a later deadline. End it now
+        // and wake both workers to read it, so they release storage within
+        // Drop's budget.
+        let now = Instant::now();
+        if self.shutdown.as_ref().unwrap().shorten_to(now) {
+            self.state.as_ref().unwrap().request_close_before(now);
+            self.transport.as_ref().unwrap().request_close_before(now);
+        }
         if !defer {
             let transport = self.transport.as_ref().unwrap();
             let state = self.state.as_ref().unwrap();
