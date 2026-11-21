@@ -52,7 +52,8 @@ pub struct Config {
     /// user with `$identify`, call `identify` after initialization instead.
     pub bootstrap_identified_id: Option<String>,
     /// Default person processing and identity-operation policy. Default: IdentifiedOnly.
-    /// Explicit capture options and hooks retain their normal precedence.
+    /// An event's `process_person_profile` option, then its
+    /// `$process_person_profile` property, take precedence over this mode.
     pub person_profiles: PersonProfiles,
     /// Events that trigger an automatic flush. Default: 20.
     pub flush_at: usize,
