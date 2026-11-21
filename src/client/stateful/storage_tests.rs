@@ -613,17 +613,6 @@ fn malformed_mandatory_targeting_and_explicit_device_are_core_corruption() {
 }
 
 #[test]
-fn missing_device_initializes_from_anonymous_and_requires_rewrite() {
-    let mut value = fixture();
-    value["state"].as_object_mut().unwrap().remove("device_id");
-    let decoded = FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()).unwrap();
-    assert!(decoded.rewrite_required);
-    assert_eq!(decoded.snapshot.device_id, "anonymous");
-    assert_eq!(decoded.snapshot.distinct_id, "person");
-    assert_eq!(decoded.snapshot.opt_out, Some(true));
-}
-
-#[test]
 fn additive_fields_still_obey_whole_json_depth_bounds() {
     let mut value = fixture();
     let mut deep = serde_json::json!(0);

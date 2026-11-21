@@ -10,7 +10,8 @@
 //! return a [`CaptureOutcome`] at once; background workers write to disk and
 //! deliver events in batches. Call [`Client::flush_blocking`] to request
 //! delivery now, and [`Client::shutdown_blocking`] before the app exits.
-//! Dropping the client also shuts it down.
+//! Dropping the client also shuts it down: it does not wait for delivery, but
+//! waits up to about 1 s to write pending state and captured events to disk.
 //!
 //! [`Config::persistence`] selects where state and events are kept: the OS
 //! local application-data directory by default, a directory you choose, or
@@ -144,17 +145,35 @@ impl Snapshot {
         }
     }
 
+    /// Compares only the persisted fields. The exhaustive destructure makes a new
+    /// field fail to compile until it is classified as persisted or not.
     fn same_persisted_state(&self, other: &Self) -> bool {
-        self.anonymous_id == other.anonymous_id
-            && self.device_id == other.device_id
-            && self.distinct_id == other.distinct_id
-            && self.identified == other.identified
-            && self.person_processing == other.person_processing
-            && self.opt_out == other.opt_out
-            && self.registered == other.registered
-            && self.groups == other.groups
-            && self.flags == other.flags
-            && self.session == other.session
+        let Self {
+            device_id,
+            anonymous_id,
+            distinct_id,
+            identified,
+            person_processing,
+            opt_out,
+            registered,
+            groups,
+            flags,
+            flag_load: _,
+            session,
+            sessions: _,
+            generation: _,
+            person_properties: _,
+        } = self;
+        *device_id == other.device_id
+            && *anonymous_id == other.anonymous_id
+            && *distinct_id == other.distinct_id
+            && *identified == other.identified
+            && *person_processing == other.person_processing
+            && *opt_out == other.opt_out
+            && *registered == other.registered
+            && *groups == other.groups
+            && *flags == other.flags
+            && *session == other.session
     }
 
     fn is_valid(&self) -> bool {

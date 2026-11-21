@@ -85,13 +85,20 @@ struct State {
 
 impl State {
     fn observe_close(&mut self, deadline: Instant, now: Instant) {
-        if self.closing.is_none() {
-            self.closing = Some(deadline);
-            Arc::make_mut(&mut Arc::make_mut(&mut self.snapshot).flag_load.reports).clear();
-            if self.mode == Mode::Persistent && self.persisted < self.revision && self.failures == 0
-            {
-                self.due = Some(now);
+        match self.closing {
+            None => {
+                self.closing = Some(deadline);
+                Arc::make_mut(&mut Arc::make_mut(&mut self.snapshot).flag_load.reports).clear();
+                if self.mode == Mode::Persistent
+                    && self.persisted < self.revision
+                    && self.failures == 0
+                {
+                    self.due = Some(now);
+                }
             }
+            // Dropping the client can shorten the selected deadline.
+            Some(closing) if deadline < closing => self.closing = Some(deadline),
+            Some(_) => {}
         }
     }
 
@@ -446,8 +453,7 @@ impl StateWriter {
         self.shared.lock().snapshot.clone()
     }
 
-    /// Domain-internal mutation only; do not call application code in `change`.
-    /// Candidate validation happens before the authoritative state is replaced.
+    /// Test helper over [`Self::mutate`].
     #[cfg(test)]
     pub(super) fn update(&self, change: impl FnOnce(&mut Snapshot)) -> Result<u64, UpdateError> {
         self.mutate(change).map(|(revision, ())| revision)
@@ -460,6 +466,9 @@ impl StateWriter {
         }
     }
 
+    /// Domain-internal mutation only. `change` runs under the state lock, so it
+    /// must not run hooks, tracing subscribers, application code or other client
+    /// calls. Candidate validation happens before the authoritative state is replaced.
     pub(super) fn mutate<T>(
         &self,
         change: impl FnOnce(&mut Snapshot) -> T,
