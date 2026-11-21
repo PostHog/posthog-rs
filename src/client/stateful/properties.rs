@@ -88,7 +88,14 @@ impl Client {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return;
         }
-        let _ = self.state.as_ref().unwrap().mutate(change);
+        // Only `register` can make the state invalid, through a value nested too deep.
+        if let Err(super::writer::UpdateError::Invalid) =
+            self.state.as_ref().unwrap().mutate(change)
+        {
+            tracing::warn!(
+                "posthog-rs: register update nested more than 100 levels deep was ignored"
+            );
+        }
     }
 
     fn capture_group(&self, group: impl Into<Group>, remember: bool) {

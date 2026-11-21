@@ -17,6 +17,11 @@
 //! the choice is saved with the identity. [`Config::opt_out`] sets the default
 //! when no choice is saved, including after [`Client::reset`].
 //!
+//! [`Client::register`] adds properties to every later event, and
+//! [`Client::group`] adds a group to every later event's `$groups` and turns on
+//! person processing. Both are saved with the identity; [`Client::reset`]
+//! clears them.
+//!
 //! [`Config::persistence`] selects where state and events are kept: the OS
 //! local application-data directory by default, a directory you choose, or
 //! memory only. See [`Persistence`].
@@ -81,10 +86,12 @@ struct Snapshot {
     // or unreadable value is None, so it never discards the identity.
     #[serde(default, deserialize_with = "lenient_bool")]
     opt_out: Option<bool>,
-    // Records written before registered properties and groups lack them.
-    #[serde(default)]
+    // Records written before registered properties and groups lack them. A
+    // value this build can't read or accept restores empty, so, like
+    // `opt_out`, it never discards the identity.
+    #[serde(default, deserialize_with = "lenient_registered")]
     registered: HashMap<String, Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_groups")]
     groups: HashMap<String, String>,
     // Records written before sessions lack this field and restore without one.
     #[serde(default)]
@@ -103,6 +110,38 @@ fn lenient_bool<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<bool>, D::Error> {
     Ok(serde_json::Value::deserialize(deserializer)?.as_bool())
+}
+
+/// Saved registered properties, or none when they can't be read or are too deep.
+fn lenient_registered<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, Value>, D::Error> {
+    let registered: HashMap<String, Value> =
+        serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default();
+    Ok(if within_depth(registered.values()) {
+        registered
+    } else {
+        HashMap::new()
+    })
+}
+
+/// Saved groups, or none when they can't be read or hold a blank type or key.
+fn lenient_groups<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, String>, D::Error> {
+    let groups: HashMap<String, String> =
+        serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default();
+    Ok(if valid_groups(&groups) {
+        groups
+    } else {
+        HashMap::new()
+    })
+}
+
+fn valid_groups(groups: &HashMap<String, String>) -> bool {
+    groups
+        .iter()
+        .all(|(kind, key)| !kind.trim().is_empty() && !key.trim().is_empty())
 }
 
 impl Snapshot {
@@ -169,9 +208,6 @@ impl Snapshot {
             && !self.device_id.trim().is_empty()
             && !self.anonymous_id.trim().is_empty()
             && !self.distinct_id.trim().is_empty()
-            && self
-                .groups
-                .iter()
-                .all(|(kind, key)| !kind.trim().is_empty() && !key.trim().is_empty())
+            && valid_groups(&self.groups)
     }
 }

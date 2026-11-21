@@ -61,6 +61,30 @@ impl Directory {
     fn state(&self) -> Value {
         serde_json::from_slice(&std::fs::read(self.state_path()).unwrap()).unwrap()
     }
+    /// Saves an identified user, opted out if asked, then replaces one saved state field.
+    fn saved_user(&self, opted_out: bool, field: &str, value: Value) {
+        let client = Client::init_blocking(self.config());
+        client.identify("stored-user");
+        if opted_out {
+            client.opt_out();
+        }
+        assert_eq!(
+            client.shutdown_blocking(None).state,
+            PersistenceOutcome::Persisted
+        );
+        drop(client);
+        let mut state = self.state();
+        state["state"][field] = value;
+        std::fs::write(self.state_path(), serde_json::to_vec(&state).unwrap()).unwrap();
+    }
+    /// The distinct ID restored after `field` is replaced with `value`.
+    fn restored_id(&self, field: &str, value: Value) -> String {
+        self.saved_user(false, field, value);
+        let client = Client::init_blocking(self.config());
+        let id = client.get_distinct_id();
+        client.shutdown_blocking(None);
+        id
+    }
 }
 impl Drop for Directory {
     fn drop(&mut self) {
@@ -338,7 +362,7 @@ fn restart_restores_owned_context_and_removals() {
 
 #[test]
 fn invalid_current_records_use_configured_fallback_and_allow_replacement() {
-    for invalid in [json!(null), json!({"company":1}), json!({" ":"key"})] {
+    for invalid in [json!(null), json!(1), json!(" ")] {
         let directory = Directory::new();
         let client = Client::init_blocking(directory.config());
         client.identify("stored-user");
@@ -350,7 +374,7 @@ fn invalid_current_records_use_configured_fallback_and_allow_replacement() {
         );
         drop(client);
         let mut state = directory.state();
-        state["state"]["groups"] = invalid;
+        state["state"]["distinct_id"] = invalid;
         std::fs::write(directory.state_path(), serde_json::to_vec(&state).unwrap()).unwrap();
         let mut conf = directory.config();
         conf.bootstrap_anonymous_id = Some("fallback-id".into());
@@ -397,6 +421,114 @@ fn invalid_current_records_use_configured_fallback_and_allow_replacement() {
             PersistenceOutcome::Persisted
         );
     }
+}
+
+fn nested(depth: usize) -> Value {
+    let mut value = json!(1);
+    for _ in 0..depth {
+        value = Value::Array(vec![value]);
+    }
+    value
+}
+
+#[test]
+fn numeric_saved_group_key_keeps_identity() {
+    let directory = Directory::new();
+    assert_eq!(
+        directory.restored_id("groups", json!({"company": 42})),
+        "stored-user"
+    );
+}
+
+#[test]
+fn null_saved_groups_keep_identity() {
+    let directory = Directory::new();
+    assert_eq!(directory.restored_id("groups", Value::Null), "stored-user");
+}
+
+#[test]
+fn blank_saved_group_type_keeps_identity() {
+    let directory = Directory::new();
+    assert_eq!(
+        directory.restored_id("groups", json!({" ": "key"})),
+        "stored-user"
+    );
+}
+
+#[test]
+fn null_saved_registered_properties_keep_identity() {
+    let directory = Directory::new();
+    assert_eq!(
+        directory.restored_id("registered", Value::Null),
+        "stored-user"
+    );
+}
+
+#[test]
+fn too_deep_saved_registered_property_keeps_identity() {
+    let directory = Directory::new();
+    assert_eq!(
+        directory.restored_id("registered", json!({"nested": nested(101)})),
+        "stored-user"
+    );
+}
+
+#[test]
+fn unreadable_saved_groups_keep_saved_opt_out() {
+    // The configured default is opted in; the saved choice is opted out.
+    let directory = Directory::new();
+    directory.saved_user(true, "groups", json!({"company": 42}));
+    let client = Client::init_blocking(directory.config());
+    assert_eq!(client.capture("after restart"), CaptureOutcome::OptedOut);
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn rejected_registration_is_logged_without_values() {
+    let (client, _) = observed(config());
+    let (output, _guard) = record_logs(tracing::Level::WARN);
+    client.register(HashMap::from([
+        ("plan".into(), json!("private-plan")),
+        ("nested".into(), nested(101)),
+    ]));
+    let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("register update nested more than 100 levels deep was ignored"));
+    assert!(!logs.contains("private"));
+}
+
+#[derive(Clone)]
+struct Recorder(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for Recorder {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Keeps a second dispatch alive for the whole test process. With a single
+/// dispatch, tracing-core registers a new callsite against the registering
+/// thread's default, so a thread without a recorder could hide a log line from
+/// a thread that has one.
+fn keep_callsites_shared() {
+    static REGISTRATION: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    REGISTRATION.get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
+}
+
+/// Records this thread's log output at `level` and above while the guard lives.
+fn record_logs(level: tracing::Level) -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+    keep_callsites_shared();
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let sink = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(level)
+        .with_writer(move || Recorder(sink.clone()))
+        .finish();
+    (output, tracing::subscriber::set_default(subscriber))
 }
 
 #[test]

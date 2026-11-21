@@ -467,7 +467,7 @@ fn a_registered_process_person_profile_never_reaches_identity_events() {
         .prepare(Capture::new("ordinary"), &state, now(), None)
         .unwrap();
     assert_eq!(ordinary.options["process_person_profile"], false);
-    for name in super::IDENTITY_EVENTS {
+    for name in crate::event::IDENTIFY_STYLE_EVENTS {
         let wire = producer
             .prepare(Capture::new(name), &state, now(), None)
             .unwrap();
