@@ -1651,11 +1651,27 @@ fn match_property(
     match_property_with_version(property, properties, 1)
 }
 
+/// Filter types matched against the person or group properties the caller
+/// passes. Cohort and flag filters have their own matching. Any other type, such
+/// as `person_metadata` (a value `/flags` reads from the persons table, not from
+/// person properties), can't be evaluated locally: matching it against a caller
+/// property with the same key could disagree with `/flags`.
+fn check_property_filter_type(property: &Property) -> Result<(), InconclusiveMatchError> {
+    match property.property_type.as_deref() {
+        None | Some("") | Some("person") | Some("group") => Ok(()),
+        Some(other) => Err(InconclusiveMatchError::new(&format!(
+            "Can't evaluate a '{other}' filter on '{}' locally",
+            property.key
+        ))),
+    }
+}
+
 fn match_property_with_version(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
     property_matching_version: i64,
 ) -> Result<bool, InconclusiveMatchError> {
+    check_property_filter_type(property)?;
     let value = match properties.get(&property.key) {
         Some(v) => v,
         None => {
@@ -2892,6 +2908,86 @@ mod tests {
 
         properties.insert("event_time".to_string(), json!("2024-06-15T12:00:00Z"));
         assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    // ==================== Tests for person_metadata filters ====================
+
+    // A cohort can filter on Person metadata > First seen (type "person_metadata",
+    // key "created_at"). /flags reads that value from the persons table and
+    // ignores a created_at person property, so local evaluation must not match it
+    // against one. See https://github.com/PostHog/posthog/issues/137503.
+
+    fn first_seen_filter(property_type: &str) -> Property {
+        Property {
+            key: "created_at".to_string(),
+            value: json!("2025-01-01"),
+            operator: "is_date_after".to_string(),
+            property_type: Some(property_type.to_string()),
+        }
+    }
+
+    fn created_in_2026() -> HashMap<String, serde_json::Value> {
+        HashMap::from([("created_at".to_string(), json!("2026-06-01"))])
+    }
+
+    #[test]
+    fn person_metadata_filter_is_inconclusive() {
+        assert!(match_property(&first_seen_filter("person_metadata"), &created_in_2026()).is_err());
+    }
+
+    #[test]
+    fn person_filter_on_created_at_still_matches() {
+        assert!(match_property(&first_seen_filter("person"), &created_in_2026()).unwrap());
+    }
+
+    #[test]
+    fn person_metadata_filter_in_a_cohort_is_inconclusive() {
+        let cohorts = HashMap::from([(
+            "7".to_string(),
+            CohortDefinition::new("7".to_string(), vec![first_seen_filter("person_metadata")]),
+        )]);
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &cohorts,
+            flags: &HashMap::new(),
+            distinct_id: "user-123",
+            groups: &HashMap::new(),
+            group_properties: &HashMap::new(),
+            group_type_mapping: &HashMap::new(),
+        };
+        let in_cohort = Property {
+            key: "id".to_string(),
+            value: json!(7),
+            operator: "in".to_string(),
+            property_type: Some("cohort".to_string()),
+        };
+
+        assert!(match_property_with_context(&in_cohort, &created_in_2026(), &ctx).is_err());
+    }
+
+    #[test]
+    fn person_metadata_filter_makes_the_flag_inconclusive() {
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "first-seen-flag",
+            "active": true,
+            "filters": {
+                "groups": [{
+                    "properties": [{"key": "created_at", "type": "person_metadata", "operator": "is_date_after", "value": "2025-01-01"}],
+                    "rollout_percentage": 100
+                }]
+            }
+        }))
+        .unwrap();
+
+        let result = match_feature_flag(
+            &flag,
+            "user-123",
+            &created_in_2026(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(result.is_err());
     }
 
     // ==================== Tests for cohort membership ====================
