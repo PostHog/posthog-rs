@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::Duration;
 
@@ -61,7 +61,8 @@ fn reload(
             .json_body(json!({
                 "api_key":"phc_test", "distinct_id":id,
                 "$anon_distinct_id":"device", "$device_id":"device", "geoip_disable":false,
-                "person_properties":person, "groups":groups, "group_properties":group_properties
+                "person_properties":person, "groups":groups, "group_properties":group_properties,
+                "evaluation_runtime":"client"
             }));
         then.status(200).json_body(json!({"featureFlags": {}}));
     });
@@ -84,7 +85,8 @@ fn reset_flags_use_stable_device_and_rotated_anonymous_identity() {
             .json_body(json!({
                 "api_key":"phc_test", "distinct_id":anonymous,
                 "$anon_distinct_id":anonymous, "$device_id":"device", "geoip_disable":false,
-                "person_properties":{}, "groups":{}, "group_properties":{}
+                "person_properties":{}, "groups":{}, "group_properties":{},
+                "evaluation_runtime":"client"
             }));
         then.status(200).json_body(json!({"featureFlags": {}}));
     });
@@ -477,4 +479,110 @@ fn asynchronous_initialization_exposes_the_same_synchronous_targeting_api() {
         },
     );
     futures::executor::block_on(client.shutdown(None));
+}
+
+// Without a declared runtime the backend classifies the `posthog-rs` user agent
+// as a server SDK and hides client-only flags.
+#[test]
+fn flags_request_declares_the_client_evaluation_runtime() {
+    let server = MockServer::start();
+    let declared = server.mock(|when, then| {
+        when.method(POST)
+            .path("/flags/")
+            .json_body_includes(r#"{"evaluation_runtime":"client"}"#);
+        then.status(200)
+            .json_body(json!({"flags": {"beta": {"key": "beta", "enabled": true}}}));
+    });
+    let client = Client::init_blocking(config(&server));
+    complete(&client, || client.reload_feature_flags());
+    let calls = declared.calls();
+    client.shutdown_blocking(None);
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn flags_request_uses_the_configured_request_timeout() {
+    let server = MockServer::start();
+    let _flags = server.mock(|when, then| {
+        when.path("/flags/");
+        then.status(200)
+            .delay(Duration::from_millis(4500))
+            .json_body(json!({"flags": {"late": {"key": "late", "enabled": true}}}));
+    });
+    let mut settings = config(&server);
+    settings.request_timeout = Duration::from_secs(10);
+    let client = Client::init_blocking(settings);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let subscription = client.on_feature_flags(move |update| {
+        let _ = tx.send(update.error);
+    });
+    client.reload_feature_flags();
+    let error = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("flags completion");
+    subscription.unsubscribe();
+    client.shutdown_blocking(None);
+    assert_eq!(
+        error, None,
+        "a 4.5 s response failed within a 10 s request_timeout"
+    );
+}
+
+fn nested(levels: usize) -> Value {
+    let mut value = json!(1);
+    for _ in 0..levels {
+        value = json!({ "a": value });
+    }
+    value
+}
+
+// Only the local flag-targeting copy has a depth limit. A value nested too
+// deep for it is left out there; identity, membership and events go ahead.
+#[test]
+fn too_deep_analytics_properties_are_left_out_of_flag_targeting_only() {
+    let server = MockServer::start();
+    let _events = server.mock(|when, then| {
+        when.path("/i/v1/analytics/events");
+        then.status(200).json_body(json!({}));
+    });
+    let mut conf = config(&server);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = events.clone();
+    conf.before_send(move |event| {
+        seen.lock().unwrap().push(event.event_name().to_string());
+        Some(event)
+    });
+    let client = Client::init_blocking(conf);
+    let mut identify = Identify::new("user-1");
+    identify.set = properties(json!({"plan": "pro", "deep": nested(120)}));
+    identify.set_once = properties(json!({"deep_once": nested(120)}));
+    reload(
+        &server,
+        &client,
+        "user-1",
+        json!({"plan": "pro"}),
+        json!({}),
+        json!({}),
+        || client.identify(identify),
+    );
+    assert_eq!(client.get_distinct_id(), "user-1");
+    client.set_person_properties(PersonProperties::from(properties(
+        json!({"deep": nested(120)}),
+    )));
+    let mut group = Group::new("company", "acme");
+    group.properties = properties(json!({"tier": 1, "deep": nested(120)}));
+    reload(
+        &server,
+        &client,
+        "user-1",
+        json!({"plan": "pro"}),
+        json!({"company": "acme"}),
+        json!({"company": {"tier": 1}}),
+        || client.group(group),
+    );
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["$identify", "$set", "$groupidentify"]
+    );
+    client.shutdown_blocking(None);
 }

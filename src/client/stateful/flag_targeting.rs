@@ -8,18 +8,37 @@ use serde_json::Value;
 use super::flag_state::FlagState;
 use super::Client;
 
+/// Only the local targeting copy limits depth, so a value nested too deep for it
+/// is left out there while the analytics call that carried it goes ahead.
+fn targetable(properties: &HashMap<String, Value>) -> impl Iterator<Item = (&String, &Value)> {
+    properties
+        .iter()
+        .filter(|(_, value)| super::within_depth(std::iter::once(*value)))
+}
+
 impl FlagState {
     pub(super) fn mirror_person(
         &mut self,
         set: &HashMap<String, Value>,
         set_once: &HashMap<String, Value>,
     ) {
-        for (key, value) in set_once {
+        for (key, value) in targetable(set_once) {
             self.person_properties
                 .entry(key.clone())
                 .or_insert_with(|| value.clone());
         }
-        self.person_properties.extend(set.clone());
+        self.person_properties
+            .extend(targetable(set).map(|(key, value)| (key.clone(), value.clone())));
+    }
+
+    pub(super) fn mirror_group(&mut self, group_type: &str, properties: &HashMap<String, Value>) {
+        let mut targetable = targetable(properties).peekable();
+        if targetable.peek().is_some() {
+            self.group_properties
+                .entry(group_type.to_owned())
+                .or_default()
+                .extend(targetable.map(|(key, value)| (key.clone(), value.clone())));
+        }
     }
 }
 

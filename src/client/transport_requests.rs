@@ -81,14 +81,6 @@ impl Worker {
         let _ = self.tx.send(Control::Shutdown(Completion::Blocking(tx)));
     }
 
-    pub(super) fn is_stopped(&self) -> bool {
-        self.worker
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map_or(true, JoinHandle::is_finished)
-    }
-
     pub(super) fn join(&self) {
         if !self.on_worker_thread() {
             let worker = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take();

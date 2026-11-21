@@ -48,6 +48,9 @@ impl Request {
             "person_properties": self.context.person_properties,
             "group_properties": self.context.group_properties,
             "geoip_disable": self.context.disable_geoip,
+            // The backend would otherwise classify the `posthog-rs` user agent
+            // as a server SDK and serve server-only flags, not client-only ones.
+            "evaluation_runtime": "client",
         })
     }
 }
@@ -140,7 +143,6 @@ fn install(
                 state.flags.cache = Some(Arc::new(FlagCache::updated(
                     state.flags.cache.as_deref(),
                     request.context.clone(),
-                    request.revision,
                     loaded,
                 )));
             }

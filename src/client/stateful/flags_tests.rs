@@ -161,7 +161,6 @@ fn seed(client: &Client) {
             state.flags.cache = Some(Arc::new(FlagCache::updated(
                 None,
                 Arc::new(FlagContext::current(state, false)),
-                state.flag_load.revision,
                 loaded(
                     HashMap::from([("old".into(), record(Some(json!("old-payload"))))]),
                     false,
@@ -216,7 +215,8 @@ fn public_reload_sends_exact_current_context_while_opted_out() {
     assert_eq!(
         request,
         json!({"api_key":"phc_test","distinct_id":"person","$anon_distinct_id":device,"$device_id":device,
-        "groups":{"company":"acme"},"person_properties":{"plan":"pro"},"group_properties":{"company":{"tier":2}},"geoip_disable":true})
+        "groups":{"company":"acme"},"person_properties":{"plan":"pro"},"group_properties":{"company":{"tier":2}},"geoip_disable":true,
+        "evaluation_runtime":"client"})
     );
     let state = client.state.as_ref().unwrap().snapshot();
     let cache = state.flags.cache.as_ref().unwrap();
@@ -481,7 +481,6 @@ fn partial_merge_preserves_record_provenance_through_a_restart() {
     assert_eq!(cache.flags["b"].evaluated_at, Some(20));
     assert!(cache.flags["b"].partial);
     assert_eq!(cache.flags["b"].context.person_properties["plan"], "pro");
-    assert_eq!(cache.flags["b"].revision, 1);
     // A restart restores every cached record, as the other SDKs do.
     let restored: Snapshot =
         serde_json::from_slice(&serde_json::to_vec(second.as_ref()).unwrap()).unwrap();
@@ -574,7 +573,7 @@ fn close_from_capture_hook_rejects_active_flag_completion() {
 }
 
 #[test]
-fn evaluation_revision_changes_only_with_effective_context_and_rejected_mutations_are_atomic() {
+fn flag_load_revision_changes_only_with_effective_context_and_rejected_mutations_are_atomic() {
     let client = Client::init_blocking(config("http://127.0.0.1:1"));
     client.flush_blocking();
     seed(&client);
@@ -785,15 +784,11 @@ fn fitting_partial_replacements_are_admitted_in_either_hash_iteration_order() {
             (grow.clone(), record(Some(json!("x".repeat(400 * 1024))))),
             (shrink.clone(), record(Some(json!("x".repeat(1400 * 1024))))),
         ]);
-        let previous = FlagCache::updated(None, context.clone(), 0, loaded(old, false));
+        let previous = FlagCache::updated(None, context.clone(), loaded(old, false));
         replacements.get_mut(grow).unwrap().payload = Some(json!("x".repeat(800 * 1024)));
         replacements.get_mut(shrink).unwrap().payload = Some(json!(""));
-        let updated = FlagCache::updated(
-            Some(&previous),
-            context.clone(),
-            1,
-            loaded(replacements, true),
-        );
+        let updated =
+            FlagCache::updated(Some(&previous), context.clone(), loaded(replacements, true));
         assert_eq!(updated.flags.len(), 2);
         assert_eq!(
             updated.flags[grow]
@@ -879,7 +874,8 @@ fn preload_readiness(asynchronous: bool) {
         request,
         json!({"api_key":"phc_test", "distinct_id":"device",
         "$anon_distinct_id":"device", "$device_id":"device", "geoip_disable":false,
-        "person_properties":{}, "group_properties":{}, "groups":{}})
+        "person_properties":{}, "group_properties":{}, "groups":{},
+        "evaluation_runtime":"client"})
     );
     let snapshot = client.state.as_ref().unwrap().snapshot();
     assert_eq!(snapshot.flag_load.request, 1);

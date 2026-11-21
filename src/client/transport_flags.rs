@@ -73,9 +73,16 @@ impl Task {
         }
     }
 
-    fn run(self, http: &reqwest::blocking::Client, options: &ClientOptions) -> Option<Task> {
+    /// Runs the request and its completion. A request abandoned because
+    /// `closed` became true runs neither its completion nor a diagnostic.
+    fn run(
+        self,
+        http: &reqwest::blocking::Client,
+        options: &ClientOptions,
+        closed: &dyn Fn() -> bool,
+    ) -> Option<Task> {
         let endpoint = options.endpoints().build_url(Endpoint::Flags);
-        let result = fetch(http, options, &endpoint, &self.body);
+        let result = fetch(http, options, &endpoint, &self.body, closed)?;
         let failure = match &result {
             Err(error) => Some(*error),
             Ok(loaded) if loaded.invalid_payloads => Some(LoadError::InvalidResponse),
@@ -141,6 +148,10 @@ impl Slot {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).closed = true;
     }
 
+    fn is_closed(&self) -> bool {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).closed
+    }
+
     pub(super) fn discard(&self) {
         let discarded = {
             let mut pending = self.0.lock().unwrap_or_else(|p| p.into_inner());
@@ -161,7 +172,7 @@ impl Slot {
         };
         let mut next = task;
         while let Some(task) = next.take() {
-            let Some(follow_up) = task.run(http, options) else {
+            let Some(follow_up) = task.run(http, options, &|| self.is_closed()) else {
                 break;
             };
             // A newer request already waiting supersedes the follow-up. Decide
@@ -196,12 +207,24 @@ pub(crate) fn report(options: &ClientOptions, endpoint: &str, id: Option<&str>, 
     }
 }
 
+/// Wait out a retry backoff. Returns false, without sending the retry, once
+/// shutdown has started: shutdown discards the result, so it is abandoned.
+fn backoff(delay: Duration, closed: &dyn Fn() -> bool) -> bool {
+    if closed() {
+        return false;
+    }
+    std::thread::sleep(delay);
+    !closed()
+}
+
+/// The load result, or None when shutdown abandoned the request before a retry.
 fn fetch(
     http: &reqwest::blocking::Client,
     options: &ClientOptions,
     endpoint: &str,
     body: &[u8],
-) -> Result<LoadedFlags, LoadError> {
+    closed: &dyn Fn() -> bool,
+) -> Option<Result<LoadedFlags, LoadError>> {
     let mut attempt = 1;
     loop {
         let request = http
@@ -221,20 +244,22 @@ fn fetch(
                 match retry::feature_flags_after_response(options, attempt, status) {
                     FeatureFlagsResponseStep::Backoff(delay) => {
                         drop(response);
-                        std::thread::sleep(delay);
+                        if !backoff(delay, closed) {
+                            return None;
+                        }
                         attempt += 1;
                         continue;
                     }
                     FeatureFlagsResponseStep::Done => {}
                 }
                 if status != 200 {
-                    return Err(LoadError::Http(status));
+                    return Some(Err(LoadError::Http(status)));
                 }
                 let mut bytes = Vec::new();
-                response
-                    .read_to_end(&mut bytes)
-                    .map_err(|_| LoadError::Network)?;
-                return decode(&bytes);
+                if response.read_to_end(&mut bytes).is_err() {
+                    return Some(Err(LoadError::Network));
+                }
+                return Some(decode(&bytes));
             }
             Err(error) => match retry::feature_flags_after_transport_error(
                 options,
@@ -243,10 +268,12 @@ fn fetch(
                 "Feature flags request failed".into(),
             ) {
                 FeatureFlagsTransportStep::Backoff(delay) => {
-                    std::thread::sleep(delay);
+                    if !backoff(delay, closed) {
+                        return None;
+                    }
                     attempt += 1;
                 }
-                FeatureFlagsTransportStep::Fail(_) => return Err(LoadError::Network),
+                FeatureFlagsTransportStep::Fail(_) => return Some(Err(LoadError::Network)),
             },
         }
     }

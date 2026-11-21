@@ -103,8 +103,9 @@ struct Snapshot {
     registered: HashMap<String, Value>,
     #[serde(default, deserialize_with = "lenient_groups")]
     groups: HashMap<String, String>,
-    // Records written before feature flags restore with an empty cache.
-    #[serde(default)]
+    // Records written before feature flags, or flags this build can't read,
+    // restore without targeting or a cache.
+    #[serde(default, deserialize_with = "flag_state::lenient_flags")]
     flags: flag_state::FlagState,
     #[serde(skip)]
     flag_load: flag_state::FlagLoadState,

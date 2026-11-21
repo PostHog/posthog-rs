@@ -346,8 +346,8 @@ impl FileStateStore {
     }
 }
 
-/// Recovery applies only to present optional values; missing required fields and
-/// invalid mandatory targeting still reject the core snapshot.
+/// Recovery applies only to present optional values; missing or invalid
+/// identity fields still reject the core snapshot.
 /// Replace an optional field that doesn't decode or isn't valid with `null`.
 /// Returns whether it was replaced.
 fn normalize_optional<T: serde::de::DeserializeOwned>(

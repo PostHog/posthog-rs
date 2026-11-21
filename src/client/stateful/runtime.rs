@@ -432,8 +432,12 @@ impl Client {
         self.on_worker_thread() || self.in_capture() || self.in_flag_callback()
     }
 
+    /// Event delivery and the state writer have stopped. Shutdown does not wait
+    /// for the flag request worker: it discards a flags result, so an in-flight
+    /// request is abandoned, as `Drop`, posthog-ios and posthog-android do.
     fn workers_stopped(&self) -> bool {
-        self.transport.as_ref().unwrap().all_stopped() && self.state.as_ref().unwrap().is_stopped()
+        self.transport.as_ref().unwrap().delivery_stopped()
+            && self.state.as_ref().unwrap().is_stopped()
     }
 
     /// Report a shutdown once its wait ends, completing it if every worker stopped.
@@ -474,6 +478,8 @@ impl Client {
     /// `None` uses Config::shutdown_timeout; `Some` overrides it (at most one day).
     /// Repeated calls share that deadline. Already-started work owns its resources
     /// through completion; return does not promise every event reached disk.
+    /// An in-flight feature flags request is not awaited or retried; its result
+    /// is discarded.
     /// Application callback-capture destructors may run synchronously and block
     /// outside the SDK-controlled waiting bound. Worker callbacks and synchronous
     /// capture hooks request closure but return Deferred instead of waiting.

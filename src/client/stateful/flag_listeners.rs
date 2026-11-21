@@ -55,17 +55,16 @@ impl FeatureFlagsUpdate {
 
 pub(super) type FlagsHook = Arc<dyn Fn(&FeatureFlagsUpdate) + Send + Sync + 'static>;
 
-// Queuing a refresh does not supersede a committed notification. Only a
-// changed context or a new completion changes its delivery identity.
+// Only a new completion, or an identity change that clears it, changes a
+// notification's delivery identity. Queuing a refresh or changing targeting
+// properties does not supersede it: the update describes the completed load.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Token {
-    revision: u64,
     completed: Option<(u64, u64)>,
 }
 impl Token {
     fn of(snapshot: &Snapshot) -> Self {
         Self {
-            revision: snapshot.flag_load.revision,
             completed: snapshot
                 .flag_load
                 .completed
@@ -211,12 +210,11 @@ impl Listeners {
         let Some(snapshot) = access.snapshot() else {
             return;
         };
-        if snapshot.flag_load.revision == revision
-            && snapshot
-                .flag_load
-                .completed
-                .as_ref()
-                .is_some_and(|c| c.revision == revision && c.request == request)
+        if snapshot
+            .flag_load
+            .completed
+            .as_ref()
+            .is_some_and(|c| c.revision == revision && c.request == request)
         {
             self.dispatch(access, &snapshot, None);
         }

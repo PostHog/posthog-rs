@@ -493,7 +493,7 @@ const FINAL_V1: &str = r#"{
           "group_properties":{"company":{"tier":2}},"disable_geoip":false}],
         "flags":{"checkout":{
           "context":0,
-          "revision":0,"partial":false,"request_id":"request","evaluated_at":123,
+          "partial":false,"request_id":"request","evaluated_at":123,
           "record":{"enabled":true,"variant":"blue","payload":[null],"id":1,"version":3,
             "reason":"Matched","locally_evaluated":false,"has_experiment":false,
             "minimal_flag_called_events":true}
@@ -616,12 +616,71 @@ fn optional_sections_recover_independently_without_losing_targeting_or_consent()
     assert_eq!(decoded.snapshot.opt_out, Some(true));
 }
 
+// Like `registered` and `groups`, flag targeting this build can't read or
+// accept restores empty, so it never discards the identity and consent.
 #[test]
-fn malformed_mandatory_targeting_and_explicit_device_are_core_corruption() {
+fn unreadable_flag_targeting_restores_empty_and_keeps_identity_and_consent() {
+    let original = FileStateStore::decode_restored(FINAL_V1.as_bytes())
+        .unwrap()
+        .snapshot;
+    let mut deep = serde_json::json!(1);
+    for _ in 0..=super::super::MAX_VALUE_DEPTH {
+        deep = serde_json::json!([deep]);
+    }
     for (path, invalid) in [
+        ("/state/flags", serde_json::Value::Null),
         ("/state/flags", serde_json::json!(false)),
-        ("/state/flags/person_properties", serde_json::json!([])),
-        ("/state/flags/group_properties", serde_json::json!({" ":{}})),
+        ("/state/flags/person_properties", serde_json::json!([1])),
+        (
+            "/state/flags/person_properties",
+            serde_json::json!({"deep": deep}),
+        ),
+        (
+            "/state/flags/group_properties",
+            serde_json::json!({"company": 5}),
+        ),
+        (
+            "/state/flags/group_properties",
+            serde_json::json!({" ": {"tier": 1}}),
+        ),
+        (
+            "/state/flags/group_properties",
+            serde_json::json!({"company": {"deep": deep}}),
+        ),
+    ] {
+        let mut value = fixture();
+        *value.pointer_mut(path).unwrap() = invalid;
+        let decoded =
+            FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut expected = original.clone();
+        match path {
+            "/state/flags" => expected.flags = Default::default(),
+            "/state/flags/person_properties" => expected.flags.person_properties.clear(),
+            _ => expected.flags.group_properties.clear(),
+        }
+        assert_eq!(decoded.snapshot, expected, "{path}");
+    }
+    for field in ["person_properties", "group_properties", "cache"] {
+        let mut value = fixture();
+        value["state"]["flags"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        let decoded =
+            FileStateStore::decode_restored(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut expected = original.clone();
+        match field {
+            "person_properties" => expected.flags.person_properties.clear(),
+            "group_properties" => expected.flags.group_properties.clear(),
+            _ => expected.flags.cache = None,
+        }
+        assert_eq!(decoded.snapshot, expected, "missing {field}");
+    }
+}
+
+#[test]
+fn malformed_identity_is_core_corruption() {
+    for (path, invalid) in [
         ("/state/device_id", serde_json::json!(" ")),
         ("/state/device_id", serde_json::json!(false)),
         ("/state/anonymous_id", serde_json::json!("")),

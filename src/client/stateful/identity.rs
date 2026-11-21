@@ -175,7 +175,8 @@ impl Client {
     /// A different already-identified ID is ignored: call reset before switching users.
     /// Dropped/full events do not roll back local state or schedule linking-event replay.
     /// Properties also merge into local flag targeting before hooks, independently
-    /// of analytics dedup/admission. Anonymous identity changes reload flags; same-ID
+    /// of analytics dedup/admission; a value nested more than 100 levels deep is
+    /// left out of flag targeting only. Anonymous identity changes reload flags; same-ID
     /// promotion reloads only with properties. Identified property updates do not.
     /// Persistence and delivery are asynchronous; this is not an ingestion acknowledgment.
     /// While opted out, the identity still changes, but no `$identify` or `$set`
@@ -301,7 +302,8 @@ impl Client {
     /// Update the current person's properties without identifying. Empty maps are a no-op.
     /// Only accepted analytics updates are deduplicated. Local flag targeting merges
     /// set-once absent keys, then set values, even when analytics is deduplicated or
-    /// rejected. It does not immediately reload flags. State enablement survives rejection.
+    /// rejected, leaving out values nested more than 100 levels deep. It does not
+    /// immediately reload flags. State enablement survives rejection.
     pub fn set_person_properties(&self, input: impl Into<PersonProperties>) {
         let Some(_guard) = self.identity_guard("set_person_properties") else {
             return;

@@ -25,7 +25,6 @@ fn with_cache(payload: Option<Value>) -> Snapshot {
             "checkout".into(),
             CachedFlag {
                 context: Arc::new(FlagContext::current(&snapshot, false)),
-                revision: 0,
                 partial: false,
                 record: EvaluatedFlagRecord {
                     enabled: true,
@@ -43,6 +42,7 @@ fn with_cache(payload: Option<Value>) -> Snapshot {
             },
         )]),
         failed: Default::default(),
+        errors_while_computing: false,
     }));
     snapshot
 }
@@ -201,24 +201,20 @@ fn cache_and_targeting_mutations_complete_while_state_io_is_blocked() {
 }
 
 #[test]
-fn current_flag_fields_are_required_and_optional_cache_is_repaired() {
+fn missing_flag_fields_restore_empty_and_optional_cache_is_repaired() {
     let valid: Value = serde_json::from_slice(&record(&with_cache(Some(json!(false))))).unwrap();
     // A record written before feature flags restores with an empty cache.
     let mut older = valid.clone();
     older["state"].as_object_mut().unwrap().remove("flags");
     assert!(FileStateStore::decode(&serde_json::to_vec(&older).unwrap()).is_ok());
-    for path in [
-        vec!["flags", "person_properties"],
-        vec!["flags", "group_properties"],
-        vec!["flags", "cache"],
-    ] {
-        let mut invalid = valid.clone();
-        let mut parent = &mut invalid["state"];
-        for key in &path[..path.len() - 1] {
-            parent = &mut parent[*key];
-        }
-        parent.as_object_mut().unwrap().remove(path[path.len() - 1]);
-        assert!(FileStateStore::decode(&serde_json::to_vec(&invalid).unwrap()).is_err());
+    for field in ["person_properties", "group_properties", "cache"] {
+        let mut missing = valid.clone();
+        missing["state"]["flags"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        let decoded = FileStateStore::decode(&serde_json::to_vec(&missing).unwrap()).unwrap();
+        assert_eq!(decoded.distinct_id, "person", "missing {field}");
     }
     let mut additive = valid.clone();
     additive["state"]["flags"]["unknown"] = json!(42);
@@ -412,7 +408,6 @@ fn large_flag_sets_persist_each_context_once() {
     snapshot.flags.cache = Some(Arc::new(FlagCache::updated(
         None,
         context,
-        0,
         crate::client::transport::flags::LoadedFlags {
             records,
             request_id: None,

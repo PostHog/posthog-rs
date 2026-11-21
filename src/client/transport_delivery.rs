@@ -345,18 +345,6 @@ impl TransportHandle {
         finished(&self.worker)
     }
 
-    /// Whether every delivery thread has finished. Never waits.
-    /// Event delivery and the feature flag worker have both stopped.
-    pub(crate) fn all_stopped(&self) -> bool {
-        self.delivery_stopped()
-            && self.delivery.as_ref().map_or(true, |delivery| {
-                delivery
-                    .requests
-                    .as_ref()
-                    .map_or(true, super::requests::Worker::is_stopped)
-            })
-    }
-
     /// Event delivery has stopped.
     pub(crate) fn delivery_stopped(&self) -> bool {
         finished(&self.worker)

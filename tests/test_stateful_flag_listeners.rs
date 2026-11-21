@@ -447,3 +447,67 @@ fn retained_handle_does_not_keep_callbacks_or_namespace_alive_and_restore_notifi
     drop(client);
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+// A property-only targeting change made by an earlier listener does not
+// replace the load being delivered, so every later listener still hears it.
+#[test]
+fn every_listener_sees_a_load_when_an_earlier_listener_changes_person_targeting() {
+    for mode in [
+        "none",
+        "set_person_properties",
+        "set_person_properties_for_flags",
+    ] {
+        let server = MockServer::start();
+        let _flags = server.mock(|when, then| {
+            when.path("/flags/");
+            then.status(200)
+                .json_body(json!({"flags": {"beta": {"key": "beta", "enabled": true}}}));
+        });
+        let _events = server.mock(|when, then| {
+            when.path("/i/v1/analytics/events");
+            then.status(200).json_body(json!({}));
+        });
+        let mut setup = config(&server);
+        setup.bootstrap_feature_flags = None;
+        setup.bootstrap_feature_flag_payloads = None;
+        let client = Arc::new(Client::init_blocking(setup));
+        let weak = Arc::downgrade(&client);
+        let first = client.on_feature_flags(move |update| {
+            let loaded = update
+                .flags
+                .as_ref()
+                .is_some_and(|f| f.contains_key("beta"));
+            let Some(client) = weak.upgrade().filter(|_| loaded) else {
+                return;
+            };
+            let properties = HashMap::from([("beta_user".to_string(), json!(true))]);
+            match mode {
+                "set_person_properties" => client.set_person_properties(properties),
+                "set_person_properties_for_flags" => {
+                    client.set_person_properties_for_flags(properties, Some(false))
+                }
+                _ => {}
+            }
+        });
+        let (tx, rx) = mpsc::channel();
+        let second = client.on_feature_flags(move |update| {
+            let _ = tx.send(
+                update
+                    .flags
+                    .as_ref()
+                    .is_some_and(|f| f.contains_key("beta")),
+            );
+        });
+        client.reload_feature_flags();
+        let seen = rx.recv_timeout(WAIT);
+        first.unsubscribe();
+        second.unsubscribe();
+        client.shutdown_blocking(None);
+        assert_eq!(
+            seen,
+            Ok(true),
+            "{}: the second listener missed the load",
+            mode
+        );
+    }
+}
