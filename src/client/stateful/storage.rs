@@ -144,6 +144,11 @@ struct StateRecord<T> {
 }
 
 fn encode_record(snapshot: &Snapshot) -> io::Result<Vec<u8>> {
+    // Restore reads registered properties and groups leniently, so decoding
+    // alone would not reject them.
+    if !snapshot.is_valid() {
+        return Err(invalid_state());
+    }
     let bytes = serde_json::to_vec(&StateRecord {
         version: 1,
         state: snapshot,
