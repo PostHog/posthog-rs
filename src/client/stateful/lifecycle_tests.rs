@@ -454,3 +454,81 @@ fn blocked_event_append_owns_lease_after_deadline_and_drop_without_new_uploads()
     );
     eprintln!("blocked-event shutdown_and_drop_us={}", elapsed.as_micros());
 }
+
+/// The writer is inside its first save and a state change waits behind it.
+fn writer_with_a_pending_change(directory: &Directory) -> (StateWriter, WriteGate) {
+    let (state, gate) = gated_writer(directory);
+    gate.entered.recv_timeout(WAIT).unwrap();
+    state
+        .update(|snapshot| snapshot.distinct_id = "changed".into())
+        .unwrap();
+    (state, gate)
+}
+
+/// Release the save in progress and the one queued behind it once `Drop`
+/// has started.
+fn release_both_saves_during_drop(gate: &WriteGate) -> thread::JoinHandle<()> {
+    let release = gate.release.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        let _ = release.send(());
+        let _ = release.send(());
+    })
+}
+
+fn saved_distinct_id(directory: &Directory) -> String {
+    FileStateStore::open(StorageDirectory::open(&directory.0).unwrap())
+        .unwrap()
+        .snapshot
+        .unwrap()
+        .distinct_id
+}
+
+#[cfg(feature = "async-client")]
+#[test]
+fn drop_after_a_cancelled_shutdown_saves_a_pending_state_change() {
+    let directory = Directory::new();
+    let (state, gate) = writer_with_a_pending_change(&directory);
+    let mut config = config();
+    config.shutdown_timeout = Duration::from_secs(8);
+    let client = client_with_writer(&config, state);
+    futures::executor::block_on(async {
+        let shutdown = client.shutdown(None);
+        futures::pin_mut!(shutdown);
+        // Select the 8 s deadline, then cancel the wait.
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+    });
+    let releaser = release_both_saves_during_drop(&gate);
+    drop(client);
+    releaser.join().unwrap();
+    gate.dropped.recv_timeout(WAIT).unwrap();
+    assert_eq!(saved_distinct_id(&directory), "changed");
+}
+
+#[test]
+fn drop_after_a_hook_shutdown_saves_a_pending_state_change() {
+    use crate::stateful::CaptureOutcome;
+    let directory = Directory::new();
+    let (state, gate) = writer_with_a_pending_change(&directory);
+    let slot = Arc::new(Mutex::new(std::sync::Weak::<Client>::new()));
+    let hook_slot = slot.clone();
+    let mut config = config();
+    config.shutdown_timeout = Duration::from_secs(8);
+    config.before_send(move |event| {
+        let client = hook_slot.lock().unwrap().upgrade().unwrap();
+        assert_eq!(
+            client.shutdown_blocking(None).delivery,
+            DeliveryOutcome::Deferred
+        );
+        Some(event)
+    });
+    let client = Arc::new(client_with_writer(&config, state));
+    *slot.lock().unwrap() = Arc::downgrade(&client);
+    assert_eq!(client.capture("stop"), CaptureOutcome::Closed);
+    let client = Arc::try_unwrap(client).ok().unwrap();
+    let releaser = release_both_saves_during_drop(&gate);
+    drop(client);
+    releaser.join().unwrap();
+    gate.dropped.recv_timeout(WAIT).unwrap();
+    assert_eq!(saved_distinct_id(&directory), "changed");
+}
