@@ -359,13 +359,15 @@ impl StateWriter {
         self.shared.lock().snapshot.clone()
     }
 
-    /// Domain-internal mutation only; do not call application code in `change`.
-    /// Candidate validation happens before the authoritative state is replaced.
+    /// Test helper over [`Self::mutate`].
     #[cfg(test)]
     pub(super) fn update(&self, change: impl FnOnce(&mut Snapshot)) -> Result<u64, UpdateError> {
         self.mutate(change).map(|(revision, ())| revision)
     }
 
+    /// Domain-internal mutation only. `change` runs under the state lock, so it
+    /// must not run hooks, tracing subscribers, application code or other client
+    /// calls. Candidate validation happens before the authoritative state is replaced.
     pub(super) fn mutate<T>(
         &self,
         change: impl FnOnce(&mut Snapshot) -> T,

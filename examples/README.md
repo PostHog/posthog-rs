@@ -9,7 +9,7 @@ Set `POSTHOG_PROJECT_TOKEN` and optionally `POSTHOG_HOST` and
 
 ```bash
 cargo run --features stateful --example stateful
-# Identify a user (omit POSTHOG_DISTINCT_ID to remain anonymous):
+# Identify a user (identity persists between runs; use a fresh POSTHOG_DATA_DIR to run anonymously again):
 POSTHOG_DISTINCT_ID=user-123 cargo run --features stateful --example stateful
 # Without the async client feature:
 cargo run --no-default-features --features stateful,tls --example stateful

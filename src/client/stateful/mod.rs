@@ -119,15 +119,29 @@ impl Snapshot {
         }
     }
 
+    /// Compares only the persisted fields. The exhaustive destructure makes a new
+    /// field fail to compile until it is classified as persisted or not.
     fn same_persisted_state(&self, other: &Self) -> bool {
-        self.anonymous_id == other.anonymous_id
-            && self.device_id == other.device_id
-            && self.distinct_id == other.distinct_id
-            && self.identified == other.identified
-            && self.person_processing == other.person_processing
-            && self.opt_out == other.opt_out
-            && self.registered == other.registered
-            && self.groups == other.groups
+        let Self {
+            device_id,
+            anonymous_id,
+            distinct_id,
+            identified,
+            person_processing,
+            opt_out,
+            registered,
+            groups,
+            generation: _,
+            person_properties: _,
+        } = self;
+        *device_id == other.device_id
+            && *anonymous_id == other.anonymous_id
+            && *distinct_id == other.distinct_id
+            && *identified == other.identified
+            && *person_processing == other.person_processing
+            && *opt_out == other.opt_out
+            && *registered == other.registered
+            && *groups == other.groups
     }
 
     fn is_valid(&self) -> bool {
