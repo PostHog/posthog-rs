@@ -351,11 +351,11 @@ fn corrupt_state_is_replaced_but_future_state_is_preserved() {
 }
 
 #[test]
-fn startup_rewrites_missing_device_and_tolerates_additive_fields() {
+fn startup_tolerates_additive_state_fields() {
     let directory = Directory::new();
     fs::create_dir_all(directory.scope()).unwrap();
     let path = directory.scope().join("state.json");
-    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","identified":true,"person_processing":true,"opt_out":true,"registered":{},"groups":{},"session":null,"future_field":42}}"#).unwrap();
+    fs::write(&path, br#"{"version":1,"future_envelope":{},"state":{"anonymous_id":"anonymous","distinct_id":"person","device_id":"device","identified":true,"person_processing":true,"opt_out":true,"registered":{},"groups":{},"session":null,"future_field":42}}"#).unwrap();
     let client = Client::init_blocking(directory.config());
     assert_eq!(client.get_anonymous_id(), "anonymous");
     assert_eq!(client.get_distinct_id(), "person");
@@ -367,7 +367,6 @@ fn startup_rewrites_missing_device_and_tolerates_additive_fields() {
         DeliveryOutcome::Stopped
     );
     let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    assert_eq!(value["state"]["device_id"], "anonymous");
     assert_eq!(value["state"]["opt_out"], true);
 }
 

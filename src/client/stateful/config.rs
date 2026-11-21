@@ -46,10 +46,20 @@ pub struct Config {
     /// Each persistent namespace has one live owner; see [`Persistence`] for
     /// sharing a client or selecting independent identities.
     pub instance_name: String,
-    /// Seed a fresh scope's anonymous identity. Persisted identity takes precedence.
+    /// Anonymous setup seed. On a fresh install it becomes the anonymous ID and
+    /// the device ID (`$device_id`), and also the distinct ID unless
+    /// `bootstrap_identified_id` is set. Persisted identity takes precedence, so a
+    /// restored install ignores it. A blank value is ignored.
     pub bootstrap_anonymous_id: Option<String>,
-    /// Identified setup seed. Mutually exclusive with bootstrap_anonymous_id.
-    /// Reconciles restored anonymous state; never replaces a different identified user.
+    /// Identified setup seed. On a fresh install it becomes the distinct ID and the
+    /// client starts identified without sending an event, also under
+    /// [`PersonProfiles::Never`]. The anonymous and device ID come from
+    /// `bootstrap_anonymous_id` when it is set, and are generated otherwise. On a
+    /// restored install it reconciles: a restored anonymous
+    /// user is identified (under `Never` the anonymous user is kept), a matching
+    /// anonymous ID is upgraded without an event, and a different identified user is
+    /// kept with a warning. A blank value is ignored. To link an anonymous ID to the
+    /// user with `$identify`, call `identify` after initialization instead.
     pub bootstrap_identified_id: Option<String>,
     /// Default person processing and identity/group-operation policy. Default: IdentifiedOnly.
     /// Explicit capture options and hooks retain their normal precedence.
@@ -78,9 +88,11 @@ pub struct Config {
     pub request_timeout: Duration,
     /// Default SDK-controlled shutdown waiting budget. Default: 30 seconds.
     /// The first shutdown selects one deadline; later calls cannot extend it.
-    /// Dropping the client does not wait for delivery. Already-started work owns its resources until completion and
-    /// may retain them indefinitely if it never returns. Arbitrary destructors
-    /// of application objects captured by callbacks may block outside this bound.
+    /// Dropping the client ends that deadline at once and does not wait for
+    /// delivery; it waits up to about 1 s for local writes. Already-started work owns its
+    /// resources until completion and may retain them indefinitely if it never
+    /// returns. Arbitrary destructors of application objects captured by
+    /// callbacks may block outside this bound.
     pub shutdown_timeout: Duration,
     /// Request compression. Default: gzip; None disables compression.
     pub capture_compression: Option<CaptureCompression>,
@@ -91,10 +103,13 @@ pub struct Config {
     pub platform_context: HashMap<String, serde_json::Value>,
     /// SDK name for events' `$lib` and for the `PostHog-Sdk-Info` and
     /// `User-Agent` headers of capture requests. Defaults to posthog-rs; a
-    /// wrapper SDK sets its own.
+    /// wrapper SDK sets its own. A blank name or version uses its default. If
+    /// the name or version is not visible ASCII, the client uses both
+    /// defaults.
     pub sdk_name: String,
     /// SDK version for events' `$lib_version` and for the same headers.
-    /// Defaults to this crate's version.
+    /// Defaults to this crate's version. Like the name, it must be visible
+    /// ASCII.
     pub sdk_version: String,
     pub(super) before_send: Vec<BeforeSendHook>,
     pub(super) on_error: Vec<OnErrorHook>,
@@ -176,6 +191,17 @@ impl Config {
         if self.sdk_version.is_empty() {
             self.sdk_version = crate::client::CRATE_VERSION.into();
         }
+        // Capture rejects header values that are not visible ASCII, which
+        // `HeaderValue::from_str` would otherwise accept.
+        let readable = reqwest::header::HeaderValue::from_str(&self.sdk_identity().user_agent())
+            .is_ok_and(|value| value.to_str().is_ok());
+        if !readable {
+            tracing::warn!(
+                "posthog-rs: sdk_name or sdk_version is not visible ASCII; using the defaults"
+            );
+            self.sdk_name = crate::client::SDK_USERAGENT_NAME.into();
+            self.sdk_version = crate::client::CRATE_VERSION.into();
+        }
         self.host = self.host.trim().into();
         if !valid_host(&self.host) {
             if !self.host.is_empty() {
@@ -218,18 +244,15 @@ impl Config {
         {
             return Some("project_token contains invalid header characters");
         }
-        if reqwest::header::HeaderValue::from_str(&self.sdk_info()).is_err() {
-            return Some("SDK name and version must be valid header text");
-        }
-        if self.bootstrap_anonymous_id.is_some() && self.bootstrap_identified_id.is_some() {
-            return Some("configure only one bootstrap identity");
-        }
         None
     }
 
-    /// The `name/version` sent in the `PostHog-Sdk-Info` and `User-Agent` headers.
-    fn sdk_info(&self) -> String {
-        format!("{}/{}", self.sdk_name, self.sdk_version)
+    /// The SDK the requests name in the `PostHog-Sdk-Info` and `User-Agent` headers.
+    fn sdk_identity(&self) -> crate::client::SdkIdentity {
+        crate::client::SdkIdentity {
+            name: self.sdk_name.clone().into(),
+            version: self.sdk_version.clone().into(),
+        }
     }
 
     pub(super) fn request_timeout_seconds(&self) -> u64 {
@@ -263,7 +286,7 @@ impl Config {
         options.shutdown_timeout_ms = self.shutdown_timeout.as_millis() as u64;
         options.retry_initial_backoff_ms = RETRY_INITIAL_BACKOFF_MS;
         options.capture_compression = self.capture_compression;
-        options.sdk_info = Some(self.sdk_info());
+        options.sdk_identity = self.sdk_identity();
         options.on_error = self.on_error.clone();
         options
     }

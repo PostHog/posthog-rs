@@ -86,7 +86,6 @@ pub(super) fn namespace(project_token: &str, instance: &str) -> String {
 #[derive(Default)]
 pub(super) struct RestoredStorage {
     pub(super) snapshot: Option<Snapshot>,
-    pub(super) rewrite_required: bool,
     pub(super) state_store: Option<FileStateStore>,
     pub(super) event_store: Option<FileEventStore>,
 }
@@ -124,7 +123,6 @@ impl RestoredStorage {
                 }
                 restored.state_store = Some(opened.store);
                 restored.snapshot = opened.snapshot;
-                restored.rewrite_required = opened.rewrite_required;
             }
             Err(error) => report_storage_error(hooks, StorageOperation::Read, &error),
         }
@@ -171,13 +169,7 @@ pub(super) struct FileStateStore {
 pub(super) struct OpenedStateStore {
     pub(super) store: FileStateStore,
     pub(super) snapshot: Option<Snapshot>,
-    rewrite_required: bool,
     read_error: Option<io::Error>,
-}
-
-struct DecodedSnapshot {
-    snapshot: Snapshot,
-    rewrite_required: bool,
 }
 
 // Only bounded, readable current-format corruption permits replacement. Access
@@ -192,16 +184,14 @@ impl FileStateStore {
     pub(super) fn open(directory: Arc<StorageDirectory>) -> io::Result<OpenedStateStore> {
         let store = Self { directory };
         match store.restore() {
-            Ok(decoded) => Ok(OpenedStateStore {
+            Ok(snapshot) => Ok(OpenedStateStore {
                 store,
-                rewrite_required: decoded.as_ref().is_some_and(|state| state.rewrite_required),
-                snapshot: decoded.map(|state| state.snapshot),
+                snapshot,
                 read_error: None,
             }),
             Err(RestoreFailure::Corrupt(error)) => Ok(OpenedStateStore {
                 store,
                 snapshot: None,
-                rewrite_required: true,
                 read_error: Some(error),
             }),
             Err(RestoreFailure::Unavailable(error)) => Err(error),
@@ -212,7 +202,7 @@ impl FileStateStore {
         self.directory.path().join("state.json")
     }
 
-    fn restore(&self) -> Result<Option<DecodedSnapshot>, RestoreFailure> {
+    fn restore(&self) -> Result<Option<Snapshot>, RestoreFailure> {
         let path = self.path();
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -232,14 +222,12 @@ impl FileStateStore {
 
     #[cfg(test)]
     fn load(&self) -> io::Result<Option<Snapshot>> {
-        self.restore()
-            .map(|decoded| decoded.map(|decoded| decoded.snapshot))
-            .map_err(|error| match error {
-                RestoreFailure::Corrupt(error) | RestoreFailure::Unavailable(error) => error,
-            })
+        self.restore().map_err(|error| match error {
+            RestoreFailure::Corrupt(error) | RestoreFailure::Unavailable(error) => error,
+        })
     }
 
-    fn decode_restored(encoded: &[u8]) -> Result<DecodedSnapshot, RestoreFailure> {
+    fn decode_restored(encoded: &[u8]) -> Result<Snapshot, RestoreFailure> {
         let record: serde_json::Value = serde_json::from_slice(encoded)
             .map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
         // Inspect the explicit version before interpreting any state fields.
@@ -253,37 +241,21 @@ impl FileStateStore {
                 "Unsupported state store version",
             )));
         }
-        let mut record: StateRecord<serde_json::Value> =
+        let record: StateRecord<serde_json::Value> =
             serde_json::from_value(record).map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
-        let mut rewrite_required = false;
-        let state = record
-            .state
-            .as_object_mut()
-            .ok_or_else(|| RestoreFailure::Corrupt(invalid_state()))?;
-        if !state.contains_key("device_id") {
-            let anonymous = state
-                .get("anonymous_id")
-                .cloned()
-                .ok_or_else(|| RestoreFailure::Corrupt(invalid_state()))?;
-            state.insert("device_id".into(), anonymous);
-            rewrite_required = true;
-        }
+        // An invalid stored session is dropped; the next save rewrites it.
+        let mut state = record.state;
         if let Some(session) = state.get_mut("session") {
-            normalize_optional::<super::sessions::StoredSession>(
-                session,
-                |session| session.is_valid(),
-                &mut rewrite_required,
-            );
+            normalize_optional::<super::sessions::StoredSession>(session, |session| {
+                session.is_valid()
+            });
         }
-        let snapshot: Snapshot = serde_json::from_value(record.state)
-            .map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
+        let snapshot: Snapshot =
+            serde_json::from_value(state).map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
         if !snapshot.is_valid() {
             return Err(RestoreFailure::Corrupt(invalid_state()));
         }
-        Ok(DecodedSnapshot {
-            snapshot,
-            rewrite_required,
-        })
+        Ok(snapshot)
     }
 
     fn decode(encoded: &[u8]) -> io::Result<Snapshot> {
@@ -330,16 +302,15 @@ impl FileStateStore {
 
 /// Recovery applies only to present optional values; missing required fields and
 /// invalid mandatory targeting still reject the core snapshot.
+/// Replace an optional field that doesn't decode or isn't valid with `null`.
 fn normalize_optional<T: serde::de::DeserializeOwned>(
     value: &mut serde_json::Value,
     valid: impl FnOnce(&T) -> bool,
-    rewrite_required: &mut bool,
 ) {
     if !value.is_null()
         && !serde_json::from_value::<T>(value.clone()).is_ok_and(|decoded| valid(&decoded))
     {
         *value = serde_json::Value::Null;
-        *rewrite_required = true;
     }
 }
 
