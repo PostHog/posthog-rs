@@ -5,14 +5,17 @@
 //! the payload are cut to a short limit, which bounds their scan too: an event
 //! that large is shrunk afterwards anyway.
 
-use serde_json::{Map, Value};
+use std::collections::HashMap;
 
-use super::text::{bounded_text, truncate};
+use serde_json::{Map, Number, Value};
+
+use super::text::bounded_text;
 use crate::mcp::contract::limits::{
     MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, MAX_PAYLOAD_ENTRIES, MAX_PAYLOAD_KEY_LENGTH,
     MAX_PAYLOAD_STRING_LENGTH, REDACTION_SCAN_MARGIN,
 };
 use crate::mcp::contract::REDACTED;
+use crate::mcp::number::Decimal;
 use crate::mcp::privacy::{is_credential_key, TextPass};
 
 const OVERFLOW_MARKER: &str = "[MaxProperties ~]";
@@ -26,6 +29,53 @@ pub(crate) fn bounded_payload(value: &Value, pass: TextPass) -> Value {
     bound(value, MAX_PAYLOAD_DEPTH, pass, &mut budget)
 }
 
+/// Borrowed object entries, each bounded as `bounded_payload` bounds an
+/// object's entry, so the caller copies only what the bounds keep. There is no
+/// entry limit, but the entries stop where they would overflow an event, since
+/// no event could carry more.
+pub(crate) fn bounded_entries<'a>(
+    entries: impl Iterator<Item = (&'a String, &'a Value)>,
+    pass: TextPass,
+) -> Map<String, Value> {
+    let mut budget = MAX_EVENT_BYTES;
+    let mut room = MAX_EVENT_BYTES - 1;
+    let mut bounded = KeptEntries::default();
+    for (received, value) in entries {
+        let (key, value) = bound_entry(received, value, MAX_PAYLOAD_DEPTH - 1, pass, &mut budget);
+        let size = json_length(&Value::from(key.as_str())) + 1 + json_length(&value) + 1;
+        if size > room {
+            break;
+        }
+        room -= size;
+        bounded.insert(received, key, value);
+    }
+    bounded.entries
+}
+
+/// Entries whose bounded keys may collide: of the entries whose keys redaction
+/// or cutting made equal, the one whose key as received sorts first is kept.
+#[derive(Default)]
+struct KeptEntries<'a> {
+    entries: Map<String, Value>,
+    received: HashMap<String, &'a str>,
+}
+
+impl<'a> KeptEntries<'a> {
+    fn insert(&mut self, received: &'a str, key: String, value: Value) {
+        match self.received.get(&key) {
+            Some(kept) if *kept <= received => {}
+            _ => {
+                self.received.insert(key.clone(), received);
+                self.entries.insert(key, value);
+            }
+        }
+    }
+}
+
+fn json_length(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+}
+
 fn bound(value: &Value, remaining_depth: usize, pass: TextPass, budget: &mut usize) -> Value {
     match value {
         Value::String(text) => Value::String(bound_string(text, pass, budget)),
@@ -33,7 +83,22 @@ fn bound(value: &Value, remaining_depth: usize, pass: TextPass, budget: &mut usi
         Value::Object(_) if remaining_depth == 0 => Value::from(NESTED_OBJECT_MARKER),
         Value::Array(items) => bound_array(items, remaining_depth - 1, pass, budget),
         Value::Object(object) => bound_object(object, remaining_depth - 1, pass, budget),
+        Value::Number(number) if pass.reads_numbers() => bound_number(number, pass),
         other => other.clone(),
+    }
+}
+
+/// `[redacted]` as a string, so JSON text stays valid. Read as written and in
+/// plain digits, since an exponent form such as `4.111111111111111e15` hides
+/// the digits redaction looks for.
+fn bound_number(number: &Number, pass: TextPass) -> Value {
+    let plain = Decimal::of(number).and_then(|decimal| decimal.plain());
+    let clean = std::iter::once(number.to_string())
+        .chain(plain)
+        .all(|text| pass.apply(&text) == text);
+    match clean {
+        true => Value::Number(number.clone()),
+        false => Value::from(REDACTED),
     }
 }
 
@@ -71,21 +136,36 @@ fn bound_object(
     budget: &mut usize,
 ) -> Value {
     let overflows = object.len() > MAX_PAYLOAD_ENTRIES;
-    let mut bounded: Map<String, Value> = object
-        .iter()
-        .take(kept_entries(object.len()))
-        .map(|(key, nested)| {
-            let value = match is_credential_key(key) {
-                true => Value::from(REDACTED),
-                false => bound(nested, remaining_depth, pass, budget),
-            };
-            (truncate(key, MAX_PAYLOAD_KEY_LENGTH), value)
-        })
-        .collect();
+    let mut bounded = KeptEntries::default();
+    for (received, nested) in object.iter().take(kept_entries(object.len())) {
+        let (key, value) = bound_entry(received, nested, remaining_depth, pass, budget);
+        bounded.insert(received, key, value);
+    }
+    let mut bounded = bounded.entries;
     if overflows {
         bounded.insert(OVERFLOW_KEY.to_string(), Value::from(OVERFLOW_MARKER));
     }
     Value::Object(bounded)
+}
+
+fn bound_entry(
+    key: &str,
+    value: &Value,
+    remaining_depth: usize,
+    pass: TextPass,
+    budget: &mut usize,
+) -> (String, Value) {
+    let value = match is_credential_key(key) {
+        true => Value::from(REDACTED),
+        false => bound(value, remaining_depth, pass, budget),
+    };
+    (bounded_key(key, pass), value)
+}
+
+/// A key is a captured string too, since data such as a signed URL can be the
+/// key, but it skips the entropy check, which would redact field names.
+fn bounded_key(key: &str, pass: TextPass) -> String {
+    bounded_text(key, MAX_PAYLOAD_KEY_LENGTH, pass.for_keys())
 }
 
 fn kept_entries(length: usize) -> usize {
@@ -109,6 +189,87 @@ mod tests {
             bounded_payload(&value, TextPass::Captured),
             json!({ "api_key": "[redacted]", "Authorization": "[redacted]", "q": "eu" })
         );
+    }
+
+    #[test]
+    fn keys_get_the_name_passes() {
+        let cases = [
+            (
+                json!({ "https://bucket.test/a.png?X-Amz-Signature=abc123": "logo" }),
+                json!({ "https://bucket.test/a.png?X-Amz-Signature=%5Bredacted%5D": "logo" }),
+            ),
+            (
+                json!({ "Get_Organization_Memberships": 1 }),
+                json!({ "Get_Organization_Memberships": 1 }),
+            ),
+            (
+                json!({ "https://a.test/?token=one": "first", "https://a.test/?token=two": "second" }),
+                json!({ "https://a.test/?token=%5Bredacted%5D": "first" }),
+            ),
+        ];
+        for (value, bounded) in cases {
+            assert_eq!(
+                bounded_payload(&value, TextPass::Captured),
+                bounded,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_card_number_is_redacted_however_it_is_written() {
+        for written in [
+            "4111111111111111",
+            "4.111111111111111e15",
+            "4111111111111111e0",
+            "0.04111111111111111e17",
+            "41111111111111.11e2",
+        ] {
+            let number: Value = serde_json::from_str(written).unwrap();
+            assert_eq!(
+                bounded_payload(&number, TextPass::FreeText),
+                json!("[redacted]"),
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_numbers_stay_numbers() {
+        for written in [
+            "100000000009",
+            "1731500000006",
+            "123456789012346",
+            "3.5",
+            "-7",
+        ] {
+            let number: Value = serde_json::from_str(written).unwrap();
+            assert_eq!(
+                bounded_payload(&number, TextPass::FreeText),
+                number,
+                "{written}"
+            );
+        }
+    }
+
+    /// Runs only when a crate in the build turns on serde_json's
+    /// `arbitrary_precision`, the one way a number keeps more digits than an
+    /// `f64` holds.
+    #[test]
+    fn a_long_card_number_is_redacted_in_exponent_form() {
+        let written = "0.6212345678901234569e19";
+        let number: Value = serde_json::from_str(written).unwrap();
+        if !number.to_string().contains("6212345678901234569") {
+            return;
+        }
+        for written in [written, "6212345678901234569e0", "62123456789012345690e-1"] {
+            let number: Value = serde_json::from_str(written).unwrap();
+            assert_eq!(
+                bounded_payload(&number, TextPass::FreeText),
+                json!("[redacted]"),
+                "{written}"
+            );
+        }
     }
 
     #[test]

@@ -42,7 +42,8 @@ pub(crate) enum StartupFailure {
 
 pub(super) struct Delivery {
     pub(super) inbox: Arc<Inbox>,
-    /// The shutdown deadline. The first caller to select one wins.
+    /// The shutdown deadline. The first caller to select one wins; dropping
+    /// the stateful client can then shorten it.
     deadline: Arc<Mutex<Option<Instant>>>,
     pub(super) drain_timeout: Duration,
     executor: Mutex<Option<JoinHandle<()>>>,
@@ -345,6 +346,13 @@ impl TransportHandle {
             // Wake the coordinator to read the deadline.
             let _ = self.tx.send(Control::QueueWake);
         }
+    }
+
+    /// Whether the coordinator has finished: admitted events are written to
+    /// disk and storage is released. The executor may still be sending.
+    /// Never waits.
+    pub(crate) fn coordinator_stopped(&self) -> bool {
+        finished(&self.worker)
     }
 
     /// Whether every delivery thread has finished. Never waits.

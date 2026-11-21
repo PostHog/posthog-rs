@@ -1,0 +1,214 @@
+name: "Build C bindings"
+
+# Builds and smoke-tests posthog-rs-ffi for each supported platform, and uploads
+# one archive per platform as a workflow artifact. release.yml calls it for a
+# posthog-rs-ffi release tag and attaches the archives to that GitHub Release. CI
+# calls it on pull requests, where it builds the PR's commit.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "posthog-rs-ffi version, used in the archive names"
+        required: true
+        type: string
+      release:
+        description: "Build the release tag posthog-rs-ffi-v<version>. Otherwise build the commit that triggered the run."
+        required: false
+        default: false
+        type: boolean
+      release-commit:
+        description: "With `release`, the commit the tag must point to. The build fails if it points anywhere else."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/posthog-rs-ffi
+    steps:
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VERSION' is not a version like 1.2.0"
+            exit 1
+          fi
+        working-directory: .
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release && format('refs/tags/posthog-rs-ffi-v{0}', inputs.version) || '' }}
+          persist-credentials: false
+
+      - name: Check the tag points to the release commit
+        if: inputs.release
+        env:
+          RELEASE_COMMIT: ${{ inputs.release-commit }}
+          VERSION: ${{ inputs.version }}
+        working-directory: .
+        run: |
+          actual=$(git rev-parse HEAD)
+          if [ -z "$RELEASE_COMMIT" ] || [ "$actual" != "$RELEASE_COMMIT" ]; then
+            echo "::error::Tag posthog-rs-ffi-v$VERSION points to $actual, not the release commit $RELEASE_COMMIT"
+            exit 1
+          fi
+
+      - name: Check the posthog-rs-ffi version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          crate_version=$(grep -m1 '^version = ' Cargo.toml | tr -d '\r' | sed 's/version = "\(.*\)"/\1/')
+          if [ "$crate_version" != "$VERSION" ]; then
+            echo "::error::Expected posthog-rs-ffi $VERSION, found $crate_version"
+            exit 1
+          fi
+
+      - name: Set up Rust
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add "$TARGET"
+
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --locked --release -p posthog-rs-ffi --target "$TARGET"
+
+      - name: List the system libraries the static library needs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo rustc --locked --release -p posthog-rs-ffi --lib --target "$TARGET" --crate-type staticlib -- --print native-static-libs 2>&1 \
+            | sed -n 's/.*native-static-libs: //p' | tail -1 | tr -d '\r' > "../../target/$TARGET/release/native-static-libs.txt"
+          cat "../../target/$TARGET/release/native-static-libs.txt"
+
+      - name: Link and run from C and C++
+        if: runner.os != 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          out="../../target/$TARGET/release"
+          read -ra native_libs < "$out/native-static-libs.txt"
+          # The examples need a PostHog project, so they're only built.
+          cc -std=c99 -Wall -Wextra -Werror -pedantic examples/capture.c -Iinclude -L"$out" -lposthog_ffi -o capture
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic examples/capture.cpp -Iinclude -L"$out" -lposthog_ffi -o capture-cpp
+          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude -L"$out" -lposthog_ffi -o smoke-shared
+          c++ -std=c++11 -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude "$out/libposthog_ffi.a" "${native_libs[@]}" -o smoke-static
+          c++ -std=c++11 -fshort-enums -Wall -Wextra -Werror tests/c/smoke.cpp -Iinclude "$out/libposthog_ffi.a" "${native_libs[@]}" -o smoke-short-enums
+          LD_LIBRARY_PATH="$out" DYLD_LIBRARY_PATH="$out" ./smoke-shared
+          ./smoke-static
+          ./smoke-short-enums
+
+      - name: Link and run from C and C++ (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set "OUT=..\..\target\x86_64-pc-windows-msvc\release"
+          rem MSVC has no -fshort-enums, and its enums are always int-sized.
+          rem The examples read settings with getenv, which MSVC flags as unsafe (C4996).
+          cl /nologo /W4 /WX /D_CRT_SECURE_NO_WARNINGS examples\capture.c /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:capture.exe || exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX /D_CRT_SECURE_NO_WARNINGS examples\capture.cpp /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:capture-cpp.exe || exit /b 1
+          rem Shared: link the DLL's import library. The DLL must sit next to the program.
+          cl /nologo /std:c++17 /EHsc /W4 /WX tests\c\smoke.cpp /Iinclude "%OUT%\posthog_ffi.dll.lib" /Fe:smoke-shared.exe || exit /b 1
+          copy /y "%OUT%\posthog_ffi.dll" . || exit /b 1
+          smoke-shared.exe || exit /b 1
+          rem Static: Rust builds against the DLL C runtime, so the program must use /MD too.
+          rem The system library list includes linker options such as /defaultlib, so it goes after /link.
+          for /f "usebackq tokens=*" %%l in ("%OUT%\native-static-libs.txt") do set "NATIVE=%%l"
+          cl /nologo /MD /std:c++17 /EHsc /W4 /WX tests\c\smoke.cpp /Iinclude /Fe:smoke-static.exe /link "%OUT%\posthog_ffi.lib" %NATIVE% || exit /b 1
+          smoke-static.exe
+
+      - name: Package
+        id: package
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          archive=$(packaging/package.sh "$TARGET" "$VERSION" "$PWD/../../target/$TARGET/release" "$PWD/dist")
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Use the archive from CMake and pkg-config
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Unpack to a new place, as a customer would, so nothing points back at the build.
+          consumer="$RUNNER_TEMP/consumer"
+          rm -rf "$consumer" && mkdir -p "$consumer"
+          archive="dist/posthog-rs-ffi-$VERSION-$TARGET"
+          if [[ "$TARGET" == *windows* ]]; then
+            7z x -o"$consumer" "$archive.zip" >/dev/null
+          else
+            tar -xzf "$archive.tar.gz" -C "$consumer"
+          fi
+          prefix="$consumer/posthog-rs-ffi-$VERSION-$TARGET"
+          minor=$(echo "$VERSION" | cut -d. -f1,2)
+          for mode in OFF ON; do
+            cmake -S packaging/test -B "$consumer/cmake-$mode" -DCMAKE_PREFIX_PATH="$prefix" \
+              -DPOSTHOG_RS_FFI_STATIC="$mode" -DPOSTHOG_RS_FFI_VERSION="$minor"
+            cmake --build "$consumer/cmake-$mode" --config Release
+            smoke=$(find "$consumer/cmake-$mode" -name 'smoke' -o -name 'smoke.exe' | head -1)
+            (cd "$(dirname "$smoke")" && "./$(basename "$smoke")")
+          done
+          if [[ "$TARGET" != *windows* ]]; then
+            export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+            # shellcheck disable=SC2046 # pkg-config prints several flags.
+            c++ -std=c++11 tests/c/smoke.cpp $(pkg-config --cflags --libs posthog-rs-ffi) -Wl,-rpath,"$prefix/lib" -o "$consumer/pc-shared"
+            # shellcheck disable=SC2046
+            c++ -std=c++11 tests/c/smoke.cpp $(pkg-config --cflags --libs posthog-rs-ffi-static) -o "$consumer/pc-static"
+            "$consumer/pc-shared"
+            "$consumer/pc-static"
+          fi
+
+          # Ship the CMake-built program with its shared library to a new folder,
+          # then delete the archive. The program must still find the library there,
+          # so it can't have recorded the archive's path.
+          deploy="$consumer/deploy"
+          mkdir -p "$deploy"
+          smoke=$(find "$consumer/cmake-OFF" -name 'smoke' -o -name 'smoke.exe' | head -1)
+          cp "$smoke" "$deploy/"
+          case "$TARGET" in
+            *windows*) cp "$prefix/lib/posthog_ffi.dll" "$deploy/" ;;
+            *apple*) cp "$prefix/lib/libposthog_ffi.dylib" "$deploy/" ;;
+            *) cp "$prefix/lib/libposthog_ffi.so" "$deploy/" ;;
+          esac
+          rm -rf "$prefix"
+          (cd "$deploy" && LD_LIBRARY_PATH="$deploy" DYLD_LIBRARY_PATH="$deploy" "./$(basename "$smoke")")
+
+      - name: Upload archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: posthog-rs-ffi-${{ matrix.target }}
+          path: |
+            crates/posthog-rs-ffi/dist/${{ steps.package.outputs.archive }}
+            crates/posthog-rs-ffi/dist/${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 7
