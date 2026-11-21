@@ -1,5 +1,7 @@
 #![cfg(feature = "stateful")]
 
+mod stateful_support;
+
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::time::Duration;
@@ -10,6 +12,7 @@ use posthog::stateful::{
 };
 use posthog::Event;
 use serde_json::{json, Value};
+use stateful_support::record_logs;
 use uuid::Uuid;
 
 fn properties(value: Value) -> HashMap<String, Value> {
@@ -495,41 +498,6 @@ fn rejected_registration_is_logged_without_values() {
     let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
     assert!(logs.contains("register update nested more than 100 levels deep was ignored"));
     assert!(!logs.contains("private"));
-}
-
-#[derive(Clone)]
-struct Recorder(Arc<Mutex<Vec<u8>>>);
-impl std::io::Write for Recorder {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Keeps a second dispatch alive for the whole test process. With a single
-/// dispatch, tracing-core registers a new callsite against the registering
-/// thread's default, so a thread without a recorder could hide a log line from
-/// a thread that has one.
-fn keep_callsites_shared() {
-    static REGISTRATION: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
-    REGISTRATION.get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
-}
-
-/// Records this thread's log output at `level` and above while the guard lives.
-fn record_logs(level: tracing::Level) -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
-    keep_callsites_shared();
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let sink = output.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_max_level(level)
-        .with_writer(move || Recorder(sink.clone()))
-        .finish();
-    (output, tracing::subscriber::set_default(subscriber))
 }
 
 #[test]
