@@ -668,6 +668,7 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
+                feature_enrollment: false,
             },
         };
 
