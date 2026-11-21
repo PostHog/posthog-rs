@@ -28,7 +28,7 @@ previously admitted events or flag loading.
 
 The example observes flag-load notifications, sets explicit person targeting, and
 requests a refresh after identity/group changes. `POSTHOG_FLAG_KEY` optionally reads
-a cached flag and payload. A known flag read reports access when consent allows;
+a cached flag and payload. Every read reports access (a missing flag as `flag_missing`) unless consent disallows it or `send_event(false)` is set;
 `None` means unavailable, not disabled. Initialization and successful drains do not
 promise remote flag success. The listener reports load errors and is explicitly
 unsubscribed before shutdown. Notifications can run on the caller or independent request worker.

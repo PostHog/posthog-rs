@@ -192,15 +192,12 @@ fn obsolete_response_does_not_mark_bootstrap_remote_and_reset_drops_all_context(
     config.preload_feature_flags = true;
     let client = Client::init_blocking(config);
     server.request();
-    client.set_person_properties_for_flags(
-        HashMap::from([("changed".into(), json!(true))]),
-        Some(false),
-    );
+    client.identify("person");
     server.respond();
-    // The obsolete response is discarded and the load continues with a
-    // follow-up for the current targeting.
-    let follow_up = server.request();
-    assert_eq!(follow_up["person_properties"]["changed"], true);
+    // The response for the earlier identity is discarded; identify's own
+    // request runs next.
+    let current = server.request();
+    assert_eq!(current["distinct_id"], "person");
     let state = client.state.as_ref().unwrap().snapshot();
     assert!(!state.flag_load.remote_received);
     assert!(state.flag_load.completed.is_none());

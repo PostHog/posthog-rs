@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use serde_json::Value;
 
 use super::flag_state::FlagState;
-use super::Client;
+use super::{Client, Snapshot};
 
 /// Only the local targeting copy limits depth, so a value nested too deep for it
 /// is left out there while the analytics call that carried it goes ahead.
@@ -39,6 +39,17 @@ impl FlagState {
                 .or_default()
                 .extend(targetable.map(|(key, value)| (key.clone(), value.clone())));
         }
+    }
+}
+
+impl Snapshot {
+    /// Record a direct flag-targeting change: a `*_for_flags` setter or group
+    /// properties. A load already in flight then follows up with the new
+    /// targeting. Analytics person properties don't call this, so, as in
+    /// posthog-ios and posthog-android, they wait for the next load.
+    pub(super) fn retarget_flags(&mut self) {
+        // Only compared for equality, so wrapping is harmless.
+        self.flag_load.targeting = self.flag_load.targeting.wrapping_add(1);
     }
 }
 
@@ -122,7 +133,10 @@ impl Client {
             .state
             .as_ref()
             .unwrap()
-            .mutate(|state| update(&mut state.flags))
+            .mutate(|state| {
+                update(&mut state.flags);
+                state.retarget_flags();
+            })
             .is_ok()
             && reload.unwrap_or(true)
         {

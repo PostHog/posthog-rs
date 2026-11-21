@@ -23,6 +23,7 @@ pub(super) struct FlagLoader {
 struct Request {
     context: Arc<FlagContext>,
     revision: u64,
+    targeting: u64,
     sequence: u64,
 }
 
@@ -34,6 +35,7 @@ impl Request {
         Some(Self {
             context: Arc::new(FlagContext::current(state, disable_geoip)),
             revision: state.flag_load.revision,
+            targeting: state.flag_load.targeting,
             sequence,
         })
     }
@@ -84,9 +86,10 @@ impl FlagLoader {
     }
 }
 
-/// The request task. If targeting changed while it was in flight and no newer
-/// request exists, its completion continues with a follow-up for the current
-/// targeting, as iOS and Android do, so a load is never lost.
+/// The request task. If flag targeting was set directly while it was in flight
+/// and no newer request exists, its completion installs the response and
+/// continues with a follow-up for the current targeting, so the new targeting
+/// is never lost.
 fn task_for(
     access: StateAccess,
     options: Arc<ClientOptions>,
@@ -101,10 +104,15 @@ fn task_for(
     })
 }
 
-/// Transport failures are diagnosed by the worker. An obsolete completion
-/// changes no state or status. When only targeting properties made it obsolete
-/// and no newer request exists, returns the follow-up request, reserved in the
-/// same update so a concurrent reload supersedes it.
+/// Transport failures are diagnosed by the worker. A completion for an earlier
+/// identity (identify, reset, group membership) changes no state or status:
+/// that change started its own request. Otherwise the response is installed, as
+/// in posthog-ios, posthog-android and posthog-js, even if targeting properties
+/// changed or a newer request is queued; each result keeps the context that
+/// produced it. When flag targeting was set directly (see
+/// `Snapshot::retarget_flags`) and no newer request exists, returns the
+/// follow-up request, reserved in the same update so a concurrent reload
+/// supersedes it. Analytics person properties alone start no follow-up.
 fn install(
     access: &StateAccess,
     request: &Request,
@@ -112,18 +120,11 @@ fn install(
     disable_geoip: bool,
 ) -> Option<Request> {
     let follow_up = access.mutate(|state| {
-        if state.flag_load.request != request.sequence {
+        if state.distinct_id != request.context.distinct_id
+            || state.anonymous_id != request.context.anonymous_id
+            || state.groups != request.context.groups
+        {
             return None;
-        }
-        if state.flag_load.revision != request.revision {
-            // Identity changes (identify, reset, groups) start their own request.
-            if state.distinct_id != request.context.distinct_id
-                || state.anonymous_id != request.context.anonymous_id
-                || state.groups != request.context.groups
-            {
-                return None;
-            }
-            return Request::reserve(state, disable_geoip);
         }
         let mut completion = FlagCompletion {
             context: request.context.clone(),
@@ -149,7 +150,15 @@ fn install(
             Err(error) => completion.error = Some(error),
         }
         state.flag_load.completed = Some(completion);
-        None
+        // A newer request already carries the current targeting, and analytics
+        // person properties alone wait for the next load.
+        if state.flag_load.request != request.sequence
+            || state.flag_load.revision == request.revision
+            || state.flag_load.targeting == request.targeting
+        {
+            return None;
+        }
+        Request::reserve(state, disable_geoip)
     });
     follow_up.ok().and_then(|(_, next)| next)
 }
@@ -157,7 +166,8 @@ fn install(
 impl Client {
     /// Request current-user flags without waiting for network I/O. Reload emits
     /// no analytics and remains available while opted out. Concurrent requests
-    /// coalesce to one latest pending refresh; obsolete responses cannot install.
+    /// coalesce to one latest pending refresh; a response for an earlier identity
+    /// cannot install.
     /// Failures retain cached values and report through `on_error`.
     ///
     /// Uses the independent request worker. Delivery and in-memory access

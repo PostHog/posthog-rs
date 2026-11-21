@@ -303,7 +303,9 @@ impl Client {
     /// Only accepted analytics updates are deduplicated. Local flag targeting merges
     /// set-once absent keys, then set values, even when analytics is deduplicated or
     /// rejected, leaving out values nested more than 100 levels deep. It does not
-    /// immediately reload flags. State enablement survives rejection.
+    /// reload flags, even when a load is in flight: the next load uses the new
+    /// targeting, as in posthog-ios and posthog-android. State enablement
+    /// survives rejection.
     pub fn set_person_properties(&self, input: impl Into<PersonProperties>) {
         let Some(_guard) = self.identity_guard("set_person_properties") else {
             return;

@@ -569,6 +569,33 @@ fn shutdown_does_not_wait_for_or_retry_an_in_flight_flags_request() {
     );
 }
 
+// Shutdown discards the result of an in-flight flags request, so a failure
+// that arrives afterwards is not reported either.
+#[test]
+fn a_flags_failure_arriving_after_shutdown_is_not_reported() {
+    let server = MockServer::start();
+    let flags = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        // 503 is not retried, so the failure is reported as soon as it arrives.
+        then.status(503).delay(Duration::from_millis(500));
+    });
+    let mut setup = config(&server);
+    setup.preload_feature_flags = true;
+    let (errors_tx, errors) = std::sync::mpsc::channel();
+    setup.on_error(move |_| {
+        let _ = errors_tx.send(());
+    });
+    let client = Client::init_blocking(setup);
+    wait_for_preload(&flags);
+    client.shutdown_blocking(None);
+    drop(client);
+    // Well past the delayed response.
+    assert!(
+        errors.recv_timeout(Duration::from_secs(2)).is_err(),
+        "on_error ran after shutdown returned"
+    );
+}
+
 #[cfg(feature = "async-client")]
 #[test]
 fn async_shutdown_does_not_wait_for_an_in_flight_flags_request() {

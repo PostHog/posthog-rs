@@ -83,6 +83,11 @@ impl Task {
     ) -> Option<Task> {
         let endpoint = options.endpoints().build_url(Endpoint::Flags);
         let result = fetch(http, options, &endpoint, &self.body, closed)?;
+        // Shutdown discards a result that arrives after it started, so its
+        // failure is not reported either.
+        if closed() {
+            return None;
+        }
         let failure = match &result {
             Err(error) => Some(*error),
             Ok(loaded) if loaded.invalid_payloads => Some(LoadError::InvalidResponse),
