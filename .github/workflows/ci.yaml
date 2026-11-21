@@ -57,7 +57,7 @@ jobs:
         run: cargo clippy --tests -- -D warnings
 
       - name: Clippy (mcp)
-        run: cargo clippy --tests --features mcp -- -D warnings
+        run: cargo clippy --tests --features mcp,tower -- -D warnings
 
       - name: Clippy (stateful)
         run: cargo clippy --tests --features stateful -- -D warnings
@@ -150,6 +150,88 @@ jobs:
       - name: Build
         run: ${{ matrix.command }}
 
+  ffi:
+    name: C bindings
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/posthog-rs-ffi
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cbindgen
+            target
+          key: ${{ runner.os }}-cargo-ffi-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ffi-
+
+      - name: Format
+        run: cargo fmt -p posthog-rs-ffi -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked -p posthog-rs-ffi --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked -p posthog-rs-ffi
+
+      - name: Check the header matches the source
+        run: |
+          command -v cbindgen >/dev/null || cargo install cbindgen --version 0.29.4 --locked
+          cbindgen --config cbindgen.toml --output include/posthog.h
+          git diff --exit-code include/posthog.h
+
+  ffi-release-version:
+    name: C bindings release version
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the posthog-rs-ffi version
+        id: version
+        run: echo "version=$(grep -m1 '^version = ' crates/posthog-rs-ffi/Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
+
+  ffi-release-dry-run:
+    # Builds, links and runs the bindings on every release platform, as the release does.
+    name: C bindings release build
+    needs: ffi-release-version
+    uses: ./.github/workflows/ffi-build.yml
+    with:
+      version: ${{ needs.ffi-release-version.outputs.version }}
+
+  ffi-msrv:
+    name: C bindings (MSRV)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust 1.78.0
+        run: |
+          rustup toolchain install 1.78.0 --profile minimal
+          rustup default 1.78.0
+
+      - name: Check
+        run: cargo check --locked -p posthog-rs-ffi --lib
+
   package:
     name: Cargo publish dry run
     runs-on: ubuntu-latest
@@ -210,7 +292,7 @@ jobs:
               && cargo test --locked --no-default-features --features stateful,tls --test test_stateful_init --test test_stateful_capture --test test_stateful_drains --test test_stateful_identity --test test_stateful_consent --test test_stateful_properties
           - name: Unit test (workspace)
             cache-key: workspace
-            command: cargo test --workspace --verbose
+            command: cargo test --workspace --exclude posthog-rs-ffi --verbose
           - name: Compatibility crate
             cache-key: compatibility-crate
             command: >-
@@ -238,7 +320,7 @@ jobs:
             command: cargo test --verbose --no-default-features --features stateful,tls-no-provider --test test_tls_no_provider
           - name: Unit test (mcp)
             cache-key: mcp
-            command: cargo test --verbose --features mcp
+            command: cargo test --verbose --features mcp,tower
           - name: E2E test
             cache-key: e2e
             command: cargo test --verbose --features e2e-test,tls --no-default-features
