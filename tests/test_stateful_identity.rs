@@ -734,6 +734,22 @@ fn blank_or_self_alias_sends_nothing() {
 }
 
 #[test]
+fn identified_alias_event_keeps_its_own_source_identity() {
+    // Anonymous ID "anonymous", distinct ID "user": no preceding $identify event.
+    let mut conf = config();
+    conf.bootstrap_identified_id = Some("user".into());
+    let (client, events) = observed(conf);
+    client.alias("other");
+    client.reset();
+    let seen = events.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].event_name(), "$create_alias");
+    assert_eq!(seen[0].distinct_id(), "user");
+    assert_eq!(seen[0].properties()["distinct_id"], "user");
+    assert_eq!(seen[0].properties()["alias"], "other");
+}
+
+#[test]
 fn identity_options_reach_their_events() {
     let (client, events) = observed(config());
     let mut identify = Identify::new("A");
