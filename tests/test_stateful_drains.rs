@@ -426,3 +426,94 @@ fn drop_after_a_cancelled_shutdown_does_not_wait_for_its_deadline() {
         elapsed
     );
 }
+
+/// A persistent client whose uploads take 6 s, so one stays in flight while
+/// an earlier shutdown selects an 8 s deadline.
+fn slow_persistent(server: &MockServer, directory: &Path) -> Config {
+    let mut config = config(server);
+    config.persistence = Persistence::Directory(directory.to_path_buf());
+    config
+}
+
+fn slow_server() -> MockServer {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST);
+        then.delay(Duration::from_secs(6)).status(200);
+    });
+    server
+}
+
+/// Drop `client`, then create a client for the same namespace at once and
+/// return its distinct ID.
+fn distinct_id_after_drop<C>(client: C, server: &MockServer, directory: &Path) -> String {
+    drop(client);
+    let again = Client::init_blocking(slow_persistent(server, directory));
+    let restored = again.get_distinct_id();
+    drop(again);
+    restored
+}
+
+#[cfg(feature = "async-client")]
+#[test]
+fn a_client_created_right_after_drop_following_a_cancelled_shutdown_restores_the_identity() {
+    let server = slow_server();
+    let directory = temporary_directory();
+    let mut config = slow_persistent(&server, &directory);
+    config.flush_at = 1;
+    config.shutdown_timeout = Duration::from_secs(8);
+    let client = Client::init_blocking(config);
+    let id = client.get_distinct_id();
+    client.flush_blocking();
+    assert!(matches!(
+        client.capture("in-flight"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(async {
+        let shutdown = client.shutdown(None);
+        futures::pin_mut!(shutdown);
+        // Select the 8 s deadline, then cancel the wait.
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+    });
+    let restored = distinct_id_after_drop(client, &server, &directory);
+    let _ = std::fs::remove_dir_all(&directory);
+    assert_eq!(restored, id, "re-init right after Drop lost the identity");
+}
+
+#[test]
+fn a_client_created_right_after_drop_following_a_hook_shutdown_restores_the_identity() {
+    use std::sync::{Arc, Mutex, Weak};
+    let server = slow_server();
+    let directory = temporary_directory();
+    let slot = Arc::new(Mutex::new(Weak::<Client>::new()));
+    let hook_slot = slot.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tx = Mutex::new(tx);
+    let mut config = slow_persistent(&server, &directory);
+    config.flush_at = 1;
+    config.shutdown_timeout = Duration::from_secs(8);
+    config.before_send(move |event| {
+        if event.event_name() == "stop" {
+            if let Some(client) = hook_slot.lock().unwrap().upgrade() {
+                let _ = tx.lock().unwrap().send(client.shutdown_blocking(None));
+            }
+        }
+        Some(event)
+    });
+    let client = Arc::new(Client::init_blocking(config));
+    *slot.lock().unwrap() = Arc::downgrade(&client);
+    let id = client.get_distinct_id();
+    client.flush_blocking();
+    assert!(matches!(
+        client.capture("in-flight"),
+        CaptureOutcome::Accepted { .. }
+    ));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(client.capture("stop"), CaptureOutcome::Closed);
+    let report = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(report.delivery, DeliveryOutcome::Deferred);
+    let restored = distinct_id_after_drop(client, &server, &directory);
+    let _ = std::fs::remove_dir_all(&directory);
+    assert_eq!(restored, id, "re-init right after Drop lost the identity");
+}

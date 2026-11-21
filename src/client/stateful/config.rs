@@ -68,8 +68,8 @@ pub struct Config {
     pub request_timeout: Duration,
     /// Default SDK-controlled shutdown waiting budget. Default: 30 seconds.
     /// The first shutdown selects one deadline; later calls cannot extend it.
-    /// Dropping the client does not wait for delivery or for this deadline; it
-    /// waits up to about 1 s for local writes. Already-started work owns its
+    /// Dropping the client ends that deadline at once and does not wait for
+    /// delivery; it waits up to about 1 s for local writes. Already-started work owns its
     /// resources until completion and may retain them indefinitely if it never
     /// returns. Arbitrary destructors of application objects captured by
     /// callbacks may block outside this bound.
@@ -84,11 +84,12 @@ pub struct Config {
     /// SDK name for events' `$lib` and for the `PostHog-Sdk-Info` and
     /// `User-Agent` headers of capture requests. Defaults to posthog-rs; a
     /// wrapper SDK sets its own. A blank name or version uses its default. If
-    /// the name or version is not valid header text, the client uses both
+    /// the name or version is not visible ASCII, the client uses both
     /// defaults.
     pub sdk_name: String,
     /// SDK version for events' `$lib_version` and for the same headers.
-    /// Defaults to this crate's version.
+    /// Defaults to this crate's version. Like the name, it must be visible
+    /// ASCII.
     pub sdk_version: String,
     pub(super) before_send: Vec<BeforeSendHook>,
     pub(super) on_error: Vec<OnErrorHook>,
@@ -167,9 +168,13 @@ impl Config {
         if self.sdk_version.is_empty() {
             self.sdk_version = crate::client::CRATE_VERSION.into();
         }
-        if reqwest::header::HeaderValue::from_str(&self.sdk_identity().user_agent()).is_err() {
+        // Capture rejects header values that are not visible ASCII, which
+        // `HeaderValue::from_str` would otherwise accept.
+        let readable = reqwest::header::HeaderValue::from_str(&self.sdk_identity().user_agent())
+            .is_ok_and(|value| value.to_str().is_ok());
+        if !readable {
             tracing::warn!(
-                "posthog-rs: sdk_name or sdk_version is not valid header text; using the defaults"
+                "posthog-rs: sdk_name or sdk_version is not visible ASCII; using the defaults"
             );
             self.sdk_name = crate::client::SDK_USERAGENT_NAME.into();
             self.sdk_version = crate::client::CRATE_VERSION.into();

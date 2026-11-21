@@ -101,6 +101,25 @@ impl Shutdown {
         self.shared.changed.notify_all();
         (deadline, true)
     }
+    /// End the selected deadline at `at` if it is later. Only `Drop` calls
+    /// this: it holds the last reference, so no caller still waits on the
+    /// longer deadline. Returns whether the deadline changed.
+    pub(super) fn shorten_to(&self, at: Instant) -> bool {
+        let state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut selected = self
+            .shared
+            .deadline
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if selected.is_some_and(|end| end <= at) {
+            return false;
+        }
+        *selected = Some(at);
+        drop(selected);
+        drop(state);
+        self.shared.changed.notify_all();
+        true
+    }
     pub(super) fn complete(&self) {
         self.shared
             .state
