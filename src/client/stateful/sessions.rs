@@ -167,6 +167,14 @@ impl Sessions {
             .map(|live| live.id)
     }
 
+    /// Attribution to a valid live session. Preparing it would change nothing.
+    pub(super) fn live_admission(&self, now: SessionTime) -> Option<AdmissionSession> {
+        self.active_id(now).map(|id| AdmissionSession {
+            epoch: self.epoch,
+            id: Some(id),
+        })
+    }
+
     pub(super) fn prepare_admission(&mut self, now: SessionTime) -> AdmissionSession {
         let mut id = self.active_id(now);
         if id.is_none() && self.mode == SessionMode::Automatic && !self.background {
@@ -218,6 +226,15 @@ impl Sessions {
         self.live = Some(Self::new_live(now));
     }
 
+    /// Begin the session that in-flight captures already attribute to, if it is
+    /// still valid, so their admission commits to it; otherwise start a new one.
+    fn start_or_adopt(&mut self, now: SessionTime) {
+        match self.provisional.take().filter(|live| !live.expired(now)) {
+            Some(provisional) => self.live = Some(provisional),
+            None => self.start(now),
+        }
+    }
+
     fn maintain(&mut self, now: SessionTime, activity: bool) {
         if self.mode == SessionMode::Manual {
             return;
@@ -228,10 +245,11 @@ impl Sessions {
         if self.background {
             return;
         }
-        match self.live.as_mut() {
-            None => self.start(now),
-            Some(live) if activity => live.touch(now),
-            Some(_) => {}
+        if self.live.is_none() {
+            self.start_or_adopt(now);
+        }
+        if let Some(live) = self.live.as_mut().filter(|_| activity) {
+            live.touch(now);
         }
     }
 
@@ -260,7 +278,7 @@ impl Sessions {
             Operation::Activity => self.maintain(now, true),
             Operation::Start => {
                 if self.live.is_none() {
-                    self.start(now);
+                    self.start_or_adopt(now);
                 }
             }
             Operation::Reset => self.start(now),
@@ -307,7 +325,7 @@ impl Client {
     /// Automatic foreground mode creates/rotates; background mode clears expired
     /// sessions. While opted out, returns only a valid existing ID without mutation.
     /// Disabled/closed clients return None. No filesystem or network I/O.
-    pub fn session_id(&self) -> Option<Uuid> {
+    pub fn get_session_id(&self) -> Option<Uuid> {
         self.session_operation(Operation::Maintain)
     }
 

@@ -481,7 +481,7 @@ fn session_operations_complete_while_state_io_is_gated() {
     let caller_client = client.clone();
     let (done_tx, done_rx) = mpsc::channel();
     let caller = thread::spawn(move || {
-        let first = caller_client.session_id().unwrap();
+        let first = caller_client.get_session_id().unwrap();
         caller_client.session_activity();
         caller_client.set_app_in_background(true);
         caller_client.set_app_in_background(false);

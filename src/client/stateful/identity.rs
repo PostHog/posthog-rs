@@ -365,6 +365,8 @@ impl Client {
     /// collection. Setup bootstrap is not
     /// reapplied. A hook may reset:
     /// its already-snapshotted outer event retains the old identity.
+    /// Ends the current session; Automatic mode starts a new one on the next event
+    /// or `get_session_id()`, Manual mode waits for `start_session()`.
     pub fn reset(&self) {
         if self.is_disabled() || self.closed.load(Ordering::Acquire) {
             return;
