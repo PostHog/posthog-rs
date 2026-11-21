@@ -33,23 +33,67 @@ pub(super) struct FlagCompletion {
     pub(super) invalid_payloads: bool,
 }
 
+// Like `registered` and `groups`, a missing field or a value this build can't
+// read or accept restores empty, so it never discards the identity and consent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct FlagState {
+    #[serde(default, deserialize_with = "lenient_person_properties")]
     pub(super) person_properties: HashMap<String, Value>,
+    #[serde(default, deserialize_with = "lenient_group_properties")]
     pub(super) group_properties: HashMap<String, HashMap<String, Value>>,
     // Immutable evaluation data is shared by otherwise independent state snapshots.
-    #[serde(with = "super::shared_arc")]
+    #[serde(default, with = "super::shared_arc")]
     pub(super) cache: Option<Arc<FlagCache>>,
 }
 
 impl FlagState {
     pub(super) fn is_valid(&self) -> bool {
-        self.group_properties
-            .keys()
-            .all(|key| !key.trim().is_empty())
-            && super::within_depth(self.person_properties.values())
-            && super::within_depth(self.group_properties.values().flat_map(HashMap::values))
+        valid_person_properties(&self.person_properties)
+            && valid_group_properties(&self.group_properties)
     }
+}
+
+fn valid_person_properties(properties: &HashMap<String, Value>) -> bool {
+    super::within_depth(properties.values())
+}
+
+fn valid_group_properties(properties: &HashMap<String, HashMap<String, Value>>) -> bool {
+    properties.keys().all(|key| !key.trim().is_empty())
+        && super::within_depth(properties.values().flat_map(HashMap::values))
+}
+
+/// Saved person targeting, or none when it can't be read or is too deep.
+fn lenient_person_properties<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, Value>, D::Error> {
+    let properties: HashMap<String, Value> =
+        serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default();
+    Ok(if valid_person_properties(&properties) {
+        properties
+    } else {
+        HashMap::new()
+    })
+}
+
+/// Saved group targeting, or none when it can't be read, has a blank group
+/// type or is too deep.
+fn lenient_group_properties<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, HashMap<String, Value>>, D::Error> {
+    let properties: HashMap<String, HashMap<String, Value>> =
+        serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default();
+    Ok(if valid_group_properties(&properties) {
+        properties
+    } else {
+        HashMap::new()
+    })
+}
+
+/// Saved flag state, or the default when it isn't an object this build can read.
+pub(super) fn lenient_flags<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<FlagState, D::Error> {
+    Ok(serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +128,9 @@ pub(super) struct FlagCache {
     /// Keys whose latest record failed to evaluate. A read with no value for
     /// one reports `evaluation_failed` instead of `flag_missing`.
     pub(super) failed: HashSet<String>,
+    /// The latest response's `errorsWhileComputingFlags`. As in posthog-ios and
+    /// posthog-android, every read reports it, whichever record it finds.
+    pub(super) errors_while_computing: bool,
 }
 
 /// Reporting metadata belongs to each retained record: a partial response cannot
@@ -91,7 +138,6 @@ pub(super) struct FlagCache {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CachedFlag {
     pub(super) context: Arc<FlagContext>,
-    pub(super) revision: u64,
     pub(super) partial: bool,
     pub(super) record: EvaluatedFlagRecord,
     pub(super) request_id: Option<String>,
@@ -113,12 +159,13 @@ struct StoredCacheRef<'a> {
     flags: HashMap<&'a str, StoredFlagRef<'a>>,
     #[serde(skip_serializing_if = "HashSet::is_empty")]
     failed: &'a HashSet<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    errors_while_computing: bool,
 }
 
 #[derive(Serialize)]
 struct StoredFlagRef<'a> {
     context: usize,
-    revision: u64,
     partial: bool,
     record: &'a EvaluatedFlagRecord,
     request_id: &'a Option<String>,
@@ -131,12 +178,13 @@ struct StoredCache {
     flags: HashMap<String, StoredFlag>,
     #[serde(default)]
     failed: HashSet<String>,
+    #[serde(default)]
+    errors_while_computing: bool,
 }
 
 #[derive(Deserialize)]
 struct StoredFlag {
     context: usize,
-    revision: u64,
     partial: bool,
     record: EvaluatedFlagRecord,
     request_id: Option<String>,
@@ -172,7 +220,6 @@ impl Serialize for FlagCache {
                     key.as_str(),
                     StoredFlagRef {
                         context: index,
-                        revision: flag.revision,
                         partial: flag.partial,
                         record: &flag.record,
                         request_id: &flag.request_id,
@@ -185,6 +232,7 @@ impl Serialize for FlagCache {
             contexts,
             flags,
             failed: &self.failed,
+            errors_while_computing: self.errors_while_computing,
         }
         .serialize(serializer)
     }
@@ -210,7 +258,6 @@ impl<'de> Deserialize<'de> for FlagCache {
                     key,
                     CachedFlag {
                         context,
-                        revision: flag.revision,
                         partial: flag.partial,
                         record: flag.record,
                         request_id: flag.request_id,
@@ -223,6 +270,7 @@ impl<'de> Deserialize<'de> for FlagCache {
             context,
             flags,
             failed: stored.failed,
+            errors_while_computing: stored.errors_while_computing,
         })
     }
 }
@@ -231,7 +279,6 @@ impl FlagCache {
     pub(super) fn updated(
         previous: Option<&Self>,
         context: Arc<FlagContext>,
-        revision: u64,
         loaded: LoadedFlags,
     ) -> Self {
         let (mut flags, mut failed) = if loaded.partial {
@@ -250,7 +297,6 @@ impl FlagCache {
                 key,
                 CachedFlag {
                     context: context.clone(),
-                    revision,
                     partial: loaded.partial,
                     record,
                     request_id: loaded.request_id.clone(),
@@ -262,6 +308,7 @@ impl FlagCache {
             context: context.clone(),
             flags,
             failed,
+            errors_while_computing: loaded.partial,
         }
     }
 }

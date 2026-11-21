@@ -125,7 +125,9 @@ impl Task {
                     if closed.load(std::sync::atomic::Ordering::Acquire) {
                         break;
                     }
-                    next = task.run(http, options);
+                    next = task.run(http, options, &|| {
+                        closed.load(std::sync::atomic::Ordering::Acquire)
+                    });
                 }
             }
             Err(_) => tracing::warn!("posthog-rs: remote config completion panicked"),

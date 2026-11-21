@@ -744,3 +744,53 @@ fn a_failed_flag_reports_evaluation_failed_and_a_healthy_sibling_does_not() {
         .unwrap();
     assert_eq!(checkout.properties()["$feature_flag_response"], Value::Null);
 }
+
+// sdk-specs feature-flag-called-tracker "Failed flag diagnostics coexist with
+// response-wide errors". As posthog-ios and posthog-android do, the latest
+// response's errorsWhileComputingFlags applies to every read, including a
+// failed key, a missing key and a record kept from an earlier response.
+#[test]
+fn response_wide_errors_are_reported_with_failed_missing_and_retained_flags() {
+    let server = MockServer::start();
+    accept(&server);
+    let mut c = config(&server);
+    c.bootstrap_feature_flags = None;
+    c.bootstrap_feature_flag_payloads = None;
+    let events = observe(&mut c);
+    let client = Client::init_blocking(c);
+    let mut full = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200)
+            .json_body(json!({"flags": {"kept": {"key": "kept", "enabled": true}}}));
+    });
+    reload(&client);
+    full.delete();
+    server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({
+            "errorsWhileComputingFlags": true,
+            "flags": {"checkout": {"key": "checkout", "enabled": false, "failed": true}}
+        }));
+    });
+    reload(&client);
+    assert_eq!(client.feature_flag("checkout").get(), None);
+    assert_eq!(client.feature_flag("absent").get(), None);
+    assert!(client.feature_flag("kept").is_enabled());
+    let events = events.lock().unwrap();
+    let error = |key: &str| {
+        let event = events
+            .iter()
+            .find(|event| event.properties()["$feature_flag"] == key)
+            .unwrap();
+        event.properties().get("$feature_flag_error").cloned()
+    };
+    assert_eq!(
+        error("checkout"),
+        Some(json!("errors_while_computing_flags,evaluation_failed"))
+    );
+    assert_eq!(
+        error("absent"),
+        Some(json!("errors_while_computing_flags,flag_missing"))
+    );
+    assert_eq!(error("kept"), Some(json!("errors_while_computing_flags")));
+}

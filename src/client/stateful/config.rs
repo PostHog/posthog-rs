@@ -331,6 +331,9 @@ impl Config {
         options.max_queue_size = self.max_queue_size;
         options.flush_interval_ms = self.flush_interval.as_millis() as u64;
         options.request_timeout_seconds = self.request_timeout_seconds();
+        // One timeout for every request, flags included, as in posthog-ios and
+        // posthog-android.
+        options.feature_flags_request_timeout_seconds = self.request_timeout_seconds();
         options.shutdown_timeout_ms = self.shutdown_timeout.as_millis() as u64;
         options.retry_initial_backoff_ms = RETRY_INITIAL_BACKOFF_MS;
         options.capture_compression = self.capture_compression;

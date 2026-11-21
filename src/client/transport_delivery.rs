@@ -421,8 +421,8 @@ impl TransportHandle {
         finished(&self.worker)
     }
 
-    /// Whether every delivery thread has finished. Never waits.
-    /// Event delivery and the feature flag worker have both stopped.
+    /// Event delivery and the request worker have stopped.
+    #[cfg(test)]
     pub(crate) fn all_stopped(&self) -> bool {
         self.delivery_stopped()
             && self.delivery.as_ref().map_or(true, |delivery| {

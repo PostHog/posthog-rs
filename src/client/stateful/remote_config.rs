@@ -64,6 +64,7 @@ impl Client {
                                         context: context.clone(),
                                         flags: HashMap::new(),
                                         failed: Default::default(),
+                                        errors_while_computing: false,
                                     }))
                                 });
                             state.flag_load.completed = Some(FlagCompletion {

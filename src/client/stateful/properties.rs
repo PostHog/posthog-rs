@@ -60,7 +60,8 @@ impl Client {
     /// call, even for the same key without properties. Enables person processing
     /// without identifying the user. Opted-out/Never/disabled/closed clients no-op.
     /// Changed membership replaces scoped flag targeting and reloads flags. Supplied
-    /// properties for the same membership merge without an immediate reload.
+    /// properties for the same membership merge without an immediate reload, leaving
+    /// out of flag targeting any value nested more than 100 levels deep.
     /// Membership is visible before hooks run; rejected events do not roll it back
     /// or schedule replay. Persistence and delivery remain asynchronous.
     pub fn group(&self, group: impl Into<Group>) {
@@ -138,12 +139,7 @@ impl Client {
             // A direct profile update for another group must not target the
             // currently remembered group of the same type.
             if state.groups.get(&group_type) == Some(&group_key) && !properties.is_empty() {
-                state
-                    .flags
-                    .group_properties
-                    .entry(group_type.clone())
-                    .or_default()
-                    .extend(properties.clone());
+                state.flags.mirror_group(&group_type, &properties);
             }
             Some((state.clone(), changed))
         });

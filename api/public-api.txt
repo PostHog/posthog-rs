@@ -352,7 +352,6 @@ pub fn posthog::stateful::FeatureFlagLookup<'_>::value(self) -> core::option::Op
 pub posthog::stateful::FeatureFlagResult::context: posthog::stateful::FeatureFlagContext
 pub posthog::stateful::FeatureFlagResult::enabled: bool
 pub posthog::stateful::FeatureFlagResult::evaluated_at: core::option::Option<i64>
-pub posthog::stateful::FeatureFlagResult::evaluation_revision: u64
 pub posthog::stateful::FeatureFlagResult::id: core::option::Option<u64>
 pub posthog::stateful::FeatureFlagResult::key: alloc::string::String
 pub posthog::stateful::FeatureFlagResult::partial: bool
