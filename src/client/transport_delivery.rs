@@ -42,7 +42,8 @@ pub(crate) enum StartupFailure {
 
 pub(super) struct Delivery {
     pub(super) inbox: Arc<Inbox>,
-    /// The shutdown deadline. The first caller to select one wins.
+    /// The shutdown deadline. The first caller to select one wins; dropping
+    /// the stateful client can then shorten it.
     deadline: Arc<Mutex<Option<Instant>>>,
     pub(super) drain_timeout: Duration,
     executor: Mutex<Option<JoinHandle<()>>>,

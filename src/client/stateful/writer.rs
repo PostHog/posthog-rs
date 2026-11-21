@@ -85,12 +85,19 @@ struct State {
 
 impl State {
     fn observe_close(&mut self, deadline: Instant, now: Instant) {
-        if self.closing.is_none() {
-            self.closing = Some(deadline);
-            if self.mode == Mode::Persistent && self.persisted < self.revision && self.failures == 0
-            {
-                self.due = Some(now);
+        match self.closing {
+            None => {
+                self.closing = Some(deadline);
+                if self.mode == Mode::Persistent
+                    && self.persisted < self.revision
+                    && self.failures == 0
+                {
+                    self.due = Some(now);
+                }
             }
+            // Dropping the client can shorten the selected deadline.
+            Some(closing) if deadline < closing => self.closing = Some(deadline),
+            Some(_) => {}
         }
     }
 

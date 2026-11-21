@@ -446,6 +446,23 @@ fn explicit_shutdown_deadline_is_shared_and_cannot_be_extended_by_later_close() 
 }
 
 #[test]
+fn a_shortened_deadline_stops_a_writer_closing_toward_a_later_one() {
+    let (writer, calls, clock) = controlled(vec![]);
+    let revision = replace(&writer, "pending");
+    writer.checkpoint();
+    call(&calls).finish(Err(io::Error::other("test failure")));
+    assert_eq!(writer.wait_blocking(revision), DrainOutcome::WriteFailed);
+    writer.request_close_before(clock.now() + Duration::from_secs(60));
+    writer.tick();
+    // Dropping the client shortens the shared deadline, then wakes the writer.
+    *writer.deadline_handle().lock().unwrap() = Some(clock.now());
+    writer.request_close_before(clock.now());
+    writer.tick();
+    assert!(writer.shared.lock().stopped);
+    assert!(calls.try_recv().is_err());
+}
+
+#[test]
 fn shutdown_from_error_hook_is_deferred_without_self_join_or_state_lock_deadlock() {
     let reference = Arc::new(Mutex::new(Weak::<StateWriter>::new()));
     let weak = reference.clone();
