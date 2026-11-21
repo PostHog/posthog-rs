@@ -505,7 +505,10 @@ impl Drop for Client {
         let budget = Instant::now() + DROP_LOCAL_WRITE_WAIT;
         let on_worker = self.on_worker_thread();
         let defer = self.must_defer_drain();
-        if !defer && !self.closed.load(Ordering::Acquire) {
+        // Wait for pending client state even after an earlier shutdown: the
+        // deadline is shortened to now below, after which the writer no
+        // longer saves.
+        if !defer {
             let state = self.state.as_ref().unwrap();
             let revision = state.checkpoint();
             let _ = state.wait_blocking_until(revision, budget);
