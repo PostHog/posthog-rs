@@ -226,7 +226,7 @@ impl Client {
         let backend = match restored.state_store {
             Some(store) => Backend::Persistent {
                 store: Box::new(store),
-                restored: was_restored && !session_changed,
+                restored: was_restored && !restored.rewrite_required && !session_changed,
             },
             None if matches!(config.persistence, Persistence::Memory) => Backend::Memory,
             None => Backend::Unavailable,
