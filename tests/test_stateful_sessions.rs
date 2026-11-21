@@ -74,9 +74,9 @@ fn defaults_getters_capture_and_manual_boundaries() {
     assert_eq!(conf.session_persistence, SessionPersistence::Memory);
     let (client, events) = observed(conf);
     assert_eq!(client.peek_session_id(), None);
-    let first = client.session_id().unwrap();
+    let first = client.get_session_id().unwrap();
     assert_eq!(first.get_version_num(), 7);
-    assert_eq!(client.session_id(), Some(first));
+    assert_eq!(client.get_session_id(), Some(first));
     client.start_session();
     assert_eq!(client.peek_session_id(), Some(first));
     client.capture("first");
@@ -101,17 +101,17 @@ fn manual_mode_is_sessionless_until_start_and_ends_until_restarted() {
     client.session_activity();
     client.set_app_in_background(true);
     client.set_app_in_background(false);
-    assert_eq!(client.session_id(), None);
+    assert_eq!(client.get_session_id(), None);
     client.start_session();
-    let id = client.session_id().unwrap();
+    let id = client.get_session_id().unwrap();
     client.capture("active");
     client.end_session();
     client.capture("ended");
-    assert_eq!(client.session_id(), None);
+    assert_eq!(client.get_session_id(), None);
     client.reset_session();
-    assert_ne!(client.session_id(), Some(id));
+    assert_ne!(client.get_session_id(), Some(id));
     client.reset();
-    assert_eq!(client.session_id(), None);
+    assert_eq!(client.get_session_id(), None);
     let seen = events.lock().unwrap();
     assert!(!seen[0].properties().contains_key("$session_id"));
     assert_eq!(seen[1].properties()["$session_id"], id.to_string());
@@ -126,7 +126,7 @@ fn consent_disabled_closed_invalid_and_recursive_capture_do_not_create() {
     client.start_session();
     client.reset_session();
     client.session_activity();
-    assert_eq!(client.session_id(), None);
+    assert_eq!(client.get_session_id(), None);
     assert_eq!(client.capture("blocked"), CaptureOutcome::OptedOut);
     client.opt_in();
     assert_eq!(client.peek_session_id(), None);
@@ -140,14 +140,14 @@ fn consent_disabled_closed_invalid_and_recursive_capture_do_not_create() {
     assert_eq!(client.peek_session_id(), None);
     client.shutdown_blocking(None);
     client.start_session();
-    assert_eq!(client.session_id(), None);
+    assert_eq!(client.get_session_id(), None);
     let mut conf = config();
     conf.disabled = true;
     let client = Client::init_blocking(conf);
     client.start_session();
     client.reset_session();
     client.session_activity();
-    assert_eq!(client.session_id(), None);
+    assert_eq!(client.get_session_id(), None);
     assert_eq!(client.peek_session_id(), None);
 
     let slot = Arc::new(Mutex::new(Weak::<Client>::new()));
@@ -173,7 +173,7 @@ fn background_state_survives_reset_and_dropped_passive_helpers_do_not_commit() {
     assert_eq!(client.peek_session_id(), None);
     client.set_app_in_background(true);
     client.capture("background");
-    assert_eq!(client.session_id(), None);
+    assert_eq!(client.get_session_id(), None);
     client.reset();
     client.capture("still background");
     assert_eq!(client.peek_session_id(), None);
@@ -196,7 +196,7 @@ fn canonical_event_registered_and_platform_session_precedence() {
     conf.platform_context
         .insert("$session_id".into(), json!("platform"));
     let (client, events) = observed(conf);
-    let managed = client.session_id().unwrap();
+    let managed = client.get_session_id().unwrap();
     client.capture("platform");
     client.register(HashMap::from([("$session_id".into(), json!("registered"))]));
     client.capture("registered");
@@ -216,7 +216,7 @@ fn canonical_event_registered_and_platform_session_precedence() {
 fn persistent_session_continues_but_memory_mode_clears_disk_session() {
     let directory = Directory::new();
     let client = Client::init_blocking(directory.config());
-    let id = client.session_id().unwrap();
+    let id = client.get_session_id().unwrap();
     client.capture("touch");
     assert_eq!(
         client.shutdown_blocking(None).state,
@@ -233,7 +233,7 @@ fn persistent_session_continues_but_memory_mode_clears_disk_session() {
     conf.session_persistence = SessionPersistence::Memory;
     let client = Client::init_blocking(conf);
     assert_eq!(client.peek_session_id(), None);
-    assert_ne!(client.session_id(), Some(id));
+    assert_ne!(client.get_session_id(), Some(id));
     client.register(HashMap::from([("plan".into(), json!("pro"))]));
     assert_eq!(
         client.shutdown_blocking(None).state,
@@ -243,7 +243,7 @@ fn persistent_session_continues_but_memory_mode_clears_disk_session() {
     assert_eq!(directory.state()["state"]["session"], Value::Null);
     let client = Client::init_blocking(directory.config());
     assert_eq!(client.peek_session_id(), None);
-    assert_ne!(client.session_id(), Some(id));
+    assert_ne!(client.get_session_id(), Some(id));
 }
 
 #[test]
@@ -251,9 +251,9 @@ fn persistent_choice_does_not_override_memory_backend_and_clients_are_independen
     let mut conf = config();
     conf.session_persistence = SessionPersistence::Persistent;
     let client = Client::init_blocking(conf);
-    let first = client.session_id();
+    let first = client.get_session_id();
     let second = Client::init_blocking(config());
-    assert_ne!(first, second.session_id());
+    assert_ne!(first, second.get_session_id());
     assert_eq!(
         client.flush_blocking().state,
         PersistenceOutcome::MemoryOnly
@@ -269,7 +269,7 @@ fn reset_clears_persisted_session_and_retains_manual_policy() {
     client.start_session();
     assert!(client.peek_session_id().is_some());
     client.reset();
-    assert_eq!(client.session_id(), None);
+    assert_eq!(client.get_session_id(), None);
     client.shutdown_blocking(None);
     drop(client);
     assert_eq!(directory.state()["state"]["session"], Value::Null);
@@ -298,7 +298,7 @@ fn invalid_optional_session_cache_is_repaired_without_discarding_identity() {
         assert_eq!(client.get_distinct_id(), identity);
         assert!(!client.is_disabled());
         assert_eq!(client.peek_session_id(), None);
-        assert!(client.session_id().is_some());
+        assert!(client.get_session_id().is_some());
         assert_eq!(
             client.shutdown_blocking(None).state,
             PersistenceOutcome::Persisted
@@ -339,7 +339,7 @@ fn session_state_write_failure_preserves_live_session_and_retries() {
     let path = directory.path();
     let temp = path.with_file_name("state.json.tmp");
     std::fs::create_dir(&temp).unwrap();
-    let id = client.session_id().unwrap();
+    let id = client.get_session_id().unwrap();
     assert_eq!(
         client.flush_blocking().state,
         PersistenceOutcome::WriteFailed
@@ -372,7 +372,7 @@ fn queued_wire_and_hook_snapshot_keep_old_session_across_reset() {
     });
     let client = Arc::new(Client::init_blocking(conf));
     *slot.lock().unwrap() = Arc::downgrade(&client);
-    let old_id = client.session_id().unwrap();
+    let old_id = client.get_session_id().unwrap();
     let old_person = client.get_distinct_id();
     let old = server.mock(|when, then| {
         when.method(POST)
@@ -388,7 +388,7 @@ fn queued_wire_and_hook_snapshot_keep_old_session_across_reset() {
     assert_eq!(client.peek_session_id(), None);
     client.flush_blocking();
     old.assert_calls(1);
-    assert_ne!(client.session_id(), Some(old_id));
+    assert_ne!(client.get_session_id(), Some(old_id));
 }
 
 #[test]
@@ -405,13 +405,13 @@ fn capture_racing_reset_keeps_coherent_pre_hook_identity_and_session() {
         None
     });
     let client = Arc::new(Client::init_blocking(conf));
-    let id = client.session_id().unwrap();
+    let id = client.get_session_id().unwrap();
     let person = client.get_distinct_id();
     let other = client.clone();
     let caller = std::thread::spawn(move || other.capture("old"));
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     client.reset();
-    let next = client.session_id().unwrap();
+    let next = client.get_session_id().unwrap();
     release_tx.send(()).unwrap();
     caller.join().unwrap();
     assert_ne!(next, id);
@@ -438,7 +438,7 @@ fn recovery_sends_queued_events_with_their_original_session() {
     };
     let client = Client::init_blocking(configure());
     client.flush_blocking();
-    let old = client.session_id().unwrap();
+    let old = client.get_session_id().unwrap();
     assert!(matches!(
         client.capture("retained"),
         CaptureOutcome::Accepted { .. }
@@ -481,7 +481,7 @@ fn hook_can_replace_or_remove_wire_session_without_changing_manager() {
         Some(event)
     });
     let client = Client::init_blocking(conf);
-    let id = client.session_id();
+    let id = client.get_session_id();
     let wire = server.mock(|when, then| {
         when.method(POST)
             .path("/i/v1/analytics/events")
@@ -502,12 +502,99 @@ fn async_initialization_and_drains_share_session_persistence_without_runtime() {
     futures::executor::block_on(async {
         let directory = Directory::new();
         let client = Client::init(directory.config()).await;
-        let id = client.session_id();
+        let id = client.get_session_id();
         assert_eq!(client.flush().await.state, PersistenceOutcome::Persisted);
         client.shutdown(None).await;
         drop(client);
         let client = Client::init(directory.config()).await;
-        assert_eq!(client.session_id(), id);
+        assert_eq!(client.get_session_id(), id);
         client.shutdown(None).await;
     });
+}
+
+fn wire_session(event: &Event) -> String {
+    event.properties()["$session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Runs `call` while the first capture of the process waits in its hook, then
+/// returns the session IDs of that capture and of the next one.
+fn session_call_during_first_capture(call: impl FnOnce(&Client)) -> (String, String) {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let mut conf = config();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let hook_seen = seen.clone();
+    conf.before_send(move |event| {
+        if event.event_name() == "first" {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }
+        hook_seen.lock().unwrap().push(event);
+        None
+    });
+    let client = Arc::new(Client::init_blocking(conf));
+    let other = client.clone();
+    let caller = std::thread::spawn(move || other.capture("first"));
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    call(&client);
+    release_tx.send(()).unwrap();
+    assert_eq!(caller.join().unwrap(), CaptureOutcome::Dropped);
+    client.capture("second");
+    let seen = seen.lock().unwrap();
+    (wire_session(&seen[0]), wire_session(&seen[1]))
+}
+
+#[test]
+fn getter_during_the_capture_that_creates_a_session_keeps_one_session() {
+    let (first, second) = session_call_during_first_capture(|client| {
+        client.get_session_id();
+    });
+    assert_eq!(first, second);
+}
+
+#[test]
+fn activity_during_the_capture_that_creates_a_session_keeps_one_session() {
+    let (first, second) = session_call_during_first_capture(Client::session_activity);
+    assert_eq!(first, second);
+}
+
+#[test]
+fn start_during_the_capture_that_creates_a_session_keeps_one_session() {
+    let (first, second) = session_call_during_first_capture(Client::start_session);
+    assert_eq!(first, second);
+}
+
+#[test]
+fn hook_reading_the_session_on_the_first_capture_sees_the_events_session() {
+    let slot = Arc::new(Mutex::new(Weak::<Client>::new()));
+    let hook_slot = slot.clone();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let hook_seen = seen.clone();
+    let mut conf = config();
+    conf.before_send(move |event| {
+        let current = hook_slot
+            .lock()
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .get_session_id();
+        hook_seen.lock().unwrap().push((event, current));
+        None
+    });
+    let client = Arc::new(Client::init_blocking(conf));
+    *slot.lock().unwrap() = Arc::downgrade(&client);
+    client.capture("first");
+    client.capture("second");
+    let seen = seen.lock().unwrap();
+    let first = wire_session(&seen[0].0);
+    assert_eq!(seen[0].1.map(|id| id.to_string()), Some(first.clone()));
+    assert_eq!(wire_session(&seen[1].0), first);
 }

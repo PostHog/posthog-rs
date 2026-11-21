@@ -73,7 +73,7 @@ fn reexports_stateful_client_and_its_public_entry_points() {
     client.set_app_in_background(true);
     client.reset_session();
     client.end_session();
-    assert_eq!(client.session_id(), None);
+    assert_eq!(client.get_session_id(), None);
     assert_eq!(client.peek_session_id(), None);
     client.reset();
     client.opt_out();
