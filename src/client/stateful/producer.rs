@@ -615,6 +615,7 @@ impl Client {
     /// Capture `$screen` through the ordinary event pipeline. The explicit name
     /// wins over a conflicting `$screen_name` property before hooks run. Later
     /// events carry the name as `$screen_name` unless they set their own.
+    /// While opted out, nothing is recorded.
     pub fn screen(&self, screen: impl Into<Screen>) -> CaptureOutcome {
         if self.is_disabled() {
             return CaptureOutcome::Disabled;
@@ -629,6 +630,9 @@ impl Client {
         } = screen.into();
         if name.trim().is_empty() {
             return CaptureOutcome::Invalid;
+        }
+        if self.snapshot_opted_out(&self.state.as_ref().unwrap().snapshot()) {
+            return CaptureOutcome::OptedOut;
         }
         self.producer
             .as_ref()
