@@ -153,7 +153,11 @@ impl Client {
             &response,
             flag.and_then(|flag| flag.request_id.as_deref()),
             flag.and_then(|flag| flag.evaluated_at),
-            flag.is_some_and(|flag| flag.partial),
+            snapshot
+                .flags
+                .cache
+                .as_ref()
+                .is_some_and(|cache| cache.errors_while_computing),
             false,
             flag.is_none()
                 && snapshot

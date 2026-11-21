@@ -26,8 +26,6 @@ pub struct FeatureFlagResult {
     pub variant: Option<String>,
     pub payload: Option<Value>,
     pub context: FeatureFlagContext,
-    /// Producing process-local targeting revision; not a server/global version.
-    pub evaluation_revision: u64,
     pub request_id: Option<String>,
     pub evaluated_at: Option<i64>,
     pub partial: bool,
@@ -78,7 +76,6 @@ impl FeatureFlagResult {
             },
             payload: flag.record.payload.clone(),
             context: FeatureFlagContext::new(flag.context.clone()),
-            evaluation_revision: flag.revision,
             request_id: flag.request_id.clone(),
             evaluated_at: flag.evaluated_at,
             partial: flag.partial,

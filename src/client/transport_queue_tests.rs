@@ -975,7 +975,7 @@ fn shutdown_waits_for_a_retry_that_falls_before_its_deadline() {
     finished.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(log.names().last().unwrap(), &names(&["a"]));
     harness.handle.join();
-    assert!(harness.handle.all_stopped());
+    assert!(harness.handle.delivery_stopped());
 }
 
 #[test]
@@ -993,7 +993,7 @@ fn shutdown_stops_at_a_retry_beyond_its_deadline_and_keeps_disk_events() {
     flush(&harness.handle);
     *harness.deadline.lock().unwrap() = Some(harness.clock.now() + Duration::from_millis(1));
     harness.handle.shutdown_blocking();
-    assert!(harness.handle.all_stopped());
+    assert!(harness.handle.delivery_stopped());
     assert_eq!(log.all().len(), 1);
     assert_eq!(directory.records(), [1]);
     // The lease is released, so the next start finds the event.

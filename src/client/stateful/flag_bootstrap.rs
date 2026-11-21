@@ -16,12 +16,7 @@ impl Client {
         };
         let _ = self.state.as_ref().unwrap().mutate(|state| {
             let context = Arc::new(FlagContext::current(state, config.disable_geoip));
-            let cache = Arc::new(bootstrap_cache(
-                config,
-                values,
-                context,
-                state.flag_load.revision,
-            ));
+            let cache = Arc::new(bootstrap_cache(config, values, context));
             state.flag_load.bootstrap = Some(cache.clone());
             state.flags.cache = Some(cache);
         });
@@ -32,7 +27,6 @@ fn bootstrap_cache(
     config: &Config,
     values: &HashMap<String, FlagValue>,
     context: Arc<FlagContext>,
-    revision: u64,
 ) -> FlagCache {
     let mut records = HashMap::new();
     // Unserved/orphan payloads are ignored.
@@ -65,7 +59,6 @@ fn bootstrap_cache(
     FlagCache::updated(
         None,
         context,
-        revision,
         LoadedFlags {
             records,
             request_id: None,

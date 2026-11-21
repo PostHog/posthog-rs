@@ -12,6 +12,15 @@ pub(super) struct Worker {
 }
 
 impl Worker {
+    #[cfg(test)]
+    pub(super) fn is_stopped(&self) -> bool {
+        self.worker
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(true, JoinHandle::is_finished)
+    }
+
     pub(super) fn spawn(
         options: ClientOptions,
         slot: Arc<flags::Slot>,
@@ -80,14 +89,6 @@ impl Worker {
     pub(super) fn request_close(&self) {
         let (tx, _) = mpsc::channel();
         let _ = self.tx.send(Control::Shutdown(Completion::Blocking(tx)));
-    }
-
-    pub(super) fn is_stopped(&self) -> bool {
-        self.worker
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map_or(true, JoinHandle::is_finished)
     }
 
     pub(super) fn join(&self) {
