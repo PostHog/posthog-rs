@@ -107,7 +107,7 @@ impl Task {
         self,
         http: &reqwest::blocking::Client,
         options: &ClientOptions,
-        closed: &std::sync::atomic::AtomicBool,
+        flags: &flags::Slot,
     ) {
         let result = fetch(http, options, &self.url);
         if let Err(error) = result.as_ref() {
@@ -118,18 +118,9 @@ impl Task {
         let follow_up =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.complete)(result)));
         match follow_up {
-            // A flags completion may continue with one follow-up for newer
-            // targeting; it only exists when no newer request was made.
-            Ok(mut next) => {
-                while let Some(task) = next {
-                    if closed.load(std::sync::atomic::Ordering::Acquire) {
-                        break;
-                    }
-                    next = task.run(http, options, &|| {
-                        closed.load(std::sync::atomic::Ordering::Acquire)
-                    });
-                }
-            }
+            // The flags slot decides closure and supersession for the chain.
+            Ok(Some(task)) => flags.run_chain(task, http, options),
+            Ok(None) => {}
             Err(_) => tracing::warn!("posthog-rs: remote config completion panicked"),
         }
     }
@@ -278,7 +269,7 @@ mod tests {
                 .run(
                     &reqwest::blocking::Client::new(),
                     &options,
-                    &std::sync::atomic::AtomicBool::new(false),
+                    &flags::Slot::default(),
                 );
                 assert_eq!(rx.recv().unwrap(), Some(error));
                 let diagnostics = diagnostics.lock().unwrap();

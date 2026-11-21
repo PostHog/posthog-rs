@@ -140,6 +140,7 @@ impl Client {
             // currently remembered group of the same type.
             if state.groups.get(&group_type) == Some(&group_key) && !properties.is_empty() {
                 state.flags.mirror_group(&group_type, &properties);
+                state.retarget_flags();
             }
             Some((state.clone(), changed))
         });
