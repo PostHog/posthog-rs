@@ -230,7 +230,12 @@ impl Sessions {
     /// still valid, so their admission commits to it; otherwise start a new one.
     fn start_or_adopt(&mut self, now: SessionTime) {
         match self.provisional.take().filter(|live| !live.expired(now)) {
-            Some(provisional) => self.live = Some(provisional),
+            Some(mut provisional) => {
+                // A capture a hook dropped can leave a preview up to 30 minutes
+                // old. Becoming current counts as activity, as in `start`.
+                provisional.touch(now);
+                self.live = Some(provisional);
+            }
             None => self.start(now),
         }
     }
