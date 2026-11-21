@@ -597,7 +597,7 @@ fn evaluation_revision_changes_only_with_effective_context_and_rejected_mutation
     client.register(HashMap::from([("analytics-only".into(), json!(1))]));
     client.opt_out();
     client.opt_in();
-    client.session_id();
+    client.get_session_id();
     client.identify("device"); // Identified bit alone is not an evaluation input.
     let writer = client.state.as_ref().unwrap();
     assert_eq!(writer.snapshot().flag_load.revision, 0);

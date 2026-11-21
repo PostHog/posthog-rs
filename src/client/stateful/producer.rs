@@ -454,7 +454,22 @@ impl Client {
         if input.event.trim().is_empty() {
             return CaptureOutcome::Invalid;
         }
-        let snapshot = self.state.as_ref().unwrap().mutate(|snapshot| {
+        let state = self.state.as_ref().unwrap();
+        // With a valid live session, preparing attribution changes nothing, so
+        // skip the clone-and-compare of a state mutation on the common path.
+        let current = state.snapshot();
+        if !self.snapshot_opted_out(&current) {
+            if let Some(session) = current.sessions.live_admission(self.session_now()) {
+                return self.capture_with_session(
+                    input,
+                    &current,
+                    Some(session),
+                    true,
+                    CapturePolicy::Standard,
+                );
+            }
+        }
+        let snapshot = state.mutate(|snapshot| {
             let opted_out = self.snapshot_opted_out(snapshot);
             let now = self.session_now();
             let session = (!opted_out).then(|| snapshot.sessions.prepare_admission(now));

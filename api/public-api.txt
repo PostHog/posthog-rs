@@ -255,10 +255,10 @@ pub fn posthog::stateful::Client::capture(&self, impl core::convert::Into<postho
 pub fn posthog::stateful::Client::screen(&self, impl core::convert::Into<posthog::stateful::Screen>) -> posthog::stateful::CaptureOutcome
 impl posthog::stateful::Client
 pub fn posthog::stateful::Client::end_session(&self)
+pub fn posthog::stateful::Client::get_session_id(&self) -> core::option::Option<uuid::Uuid>
 pub fn posthog::stateful::Client::peek_session_id(&self) -> core::option::Option<uuid::Uuid>
 pub fn posthog::stateful::Client::reset_session(&self)
 pub fn posthog::stateful::Client::session_activity(&self)
-pub fn posthog::stateful::Client::session_id(&self) -> core::option::Option<uuid::Uuid>
 pub fn posthog::stateful::Client::set_app_in_background(&self, bool)
 pub fn posthog::stateful::Client::start_session(&self)
 impl posthog::stateful::Client
