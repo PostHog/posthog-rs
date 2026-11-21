@@ -12,22 +12,12 @@ use crate::capture_event::CaptureEvent;
 use crate::client::common::apply_before_send_hooks;
 use crate::client::transport::Admission;
 use crate::constants::PROCESS_PERSON_PROFILE_OPT;
+use crate::event::IDENTIFY_STYLE_EVENTS;
 use crate::{BeforeSendHook, Event};
 
 #[cfg(test)]
 #[path = "producer_tests.rs"]
 mod tests;
-
-/// Events that create or change a person or group. A registered
-/// `$process_person_profile` is not sent with them.
-const IDENTITY_EVENTS: [&str; 6] = [
-    "$identify",
-    "$create_alias",
-    "$merge_dangerously",
-    "$groupidentify",
-    "$set",
-    "$set_once",
-];
 
 /// An event input whose identity comes from the stateful client.
 /// Start with [`Capture::new`] and set optional fields before capture.
@@ -311,7 +301,7 @@ impl Producer {
     /// Registered properties, groups and device context, which every event
     /// but `$snapshot` carries.
     fn fill_shared_context(&self, event: &mut Event, snapshot: &Snapshot) {
-        let identity_event = IDENTITY_EVENTS.contains(&event.event_name());
+        let identity_event = IDENTIFY_STYLE_EVENTS.contains(&event.event_name());
         for (key, value) in &snapshot.registered {
             // A registered false would make PostHog drop or ignore an identity
             // event, so it never reaches one (capture spec), as in posthog-ios
