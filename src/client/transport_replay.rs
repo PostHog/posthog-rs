@@ -381,11 +381,12 @@ impl Sender {
                 let status = response.status().as_u16();
                 retry_after = parse_retry_after(response.headers());
                 let mut bytes = Vec::new();
-                if response.take(4097).read_to_end(&mut bytes).is_err() {
-                    // A failed optional body cannot turn a known rejection into
-                    // an unknown transport failure. Successful bodies may carry quota state.
-                    (!(200..=299).contains(&status)).then_some(status)
-                } else if quota_limited(&bytes) {
+                // The status is the answer even when the body is cut off: a 2xx
+                // was accepted, and sending it again would store the
+                // screenshots twice (capture spec; event delivery and
+                // posthog-ios do the same). Only a readable body carries quota state.
+                let readable = response.take(4097).read_to_end(&mut bytes).is_ok();
+                if readable && quota_limited(&bytes) {
                     report(
                         &self.options,
                         "Screenshot upload rejected by recording quota",

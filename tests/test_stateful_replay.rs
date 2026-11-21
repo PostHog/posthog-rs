@@ -329,6 +329,11 @@ fn truncated_400_releases_capacity() {
 }
 
 #[test]
+fn truncated_200_releases_capacity() {
+    status_case(200, true, false, 1, 1, true);
+}
+
+#[test]
 fn complete_413_pair_splits_control() {
     status_case(413, false, true, 2, 3, true);
 }

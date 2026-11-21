@@ -110,9 +110,9 @@ pub enum SubmitOutcome {
 pub enum FrameUnavailable {
     /// Recording was never started, or [`SessionReplay::stop`] was called.
     NotRecording,
-    /// Project settings disallow recording, including remote controls this
-    /// client does not support yet (sampling, linked flags, minimum duration,
-    /// triggers).
+    /// Project settings disallow recording: they have not loaded, replay is
+    /// disabled, or they use controls this client does not support (sampling,
+    /// linked flags, minimum duration, event triggers).
     NotPermitted,
     /// The user has opted out.
     OptedOut,
@@ -349,7 +349,11 @@ impl SessionReplay {
             .state
             .mutate(|snapshot| {
                 if !controller.opted_out(snapshot) && snapshot.sessions.active_id(now).is_none() {
-                    snapshot.session_operation(Operation::End, now, false);
+                    // Maintain drops an expired session without invalidating
+                    // in-flight captures; Start then adopts the session they
+                    // attribute to, or creates one (also in manual mode and
+                    // the background), as `start_session` does.
+                    snapshot.session_operation(Operation::Maintain, now, false);
                     snapshot.session_operation(Operation::Start, now, false);
                 }
             })

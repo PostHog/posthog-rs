@@ -399,7 +399,9 @@ impl Client {
     /// Request persistence through the current state revision and attempt
     /// delivery of earlier queued events. Does not acknowledge ingestion.
     /// Failed writes/retry cooldowns may leave work pending. An in-flight I/O
-    /// operation or user callback can delay the wait.
+    /// operation or user callback can delay the wait. With session replay, it
+    /// also waits for submitted screenshots and their `before_send` hooks on
+    /// the encoder thread; don't call it while holding a lock a hook takes.
     pub fn flush_blocking(&self) -> DrainReport {
         if self.disabled {
             return DrainReport::disabled();

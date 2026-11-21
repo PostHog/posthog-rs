@@ -1221,3 +1221,55 @@ fn snapshot_events_carry_only_replay_and_sdk_properties() {
     assert!(properties.contains_key("$session_id"));
     assert!(properties.contains_key("$snapshot_data"));
 }
+
+/// Run `start` while an automatic-mode client's first capture is inside its
+/// `before_send` hook. Returns the event's `$session_id` and the live session.
+fn start_during_first_capture(start: impl FnOnce(&Client)) -> (Option<Value>, Option<uuid::Uuid>) {
+    let backend = Backend::new();
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let seen = Arc::new(Mutex::new(None));
+    let record = seen.clone();
+    let client = backend.client(move |config| {
+        config.before_send(move |event| {
+            if event.event_name() == "first" {
+                *record.lock().unwrap() = event.properties().get("$session_id").cloned();
+                entered_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+            Some(event)
+        });
+    });
+    assert_eq!(client.peek_session_id(), None);
+    std::thread::scope(|scope| {
+        let capture = scope.spawn(|| client.capture("first"));
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        start(&client);
+        release_tx.send(()).unwrap();
+        capture.join().unwrap();
+    });
+    let live = client.peek_session_id();
+    let event_session = seen.lock().unwrap().clone();
+    client.shutdown_blocking(None);
+    (event_session, live)
+}
+
+#[test]
+fn replay_start_adopts_the_session_of_an_in_flight_first_capture() {
+    for replay in [false, true] {
+        let (event, live) = start_during_first_capture(|client| {
+            if replay {
+                client.session_replay().start();
+            } else {
+                client.start_session();
+            }
+        });
+        assert_eq!(
+            event,
+            Some(json!(live.unwrap().to_string())),
+            "replay={}",
+            replay
+        );
+    }
+}

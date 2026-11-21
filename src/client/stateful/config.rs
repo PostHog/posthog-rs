@@ -207,6 +207,8 @@ impl Config {
     /// serialized across captures; do not wait for another capture from a hook.
     /// Screenshots run this chain after JPEG encoding on the encoder worker,
     /// before replay delivery. Submission acceptance precedes that filtering.
+    /// A flush waits for those hooks, so don't flush while holding a lock a
+    /// hook takes.
     ///
     /// A hook that returns a new [`Event`] instead of the one it received should
     /// copy that event's options, such as `process_person_profile`; the new
