@@ -613,9 +613,6 @@ fn matching_bootstrap_upgrades_without_an_event_and_never_gates_reconciliation()
         events.lock().unwrap()[1].options()["process_person_profile"],
         true
     );
-    let mut conf = config();
-    conf.bootstrap_identified_id = Some("conflict".into());
-    assert!(Client::init_blocking(conf).is_disabled());
 }
 
 #[test]
@@ -855,5 +852,68 @@ fn reset_forgets_the_last_screen_name() {
     assert_eq!(after.event_name(), "after reset");
     assert!(after.properties().get("$screen_name").is_none());
     drop(seen);
+    client.shutdown_blocking(None);
+}
+
+#[test]
+fn both_bootstrap_ids_combine_on_fresh_and_restored_installs() {
+    // Fresh install: the anonymous seed becomes the anonymous and device ID and
+    // the identified ID the distinct ID, with no event and no diagnostic.
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let seen = errors.clone();
+    let directory = Directory::new();
+    let mut conf = directory.config(); // bootstrap_anonymous_id = "anonymous"
+    conf.bootstrap_identified_id = Some("user-1".into());
+    conf.on_error(move |error| seen.lock().unwrap().push(format!("{:?}", error)));
+    let (client, events) = observed(conf);
+    assert!(
+        !client.is_disabled(),
+        "both bootstrap IDs disabled the client: {:?}",
+        errors.lock().unwrap()
+    );
+    assert_eq!(client.get_distinct_id(), "user-1");
+    assert_eq!(client.get_anonymous_id(), "anonymous");
+    assert!(events.lock().unwrap().is_empty());
+    client.capture("fresh");
+    {
+        let seen = events.lock().unwrap();
+        assert_eq!(seen[0].properties()["$is_identified"], true);
+        assert_eq!(seen[0].properties()["$device_id"], "anonymous");
+    }
+    assert!(errors.lock().unwrap().is_empty());
+    client.shutdown_blocking(None);
+
+    // Restored anonymous install: the anonymous seed is ignored (persisted
+    // identity wins) and the identified ID reconciles through identify.
+    let directory = Directory::new();
+    close_before_reopen(Client::init_blocking(directory.config()));
+    let mut conf = directory.config();
+    conf.bootstrap_anonymous_id = Some("other-seed".into());
+    conf.bootstrap_identified_id = Some("user-2".into());
+    let (client, events) = observed(conf);
+    assert!(
+        !client.is_disabled(),
+        "both bootstrap IDs disabled the client"
+    );
+    assert_eq!(client.get_distinct_id(), "user-2");
+    assert_eq!(client.get_anonymous_id(), "anonymous");
+    {
+        let seen = events.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].event_name(), "$identify");
+        assert_eq!(seen[0].properties()["$anon_distinct_id"], "anonymous");
+    }
+    close_before_reopen(client);
+
+    // Restored identified install with a different identified ID: kept.
+    let mut conf = directory.config();
+    conf.bootstrap_identified_id = Some("user-3".into());
+    let (client, events) = observed(conf);
+    assert!(
+        !client.is_disabled(),
+        "both bootstrap IDs disabled the client"
+    );
+    assert_eq!(client.get_distinct_id(), "user-2");
+    assert!(events.lock().unwrap().is_empty());
     client.shutdown_blocking(None);
 }
