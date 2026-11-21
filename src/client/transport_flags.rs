@@ -213,7 +213,7 @@ fn fetch(
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(
                 reqwest::header::USER_AGENT,
-                crate::client::get_default_user_agent(),
+                options.sdk_identity.user_agent(),
             )
             .timeout(Duration::from_secs(
                 options.feature_flags_request_timeout_seconds,

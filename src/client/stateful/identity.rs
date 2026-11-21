@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
-use super::producer::CaptureGuard;
+use super::producer::{CaptureGuard, CaptureOutcome};
 use super::writer::{PersonAdmission, UpdateError};
 use super::{Capture, Client, Snapshot};
 use crate::client::transport::Admission;
@@ -15,7 +15,9 @@ use crate::constants::PROCESS_PERSON_PROFILE_OPT;
 mod tests;
 
 /// Default person processing and permission to use identity/profile operations.
-/// Per-event options and before-send hooks retain the ordinary Rust precedence.
+/// An event's `process_person_profile` option wins, then its
+/// `$process_person_profile` property, then this mode; `before_send` hooks see
+/// the result and may change it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PersonProfiles {
@@ -156,7 +158,17 @@ impl Client {
             );
             return None;
         }
-        CaptureGuard::enter(self).ok()
+        match CaptureGuard::enter(self) {
+            Ok(guard) => Some(guard),
+            Err(CaptureOutcome::Reentrant) => {
+                tracing::warn!(
+                    "posthog-rs: {} is ignored inside a before_send hook",
+                    operation
+                );
+                None
+            }
+            Err(_) => None,
+        }
     }
 
     /// Update identity synchronously, then attempt its event through ordinary capture.
@@ -342,7 +354,9 @@ impl Client {
         }
     }
 
-    /// Start a fresh anonymous identity, preserving the device ID. Emits no event
+    /// Start a fresh anonymous identity, preserving the device ID. Clears the
+    /// identified and person-processing state, and the last screen name, so
+    /// `$screen_name` is no longer added until the next `screen`. Emits no event
     /// and preserves queued events. Clears registered properties, groups and explicit
     /// consent, restoring Config::opt_out; with the normal default, reset re-enables
     /// collection. Setup bootstrap is not

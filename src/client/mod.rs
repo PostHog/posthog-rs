@@ -107,12 +107,30 @@ impl BeforeSendHook {
 pub(crate) const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SDK_USERAGENT_NAME: &str = "posthog-rs";
 
+/// The library name and version the client reports: in the `PostHog-Sdk-Info`
+/// and `User-Agent` headers, and as the default `$lib` and `$lib_version`.
+/// An SDK that wraps this one replaces it with its own, so its events and
+/// requests are attributed to it rather than to this crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SdkIdentity {
+    pub(crate) name: std::borrow::Cow<'static, str>,
+    pub(crate) version: std::borrow::Cow<'static, str>,
+}
+
+impl SdkIdentity {
+    pub(crate) const DEFAULT: SdkIdentity = SdkIdentity {
+        name: std::borrow::Cow::Borrowed(SDK_USERAGENT_NAME),
+        version: std::borrow::Cow::Borrowed(CRATE_VERSION),
+    };
+
+    /// `<name>/<version>`, the `PostHog-Sdk-Info` and `User-Agent` value.
+    pub(crate) fn user_agent(&self) -> String {
+        format!("{}/{}", self.name, self.version)
+    }
+}
+
 /// Prefix of a personal API key, which capture always rejects as a project key.
 const PERSONAL_API_KEY_PREFIX: &str = "phx_";
-
-pub(crate) fn get_default_user_agent() -> String {
-    format!("{}/{}", SDK_USERAGENT_NAME, CRATE_VERSION)
-}
 
 /// Most redirects an SDK-built HTTP client follows for one request.
 const MAX_REDIRECTS: usize = 5;
@@ -382,6 +400,9 @@ pub struct ClientOptions {
     #[builder(default, setter(custom))]
     pub(crate) before_send: Vec<BeforeSendHook>,
 
+    #[builder(default = "SdkIdentity::DEFAULT", setter(custom))]
+    pub(crate) sdk_identity: SdkIdentity,
+
     /// Hooks invoked once per terminal failure on a network surface (capture
     /// batch delivery, remote `/flags` requests, the local-evaluation poller).
     /// Observability only; registering at least one also silences the default
@@ -401,12 +422,6 @@ pub struct ClientOptions {
     #[builder(setter(skip))]
     #[builder(default = "EndpointManager::new(DEFAULT_HOST.to_string())")]
     endpoint_manager: EndpointManager,
-
-    /// `name/version` sent as the capture request's `PostHog-Sdk-Info` and
-    /// `User-Agent`, set by the stateful client from its configured SDK
-    /// identity. `None` sends `posthog-rs/<crate version>`.
-    #[builder(setter(skip))]
-    pub(crate) sdk_info: Option<String>,
 }
 
 /// Resolved client-level default properties for capture requests.
@@ -414,10 +429,11 @@ pub struct ClientOptions {
 /// Built once from [`ClientOptions`] and threaded through every event-producing
 /// path so each default is applied in exactly one place with caller-wins
 /// (`entry().or_insert`) semantics.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct CaptureDefaults {
     pub(crate) disable_geoip: bool,
     pub(crate) is_server: bool,
+    pub(crate) identity: SdkIdentity,
 }
 
 impl ClientOptions {
@@ -426,6 +442,7 @@ impl ClientOptions {
         CaptureDefaults {
             disable_geoip: self.disable_geoip,
             is_server: self.is_server,
+            identity: self.sdk_identity.clone(),
         }
     }
 
@@ -499,6 +516,19 @@ fn trimmed(value: Option<String>) -> Option<String> {
 }
 
 impl ClientOptionsBuilder {
+    /// Report another library's name and version instead of this crate's, in
+    /// the `PostHog-Sdk-Info` and `User-Agent` headers and as the default
+    /// `$lib` and `$lib_version`. For SDKs built on this one, such as the C
+    /// bindings in `posthog-rs-ffi`. Not part of the supported API.
+    #[doc(hidden)]
+    pub fn sdk_identity(&mut self, name: &'static str, version: &'static str) -> &mut Self {
+        self.sdk_identity = Some(SdkIdentity {
+            name: name.into(),
+            version: version.into(),
+        });
+        self
+    }
+
     /// Add a hook that can modify or discard events before they are sent.
     ///
     /// Hooks should avoid panicking. Panics are caught and drop the current event,
@@ -514,15 +544,16 @@ impl ClientOptionsBuilder {
         self
     }
 
-    /// Add a hook for terminal network failures and recoverable storage errors.
+    /// Add a hook for terminal network failures and storage errors.
     ///
     /// The hook receives a [`PostHogError`] once per terminal capture failure,
     /// failed remote `/flags` request, or failed local-evaluation poll. With
-    /// persistent delivery, it also receives recoverable storage read, write,
-    /// and removal errors. A storage error does not imply delivery failed: a
-    /// failed write still permits bounded memory-backed delivery. An event can
-    /// be delivered again after restart when removing its delivered record
-    /// failed, or when shutdown stopped while it was being sent.
+    /// persistent delivery, it also receives storage read, write, and removal
+    /// errors. A failed write drops that event (reported once per run of
+    /// failures). A record that cannot be read is dropped and its file
+    /// deleted. An event whose record could not be removed after it left the
+    /// queue (delivered, reported lost, evicted, or unreadable) can come back
+    /// after a restart, as can an event in flight at shutdown.
     /// Multiple hooks fire in registration order.
     ///
     /// # Observability only — never emit from the hook

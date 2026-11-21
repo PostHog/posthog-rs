@@ -5,7 +5,6 @@ mod cards;
 
 use std::sync::LazyLock;
 
-use fancy_regex::Regex as LookaroundRegex;
 use regex::Regex;
 
 use crate::mcp::contract::REDACTED;
@@ -26,49 +25,73 @@ static IPV4: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(r"(?-u:\b)(?:{octet}\.){{3}}{octet}(?-u:\b)")).expect("ipv4 pattern")
 });
 
-static IPV6: LazyLock<LookaroundRegex> = LazyLock::new(|| {
+static IPV6: LazyLock<Regex> = LazyLock::new(|| {
     let group = "[0-9A-Fa-f]{1,4}";
     let full = format!("(?:{group}:){{7}}{group}");
     let trailing_gap = format!("(?:{group}:){{1,7}}:");
     let middle_gap = format!("(?:{group}:){{1,6}}:{group}(?::{group}){{0,5}}");
     let leading_gap = format!("::(?:{group}(?::{group}){{0,6}})");
     let address = format!("(?:{full}|{trailing_gap}|{middle_gap}|{leading_gap})");
-    LookaroundRegex::new(&format!("(^|[^{WORD}:])({address})(?=$|[^{WORD}:])"))
-        .expect("ipv6 pattern")
+    Regex::new(&format!("(^|[^{WORD}:])({address})(?:$|[^{WORD}:])")).expect("ipv6 pattern")
 });
 
 static US_SSN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?-u:\b)[0-9]{3}[ .-][0-9]{2}[ .-][0-9]{4}(?-u:\b)").expect("ssn pattern")
 });
 
-static PHONE_NORTH_AMERICA: LazyLock<LookaroundRegex> = LazyLock::new(|| {
+static PHONE_NORTH_AMERICA: LazyLock<Regex> = LazyLock::new(|| {
     let area = r"(?:\([0-9]{3}\)[ ./-]?|[0-9]{3}[ ./-])";
     let number = format!(r"(?:\+?1[ ./-]?)?{area}[0-9]{{3}}[ ./-][0-9]{{4}}");
-    LookaroundRegex::new(&format!(r"(^|[^{WORD}+])({number})(?![{WORD}])")).expect("phone pattern")
+    Regex::new(&format!(r"(^|[^{WORD}+])({number})(?:$|[^{WORD}])")).expect("phone pattern")
 });
 
-static PHONE_INTERNATIONAL: LazyLock<LookaroundRegex> = LazyLock::new(|| {
+static PHONE_INTERNATIONAL: LazyLock<Regex> = LazyLock::new(|| {
     let number = r"\+[0-9]{1,3}(?:[ ./()-]{0,2}[0-9]){7,13}";
-    LookaroundRegex::new(&format!(r"(^|[^{WORD}])({number})(?![{WORD}])")).expect("phone pattern")
+    Regex::new(&format!(r"(^|[^{WORD}])({number})(?:$|[^{WORD}])")).expect("phone pattern")
 });
 
 pub(super) fn redact_pii(text: &str) -> String {
     let text = UNICODE_SPACE.replace_all(text, " ");
     let text = EMAIL.replace_all(&text, REDACTED);
     let text = IPV4.replace_all(&text, REDACTED);
-    let text = replace_after_prefix(&IPV6, &text);
+    let text = redact_bounded(&IPV6, &text);
     let text = cards::redact_cards(&text);
     let text = US_SSN.replace_all(&text, REDACTED);
-    let text = replace_after_prefix(&PHONE_NORTH_AMERICA, &text);
-    replace_after_prefix(&PHONE_INTERNATIONAL, &text)
+    let text = redact_bounded(&PHONE_NORTH_AMERICA, &text);
+    redact_bounded(&PHONE_INTERNATIONAL, &text)
 }
 
-/// A pattern that exhausts its backtracking budget redacts the whole text,
-/// failing closed rather than panicking on the request path.
-fn replace_after_prefix(pattern: &LookaroundRegex, text: &str) -> String {
-    let replacement = format!("${{1}}{REDACTED}");
-    match pattern.try_replacen(text, 0, replacement.as_str()) {
-        Ok(redacted) => redacted.into_owned(),
-        Err(_) => REDACTED.to_string(),
+/// Redacts each match's second group. The boundary after it is matched but
+/// not redacted, and the next search starts on it, so it can be the boundary
+/// before the next match too, as a lookahead would allow.
+fn redact_bounded(pattern: &Regex, text: &str) -> String {
+    let mut redacted = String::with_capacity(text.len());
+    let mut copied = 0;
+    while let Some(found) = pattern.captures_at(text, copied) {
+        let matched = found.get(2).expect("pattern has a second group");
+        redacted.push_str(&text[copied..matched.start()]);
+        redacted.push_str(REDACTED);
+        copied = matched.end();
+    }
+    redacted.push_str(&text[copied..]);
+    redacted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_character_bounds_the_match_before_it_and_the_one_after() {
+        let cases = [
+            ("415-555-0142 415-555-0142", "[redacted] [redacted]"),
+            ("+44 20 7946 0958,+44 20 7946 0958", "[redacted],[redacted]"),
+            ("::1 ::2", "[redacted] [redacted]"),
+            ("+12345678 901234567890123", "[redacted] 901234567890123"),
+            ("415-555-0142x 415-555-0142", "415-555-0142x [redacted]"),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(redact_pii(text), expected, "{text}");
+        }
     }
 }

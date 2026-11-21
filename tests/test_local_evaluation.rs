@@ -1962,3 +1962,33 @@ fn test_reload_feature_flags_reports_failures_and_missing_configuration() {
         err
     );
 }
+
+#[cfg(not(feature = "async-client"))]
+#[test]
+fn test_shutdown_stops_the_definitions_poller() {
+    let server = MockServer::start();
+    let definitions = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(reload_definitions(0.0));
+    });
+    let options = posthog::ClientOptionsBuilder::default()
+        .api_key("phc_test".to_string())
+        .host(server.base_url())
+        .secret_key("phs_test")
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(1u64)
+        .build()
+        .unwrap();
+    let client = posthog::client(options);
+    wait_for_calls(&definitions, 1);
+
+    client.shutdown();
+    let at_shutdown = definitions.calls();
+    // Longer than the poll interval, so a running poller would have fetched again.
+    std::thread::sleep(Duration::from_millis(1600));
+    assert_eq!(
+        definitions.calls(),
+        at_shutdown,
+        "the poller kept fetching after shutdown"
+    );
+}

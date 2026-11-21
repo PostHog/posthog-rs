@@ -86,6 +86,7 @@ pub(super) fn namespace(project_token: &str, instance: &str) -> String {
 #[derive(Default)]
 pub(super) struct RestoredStorage {
     pub(super) snapshot: Option<Snapshot>,
+    /// Restoring dropped an invalid optional field, so the record needs a save.
     pub(super) rewrite_required: bool,
     pub(super) state_store: Option<FileStateStore>,
     pub(super) event_store: Option<FileEventStore>,
@@ -188,6 +189,8 @@ pub(super) struct OpenedStateStore {
     read_error: Option<io::Error>,
 }
 
+/// A restored snapshot, and whether restoring normalized it so that it differs
+/// from the stored record.
 struct DecodedSnapshot {
     snapshot: Snapshot,
     rewrite_required: bool,
@@ -205,16 +208,18 @@ impl FileStateStore {
     pub(super) fn open(directory: Arc<StorageDirectory>) -> io::Result<OpenedStateStore> {
         let store = Self { directory };
         match store.restore() {
-            Ok(decoded) => Ok(OpenedStateStore {
+            Ok(restored) => Ok(OpenedStateStore {
                 store,
-                rewrite_required: decoded.as_ref().is_some_and(|state| state.rewrite_required),
-                snapshot: decoded.map(|state| state.snapshot),
+                rewrite_required: restored
+                    .as_ref()
+                    .is_some_and(|state| state.rewrite_required),
+                snapshot: restored.map(|state| state.snapshot),
                 read_error: None,
             }),
             Err(RestoreFailure::Corrupt(error)) => Ok(OpenedStateStore {
                 store,
                 snapshot: None,
-                rewrite_required: true,
+                rewrite_required: false,
                 read_error: Some(error),
             }),
             Err(RestoreFailure::Unavailable(error)) => Err(error),
@@ -246,7 +251,7 @@ impl FileStateStore {
     #[cfg(test)]
     fn load(&self) -> io::Result<Option<Snapshot>> {
         self.restore()
-            .map(|decoded| decoded.map(|decoded| decoded.snapshot))
+            .map(|restored| restored.map(|state| state.snapshot))
             .map_err(|error| match error {
                 RestoreFailure::Corrupt(error) | RestoreFailure::Unavailable(error) => error,
             })
@@ -266,47 +271,31 @@ impl FileStateStore {
                 "Unsupported state store version",
             )));
         }
-        let mut record: StateRecord<serde_json::Value> =
+        let record: StateRecord<serde_json::Value> =
             serde_json::from_value(record).map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
+        // An invalid stored session, flag cache or remote config is dropped,
+        // and the record is rewritten.
+        let mut state = record.state;
         let mut rewrite_required = false;
-        let state = record
-            .state
-            .as_object_mut()
-            .ok_or_else(|| RestoreFailure::Corrupt(invalid_state()))?;
-        if !state.contains_key("device_id") {
-            let anonymous = state
-                .get("anonymous_id")
-                .cloned()
-                .ok_or_else(|| RestoreFailure::Corrupt(invalid_state()))?;
-            state.insert("device_id".into(), anonymous);
-            rewrite_required = true;
-        }
         if let Some(cache) = state
             .get_mut("flags")
             .and_then(|flags| flags.get_mut("cache"))
         {
-            normalize_optional::<super::flag_state::FlagCache>(
-                cache,
-                |_| true,
-                &mut rewrite_required,
-            );
+            rewrite_required |= normalize_optional::<super::flag_state::FlagCache>(cache, |_| true);
         }
         if let Some(config) = state.get_mut("remote_config") {
-            normalize_optional::<crate::client::transport::remote_config::RemoteConfig>(
-                config,
-                |config| config.valid(),
-                &mut rewrite_required,
-            );
+            rewrite_required |= normalize_optional::<
+                crate::client::transport::remote_config::RemoteConfig,
+            >(config, |config| config.valid());
         }
         if let Some(session) = state.get_mut("session") {
-            normalize_optional::<super::sessions::StoredSession>(
-                session,
-                |session| session.is_valid(),
-                &mut rewrite_required,
-            );
+            rewrite_required |=
+                normalize_optional::<super::sessions::StoredSession>(session, |session| {
+                    session.is_valid()
+                });
         }
-        let snapshot: Snapshot = serde_json::from_value(record.state)
-            .map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
+        let snapshot: Snapshot =
+            serde_json::from_value(state).map_err(|_| RestoreFailure::Corrupt(invalid_state()))?;
         if !snapshot.is_valid() {
             return Err(RestoreFailure::Corrupt(invalid_state()));
         }
@@ -360,17 +349,18 @@ impl FileStateStore {
 
 /// Recovery applies only to present optional values; missing required fields and
 /// invalid mandatory targeting still reject the core snapshot.
+/// Replace an optional field that doesn't decode or isn't valid with `null`.
+/// Returns whether it was replaced.
 fn normalize_optional<T: serde::de::DeserializeOwned>(
     value: &mut serde_json::Value,
     valid: impl FnOnce(&T) -> bool,
-    rewrite_required: &mut bool,
-) {
-    if !value.is_null()
-        && !serde_json::from_value::<T>(value.clone()).is_ok_and(|decoded| valid(&decoded))
-    {
+) -> bool {
+    let replace = !value.is_null()
+        && !serde_json::from_value::<T>(value.clone()).is_ok_and(|decoded| valid(&decoded));
+    if replace {
         *value = serde_json::Value::Null;
-        *rewrite_required = true;
     }
+    replace
 }
 
 fn remove_temporary(path: &Path) -> io::Result<()> {

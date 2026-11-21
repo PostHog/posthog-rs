@@ -121,10 +121,11 @@ impl DrainReport {
 /// retrying persistent initialization. A shutdown timeout does not release a
 /// namespace lease while already-started storage I/O can still access it.
 ///
-/// Dropping the client requests shutdown. SDK-controlled waiting ends by the
-/// first selected shutdown deadline; already-started work retains its resources
-/// until completion. Arbitrary destructors of application objects captured by
-/// callbacks may run synchronously and block outside that waiting bound.
+/// Dropping the client shuts it down without waiting for delivery. It waits up
+/// to about 1 s for local writes: pending client state and events already
+/// captured. Already-started work retains its resources until completion.
+/// Arbitrary destructors of application objects captured by callbacks may run
+/// synchronously and block outside that waiting bound.
 pub struct Client {
     disabled: bool,
     shutdown_timeout: Duration,
@@ -548,26 +549,55 @@ impl Client {
     }
 }
 
-/// The longest `Drop` waits for the local state write.
-const DROP_STATE_WRITE_WAIT: Duration = Duration::from_secs(1);
+/// The longest `Drop` waits for local writes: pending client state and
+/// events already captured.
+const DROP_LOCAL_WRITE_WAIT: Duration = Duration::from_secs(1);
 
 /// Dropping the client does not wait for delivery, as in posthog-ios and
-/// posthog-android: queued events stay on disk for the next start. It does
-/// finish writing pending client state, which those SDKs write as soon as it
-/// changes. Call `shutdown_blocking` to also attempt delivery first.
+/// posthog-android: queued events stay on disk for the next start. It waits up
+/// to about 1 s for local writes only: pending client state, which those SDKs
+/// write as soon as it changes, and events already captured, which it writes
+/// to disk before releasing storage. It ends an earlier shutdown's deadline at
+/// once instead of waiting for it. An upload already in flight finishes in the
+/// background. Call `shutdown_blocking` to also attempt delivery first.
 impl Drop for Client {
     fn drop(&mut self) {
+        if self.disabled {
+            return;
+        }
+        let budget = Instant::now() + DROP_LOCAL_WRITE_WAIT;
         let on_worker = self.on_worker_thread();
-        if !self.disabled
-            && !on_worker
-            && !self.in_capture()
-            && !self.closed.load(Ordering::Acquire)
-        {
+        let defer = self.must_defer_drain();
+        // Wait for pending client state even after an earlier shutdown: the
+        // deadline is shortened to now below, after which the writer no
+        // longer saves.
+        if !defer {
             let state = self.state.as_ref().unwrap();
             let revision = state.checkpoint();
-            let _ = state.wait_blocking_until(revision, Instant::now() + DROP_STATE_WRITE_WAIT);
+            let _ = state.wait_blocking_until(revision, budget);
         }
-        self.shutdown_blocking(Some(Duration::ZERO));
+        self.request_shutdown(Some(Duration::ZERO));
+        // An earlier shutdown may have selected a later deadline. End it now
+        // and wake both workers to read it, so they release storage within
+        // Drop's budget.
+        let now = Instant::now();
+        if self.shutdown.as_ref().unwrap().shorten_to(now) {
+            self.state.as_ref().unwrap().request_close_before(now);
+            self.transport.as_ref().unwrap().request_close_before(now);
+        }
+        if !defer {
+            let transport = self.transport.as_ref().unwrap();
+            let state = self.state.as_ref().unwrap();
+            self.shutdown
+                .as_ref()
+                .unwrap()
+                .wait_blocking_until(budget, || {
+                    transport.coordinator_stopped() && state.is_stopped()
+                });
+            if self.workers_stopped() {
+                self.shutdown.as_ref().unwrap().complete();
+            }
+        }
         if on_worker {
             // Field destruction must preserve the same no-join rule as explicit
             // shutdown from either worker, not only the state writer's thread.

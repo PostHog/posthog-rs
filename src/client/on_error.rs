@@ -60,8 +60,7 @@ impl OnErrorHook {
 }
 
 /// A delivery, network, storage, or initialization failure, passed by
-/// reference to each registered `on_error` hook. A storage failure does not
-/// necessarily prevent delivery: events may still be sent from memory.
+/// reference to each registered `on_error` hook.
 ///
 /// `#[non_exhaustive]`: new variants may be added as more surfaces gain hook
 /// coverage, so a `match` must include a wildcard arm.
@@ -79,8 +78,10 @@ pub enum PostHogError<'a> {
     /// error, non-success status, or an unparseable response body). The SDK
     /// keeps serving the previously cached definitions.
     LocalEvaluation(LocalEvaluationFailure<'a>),
-    /// A persistence operation failed. Live in-memory state remains usable;
-    /// data that could not be persisted may be lost when the process exits.
+    /// A persistence operation failed. For queued events, a failed write or
+    /// read loses that event. For client state, the in-memory state remains
+    /// usable, and what could not be persisted may be lost when the process
+    /// exits.
     Storage(StorageFailure<'a>),
     /// A stateful client could not be enabled. The returned client is disabled.
     #[cfg(feature = "stateful")]
@@ -166,10 +167,11 @@ pub enum StorageOperation {
 /// Details of a storage failure. The callback runs on the thread performing
 /// storage I/O, not on an ordinary capture caller.
 ///
-/// Failure to write does not roll back in-memory state. A write can fail after
-/// creating a record, so the error does not guarantee that no disk copy exists.
-/// Such a record, or an acknowledged record whose removal failed, can cause
-/// duplicate delivery after restart.
+/// For client state, a failed write does not roll back the in-memory state.
+/// For queued events, a failed write leaves no record and the event is
+/// dropped. An event whose record could not be removed after it left the
+/// queue (delivered, reported lost, evicted, or unreadable) can come back
+/// after a restart, as can an event in flight at shutdown.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct StorageFailure<'a> {

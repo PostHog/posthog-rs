@@ -364,7 +364,7 @@ impl Sender {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(
                 reqwest::header::USER_AGENT,
-                crate::client::get_default_user_agent(),
+                self.options.sdk_identity.user_agent(),
             )
             .timeout(timeout)
             .body(body);

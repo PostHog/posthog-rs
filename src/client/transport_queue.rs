@@ -81,10 +81,11 @@ enum Verdict {
     /// Every event reached a final outcome: delivered, or reported lost.
     Finished,
     /// These events, with any duplicate copies capture dropped, are retried
-    /// after `delay`. The rest of the request is finished.
+    /// after the queue's backoff, and no sooner than a server's `Retry-After`.
+    /// The rest of the request is finished.
     Retry {
         retained: Vec<(u64, u32)>,
-        delay: Duration,
+        retry_after: Option<Duration>,
     },
 }
 
@@ -147,6 +148,10 @@ pub(super) struct Coordinator {
     shutdown: Option<Completion>,
     capacity_warned: bool,
     write_failing: bool,
+    /// Requests answered with a retry since the last finished one. The
+    /// backoff grows with it, like the iOS and Android queues, so it keeps
+    /// growing when eviction gives a retry a new request identity.
+    failures: u32,
     /// Duplicate copies capture dropped for an event that is being retried,
     /// reported when the event reaches its final outcome.
     copies: HashMap<u64, u32>,
@@ -216,6 +221,7 @@ impl Coordinator {
             shutdown: None,
             capacity_warned: false,
             write_failing: false,
+            failures: 0,
             copies: HashMap::new(),
         };
         (coordinator, inbox)
@@ -495,8 +501,21 @@ impl Coordinator {
     fn apply(&mut self, sent: Sent) {
         self.sending = false;
         match sent.verdict {
-            Verdict::Finished => self.finish_events(&sent.seqs),
-            Verdict::Retry { retained, delay } => {
+            Verdict::Finished => {
+                // Success or a terminal answer resets the backoff.
+                self.failures = 0;
+                self.finish_events(&sent.seqs);
+            }
+            Verdict::Retry {
+                retained,
+                retry_after,
+            } => {
+                self.failures = self.failures.saturating_add(1);
+                let delay = crate::client::retry::capture_backoff_duration(
+                    &self.options,
+                    self.failures,
+                    retry_after,
+                );
                 for (seq, copies) in &retained {
                     // Capacity may have evicted the event while it was out.
                     if *copies > 0 && self.table.get(*seq).is_some() {
@@ -671,11 +690,7 @@ impl Executor {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.attempt(&url, job)))
                     .unwrap_or_else(|_| Verdict::Retry {
                         retained: seqs.iter().map(|seq| (*seq, 0)).collect(),
-                        delay: crate::client::retry::capture_backoff_duration(
-                            &self.options,
-                            attempt,
-                            None,
-                        ),
+                        retry_after: None,
                     });
             let sent = Sent {
                 seqs,
@@ -706,6 +721,7 @@ impl Executor {
         // limits, or left behind at shutdown.
         let is_final = false;
         let mut status = None;
+        let mut server_retry_after = None;
         let mut error_body = None;
         let step = match outcome {
             Outcome::Network(message) => capture::transport_error_step(
@@ -722,6 +738,7 @@ impl Executor {
                 body,
             } => {
                 status = Some(code);
+                server_retry_after = retry_after;
                 let step = capture::response_step(
                     &self.options,
                     &request_id,
@@ -773,7 +790,9 @@ impl Executor {
                 }
                 Verdict::Finished
             }
-            Step::Backoff(delay) => {
+            // The coordinator sets the wait from its queue-wide failure count,
+            // not from this request's attempt.
+            Step::Backoff(_) => {
                 let rejected = undelivered_results(&results);
                 if rejected > 0 {
                     if self.options.on_error.is_empty() {
@@ -787,7 +806,7 @@ impl Executor {
                         .iter()
                         .map(|sending| (sending.seq, sending.event.dropped_copies))
                         .collect(),
-                    delay,
+                    retry_after: server_retry_after,
                 }
             }
         };

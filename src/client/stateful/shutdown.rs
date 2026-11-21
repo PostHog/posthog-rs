@@ -101,6 +101,25 @@ impl Shutdown {
         self.shared.changed.notify_all();
         (deadline, true)
     }
+    /// End the selected deadline at `at` if it is later. Only `Drop` calls
+    /// this: it holds the last reference, so no caller still waits on the
+    /// longer deadline. Returns whether the deadline changed.
+    pub(super) fn shorten_to(&self, at: Instant) -> bool {
+        let state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut selected = self
+            .shared
+            .deadline
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if selected.is_some_and(|end| end <= at) {
+            return false;
+        }
+        *selected = Some(at);
+        drop(selected);
+        drop(state);
+        self.shared.changed.notify_all();
+        true
+    }
     pub(super) fn complete(&self) {
         self.shared
             .state
@@ -121,10 +140,14 @@ impl Shutdown {
             .unwrap_or_else(|p| p.into_inner())
     }
     pub(super) fn wait_blocking(&self, done: impl Fn() -> bool) {
-        let selected = self.deadline().unwrap();
+        self.wait_blocking_until(self.deadline().unwrap(), done);
+    }
+    /// Wait until `done` or `bound`, whichever comes first, whatever deadline
+    /// is selected.
+    pub(super) fn wait_blocking_until(&self, bound: Instant, done: impl Fn() -> bool) {
         while !done() {
             let state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
-            let remaining = selected.saturating_duration_since(Instant::now());
+            let remaining = bound.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return;
             }
