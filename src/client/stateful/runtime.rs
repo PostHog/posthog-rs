@@ -513,8 +513,9 @@ impl Client {
     /// `None` uses Config::shutdown_timeout; `Some` overrides it (at most one day).
     /// Repeated calls share that deadline. Already-started work owns its resources
     /// through completion; return does not promise every event reached disk.
-    /// An in-flight feature flags request is not awaited or retried; its result
-    /// is discarded.
+    /// An in-flight remote configuration or feature flags request is not awaited
+    /// or retried; its result is discarded, and a failure that arrives after
+    /// shutdown starts is not reported to `on_error`.
     /// Application callback-capture destructors may run synchronously and block
     /// outside the SDK-controlled waiting bound. Worker callbacks and synchronous
     /// capture hooks request closure but return Deferred instead of waiting.

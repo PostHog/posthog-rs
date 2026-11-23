@@ -59,8 +59,9 @@ impl OnErrorHook {
     }
 }
 
-/// A delivery, network, storage, or initialization failure, passed by
-/// reference to each registered `on_error` hook.
+/// A delivery, feature flag, local evaluation, remote configuration, storage,
+/// or initialization failure, passed by reference to each registered `on_error`
+/// hook.
 ///
 /// `#[non_exhaustive]`: new variants may be added as more surfaces gain hook
 /// coverage, so a `match` must include a wildcard arm.
