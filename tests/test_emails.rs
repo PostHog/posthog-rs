@@ -5,13 +5,13 @@ mod email_support;
 
 use sha2::Digest;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::default_user_agent;
 use email_support::{
     accepted, closed_url, connection_counting_store, options, s3_error, unavailable, Answer,
-    FakePostHog, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID, UPLOADS_PATH,
+    FakePostHog, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
 use posthog::{
     CodeEmail, EmailAttachment, EmailCategory, EmailDeliveryStatus, EmailErrorKind, EmailTracking,
@@ -1326,103 +1326,43 @@ async fn marketing_code_send_uploads_attachment_before_posthog_refuses_the_send(
         "description": "Monthly product news",
     });
     let digest_html = "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>";
-    let upload_path = format!("/bucket/team/2/{PDF_SHA256}");
+    let workflow_can_wait_why =
+        "The \"Send email\" step sends marketing email. Sending limits can hold it before it goes out, so its files could expire first.";
+    let workflow_can_wait_fix =
+        "Send files through a workflow whose transactional email step follows the trigger directly, or send this email without files.";
 
-    for (code, detail) in [
+    let cases = [
         (
             "workflow_can_wait",
-            "Marketing code sends cannot carry attachments.",
+            json!({
+                "type": "invalid_request",
+                "code": "workflow_can_wait",
+                "detail": "This email's workflow can hold a send, so PostHog didn't send the email with its files.",
+                "attr": "attachments",
+                "why": workflow_can_wait_why,
+                "fix": workflow_can_wait_fix,
+            }),
+            Some(workflow_can_wait_why),
+            Some(workflow_can_wait_fix),
         ),
         (
             "sandbox_fields_unsupported",
-            "The PostHog test sender does not support attachments on marketing sends.",
+            json!({
+                "type": "validation_error",
+                "code": "sandbox_fields_unsupported",
+                "detail": "This project has no verified sending domain, so this email would go out from PostHog's sandbox sender, which can't send `cc`, `bcc`, `reply_to`, `attachments`, a custom `from` or a message category. Remove those fields, or verify a sending domain at https://app.posthog.com/project/1/messaging/senders.",
+                "attr": "attachments",
+            }),
+            None,
+            None,
         ),
-    ] {
-        type TracedRequest = (String, String, Vec<(String, String)>, Vec<u8>);
-        let trace = Arc::new(Mutex::new(Vec::<TracedRequest>::new()));
-        let server = httpmock::MockServer::start_async().await;
-        let base_url = server.base_url();
-        let trace_in_mock = Arc::clone(&trace);
-        let upload_path_in_mock = upload_path.clone();
-        server
-            .mock_async(|_, then| {
-                then.respond_with(move |request: &httpmock::HttpMockRequest| {
-                    let method = request.method_str().to_string();
-                    let path = request.uri().path().to_string();
-                    let headers: Vec<(String, String)> = request
-                        .headers_vec()
-                        .iter()
-                        .map(|(k, v)| (k.to_lowercase(), v.clone()))
-                        .collect();
-                    let body = request.body_vec();
-                    let prior_sends = {
-                        let mut guard = trace_in_mock.lock().unwrap();
-                        let count = guard
-                            .iter()
-                            .filter(|(m, p, _, _)| m == "POST" && p == SEND_PATH)
-                            .count();
-                        guard.push((method.clone(), path.clone(), headers, body));
-                        count
-                    };
+    ];
 
-                    if method == "POST" && path == UPLOADS_PATH {
-                        httpmock::HttpMockResponse::builder()
-                            .status(200)
-                            .header("content-type", "application/json")
-                            .body(
-                                json!({
-                                    "files": [{
-                                        "sha256": PDF_SHA256,
-                                        "status": "upload",
-                                        "url": format!(
-                                            "{}{}?X-Amz-Signature=signed",
-                                            base_url, upload_path_in_mock
-                                        ),
-                                        "method": "PUT",
-                                        "headers": {
-                                            "content-length": PDF.len().to_string(),
-                                        },
-                                        "url_expires_at": "2026-11-09T12:15:00Z",
-                                    }],
-                                })
-                                .to_string(),
-                            )
-                            .build()
-                    } else if method == "PUT" && path == upload_path_in_mock {
-                        httpmock::HttpMockResponse::builder()
-                            .status(200)
-                            .body("")
-                            .build()
-                    } else if method == "POST" && path == SEND_PATH {
-                        if prior_sends == 0 {
-                            httpmock::HttpMockResponse::builder()
-                                .status(400)
-                                .header("content-type", "application/json")
-                                .body(
-                                    json!({
-                                        "type": "invalid_request",
-                                        "code": code,
-                                        "detail": detail,
-                                        "attr": "attachments",
-                                    })
-                                    .to_string(),
-                                )
-                                .build()
-                        } else {
-                            httpmock::HttpMockResponse::builder()
-                                .status(202)
-                                .header("content-type", "application/json")
-                                .body(json!({"message_id": MESSAGE_ID}).to_string())
-                                .build()
-                        }
-                    } else {
-                        panic!("unexpected request {} {}", method, path);
-                    }
-                });
-            })
-            .await;
+    for (code, response_body, expected_why, expected_fix) in cases {
+        let posthog = FakePostHog::start_async().await;
+        posthog.send_answers_next(Answer::json(400, response_body));
+        let client = client_of(&posthog).await;
 
-        let client = posthog::client(options(&server.base_url()).build().unwrap()).await;
         let error = client
             .emails()
             .send(
@@ -1437,49 +1377,28 @@ async fn marketing_code_send_uploads_attachment_before_posthog_refuses_the_send(
         assert_eq!(error.kind(), EmailErrorKind::ValidationError, "{}", code);
         assert_eq!(error.status(), Some(400), "{}", code);
         assert_eq!(error.field(), Some("attachments"), "{}", code);
-        assert!(error.fix().is_none(), "{}", code);
-
-        let requests = trace.lock().unwrap().clone();
+        assert_eq!(error.why(), expected_why, "{}", code);
+        assert_eq!(error.fix(), expected_fix, "{}", code);
         assert_eq!(
-            requests.len(),
-            3,
-            "expected upload-grant -> PUT -> send with no retry ({})",
+            posthog.versions(PDF_SHA256),
+            vec![PDF.to_vec()],
+            "signed upload must store exact PDF bytes before send refusal ({})",
             code
         );
-        assert_eq!(
-            (requests[0].0.as_str(), requests[0].1.as_str()),
-            ("POST", UPLOADS_PATH)
-        );
-        let grant_req: serde_json::Value = serde_json::from_slice(&requests[0].3).unwrap();
-        assert_eq!(
-            grant_req,
-            json!({
-                "files": [{
-                    "sha256": PDF_SHA256,
-                    "size": PDF.len(),
-                }],
-            })
-        );
-        assert_eq!(
-            (requests[1].0.as_str(), requests[1].1.as_str()),
-            ("PUT", upload_path.as_str())
-        );
-        assert_eq!(requests[1].3, PDF, "{}", code);
         assert!(
-            !requests[1]
-                .2
-                .iter()
-                .any(|(name, _)| name == "authorization"),
-            "storage PUT must not carry PostHog Authorization header ({})",
+            posthog.sent().is_empty(),
+            "send must not be accepted ({})",
+            code
+        );
+        let send_requests = posthog.send_requests();
+        assert_eq!(
+            send_requests.len(),
+            1,
+            "send refusal must not be retried ({})",
             code
         );
         assert_eq!(
-            (requests[2].0.as_str(), requests[2].1.as_str()),
-            ("POST", SEND_PATH)
-        );
-        let send_req: serde_json::Value = serde_json::from_slice(&requests[2].3).unwrap();
-        assert_eq!(
-            send_req,
+            send_requests[0],
             json!({
                 "to": "user@example.com",
                 "template_key": "november-digest",

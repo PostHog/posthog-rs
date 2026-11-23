@@ -255,14 +255,17 @@ impl CodeEmail {
     }
 
     /// The email's message category: [`EmailCategory::Transactional`], or a
-    /// [`MessageCategory`] that the send defines. When code-send categories
-    /// are enabled for the project, leaving `category` out follows the
-    /// transactional category of the template that `template_key` names, or
-    /// sends as transactional with no category (and a sendable saved template
-    /// in a marketing category returns `marketing_template` for any `category`
-    /// value before category comparison). When code-send categories are
-    /// disabled for the project, an explicit [`MessageCategory`] returns HTTP
-    /// 400 `categories_not_enabled` before template sendability and category
+    /// [`MessageCategory`] that the send defines. Django validates the category
+    /// object first (for example, a reserved key such as `$all` returns
+    /// `invalid_input` before feature-flag or template checks). For valid
+    /// category values: when code-send categories are enabled for the project,
+    /// leaving `category` out follows the transactional category of the
+    /// template that `template_key` names, or sends as transactional with no
+    /// category (and a sendable saved template in a marketing category returns
+    /// `marketing_template` for any valid `category` value before category
+    /// comparison). When code-send categories are disabled for the project, a
+    /// valid explicit [`MessageCategory`] returns HTTP 400
+    /// `categories_not_enabled` before template sendability and category
     /// comparison (even if `template_key` names a marketing template); leaving
     /// `category` out sends as transactional with no category (or returns
     /// `marketing_template` for a sendable saved template in a marketing
@@ -307,12 +310,16 @@ impl CodeEmail {
     /// - `workflow_can_wait` (on a verified sender) or
     ///   `sandbox_fields_unsupported` (on the PostHog test sender) when a
     ///   marketing email carries attachments (because marketing sending limits
-    ///   can hold delivery). Both the async and blocking clients upload
-    ///   attachments before PostHog validates and refuses the send, so a
-    ///   marketing send with files can transfer files or fail during upload
-    ///   before reaching the send endpoint,
+    ///   can hold delivery). Both the async and blocking clients request upload
+    ///   grants and upload any missing attachments (skipping files PostHog
+    ///   already reports as `present`) before PostHog validates and refuses the
+    ///   send, so a marketing send with files can transfer missing files or
+    ///   fail during upload before reaching the send endpoint,
     /// - `recipient_opted_out` when the recipient opted out of the category
-    ///   or of all marketing email.
+    ///   or of all marketing email. If the preference lookup exceeds CDP's
+    ///   async intake budget, the API can still return HTTP 202 and the
+    ///   delivery worker skips delivery later, so a `202` response from
+    ///   `send()` does not by itself prove the recipient passed opt-out.
     pub fn category(mut self, category: impl Into<EmailCategory>) -> Self {
         self.category = Some(Box::new(category.into()));
         self
@@ -397,7 +404,8 @@ impl From<MessageCategory> for EmailCategory {
 /// attachments (`workflow_can_wait` on a verified sender, or
 /// `sandbox_fields_unsupported` on the PostHog test sender, because marketing
 /// sending limits can hold delivery; both the async and blocking clients
-/// upload attachments before PostHog validates and refuses the send).
+/// request upload grants and upload any missing attachments not already
+/// `present` on PostHog before PostHog validates and refuses the send).
 ///
 /// ```
 /// use posthog::{CodeEmail, MessageCategory, MessageCategoryType};

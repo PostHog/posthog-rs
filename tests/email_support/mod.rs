@@ -187,7 +187,9 @@ struct FakeState {
     grants: Grants,
     versions: HashMap<String, Vec<Vec<u8>>>,
     store_faults: VecDeque<Answer>,
+    send_faults: VecDeque<Answer>,
     redirect_next_to: Option<String>,
+    send_requests: Vec<serde_json::Value>,
     sent: Vec<serde_json::Value>,
 }
 
@@ -321,6 +323,12 @@ impl FakePostHog {
         self.state.lock().unwrap().store_faults.push_back(answer);
     }
 
+    /// The send route answers its next valid send (after attachments are
+    /// stored) with `answer`.
+    pub fn send_answers_next(&self, answer: Answer) {
+        self.state.lock().unwrap().send_faults.push_back(answer);
+    }
+
     /// The store answers its next upload with a `307` to the same path and
     /// query on `other_store`, as a store that moved the file elsewhere would.
     pub fn store_redirects_next_to(&self, other_store: &str) {
@@ -342,6 +350,12 @@ impl FakePostHog {
     pub fn versions(&self, sha256: &str) -> Vec<Vec<u8>> {
         let state = self.state.lock().unwrap();
         state.versions.get(sha256).cloned().unwrap_or_default()
+    }
+
+    /// Every valid send request body PostHog received on the send route
+    /// (including sends refused by `send_answers_next`).
+    pub fn send_requests(&self) -> Vec<serde_json::Value> {
+        self.state.lock().unwrap().send_requests.clone()
     }
 
     /// The emails PostHog accepted.
@@ -445,6 +459,10 @@ fn posthog_answer(state: &Mutex<FakeState>, request: &HttpMockRequest) -> Answer
                 Some(&attr),
             );
         }
+    }
+    state.send_requests.push(body.clone());
+    if let Some(fault) = state.send_faults.pop_front() {
+        return fault;
     }
     state.sent.push(body);
     accepted()
