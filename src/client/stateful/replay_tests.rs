@@ -96,6 +96,8 @@ impl Backend {
         config.preload_feature_flags = false;
         config.request_timeout = Duration::from_secs(2);
         config.shutdown_timeout = Duration::from_secs(2);
+        // Most tests take frames back to back; throttle tests opt back in.
+        config.session_replay.throttle_delay = Duration::ZERO;
         configure(&mut config);
         let client = Client::init_blocking(config);
         wait_for_config_completion(&client);
@@ -195,6 +197,7 @@ fn with_clock_config(
     config.preload_feature_flags = false;
     config.request_timeout = Duration::from_secs(2);
     config.shutdown_timeout = Duration::from_secs(2);
+    config.session_replay.throttle_delay = Duration::ZERO;
     configure(&mut config);
     let client = Client::init_with_transport_clock(config, clock.clone());
     let recording = backend.config.lock().unwrap()["sessionRecording"].clone();
@@ -1008,6 +1011,87 @@ fn frame_unavailable_is_a_standard_error() {
         FrameUnavailable::InvalidLayout.to_string(),
         "invalid frame layout"
     );
+    assert_eq!(
+        FrameUnavailable::Throttled.to_string(),
+        "the previous frame began less than the throttle delay ago"
+    );
+}
+
+fn throttled_client(backend: &Backend) -> (Client, Arc<ManualClock>) {
+    with_clock_config(backend, |config| {
+        config.session_replay.throttle_delay = ReplayConfig::default().throttle_delay;
+    })
+}
+
+#[test]
+fn frames_within_the_throttle_delay_are_throttled_without_reserving_capacity() {
+    let backend = Backend::new();
+    let (client, clock) = throttled_client(&backend);
+    let replay = client.session_replay();
+    replay.start();
+    drop(replay.begin_frame(layout()).unwrap());
+    clock.advance(Duration::from_millis(999));
+    assert_eq!(
+        replay.begin_frame(layout()).err(),
+        Some(FrameUnavailable::Throttled)
+    );
+    assert_eq!(
+        replay.0.upgrade().unwrap().pool.lock().unwrap().in_flight,
+        0
+    );
+}
+
+#[test]
+fn a_frame_is_allowed_once_the_throttle_delay_has_passed() {
+    let backend = Backend::new();
+    let (client, clock) = throttled_client(&backend);
+    let replay = client.session_replay();
+    replay.start();
+    drop(replay.begin_frame(layout()).unwrap());
+    clock.advance(Duration::from_secs(1));
+    assert!(replay.begin_frame(layout()).is_ok());
+}
+
+#[test]
+fn a_zero_throttle_delay_disables_throttling() {
+    let backend = Backend::new();
+    let (client, _clock) = with_clock_config(&backend, |config| {
+        config.session_replay.throttle_delay = Duration::ZERO;
+    });
+    let replay = client.session_replay();
+    replay.start();
+    drop(replay.begin_frame(layout()).unwrap());
+    assert!(replay.begin_frame(layout()).is_ok());
+}
+
+#[test]
+fn a_host_polling_every_render_frame_records_about_one_frame_a_second() {
+    let backend = Backend::new();
+    let client = backend.client(|config| {
+        config.session_replay.throttle_delay = ReplayConfig::default().throttle_delay;
+    });
+    let replay = client.session_replay();
+    replay.start();
+    let started = Instant::now();
+    let mut accepted = 0;
+    while started.elapsed() < Duration::from_secs(2) {
+        match replay.begin_frame(layout()) {
+            Ok(frame) => {
+                assert_eq!(replay.submit_frame(frame), SubmitOutcome::Accepted);
+                accepted += 1;
+            }
+            Err(FrameUnavailable::Throttled | FrameUnavailable::AtCapacity) => {}
+            Err(other) => panic!("unexpected {:?}", other),
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    // Frames at about 0 s and 1 s, and at most one more at the 2 s boundary.
+    assert!(
+        (2..=3).contains(&accepted),
+        "recorded {} frames in 2 s",
+        accepted
+    );
+    client.shutdown_blocking(Some(Duration::ZERO));
 }
 
 type Seen = Arc<Mutex<Vec<(String, std::collections::HashMap<String, Value>)>>>;

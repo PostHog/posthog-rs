@@ -146,6 +146,8 @@ impl Host {
         config.request_timeout = Duration::from_secs(1);
         config.shutdown_timeout = Duration::ZERO;
         config.session_replay.max_frames_in_flight = frames;
+        // These tests submit frames back to back.
+        config.session_replay.throttle_delay = Duration::ZERO;
         if disable_compression {
             config.capture_compression = None;
         }

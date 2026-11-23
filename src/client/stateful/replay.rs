@@ -4,13 +4,14 @@
 mod tests;
 use chrono::{DateTime, Utc};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::producer::Producer;
 use super::sessions::{Operation, SessionClock, SessionMode, Sessions};
 use super::writer::StateAccess;
 use super::{Client, Config, Snapshot};
-use crate::client::transport::{Completion, Control};
+use crate::client::transport::{Clock, Completion, Control};
 
 #[path = "replay_encoder.rs"]
 pub(crate) mod encoder;
@@ -25,12 +26,19 @@ pub struct ReplayConfig {
     pub jpeg_quality: u8,
     /// Frames from acquisition through delivery/retries, at least 1. Default: 2.
     pub max_frames_in_flight: usize,
+    /// Minimum time between frames. [`SessionReplay::begin_frame`] returns
+    /// [`FrameUnavailable::Throttled`] when called sooner than this after the
+    /// last frame it began, so a host may call it every render frame. Zero
+    /// disables throttling. Default: 1 second, as in posthog-ios and
+    /// posthog-android.
+    pub throttle_delay: Duration,
 }
 impl Default for ReplayConfig {
     fn default() -> Self {
         Self {
             jpeg_quality: 65,
             max_frames_in_flight: 2,
+            throttle_delay: Duration::from_secs(1),
         }
     }
 }
@@ -121,8 +129,11 @@ pub enum FrameUnavailable {
     /// the background and its automatic session expired or was ended. In the
     /// foreground, automatic mode starts a new session for the frame instead.
     NoSession,
+    /// Called sooner than `throttle_delay` after the previous frame began.
+    /// Skip this frame; a host may call `begin_frame` every render frame.
+    Throttled,
     /// `max_frames_in_flight` frames are still being encoded or uploaded.
-    /// Skip this frame and try again later.
+    /// Skip this frame; a later call succeeds once an earlier frame finishes.
     AtCapacity,
     /// Zero or oversized dimensions, or a row stride smaller than the width.
     InvalidLayout,
@@ -141,6 +152,7 @@ impl std::fmt::Display for FrameUnavailable {
             Self::NotPermitted => "project settings do not permit session replay",
             Self::OptedOut => "the user has opted out",
             Self::NoSession => "no active session",
+            Self::Throttled => "the previous frame began less than the throttle delay ago",
             Self::AtCapacity => "all replay frames are still in flight",
             Self::InvalidLayout => "invalid frame layout",
             Self::OutOfMemory => "could not allocate the frame buffer",
@@ -205,6 +217,9 @@ struct Pool {
     sequence: u64,
     in_flight: usize,
     max_frames: usize,
+    throttle_delay: Duration,
+    /// When the last frame was reserved, for `throttle_delay`.
+    last_frame: Option<Instant>,
     buffers: Vec<Vec<u8>>,
 }
 
@@ -234,6 +249,8 @@ pub(super) struct Controller {
     pool: Arc<Mutex<Pool>>,
     gate: Arc<encoder::Gate>,
     session_clock: Arc<dyn SessionClock>,
+    /// The replay lane's monotonic clock, which also throttles acquisition.
+    clock: Arc<dyn Clock>,
     default_opt_out: bool,
     capture_key: usize,
 }
@@ -261,10 +278,13 @@ impl Controller {
                 sequence: 0,
                 in_flight: 0,
                 max_frames: config.session_replay.max_frames_in_flight,
+                throttle_delay: config.session_replay.throttle_delay,
+                last_frame: None,
                 buffers: Vec::new(),
             })),
             gate,
             session_clock: producer.session_clock.clone(),
+            clock: transport.clock(),
             default_opt_out: config.opt_out,
             capture_key: producer.capture_key(),
         }))
@@ -345,6 +365,7 @@ impl Client {
 impl SessionReplay {
     /// Request recording and resume/create a session without extending activity.
     /// Remote permission is still required. Remote settings never undo manual stop.
+    /// Ignored while the user is opted out, as in posthog-ios and posthog-android.
     pub fn start(&self) {
         let Some(controller) = self.0.upgrade() else {
             return;
@@ -353,20 +374,23 @@ impl SessionReplay {
             return;
         }
         let now = controller.session_clock.now();
-        if controller
-            .state
-            .mutate(|snapshot| {
-                if !controller.opted_out(snapshot) && snapshot.sessions.active_id(now).is_none() {
-                    // Maintain drops an expired session without invalidating
-                    // in-flight captures; Start then adopts the session they
-                    // attribute to, or creates one (also in manual mode and
-                    // the background), as `start_session` does.
-                    snapshot.session_operation(Operation::Maintain, now, false);
-                    snapshot.session_operation(Operation::Start, now, false);
-                }
-            })
-            .is_ok()
-        {
+        // Decide in one mutation, so the consent check and the session
+        // operation see the same snapshot.
+        let started = controller.state.mutate(|snapshot| {
+            if controller.opted_out(snapshot) {
+                return false;
+            }
+            if snapshot.sessions.active_id(now).is_none() {
+                // Maintain drops an expired session without invalidating
+                // in-flight captures; Start then adopts the session they
+                // attribute to, or creates one (also in manual mode and
+                // the background), as `start_session` does.
+                snapshot.session_operation(Operation::Maintain, now, false);
+                snapshot.session_operation(Operation::Start, now, false);
+            }
+            true
+        });
+        if matches!(started, Ok((_, true))) {
             controller
                 .pool
                 .lock()
@@ -376,6 +400,7 @@ impl SessionReplay {
     }
     /// Stop acquisition, free idle buffers, and request flush. Valid host-held
     /// frames can still submit; only explicit start requests recording again.
+    /// Takes effect even while the user is opted out.
     pub fn stop(&self) {
         let Some(controller) = self.0.upgrade() else {
             return;
@@ -402,7 +427,9 @@ impl SessionReplay {
             })
     }
     /// Reserve immediately before acquisition. The error says why no frame is
-    /// available; `AtCapacity` clears once earlier frames finish uploading.
+    /// available. Calling this every render frame is fine: `Throttled` skips
+    /// frames within `throttle_delay` of the last one, and `AtCapacity` clears
+    /// once earlier frames finish uploading.
     pub fn begin_frame(&self, layout: FrameLayout) -> Result<ReplayFrame, FrameUnavailable> {
         let bytes = layout.byte_len().ok_or(FrameUnavailable::InvalidLayout)?;
         let c = self.0.upgrade().ok_or(FrameUnavailable::Closed)?;
@@ -419,11 +446,11 @@ impl SessionReplay {
         if !c.allowed(&snapshot) {
             return Err(FrameUnavailable::NotPermitted);
         }
+        if !c.pool.lock().unwrap_or_else(|p| p.into_inner()).active {
+            return Err(FrameUnavailable::NotRecording);
+        }
         let now = c.session_clock.now();
-        if snapshot.sessions.active_id(now).is_none()
-            && frames_start_sessions(&snapshot.sessions)
-            && c.pool.lock().unwrap_or_else(|p| p.into_inner()).active
-        {
+        if snapshot.sessions.active_id(now).is_none() && frames_start_sessions(&snapshot.sessions) {
             // Frames aren't activity, but like `get_session_id` (and the frame
             // path of posthog-android) they replace an expired or ended
             // session, so recording doesn't stop until the next capture.
@@ -439,6 +466,17 @@ impl SessionReplay {
         let mut pool = c.pool.lock().unwrap_or_else(|p| p.into_inner());
         if !pool.active {
             return Err(FrameUnavailable::NotRecording);
+        }
+        // Checked and recorded under the reservation lock, so concurrent
+        // callers can't both pass. A refusal with a more specific reason above
+        // takes precedence; capacity is only worth reporting once the interval
+        // has passed.
+        let instant = c.clock.now();
+        if pool
+            .last_frame
+            .is_some_and(|last| instant.saturating_duration_since(last) < pool.throttle_delay)
+        {
+            return Err(FrameUnavailable::Throttled);
         }
         if pool.in_flight >= pool.max_frames {
             return Err(FrameUnavailable::AtCapacity);
@@ -458,6 +496,7 @@ impl SessionReplay {
         pixels.resize(bytes, 0);
         pool.sequence = sequence;
         pool.in_flight += 1;
+        pool.last_frame = Some(instant);
         let attribution = Attribution {
             distinct_id: snapshot.distinct_id.clone(),
             session_id,

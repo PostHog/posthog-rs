@@ -19,6 +19,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.persistence = Persistence::Memory;
     config.preload_feature_flags = false;
     config.shutdown_timeout = Duration::from_secs(2);
+    // This measurement loop takes frames back to back. A host that calls
+    // `begin_frame` every render frame keeps the default one-second throttle.
+    config.session_replay.throttle_delay = Duration::ZERO;
     let drop_frames = std::env::var("REPLAY_DROP").as_deref() == Ok("true");
     config.before_send(move |mut event| {
         if event.event_name() == "$snapshot" {

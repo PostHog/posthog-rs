@@ -746,6 +746,8 @@ fn blocked_encoder_self_owns_until_completion_without_extending_shutdown_or_drop
     ));
     config.host = server.base_url();
     config.shutdown_timeout = Duration::from_millis(20);
+    // The test takes a second frame at once.
+    config.session_replay.throttle_delay = Duration::ZERO;
     config.before_send(move |event| {
         finished.retain();
         if event.event_name() == "$snapshot" {

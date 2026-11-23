@@ -173,6 +173,7 @@ impl ImageEncoder for Jpeg {
         pixels: &[u8],
         quality: u8,
     ) -> Result<Vec<u8>, &'static str> {
+        // Base64 grows the image by 4/3, so a larger JPEG can't fit a request.
         let mut output = LimitedBuffer {
             bytes: Vec::new(),
             limit: (MAX_BODY_BYTES / 4 * 3) as u64,
@@ -448,6 +449,7 @@ fn encode(
             event.set_prop(property.to_owned(), value);
         }
     }
+    // A one-frame request adds only the surrounding `[` and `]`.
     let mut body = LimitedBuffer {
         bytes: Vec::new(),
         limit: (MAX_BODY_BYTES - 2) as u64,

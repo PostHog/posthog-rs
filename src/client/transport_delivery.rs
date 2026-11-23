@@ -475,6 +475,13 @@ impl TransportHandle {
         *delivery.replay.lock().unwrap_or_else(|p| p.into_inner()) = Some(Replay { encoder, lane });
         Ok(gate)
     }
+
+    /// The monotonic clock the replay lane schedules frames with, so frame
+    /// acquisition can be throttled on the same time source.
+    #[cfg(feature = "session-replay")]
+    pub(crate) fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
 }
 
 impl Drop for TransportHandle {

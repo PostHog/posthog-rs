@@ -658,6 +658,7 @@ mod replay_sessions {
         config.preload_feature_flags = false;
         config.session_mode = mode;
         config.opt_out = opt_out;
+        config.session_replay.throttle_delay = Duration::ZERO;
         let client = Client::init_blocking(config);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -758,7 +759,7 @@ mod replay_sessions {
         let replay = client.session_replay();
         assert_eq!(
             replay.begin_frame(layout()).err(),
-            Some(FrameUnavailable::NoSession)
+            Some(FrameUnavailable::NotRecording)
         );
         assert_eq!(client.peek_session_id(), None);
         replay.start();
@@ -773,7 +774,7 @@ mod replay_sessions {
     }
 
     #[test]
-    fn start_while_opted_out_records_after_opt_in() {
+    fn start_while_opted_out_is_ignored() {
         let (_server, client) = recording_client(SessionMode::Automatic, true);
         let replay = client.session_replay();
         replay.start();
@@ -783,9 +784,33 @@ mod replay_sessions {
             Some(FrameUnavailable::OptedOut)
         );
         client.opt_in();
-        // The latched start now records on the next frame after opt-in.
+        // As in posthog-ios and posthog-android, opting in doesn't revive a
+        // start made while opted out; the app starts recording again.
+        assert!(!replay.is_active());
+        assert_eq!(
+            replay.begin_frame(layout()).err(),
+            Some(FrameUnavailable::NotRecording)
+        );
+        replay.start();
         assert!(replay.is_active());
         assert!(replay.begin_frame(layout()).is_ok());
+        client.shutdown_blocking(Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn frames_after_stop_and_expiry_report_not_recording() {
+        let (_server, client) = recording_client(SessionMode::Automatic, false);
+        let replay = client.session_replay();
+        replay.start();
+        replay.stop();
+        idle_31_minutes(&client);
+        let expired = client.peek_session_id();
+        assert_eq!(
+            replay.begin_frame(layout()).err(),
+            Some(FrameUnavailable::NotRecording)
+        );
+        // A frame that isn't recording doesn't rotate the session either.
+        assert_eq!(client.peek_session_id(), expired);
         client.shutdown_blocking(Some(Duration::ZERO));
     }
 

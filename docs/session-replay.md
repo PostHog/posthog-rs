@@ -3,7 +3,8 @@
 Enable `session-replay` on `posthog` (or the compatibility package `posthog-rs`).
 It implies `stateful` and supports both client modes, with Rust 1.78.
 
-The host owns capture cadence, renderer lifetime, downscaling and privacy masking.
+The host owns when to try a capture, renderer lifetime, downscaling and privacy
+masking. The SDK throttles frames to one a second by default.
 Supply already-composited, already-masked BGRA8888 pixels. Rust encodes those
 dimensions unchanged as JPEG. Alpha is ignored.
 
@@ -16,6 +17,7 @@ let mut config = Config::new("phc_project_token");
 config.persistence = Persistence::Memory;
 config.session_replay.jpeg_quality = 65;
 config.session_replay.max_frames_in_flight = 2;
+config.session_replay.throttle_delay = std::time::Duration::from_secs(1);
 let client = Client::init_blocking(config);
 let replay = client.session_replay();
 replay.start();
@@ -34,8 +36,9 @@ match replay.begin_frame(layout) {
         let outcome = replay.submit_frame(frame);
         // Accepted means queued work, not successful encoding, hooks or ingestion.
     }
-    // Earlier frames are still uploading; try again on a later frame.
-    Err(FrameUnavailable::AtCapacity) => {}
+    // Too soon after the last frame, or earlier frames are still uploading:
+    // skip this frame. Calling `begin_frame` every render frame is fine.
+    Err(FrameUnavailable::Throttled | FrameUnavailable::AtCapacity) => {}
     // Not recording, not permitted, opted out, no session, closed, …
     Err(_) => {}
 }
@@ -47,6 +50,13 @@ Carry the owned frame through asynchronous readback and submit it once. It can
 move between threads; it cannot be cloned. Dropping it abandons acquisition.
 At capacity, skip that capture instead of prefetching or accumulating handles.
 
+`begin_frame` returns `FrameUnavailable::Throttled` when it is called sooner
+than `throttle_delay` (default one second, as posthog-ios `throttleDelay` and
+posthog-android `throttleDelayMs`) after the last frame it began, so a host can
+call it on every render frame and record about one frame a second. A dropped
+frame still counts. Set `throttle_delay` to zero to disable throttling and pace
+captures yourself.
+
 Layouts require nonzero dimensions fitting JPEG's 16-bit width/height, at least
 four bytes per pixel per row, and checked allocation arithmetic; otherwise
 `begin_frame` returns `FrameUnavailable::InvalidLayout`. Allocation failures
@@ -55,7 +65,10 @@ return `FrameUnavailable::OutOfMemory`. Tokens have no time-based expiry.
 ## Eligibility and attribution
 
 Only `start()` requests recording. It resumes a valid session or creates one
-through the existing session manager, without touching activity. Recording also
+through the existing session manager, without touching activity. A `start()`
+made while the user is opted out is ignored, as in posthog-ios and
+posthog-android; call it again after `opt_in()`. A `stop()` made while opted
+out still takes effect. Recording also
 requires current consent, a valid session and remotely enabled project settings.
 Settings load asynchronously; delivery flush does not wait for them. Check
 `is_active()` on a later capture opportunity if recording is not yet eligible.
@@ -86,6 +99,8 @@ do not extend session activity. In automatic session mode in the foreground,
 without activity, or 24 hours) or was ended by `reset()` or `end_session()`,
 as `get_session_id` does; posthog-android's frames rotate the same way. Call
 `session_activity()` on user input to keep one session across an idle screen.
+A host that keeps capturing an idle screen without reporting activity starts a
+new recording every 30 minutes; pause capture while the app is idle to avoid it.
 Once accepted, work retains its attribution through later identity, session
 and consent changes.
 
@@ -134,10 +149,12 @@ allocations are freed safely when returned. A host-held frame cannot be forcibly
 reclaimed by stop or flush.
 
 Frame count is not a process-memory cap. Raw capacities, JPEG working memory,
-encoded envelopes, JSON/base64 and gzip buffers all contribute. Serialized and
-compressed requests are bounded to 25 MiB; oversized pairs split, and an
-oversized singleton is dropped with a sanitized diagnostic. Hosts should
-downscale before acquisition to control memory and encoding cost.
+encoded envelopes, JSON/base64 and gzip buffers all contribute. Requests are
+bounded to 0.9 MB before compression, under the backend's limit of about 1 MB
+decompressed, as in posthog-js. Oversized pairs split, and a single frame over
+the limit (a JPEG over about 675 KB) is dropped with a sanitized diagnostic.
+Hosts should downscale before acquisition to control memory, encoding cost and
+frame size.
 
 ## Delivery and lifecycle
 

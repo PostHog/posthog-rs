@@ -187,6 +187,7 @@ pub posthog::stateful::FrameUnavailable::NotRecording
 pub posthog::stateful::FrameUnavailable::OptedOut
 pub posthog::stateful::FrameUnavailable::OutOfMemory
 pub posthog::stateful::FrameUnavailable::Reentrant
+pub posthog::stateful::FrameUnavailable::Throttled
 impl core::error::Error for posthog::stateful::FrameUnavailable
 impl core::fmt::Display for posthog::stateful::FrameUnavailable
 pub fn posthog::stateful::FrameUnavailable::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -415,6 +416,7 @@ pub fn posthog::stateful::RemoteConfigFailure::status(&self) -> core::option::Op
 #[non_exhaustive] pub struct posthog::stateful::ReplayConfig
 pub posthog::stateful::ReplayConfig::jpeg_quality: u8
 pub posthog::stateful::ReplayConfig::max_frames_in_flight: usize
+pub posthog::stateful::ReplayConfig::throttle_delay: core::time::Duration
 impl core::default::Default for posthog::stateful::ReplayConfig
 pub fn posthog::stateful::ReplayConfig::default() -> Self
 #[non_exhaustive] pub struct posthog::stateful::ReplayFailure

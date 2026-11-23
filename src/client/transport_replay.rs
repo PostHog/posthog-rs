@@ -16,7 +16,10 @@ use crate::client::retry::{capture_backoff_duration, is_retryable_status, parse_
 use crate::client::stateful::replay::EncodedFrame;
 use crate::client::PostHogError;
 
-pub(crate) const MAX_BODY_BYTES: usize = 25 * 1024 * 1024;
+/// The largest uncompressed `/s/` request body, which also bounds its gzip
+/// output, each envelope and each JPEG. The backend refuses replay requests
+/// over about 1 MB decompressed; posthog-js targets 0.9 MB the same way.
+pub(crate) const MAX_BODY_BYTES: usize = 900 * 1000;
 const INTERVAL: Duration = Duration::from_secs(1);
 /// Upload attempts per screenshot batch, including the first.
 const MAX_ATTEMPTS: u32 = 4;

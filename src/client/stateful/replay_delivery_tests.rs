@@ -400,6 +400,44 @@ fn idle_worker_sends_a_pair_without_an_explicit_flush() {
 }
 
 #[test]
+fn a_frame_over_the_request_size_target_is_dropped_and_reported() {
+    let backend = Backend::new();
+    let (tx, rx) = mpsc::channel();
+    let client = backend.client(|config| {
+        config.session_replay.jpeg_quality = 100;
+        config.on_error(move |error| {
+            if let crate::client::PostHogError::Replay(failure) = error {
+                tx.send(failure.message().to_owned()).unwrap();
+            }
+        });
+    });
+    let replay = client.session_replay();
+    replay.start();
+    // Noise barely compresses, so 1024x768 encodes to well over the 0.9 MB
+    // request target.
+    let layout = FrameLayout::new(1024, 768, 1024 * 4, PixelFormat::Bgra8888);
+    let mut frame = replay.begin_frame(layout).unwrap();
+    let mut seed = 0x2545_f491_u32;
+    for byte in frame.pixels_mut() {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        *byte = seed as u8;
+    }
+    assert_eq!(replay.submit_frame(frame), SubmitOutcome::Accepted);
+    client.flush_blocking();
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "Screenshot JPEG encoding failed or exceeded its byte limit"
+    );
+    assert!(backend.bodies.lock().unwrap().is_empty());
+    assert_eq!(
+        replay.0.upgrade().unwrap().pool.lock().unwrap().in_flight,
+        0
+    );
+}
+
+#[test]
 fn terminal_and_quota_diagnostics_reach_the_public_hook_without_sensitive_data() {
     for (status, quota, expected) in [
         (400, false, "Screenshot upload permanently rejected"),
