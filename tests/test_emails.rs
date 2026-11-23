@@ -5,7 +5,7 @@ mod email_support;
 
 use sha2::Digest;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::default_user_agent;
@@ -1319,81 +1319,8 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
 
 #[tokio::test]
 async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_sends() {
-    let server = httpmock::MockServer::start_async().await;
-    let recorded = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
-    let recorded_in_mock = Arc::clone(&recorded);
-    server
-        .mock_async(|when, then| {
-            when.method("POST").path(SEND_PATH);
-            then.respond_with(move |request: &httpmock::HttpMockRequest| {
-                let Ok(serde_json::Value::Object(fields)) =
-                    serde_json::from_slice::<serde_json::Value>(&request.body_vec())
-                else {
-                    return httpmock::HttpMockResponse::builder()
-                        .status(400)
-                        .header("content-type", "application/json")
-                        .body(
-                            json!({
-                                "type": "validation_error",
-                                "code": "parse_error",
-                                "detail": "Malformed JSON.",
-                            })
-                            .to_string(),
-                        )
-                        .build();
-                };
-                recorded_in_mock
-                    .lock()
-                    .unwrap()
-                    .push(serde_json::Value::Object(fields.clone()));
-                let non_empty_str = |name: &str| {
-                    fields
-                        .get(name)
-                        .and_then(|value| value.as_str())
-                        .is_some_and(|value| !value.is_empty())
-                };
-                if fields.contains_key("category") {
-                    httpmock::HttpMockResponse::builder()
-                        .status(400)
-                        .header("content-type", "application/json")
-                        .body(
-                            json!({
-                                "type": "validation_error",
-                                "code": "invalid_input",
-                                "detail": "Unknown field category.",
-                                "attr": "category",
-                            })
-                            .to_string(),
-                        )
-                        .build()
-                } else if !non_empty_str("to")
-                    || !non_empty_str("template_key")
-                    || !non_empty_str("subject")
-                    || (!non_empty_str("html") && !non_empty_str("text"))
-                {
-                    httpmock::HttpMockResponse::builder()
-                        .status(400)
-                        .header("content-type", "application/json")
-                        .body(
-                            json!({
-                                "type": "validation_error",
-                                "code": "invalid_input",
-                                "detail": "Missing required field.",
-                            })
-                            .to_string(),
-                        )
-                        .build()
-                } else {
-                    httpmock::HttpMockResponse::builder()
-                        .status(202)
-                        .header("content-type", "application/json")
-                        .body(json!({"message_id": MESSAGE_ID}).to_string())
-                        .build()
-                }
-            });
-        })
-        .await;
-    let client = posthog::client(options(&server.base_url()).build().unwrap()).await;
+    let server = ScriptedServer::start_async(vec![accepted()]).await;
+    let client = client_for(&server).await;
 
     let sent = client
         .emails()
@@ -1401,26 +1328,9 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
         .await
         .unwrap();
     assert_eq!(sent.id, MESSAGE_ID);
-
-    for category in [
-        EmailCategory::Transactional,
-        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter").into(),
-    ] {
-        let error = client
-            .emails()
-            .send(digest_email().category(category))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), "invalid_input");
-        assert_eq!(error.kind(), EmailErrorKind::ValidationError);
-        assert_eq!(error.status(), Some(400));
-        assert_eq!(error.field(), Some("category"));
-    }
-
-    let requests = recorded.lock().unwrap().clone();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(server.requests().len(), 1);
     assert_eq!(
-        requests[0],
+        server.requests()[0].json(),
         json!({
             "to": "user@example.com",
             "template_key": "welcome",
@@ -1428,30 +1338,88 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
             "text": "Hi",
         })
     );
-    assert_eq!(
-        requests[1],
-        json!({
-            "to": "user@example.com",
-            "template_key": "november-digest",
-            "subject": "Your November",
-            "html": "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>",
-            "category": "transactional",
-        })
-    );
-    assert_eq!(
-        requests[2],
-        json!({
-            "to": "user@example.com",
-            "template_key": "november-digest",
-            "subject": "Your November",
-            "html": "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>",
-            "category": {
-                "key": "newsletter",
-                "type": "marketing",
-                "name": "Newsletter",
-            },
-        })
-    );
+
+    let refusal_cases = [
+        (
+            EmailCategory::Transactional,
+            "invalid_input",
+            "Unknown field category.",
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>",
+                "category": "transactional",
+            }),
+        ),
+        (
+            MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter").into(),
+            "invalid_input",
+            "Unknown field category.",
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>",
+                "category": {
+                    "key": "newsletter",
+                    "type": "marketing",
+                    "name": "Newsletter",
+                },
+            }),
+        ),
+        (
+            MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter").into(),
+            "field_not_accepted",
+            "Unknown field category.",
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>",
+                "category": {
+                    "key": "newsletter",
+                    "type": "marketing",
+                    "name": "Newsletter",
+                },
+            }),
+        ),
+    ];
+
+    for (category, expected_code, detail, expected_body) in refusal_cases {
+        let server = ScriptedServer::start_async(vec![
+            Answer::json(
+                400,
+                json!({
+                    "type": "validation_error",
+                    "code": expected_code,
+                    "detail": detail,
+                    "attr": "category",
+                }),
+            ),
+            accepted(),
+        ])
+        .await;
+        let client = client_for(&server).await;
+
+        let error = client
+            .emails()
+            .send(digest_email().category(category))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), expected_code);
+        assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+        assert_eq!(error.status(), Some(400));
+        assert_eq!(error.field(), Some("category"));
+        assert!(error.fix().is_none(), "{}", expected_code);
+        assert_eq!(server.requests().len(), 1, "{}", expected_code);
+        assert_eq!(
+            server.requests()[0].json(),
+            expected_body,
+            "{}",
+            expected_code
+        );
+    }
 }
 
 #[tokio::test]
