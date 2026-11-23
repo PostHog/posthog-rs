@@ -258,9 +258,12 @@ impl CodeEmail {
     /// sends as transactional with no category; when code-send categories are
     /// disabled for the project, leaving `category` out sends as transactional
     /// with no category, explicit [`EmailCategory::Transactional`] still
-    /// returns HTTP 400 `category_mismatch` for a categorized template, an
-    /// explicit [`MessageCategory`] returns HTTP 400 `categories_not_enabled`,
-    /// and an older server rejects `category` with HTTP 400.
+    /// returns HTTP 400 `category_mismatch` for a saved template in a
+    /// transactional category (a sendable saved template in a marketing
+    /// category returns `marketing_template` before category comparison,
+    /// including with the flag off), an explicit [`MessageCategory`] returns
+    /// HTTP 400 `categories_not_enabled`, and an older server rejects
+    /// `category` with HTTP 400.
     ///
     /// [`EmailCategory::Transactional`] asks for transactional email with no
     /// category. PostHog refuses the send with:
@@ -268,12 +271,12 @@ impl CodeEmail {
     /// - `categories_not_enabled` when code-send categories aren't enabled for
     ///   the project yet,
     /// - `category_mismatch` when the key exists with another type, when
-    ///   `template_key` names a template in another category (including
-    ///   [`EmailCategory::Transactional`] for a template in a category), or
-    ///   when code-send categories are enabled and `template_key` names an
-    ///   existing saved template with no category and the send passes an
-    ///   explicit [`MessageCategory`] (for marketing emails, use a different
-    ///   `template_key`; omit `category` or pass
+    ///   `template_key` names a saved template in a transactional category
+    ///   with [`EmailCategory::Transactional`] or a mismatched
+    ///   [`MessageCategory`], or when code-send categories are enabled and
+    ///   `template_key` names an existing saved template with no category and
+    ///   the send passes an explicit [`MessageCategory`] (for marketing emails,
+    ///   use a different `template_key`; omit `category` or pass
     ///   [`EmailCategory::Transactional`] only for transactional emails; with
     ///   the flag off, PostHog returns `categories_not_enabled` first),
     /// - `too_many_categories` when it would create a category past the

@@ -4,15 +4,14 @@ mod common;
 mod email_support;
 
 use sha2::Digest;
-use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::default_user_agent;
 use email_support::{
     accepted, closed_url, connection_counting_store, options, s3_error, unavailable, Answer,
-    FakePostHog, ScriptedServer, SendApi, StoredCategory, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    FakePostHog, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
 use posthog::{
     CodeEmail, EmailAttachment, EmailCategory, EmailDeliveryStatus, EmailErrorKind, EmailTracking,
@@ -780,15 +779,6 @@ async fn code_send_leaves_out_sensitivity_tracking_and_engagement_capture_it_was
     );
 }
 
-async fn client_with_a_receipts_template() -> (posthog::Client, SendApi) {
-    let api = SendApi::start_async()
-        .await
-        .with_category("receipts", "transactional", "Receipts", "")
-        .with_template("order-receipt", Some("receipts"));
-    let client = posthog::client(options(&api.url).build().unwrap()).await;
-    (client, api)
-}
-
 fn digest_email() -> CodeEmail {
     CodeEmail::new("user@example.com", "november-digest", "Your November")
         .html("<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>")
@@ -800,24 +790,37 @@ fn receipt_email() -> CodeEmail {
 }
 
 #[tokio::test]
-async fn a_send_for_a_template_in_a_category_follows_its_category() {
-    let (client, api) = client_with_a_receipts_template().await;
+async fn a_send_without_a_category_omits_category_on_the_wire() {
+    let server = ScriptedServer::start_async(vec![accepted()]).await;
+    let client = client_for(&server).await;
 
-    client.emails().send(receipt_email()).await.unwrap();
+    let sent = client.emails().send(receipt_email()).await.unwrap();
 
+    assert_eq!(sent.id, MESSAGE_ID);
+    assert_eq!(server.requests().len(), 1);
     assert_eq!(
-        api.sent(),
-        vec![("user@example.com".to_string(), Some("receipts".to_string()))]
+        server.requests()[0].json(),
+        json!({
+            "to": "user@example.com",
+            "template_key": "order-receipt",
+            "subject": "Your receipt",
+            "html": "<p>Thanks for your order.</p>",
+        })
     );
-    assert!(!api.requests()[0]
-        .as_object()
-        .unwrap()
-        .contains_key("category"));
 }
 
 #[tokio::test]
 async fn transactional_on_a_template_in_a_category_is_refused() {
-    let (client, api) = client_with_a_receipts_template().await;
+    let server = ScriptedServer::start_async(vec![Answer::json(
+        400,
+        json!({
+            "code": "category_mismatch",
+            "detail": "Refused.",
+            "attr": "category",
+        }),
+    )])
+    .await;
+    let client = client_for(&server).await;
 
     let error = client
         .emails()
@@ -825,26 +828,30 @@ async fn transactional_on_a_template_in_a_category_is_refused() {
         .await
         .unwrap_err();
 
+    assert_eq!(error.code(), "category_mismatch");
+    assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+    assert_eq!(error.status(), Some(400));
+    assert_eq!(error.field(), Some("category"));
+    assert!(error.fix().is_none());
+    assert_eq!(server.requests().len(), 1);
     assert_eq!(
-        (error.code(), error.kind()),
-        ("category_mismatch", EmailErrorKind::ValidationError)
+        server.requests()[0].json(),
+        json!({
+            "to": "user@example.com",
+            "template_key": "order-receipt",
+            "subject": "Your receipt",
+            "html": "<p>Thanks for your order.</p>",
+            "category": "transactional",
+        })
     );
-    assert_eq!(api.sent(), vec![]);
-    assert_eq!(api.requests()[0]["category"], json!("transactional"));
 }
 
 #[tokio::test]
-async fn a_send_creates_its_category_in_the_project() {
+async fn code_send_sends_its_category_definition_on_the_wire() {
     let cases = [
         (
-            "newsletter",
             MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
                 .description("Monthly product news"),
-            StoredCategory {
-                category_type: "marketing".into(),
-                name: "Newsletter".into(),
-                description: "Monthly product news".into(),
-            },
             json!({
                 "key": "newsletter",
                 "type": "marketing",
@@ -853,13 +860,7 @@ async fn a_send_creates_its_category_in_the_project() {
             }),
         ),
         (
-            "receipts",
             MessageCategory::new("receipts", MessageCategoryType::Transactional, "Receipts"),
-            StoredCategory {
-                category_type: "transactional".into(),
-                name: "Receipts".into(),
-                description: "".into(),
-            },
             json!({
                 "key": "receipts",
                 "type": "transactional",
@@ -867,14 +868,8 @@ async fn a_send_creates_its_category_in_the_project() {
             }),
         ),
         (
-            "alerts",
             MessageCategory::new("alerts", MessageCategoryType::Transactional, "Alerts")
                 .description(""),
-            StoredCategory {
-                category_type: "transactional".into(),
-                name: "Alerts".into(),
-                description: "".into(),
-            },
             json!({
                 "key": "alerts",
                 "type": "transactional",
@@ -883,51 +878,60 @@ async fn a_send_creates_its_category_in_the_project() {
             }),
         ),
     ];
-    for (key, category, stored, expected_wire_category) in cases {
-        let api = SendApi::start_async().await;
-        let client = posthog::client(options(&api.url).build().unwrap()).await;
+    for (category, expected_wire_category) in cases {
+        let server = ScriptedServer::start_async(vec![accepted()]).await;
+        let client = client_for(&server).await;
 
-        client
+        let sent = client
             .emails()
             .send(digest_email().category(category))
             .await
             .unwrap();
 
-        assert_eq!(api.categories(), HashMap::from([(key.to_string(), stored)]));
+        assert_eq!(sent.id, MESSAGE_ID);
+        assert_eq!(server.requests().len(), 1);
         assert_eq!(
-            api.sent(),
-            vec![("user@example.com".to_string(), Some(key.to_string()))]
-        );
-        let request = &api.requests()[0];
-        assert_eq!(request["category"], expected_wire_category);
-        assert_eq!(
-            request["html"],
-            json!("<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>")
+            server.requests()[0].json(),
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>",
+                "category": expected_wire_category,
+            })
         );
     }
 }
 
 #[tokio::test]
 async fn a_send_without_a_category_is_transactional() {
+    let digest_html = "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>";
     for category in [None, Some(EmailCategory::Transactional)] {
-        let api = SendApi::start_async().await;
-        let client = posthog::client(options(&api.url).build().unwrap()).await;
+        let server = ScriptedServer::start_async(vec![accepted()]).await;
+        let client = client_for(&server).await;
         let mut email = digest_email();
         let explicit = category.is_some();
         if let Some(category) = category {
             email = email.category(category);
         }
 
-        client.emails().send(email).await.unwrap();
+        let sent = client.emails().send(email).await.unwrap();
 
-        assert_eq!(api.sent(), vec![("user@example.com".to_string(), None)]);
-        assert_eq!(api.categories(), HashMap::new());
-        let body = api.requests()[0].as_object().unwrap().clone();
+        assert_eq!(sent.id, MESSAGE_ID);
+        assert_eq!(server.requests().len(), 1);
+        let mut expected = json!({
+            "to": "user@example.com",
+            "template_key": "november-digest",
+            "subject": "Your November",
+            "html": digest_html,
+        });
         if explicit {
-            assert_eq!(body.get("category"), Some(&json!("transactional")));
-        } else {
-            assert!(!body.contains_key("category"));
+            expected
+                .as_object_mut()
+                .unwrap()
+                .insert("category".to_string(), json!("transactional"));
         }
+        assert_eq!(server.requests()[0].json(), expected);
     }
 }
 
@@ -1316,10 +1320,12 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
 #[tokio::test]
 async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_sends() {
     let server = httpmock::MockServer::start_async().await;
+    let recorded = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let recorded_in_mock = Arc::clone(&recorded);
     server
         .mock_async(|when, then| {
             when.method("POST").path(SEND_PATH);
-            then.respond_with(|request: &httpmock::HttpMockRequest| {
+            then.respond_with(move |request: &httpmock::HttpMockRequest| {
                 let Ok(serde_json::Value::Object(fields)) =
                     serde_json::from_slice::<serde_json::Value>(&request.body_vec())
                 else {
@@ -1336,6 +1342,16 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
                         )
                         .build();
                 };
+                recorded_in_mock
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::Value::Object(fields.clone()));
+                let non_empty_str = |name: &str| {
+                    fields
+                        .get(name)
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|value| !value.is_empty())
+                };
                 if fields.contains_key("category") {
                     httpmock::HttpMockResponse::builder()
                         .status(400)
@@ -1346,6 +1362,23 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
                                 "code": "invalid_input",
                                 "detail": "Unknown field category.",
                                 "attr": "category",
+                            })
+                            .to_string(),
+                        )
+                        .build()
+                } else if !non_empty_str("to")
+                    || !non_empty_str("template_key")
+                    || !non_empty_str("subject")
+                    || (!non_empty_str("html") && !non_empty_str("text"))
+                {
+                    httpmock::HttpMockResponse::builder()
+                        .status(400)
+                        .header("content-type", "application/json")
+                        .body(
+                            json!({
+                                "type": "validation_error",
+                                "code": "invalid_input",
+                                "detail": "Missing required field.",
                             })
                             .to_string(),
                         )
@@ -1383,6 +1416,42 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
         assert_eq!(error.status(), Some(400));
         assert_eq!(error.field(), Some("category"));
     }
+
+    let requests = recorded.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0],
+        json!({
+            "to": "user@example.com",
+            "template_key": "welcome",
+            "subject": "Welcome",
+            "text": "Hi",
+        })
+    );
+    assert_eq!(
+        requests[1],
+        json!({
+            "to": "user@example.com",
+            "template_key": "november-digest",
+            "subject": "Your November",
+            "html": "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>",
+            "category": "transactional",
+        })
+    );
+    assert_eq!(
+        requests[2],
+        json!({
+            "to": "user@example.com",
+            "template_key": "november-digest",
+            "subject": "Your November",
+            "html": "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>",
+            "category": {
+                "key": "newsletter",
+                "type": "marketing",
+                "name": "Newsletter",
+            },
+        })
+    );
 }
 
 #[tokio::test]
