@@ -1342,8 +1342,10 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
     let refusal_cases = [
         (
             EmailCategory::Transactional,
+            "validation_error",
             "invalid_input",
             "Unknown field category.",
+            None,
             json!({
                 "to": "user@example.com",
                 "template_key": "november-digest",
@@ -1354,8 +1356,10 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
         ),
         (
             MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter").into(),
+            "validation_error",
             "invalid_input",
             "Unknown field category.",
+            None,
             json!({
                 "to": "user@example.com",
                 "template_key": "november-digest",
@@ -1370,8 +1374,10 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
         ),
         (
             MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter").into(),
+            "invalid_request",
             "field_not_accepted",
-            "Unknown field category.",
+            "PostHog does not accept category yet.",
+            Some("Wait until PostHog accepts category, then retry."),
             json!({
                 "to": "user@example.com",
                 "template_key": "november-digest",
@@ -1386,20 +1392,22 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
         ),
     ];
 
-    for (category, expected_code, detail, expected_body) in refusal_cases {
-        let server = ScriptedServer::start_async(vec![
-            Answer::json(
-                400,
-                json!({
-                    "type": "validation_error",
-                    "code": expected_code,
-                    "detail": detail,
-                    "attr": "category",
-                }),
-            ),
-            accepted(),
-        ])
-        .await;
+    for (category, error_type, expected_code, detail, expected_fix, expected_body) in refusal_cases
+    {
+        let mut response = json!({
+            "type": error_type,
+            "code": expected_code,
+            "detail": detail,
+            "attr": "category",
+        });
+        if let Some(fix) = expected_fix {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("fix".to_string(), json!(fix));
+        }
+        let server =
+            ScriptedServer::start_async(vec![Answer::json(400, response), accepted()]).await;
         let client = client_for(&server).await;
 
         let error = client
@@ -1411,7 +1419,7 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
         assert_eq!(error.kind(), EmailErrorKind::ValidationError);
         assert_eq!(error.status(), Some(400));
         assert_eq!(error.field(), Some("category"));
-        assert!(error.fix().is_none(), "{}", expected_code);
+        assert_eq!(error.fix(), expected_fix, "{}", expected_code);
         assert_eq!(server.requests().len(), 1, "{}", expected_code);
         assert_eq!(
             server.requests()[0].json(),

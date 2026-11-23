@@ -280,9 +280,12 @@ impl CodeEmail {
     ///   `template_key` names a saved template in a transactional category
     ///   with [`EmailCategory::Transactional`] or a mismatched
     ///   [`MessageCategory`], or when code-send categories are enabled and
-    ///   `template_key` names an existing saved template with no category and
-    ///   the send passes an explicit [`MessageCategory`] (for marketing emails,
-    ///   use a different `template_key`; omit `category` or pass
+    ///   `template_key` names an existing transactional-enabled saved email
+    ///   template with no category and the send passes an explicit
+    ///   [`MessageCategory`] (a saved email template never enabled for
+    ///   transactional sends returns `template_not_transactional` before
+    ///   PostHog compares categories; for marketing emails, use a different
+    ///   `template_key`; omit `category` or pass
     ///   [`EmailCategory::Transactional`] only for transactional emails; with
     ///   the flag off, PostHog returns `categories_not_enabled` first),
     /// - `too_many_categories` when it would create a category past the
@@ -360,12 +363,15 @@ impl From<MessageCategory> for EmailCategory {
 /// doesn't match an existing saved template, PostHog creates the category with
 /// its name and description on the first send with its key. Later sends with
 /// that key keep the category's name and description, so change them in
-/// PostHog. Once code-send categories are enabled, a matching saved template
-/// keeps its own category, including when it has none: passing a
-/// `MessageCategory` for an uncategorized saved template returns
-/// `category_mismatch` (for marketing emails, use a different `template_key`;
-/// omit `category` or pass [`EmailCategory::Transactional`] only for
-/// transactional emails). If code-send categories aren't enabled for the
+/// PostHog. Once code-send categories are enabled, a matching
+/// transactional-enabled saved email template keeps its own category,
+/// including when it has none: passing a `MessageCategory` for an
+/// uncategorized transactional-enabled saved email template returns
+/// `category_mismatch` (a saved email template never enabled for transactional
+/// sends returns `template_not_transactional` before PostHog compares
+/// categories; for marketing emails, use a different `template_key`, and omit
+/// `category` or pass [`EmailCategory::Transactional`] only for transactional
+/// emails). If code-send categories aren't enabled for the
 /// project yet, PostHog returns HTTP 400 `categories_not_enabled` before
 /// inspecting any saved template (even if `template_key` names a marketing
 /// template), and an older server rejects `category` with HTTP 400. A key that
