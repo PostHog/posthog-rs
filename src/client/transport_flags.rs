@@ -153,7 +153,7 @@ impl Slot {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).closed = true;
     }
 
-    fn is_closed(&self) -> bool {
+    pub(super) fn is_closed(&self) -> bool {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).closed
     }
 

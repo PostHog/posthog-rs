@@ -114,10 +114,10 @@ impl FlagLoader {
     }
 }
 
-/// The request task. If flag targeting was set directly while it was in flight
-/// and no newer request exists, its completion installs the response and
-/// continues with a follow-up for the current targeting, so the new targeting
-/// is never lost.
+/// The request task. Its completion installs the response unless the identity
+/// changed (see `install`). If flag targeting was set directly while it was in
+/// flight and no newer request exists, it then continues with a follow-up for
+/// the current targeting, so the new targeting is never lost.
 fn task_for(
     access: StateAccess,
     options: Arc<ClientOptions>,

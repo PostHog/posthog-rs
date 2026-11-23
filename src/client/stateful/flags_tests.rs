@@ -283,6 +283,48 @@ fn analytics_person_properties_in_flight_start_no_follow_up_request() {
 }
 
 #[test]
+fn identified_set_in_flight_starts_no_follow_up_request() {
+    let server = Server::new(vec![(200, json!({"featureFlags":{"first":true}}))]);
+    let client = Client::init_blocking(config(&server.host));
+    client.identify("person");
+    server.request();
+    let mut update = crate::client::stateful::Identify::new("person");
+    update.set.insert("plan".into(), json!("pro"));
+    client.identify(update);
+    server.respond();
+    // The fixture stops listening, so a follow-up could not go unnoticed.
+    server.finish();
+    client.transport.as_ref().unwrap().request_barrier();
+    let state = client.state.as_ref().unwrap().snapshot();
+    // Like analytics person properties, `$set` waits for the next load.
+    assert_eq!(state.flags.person_properties["plan"], json!("pro"));
+    assert_eq!(state.flag_load.request, 1);
+}
+
+#[test]
+fn group_properties_in_flight_follow_up_for_the_current_membership() {
+    let server = Server::new(vec![
+        (200, json!({"featureFlags":{"first":true}})),
+        (200, json!({"featureFlags":{"second":true}})),
+    ]);
+    let client = Client::init_blocking(config(&server.host));
+    client.group(crate::client::stateful::Group::new("company", "acme"));
+    server.request();
+    let mut update = crate::client::stateful::Group::new("company", "acme");
+    update.properties.insert("tier".into(), json!(2));
+    client.group_identify(update);
+    server.respond();
+    // Group properties are direct flag targeting, so the load follows up.
+    let follow_up = server.request();
+    assert_eq!(follow_up["group_properties"]["company"]["tier"], json!(2));
+    server.respond();
+    client.transport.as_ref().unwrap().request_barrier();
+    server.finish();
+    let state = client.state.as_ref().unwrap().snapshot();
+    assert_eq!(state.flag_load.request, 2);
+}
+
+#[test]
 fn group_targeting_change_in_flight_installs_the_response_and_follows_up() {
     let server = Server::new(vec![
         (200, json!({"featureFlags":{"obsolete":true}})),
