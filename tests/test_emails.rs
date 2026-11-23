@@ -810,15 +810,18 @@ async fn a_send_without_a_category_omits_category_on_the_wire() {
 }
 
 #[tokio::test]
-async fn transactional_on_a_template_in_a_category_is_refused() {
-    let server = ScriptedServer::start_async(vec![Answer::json(
-        400,
-        json!({
-            "code": "category_mismatch",
-            "detail": "Refused.",
-            "attr": "category",
-        }),
-    )])
+async fn explicit_transactional_category_mismatch_is_surfaced_without_retry() {
+    let server = ScriptedServer::start_async(vec![
+        Answer::json(
+            400,
+            json!({
+                "code": "category_mismatch",
+                "detail": "Refused.",
+                "attr": "category",
+            }),
+        ),
+        accepted(),
+    ])
     .await;
     let client = client_for(&server).await;
 
