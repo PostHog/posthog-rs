@@ -280,8 +280,8 @@ impl CodeEmail {
     ///   `text`,
     /// - `copies_not_allowed` when a marketing email has `cc` or `bcc`
     ///   recipients,
-    /// - `workflow_can_wait` when a marketing email carries attachments on a
-    ///   workflow that can defer delivery,
+    /// - `workflow_can_wait` when a marketing email carries attachments
+    ///   (because marketing sending limits can hold delivery),
     /// - `recipient_opted_out` when the recipient opted out of the category
     ///   or of all marketing email.
     pub fn category(mut self, category: impl Into<EmailCategory>) -> Self {
@@ -350,7 +350,8 @@ impl From<MessageCategory> for EmailCategory {
 /// it requires a clickable `<a href="{{ unsubscribe_url }}">` link; plain-text
 /// sends without `html` need `{{ unsubscribe_url }}` in `text`. Marketing
 /// sends cannot have `cc` or `bcc` (`copies_not_allowed`) and cannot carry
-/// attachments on workflows that can defer delivery (`workflow_can_wait`).
+/// attachments (`workflow_can_wait`, because marketing sending limits can
+/// hold delivery).
 ///
 /// ```
 /// use posthog::{CodeEmail, MessageCategory, MessageCategoryType};

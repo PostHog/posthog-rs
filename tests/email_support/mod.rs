@@ -196,6 +196,7 @@ struct Project {
     categories: HashMap<String, StoredCategory>,
     /// Template key to the key of its category, if it has one.
     templates: HashMap<String, Option<String>>,
+    requests: Vec<serde_json::Value>,
     sent: Vec<Sent>,
 }
 
@@ -207,10 +208,11 @@ struct Project {
 /// the send leaves `category` out. A category other than the template's,
 /// `"transactional"` for a template in a category, or an explicit category
 /// object for a saved template with no category is refused with
-/// `category_mismatch`. `"category": null` is refused at the JSON boundary.
-/// Marketing sends require a clickable `<a href="{{ unsubscribe_url }}">` link
+/// `category_mismatch`. `"category": null` is treated like an omitted category,
+/// matching PostHog's serializer. Marketing sends require a clickable
+/// `<a href="{{ unsubscribe_url }}">` link (allowing an optional `#fragment`)
 /// when `html` is present (or `{{ unsubscribe_url }}` in `text` without `html`)
-/// and refuse nonempty `cc`/`bcc` with `copies_not_allowed`.
+/// before checking for nonempty `cc`/`bcc` (`copies_not_allowed`).
 pub struct SendApi {
     pub url: String,
     project: Arc<Mutex<Project>>,
@@ -287,6 +289,10 @@ impl SendApi {
         self.project.lock().unwrap().categories.get(key).cloned()
     }
 
+    pub fn requests(&self) -> Vec<serde_json::Value> {
+        self.project.lock().unwrap().requests.clone()
+    }
+
     pub fn sent(&self) -> Vec<Sent> {
         self.project.lock().unwrap().sent.clone()
     }
@@ -297,6 +303,7 @@ fn responder(project: Arc<Mutex<Project>>) -> Responder {
         let body: serde_json::Value =
             serde_json::from_slice(&request.body_vec()).unwrap_or_default();
         let mut project = project.lock().unwrap();
+        project.requests.push(body.clone());
         let (status, reply) = match code_send(&body, &mut project) {
             Ok(sent) => {
                 project.sent.push(sent);
@@ -329,7 +336,7 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
     let text = |name: &str| fields.get(name).and_then(|value| value.as_str());
     let to = text("to").ok_or(INVALID)?.to_string();
     let template_key = text("template_key").ok_or(INVALID)?;
-    let category = fields.get("category");
+    let category = fields.get("category").filter(|value| !value.is_null());
     let defined = match category {
         None => None,
         Some(value) => defined_category(value)?,
@@ -366,6 +373,9 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
         }
     }
     if category_type == "marketing" {
+        if !has_unsubscribe_link(text("html"), text("text")) {
+            return Err((400, "unsubscribe_link_required"));
+        }
         let has_copies = ["cc", "bcc"].iter().any(|field| {
             fields
                 .get(*field)
@@ -374,9 +384,6 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
         });
         if has_copies {
             return Err((400, "copies_not_allowed"));
-        }
-        if !has_unsubscribe_link(text("html"), text("text")) {
-            return Err((400, "unsubscribe_link_required"));
         }
     }
     project
@@ -400,7 +407,7 @@ fn has_unsubscribe_link(html: Option<&str>, text: Option<&str>) -> bool {
             let comments = regex::Regex::new(r"(?s)<!--.*?-->").unwrap();
             let stripped = comments.replace_all(html, "");
             let clickable = regex::Regex::new(
-                r#"(?is)<a\b[^>]*\bhref\s*=\s*(?:"\s*\{\{\s*unsubscribe_url\s*\}\}\s*"|'\s*\{\{\s*unsubscribe_url\s*\}\}\s*')"#,
+                r#"(?is)<a\b[^>]*\bhref\s*=\s*(?:"\s*\{\{\s*unsubscribe_url\s*\}\}(?:#[^"]*)?\s*"|'\s*\{\{\s*unsubscribe_url\s*\}\}(?:#[^']*)?\s*')"#,
             )
             .unwrap();
             clickable.is_match(&stripped)
@@ -417,7 +424,7 @@ fn text_of<'a>(fields: &'a serde_json::Map<String, serde_json::Value>, name: &st
 }
 
 /// A category object's fields, `None` for `"transactional"`, or a refusal for
-/// anything else (including explicit JSON `null`).
+/// any other non-null category value.
 fn defined_category(
     category: &serde_json::Value,
 ) -> Result<Option<&serde_json::Map<String, serde_json::Value>>, Refusal> {

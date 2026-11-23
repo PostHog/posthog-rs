@@ -809,6 +809,10 @@ async fn a_send_for_a_template_in_a_category_follows_its_category() {
         api.sent(),
         vec![("user@example.com".to_string(), Some("receipts".to_string()))]
     );
+    assert!(!api.requests()[0]
+        .as_object()
+        .unwrap()
+        .contains_key("category"));
 }
 
 #[tokio::test]
@@ -875,6 +879,7 @@ async fn a_send_without_a_category_is_transactional() {
         let api = SendApi::start_async().await;
         let client = posthog::client(options(&api.url).build().unwrap()).await;
         let mut email = digest_email();
+        let explicit = category.is_some();
         if let Some(category) = category {
             email = email.category(category);
         }
@@ -883,6 +888,12 @@ async fn a_send_without_a_category_is_transactional() {
 
         assert_eq!(api.sent(), vec![("user@example.com".to_string(), None)]);
         assert_eq!(api.categories(), HashMap::new());
+        let body = api.requests()[0].as_object().unwrap().clone();
+        if explicit {
+            assert_eq!(body.get("category"), Some(&json!("transactional")));
+        } else {
+            assert!(!body.contains_key("category"));
+        }
     }
 }
 
