@@ -178,12 +178,14 @@ let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in 
 
 A marketing send honors the recipient's opt-outs, and PostHog fills
 `{{ unsubscribe_url }}` with the recipient's preferences link. When `html` is
-present, it must include a clickable link whose `href` points to
+non-empty, it must include a clickable link whose `href` points to
 `{{ unsubscribe_url }}` (for example,
-`<a href="{{ unsubscribe_url }}">Unsubscribe</a>`); plain-text sends without
-`html` need `{{ unsubscribe_url }}` in `text`. Marketing sends cannot include
-`cc` or `bcc` (`copies_not_allowed`) and cannot carry attachments on workflows
-that can defer delivery (`workflow_can_wait`).
+`<a href="{{ unsubscribe_url }}">Unsubscribe</a>`); plain-text sends with
+`html` unset or empty need `{{ unsubscribe_url }}` in `text`. Marketing sends
+cannot include `cc` or `bcc` (`copies_not_allowed`) and cannot carry
+attachments (`workflow_can_wait` on a verified sender, or
+`sandbox_fields_unsupported` on the PostHog test sender, because marketing
+sending limits can hold delivery).
 
 Leave `category` out for transactional email with no category, or, when
 code-send categories are enabled for the project, to follow the transactional
@@ -191,10 +193,12 @@ category of the template that `template_key` names (otherwise an omitted
 `category` sends as transactional with no category).
 `EmailCategory::Transactional` asks for transactional email with no category,
 so PostHog refuses it with `category_mismatch` when `template_key` names a
-template in a category. When `template_key` names an existing saved template
-with no category, passing an explicit `MessageCategory` also returns
-`category_mismatch` (omit `category` or pass `EmailCategory::Transactional`
-instead). A template made in PostHog sends transactional email only: PostHog
+template in a category (even when code-send categories are disabled for the
+project). When `template_key` names an existing saved template with no
+category, passing an explicit `MessageCategory` also returns
+`category_mismatch` (for marketing emails, use a different `template_key`; omit
+`category` or pass `EmailCategory::Transactional` only for transactional
+emails). A template made in PostHog sends transactional email only: PostHog
 checks whether a saved template is enabled for transactional sends first
 (`template_not_transactional`), and returns `marketing_template` when an
 otherwise sendable template belongs to a marketing category.

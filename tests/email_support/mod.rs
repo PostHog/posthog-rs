@@ -209,11 +209,12 @@ struct Project {
 /// `"transactional"` for a template in a category, or an explicit category
 /// object for a saved template with no category is refused with
 /// `category_mismatch`. `"category": null` is treated like an omitted category,
-/// matching PostHog's serializer. Marketing sends require a clickable
-/// `<a href="{{ unsubscribe_url }}">` link (allowing optional `?query` and/or
-/// `#fragment`) when `html` is present (or `{{ unsubscribe_url }}` in `text`
-/// without `html`) before checking for nonempty `cc`/`bcc`
-/// (`copies_not_allowed`).
+/// matching PostHog's serializer. Marketing sends mirror PostHog's check
+/// order: raw `{{ unsubscribe_url }}` placeholder presence first
+/// (`unsubscribe_link_required`), then nonempty `cc`/`bcc`
+/// (`copies_not_allowed`), then a clickable `<a href="{{ unsubscribe_url }}">`
+/// link (allowing optional `?query` and/or `#fragment`) when `html` is
+/// non-empty (`unsubscribe_link_required`).
 pub struct SendApi {
     pub url: String,
     project: Arc<Mutex<Project>>,
@@ -374,7 +375,9 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
         }
     }
     if category_type == "marketing" {
-        if !has_unsubscribe_link(text("html"), text("text")) {
+        let html = text("html").filter(|body| !body.is_empty());
+        let plain = text("text");
+        if !has_unsubscribe_placeholder(html, plain) {
             return Err((400, "unsubscribe_link_required"));
         }
         let has_copies = ["cc", "bcc"].iter().any(|field| {
@@ -385,6 +388,11 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
         });
         if has_copies {
             return Err((400, "copies_not_allowed"));
+        }
+        if let Some(html) = html {
+            if !has_clickable_unsubscribe_link(html) {
+                return Err((400, "unsubscribe_link_required"));
+            }
         }
     }
     project
@@ -402,22 +410,20 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
     Ok((to, Some(key.to_string())))
 }
 
-fn has_unsubscribe_link(html: Option<&str>, text: Option<&str>) -> bool {
-    match html.filter(|body| !body.is_empty()) {
-        Some(html) => {
-            let comments = regex::Regex::new(r"(?s)<!--.*?-->").unwrap();
-            let stripped = comments.replace_all(html, "");
-            let clickable = regex::Regex::new(
-                r##"<(?i:a)(?:\s+[^>]*?)?\s+(?i:href)\s*=\s*(?:"\s*\{\{\s*unsubscribe_url\s*\}\}(?:\?[^"#]*)?(?:#[^"]*)?\s*"|'\s*\{\{\s*unsubscribe_url\s*\}\}(?:\?[^'#]*)?(?:#[^']*)?\s*')[^>]*>"##,
-            )
-            .unwrap();
-            clickable.is_match(&stripped)
-        }
-        None => {
-            let placeholder = regex::Regex::new(r"\{\{\s*unsubscribe_url\s*\}\}").unwrap();
-            placeholder.is_match(text.unwrap_or_default())
-        }
-    }
+fn has_unsubscribe_placeholder(html: Option<&str>, text: Option<&str>) -> bool {
+    let placeholder = regex::Regex::new(r"\{\{\s*unsubscribe_url\s*\}\}").unwrap();
+    let target = html.or(text).unwrap_or_default();
+    placeholder.is_match(target)
+}
+
+fn has_clickable_unsubscribe_link(html: &str) -> bool {
+    let comments = regex::Regex::new(r"(?s)<!--.*?-->").unwrap();
+    let stripped = comments.replace_all(html, "");
+    let clickable = regex::Regex::new(
+        r##"<(?i:a)(?:\s+[^>]*?)?\s+(?i:href)\s*=\s*(?:"\s*\{\{\s*unsubscribe_url\s*\}\}(?:\?[^"#]*)?(?:#[^"]*)?\s*"|'\s*\{\{\s*unsubscribe_url\s*\}\}(?:\?[^'#]*)?(?:#[^']*)?\s*')[^>]*>"##,
+    )
+    .unwrap();
+    clickable.is_match(&stripped)
 }
 
 fn text_of<'a>(fields: &'a serde_json::Map<String, serde_json::Value>, name: &str) -> &'a str {

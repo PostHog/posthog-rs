@@ -257,9 +257,10 @@ impl CodeEmail {
     /// transactional category of the template that `template_key` names, or
     /// sends as transactional with no category; when code-send categories are
     /// disabled for the project, leaving `category` out sends as transactional
-    /// with no category, an explicit [`MessageCategory`] returns HTTP 400
-    /// `categories_not_enabled`, and an older server rejects `category` with
-    /// HTTP 400.
+    /// with no category, explicit [`EmailCategory::Transactional`] still
+    /// returns HTTP 400 `category_mismatch` for a categorized template, an
+    /// explicit [`MessageCategory`] returns HTTP 400 `categories_not_enabled`,
+    /// and an older server rejects `category` with HTTP 400.
     ///
     /// [`EmailCategory::Transactional`] asks for transactional email with no
     /// category. PostHog refuses the send with:
@@ -275,10 +276,10 @@ impl CodeEmail {
     ///   [`EmailCategory::Transactional`] only for transactional emails),
     /// - `too_many_categories` when it would create a category past the
     ///   project's limit,
-    /// - `unsubscribe_link_required` when a marketing email with `html` has no
-    ///   clickable `<a href="{{ unsubscribe_url }}">` link, or a plain-text
-    ///   marketing email without `html` has no `{{ unsubscribe_url }}` in
-    ///   `text`,
+    /// - `unsubscribe_link_required` when a marketing email with non-empty
+    ///   `html` has no clickable `<a href="{{ unsubscribe_url }}">` link, or a
+    ///   plain-text marketing email with `html` unset or empty has no
+    ///   `{{ unsubscribe_url }}` in `text`,
     /// - `copies_not_allowed` when a marketing email has `cc` or `bcc`
     ///   recipients,
     /// - `workflow_can_wait` (on a verified sender) or
@@ -354,9 +355,9 @@ impl From<MessageCategory> for EmailCategory {
 /// older server rejects `category` with HTTP 400). A key that exists with
 /// another type refuses the send with `category_mismatch`.
 ///
-/// A marketing send honors the recipient's opt-outs. When `html` is present,
+/// A marketing send honors the recipient's opt-outs. When `html` is non-empty,
 /// it requires a clickable `<a href="{{ unsubscribe_url }}">` link; plain-text
-/// sends without `html` need `{{ unsubscribe_url }}` in `text`. Marketing
+/// sends with `html` unset or empty need `{{ unsubscribe_url }}` in `text`. Marketing
 /// sends cannot have `cc` or `bcc` (`copies_not_allowed`) and cannot carry
 /// attachments (`workflow_can_wait` on a verified sender, or
 /// `sandbox_fields_unsupported` on the PostHog test sender, because marketing

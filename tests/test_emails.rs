@@ -1170,7 +1170,7 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
         (
             400,
             "unsubscribe_link_required",
-            Some("html"),
+            None,
             CodeEmail::new("user@example.com", "november-digest", "Your November")
                 .html("<p>No link here.</p>")
                 .category(marketing()),
@@ -1178,22 +1178,26 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
         (
             400,
             "copies_not_allowed",
-            Some("cc"),
+            None,
             digest_email().cc("copy@example.com").category(marketing()),
         ),
+        (400, "marketing_template", None, digest_email()),
         (
             422,
             "recipient_opted_out",
-            Some("to"),
+            None,
             digest_email().category(marketing()),
         ),
     ];
     for (status, code, attr, email) in cases {
-        let server = ScriptedServer::start_async(vec![Answer::json(
-            status,
-            json!({"code": code, "detail": "Refused.", "attr": attr, "fix": "Fix it."}),
-        )])
-        .await;
+        let mut payload = json!({"code": code, "detail": "Refused.", "fix": "Fix it."});
+        if let Some(field) = attr {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("attr".to_string(), json!(field));
+        }
+        let server = ScriptedServer::start_async(vec![Answer::json(status, payload)]).await;
         let client = client_for(&server).await;
         let error = client.emails().send(email).await.unwrap_err();
         assert_eq!(error.code(), code);
@@ -1216,12 +1220,23 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
         .mock_async(|when, then| {
             when.method("POST").path(SEND_PATH);
             then.respond_with(|request: &httpmock::HttpMockRequest| {
-                let body: serde_json::Value =
-                    serde_json::from_slice(&request.body_vec()).unwrap_or_default();
-                let has_category = body
-                    .as_object()
-                    .is_some_and(|fields| fields.contains_key("category"));
-                if has_category {
+                let Ok(serde_json::Value::Object(fields)) =
+                    serde_json::from_slice::<serde_json::Value>(&request.body_vec())
+                else {
+                    return httpmock::HttpMockResponse::builder()
+                        .status(400)
+                        .header("content-type", "application/json")
+                        .body(
+                            json!({
+                                "type": "validation_error",
+                                "code": "parse_error",
+                                "detail": "Malformed JSON.",
+                            })
+                            .to_string(),
+                        )
+                        .build();
+                };
+                if fields.contains_key("category") {
                     httpmock::HttpMockResponse::builder()
                         .status(400)
                         .header("content-type", "application/json")
