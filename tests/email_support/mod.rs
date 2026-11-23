@@ -210,9 +210,10 @@ struct Project {
 /// object for a saved template with no category is refused with
 /// `category_mismatch`. `"category": null` is treated like an omitted category,
 /// matching PostHog's serializer. Marketing sends require a clickable
-/// `<a href="{{ unsubscribe_url }}">` link (allowing an optional `#fragment`)
-/// when `html` is present (or `{{ unsubscribe_url }}` in `text` without `html`)
-/// before checking for nonempty `cc`/`bcc` (`copies_not_allowed`).
+/// `<a href="{{ unsubscribe_url }}">` link (allowing optional `?query` and/or
+/// `#fragment`) when `html` is present (or `{{ unsubscribe_url }}` in `text`
+/// without `html`) before checking for nonempty `cc`/`bcc`
+/// (`copies_not_allowed`).
 pub struct SendApi {
     pub url: String,
     project: Arc<Mutex<Project>>,
@@ -407,7 +408,7 @@ fn has_unsubscribe_link(html: Option<&str>, text: Option<&str>) -> bool {
             let comments = regex::Regex::new(r"(?s)<!--.*?-->").unwrap();
             let stripped = comments.replace_all(html, "");
             let clickable = regex::Regex::new(
-                r#"(?is)<a\b[^>]*\bhref\s*=\s*(?:"\s*\{\{\s*unsubscribe_url\s*\}\}(?:#[^"]*)?\s*"|'\s*\{\{\s*unsubscribe_url\s*\}\}(?:#[^']*)?\s*')"#,
+                r##"<(?i:a)(?:\s+[^>]*?)?\s+(?i:href)\s*=\s*(?:"\s*\{\{\s*unsubscribe_url\s*\}\}(?:\?[^"#]*)?(?:#[^"]*)?\s*"|'\s*\{\{\s*unsubscribe_url\s*\}\}(?:\?[^'#]*)?(?:#[^']*)?\s*')[^>]*>"##,
             )
             .unwrap();
             clickable.is_match(&stripped)

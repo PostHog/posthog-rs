@@ -270,8 +270,9 @@ impl CodeEmail {
     ///   `template_key` names a template in another category (including
     ///   [`EmailCategory::Transactional`] for a template in a category), or
     ///   when `template_key` names an existing saved template with no category
-    ///   and the send passes an explicit [`MessageCategory`] (omit `category`
-    ///   or pass [`EmailCategory::Transactional`] instead),
+    ///   and the send passes an explicit [`MessageCategory`] (for marketing
+    ///   emails, use a different `template_key`; omit `category` or pass
+    ///   [`EmailCategory::Transactional`] only for transactional emails),
     /// - `too_many_categories` when it would create a category past the
     ///   project's limit,
     /// - `unsubscribe_link_required` when a marketing email with `html` has no
@@ -280,8 +281,10 @@ impl CodeEmail {
     ///   `text`,
     /// - `copies_not_allowed` when a marketing email has `cc` or `bcc`
     ///   recipients,
-    /// - `workflow_can_wait` when a marketing email carries attachments
-    ///   (because marketing sending limits can hold delivery),
+    /// - `workflow_can_wait` (on a verified sender) or
+    ///   `sandbox_fields_unsupported` (on the PostHog test sender) when a
+    ///   marketing email carries attachments (because marketing sending limits
+    ///   can hold delivery),
     /// - `recipient_opted_out` when the recipient opted out of the category
     ///   or of all marketing email.
     pub fn category(mut self, category: impl Into<EmailCategory>) -> Self {
@@ -338,11 +341,16 @@ impl From<MessageCategory> for EmailCategory {
 
 /// A message category, defined in code by its key.
 ///
-/// When code-send categories are enabled for the project, PostHog creates the
-/// category with its name and description on the first send with its key.
-/// Later sends with that key keep the category's name and description, so
-/// change them in PostHog. If code-send categories aren't enabled for the
-/// project yet, PostHog returns HTTP 400 `categories_not_enabled` (and an
+/// When code-send categories are enabled for the project and `template_key`
+/// doesn't match an existing saved template, PostHog creates the category with
+/// its name and description on the first send with its key. Later sends with
+/// that key keep the category's name and description, so change them in
+/// PostHog. A matching saved template keeps its own category, including when it
+/// has none: passing a `MessageCategory` for an uncategorized saved template
+/// returns `category_mismatch` (for marketing emails, use a different
+/// `template_key`; omit `category` or pass [`EmailCategory::Transactional`]
+/// only for transactional emails). If code-send categories aren't enabled for
+/// the project yet, PostHog returns HTTP 400 `categories_not_enabled` (and an
 /// older server rejects `category` with HTTP 400). A key that exists with
 /// another type refuses the send with `category_mismatch`.
 ///
@@ -350,8 +358,9 @@ impl From<MessageCategory> for EmailCategory {
 /// it requires a clickable `<a href="{{ unsubscribe_url }}">` link; plain-text
 /// sends without `html` need `{{ unsubscribe_url }}` in `text`. Marketing
 /// sends cannot have `cc` or `bcc` (`copies_not_allowed`) and cannot carry
-/// attachments (`workflow_can_wait`, because marketing sending limits can
-/// hold delivery).
+/// attachments (`workflow_can_wait` on a verified sender, or
+/// `sandbox_fields_unsupported` on the PostHog test sender, because marketing
+/// sending limits can hold delivery).
 ///
 /// ```
 /// use posthog::{CodeEmail, MessageCategory, MessageCategoryType};
