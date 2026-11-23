@@ -57,6 +57,13 @@ call it on every render frame and record about one frame a second. A dropped
 frame still counts. Set `throttle_delay` to zero to disable throttling and pace
 captures yourself.
 
+A throttled frame is skipped, not deferred. posthog-ios and posthog-android take
+one more screenshot when the delay ends, so a change inside the window is still
+recorded. A host that renders only when something changes should do the same:
+after `Throttled`, call `begin_frame` again (for example, by requesting a redraw)
+`throttle_delay` later. Otherwise the last change before the screen goes still
+isn't recorded until the next redraw.
+
 Layouts require nonzero dimensions fitting JPEG's 16-bit width/height, at least
 four bytes per pixel per row, and checked allocation arithmetic; otherwise
 `begin_frame` returns `FrameUnavailable::InvalidLayout`. Allocation failures
@@ -138,7 +145,8 @@ API.
 
 ## Capacity and memory
 
-Defaults are JPEG quality 65 and two frames in flight. Each reservation spans
+Defaults are JPEG quality 65, two frames in flight and a one-second throttle.
+Each reservation spans
 acquisition, encoding, queued upload and retries. Returning raw pixels to the pool
 does not release it. With the default of two, frames waiting to retry pause new
 acquisition until they upload or reach the attempt limit.

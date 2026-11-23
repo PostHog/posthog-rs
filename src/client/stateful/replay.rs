@@ -130,7 +130,9 @@ pub enum FrameUnavailable {
     /// foreground, automatic mode starts a new session for the frame instead.
     NoSession,
     /// Called sooner than `throttle_delay` after the previous frame began.
-    /// Skip this frame; a host may call `begin_frame` every render frame.
+    /// Skip this frame; a host may call `begin_frame` every render frame. A
+    /// host that renders only on change calls again after `throttle_delay`,
+    /// or the latest screen isn't recorded until its next redraw.
     Throttled,
     /// `max_frames_in_flight` frames are still being encoded or uploaded.
     /// Skip this frame; a later call succeeds once an earlier frame finishes.

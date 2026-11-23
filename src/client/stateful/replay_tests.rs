@@ -1065,32 +1065,26 @@ fn a_zero_throttle_delay_disables_throttling() {
 }
 
 #[test]
-fn a_host_polling_every_render_frame_records_about_one_frame_a_second() {
+fn a_host_polling_every_render_frame_records_one_frame_a_second() {
     let backend = Backend::new();
-    let client = backend.client(|config| {
-        config.session_replay.throttle_delay = ReplayConfig::default().throttle_delay;
-    });
+    let (client, clock) = throttled_client(&backend);
     let replay = client.session_replay();
     replay.start();
-    let started = Instant::now();
     let mut accepted = 0;
-    while started.elapsed() < Duration::from_secs(2) {
+    // Two seconds of render frames at 60 fps.
+    for _ in 0..120 {
         match replay.begin_frame(layout()) {
             Ok(frame) => {
                 assert_eq!(replay.submit_frame(frame), SubmitOutcome::Accepted);
                 accepted += 1;
             }
-            Err(FrameUnavailable::Throttled | FrameUnavailable::AtCapacity) => {}
+            Err(FrameUnavailable::Throttled) => {}
             Err(other) => panic!("unexpected {:?}", other),
         }
-        std::thread::sleep(Duration::from_millis(16));
+        clock.advance(Duration::from_micros(16_667));
     }
-    // Frames at about 0 s and 1 s, and at most one more at the 2 s boundary.
-    assert!(
-        (2..=3).contains(&accepted),
-        "recorded {} frames in 2 s",
-        accepted
-    );
+    // Frames at 0 s and at the first render frame from 1 s on.
+    assert_eq!(accepted, 2);
     client.shutdown_blocking(Some(Duration::ZERO));
 }
 
