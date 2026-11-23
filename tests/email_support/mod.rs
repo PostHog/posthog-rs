@@ -209,12 +209,13 @@ struct Project {
 /// `"transactional"` for a template in a category, or an explicit category
 /// object for a saved template with no category is refused with
 /// `category_mismatch`. `"category": null` is treated like an omitted category,
-/// matching PostHog's serializer. Marketing sends mirror PostHog's check
-/// order: raw `{{ unsubscribe_url }}` placeholder presence first
+/// matching PostHog's serializer. Marketing sends mirror PostHog's Django to
+/// CDP check order: raw `{{ unsubscribe_url }}` placeholder presence first
 /// (`unsubscribe_link_required`), then nonempty `cc`/`bcc`
-/// (`copies_not_allowed`), then a clickable `<a href="{{ unsubscribe_url }}">`
-/// link (allowing optional `?query` and/or `#fragment`) when `html` is
-/// non-empty (`unsubscribe_link_required`).
+/// (`copies_not_allowed`), then category creation, then clickable
+/// `<a href="{{ unsubscribe_url }}">` anchor validation (allowing optional
+/// `?query` and/or `#fragment`) when `html` is non-empty
+/// (`unsubscribe_link_required`).
 pub struct SendApi {
     pub url: String,
     project: Arc<Mutex<Project>>,
@@ -374,8 +375,8 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
             return Err((400, "category_mismatch"));
         }
     }
+    let html = text("html").filter(|body| !body.is_empty());
     if category_type == "marketing" {
-        let html = text("html").filter(|body| !body.is_empty());
         let plain = text("text");
         if !has_unsubscribe_placeholder(html, plain) {
             return Err((400, "unsubscribe_link_required"));
@@ -388,11 +389,6 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
         });
         if has_copies {
             return Err((400, "copies_not_allowed"));
-        }
-        if let Some(html) = html {
-            if !has_clickable_unsubscribe_link(html) {
-                return Err((400, "unsubscribe_link_required"));
-            }
         }
     }
     project
@@ -407,6 +403,11 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
                 .unwrap_or_default()
                 .to_string(),
         });
+    if category_type == "marketing"
+        && html.is_some_and(|body| !has_clickable_unsubscribe_link(body))
+    {
+        return Err((400, "unsubscribe_link_required"));
+    }
     Ok((to, Some(key.to_string())))
 }
 
@@ -417,13 +418,165 @@ fn has_unsubscribe_placeholder(html: Option<&str>, text: Option<&str>) -> bool {
 }
 
 fn has_clickable_unsubscribe_link(html: &str) -> bool {
-    let comments = regex::Regex::new(r"(?s)<!--.*?-->").unwrap();
-    let stripped = comments.replace_all(html, "");
-    let clickable = regex::Regex::new(
-        r##"<(?i:a)(?:\s+[^>]*?)?\s+(?i:href)\s*=\s*(?:"\s*\{\{\s*unsubscribe_url\s*\}\}(?:\?[^"#]*)?(?:#[^"]*)?\s*"|'\s*\{\{\s*unsubscribe_url\s*\}\}(?:\?[^'#]*)?(?:#[^']*)?\s*')[^>]*>"##,
-    )
-    .unwrap();
-    clickable.is_match(&stripped)
+    let bytes = html.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i..].starts_with(b"<!--") {
+            match bytes[i + 4..].windows(3).position(|w| w == b"-->") {
+                Some(end) => {
+                    i += 4 + end + 3;
+                    continue;
+                }
+                None => return false,
+            }
+        }
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if i + 2 < len
+            && bytes[i + 1].eq_ignore_ascii_case(&b'a')
+            && bytes[i + 2].is_ascii_whitespace()
+        {
+            match scan_anchor_tag(html, i + 2) {
+                Some((end, first_href)) => {
+                    if first_href.is_some_and(is_unsubscribe_href) {
+                        return true;
+                    }
+                    i = end;
+                    continue;
+                }
+                None => return false,
+            }
+        }
+        if i + 1 < len && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'/') {
+            match skip_tag(bytes, i + 1) {
+                Some(end) => {
+                    i = end;
+                    continue;
+                }
+                None => return false,
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Scans attributes of an `<a ...>` start tag beginning right after `<a`.
+/// Returns `(next_index_after_gt, first_href_value)` when closed by `>`, or
+/// `None` if the tag or a quoted attribute is unclosed.
+fn scan_anchor_tag(html: &str, mut pos: usize) -> Option<(usize, Option<&str>)> {
+    let bytes = html.as_bytes();
+    let len = bytes.len();
+    let mut first_href: Option<&str> = None;
+
+    loop {
+        while pos < len && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= len {
+            return None;
+        }
+        if bytes[pos] == b'>' {
+            return Some((pos + 1, first_href));
+        }
+        if bytes[pos] == b'/' {
+            pos += 1;
+            continue;
+        }
+
+        let name_start = pos;
+        while pos < len
+            && !bytes[pos].is_ascii_whitespace()
+            && bytes[pos] != b'='
+            && bytes[pos] != b'>'
+            && bytes[pos] != b'/'
+        {
+            pos += 1;
+        }
+        if pos == name_start {
+            pos += 1;
+            continue;
+        }
+        let attr_name = &html[name_start..pos];
+
+        while pos < len && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        let value = if pos < len && bytes[pos] == b'=' {
+            pos += 1;
+            while pos < len && bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            if pos >= len {
+                return None;
+            }
+            if bytes[pos] == b'"' || bytes[pos] == b'\'' {
+                let quote = bytes[pos];
+                pos += 1;
+                let val_start = pos;
+                while pos < len && bytes[pos] != quote {
+                    pos += 1;
+                }
+                if pos >= len {
+                    return None;
+                }
+                let val = &html[val_start..pos];
+                pos += 1;
+                val
+            } else {
+                let val_start = pos;
+                while pos < len && !bytes[pos].is_ascii_whitespace() && bytes[pos] != b'>' {
+                    pos += 1;
+                }
+                &html[val_start..pos]
+            }
+        } else {
+            ""
+        };
+
+        if first_href.is_none() && attr_name.eq_ignore_ascii_case("href") {
+            first_href = Some(value);
+        }
+    }
+}
+
+fn skip_tag(bytes: &[u8], mut pos: usize) -> Option<usize> {
+    let len = bytes.len();
+    while pos < len {
+        match bytes[pos] {
+            b'>' => return Some(pos + 1),
+            b'"' | b'\'' => {
+                let quote = bytes[pos];
+                pos += 1;
+                while pos < len && bytes[pos] != quote {
+                    pos += 1;
+                }
+                if pos >= len {
+                    return None;
+                }
+                pos += 1;
+            }
+            _ => pos += 1,
+        }
+    }
+    None
+}
+
+fn is_unsubscribe_href(value: &str) -> bool {
+    let Some(rest) = value.trim().strip_prefix("{{") else {
+        return false;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix("unsubscribe_url") else {
+        return false;
+    };
+    let Some(suffix) = rest.trim_start().strip_prefix("}}") else {
+        return false;
+    };
+    suffix.is_empty() || suffix.starts_with('?') || suffix.starts_with('#')
 }
 
 fn text_of<'a>(fields: &'a serde_json::Map<String, serde_json::Value>, name: &str) -> &'a str {

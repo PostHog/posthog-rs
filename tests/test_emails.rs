@@ -1190,7 +1190,7 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
         ),
     ];
     for (status, code, attr, email) in cases {
-        let mut payload = json!({"code": code, "detail": "Refused.", "fix": "Fix it."});
+        let mut payload = json!({"code": code, "detail": "Refused."});
         if let Some(field) = attr {
             payload
                 .as_object_mut()
@@ -1208,7 +1208,7 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
         );
         assert_eq!(error.status(), Some(status));
         assert_eq!(error.field(), attr);
-        assert_eq!(error.fix(), Some("Fix it."));
+        assert!(error.fix().is_none(), "{} {}", status, code);
         assert_eq!(server.requests().len(), 1, "{status} {code}");
     }
 }

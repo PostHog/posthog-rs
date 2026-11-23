@@ -185,7 +185,8 @@ non-empty, it must include a clickable link whose `href` points to
 cannot include `cc` or `bcc` (`copies_not_allowed`) and cannot carry
 attachments (`workflow_can_wait` on a verified sender, or
 `sandbox_fields_unsupported` on the PostHog test sender, because marketing
-sending limits can hold delivery).
+sending limits can hold delivery; both the async and blocking clients upload
+attachments before PostHog validates and refuses the send).
 
 Leave `category` out for transactional email with no category, or, when
 code-send categories are enabled for the project, to follow the transactional

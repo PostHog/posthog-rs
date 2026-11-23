@@ -285,7 +285,10 @@ impl CodeEmail {
     /// - `workflow_can_wait` (on a verified sender) or
     ///   `sandbox_fields_unsupported` (on the PostHog test sender) when a
     ///   marketing email carries attachments (because marketing sending limits
-    ///   can hold delivery),
+    ///   can hold delivery). Both the async and blocking clients upload
+    ///   attachments before PostHog validates and refuses the send, so a
+    ///   marketing send with files can transfer files or fail during upload
+    ///   before reaching the send endpoint,
     /// - `recipient_opted_out` when the recipient opted out of the category
     ///   or of all marketing email.
     pub fn category(mut self, category: impl Into<EmailCategory>) -> Self {
@@ -361,7 +364,8 @@ impl From<MessageCategory> for EmailCategory {
 /// sends cannot have `cc` or `bcc` (`copies_not_allowed`) and cannot carry
 /// attachments (`workflow_can_wait` on a verified sender, or
 /// `sandbox_fields_unsupported` on the PostHog test sender, because marketing
-/// sending limits can hold delivery).
+/// sending limits can hold delivery; both the async and blocking clients
+/// upload attachments before PostHog validates and refuses the send).
 ///
 /// ```
 /// use posthog::{CodeEmail, MessageCategory, MessageCategoryType};
