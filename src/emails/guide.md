@@ -60,6 +60,30 @@ from the environment, such as `HTTPS_PROXY`. None of your client's own
 settings apply to uploads: a root certificate, TLS option or proxy set in
 code doesn't reach them.
 
+# Scheduling
+
+Pass a time to `scheduled_at` on a [`TemplateEmail`](crate::TemplateEmail)
+or a [`CodeEmail`](crate::CodeEmail) to send the email up to 7 days later.
+Only PostHog Cloud schedules emails: with any other app host, such as a
+self-hosted PostHog, a reverse proxy or a custom domain, the send fails with
+`scheduling_requires_cloud` before any request.
+
+The client rounds the time up to the next millisecond, so the email never
+goes out early. A result with [`SendEmailStatus::Scheduled`](crate::SendEmailStatus::Scheduled)
+carries the time PostHog confirmed in `scheduled_at`, and
+[`Emails::get`] reads [`EmailDeliveryStatus::Scheduled`](crate::EmailDeliveryStatus::Scheduled)
+until the email goes out. A time that has already passed sends the email
+now, and the result's status is `Queued`. When PostHog accepts the email
+without confirming its time, the send fails with `schedule_not_confirmed`
+and the error's [`message_id`](crate::EmailError::message_id): read the
+email's status before you send it again.
+
+Work out the time once and reuse it on your own retries: the idempotency key
+covers it, so the same key with another time fails with
+`idempotency_key_reused`. To stop scheduled emails before they go out,
+disable the email's workflow in PostHog until they have reached a final
+status. That refuses every new send of it meanwhile.
+
 # Timeouts and retries
 
 Each request times out after `email_request_timeout_seconds`, 15 by

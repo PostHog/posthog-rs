@@ -15,7 +15,7 @@ use email_support::{
 };
 use posthog::{
     CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, EmailTracking,
-    EmailTrackingOptions, TemplateEmail,
+    EmailTrackingOptions, SendEmailStatus, TemplateEmail,
 };
 use serde_json::json;
 
@@ -1374,4 +1374,211 @@ async fn reading_stops_at_the_cap_on_an_endless_reply() {
     assert_eq!(error.code(), "network_error");
     assert!(error.message().contains("larger than"), "{}", error);
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[cfg(feature = "tls")]
+async fn cloud_client(proxy: &email_support::CloudProxy, host: &str) -> posthog::Client {
+    let mut builder = posthog::ClientOptionsBuilder::default();
+    builder
+        .api_key("phc_test".to_string())
+        .host(host)
+        .secret_key("phs_test")
+        .http_client(proxy.http());
+    posthog::client(builder.build().unwrap()).await
+}
+
+fn utc(time: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(time)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_scheduled_send_on_posthog_cloud_sends_one_rounded_time_on_every_retry() {
+    let server = ScriptedServer::start_async(vec![
+        unavailable(),
+        Answer::json(
+            202,
+            json!({
+                "message_id": MESSAGE_ID,
+                "replayed": true,
+                "status": "scheduled",
+                "scheduled_at": "2026-12-01T09:00:00.124000Z",
+            }),
+        ),
+    ])
+    .await;
+    let proxy = email_support::CloudProxy::start(&server.url).await;
+    let client = cloud_client(&proxy, "https://eu.i.posthog.com").await;
+    let at = chrono::DateTime::parse_from_rfc3339("2026-12-01T11:00:00.123000500+02:00").unwrap();
+
+    let result = client
+        .emails()
+        .send(
+            TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                .scheduled_at(at)
+                .max_retries(1),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.id, MESSAGE_ID);
+    assert!(result.replayed);
+    assert_eq!(result.status, SendEmailStatus::Scheduled);
+    assert_eq!(result.scheduled_at, Some(utc("2026-12-01T09:00:00.124Z")));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(request.json()["scheduled_at"], "2026-12-01T09:00:00.124Z");
+    }
+    assert_eq!(requests[0].body, requests[1].body);
+    assert_eq!(
+        requests[0].header("idempotency-key"),
+        requests[1].header("idempotency-key")
+    );
+    assert!(proxy
+        .tunnels()
+        .iter()
+        .all(|tunnel| tunnel == "eu.posthog.com:443"));
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_scheduled_time_that_had_passed_is_queued_now() {
+    let server = ScriptedServer::start_async(vec![Answer::json(
+        202,
+        json!({"message_id": MESSAGE_ID, "status": "queued", "scheduled_at": null}),
+    )])
+    .await;
+    let proxy = email_support::CloudProxy::start(&server.url).await;
+    let client = cloud_client(&proxy, "https://us.i.posthog.com").await;
+
+    let result = client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "reminder", "Your reminder")
+                .text("It's time.")
+                .scheduled_at(utc("2020-01-01T00:00:00Z")),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, SendEmailStatus::Queued);
+    assert_eq!(result.scheduled_at, None);
+    let requests = server.requests();
+    assert_eq!(
+        requests[0].json()["scheduled_at"],
+        "2020-01-01T00:00:00.000Z"
+    );
+    assert_eq!(proxy.tunnels(), vec!["us.posthog.com:443"]);
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_acceptance_that_doesnt_confirm_the_schedule_fails_with_the_message_id_once() {
+    let server = ScriptedServer::start_async(vec![
+        Answer::json(202, json!({"message_id": MESSAGE_ID})),
+        accepted(),
+    ])
+    .await;
+    let proxy = email_support::CloudProxy::start(&server.url).await;
+    let client = cloud_client(&proxy, "https://us.i.posthog.com").await;
+
+    let error = client
+        .emails()
+        .send(
+            TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                .scheduled_at(utc("2026-12-01T09:00:00Z")),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "schedule_not_confirmed");
+    assert_eq!(error.message_id(), Some(MESSAGE_ID));
+    assert_eq!(error.status(), Some(202));
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "an accepted send is not retried"
+    );
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_refused_scheduled_at_is_reported_and_never_sent_now() {
+    let server = ScriptedServer::start_async(vec![
+        Answer::json(
+            400,
+            json!({
+                "type": "validation_error",
+                "code": "invalid_input",
+                "detail": "scheduled_at is more than 7 days ahead.",
+                "attr": "scheduled_at",
+            }),
+        ),
+        accepted(),
+    ])
+    .await;
+    let proxy = email_support::CloudProxy::start(&server.url).await;
+    let client = cloud_client(&proxy, "https://us.i.posthog.com").await;
+
+    let error = client
+        .emails()
+        .send(
+            TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                .scheduled_at(utc("2027-12-01T09:00:00Z")),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.status(), Some(400));
+    assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+    assert_eq!(error.field(), Some("scheduled_at"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].json()["scheduled_at"],
+        "2027-12-01T09:00:00.000Z"
+    );
+}
+
+#[tokio::test]
+async fn scheduling_off_posthog_cloud_makes_no_request() {
+    // A self-hosted PostHog from before scheduling would send the email at
+    // once, so the client refuses before it uploads a file or sends.
+    let server = ScriptedServer::start_async(vec![accepted()]).await;
+    let client = client_for(&server).await;
+
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files().scheduled_at(utc("2026-12-01T09:00:00Z")))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "scheduling_requires_cloud");
+    assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+    assert_eq!(error.field(), Some("scheduled_at"));
+    assert!(error.message().contains(&server.url), "{}", error);
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
+async fn get_reads_a_scheduled_email() {
+    let server = ScriptedServer::start_async(vec![Answer::json(
+        200,
+        json!({
+            "id": MESSAGE_ID,
+            "status": "scheduled",
+            "created_at": "2026-11-23T09:00:00.000000Z",
+            "status_at": "2026-11-23T09:00:00.000000Z",
+            "reason": null,
+        }),
+    )])
+    .await;
+    let client = client_for(&server).await;
+
+    let status = client.emails().get(MESSAGE_ID).await.unwrap();
+
+    assert_eq!(status.status, EmailDeliveryStatus::Scheduled);
 }

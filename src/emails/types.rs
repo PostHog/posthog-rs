@@ -1,7 +1,7 @@
 use std::fmt;
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -11,6 +11,7 @@ pub(crate) struct SendOptions {
     pub(crate) distinct_id: Option<String>,
     pub(crate) idempotency_key: Option<String>,
     pub(crate) max_retries: Option<u32>,
+    pub(crate) scheduled_at: Option<DateTime<Utc>>,
 }
 
 /// One email from an email template made transactional in PostHog, sent by
@@ -71,6 +72,13 @@ impl TemplateEmail {
     /// turns retries off.
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.options.max_retries = Some(max_retries);
+        self
+    }
+
+    /// When to send the email, at most 7 days ahead. See
+    /// [`CodeEmail::scheduled_at`].
+    pub fn scheduled_at<Tz: TimeZone>(mut self, at: DateTime<Tz>) -> Self {
+        self.options.scheduled_at = Some(at.with_timezone(&Utc));
         self
     }
 }
@@ -267,6 +275,52 @@ impl CodeEmail {
     /// turns retries off.
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.options.max_retries = Some(max_retries);
+        self
+    }
+
+    /// When to send the email, at most 7 days ahead, in any time zone. A time
+    /// that has passed sends the email now.
+    ///
+    /// PostHog keeps the time to the millisecond, so the client rounds a finer
+    /// time up to the next millisecond and the email never goes out early.
+    /// Every retry sends that same time. Work out a relative time, such as an
+    /// hour from now, once, and send the same time when you send again with
+    /// the same idempotency key: another time with that key is
+    /// `idempotency_key_reused`.
+    ///
+    /// Only PostHog Cloud schedules emails. With any other app host, such as a
+    /// self-hosted PostHog, a reverse proxy or a custom domain, the send fails
+    /// with `scheduling_requires_cloud` before any request.
+    ///
+    /// A time read as text needs its offset: parse it with
+    /// [`DateTime::parse_from_rfc3339`], which refuses a time without one. A
+    /// [`NaiveDateTime`](chrono::NaiveDateTime) has no time zone, so it can't
+    /// be passed:
+    ///
+    /// ```compile_fail
+    /// use posthog::CodeEmail;
+    ///
+    /// let naive = chrono::NaiveDate::from_ymd_opt(2026, 12, 1)
+    ///     .unwrap()
+    ///     .and_hms_opt(9, 0, 0)
+    ///     .unwrap();
+    /// CodeEmail::new("jane@example.com", "reminder", "Your reminder").scheduled_at(naive);
+    /// ```
+    ///
+    /// ```
+    /// use chrono::{DateTime, Duration, Utc};
+    /// use posthog::CodeEmail;
+    ///
+    /// let in_an_hour = Utc::now() + Duration::hours(1);
+    /// let email = CodeEmail::new("jane@example.com", "reminder", "Your reminder")
+    ///     .text("Your trial ends tomorrow.")
+    ///     .scheduled_at(in_an_hour);
+    ///
+    /// let at = DateTime::parse_from_rfc3339("2026-12-01T10:00:00+01:00").unwrap();
+    /// let email = email.scheduled_at(at);
+    /// ```
+    pub fn scheduled_at<Tz: TimeZone>(mut self, at: DateTime<Tz>) -> Self {
+        self.options.scheduled_at = Some(at.with_timezone(&Utc));
         self
     }
 }
@@ -486,20 +540,47 @@ pub struct EmailWarning {
     pub fix: Option<String>,
 }
 
-/// The queued email.
+/// The accepted email.
 ///
-/// A result means PostHog queued the email, not that it was delivered. Read
-/// its delivery status with [`Emails::get`](crate::Emails::get).
+/// A result means PostHog queued or scheduled the email, not that it was
+/// delivered: [`status`](Self::status) says which. Read its delivery status
+/// with [`Emails::get`](crate::Emails::get).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SendEmailResult {
-    /// The queued email's message ID.
+    /// The accepted email's message ID.
     pub id: String,
     /// True when PostHog had already accepted this idempotency key and
     /// returned the first send's result.
     pub replayed: bool,
     /// Warnings PostHog returned with the email. The client also logs each one.
     pub warnings: Vec<EmailWarning>,
+    /// Whether the email goes out now or waits for its scheduled time.
+    pub status: SendEmailStatus,
+    /// When a scheduled email goes out, as PostHog confirmed it. `None` for an
+    /// email that goes out now, also when its scheduled time had passed when
+    /// PostHog accepted it.
+    pub scheduled_at: Option<DateTime<Utc>>,
+}
+
+/// Whether an accepted email goes out now or later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SendEmailStatus {
+    /// The email goes out now.
+    Queued,
+    /// The email waits for its [`scheduled_at`](SendEmailResult::scheduled_at).
+    Scheduled,
+}
+
+impl SendEmailStatus {
+    /// The status as PostHog sends it, such as `"scheduled"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SendEmailStatus::Queued => "queued",
+            SendEmailStatus::Scheduled => "scheduled",
+        }
+    }
 }
 
 /// What happened to an email. Later SDK versions can know statuses that this
@@ -507,6 +588,8 @@ pub struct SendEmailResult {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EmailDeliveryStatus {
+    /// The email waits for the time it was scheduled for.
+    Scheduled,
     /// The email waits to go out.
     Queued,
     /// PostHog handed the email to the email provider.
@@ -526,6 +609,7 @@ pub enum EmailDeliveryStatus {
 impl EmailDeliveryStatus {
     pub(crate) fn parse(status: &str) -> Self {
         match status {
+            "scheduled" => EmailDeliveryStatus::Scheduled,
             "queued" => EmailDeliveryStatus::Queued,
             "sent" => EmailDeliveryStatus::Sent,
             "failed" => EmailDeliveryStatus::Failed,
@@ -539,6 +623,7 @@ impl EmailDeliveryStatus {
     /// The status as PostHog sends it, such as `"delivered"`.
     pub fn as_str(&self) -> &str {
         match self {
+            EmailDeliveryStatus::Scheduled => "scheduled",
             EmailDeliveryStatus::Queued => "queued",
             EmailDeliveryStatus::Sent => "sent",
             EmailDeliveryStatus::Failed => "failed",
@@ -550,7 +635,7 @@ impl EmailDeliveryStatus {
     }
 }
 
-/// The status of an email that [`Emails::send`](crate::Emails::send) queued.
+/// The status of an email that [`Emails::send`](crate::Emails::send) accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EmailStatus {
@@ -558,7 +643,7 @@ pub struct EmailStatus {
     pub id: String,
     /// What happened to the email.
     pub status: EmailDeliveryStatus,
-    /// When PostHog queued the email.
+    /// When PostHog accepted the email.
     pub created_at: DateTime<Utc>,
     /// When the email reached its current status.
     pub status_at: DateTime<Utc>,

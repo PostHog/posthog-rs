@@ -19,5 +19,5 @@ pub use error::{EmailError, EmailErrorKind};
 pub(crate) use shared::EmailTracker;
 pub use types::{
     CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailStatus, EmailTracking,
-    EmailTrackingOptions, EmailWarning, SendEmail, SendEmailResult, TemplateEmail,
+    EmailTrackingOptions, EmailWarning, SendEmail, SendEmailResult, SendEmailStatus, TemplateEmail,
 };

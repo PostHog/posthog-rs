@@ -33,12 +33,12 @@ impl<'a> Emails<'a> {
     }
 
     /// Queues one email, from a template made in PostHog or from content your
-    /// code rendered.
+    /// code rendered, or schedules it with `scheduled_at`.
     ///
-    /// `Ok` means PostHog queued the email, not that it was delivered. Network
-    /// errors, rate limits, a send with the same idempotency key still in
-    /// flight and an unavailable service are retried with the same idempotency
-    /// key.
+    /// `Ok` means PostHog queued or scheduled the email, not that it was
+    /// delivered. Network errors, rate limits, a send with the same
+    /// idempotency key still in flight and an unavailable service are retried
+    /// with the same idempotency key.
     ///
     /// A [`CodeEmail`](crate::CodeEmail) with attachments first asks PostHog
     /// which files it lacks, uploads those straight to PostHog's file store,
@@ -49,7 +49,13 @@ impl<'a> Emails<'a> {
     /// Returns an [`EmailError`] when an argument check fails, the client is
     /// disabled, shut down or has no `secret_key`, the file store refused an
     /// upload (`attachment_upload_failed`), or PostHog did not queue the
-    /// email.
+    /// email. A send with `scheduled_at` also fails with
+    /// `scheduling_requires_cloud` before any request when the app host isn't
+    /// PostHog Cloud, and with `schedule_not_confirmed` when PostHog accepted
+    /// the email without confirming its time: the error's
+    /// [`message_id`](EmailError::message_id) names the email. When PostHog
+    /// refuses `scheduled_at`, the send fails: the client never sends the
+    /// email now instead.
     ///
     /// # Examples
     ///
@@ -96,6 +102,7 @@ impl<'a> Emails<'a> {
             .tracker
             .admit(self.options.is_disabled(), shared::SEND_NOT_DONE)?;
         let connection = shared::connect(self.options, shared::SEND_KEY_NEEDED)?;
+        shared::check_schedulable(&prepared, &connection)?;
         let max_retries = prepared.max_retries.unwrap_or(connection.max_retries);
         if !prepared.attachments.is_empty() {
             self.upload(&prepared.attachments, &connection, max_retries)
@@ -113,7 +120,7 @@ impl<'a> Emails<'a> {
                 max_retries,
             )
             .await?;
-        let result = shared::parse_send_reply(reply)?;
+        let result = shared::parse_send_reply(reply, prepared.scheduled_at)?;
         shared::log_warnings(&result);
         Ok(result)
     }

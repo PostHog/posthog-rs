@@ -190,6 +190,7 @@ pub posthog::EmailDeliveryStatus::Delivered
 pub posthog::EmailDeliveryStatus::Failed
 pub posthog::EmailDeliveryStatus::Other(alloc::string::String)
 pub posthog::EmailDeliveryStatus::Queued
+pub posthog::EmailDeliveryStatus::Scheduled
 pub posthog::EmailDeliveryStatus::Sent
 impl posthog::EmailDeliveryStatus
 pub fn posthog::EmailDeliveryStatus::as_str(&self) -> &str
@@ -293,6 +294,11 @@ impl core::convert::From<posthog::CodeEmail> for posthog::SendEmail
 pub fn posthog::SendEmail::from(posthog::CodeEmail) -> Self
 impl core::convert::From<posthog::TemplateEmail> for posthog::SendEmail
 pub fn posthog::SendEmail::from(posthog::TemplateEmail) -> Self
+#[non_exhaustive] pub enum posthog::SendEmailStatus
+pub posthog::SendEmailStatus::Queued
+pub posthog::SendEmailStatus::Scheduled
+impl posthog::SendEmailStatus
+pub fn posthog::SendEmailStatus::as_str(self) -> &'static str
 pub struct posthog::AsyncFlagPoller
 impl posthog::AsyncFlagPoller
 pub async fn posthog::AsyncFlagPoller::is_running(&self) -> bool
@@ -421,6 +427,7 @@ pub fn posthog::CodeEmail::idempotency_key(self, impl core::convert::Into<alloc:
 pub fn posthog::CodeEmail::max_retries(self, u32) -> Self
 pub fn posthog::CodeEmail::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::reply_to(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::CodeEmail::scheduled_at<Tz: chrono::offset::TimeZone>(self, chrono::datetime::DateTime<Tz>) -> Self
 pub fn posthog::CodeEmail::sensitive(self, bool) -> Self
 pub fn posthog::CodeEmail::text(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::CodeEmail::tracking(self, impl core::convert::Into<posthog::EmailTracking>) -> Self
@@ -449,6 +456,7 @@ pub fn posthog::EmailError::field(&self) -> core::option::Option<&str>
 pub fn posthog::EmailError::fix(&self) -> core::option::Option<&str>
 pub fn posthog::EmailError::kind(&self) -> posthog::EmailErrorKind
 pub fn posthog::EmailError::message(&self) -> &str
+pub fn posthog::EmailError::message_id(&self) -> core::option::Option<&str>
 pub fn posthog::EmailError::retry_after(&self) -> core::option::Option<core::time::Duration>
 pub fn posthog::EmailError::status(&self) -> core::option::Option<u16>
 pub fn posthog::EmailError::why(&self) -> core::option::Option<&str>
@@ -677,6 +685,8 @@ pub fn posthog::RequestContext::session_id(self, impl core::convert::Into<alloc:
 #[non_exhaustive] pub struct posthog::SendEmailResult
 pub posthog::SendEmailResult::id: alloc::string::String
 pub posthog::SendEmailResult::replayed: bool
+pub posthog::SendEmailResult::scheduled_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub posthog::SendEmailResult::status: posthog::SendEmailStatus
 pub posthog::SendEmailResult::warnings: alloc::vec::Vec<posthog::EmailWarning>
 pub struct posthog::TemplateEmail
 impl posthog::TemplateEmail
@@ -684,6 +694,7 @@ pub fn posthog::TemplateEmail::distinct_id(self, impl core::convert::Into<alloc:
 pub fn posthog::TemplateEmail::idempotency_key(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn posthog::TemplateEmail::max_retries(self, u32) -> Self
 pub fn posthog::TemplateEmail::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn posthog::TemplateEmail::scheduled_at<Tz: chrono::offset::TimeZone>(self, chrono::datetime::DateTime<Tz>) -> Self
 pub fn posthog::TemplateEmail::template_data(self, serde_json::value::Value) -> Self
 impl core::convert::From<posthog::TemplateEmail> for posthog::SendEmail
 pub fn posthog::SendEmail::from(posthog::TemplateEmail) -> Self

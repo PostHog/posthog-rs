@@ -7,7 +7,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as TimeDelta, SecondsFormat, Utc};
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT,
 };
@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::error::{EmailError, EmailErrorKind};
 use super::types::{
     CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailStatus, EmailWarning, SendEmail,
-    SendEmailResult, SendOptions, TemplateEmail,
+    SendEmailResult, SendEmailStatus, SendOptions, TemplateEmail,
 };
 use crate::client::ClientOptions;
 
@@ -60,6 +60,8 @@ pub(crate) struct PreparedSend {
     pub(crate) attachments: Vec<EmailAttachment>,
     pub(crate) idempotency_key: String,
     pub(crate) max_retries: Option<u32>,
+    /// The time the body carries, rounded up to the millisecond.
+    pub(crate) scheduled_at: Option<DateTime<Utc>>,
 }
 
 /// Where and how the client reaches the email API.
@@ -133,6 +135,13 @@ pub(crate) fn prepare_send(email: SendEmail) -> Result<PreparedSend, EmailError>
         body.insert("distinct_id".into(), Value::String(distinct_id));
     }
     body.insert("to".into(), Value::String(to));
+    let scheduled_at = options.scheduled_at.map(ceil_to_millisecond).transpose()?;
+    if let Some(at) = scheduled_at {
+        body.insert(
+            "scheduled_at".into(),
+            Value::String(at.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        );
+    }
     let idempotency_key = match options.idempotency_key {
         Some(key) => key,
         None => Uuid::new_v4().to_string(),
@@ -149,7 +158,50 @@ pub(crate) fn prepare_send(email: SendEmail) -> Result<PreparedSend, EmailError>
         attachments,
         idempotency_key,
         max_retries: options.max_retries,
+        scheduled_at,
     })
+}
+
+/// PostHog keeps a scheduled time to the millisecond, so a finer time rounds
+/// up: rounding down would send the email early.
+fn ceil_to_millisecond(at: DateTime<Utc>) -> Result<DateTime<Utc>, EmailError> {
+    let below_a_millisecond = at.timestamp_subsec_nanos() % 1_000_000;
+    if below_a_millisecond == 0 {
+        return Ok(at);
+    }
+    at.checked_add_signed(TimeDelta::nanoseconds(i64::from(
+        1_000_000 - below_a_millisecond,
+    )))
+    .ok_or_else(|| {
+        EmailError::invalid(
+            "invalid_scheduled_at",
+            "scheduled_at is out of range.",
+            "scheduled_at",
+        )
+    })
+}
+
+/// Only PostHog Cloud schedules emails. A self-hosted PostHog from before
+/// scheduling would drop `scheduled_at` and send the email at once, which no
+/// check of its answer can undo, so the client refuses before any request.
+pub(crate) fn check_schedulable(
+    prepared: &PreparedSend,
+    connection: &Connection,
+) -> Result<(), EmailError> {
+    let host = connection.app_host.as_str();
+    if prepared.scheduled_at.is_none() || host == US_APP_HOST || host == EU_APP_HOST {
+        return Ok(());
+    }
+    Err(EmailError::invalid(
+        "scheduling_requires_cloud",
+        format!("Scheduled sends work only on PostHog Cloud (us.posthog.com or eu.posthog.com), and this client sends to {host}, so no email was sent."),
+        "scheduled_at",
+    )
+    .with_details(
+        Some("A PostHog that doesn't schedule emails would send this one at once.".into()),
+        Some("Send without scheduled_at, or send through PostHog Cloud's app host. A reverse proxy or custom domain can't schedule emails yet.".into()),
+        None,
+    ))
 }
 
 fn check_recipient(to: &str, options: &SendOptions) -> Result<(), EmailError> {
@@ -740,7 +792,13 @@ pub(crate) fn accept(reply: Reply) -> Result<Accepted, EmailError> {
     })
 }
 
-pub(crate) fn parse_send_reply(reply: Accepted) -> Result<SendEmailResult, EmailError> {
+/// The send's result. For a send with `scheduled_at`, PostHog must confirm
+/// the time it waits for, or answer `queued` with `null` when the time had
+/// passed: any other acceptance may send the email at another time.
+pub(crate) fn parse_send_reply(
+    reply: Accepted,
+    scheduled_at: Option<DateTime<Utc>>,
+) -> Result<SendEmailResult, EmailError> {
     let Accepted { status, fields } = reply;
     let id = text(&fields, "message_id").ok_or_else(|| {
         EmailError::from_response(
@@ -764,17 +822,53 @@ pub(crate) fn parse_send_reply(reply: Accepted) -> Result<SendEmailResult, Email
             .collect(),
         _ => Vec::new(),
     };
+    let (send_status, confirmed) = match scheduled_at {
+        None => (SendEmailStatus::Queued, None),
+        Some(requested) => match (fields.get("status"), fields.get("scheduled_at")) {
+            (Some(Value::String(answered)), Some(Value::Null)) if answered == "queued" => {
+                (SendEmailStatus::Queued, None)
+            }
+            (Some(Value::String(answered)), Some(Value::String(time)))
+                if answered == "scheduled" && instant(time) == Some(requested) =>
+            {
+                (SendEmailStatus::Scheduled, Some(requested))
+            }
+            _ => return Err(schedule_not_confirmed(id, status)),
+        },
+    };
     Ok(SendEmailResult {
         id,
         replayed: fields.get("replayed") == Some(&Value::Bool(true)),
         warnings,
+        status: send_status,
+        scheduled_at: confirmed,
     })
 }
 
-fn timestamp(fields: &Map<String, Value>, name: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(&text(fields, name)?)
+fn instant(time: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(time)
         .ok()
         .map(|time| time.with_timezone(&Utc))
+}
+
+fn schedule_not_confirmed(id: String, status: u16) -> EmailError {
+    EmailError::from_response(
+        status,
+        Some("schedule_not_confirmed".into()),
+        Some(format!("PostHog accepted email {id} without confirming its scheduled_at, so it may go out at another time.")),
+        None,
+    )
+    .with_field(Some("scheduled_at".into()))
+    .with_details(
+        None,
+        Some(format!("Read the email's status with emails().get(\"{id}\") before you send it again: a send with another idempotency key makes a second email.")),
+        None,
+    )
+    .with_message_id(id)
+}
+
+fn timestamp(fields: &Map<String, Value>, name: &str) -> Option<DateTime<Utc>> {
+    instant(&text(fields, name)?)
 }
 
 pub(crate) fn parse_status_reply(reply: Accepted) -> Result<EmailStatus, EmailError> {
@@ -975,7 +1069,7 @@ mod tests {
     }
 
     fn send_reply(reply: Reply) -> Result<SendEmailResult, EmailError> {
-        accept(reply).and_then(parse_send_reply)
+        accept(reply).and_then(|reply| parse_send_reply(reply, None))
     }
 
     fn status_reply(reply: Reply) -> Result<EmailStatus, EmailError> {
@@ -1323,6 +1417,200 @@ mod tests {
         );
         let capped = retry_delay(&answered(503, "unavailable", None), 10, 20).unwrap();
         assert_eq!(capped, MAX_RETRY_DELAY);
+    }
+
+    fn instant(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn scheduled_template(at: DateTime<chrono::FixedOffset>) -> SendEmail {
+        TemplateEmail::new("a@example.com", "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b")
+            .scheduled_at(at)
+            .into()
+    }
+
+    #[test]
+    fn scheduled_at_goes_out_in_utc_rounded_up_to_the_millisecond() {
+        let cases = [
+            ("2026-12-01T09:00:00Z", "2026-12-01T09:00:00.000Z"),
+            ("2026-12-01T10:30:00.25+01:30", "2026-12-01T09:00:00.250Z"),
+            (
+                "2026-12-01T09:00:00.123000-05:00",
+                "2026-12-01T14:00:00.123Z",
+            ),
+            ("2026-12-01T09:00:00.123000001Z", "2026-12-01T09:00:00.124Z"),
+            (
+                "2026-12-01T09:00:00.999999+00:00",
+                "2026-12-01T09:00:01.000Z",
+            ),
+            ("2026-12-31T23:59:59.9999Z", "2027-01-01T00:00:00.000Z"),
+        ];
+        for (requested, sent) in cases {
+            let prepared = prepare_send(scheduled_template(
+                DateTime::parse_from_rfc3339(requested).unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(body(&prepared)["scheduled_at"], json!(sent), "{requested}");
+            assert_eq!(prepared.scheduled_at, Some(instant(sent)), "{requested}");
+        }
+    }
+
+    #[test]
+    fn scheduled_at_goes_on_the_code_form_too() {
+        let prepared = prepare_send(
+            CodeEmail::new("a@example.com", "reminder", "Hi")
+                .text("x")
+                .scheduled_at(instant("2026-12-01T09:00:00.000001Z"))
+                .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            body(&prepared)["scheduled_at"],
+            json!("2026-12-01T09:00:00.001Z")
+        );
+    }
+
+    #[test]
+    fn a_send_without_scheduled_at_sends_no_field() {
+        let prepared = prepare_send(
+            TemplateEmail::new("a@example.com", "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b").into(),
+        )
+        .unwrap();
+        assert_eq!(body(&prepared).get("scheduled_at"), None);
+        assert_eq!(prepared.scheduled_at, None);
+    }
+
+    fn connection_to(app_host: &str) -> Connection {
+        Connection {
+            app_host: app_host.into(),
+            timeout: Duration::from_secs(1),
+            max_retries: 0,
+            headers: HeaderMap::new(),
+        }
+    }
+
+    #[test]
+    fn only_posthog_cloud_schedules() {
+        let scheduled = prepare_send(scheduled_template(
+            DateTime::parse_from_rfc3339("2026-12-01T09:00:00Z").unwrap(),
+        ))
+        .unwrap();
+        for host in [US_APP_HOST, EU_APP_HOST] {
+            check_schedulable(&scheduled, &connection_to(host)).unwrap();
+        }
+        for host in [
+            "https://posthog.example.com",
+            "http://us.posthog.com",
+            "https://us.posthog.com.example.com",
+            "http://localhost:8010",
+        ] {
+            let error = check_schedulable(&scheduled, &connection_to(host)).unwrap_err();
+            assert_eq!(error.code(), "scheduling_requires_cloud");
+            assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+            assert_eq!(error.field(), Some("scheduled_at"));
+            assert_eq!(error.status(), None);
+            assert!(error.message().contains(host), "{}", error.message());
+            assert!(error.fix().is_some());
+        }
+        let now = prepare_send(
+            TemplateEmail::new("a@example.com", "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b").into(),
+        )
+        .unwrap();
+        check_schedulable(&now, &connection_to("https://posthog.example.com")).unwrap();
+    }
+
+    fn scheduled_reply(payload: Value) -> Result<SendEmailResult, EmailError> {
+        accept(reply(202, payload))
+            .and_then(|reply| parse_send_reply(reply, Some(instant("2026-12-01T09:00:00.120Z"))))
+    }
+
+    #[test]
+    fn a_confirmed_schedule_returns_the_time() {
+        for answered in [
+            "2026-12-01T09:00:00.120Z",
+            "2026-12-01T09:00:00.120000Z",
+            "2026-12-01T10:00:00.12+01:00",
+        ] {
+            let result = scheduled_reply(json!({
+                "message_id": "msg_1",
+                "status": "scheduled",
+                "scheduled_at": answered,
+            }))
+            .unwrap();
+            assert_eq!(result.status, SendEmailStatus::Scheduled, "{answered}");
+            assert_eq!(
+                result.scheduled_at,
+                Some(instant("2026-12-01T09:00:00.120Z")),
+                "{answered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_time_that_had_passed_is_queued_without_a_time() {
+        let result = scheduled_reply(json!({
+            "message_id": "msg_1",
+            "status": "queued",
+            "scheduled_at": null,
+        }))
+        .unwrap();
+        assert_eq!(result.status, SendEmailStatus::Queued);
+        assert_eq!(result.scheduled_at, None);
+    }
+
+    #[test]
+    fn an_acceptance_that_doesnt_confirm_the_schedule_names_the_message() {
+        for payload in [
+            json!({"message_id": "msg_1"}),
+            json!({"message_id": "msg_1", "status": "queued"}),
+            json!({"message_id": "msg_1", "status": "scheduled"}),
+            json!({"message_id": "msg_1", "status": "scheduled", "scheduled_at": null}),
+            json!({"message_id": "msg_1", "status": "scheduled", "scheduled_at": "2026-12-01T09:00:00.121Z"}),
+            json!({"message_id": "msg_1", "status": "scheduled", "scheduled_at": "2026-12-01T09:00:00.1201Z"}),
+            json!({"message_id": "msg_1", "status": "scheduled", "scheduled_at": "2026-12-01T09:00:00.120"}),
+            json!({"message_id": "msg_1", "status": "scheduled", "scheduled_at": "tomorrow"}),
+            json!({"message_id": "msg_1", "status": "queued", "scheduled_at": "2026-12-01T09:00:00.120Z"}),
+            json!({"message_id": "msg_1", "scheduled_at": "2026-12-01T09:00:00.120Z"}),
+        ] {
+            let error = scheduled_reply(payload.clone()).unwrap_err();
+            assert_eq!(error.code(), "schedule_not_confirmed", "{payload}");
+            assert_eq!(error.message_id(), Some("msg_1"), "{payload}");
+            assert_eq!(error.status(), Some(202), "{payload}");
+            assert_eq!(error.field(), Some("scheduled_at"), "{payload}");
+            assert_eq!(error.kind(), EmailErrorKind::ApplicationError, "{payload}");
+            assert!(error.message().contains("msg_1"), "{}", error.message());
+            assert!(error.fix().unwrap().contains("msg_1"), "{:?}", error.fix());
+            assert_eq!(retry_delay(&error, 0, 2), None, "{payload}");
+        }
+    }
+
+    #[test]
+    fn a_send_without_scheduled_at_reads_as_queued() {
+        let result = send_reply(reply(
+            202,
+            json!({"message_id": "msg_1", "status": "scheduled", "scheduled_at": "2026-12-01T09:00:00Z"}),
+        ))
+        .unwrap();
+        assert_eq!(result.status, SendEmailStatus::Queued);
+        assert_eq!(result.scheduled_at, None);
+    }
+
+    #[test]
+    fn status_reply_reads_scheduled() {
+        let status = status_reply(reply(
+            200,
+            json!({
+                "id": "x",
+                "status": "scheduled",
+                "created_at": "2026-10-28T16:27:44Z",
+                "status_at": "2026-10-28T16:27:44Z",
+            }),
+        ))
+        .unwrap();
+        assert_eq!(status.status, EmailDeliveryStatus::Scheduled);
+        assert_eq!(status.status.as_str(), "scheduled");
     }
 
     #[test]
