@@ -1348,9 +1348,9 @@ async fn marketing_code_send_uploads_attachment_before_posthog_refuses_the_send(
         (
             "sandbox_fields_unsupported",
             json!({
-                "type": "validation_error",
+                "type": "invalid_request",
                 "code": "sandbox_fields_unsupported",
-                "detail": "This project has no verified sending domain, so this email would go out from PostHog's sandbox sender, which can't send `cc`, `bcc`, `reply_to`, `attachments`, a custom `from` or a message category. Remove those fields, or verify a sending domain at https://app.posthog.com/project/1/messaging/senders.",
+                "detail": "This project has no verified sending domain, so this email would go out from the PostHog test sender, which can't send `cc`, `bcc` or `attachments`. Remove those fields, or verify a sending domain at https://us.posthog.com/project/1/workflows/channels.",
                 "attr": "attachments",
             }),
             None,

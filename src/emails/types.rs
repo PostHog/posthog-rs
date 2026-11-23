@@ -85,12 +85,13 @@ impl TemplateEmail {
 /// It needs [`html`](Self::html), [`text`](Self::text) or both. Without
 /// `text`, PostHog derives it from the `html`. To send a React email, render
 /// it to HTML in your app and pass the HTML. When `template_key` names a
-/// saved template (and any explicit [`MessageCategory`] isn't rejected first
-/// with `categories_not_enabled` while code-send categories are disabled),
-/// PostHog checks whether it is enabled for transactional sends
+/// saved email template (and any explicit [`MessageCategory`] isn't rejected
+/// first with `categories_not_enabled` while code-send categories are
+/// disabled), PostHog checks whether it is enabled for transactional sends
 /// (`template_not_transactional`) before category checks, and refuses an
-/// otherwise sendable template in a marketing category with
-/// `marketing_template`.
+/// otherwise sendable saved email template in a marketing category with
+/// `marketing_template` (a saved push template sharing the same key returns
+/// `template_not_sendable` first).
 ///
 /// ```
 /// use posthog::CodeEmail;
@@ -299,8 +300,8 @@ impl CodeEmail {
     ///   `template_key`; omit `category` or pass
     ///   [`EmailCategory::Transactional`] only for transactional emails; with
     ///   the flag off, PostHog returns `categories_not_enabled` first),
-    /// - `too_many_categories` when it would create a category past the
-    ///   project's limit,
+    /// - `too_many_categories` when it would create a new category or restore
+    ///   an archived category past the project's active category limit,
     /// - `unsubscribe_link_required` when a marketing email with non-empty
     ///   `html` has no clickable `<a href="{{ unsubscribe_url }}">` link, or a
     ///   plain-text marketing email with `html` unset or empty has no
