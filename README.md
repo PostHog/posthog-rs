@@ -162,10 +162,13 @@ message category. A `MessageCategory` defines the category in code: PostHog
 creates it with its name and description on the first send with its key. Later
 sends keep the category's name and description, so change them in PostHog. If code-send categories aren't enabled for the project yet, passing a
 `MessageCategory` returns HTTP 400 `categories_not_enabled`. An older Django
-API rejects `category` with HTTP 400 (`invalid_input`), while updated Django
-with an older CDP API returns `field_not_accepted` for an explicit
-`MessageCategory` (and can accept `EmailCategory::Transactional` on a fresh
-`template_key` because Django forwards no category).
+API rejects `category` with HTTP 400 (`invalid_input`), while with code-send
+categories enabled, updated Django backed by an older CDP API returns
+`field_not_accepted` both for an explicit `MessageCategory` and when `category`
+is omitted for a `template_key` naming a saved template in a transactional
+category (because Django inherits and forwards that category to CDP; explicit
+`EmailCategory::Transactional` on a fresh `template_key` can succeed because
+Django forwards no category).
 
 ```rust
 use posthog::{CodeEmail, MessageCategory, MessageCategoryType};

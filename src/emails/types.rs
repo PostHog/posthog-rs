@@ -270,9 +270,12 @@ impl CodeEmail {
     /// `marketing_template` for a sendable saved template in a marketing
     /// category or `category_mismatch` for a saved template in a transactional
     /// category, an older Django API rejects `category` with HTTP 400
-    /// (`invalid_input`), and updated Django with an older CDP API returns
-    /// `field_not_accepted` for an explicit [`MessageCategory`] (while
-    /// accepting [`EmailCategory::Transactional`] on a fresh `template_key`
+    /// (`invalid_input`), and with code-send categories enabled, updated Django
+    /// backed by an older CDP API returns `field_not_accepted` both for an
+    /// explicit [`MessageCategory`] and when `category` is omitted for a
+    /// `template_key` naming a saved template in a transactional category
+    /// (because Django inherits and forwards that category to CDP; explicit
+    /// [`EmailCategory::Transactional`] on a fresh `template_key` can succeed
     /// because Django forwards no category).
     ///
     /// [`EmailCategory::Transactional`] asks for transactional email with no
@@ -380,8 +383,11 @@ impl From<MessageCategory> for EmailCategory {
 /// returns HTTP 400 `categories_not_enabled` before template sendability and
 /// category comparison (even if `template_key` names a marketing template). An
 /// older Django API rejects `category` with HTTP 400 (`invalid_input`), and
-/// updated Django with an older CDP API returns `field_not_accepted` for an
-/// explicit `MessageCategory`. A key that exists with another type refuses the
+/// with code-send categories enabled, updated Django backed by an older CDP
+/// API returns `field_not_accepted` both for an explicit `MessageCategory` and
+/// when `category` is omitted for a `template_key` naming a saved template in a
+/// transactional category (because Django inherits and forwards that category
+/// to CDP). A key that exists with another type refuses the
 /// send with `category_mismatch`.
 ///
 /// A marketing send honors the recipient's opt-outs. When `html` is non-empty,

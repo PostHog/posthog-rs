@@ -5,13 +5,13 @@ mod email_support;
 
 use sha2::Digest;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::default_user_agent;
 use email_support::{
     accepted, closed_url, connection_counting_store, options, s3_error, unavailable, Answer,
-    FakePostHog, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    FakePostHog, ScriptedServer, MESSAGE_ID, SEND_PATH, TEMPLATE_ID, UPLOADS_PATH,
 };
 use posthog::{
     CodeEmail, EmailAttachment, EmailCategory, EmailDeliveryStatus, EmailErrorKind, EmailTracking,
@@ -1309,6 +1309,188 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
             server.requests()[0].json(),
             expected_body,
             "{status} {code}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn marketing_code_send_uploads_attachment_before_posthog_refuses_the_send() {
+    let marketing = || {
+        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
+            .description("Monthly product news")
+    };
+    let marketing_wire = json!({
+        "key": "newsletter",
+        "type": "marketing",
+        "name": "Newsletter",
+        "description": "Monthly product news",
+    });
+    let digest_html = "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>";
+    let upload_path = format!("/bucket/team/2/{PDF_SHA256}");
+
+    for (code, detail) in [
+        (
+            "workflow_can_wait",
+            "Marketing code sends cannot carry attachments.",
+        ),
+        (
+            "sandbox_fields_unsupported",
+            "The PostHog test sender does not support attachments on marketing sends.",
+        ),
+    ] {
+        type TracedRequest = (String, String, Vec<(String, String)>, Vec<u8>);
+        let trace = Arc::new(Mutex::new(Vec::<TracedRequest>::new()));
+        let server = httpmock::MockServer::start_async().await;
+        let base_url = server.base_url();
+        let trace_in_mock = Arc::clone(&trace);
+        let upload_path_in_mock = upload_path.clone();
+        server
+            .mock_async(|_, then| {
+                then.respond_with(move |request: &httpmock::HttpMockRequest| {
+                    let method = request.method_str().to_string();
+                    let path = request.uri().path().to_string();
+                    let headers: Vec<(String, String)> = request
+                        .headers_vec()
+                        .iter()
+                        .map(|(k, v)| (k.to_lowercase(), v.clone()))
+                        .collect();
+                    let body = request.body_vec();
+                    let prior_sends = {
+                        let mut guard = trace_in_mock.lock().unwrap();
+                        let count = guard
+                            .iter()
+                            .filter(|(m, p, _, _)| m == "POST" && p == SEND_PATH)
+                            .count();
+                        guard.push((method.clone(), path.clone(), headers, body));
+                        count
+                    };
+
+                    if method == "POST" && path == UPLOADS_PATH {
+                        httpmock::HttpMockResponse::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(
+                                json!({
+                                    "files": [{
+                                        "sha256": PDF_SHA256,
+                                        "status": "upload",
+                                        "url": format!(
+                                            "{}{}?X-Amz-Signature=signed",
+                                            base_url, upload_path_in_mock
+                                        ),
+                                        "method": "PUT",
+                                        "headers": {
+                                            "content-length": PDF.len().to_string(),
+                                        },
+                                        "url_expires_at": "2026-11-09T12:15:00Z",
+                                    }],
+                                })
+                                .to_string(),
+                            )
+                            .build()
+                    } else if method == "PUT" && path == upload_path_in_mock {
+                        httpmock::HttpMockResponse::builder()
+                            .status(200)
+                            .body("")
+                            .build()
+                    } else if method == "POST" && path == SEND_PATH {
+                        if prior_sends == 0 {
+                            httpmock::HttpMockResponse::builder()
+                                .status(400)
+                                .header("content-type", "application/json")
+                                .body(
+                                    json!({
+                                        "type": "invalid_request",
+                                        "code": code,
+                                        "detail": detail,
+                                        "attr": "attachments",
+                                    })
+                                    .to_string(),
+                                )
+                                .build()
+                        } else {
+                            httpmock::HttpMockResponse::builder()
+                                .status(202)
+                                .header("content-type", "application/json")
+                                .body(json!({"message_id": MESSAGE_ID}).to_string())
+                                .build()
+                        }
+                    } else {
+                        panic!("unexpected request {} {}", method, path);
+                    }
+                });
+            })
+            .await;
+
+        let client = posthog::client(options(&server.base_url()).build().unwrap()).await;
+        let error = client
+            .emails()
+            .send(
+                digest_email()
+                    .attachment(EmailAttachment::new("invoice.pdf", PDF))
+                    .category(marketing()),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), code);
+        assert_eq!(error.kind(), EmailErrorKind::ValidationError, "{}", code);
+        assert_eq!(error.status(), Some(400), "{}", code);
+        assert_eq!(error.field(), Some("attachments"), "{}", code);
+        assert!(error.fix().is_none(), "{}", code);
+
+        let requests = trace.lock().unwrap().clone();
+        assert_eq!(
+            requests.len(),
+            3,
+            "expected upload-grant -> PUT -> send with no retry ({})",
+            code
+        );
+        assert_eq!(
+            (requests[0].0.as_str(), requests[0].1.as_str()),
+            ("POST", UPLOADS_PATH)
+        );
+        let grant_req: serde_json::Value = serde_json::from_slice(&requests[0].3).unwrap();
+        assert_eq!(
+            grant_req,
+            json!({
+                "files": [{
+                    "sha256": PDF_SHA256,
+                    "size": PDF.len(),
+                }],
+            })
+        );
+        assert_eq!(
+            (requests[1].0.as_str(), requests[1].1.as_str()),
+            ("PUT", upload_path.as_str())
+        );
+        assert_eq!(requests[1].3, PDF, "{}", code);
+        assert!(
+            !requests[1]
+                .2
+                .iter()
+                .any(|(name, _)| name == "authorization"),
+            "storage PUT must not carry PostHog Authorization header ({})",
+            code
+        );
+        assert_eq!(
+            (requests[2].0.as_str(), requests[2].1.as_str()),
+            ("POST", SEND_PATH)
+        );
+        let send_req: serde_json::Value = serde_json::from_slice(&requests[2].3).unwrap();
+        assert_eq!(
+            send_req,
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": digest_html,
+                "attachments": [{
+                    "sha256": PDF_SHA256,
+                    "filename": "invoice.pdf",
+                }],
+                "category": marketing_wire,
+            })
         );
     }
 }
