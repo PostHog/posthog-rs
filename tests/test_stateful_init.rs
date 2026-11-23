@@ -125,3 +125,13 @@ fn disabled_or_invalid_clients_do_not_start_preload() {
     }
     flags.assert_calls(0);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn blocking_initialization_on_an_application_runtime_thread_returns_a_ready_client() {
+    let mut config = Config::new("phc_test");
+    config.preload_feature_flags = false;
+    config.persistence = Persistence::Memory;
+    let client: Client = Client::init_blocking(config);
+    assert!(!client.is_disabled());
+    client.shutdown_blocking(Some(std::time::Duration::ZERO));
+}

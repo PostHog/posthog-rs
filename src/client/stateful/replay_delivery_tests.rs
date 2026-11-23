@@ -383,8 +383,10 @@ fn idle_worker_sends_a_pair_without_an_explicit_flush() {
     let client = backend.client(|_| {});
     let replay = client.session_replay();
     replay.start();
-    for _ in 0..2 {
-        assert_eq!(replay.submit_frame(frame(&replay)), SubmitOutcome::Accepted);
+    let frames = [frame(&replay), frame(&replay)];
+    let submitted = Instant::now();
+    for frame in frames {
+        assert_eq!(replay.submit_frame(frame), SubmitOutcome::Accepted);
     }
     let batch = backend
         .uploads
@@ -393,6 +395,8 @@ fn idle_worker_sends_a_pair_without_an_explicit_flush() {
         .recv_timeout(Duration::from_secs(5))
         .unwrap();
     assert_eq!(batch.as_array().unwrap().len(), 2);
+    // A pair is eligible at once, without waiting for the one-second timer.
+    assert!(submitted.elapsed() < Duration::from_millis(500));
 }
 
 #[test]

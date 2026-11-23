@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, Weak};
 use uuid::Uuid;
 
 use super::producer::Producer;
-use super::sessions::{Operation, SessionClock};
+use super::sessions::{Operation, SessionClock, SessionMode, Sessions};
 use super::writer::StateAccess;
 use super::{Client, Config, Snapshot};
 use crate::client::transport::{Completion, Control};
@@ -116,8 +116,10 @@ pub enum FrameUnavailable {
     NotPermitted,
     /// The user has opted out.
     OptedOut,
-    /// No active session: manual session mode without a session, or the
-    /// session expired while the app was in the background.
+    /// No active session: manual session mode without one (call
+    /// [`SessionReplay::start`] or `Client::start_session`), or the app is in
+    /// the background and its automatic session expired or was ended. In the
+    /// foreground, automatic mode starts a new session for the frame instead.
     NoSession,
     /// `max_frames_in_flight` frames are still being encoded or uploaded.
     /// Skip this frame and try again later.
@@ -320,6 +322,12 @@ impl Controller {
     }
 }
 
+/// Whether acquisition starts a session when none is active: automatic mode
+/// in the foreground, where `Client::get_session_id` does the same.
+fn frames_start_sessions(sessions: &Sessions) -> bool {
+    sessions.mode == SessionMode::Automatic && !sessions.background
+}
+
 /// The remote `sessionRecording` settings `snapshot` was taken under.
 fn recording_config(snapshot: &Snapshot) -> Option<&serde_json::Value> {
     snapshot
@@ -379,6 +387,8 @@ impl SessionReplay {
             .control(Control::Flush(Completion::Blocking(tx)));
     }
     /// Passive memory-only eligibility check; does not create or touch sessions.
+    /// In automatic mode in the foreground, an expired or ended session does
+    /// not make it false: the next [`begin_frame`](Self::begin_frame) starts one.
     pub fn is_active(&self) -> bool {
         let Some(c) = self.0.upgrade() else {
             return false;
@@ -386,7 +396,9 @@ impl SessionReplay {
         !c.gate.is_closed()
             && c.pool.lock().unwrap_or_else(|p| p.into_inner()).active
             && c.state.snapshot().is_some_and(|s| {
-                c.allowed(&s) && s.sessions.active_id(c.session_clock.now()).is_some()
+                c.allowed(&s)
+                    && (frames_start_sessions(&s.sessions)
+                        || s.sessions.active_id(c.session_clock.now()).is_some())
             })
     }
     /// Reserve immediately before acquisition. The error says why no frame is
@@ -400,16 +412,29 @@ impl SessionReplay {
         if c.gate.is_closed() {
             return Err(FrameUnavailable::Closed);
         }
-        let snapshot = c.state.snapshot().ok_or(FrameUnavailable::Closed)?;
+        let mut snapshot = c.state.snapshot().ok_or(FrameUnavailable::Closed)?;
         if c.opted_out(&snapshot) {
             return Err(FrameUnavailable::OptedOut);
         }
         if !c.allowed(&snapshot) {
             return Err(FrameUnavailable::NotPermitted);
         }
+        let now = c.session_clock.now();
+        if snapshot.sessions.active_id(now).is_none()
+            && frames_start_sessions(&snapshot.sessions)
+            && c.pool.lock().unwrap_or_else(|p| p.into_inner()).active
+        {
+            // Frames aren't activity, but like `get_session_id` (and the frame
+            // path of posthog-android) they replace an expired or ended
+            // session, so recording doesn't stop until the next capture.
+            let _ = c
+                .state
+                .mutate(|s| s.session_operation(Operation::Maintain, now, c.opted_out(s)));
+            snapshot = c.state.snapshot().ok_or(FrameUnavailable::Closed)?;
+        }
         let session_id = snapshot
             .sessions
-            .active_id(c.session_clock.now())
+            .active_id(now)
             .ok_or(FrameUnavailable::NoSession)?;
         let mut pool = c.pool.lock().unwrap_or_else(|p| p.into_inner());
         if !pool.active {

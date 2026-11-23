@@ -154,12 +154,19 @@ impl Lane {
         clock: Arc<dyn Clock>,
         deadline: Arc<Mutex<Option<Instant>>>,
     ) -> io::Result<(Self, mpsc::Sender<Control>)> {
-        let http = build_http(&options)
-            .ok_or_else(|| io::Error::other("Cannot build the replay HTTP client"))?;
         let (tx, rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("posthog-replay".into())
             .spawn(move || {
+                // Built on this thread, like the other workers' clients: a
+                // blocking reqwest client cannot be built on an async runtime
+                // thread, where `init_blocking` may be called.
+                let Some(http) = build_http(&options) else {
+                    let _ = ready_tx.send(false);
+                    return;
+                };
+                let _ = ready_tx.send(true);
                 Sender {
                     options,
                     clock,
@@ -169,6 +176,10 @@ impl Lane {
                 }
                 .run(&rx, &deadline)
             })?;
+        if ready_rx.recv() != Ok(true) {
+            let _ = thread.join();
+            return Err(io::Error::other("Cannot build the replay HTTP client"));
+        }
         Ok((
             Self {
                 id: thread.thread().id(),
@@ -225,7 +236,13 @@ impl Sender {
             // A deadline selected while waiting applies to this message.
             let end = self.observe_deadline(deadline);
             match message {
-                Ok(Control::ReplayFrame(frame)) => self.replay.push(*frame, self.clock.now()),
+                Ok(Control::ReplayFrame(frame)) => {
+                    self.replay.push(*frame, self.clock.now());
+                    // A pair is ready at once; a single frame waits for the timer.
+                    if self.replay.waiting.len() >= 2 {
+                        self.service_replay(false, end);
+                    }
+                }
                 Ok(Control::ReplayFailure(message)) => report(&self.options, message, None),
                 Ok(Control::ReplayShutdownAbandoned) => self.report_replay_shutdown(None),
                 Ok(Control::Flush(completion) | Control::FlushCaptures(completion)) => {

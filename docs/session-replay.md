@@ -81,8 +81,13 @@ window ID is the session ID, so a new session also starts a new replay window. S
 rechecks identity, consent transitions and the current session; changes during
 readback reject the frame instead of reattributing it. Backgrounding adds no
 special invalidation, but ordinary session expiry still applies. Screenshots
-do not extend session activity. Once accepted, work retains its attribution
-through later identity, session and consent changes.
+do not extend session activity. In automatic session mode in the foreground,
+`begin_frame` starts a new session when the last one expired (30 minutes
+without activity, or 24 hours) or was ended by `reset()` or `end_session()`,
+as `get_session_id` does; posthog-android's frames rotate the same way. Call
+`session_activity()` on user input to keep one session across an idle screen.
+Once accepted, work retains its attribution through later identity, session
+and consent changes.
 
 ## Replay status on events
 
