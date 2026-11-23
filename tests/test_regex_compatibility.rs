@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use posthog_rs::{FlagCache, FlagValue, LocalEvaluationResponse, LocalEvaluator};
+use posthog::{FlagCache, FlagValue, LocalEvaluationResponse, LocalEvaluator};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -32,7 +32,7 @@ fn evaluate(
     pattern: &str,
     operator: &str,
     input: Value,
-) -> Result<Option<FlagValue>, posthog_rs::InconclusiveMatchError> {
+) -> Result<Option<FlagValue>, posthog::InconclusiveMatchError> {
     let cache = FlagCache::new();
     cache.update(definitions(pattern, operator));
     LocalEvaluator::new(cache).evaluate_flag(
@@ -263,8 +263,24 @@ fn regex_compatibility_cohort_negation_preserves_inconclusive() {
 #[tokio::test]
 async fn regex_compatibility_public_client_fallback_and_local_only() {
     use httpmock::prelude::*;
-    use posthog_rs::{ClientOptionsBuilder, EvaluateFlagsOptions};
+    use posthog::{ClientOptionsBuilder, EvaluateFlagsOptions};
     use std::time::Duration;
+
+    async fn get_flag(
+        client: &posthog::Client,
+        key: &str,
+        properties: Option<HashMap<String, Value>>,
+    ) -> Option<FlagValue> {
+        let mut options = EvaluateFlagsOptions::default();
+        options.person_properties = properties;
+        options.flag_keys = Some(vec![key.into()]);
+        client
+            .evaluate_flags("user", options)
+            .await
+            .unwrap()
+            .get_flag(key)
+    }
+
     for pattern in std::iter::once("a(?=b)")
         .chain(NAMED_CAPTURE_PATTERNS.iter().copied())
         .chain(SERVICE_VALID_NATIVE_SYNTAX_PATTERNS.iter().copied())
@@ -296,13 +312,13 @@ async fn regex_compatibility_public_client_fallback_and_local_only() {
             let options = ClientOptionsBuilder::default()
                 .host(server.base_url())
                 .api_key("project-key".to_string())
-                .personal_api_key("personal-key".to_string())
+                .secret_key("personal-key".to_string())
                 .enable_local_evaluation(true)
                 .local_evaluation_only(local_only)
                 .poll_interval_seconds(60)
                 .build()
                 .unwrap();
-            let client = posthog_rs::client(options).await;
+            let client = posthog::client(options).await;
             let expected_calls = if local_only { 2 } else { 1 };
             tokio::time::timeout(Duration::from_secs(5), async {
                 while definitions_mock.calls_async().await < expected_calls {
@@ -310,16 +326,12 @@ async fn regex_compatibility_public_client_fallback_and_local_only() {
                 }
                 // Wait for definitions to be installed, not just requested.
                 loop {
-                    let result = client
-                        .get_feature_flag(
-                            "portable",
-                            "user",
-                            None,
-                            Some(HashMap::from([("value".into(), json!("ab"))])),
-                            None,
-                        )
-                        .await
-                        .unwrap();
+                    let result = get_flag(
+                        &client,
+                        "portable",
+                        Some(HashMap::from([("value".into(), json!("ab"))])),
+                    )
+                    .await;
                     if result == Some(FlagValue::Boolean(true)) {
                         break;
                     }
@@ -331,10 +343,7 @@ async fn regex_compatibility_public_client_fallback_and_local_only() {
             let initial_calls = remote.calls_async().await;
             let properties = HashMap::from([("value".into(), json!("ab"))]);
             for key in ["regex-flag", "negative"] {
-                let result = client
-                    .get_feature_flag(key, "user", None, Some(properties.clone()), None)
-                    .await
-                    .unwrap();
+                let result = get_flag(&client, key, Some(properties.clone())).await;
                 assert_eq!(
                     result,
                     if local_only {
@@ -345,10 +354,7 @@ async fn regex_compatibility_public_client_fallback_and_local_only() {
                 );
             }
             // Missing-property control proves the same remote gate is being exercised.
-            let missing = client
-                .get_feature_flag("regex-flag", "user", None, None, None)
-                .await
-                .unwrap();
+            let missing = get_flag(&client, "regex-flag", None).await;
             assert_eq!(
                 missing,
                 if local_only {
@@ -358,24 +364,14 @@ async fn regex_compatibility_public_client_fallback_and_local_only() {
                 }
             );
             assert_eq!(
-                client
-                    .get_feature_flag("invalid", "user", None, Some(properties.clone()), None)
-                    .await
-                    .unwrap(),
+                get_flag(&client, "invalid", Some(properties.clone())).await,
                 Some(FlagValue::Boolean(false))
             );
-            let snapshot = client
-                .evaluate_flags(
-                    "user",
-                    EvaluateFlagsOptions {
-                        person_properties: Some(properties),
-                        only_evaluate_locally: local_only,
-                        flag_keys: Some(vec!["regex-flag".into()]),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
+            let mut options = EvaluateFlagsOptions::default();
+            options.person_properties = Some(properties);
+            options.only_evaluate_locally = local_only;
+            options.flag_keys = Some(vec!["regex-flag".into()]);
+            let snapshot = client.evaluate_flags("user", options).await.unwrap();
             assert_eq!(
                 snapshot.get_flag("regex-flag"),
                 if local_only {

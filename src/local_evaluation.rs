@@ -1,4 +1,4 @@
-use crate::client::{apply_on_error_hooks, get_default_user_agent, OnErrorHook};
+use crate::client::{apply_on_error_hooks, OnErrorHook, SdkIdentity};
 use crate::feature_flags::{
     match_feature_flag_with_context, match_feature_flag_with_version, CohortDefinition,
     EvaluationContext, FeatureFlag, FlagValue, InconclusiveMatchError,
@@ -7,6 +7,7 @@ use crate::{Error, LocalEvaluationFailure, PostHogError};
 use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH, USER_AGENT};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -57,6 +58,7 @@ fn report_local_eval_error(hooks: &[OnErrorHook], status: Option<u16>, error: &E
 /// Contains feature flag definitions, group type mappings, and cohort definitions
 /// that can be cached locally for flag evaluation without server round-trips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LocalEvaluationResponse {
     /// List of feature flag definitions
     pub flags: Vec<FeatureFlag>,
@@ -79,6 +81,109 @@ pub struct LocalEvaluationResponse {
 
 fn legacy_property_matching_version() -> i64 {
     1
+}
+
+impl LocalEvaluationResponse {
+    /// Create a local-evaluation response from feature flag definitions.
+    ///
+    /// Group mappings, cohorts, and minimized flag-called events default to
+    /// empty or disabled and can be assigned through their public fields.
+    pub fn new(flags: Vec<FeatureFlag>) -> Self {
+        Self {
+            flags,
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+            minimal_flag_called_events: false,
+            property_matching_version: legacy_property_matching_version(),
+        }
+    }
+}
+
+/// Parse the body of a definitions response.
+///
+/// A body that deserializes as a whole is returned as is. Only when it does
+/// not is each flag definition tried on its own, so that a definition this SDK
+/// cannot read costs local evaluation of that flag, not of every flag.
+fn parse_definitions(body: &[u8]) -> Result<LocalEvaluationResponse, serde_json::Error> {
+    serde_json::from_slice(body)
+        .or_else(|strict_error| salvage_definitions(body).ok_or(strict_error))
+}
+
+/// The `flags` array of a definitions body, kept as its original text.
+#[derive(Deserialize)]
+struct RawDefinitions<'a> {
+    #[serde(borrow)]
+    flags: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct FlagKey {
+    key: String,
+}
+
+/// Rebuild a response that failed to deserialize, leaving out the flag
+/// definitions that fail on their own.
+///
+/// The rebuilt body is the original text without those definitions, and it
+/// goes through the same strict parse, so anything else wrong with the
+/// response still rejects it. `None` when no flag definition fails on its own
+/// or the rest does not deserialize either.
+fn salvage_definitions(body: &[u8]) -> Option<LocalEvaluationResponse> {
+    let body = std::str::from_utf8(body).ok()?;
+    let raw: RawDefinitions = serde_json::from_str(body).ok()?;
+    let flags: Vec<&RawValue> = serde_json::from_str(raw.flags.get()).ok()?;
+
+    let mut kept = Vec::with_capacity(flags.len());
+    let mut skipped = Vec::new();
+    for flag in flags {
+        match serde_json::from_str::<FeatureFlag>(flag.get()) {
+            Ok(_) => kept.push(flag.get()),
+            Err(e) => skipped.push((flag.get(), e)),
+        }
+    }
+    if skipped.is_empty() {
+        return None;
+    }
+
+    // `raw.flags` borrows from `body`, so its address gives the array's position.
+    let start = (raw.flags.get().as_ptr() as usize).checked_sub(body.as_ptr() as usize)?;
+    let end = start.checked_add(raw.flags.get().len())?;
+    let rebuilt = [
+        body.get(..start)?,
+        "[",
+        &kept.join(","),
+        "]",
+        body.get(end..)?,
+    ]
+    .concat();
+    let response = serde_json::from_str(&rebuilt).ok()?;
+
+    for (flag, e) in skipped {
+        let key = serde_json::from_str::<FlagKey>(flag)
+            .ok()
+            .map(|flag| flag.key);
+        warn!(
+            flag = key.as_deref().unwrap_or("<unknown>"),
+            error = %e,
+            "Skipping flag definition that failed to parse"
+        );
+    }
+    Some(response)
+}
+
+fn read_definitions(
+    response: reqwest::blocking::Response,
+) -> Result<LocalEvaluationResponse, String> {
+    let body = response.bytes().map_err(|e| e.to_string())?;
+    parse_definitions(&body).map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "async-client")]
+async fn read_definitions_async(
+    response: reqwest::Response,
+) -> Result<LocalEvaluationResponse, String> {
+    let body = response.bytes().await.map_err(|e| e.to_string())?;
+    parse_definitions(&body).map_err(|e| e.to_string())
 }
 
 /// A cohort definition for local evaluation.
@@ -252,8 +357,11 @@ impl FlagCache {
 /// definitions from the PostHog API for local evaluation.
 #[derive(Clone)]
 pub struct LocalEvaluationConfig {
-    /// Personal API key for authentication (found in PostHog project settings)
-    pub personal_api_key: String,
+    /// Secret key for authentication.
+    ///
+    /// Accepts either a Personal API Key (`phx_...`) or a Project Secret API
+    /// Key (`phs_...`).
+    pub secret_key: String,
     /// Project API key to identify which project's flags to fetch
     pub project_api_key: String,
     /// PostHog API host URL (for example, `https://us.i.posthog.com`).
@@ -295,6 +403,9 @@ pub struct FlagPoller {
     /// Kept here rather than on `LocalEvaluationConfig` so the public config
     /// struct stays unchanged.
     on_error: Vec<OnErrorHook>,
+    /// The `User-Agent` value. The client builder replaces it for SDKs built
+    /// on this one.
+    user_agent: String,
 }
 
 impl FlagPoller {
@@ -331,6 +442,7 @@ impl FlagPoller {
             stop_signal: Arc::new(AtomicBool::new(false)),
             thread_handle: None,
             on_error: Vec::new(),
+            user_agent: SdkIdentity::DEFAULT.user_agent(),
         }
     }
 
@@ -347,6 +459,11 @@ impl FlagPoller {
     #[cfg_attr(feature = "async-client", allow(dead_code))]
     pub(crate) fn set_on_error(&mut self, hooks: Vec<OnErrorHook>) {
         self.on_error = hooks;
+    }
+
+    #[cfg_attr(feature = "async-client", allow(dead_code))]
+    pub(crate) fn set_user_agent(&mut self, user_agent: String) {
+        self.user_agent = user_agent;
     }
 
     /// Start the polling thread.
@@ -376,6 +493,7 @@ impl FlagPoller {
         let cache = self.cache.clone();
         let stop_signal = self.stop_signal.clone();
         let on_error = self.on_error.clone();
+        let user_agent = self.user_agent.clone();
 
         let handle = std::thread::spawn(move || {
             let mut last_etag: Option<String> = None;
@@ -394,12 +512,9 @@ impl FlagPoller {
                 let mut request = client
                     .get(&url)
                     .timeout(config.request_timeout)
-                    .header(
-                        "Authorization",
-                        format!("Bearer {}", config.personal_api_key),
-                    )
+                    .header("Authorization", format!("Bearer {}", config.secret_key))
                     .header("X-PostHog-Project-Api-Key", &config.project_api_key)
-                    .header(USER_AGENT, get_default_user_agent());
+                    .header(USER_AGENT, user_agent.as_str());
 
                 if let Some(ref etag) = last_etag {
                     request = request.header(IF_NONE_MATCH, etag.as_str());
@@ -414,7 +529,7 @@ impl FlagPoller {
                             // Extract ETag before consuming the response body
                             let new_etag = extract_etag(response.headers());
 
-                            match response.json::<LocalEvaluationResponse>() {
+                            match read_definitions(response) {
                                 Ok(data) => {
                                     trace!("Successfully fetched flag definitions");
                                     cache.update(data);
@@ -463,10 +578,10 @@ impl FlagPoller {
             .get(&url)
             .header(
                 "Authorization",
-                format!("Bearer {}", self.config.personal_api_key),
+                format!("Bearer {}", self.config.secret_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
-            .header(USER_AGENT, get_default_user_agent())
+            .header(USER_AGENT, self.user_agent.as_str())
             .timeout(self.config.request_timeout)
             .send()
         {
@@ -488,7 +603,7 @@ impl FlagPoller {
         }
 
         let status = response.status().as_u16();
-        let data = match response.json::<LocalEvaluationResponse>() {
+        let data = match read_definitions(response) {
             Ok(d) => d,
             Err(e) => {
                 error!(error = %e, "Failed to parse flag response");
@@ -500,6 +615,14 @@ impl FlagPoller {
 
         self.cache.update(data);
         Ok(())
+    }
+
+    /// Tell the polling thread to exit without waiting for it. It stops before
+    /// its next fetch. The client's `shutdown` calls this, since it can't take
+    /// the poller mutably.
+    #[cfg_attr(feature = "async-client", allow(dead_code))]
+    pub(crate) fn signal_stop(&self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
     }
 
     /// Stop the polling thread and wait for it to exit.
@@ -537,6 +660,9 @@ pub struct AsyncFlagPoller {
     /// Kept here rather than on `LocalEvaluationConfig` so the public config
     /// struct stays unchanged.
     on_error: Vec<OnErrorHook>,
+    /// The `User-Agent` value. The client builder replaces it for SDKs built
+    /// on this one.
+    user_agent: String,
 }
 
 #[cfg(feature = "async-client")]
@@ -575,6 +701,7 @@ impl AsyncFlagPoller {
             task_handle: None,
             is_running: Arc::new(tokio::sync::RwLock::new(false)),
             on_error: Vec::new(),
+            user_agent: SdkIdentity::DEFAULT.user_agent(),
         }
     }
 
@@ -589,6 +716,10 @@ impl AsyncFlagPoller {
     /// [`AsyncFlagPoller::start`]; not part of the public flag-poller API.
     pub(crate) fn set_on_error(&mut self, hooks: Vec<OnErrorHook>) {
         self.on_error = hooks;
+    }
+
+    pub(crate) fn set_user_agent(&mut self, user_agent: String) {
+        self.user_agent = user_agent;
     }
 
     /// Start the polling task.
@@ -630,6 +761,7 @@ impl AsyncFlagPoller {
         let stop_signal = self.stop_signal.clone();
         let is_running = self.is_running.clone();
         let on_error = self.on_error.clone();
+        let user_agent = self.user_agent.clone();
 
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(config.poll_interval);
@@ -653,9 +785,9 @@ impl AsyncFlagPoller {
                         let mut request = client
                             .get(&url)
                             .timeout(config.request_timeout)
-                            .header("Authorization", format!("Bearer {}", config.personal_api_key))
+                            .header("Authorization", format!("Bearer {}", config.secret_key))
                             .header("X-PostHog-Project-Api-Key", &config.project_api_key)
-                            .header(USER_AGENT, get_default_user_agent());
+                            .header(USER_AGENT, user_agent.as_str());
 
                         if let Some(ref etag) = last_etag {
                             request = request.header(IF_NONE_MATCH, etag.as_str());
@@ -670,7 +802,7 @@ impl AsyncFlagPoller {
                                     // Extract ETag before consuming the response body
                                     let new_etag = extract_etag(response.headers());
 
-                                    match response.json::<LocalEvaluationResponse>().await {
+                                    match read_definitions_async(response).await {
                                         Ok(data) => {
                                             trace!("Successfully fetched flag definitions");
                                             cache.update(data);
@@ -724,10 +856,10 @@ impl AsyncFlagPoller {
             .get(&url)
             .header(
                 "Authorization",
-                format!("Bearer {}", self.config.personal_api_key),
+                format!("Bearer {}", self.config.secret_key),
             )
             .header("X-PostHog-Project-Api-Key", &self.config.project_api_key)
-            .header(USER_AGENT, get_default_user_agent())
+            .header(USER_AGENT, self.user_agent.as_str())
             .timeout(self.config.request_timeout)
             .send()
             .await
@@ -750,7 +882,7 @@ impl AsyncFlagPoller {
         }
 
         let status = response.status().as_u16();
-        let data = match response.json::<LocalEvaluationResponse>().await {
+        let data = match read_definitions_async(response).await {
             Ok(d) => d,
             Err(e) => {
                 error!(error = %e, "Failed to parse flag response");
@@ -765,6 +897,13 @@ impl AsyncFlagPoller {
     }
 
     /// Stop the polling task.
+    /// Tell the polling task to exit without waiting for it. It stops at its
+    /// next tick. The client's `shutdown` calls this, since it can't take the
+    /// poller mutably.
+    pub(crate) fn signal_stop(&self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
+    }
+
     pub async fn stop(&mut self) {
         debug!("Stopping async flag poller");
         self.stop_signal.store(true, Ordering::Relaxed);
@@ -1037,7 +1176,7 @@ mod tests {
 
     fn poller_config() -> LocalEvaluationConfig {
         LocalEvaluationConfig {
-            personal_api_key: "phx_test".to_string(),
+            secret_key: "phx_test".to_string(),
             project_api_key: "phc_test".to_string(),
             api_host: "http://localhost:1".to_string(),
             poll_interval: Duration::from_secs(30),

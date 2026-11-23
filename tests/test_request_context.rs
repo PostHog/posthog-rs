@@ -1,4 +1,4 @@
-use posthog_rs::{Event, RequestContext};
+use posthog::{Event, RequestContext};
 
 #[test]
 fn explicit_context_builds_events_without_replacing_explicit_values() {
@@ -6,23 +6,50 @@ fn explicit_context_builds_events_without_replacing_explicit_values() {
         .distinct_id("request-user")
         .session_id("request-session")
         .property("route", "/work")
+        .unwrap()
+        .property("$set", serde_json::json!({"plan": "free", "source": "web"}))
+        .unwrap()
+        .option("cookieless_mode", true)
+        .unwrap()
+        .option("disable_skew_correction", true)
         .unwrap();
     let event = context.event("work");
     let value = serde_json::to_value(event).unwrap();
     assert_eq!(value["distinct_id"], "request-user");
     assert_eq!(value["properties"]["$session_id"], "request-session");
     assert_eq!(value["properties"]["route"], "/work");
+    assert_eq!(
+        value["properties"]["$set"],
+        serde_json::json!({"plan": "free", "source": "web"})
+    );
+    assert_eq!(value["options"]["cookieless_mode"], true);
+    assert_eq!(value["options"]["disable_skew_correction"], true);
 
     let mut event = Event::new("work", "explicit-user");
     event
         .insert_prop("$session_id", "explicit-session")
         .unwrap();
     event.insert_prop("route", "/explicit").unwrap();
+    event
+        .insert_prop("$set", serde_json::json!({"plan": "pro"}))
+        .unwrap();
+    event.insert_option("cookieless_mode", false).unwrap();
+    // A null option counts as unset, so the context fills it.
+    event
+        .insert_option("disable_skew_correction", serde_json::Value::Null)
+        .unwrap();
     context.apply_to_event(&mut event);
     let value = serde_json::to_value(event).unwrap();
     assert_eq!(value["distinct_id"], "explicit-user");
     assert_eq!(value["properties"]["$session_id"], "explicit-session");
     assert_eq!(value["properties"]["route"], "/explicit");
+    // The context fills only the `$set` keys the event left out.
+    assert_eq!(
+        value["properties"]["$set"],
+        serde_json::json!({"plan": "pro", "source": "web"})
+    );
+    assert_eq!(value["options"]["cookieless_mode"], false);
+    assert_eq!(value["options"]["disable_skew_correction"], true);
 }
 
 #[test]
@@ -30,10 +57,31 @@ fn missing_context_identity_keeps_personless_capture() {
     let value =
         serde_json::to_value(RequestContext::new().session_id("session").event("work")).unwrap();
     assert!(!value["distinct_id"].as_str().unwrap().is_empty());
-    assert_eq!(value["properties"]["$process_person_profile"], false);
+    assert_eq!(value["options"]["process_person_profile"], false);
     assert_eq!(value["properties"]["$session_id"], "session");
     let value = serde_json::to_value(RequestContext::new().event("work")).unwrap();
     assert!(value["properties"].get("$session_id").is_none());
+
+    // The personless default is the lowest layer, so a context option replaces it.
+    let context = RequestContext::new()
+        .option("process_person_profile", true)
+        .unwrap();
+    let value = serde_json::to_value(context.event("work")).unwrap();
+    assert_eq!(value["options"]["process_person_profile"], true);
+    let mut event = Event::new_anon("work");
+    event
+        .insert_option("process_person_profile", false)
+        .unwrap();
+    context.apply_to_event(&mut event);
+    let value = serde_json::to_value(event).unwrap();
+    assert_eq!(value["options"]["process_person_profile"], false);
+
+    // A null context option sets nothing, so the personless default stays.
+    let context = RequestContext::new()
+        .option("process_person_profile", serde_json::Value::Null)
+        .unwrap();
+    let value = serde_json::to_value(context.event("work")).unwrap();
+    assert_eq!(value["options"]["process_person_profile"], false);
 }
 
 #[cfg(feature = "async-client")]
@@ -126,21 +174,19 @@ async fn queued_batch_and_exception_context_survives_scope_end() {
                         Some("$exception") => "context-user",
                         _ => return false,
                     };
-                    (if cfg!(feature = "capture-v1") {
-                        &event["session_id"]
-                    } else {
-                        &event["properties"]["$session_id"]
-                    }) == "original-session"
+                    event["session_id"] == "original-session"
                         && event["distinct_id"] == identity
+                        && event["options"]["cookieless_mode"] == true
                 })
         });
         then.status(200).json_body(json!({"results": {}}));
     });
-    let client = posthog_rs::client(
-        posthog_rs::ClientOptionsBuilder::default()
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
             .api_key("phc_test".into())
             .host(server.base_url())
             .flush_at(100usize)
+            .flush_interval_ms(600_000)
             .build()
             .unwrap(),
     )
@@ -148,6 +194,8 @@ async fn queued_batch_and_exception_context_survives_scope_end() {
     RequestContext::new()
         .distinct_id("context-user")
         .session_id("original-session")
+        .option("cookieless_mode", true)
+        .unwrap()
         .scope(async {
             client.capture(Event::new("work", "explicit-user"));
             client.capture_batch(vec![Event::new("batch", "batch-user")], true);
@@ -169,6 +217,54 @@ async fn queued_batch_and_exception_context_survives_scope_end() {
 
 #[cfg(feature = "async-client")]
 #[tokio::test]
+async fn flag_called_events_apply_the_lib_pair_rule_to_the_request_context() {
+    use httpmock::prelude::*;
+    use serde_json::{json, Value};
+    let sdk_version = env!("CARGO_PKG_VERSION");
+    // (context `$lib`, context `$lib_version`, wire `$lib`, wire `$lib_version`, SDK parts)
+    let cases = [
+        (Some("mw"), Some("2.0.0"), "mw", Some("2.0.0"), false),
+        (Some("mw"), None, "mw", None, false),
+        (None, Some("2.0.0"), "posthog-rs", Some(sdk_version), true),
+    ];
+    for (context_lib, context_version, wire_lib, wire_version, parts) in cases {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flags/");
+            then.status(200)
+                .json_body(json!({"featureFlags": {"feature": true}}));
+        });
+        let capture = server.mock(|when, then| {
+            when.method(POST).is_true(move |request| {
+                let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
+                let properties = &body["batch"][0]["properties"];
+                body["batch"][0]["event"] == "$feature_flag_called"
+                    && properties["$lib"] == wire_lib
+                    && properties.get("$lib_version") == wire_version.map(Value::from).as_ref()
+                    && properties.get("$lib_version__major").is_some() == parts
+            });
+            then.status(200).json_body(json!({"results": {}}));
+        });
+        let client = posthog::client(("phc_test", server.base_url().as_str())).await;
+        let mut context = RequestContext::new().distinct_id("flag-user");
+        if let Some(lib) = context_lib {
+            context = context.property("$lib", lib).unwrap();
+        }
+        if let Some(version) = context_version {
+            context = context.property("$lib_version", version).unwrap();
+        }
+        let flags = client
+            .evaluate_flags_with_context(&context, Default::default())
+            .await
+            .unwrap();
+        assert!(flags.is_enabled("feature"));
+        client.flush().await;
+        capture.assert_calls(1);
+    }
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
 async fn flag_snapshot_keeps_originating_context_after_request_ends() {
     use httpmock::prelude::*;
     use serde_json::{json, Value};
@@ -185,21 +281,21 @@ async fn flag_snapshot_keeps_originating_context_after_request_ends() {
         when.method(POST).is_true(|request| {
             let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
             body["batch"][0]["event"] == "$feature_flag_called"
-                && (if cfg!(feature = "capture-v1") {
-                    &body["batch"][0]["session_id"]
-                } else {
-                    &body["batch"][0]["properties"]["$session_id"]
-                }) == "original-session"
+                && body["batch"][0]["session_id"] == "original-session"
+                // The context beats the client's `$is_server` default.
+                && body["batch"][0]["properties"]["$is_server"] == false
                 && body["batch"][0]["properties"]
                     .get("other-request")
                     .is_none()
         });
         then.status(200).json_body(json!({"results": {}}));
     });
-    let client = posthog_rs::client(("phc_test", server.base_url().as_str())).await;
+    let client = posthog::client(("phc_test", server.base_url().as_str())).await;
     let context = RequestContext::new()
         .distinct_id("flag-user")
-        .session_id("original-session");
+        .session_id("original-session")
+        .property("$is_server", false)
+        .unwrap();
     let flags = client
         .evaluate_flags_with_context(&context, Default::default())
         .await
@@ -223,4 +319,134 @@ async fn flag_snapshot_keeps_originating_context_after_request_ends() {
     client.flush().await;
     flags_request.assert_calls(1);
     capture.assert_calls(1);
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn immediate_analytics_and_ai_capture_take_the_context() {
+    use httpmock::prelude::*;
+    use serde_json::{json, Value};
+    let server = MockServer::start();
+    let lane_mock = |path: &'static str, name: &'static str| {
+        server.mock(move |when, then| {
+            when.method(POST).path(path).is_true(move |request| {
+                let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
+                let [event] = body["batch"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                else {
+                    return false;
+                };
+                event["event"] == name
+                    && event["distinct_id"] == "explicit-user"
+                    && event["session_id"] == "context-session"
+                    && event["options"]["cookieless_mode"] == true
+                    && event["properties"]["plan"] == "pro"
+            });
+            then.status(200).json_body(json!({"results": {}}));
+        })
+    };
+    let analytics = lane_mock("/i/v1/analytics/events", "work");
+    let ai = lane_mock("/i/v1/ai/events", "$ai_generation");
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
+            .api_key("phc_test".into())
+            .host(server.base_url())
+            .max_capture_attempts(1u32)
+            .build()
+            .unwrap(),
+    )
+    .await;
+    RequestContext::new()
+        .session_id("context-session")
+        .property("plan", "pro")
+        .unwrap()
+        .option("cookieless_mode", true)
+        .unwrap()
+        .scope(async {
+            client
+                .capture_immediate(Event::new("work", "explicit-user"))
+                .await
+                .unwrap();
+            client
+                .capture_ai_immediate(Event::new("$ai_generation", "explicit-user"))
+                .await
+                .unwrap();
+        })
+        .await;
+    analytics.assert_calls(1);
+    ai.assert_calls(1);
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn group_identify_takes_the_context_id_but_never_its_session() {
+    use httpmock::prelude::*;
+    use serde_json::{json, Value};
+
+    let mut event = Event::new("$groupidentify", "$company_explicit");
+    RequestContext::new()
+        .session_id("context-session")
+        .apply_to_event(&mut event);
+    assert!(event.properties().get("$session_id").is_none());
+
+    let server = MockServer::start();
+    let group_identify_mock = |group_key: &'static str, distinct_id: &'static str| {
+        server.mock(move |when, then| {
+            when.method(POST).is_true(move |request| {
+                let body: Value = serde_json::from_slice(request.body_ref()).unwrap();
+                let [event] = body["batch"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                else {
+                    return false;
+                };
+                event["event"] == "$groupidentify"
+                    && event["properties"]["$group_key"] == group_key
+                    && event["distinct_id"] == distinct_id
+                    && event.get("session_id").is_none()
+                    && event["properties"].get("$session_id").is_none()
+                    && event["properties"]["plan"] == "pro"
+            });
+            then.status(200).json_body(json!({"results": {}}));
+        })
+    };
+    let with_id = group_identify_mock("with-id", "context-user");
+    let without_id = group_identify_mock("without-id", "$company_without-id");
+    let blank_id = group_identify_mock("blank-id", "$company_blank-id");
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
+            .api_key("phc_test".into())
+            .host(server.base_url())
+            .flush_at(1usize)
+            .build()
+            .unwrap(),
+    )
+    .await;
+    for (identity, group_key) in [
+        (Some("context-user"), "with-id"),
+        (None, "without-id"),
+        (Some("  "), "blank-id"),
+    ] {
+        let mut context = RequestContext::new()
+            .session_id("context-session")
+            .property("plan", "pro")
+            .unwrap();
+        if let Some(identity) = identity {
+            context = context.distinct_id(identity);
+        }
+        context
+            .scope(async {
+                client
+                    .group_identify("company", group_key, json!({}))
+                    .unwrap();
+            })
+            .await;
+        client.flush().await;
+    }
+    with_id.assert_calls(1);
+    without_id.assert_calls(1);
+    blank_id.assert_calls(1);
 }

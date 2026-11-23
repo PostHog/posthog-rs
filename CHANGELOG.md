@@ -1,5 +1,157 @@
 # posthog-rs
 
+## 1.3.0 — 2026-11-20
+
+### Minor changes
+
+- [6003a15](https://github.com/posthog/posthog-rs/commit/6003a1518d73e51c589ad320acb6b5718eb9f806) MCP analytics (experimental): add `McpOptionsBuilder::server_build`, which sends `$mcp_server_build` on every event, and the opt-in `send_feedback` virtual tool (`McpOptionsBuilder::feedback_tool`), which sends `$mcp_feedback`. Hosts can replace its description, declare extra report fields (`feedback_field`, `required_feedback_field`), and handle each report with an async `on_feedback` that may replace the reply. MCP events now redact the host's request context properties and fit them within the event size bound. The `mcp` feature no longer depends on `fancy-regex`. Object keys in `$mcp_parameters` and `$mcp_response` now get the token, URL, JSON member and known key format redaction, so a key that holds a signed URL no longer carries its signature, and number, object or array feedback extras are sanitized as free text, keys and numbers included. — Thanks @marandaneto!
+
+### Patch changes
+
+- [6003a15](https://github.com/posthog/posthog-rs/commit/6003a1518d73e51c589ad320acb6b5718eb9f806) `Client::shutdown` now also stops the local evaluation poller, so a shut-down client no longer fetches flag definitions in the background. — Thanks @marandaneto!
+
+## 1.2.1 — 2026-11-19
+
+### Patch changes
+
+- [770e1dd](https://github.com/posthog/posthog-rs/commit/770e1dd8a9cb460dfbc4e12d22ec7015107cd77d) Fail an email send with files, instead of panicking, when the upload route answers with more signed headers than an upload needs. — Thanks @eli-r-ph!
+
+## 1.2.0 — 2026-11-19
+
+### Minor changes
+
+- [2f87ed4](https://github.com/posthog/posthog-rs/commit/2f87ed43b0615f2ae45a2df54ec3c8d008c659e7) `Client::get_remote_config_payload(flag_key)` reads the payload of a remote config feature flag, with no distinct ID. It works with the async and the blocking client, and needs the `secret_key` option. A failed request or a non-2xx status returns an `Error`, and a flag with no payload returns `Ok(None)`. — Thanks @ioannisj!
+
+## 1.1.3 — 2026-11-18
+
+### Patch changes
+
+- [a66aefb](https://github.com/posthog/posthog-rs/commit/a66aefbd8b476146aba16b5f61d8b00411fd513d) Fix local flag evaluation for projects with an `is_set` or `is_not_set` filter that has no `value`.
+  
+  PostHog accepts these two property filters without a `value`, but `Property` required one, so a single such filter made the whole `LocalEvaluationResponse` fail to deserialize and no flags loaded at all. They now deserialize without a `value`, on flags and on cohort leaves. Other operators still require one. — Thanks @shaun-wispr!
+- [a66aefb](https://github.com/posthog/posthog-rs/commit/a66aefbd8b476146aba16b5f61d8b00411fd513d) Stop one unreadable flag definition from disabling local evaluation for the whole project.
+  
+  The flag pollers rejected a definitions response when any single flag definition failed to deserialize, so no flag loaded. A response that deserializes as a whole is handled as before. When it does not, each flag definition is now tried on its own: the ones that fail are skipped with a warning naming the flag, and the rest load. A skipped flag is absent from the local cache, so it falls back to `/flags` like any other flag local evaluation cannot resolve. A response that is unreadable for any other reason is still rejected. — Thanks @shaun-wispr!
+- [1b623af](https://github.com/posthog/posthog-rs/commit/1b623afa3dde285143ac5cc142a32692c8860fca) Local flag evaluation no longer stops at the first property filter in a condition it can't check. A later filter that doesn't match now rules the condition out, like the other SDKs, so a flag that can't match is `false` instead of inconclusive and doesn't need a call to `/flags`. — Thanks @luantaraschi!
+
+## 1.1.2 — 2026-11-18
+
+### Patch changes
+
+- [d83cb97](https://github.com/posthog/posthog-rs/commit/d83cb97ccd847f4542ba7d45428e36f8a062fcc6) Send transactional email through PostHog's key-scoped `/api/messaging/` routes, which take the project from the secret key, instead of `/api/projects/@current/messaging/`. Needs PostHog Cloud, or a self-hosted PostHog from 2026-11-18 or later. Older self-hosted versions answer these calls with a 404. — Thanks @rafaeelaudibert!
+
+## 1.1.1 — 2026-11-18
+
+### Patch changes
+
+- [f022a30](https://github.com/posthog/posthog-rs/commit/f022a30c859e248007a464665c0701efed636c21) Local flag evaluation now checks condition groups in the order they are defined, like the other SDKs, instead of moving groups with a variant override to the front. For a flag with a variant override on a group other than the first, some users can now get a different value: the variant from the first group they match, or `false` from an `early_exit` group. With `early_exit`, a rollout exclusion now also stops evaluation after an earlier inconclusive group, so the flag stays inconclusive (and falls back to the server) instead of matching a later group. — Thanks @luantaraschi!
+
+## 1.1.0 — 2026-11-18
+
+### Minor changes
+
+- [3188466](https://github.com/posthog/posthog-rs/commit/3188466a5f56fa6f9c15a67f40656c9138f4e1a5) Add `reload_feature_flags` to the async and blocking clients. It fetches local feature flag definitions now and returns once they are in use, or with the error that kept them from loading. Before, a client could only wait for its next poll. — Thanks @eli-r-ph!
+
+## 1.0.0 — 2026-11-17
+
+### Major changes
+
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Mark EvaluateFlagsOptions as non-exhaustive so new options can be added without breaking future minor releases. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) The SDK sends `posthog-rs/<version>` in the `PostHog-Sdk-Info` and `User-Agent` headers on every capture request, and adds `$lib` and `$lib_version` to each event's properties before `before_send` runs. Both are sent as they are at send time, and PostHog stores them. PostHog uses the header only to fill in what an event leaves unset: both properties when `$lib` isn't set, and the version when `$lib` is `posthog-rs` and `$lib_version` isn't set.
+  
+  A `$lib` counts as set only when it's a non-empty string. If `$lib` isn't set, the SDK sets `$lib` to `posthog-rs` and `$lib_version` to the crate version, replacing any `$lib_version` set on its own. If `$lib` is `posthog-rs` and `$lib_version` isn't set, the SDK adds the version. Any other `$lib` is sent with whatever `$lib_version` the event has, so set both when you name another library. Unlike the default 0.x path, the SDK doesn't add its `$lib_version` or version parts to another `$lib` you set, and it replaces a `null` or empty `$lib`. It adds `$lib_version__major`, `$lib_version__minor` and `$lib_version__patch` as numbers only when it adds its own `$lib_version`. MCP events send `$lib` as `posthog-rs-mcp` with the crate version as `$lib_version`, and no longer carry the version parts. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Assign an event's uuid when the client takes the event, so a cloned or reused `Event` no longer sends one uuid twice. `Event::set_timestamp` no longer rejects future timestamps. `Event::new` with an empty or whitespace-only distinct ID creates an anonymous event. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Set per-event capture options with `Event::insert_option`, or `CaptureExceptionOptions::option` for exceptions. The SDK sends them in an `options` map next to `properties`, unchanged, and PostHog validates them. `Event::alias` and `Event::group_identify` are now public, so you can set options on the events that `alias` and `group_identify` send. They return the new `Error::InvalidArgument` for a blank ID, group type or group key.
+  
+  Breaking changes:
+  
+  - Move the `$process_person_profile`, `$cookieless_mode`, `$ignore_sent_at` and `$product_tour_id` properties to the `process_person_profile`, `cookieless_mode`, `disable_skew_correction` and `product_tour_id` options. Legacy option properties still work, but an option overrides its legacy property. Use options.
+  - The SDK no longer converts option values. PostHog reads common forms such as `"false"`, `"no"` or `0`, and drops an event whose option value it cannot read. That event reaches `on_error` as a per-event `drop` with the detail `invalid_options`.
+  - Adding a group no longer turns on person processing. An anonymous event with groups stays personless; set the `process_person_profile` option to `true` if you need it in group analytics.
+  - `Event::new_anon` sets the `process_person_profile` option to `false`. Set the option to `true` to process person profiles for an anonymous event.
+  - `$os`, `$os_version`, `$is_server` and `$geoip_disable` are added before `before_send`, only for keys the event leaves unset. The hook sees them and can remove them, and they are not added again after the hook.
+  - `Event::with_flags` keeps flag properties the event already has, and `Event::add_group` groups merge into a `$groups` property key by key. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) TLS is now a Cargo feature. `default-features = false` no longer enables TLS: add `tls` for reqwest's default Rustls provider, or `tls-no-provider` when the application installs a process-level Rustls `CryptoProvider`. With `tls-no-provider`, constructing a client before a provider is installed panics. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Mark more public types `#[non_exhaustive]`: `FeatureFlagsResponse`, `FlagDetail`, `FlagMetadata`, `FlagReason`, `LocalEvaluationResponse`, `CaptureResponse` and `EventResult`. A `match` on `FeatureFlagsResponse` needs a wildcard arm, and the structs no longer accept struct literals. Build a `LocalEvaluationResponse` with the new `LocalEvaluationResponse::new`. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Remove deprecated feature flag methods and the `personal_api_key` builder alias, and rename `LocalEvaluationConfig::personal_api_key` to `secret_key`. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Publish the SDK implementation as `posthog` starting with 1.0. Keep `posthog-rs` as a compatibility crate that forwards features and re-exports `posthog`, sharing its types and global state. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Remove the legacy V0 capture pipeline. Capture V1 (`POST /i/v1/analytics/events`) is now the only capture implementation and the `capture-v1` Cargo feature has been removed.
+  
+  Breaking changes:
+  
+  - `V1ErrorResponse` is renamed `CaptureErrorResponse`, which also changes the return type of `CaptureFailure::error_response()`.
+  - `Endpoint::Batch` is removed, and `Endpoint` is now `#[non_exhaustive]` so future endpoints can be added without breaking callers.
+  - `Endpoint::Capture` now resolves to `/i/v1/analytics/events` instead of `/i/v0/e/`. Code calling `Endpoint::Capture.path()` compiles unchanged but observes a different URL.
+  - The `capture-v1` feature no longer exists; remove it from your feature list. `brotli` and `zstd` are now unconditional dependencies (`zstd-sys` builds C via `cc`).
+  
+  Behavior changes:
+  
+  - All four content encodings the capture endpoint accepts — `gzip`, `deflate`, `br`, `zstd` — now work. Previously, selecting `CaptureCompression::{Deflate, Br, Zstd}` on default features silently sent the body **uncompressed**; it is now genuinely compressed. Check any proxy or WAF in front of PostHog that may not handle `Content-Encoding: zstd` or `br`.
+  - `CaptureSummary::not_persisted()` and `all_persisted()` are now data-driven from the backend's per-event verdicts. On V0 they were hard-wired to `0` and `true`, so callers gating durable state on `all_persisted()` should re-check that logic. — Thanks @marandaneto!
+
+### Minor changes
+
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) MCP analytics can set capture options on its events. `McpOptionsBuilder::event_options` takes a callback that returns options for each request's events, and `ToolCallRequest::event_option` sets an option on one call's events in the manual API. The call's option wins over the callback's, both win over the request context, and an anonymous MCP event keeps `process_person_profile: false`. The `McpOptions` hook and the client's `before_send` see the options and can change them. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Log a warning when the SDK drops a `$session_id` or `$window_id` value that is not a string. The warning names the key and the value's type, never the value. A `null` value still drops without a warning. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) `before_send` now sees groups from `Event::add_group` in the `$groups` property and can change or remove them. For minimized `$feature_flag_called` events, the SDK trims properties to the allowlist before `before_send`, so properties the hook adds are sent. The capture and `/flags` HTTP clients the SDK builds follow only 307 and 308 redirects to the same scheme, host and port, at most 5 times; any other redirect fails the request. Shutdown and queue-full drop warnings now name the capture endpoint. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Split each background analytics batch into requests of at most 5 MiB of serialized events, so a batch of large events no longer exceeds capture's 10 MiB request limit. A larger single event is sent on its own. `before_send` timing and `capture_batch_immediate` requests are unchanged. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Retry capture requests that get HTTP 404 or 429, like 408 and 5xx, with the same backoff and `Retry-After` as the minimum wait. 0.x retried a 429 only when it had a `Retry-After` header and never retried a 404. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Capture now makes 4 attempts by default instead of 3, and the first retry waits 100 ms instead of 200 ms. Remote `/flags` retries no longer use the capture retry options. They wait 300 ms before the first retry and double up to 30 s. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Add `CaptureFailure::verdict_summary()`, which lists every dropped and retried event reason with its count on one line, for logging from an `on_error` hook. Without a hook, the per-batch warning now shows totals only, for example `3 event(s) not persisted by <endpoint>: 2 dropped, 1 out of retries`. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Add `capture_ai`, `capture_ai_batch`, `capture_ai_immediate`, `capture_ai_batch_immediate` and the global `posthog::capture_ai` for LLM analytics events. They post to `/i/v1/ai/events` on their own background lane, with the `capture_ai_compression` and `capture_ai_max_queue_size` options. Both the background lane and the immediate variants drop an event over 8 MiB locally; the immediate variants report it in the returned `CaptureSummary` as an `ai_event_too_big` drop. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) `RequestContext::option` sets a capture option on every event in a request context, including exceptions. An option the event sets, other than `null`, wins. A context `process_person_profile` replaces the `false` that `Event::new_anon` sets for a personless event. A context `process_person_profile` does not set `process_person_profile` on identify-style events (`$identify`, `$create_alias`, `$merge_dangerously`, `$groupidentify`, `$set`, `$set_once`) whose distinct ID the SDK did not generate; those default to `true` unless the event sets it. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) A `$set`, `$set_once`, `$groups` or `$group_set` from the request context fills in only the keys the event's own value lacks, as in the other v1 server SDKs. In 0.x, the context value was used only when the event had none of that property.
+  
+  `$feature_flag_called` events now take a request context value over the client's `$is_server` and `$geoip_disable` defaults, as other events already did. A per-call `disable_geoip` still wins. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Report event copies that capture dropped as duplicates. When a request contains one uuid more than once, capture keeps the first event and drops the later copies. The SDK no longer resends those copies, and counts each one as lost in `on_error` (`drop/duplicate_event_uuid` in `CaptureFailure::verdict_summary`) and in `CaptureSummary::not_persisted`. The new `EventResult::duplicates_dropped` field gives the number of copies dropped for that uuid. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) A `$trace_id` or `$span_id` set with `CaptureExceptionOptions::property` now wins over the trace context provider, and setting either one stops the SDK adding both provider IDs. `CaptureExceptionOptions::trace_context` still wins over both. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) A personal API key (`phx_...`) passed as the project `api_key` disables the client and logs one error, as an empty key does. The empty-key message is now logged at the error level, and a client built with `disabled(true)` logs nothing about its key. — Thanks @marandaneto!
+
+### Patch changes
+
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) The batch `created_at` and the `PostHog-Request-Timestamp` header now use the same format as event timestamps: UTC with a `Z` and 3, 6 or 9 fractional-second digits. Before, they used a `+00:00` offset and left out the fraction when the clock was on a whole second. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) `capture_ai_immediate` and `capture_ai_batch_immediate` now apply the current request context, like `capture_ai`, `capture_immediate` and `capture_batch_immediate`. Before, context properties (such as `$session_id`) and context options were missing from events sent this way. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) MCP events sent over HTTP now take the `RequestContext` that `PostHogLayer` or the application placed in the request extensions, so their context properties and options are no longer lost when `rmcp` runs the handler in its own task. The MCP identity stays the distinct ID, and an anonymous MCP event keeps `process_person_profile: false`. The `McpOptions` `before_send` hook now sees the context values. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) `group_identify` now sends the request context's distinct id when the context has one, and `$<group_type>_<group_key>` otherwise. It no longer adds the context session id to `$groupidentify` events. This matches the other v1 server SDKs. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) A per-call `disable_geoip: Some(false)` in `EvaluateFlagsOptions` now sends `$geoip_disable: false` on `$feature_flag_called` events, so it beats a request context `$geoip_disable`. Before, it sent nothing and the context value applied. `Some(true)` and `None` are unchanged. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) An event from `Event::new_anon` whose `process_person_profile` option is `null` or removed gets `false` again before `before_send`, so it stays personless unless the option is set to `true`. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) When a `before_send` hook panics, the error log now names the event it dropped: `panic in PostHog before_send hook for event "<name>"; dropping event`. It still never logs the panic message, which can hold the values the hook was redacting. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Event timestamps keep microsecond and nanosecond precision instead of being cut to milliseconds. Whole-millisecond timestamps are sent as before. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) Capture retry waits now vary at random by up to 25% either way, so many clients do not retry at the same moment. — Thanks @marandaneto!
+- [07702b3](https://github.com/posthog/posthog-rs/commit/07702b3bcc871e277ecef3f3b4ccff8343219598) When an MCP analytics `before_send` hook panics, the SDK now logs an error that names the event it dropped: `panic in PostHog before_send hook for event "<name>"; dropping event`. Before, it logged a warning without the event name. It never logs the panic message. — Thanks @marandaneto!
+
+## 0.33.1 — 2026-11-13
+
+### Patch changes
+
+- [2b664da](https://github.com/posthog/posthog-rs/commit/2b664dada02437d7a0896a6858854f3b7cce2abd) Ignore failed detailed feature flag records and their payloads in direct reads, bulk results, and snapshot enrichment. — Thanks @marandaneto!
+
+## 0.33.0 — 2026-11-13
+
+### Minor changes
+
+- [90cb06a](https://github.com/posthog/posthog-rs/commit/90cb06a594835f455dc39ce6ee77547d10ca33bf) A `CodeEmail` takes copies and files: `cc` and `bcc` each add one address, and `attachment` adds an `EmailAttachment` made from the file's bytes. An email carries at most 10 files and 40 MB after Base64 encoding, counting the bodies (the HTML twice without text, since PostHog derives the text from it) and the subject, about 29 MB of files; the client checks both before it sends anything. The client hashes each file, uploads the files PostHog doesn't have yet straight to PostHog's file store over https, and then sends the email naming each file by its SHA-256. A file store URL that isn't https fails the send before any upload, unless `app_host` is plain http itself, as a PostHog on your own machine is. A refused upload fails the send with `attachment_upload_failed` and sends no email. Add `content_type` and `content_id`, and reference a `content_id` as `cid:<id>` in the HTML to show the file inline. PostHog can't fetch a file from a path or URL, and an attachment's `Debug` output never shows its content. A `TemplateEmail` takes none of these, because the template sets its own recipients and content. — Thanks @Silthus!
+
+## 0.32.0 — 2026-11-12
+
+### Minor changes
+
+- [8b0fb8b](https://github.com/posthog/posthog-rs/commit/8b0fb8be20fd6d20aaf6b3656d0a66beab5340d0) A `CodeEmail` now takes `.sensitive()` and `.tracking()`.
+  
+  `.sensitive()` marks an email that carries a login link, a reset token or a code. PostHog keeps a sensitive email's links unchanged, leaves its subject off engagement events and keeps its content out of logs. Without it, a code send takes the setting of the saved template whose key matches its `template_key`, or is sensitive when no template has that key, as before.
+  
+  `.tracking()` says what PostHog tracks for the email: `true` or `EmailTracking::On`, `false` or `EmailTracking::Off`, or `EmailTrackingOptions::new()` with `.opens()`, `.clicks()` and `.engagement()` to set each kind on its own. Without it, PostHog counts opens, captures engagement events, and counts clicks only when the email isn't sensitive. Turn clicks on only when the email's links are safe to send through a redirect. Click tracking needs open tracking.
+  
+  `.capture_engagement()` is deprecated. Use `.tracking(EmailTrackingOptions::new().engagement(...))` instead. It still works, but PostHog refuses a send that sets both. The SDK now leaves `capture_engagement` out of the request unless you set it, which PostHog reads the same way.
+  
+  `.sensitive()` and `.tracking()` need PostHog's API support, which is rolling out. Until it reaches your PostHog region or self-hosted version, PostHog refuses a send that sets either. — Thanks @Silthus!
+
+## 0.31.3 — 2026-11-11
+
+### Patch changes
+
+- [2e77fbb](https://github.com/posthog/posthog-rs/commit/2e77fbb60e805c7e25ca1ca59b4308222b1c6d9e) Relative date filters in local flag evaluation now follow the server: months and years are calendar steps instead of 30 and 365 days, `7d` without a leading `-` is accepted, and a number of 10,000 or more is inconclusive instead of panicking. — Thanks @luantaraschi for your first contribution 🎉!
+
 ## 0.31.2 — 2026-11-06
 
 ### Patch changes

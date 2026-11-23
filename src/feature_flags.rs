@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -324,10 +324,13 @@ pub struct FeatureFlagCondition {
 ///
 /// Supports various operators for matching user properties against expected values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "RawProperty")]
 pub struct Property {
     /// The property key to match (e.g., "email", "country", "$feature/other-flag")
     pub key: String,
-    /// The value to compare against
+    /// The value to compare against. The presence operators (`"is_set"` and
+    /// `"is_not_set"`) never read it, and the API may omit it for them; it
+    /// then deserializes as JSON null.
     pub value: serde_json::Value,
     /// Comparison operator. Supported property operators include `"exact"`,
     /// `"is_not"`, `"icontains"`, `"not_icontains"`, `"starts_with"`,
@@ -335,15 +338,49 @@ pub struct Property {
     /// `"not_regex"`, `"gt"`, `"gte"`, `"lt"`, `"lte"`, `"is_set"`,
     /// `"is_not_set"`, `"is_date_before"`, `"is_date_after"`, and the
     /// `"semver_*"` operators used by PostHog version targeting.
-    #[serde(
-        default = "default_operator",
-        deserialize_with = "deserialize_operator"
-    )]
     pub operator: String,
     /// Property type. Use `Some("cohort")` for cohort membership checks; flag
     /// dependency checks use a property key that starts with `$feature/`.
     #[serde(rename = "type")]
     pub property_type: Option<String>,
+}
+
+/// Wire shape of [`Property`], keeping an omitted `value` distinct from an
+/// explicit JSON null.
+#[derive(Deserialize)]
+struct RawProperty {
+    key: String,
+    #[serde(default, deserialize_with = "deserialize_present_value")]
+    value: Option<serde_json::Value>,
+    #[serde(
+        default = "default_operator",
+        deserialize_with = "deserialize_operator"
+    )]
+    operator: String,
+    #[serde(rename = "type")]
+    property_type: Option<String>,
+}
+
+impl std::convert::TryFrom<RawProperty> for Property {
+    type Error = &'static str;
+
+    fn try_from(raw: RawProperty) -> Result<Self, Self::Error> {
+        let value = match raw.value {
+            Some(value) => value,
+            None if matches!(raw.operator.as_str(), "is_set" | "is_not_set") => {
+                serde_json::Value::Null
+            }
+            // Any other operator compares against the value, so a filter
+            // without one must not be read as a comparison against null.
+            None => return Err("missing field `value`"),
+        };
+        Ok(Property {
+            key: raw.key,
+            value,
+            operator: raw.operator,
+            property_type: raw.property_type,
+        })
+    }
 }
 
 fn default_operator() -> String {
@@ -355,6 +392,15 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_else(default_operator))
+}
+
+/// Unlike `Option`'s own impl, maps an explicit JSON null to `Some(Null)`, so
+/// that `None` only ever means the field was omitted.
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -485,10 +531,12 @@ pub struct MultivariateVariant {
 /// legacy format (simple flag values and payloads).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum FeatureFlagsResponse {
     /// v2 API format from `/flags/?v=2` endpoint
     V2 {
-        /// Map of flag keys to their detailed evaluation results
+        /// Map of flag keys to their successful detailed evaluation results
+        #[serde(deserialize_with = "deserialize_evaluated_flags")]
         flags: HashMap<String, FlagDetail>,
         /// Whether any errors occurred during flag computation
         #[serde(rename = "errorsWhileComputingFlags")]
@@ -525,6 +573,30 @@ pub enum FeatureFlagsResponse {
         #[serde(default)]
         errors: Option<Vec<String>>,
     },
+}
+
+// Filter at the shared wire boundary so normalization and snapshots cannot
+// interpret a failed placeholder as a decision, without changing FlagDetail's API.
+fn deserialize_evaluated_flags<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, FlagDetail>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct WireFlagDetail {
+        #[serde(default)]
+        failed: bool,
+        #[serde(flatten)]
+        detail: FlagDetail,
+    }
+
+    let flags = HashMap::<String, WireFlagDetail>::deserialize(deserializer)?;
+    Ok(flags
+        .into_iter()
+        .filter(|(_, flag)| !flag.failed)
+        .map(|(key, flag)| (key, flag.detail))
+        .collect())
 }
 
 impl FeatureFlagsResponse {
@@ -579,6 +651,7 @@ impl FeatureFlagsResponse {
 /// Returned by the `/flags/?v=2` endpoint with extended information about why a
 /// flag evaluated to a particular value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FlagDetail {
     /// The feature flag key
     pub key: String,
@@ -596,6 +669,7 @@ pub struct FlagDetail {
 
 /// Explains why a feature flag evaluated to a particular value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FlagReason {
     /// Reason code (e.g., "condition_match", "out_of_rollout_bound")
     pub code: String,
@@ -609,6 +683,7 @@ pub struct FlagReason {
 
 /// Metadata about a feature flag from the PostHog server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FlagMetadata {
     /// Unique identifier for this flag
     pub id: u64,
@@ -755,14 +830,14 @@ pub fn match_feature_flag(
     group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
     group_type_mapping: &HashMap<String, String>,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    match_feature_flag_with_version(
+    evaluate_feature_flag(
         flag,
         distinct_id,
         person_properties,
         groups,
         group_properties,
         group_type_mapping,
-        1,
+        |property, properties| match_property_with_version(property, properties, 1),
     )
 }
 
@@ -776,94 +851,17 @@ pub(crate) fn match_feature_flag_with_version(
     group_type_mapping: &HashMap<String, String>,
     property_matching_version: i64,
 ) -> Result<FlagValue, InconclusiveMatchError> {
-    if !flag.active {
-        return Ok(FlagValue::Boolean(false));
-    }
-
-    let conditions = &flag.filters.groups;
-    let flag_aggregation = flag.filters.aggregation_group_type_index;
-
-    // Sort conditions to evaluate variant overrides first
-    let mut sorted_conditions = conditions.clone();
-    sorted_conditions.sort_by_key(|c| if c.variant.is_some() { 0 } else { 1 });
-
-    let mut is_inconclusive = false;
-
-    for condition in sorted_conditions {
-        let (effective_bucketing, effective_properties) = match resolve_condition_target(
-            &condition,
-            flag_aggregation,
-            distinct_id,
-            person_properties,
-            groups,
-            group_properties,
-            group_type_mapping,
-        ) {
-            ConditionTarget::Use {
-                bucketing,
-                properties,
-            } => (bucketing, properties),
-            ConditionTarget::Skip => continue,
-            ConditionTarget::Inconclusive => {
-                is_inconclusive = true;
-                continue;
-            }
-        };
-
-        match is_condition_match(
-            flag,
-            &effective_bucketing,
-            &condition,
-            effective_properties,
-            property_matching_version,
-        ) {
-            Ok(ConditionMatch::Match) => {
-                if let Some(variant_override) = &condition.variant {
-                    // Check if variant is valid
-                    if let Some(ref multivariate) = flag.filters.multivariate {
-                        let valid_variants: Vec<String> = multivariate
-                            .variants
-                            .iter()
-                            .map(|v| v.key.clone())
-                            .collect();
-
-                        if valid_variants.contains(variant_override) {
-                            return Ok(FlagValue::String(variant_override.clone()));
-                        }
-                    }
-                }
-
-                // Try to get matching variant or return true
-                if let Some(variant) = get_matching_variant(flag, &effective_bucketing) {
-                    return Ok(FlagValue::String(variant));
-                }
-                return Ok(FlagValue::Boolean(true));
-            }
-            Ok(ConditionMatch::OutOfRolloutBound) => {
-                // The user's properties matched this group but the rollout
-                // excluded them. With early_exit enabled the flag is
-                // definitively disabled; otherwise fall through to later groups.
-                // Only short-circuit when no prior group was inconclusive — an
-                // inconclusive result means we can't evaluate locally and must
-                // fall back to the server, so it takes priority over early_exit.
-                if flag.filters.early_exit && !is_inconclusive {
-                    return Ok(FlagValue::Boolean(false));
-                }
-            }
-            Ok(ConditionMatch::NoMatch) => continue,
-            Err(_) => {
-                is_inconclusive = true;
-            }
-        }
-    }
-
-    if is_inconclusive {
-        return Err(InconclusiveMatchError::new(
-            "Can't determine if feature flag is enabled or not with given properties",
-        ));
-    }
-
-    Ok(FlagValue::Boolean(false))
+    evaluate_feature_flag(
+        flag,
+        distinct_id,
+        person_properties,
+        groups,
+        group_properties,
+        group_type_mapping,
+        |property, properties| {
+            match_property_with_version(property, properties, property_matching_version)
+        },
+    )
 }
 
 /// Outcome of evaluating a single condition group, mirroring the PostHog Rust
@@ -882,18 +880,32 @@ enum ConditionMatch {
     OutOfRolloutBound,
 }
 
-fn is_condition_match(
+fn is_condition_match<F>(
     flag: &FeatureFlag,
     bucketing_id: &str,
     condition: &FeatureFlagCondition,
     properties: &HashMap<String, serde_json::Value>,
-    property_matching_version: i64,
-) -> Result<ConditionMatch, InconclusiveMatchError> {
-    // Check properties first
+    property_matcher: &F,
+) -> Result<ConditionMatch, InconclusiveMatchError>
+where
+    F: Fn(&Property, &HashMap<String, serde_json::Value>) -> Result<bool, InconclusiveMatchError>,
+{
+    // Check properties first. The caller supplies either the basic matcher or
+    // the context-aware matcher; rollout handling remains identical.
+    // Filters in a condition have no defined order, so an inconclusive filter
+    // doesn't stop the loop: a later filter can still rule the condition out.
+    let mut inconclusive = None;
     for prop in &condition.properties {
-        if !match_property_with_version(prop, properties, property_matching_version)? {
-            return Ok(ConditionMatch::NoMatch);
+        match property_matcher(prop, properties) {
+            Ok(true) => {}
+            Ok(false) => return Ok(ConditionMatch::NoMatch),
+            Err(err) => {
+                inconclusive.get_or_insert(err);
+            }
         }
+    }
+    if let Some(err) = inconclusive {
+        return Err(err);
     }
 
     // If all properties match (or no properties), check rollout percentage
@@ -924,28 +936,49 @@ pub fn match_feature_flag_with_context(
     person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<FlagValue, InconclusiveMatchError> {
+    evaluate_feature_flag(
+        flag,
+        ctx.distinct_id,
+        person_properties,
+        ctx.groups,
+        ctx.group_properties,
+        ctx.group_type_mapping,
+        |property, properties| match_property_with_context(property, properties, ctx),
+    )
+}
+
+/// Shared feature flag evaluation engine. Public entry points differ only in
+/// how individual properties are matched.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_feature_flag<F>(
+    flag: &FeatureFlag,
+    distinct_id: &str,
+    person_properties: &HashMap<String, serde_json::Value>,
+    groups: &HashMap<String, String>,
+    group_properties: &HashMap<String, HashMap<String, serde_json::Value>>,
+    group_type_mapping: &HashMap<String, String>,
+    property_matcher: F,
+) -> Result<FlagValue, InconclusiveMatchError>
+where
+    F: Fn(&Property, &HashMap<String, serde_json::Value>) -> Result<bool, InconclusiveMatchError>,
+{
     if !flag.active {
         return Ok(FlagValue::Boolean(false));
     }
 
-    let conditions = &flag.filters.groups;
     let flag_aggregation = flag.filters.aggregation_group_type_index;
-
-    // Sort conditions to evaluate variant overrides first
-    let mut sorted_conditions = conditions.clone();
-    sorted_conditions.sort_by_key(|c| if c.variant.is_some() { 0 } else { 1 });
 
     let mut is_inconclusive = false;
 
-    for condition in sorted_conditions {
+    for condition in &flag.filters.groups {
         let (effective_bucketing, effective_properties) = match resolve_condition_target(
-            &condition,
+            condition,
             flag_aggregation,
-            ctx.distinct_id,
+            distinct_id,
             person_properties,
-            ctx.groups,
-            ctx.group_properties,
-            ctx.group_type_mapping,
+            groups,
+            group_properties,
+            group_type_mapping,
         ) {
             ConditionTarget::Use {
                 bucketing,
@@ -958,50 +991,44 @@ pub fn match_feature_flag_with_context(
             }
         };
 
-        match is_condition_match_with_context(
+        match is_condition_match(
             flag,
             &effective_bucketing,
-            &condition,
+            condition,
             effective_properties,
-            ctx,
+            &property_matcher,
         ) {
             Ok(ConditionMatch::Match) => {
                 if let Some(variant_override) = &condition.variant {
-                    // Check if variant is valid
-                    if let Some(ref multivariate) = flag.filters.multivariate {
-                        let valid_variants: Vec<String> = multivariate
-                            .variants
-                            .iter()
-                            .map(|v| v.key.clone())
-                            .collect();
-
-                        if valid_variants.contains(variant_override) {
-                            return Ok(FlagValue::String(variant_override.clone()));
-                        }
+                    let is_valid = flag
+                        .filters
+                        .multivariate
+                        .as_ref()
+                        .is_some_and(|multivariate| {
+                            multivariate
+                                .variants
+                                .iter()
+                                .any(|variant| variant.key == *variant_override)
+                        });
+                    if is_valid {
+                        return Ok(FlagValue::String(variant_override.clone()));
                     }
                 }
 
-                // Try to get matching variant or return true
                 if let Some(variant) = get_matching_variant(flag, &effective_bucketing) {
                     return Ok(FlagValue::String(variant));
                 }
                 return Ok(FlagValue::Boolean(true));
             }
             Ok(ConditionMatch::OutOfRolloutBound) => {
-                // The user's properties matched this group but the rollout
-                // excluded them. With early_exit enabled the flag is
-                // definitively disabled; otherwise fall through to later groups.
-                // Only short-circuit when no prior group was inconclusive — an
-                // inconclusive result means we can't evaluate locally and must
-                // fall back to the server, so it takes priority over early_exit.
-                if flag.filters.early_exit && !is_inconclusive {
-                    return Ok(FlagValue::Boolean(false));
+                // Later groups can't change the outcome. A prior inconclusive
+                // condition still wins below, so the caller can fall back.
+                if flag.filters.early_exit {
+                    break;
                 }
             }
             Ok(ConditionMatch::NoMatch) => continue,
-            Err(_) => {
-                is_inconclusive = true;
-            }
+            Err(_) => is_inconclusive = true,
         }
     }
 
@@ -1012,31 +1039,6 @@ pub fn match_feature_flag_with_context(
     }
 
     Ok(FlagValue::Boolean(false))
-}
-
-fn is_condition_match_with_context(
-    flag: &FeatureFlag,
-    bucketing_id: &str,
-    condition: &FeatureFlagCondition,
-    properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
-) -> Result<ConditionMatch, InconclusiveMatchError> {
-    // Check properties first (using context-aware matching for cohorts/flag dependencies)
-    for prop in &condition.properties {
-        if !match_property_with_context(prop, properties, ctx)? {
-            return Ok(ConditionMatch::NoMatch);
-        }
-    }
-
-    // If all properties match (or no properties), check rollout percentage
-    if let Some(rollout_percentage) = condition.rollout_percentage {
-        let hash_value = hash_key(&flag.key, bucketing_id, ROLLOUT_HASH_SALT);
-        if hash_value > (rollout_percentage / 100.0) {
-            return Ok(ConditionMatch::OutOfRolloutBound);
-        }
-    }
-
-    Ok(ConditionMatch::Match)
 }
 
 /// Match a property with additional context for cohorts and flag dependencies.
@@ -1410,39 +1412,83 @@ fn match_flag_dependency_property(
     })
 }
 
-/// Parse a relative date string like "-7d", "-24h", "-2w", "-3m", "-1y"
-/// Returns the DateTime<Utc> that the relative date represents
+/// Parse a relative date string like "-7d", "7d", "-24h", "-2w", "-3m" or "-1y".
+/// Returns the DateTime<Utc> that the relative date represents.
 fn parse_relative_date(value: &str) -> Option<DateTime<Utc>> {
-    let value = value.trim();
-    // Need at least 3 chars: "-", digit(s), and unit (e.g., "-7d")
-    if value.len() < 3 || !value.starts_with('-') {
+    parse_relative_date_at(value, Utc::now())
+}
+
+/// Relative date lookback from `now`, following the local evaluator spec and the
+/// server's `relative_date.rs`: an optional leading `-`, a number below 10,000 and
+/// one of `h`, `d`, `w`, `m` or `y`. Months and years are calendar steps that clamp
+/// the day after every step, so March 31 minus two months is January 28.
+fn parse_relative_date_at(value: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    static RELATIVE_DATE: OnceLock<Regex> = OnceLock::new();
+    let captures = RELATIVE_DATE
+        .get_or_init(|| Regex::new(r"^-?([0-9]+)([hdwmy])$").expect("valid relative date regex"))
+        .captures(value.trim())?;
+    let number: i64 = captures[1].parse().ok()?;
+    // The cap also keeps the arithmetic below far away from chrono's limits.
+    if number >= 10_000 {
         return None;
     }
 
-    let (num_str, unit) = value[1..].split_at(value.len() - 2);
-    let num: i64 = num_str.parse().ok()?;
-
-    let duration = match unit {
-        "h" => chrono::Duration::hours(num),
-        "d" => chrono::Duration::days(num),
-        "w" => chrono::Duration::weeks(num),
-        "m" => chrono::Duration::days(num * 30), // Approximate month as 30 days
-        "y" => chrono::Duration::days(num * 365), // Approximate year as 365 days
+    let naive = now.naive_utc();
+    let result = match &captures[2] {
+        "h" => naive - chrono::Duration::hours(number),
+        "d" => naive - chrono::Duration::days(number),
+        "w" => naive - chrono::Duration::weeks(number),
+        "m" => subtract_months(naive, number)?,
+        "y" => subtract_years(naive, number)?,
         _ => return None,
     };
+    Some(result.and_utc())
+}
 
-    Some(Utc::now() - duration)
+/// Step back one month at a time and clamp the day after every step.
+fn subtract_months(now: NaiveDateTime, months: i64) -> Option<NaiveDateTime> {
+    // Count months from year 0 so stepping back never has to special-case January.
+    let year_month = |index: i64| (index.div_euclid(12) as i32, index.rem_euclid(12) as u32 + 1);
+    let mut index = i64::from(now.year()) * 12 + i64::from(now.month0());
+    let mut day = now.day();
+    for _ in 0..months {
+        index -= 1;
+        let (year, month) = year_month(index);
+        day = day.min(days_in_month(year, month));
+    }
+    let (year, month) = year_month(index);
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    Some(date.and_time(now.time()))
+}
+
+/// Step back whole years. Only February 29 can clamp: the first step lands in a
+/// common year, and the day stays the 28th after that.
+fn subtract_years(now: NaiveDateTime, years: i64) -> Option<NaiveDateTime> {
+    let day = if years > 0 && now.month() == 2 && now.day() == 29 {
+        28
+    } else {
+        now.day()
+    };
+    let date = NaiveDate::from_ymd_opt(now.year() - years as i32, now.month(), day)?;
+    Some(date.and_time(now.time()))
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if NaiveDate::from_ymd_opt(year, 2, 29).is_some() => 29,
+        2 => 28,
+        _ => 31,
+    }
 }
 
 /// Parse a date value from a string (ISO date, ISO datetime, or relative date)
 fn parse_date_value(value: &serde_json::Value) -> Option<DateTime<Utc>> {
     let date_str = value.as_str()?;
 
-    // Try relative date first (e.g., "-7d")
-    if date_str.starts_with('-') && date_str.len() > 1 {
-        if let Some(dt) = parse_relative_date(date_str) {
-            return Some(dt);
-        }
+    // Try relative date first (e.g., "-7d" or "7d")
+    if let Some(dt) = parse_relative_date(date_str) {
+        return Some(dt);
     }
 
     // Try ISO datetime with timezone (e.g., "2024-06-15T10:30:00Z")
@@ -2414,6 +2460,33 @@ mod tests {
     }
 
     #[test]
+    fn test_property_value_may_be_omitted_only_for_presence_operators() {
+        for operator in ["is_set", "is_not_set"] {
+            let prop: Property = serde_json::from_value(
+                json!({"key": "plan", "type": "person", "operator": operator}),
+            )
+            .unwrap();
+            assert!(prop.value.is_null(), "{}", operator);
+        }
+
+        // An omitted operator defaults to `exact`, which needs a value too.
+        for operator in [Some("exact"), Some("is_not"), Some("regex"), None] {
+            let mut raw = json!({"key": "plan", "type": "person"});
+            if let Some(operator) = operator {
+                raw["operator"] = json!(operator);
+            }
+            let error = serde_json::from_value::<Property>(raw).unwrap_err();
+            assert!(error.to_string().contains("missing field `value`"));
+        }
+
+        // An explicit null is a value, not an omission.
+        let prop: Property =
+            serde_json::from_value(json!({"key": "plan", "value": null, "operator": "exact"}))
+                .unwrap();
+        assert!(prop.value.is_null());
+    }
+
+    #[test]
     fn test_is_not_set_operator() {
         let prop = Property {
             key: "phone".to_string(),
@@ -2664,6 +2737,100 @@ mod tests {
             json!(six_months_ago.format("%Y-%m-%d").to_string()),
         );
         assert!(!match_property(&prop, &properties).unwrap());
+    }
+
+    fn utc(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn test_relative_months_and_years_clamp_after_every_step() {
+        let cases = [
+            ("2025-03-31T12:00:00Z", "-1m", "2025-02-28T12:00:00Z"),
+            ("2025-05-31T12:00:00Z", "-1m", "2025-04-30T12:00:00Z"),
+            ("2024-03-31T12:00:00Z", "-1m", "2024-02-29T12:00:00Z"),
+            ("2025-03-31T12:00:00Z", "-2m", "2025-01-28T12:00:00Z"),
+            ("2025-03-31T12:00:00Z", "-13m", "2024-02-28T12:00:00Z"),
+            ("2025-12-31T12:00:00Z", "-10m", "2025-02-28T12:00:00Z"),
+            ("2019-01-29T12:00:00Z", "-12m", "2018-01-28T12:00:00Z"),
+            ("2025-01-08T00:00:00Z", "-12m", "2024-01-08T00:00:00Z"),
+            ("2019-01-29T12:00:00Z", "-1y", "2018-01-29T12:00:00Z"),
+            ("2024-02-29T12:00:00Z", "-1y", "2023-02-28T12:00:00Z"),
+            ("2024-02-29T12:00:00Z", "-4y", "2020-02-28T12:00:00Z"),
+            ("2025-03-31T12:00:00Z", "-0m", "2025-03-31T12:00:00Z"),
+        ];
+        for (now, value, expected) in cases.iter() {
+            assert_eq!(
+                parse_relative_date_at(value, utc(now)),
+                Some(utc(expected)),
+                "{} from {}",
+                value,
+                now
+            );
+        }
+    }
+
+    #[test]
+    fn test_relative_date_grammar() {
+        let now = utc("2025-01-08T00:00:00Z");
+        assert_eq!(
+            parse_relative_date_at("1d", now),
+            Some(utc("2025-01-07T00:00:00Z"))
+        );
+        assert_eq!(
+            parse_relative_date_at("-1h", now),
+            Some(utc("2025-01-07T23:00:00Z"))
+        );
+        assert_eq!(
+            parse_relative_date_at("-1w", now),
+            Some(utc("2025-01-01T00:00:00Z"))
+        );
+        assert_eq!(
+            parse_relative_date_at("1y", now),
+            Some(utc("2024-01-08T00:00:00Z"))
+        );
+        assert!(parse_relative_date_at("-9999y", now).is_some());
+        for value in [
+            "10000d",
+            "-10000h",
+            "-999999999999d",
+            "99999999999999999999d",
+            "7",
+            "d",
+            "-d",
+            "7D",
+            "7s",
+            "1.5d",
+            "--7d",
+            "+7d",
+            "",
+        ]
+        .iter()
+        {
+            assert_eq!(parse_relative_date_at(value, now), None, "{}", value);
+        }
+    }
+
+    #[test]
+    fn test_is_date_after_with_unsigned_and_out_of_range_relative_dates() {
+        let mut properties = HashMap::new();
+        properties.insert(
+            "last_seen".to_string(),
+            json!(chrono::Utc::now().to_rfc3339()),
+        );
+        let prop = |value: &str| Property {
+            key: "last_seen".to_string(),
+            value: json!(value),
+            operator: "is_date_after".to_string(),
+            property_type: None,
+        };
+
+        assert!(match_property(&prop("7d"), &properties).unwrap());
+        // Out of range is inconclusive, and the subtraction must not panic.
+        assert!(match_property(&prop("-10000d"), &properties).is_err());
+        assert!(match_property(&prop("-999999999999d"), &properties).is_err());
     }
 
     #[test]
@@ -3760,30 +3927,43 @@ mod tests {
         assert_eq!(parse_semver("not-a-version"), None);
     }
 
-    // ==================== Semver eq/neq tests ====================
+    // ==================== Semver operator tests ====================
 
-    #[test]
-    fn test_semver_eq_basic() {
-        let prop = Property {
+    fn assert_semver_cases(operator: &str, target: &str, cases: &[(&str, &str, bool)]) {
+        let property = Property {
             key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_eq".to_string(),
+            value: json!(target),
+            operator: operator.to_string(),
             property_type: None,
         };
 
-        let mut properties = HashMap::new();
+        for &(label, value, expected) in cases {
+            let properties = HashMap::from([("version".to_string(), json!(value))]);
+            let actual = match_property(&property, &properties).unwrap_or_else(|error| {
+                panic!(
+                    "{}: evaluating {} {} {} returned an error: {}",
+                    label, value, operator, target, error
+                )
+            });
+            assert_eq!(
+                actual, expected,
+                "{label}: expected {value} {operator} {target} to be {expected}"
+            );
+        }
+    }
 
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.3.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
+    #[test]
+    fn test_semver_eq_basic() {
+        assert_semver_cases(
+            "semver_eq",
+            "1.2.3",
+            &[
+                ("exact match", "1.2.3", true),
+                ("different patch", "1.2.4", false),
+                ("different minor", "1.3.3", false),
+                ("different major", "2.2.3", false),
+            ],
+        );
     }
 
     #[test]
@@ -3857,154 +4037,80 @@ mod tests {
 
     #[test]
     fn test_semver_neq() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_neq".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_neq",
+            "1.2.3",
+            &[
+                ("exact match", "1.2.3", false),
+                ("different patch", "1.2.4", true),
+                ("different major", "2.0.0", true),
+            ],
+        );
     }
 
     // ==================== Semver gt/gte/lt/lte tests ====================
 
     #[test]
     fn test_semver_gt() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_gt".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.3.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.1.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_gt",
+            "1.2.3",
+            &[
+                ("greater patch", "1.2.4", true),
+                ("greater minor", "1.3.0", true),
+                ("greater major", "2.0.0", true),
+                ("equal version", "1.2.3", false),
+                ("lesser patch", "1.2.2", false),
+                ("lesser minor", "1.1.9", false),
+                ("lesser major", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_gte() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_gte".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_gte",
+            "1.2.3",
+            &[
+                ("greater patch", "1.2.4", true),
+                ("greater major", "2.0.0", true),
+                ("equal version", "1.2.3", true),
+                ("lesser patch", "1.2.2", false),
+                ("lesser major", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_lt() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_lt".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.1.9"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_lt",
+            "1.2.3",
+            &[
+                ("lesser patch", "1.2.2", true),
+                ("lesser minor", "1.1.9", true),
+                ("lesser major", "0.9.9", true),
+                ("equal version", "1.2.3", false),
+                ("greater patch", "1.2.4", false),
+                ("greater major", "2.0.0", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_lte() {
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_lte".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Lesser versions
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Equal version
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Greater versions
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        assert_semver_cases(
+            "semver_lte",
+            "1.2.3",
+            &[
+                ("lesser patch", "1.2.2", true),
+                ("lesser major", "0.9.9", true),
+                ("equal version", "1.2.3", true),
+                ("greater patch", "1.2.4", false),
+                ("greater major", "2.0.0", false),
+            ],
+        );
     }
 
     // ==================== Semver tilde tests ====================
@@ -4080,217 +4186,107 @@ mod tests {
 
     #[test]
     fn test_semver_caret_major_nonzero() {
-        // ^1.2.3 means >=1.2.3 <2.0.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.3"),
-            operator: "semver_caret".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Exact match
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("1.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.3.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.99.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("2.0.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("1.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // ^1.2.3 means >=1.2.3 <2.0.0.
+        assert_semver_cases(
+            "semver_caret",
+            "1.2.3",
+            &[
+                ("exact lower bound", "1.2.3", true),
+                ("within patch range", "1.2.4", true),
+                ("within minor range", "1.3.0", true),
+                ("within major range", "1.99.99", true),
+                ("excluded upper bound", "2.0.0", false),
+                ("above upper bound", "2.0.1", false),
+                ("below lower patch", "1.2.2", false),
+                ("below lower major", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_caret_major_zero_minor_nonzero() {
-        // ^0.2.3 means >=0.2.3 <0.3.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("0.2.3"),
-            operator: "semver_caret".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Exact match
-        properties.insert("version".to_string(), json!("0.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("0.2.4"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.2.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("0.3.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("0.3.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("0.2.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.1.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // ^0.2.3 means >=0.2.3 <0.3.0.
+        assert_semver_cases(
+            "semver_caret",
+            "0.2.3",
+            &[
+                ("exact lower bound", "0.2.3", true),
+                ("within patch range", "0.2.4", true),
+                ("within minor range", "0.2.99", true),
+                ("excluded upper bound", "0.3.0", false),
+                ("above upper minor", "0.3.1", false),
+                ("above upper major", "1.0.0", false),
+                ("below lower patch", "0.2.2", false),
+                ("below lower minor", "0.1.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_caret_major_zero_minor_zero() {
-        // ^0.0.3 means >=0.0.3 <0.0.4
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("0.0.3"),
-            operator: "semver_caret".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // Exact match
-        properties.insert("version".to_string(), json!("0.0.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("0.0.4"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("0.0.5"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.1.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("0.0.2"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // ^0.0.3 means >=0.0.3 <0.0.4.
+        assert_semver_cases(
+            "semver_caret",
+            "0.0.3",
+            &[
+                ("exact lower bound", "0.0.3", true),
+                ("excluded upper bound", "0.0.4", false),
+                ("above upper patch", "0.0.5", false),
+                ("above upper minor", "0.1.0", false),
+                ("below lower bound", "0.0.2", false),
+            ],
+        );
     }
 
     // ==================== Semver wildcard tests ====================
 
     #[test]
     fn test_semver_wildcard_major() {
-        // 1.* means >=1.0.0 <2.0.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.*"),
-            operator: "semver_wildcard".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // At lower bound
-        properties.insert("version".to_string(), json!("1.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.99.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("2.0.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("0.9.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // 1.* means >=1.0.0 <2.0.0.
+        assert_semver_cases(
+            "semver_wildcard",
+            "1.*",
+            &[
+                ("exact lower bound", "1.0.0", true),
+                ("within minor range", "1.2.3", true),
+                ("within upper range", "1.99.99", true),
+                ("excluded upper bound", "2.0.0", false),
+                ("above upper bound", "2.0.1", false),
+                ("below lower bound", "0.9.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_wildcard_minor() {
-        // 1.2.* means >=1.2.0 <1.3.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("1.2.*"),
-            operator: "semver_wildcard".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        // At lower bound
-        properties.insert("version".to_string(), json!("1.2.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // Within range
-        properties.insert("version".to_string(), json!("1.2.3"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.2.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        // At upper bound (excluded)
-        properties.insert("version".to_string(), json!("1.3.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Above upper bound
-        properties.insert("version".to_string(), json!("1.3.1"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("2.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
-
-        // Below lower bound
-        properties.insert("version".to_string(), json!("1.1.9"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // 1.2.* means >=1.2.0 <1.3.0.
+        assert_semver_cases(
+            "semver_wildcard",
+            "1.2.*",
+            &[
+                ("exact lower bound", "1.2.0", true),
+                ("within patch range", "1.2.3", true),
+                ("within upper range", "1.2.99", true),
+                ("excluded upper bound", "1.3.0", false),
+                ("above upper minor", "1.3.1", false),
+                ("above upper major", "2.0.0", false),
+                ("below lower bound", "1.1.9", false),
+            ],
+        );
     }
 
     #[test]
     fn test_semver_wildcard_zero() {
-        // 0.* means >=0.0.0 <1.0.0
-        let prop = Property {
-            key: "version".to_string(),
-            value: json!("0.*"),
-            operator: "semver_wildcard".to_string(),
-            property_type: None,
-        };
-
-        let mut properties = HashMap::new();
-
-        properties.insert("version".to_string(), json!("0.0.0"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("0.99.99"));
-        assert!(match_property(&prop, &properties).unwrap());
-
-        properties.insert("version".to_string(), json!("1.0.0"));
-        assert!(!match_property(&prop, &properties).unwrap());
+        // 0.* means >=0.0.0 <1.0.0.
+        assert_semver_cases(
+            "semver_wildcard",
+            "0.*",
+            &[
+                ("exact lower bound", "0.0.0", true),
+                ("within upper range", "0.99.99", true),
+                ("excluded upper bound", "1.0.0", false),
+            ],
+        );
     }
 
     // ==================== Semver error handling tests ====================
@@ -4571,6 +4567,305 @@ mod tests {
         }
     }
 
+    // ==================== Evaluation engine characterizations ====================
+
+    #[test]
+    fn test_variant_overrides_keep_definition_order_in_both_public_apis() {
+        let matching_property = Property {
+            key: "audience".to_string(),
+            value: json!("matched"),
+            operator: "exact".to_string(),
+            property_type: None,
+        };
+        let flag = FeatureFlag {
+            key: "stable-overrides".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![
+                    FeatureFlagCondition {
+                        properties: vec![],
+                        rollout_percentage: Some(100.0),
+                        variant: None,
+                        aggregation_group_type_index: None,
+                    },
+                    FeatureFlagCondition {
+                        properties: vec![matching_property.clone()],
+                        rollout_percentage: Some(100.0),
+                        variant: Some("first".to_string()),
+                        aggregation_group_type_index: None,
+                    },
+                    FeatureFlagCondition {
+                        properties: vec![matching_property],
+                        rollout_percentage: Some(100.0),
+                        variant: Some("second".to_string()),
+                        aggregation_group_type_index: None,
+                    },
+                ],
+                multivariate: Some(MultivariateFilter {
+                    variants: vec![
+                        MultivariateVariant {
+                            key: "first".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                        MultivariateVariant {
+                            key: "second".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                    ],
+                }),
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let properties = HashMap::from([("audience".to_string(), json!("matched"))]);
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_mapping = HashMap::new();
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id: "user-123",
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_mapping,
+        };
+
+        let expected = FlagValue::String("first".to_string());
+        assert_eq!(
+            match_feature_flag(
+                &flag,
+                ctx.distinct_id,
+                &properties,
+                ctx.groups,
+                ctx.group_properties,
+                ctx.group_type_mapping,
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            match_feature_flag_with_context(&flag, &properties, &ctx).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_group_targeting_uses_group_properties_and_group_key_for_bucketing() {
+        let flag = FeatureFlag {
+            key: "group-bucketing".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![Property {
+                        key: "plan".to_string(),
+                        value: json!("enterprise"),
+                        operator: "exact".to_string(),
+                        property_type: None,
+                    }],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: Some(MultivariateFilter {
+                    variants: vec![
+                        MultivariateVariant {
+                            key: "control".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                        MultivariateVariant {
+                            key: "test".to_string(),
+                            rollout_percentage: 50.0,
+                        },
+                    ],
+                }),
+                payloads: HashMap::new(),
+                aggregation_group_type_index: Some(0),
+                early_exit: false,
+            },
+        };
+        let person_properties = HashMap::from([("plan".to_string(), json!("free"))]);
+        let groups = HashMap::from([("company".to_string(), "acme".to_string())]);
+        let group_properties = HashMap::from([(
+            "company".to_string(),
+            HashMap::from([("plan".to_string(), json!("enterprise"))]),
+        )]);
+        let group_type_mapping = HashMap::from([("0".to_string(), "company".to_string())]);
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id: "different-person-id",
+            groups: &groups,
+            group_properties: &group_properties,
+            group_type_mapping: &group_type_mapping,
+        };
+
+        let basic_result = match_feature_flag(
+            &flag,
+            "person-id",
+            &person_properties,
+            &groups,
+            &group_properties,
+            &group_type_mapping,
+        )
+        .unwrap();
+        let context_result =
+            match_feature_flag_with_context(&flag, &person_properties, &ctx).unwrap();
+        assert_eq!(basic_result, context_result);
+        assert!(matches!(basic_result, FlagValue::String(_)));
+
+        // An unresolved group type or absent group key skips the condition.
+        assert_eq!(
+            match_feature_flag(
+                &flag,
+                "person-id",
+                &person_properties,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .unwrap(),
+            FlagValue::Boolean(false)
+        );
+        // Once the type and key resolve, missing group properties are
+        // inconclusive rather than a definitive miss.
+        assert!(match_feature_flag(
+            &flag,
+            "person-id",
+            &person_properties,
+            &groups,
+            &HashMap::new(),
+            &group_type_mapping,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_rollout_boundary_is_inclusive_in_both_public_apis() {
+        let distinct_id = "boundary-user";
+        let key = "rollout-boundary";
+        let boundary = hash_key(key, distinct_id, ROLLOUT_HASH_SALT) * 100.0;
+        let flag = FeatureFlag {
+            key: key.to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![],
+                    rollout_percentage: Some(boundary),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_mapping = HashMap::new();
+        let properties = HashMap::new();
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id,
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_mapping,
+        };
+
+        assert_eq!(
+            match_feature_flag(
+                &flag,
+                distinct_id,
+                &properties,
+                &empty_groups,
+                &empty_group_properties,
+                &empty_group_mapping,
+            )
+            .unwrap(),
+            FlagValue::Boolean(true)
+        );
+        assert_eq!(
+            match_feature_flag_with_context(&flag, &properties, &ctx).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn test_context_engine_preserves_flag_dependency_matching() {
+        let prerequisite = FeatureFlag {
+            key: "prerequisite".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let dependent = FeatureFlag {
+            key: "dependent".to_string(),
+            active: true,
+            has_experiment: None,
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: vec![Property {
+                        key: "$feature/prerequisite".to_string(),
+                        value: json!(true),
+                        operator: "exact".to_string(),
+                        property_type: None,
+                    }],
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+        let flags = HashMap::from([("prerequisite".to_string(), prerequisite)]);
+        let empty_cohorts = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_mapping = HashMap::new();
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &empty_cohorts,
+            flags: &flags,
+            distinct_id: "user-123",
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_mapping,
+        };
+
+        assert_eq!(
+            match_feature_flag_with_context(&dependent, &HashMap::new(), &ctx).unwrap(),
+            FlagValue::Boolean(true)
+        );
+    }
+
     // ==================== Tests for early_exit ====================
 
     /// Build a two-group flag where the first group always lands
@@ -4638,22 +4933,13 @@ mod tests {
         FlagValue::Boolean(true)
     );
 
-    #[test]
-    fn test_early_exit_default_is_false_from_json() {
-        // A flag definition that omits `early_exit` must deserialize to false
-        // and preserve the legacy fall-through behavior.
-        let flag: FeatureFlag = serde_json::from_value(json!({
-            "key": "early-exit-flag",
-            "active": true,
-            "filters": {
-                "groups": [
-                    { "properties": [], "rollout_percentage": 0.0, "variant": null },
-                    { "properties": [], "rollout_percentage": 100.0, "variant": null }
-                ]
-            }
-        }))
-        .unwrap();
-        assert!(!flag.filters.early_exit);
+    fn assert_early_exit_json_falls_through(label: &str, fixture: serde_json::Value) {
+        let flag: FeatureFlag = serde_json::from_value(fixture).unwrap();
+        assert!(
+            !flag.filters.early_exit,
+            "{}: early_exit should deserialize as false",
+            label
+        );
         let result = match_feature_flag(
             &flag,
             "user-123",
@@ -4663,12 +4949,32 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(result, FlagValue::Boolean(true));
+        assert_eq!(
+            result,
+            FlagValue::Boolean(true),
+            "{label}: evaluation should fall through to the matching group"
+        );
+    }
+
+    #[test]
+    fn test_early_exit_default_is_false_from_json() {
+        // Omitting `early_exit` must preserve the legacy fall-through behavior.
+        let fixture = json!({
+            "key": "early-exit-flag",
+            "active": true,
+            "filters": {
+                "groups": [
+                    { "properties": [], "rollout_percentage": 0.0, "variant": null },
+                    { "properties": [], "rollout_percentage": 100.0, "variant": null }
+                ]
+            }
+        });
+        assert_early_exit_json_falls_through("omitted early_exit", fixture);
     }
 
     #[test]
     fn test_early_exit_explicit_false_falls_through() {
-        let flag: FeatureFlag = serde_json::from_value(json!({
+        let fixture = json!({
             "key": "early-exit-flag",
             "active": true,
             "filters": {
@@ -4678,19 +4984,8 @@ mod tests {
                     { "properties": [], "rollout_percentage": 100.0, "variant": null }
                 ]
             }
-        }))
-        .unwrap();
-        assert!(!flag.filters.early_exit);
-        let result = match_feature_flag(
-            &flag,
-            "user-123",
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(result, FlagValue::Boolean(true));
+        });
+        assert_early_exit_json_falls_through("explicit false early_exit", fixture);
     }
 
     #[test]
@@ -4777,14 +5072,14 @@ mod tests {
     );
 
     #[test]
-    fn test_early_exit_does_not_short_circuit_when_prior_group_inconclusive() {
+    fn test_early_exit_stays_inconclusive_when_prior_group_inconclusive() {
         // Group 1: group-targeted (aggregation_group_type_index = 0). The
         // group_type_mapping resolves "0" → "company" and groups supplies the
         // company key, but group_properties has no entry for "company" →
         // ConditionTarget::Inconclusive → is_inconclusive = true.
         // Group 2: person-targeted, rollout 0% → OutOfRolloutBound.
-        // With early_exit = true, the !is_inconclusive guard must prevent
-        // short-circuiting, and the overall result must be InconclusiveMatchError.
+        // With early_exit = true, evaluation stops at group 2 but must not
+        // return a definitive false: the result is InconclusiveMatchError.
         let flag = FeatureFlag {
             key: "early-exit-flag".to_string(),
             active: true,
@@ -4831,5 +5126,234 @@ mod tests {
             "expected InconclusiveMatchError, got {:?}",
             result
         );
+
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id: "user-123",
+            groups: &groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &group_type_mapping,
+        };
+        assert!(match_feature_flag_with_context(&flag, &HashMap::new(), &ctx).is_err());
+    }
+
+    /// Evaluates through both public entry points and checks they agree.
+    fn evaluate_both_ways(
+        flag: &FeatureFlag,
+        distinct_id: &str,
+        properties: &HashMap<String, serde_json::Value>,
+    ) -> Result<FlagValue, InconclusiveMatchError> {
+        let basic = match_feature_flag(
+            flag,
+            distinct_id,
+            properties,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let empty_cohorts = HashMap::new();
+        let empty_flags = HashMap::new();
+        let empty_groups = HashMap::new();
+        let empty_group_properties = HashMap::new();
+        let empty_group_type_mapping = HashMap::new();
+        let ctx = EvaluationContext {
+            property_matching_version: 1,
+            cohorts: &empty_cohorts,
+            flags: &empty_flags,
+            distinct_id,
+            groups: &empty_groups,
+            group_properties: &empty_group_properties,
+            group_type_mapping: &empty_group_type_mapping,
+        };
+        let with_context = match_feature_flag_with_context(flag, properties, &ctx);
+        assert_eq!(
+            basic.as_ref().ok(),
+            with_context.as_ref().ok(),
+            "match_feature_flag and match_feature_flag_with_context disagree"
+        );
+        basic
+    }
+
+    #[test]
+    fn test_conditions_evaluated_in_order() {
+        // A pro user matches the first condition, which has no override, so
+        // the later catch-all overriding to "test" must not win.
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {
+                "groups": [
+                    {
+                        "properties": [
+                            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 100
+                    },
+                    {"properties": [], "rollout_percentage": 100, "variant": "test"}
+                ],
+                "multivariate": {
+                    "variants": [
+                        {"key": "control", "rollout_percentage": 50},
+                        {"key": "test", "rollout_percentage": 50}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        // Variant buckets for "checkout", checked against posthog-python:
+        // user-0 = 0.9407, user-1 = 0.5740, user-2 = 0.3536, user-3 = 0.2522.
+        for (user, plan, expected) in [
+            ("user-0", "pro", "test"),
+            ("user-1", "pro", "test"),
+            ("user-2", "pro", "control"),
+            ("user-3", "pro", "control"),
+            ("user-2", "free", "test"),
+            ("user-3", "free", "test"),
+        ] {
+            let properties = HashMap::from([("plan".to_string(), json!(plan))]);
+            assert_eq!(
+                evaluate_both_ways(&flag, user, &properties).unwrap(),
+                FlagValue::String(expected.into()),
+                "{user}, {plan}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_early_exit_is_not_skipped_by_a_later_variant_override() {
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {
+                "early_exit": true,
+                "groups": [
+                    {
+                        "properties": [
+                            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 0
+                    },
+                    {"properties": [], "rollout_percentage": 100, "variant": "test"}
+                ],
+                "multivariate": {
+                    "variants": [
+                        {"key": "control", "rollout_percentage": 50},
+                        {"key": "test", "rollout_percentage": 50}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        for (plan, expected) in [
+            ("pro", FlagValue::Boolean(false)),
+            ("free", FlagValue::String("test".into())),
+        ] {
+            let properties = HashMap::from([("plan".to_string(), json!(plan))]);
+            assert_eq!(
+                evaluate_both_ways(&flag, "user-0", &properties).unwrap(),
+                expected,
+                "{plan}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_early_exit_after_inconclusive_group_does_not_reach_later_match() {
+        // With `plan` missing, group 1 is inconclusive. Group 2 excludes the
+        // user by rollout, so whatever `plan` is, the user can't get the flag:
+        // evaluation must stop there and stay inconclusive, not return the
+        // catch-all's "test".
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {
+                "early_exit": true,
+                "groups": [
+                    {
+                        "properties": [
+                            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 0
+                    },
+                    {
+                        "properties": [
+                            {"key": "region", "value": "US", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 0,
+                        "variant": "control"
+                    },
+                    {"properties": [], "rollout_percentage": 100, "variant": "test"}
+                ],
+                "multivariate": {
+                    "variants": [
+                        {"key": "control", "rollout_percentage": 50},
+                        {"key": "test", "rollout_percentage": 50}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        let properties = HashMap::from([("region".to_string(), json!("US"))]);
+        let result = evaluate_both_ways(&flag, "user-0", &properties);
+        assert!(result.is_err(), "expected inconclusive, got {:?}", result);
+
+        for (plan, region, expected) in [
+            ("pro", "US", FlagValue::Boolean(false)),
+            ("free", "US", FlagValue::Boolean(false)),
+            ("free", "EU", FlagValue::String("test".into())),
+        ] {
+            let properties = HashMap::from([
+                ("plan".to_string(), json!(plan)),
+                ("region".to_string(), json!(region)),
+            ]);
+            assert_eq!(
+                evaluate_both_ways(&flag, "user-0", &properties).unwrap(),
+                expected,
+                "{plan}, {region}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_filter_that_does_not_match_wins_over_earlier_missing_property() {
+        // `plan` is missing, so the first filter can't be checked. The second
+        // one rules the condition out whatever `plan` is, so the flag is
+        // definitively false, not inconclusive.
+        let flag: FeatureFlag = serde_json::from_value(json!({
+            "key": "checkout",
+            "active": true,
+            "filters": {
+                "groups": [
+                    {
+                        "properties": [
+                            {"key": "plan", "value": "pro", "operator": "exact", "type": "person"},
+                            {"key": "region", "value": "US", "operator": "exact", "type": "person"}
+                        ],
+                        "rollout_percentage": 100
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let properties = HashMap::from([("region".to_string(), json!("EU"))]);
+        assert_eq!(
+            evaluate_both_ways(&flag, "user-0", &properties).unwrap(),
+            FlagValue::Boolean(false)
+        );
+
+        // When every filter that can be checked matches, the missing one still
+        // decides, so the result stays inconclusive.
+        let properties = HashMap::from([("region".to_string(), json!("US"))]);
+        let result = evaluate_both_ways(&flag, "user-0", &properties);
+        assert!(result.is_err(), "expected inconclusive, got {:?}", result);
     }
 }

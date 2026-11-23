@@ -3,23 +3,25 @@
 mod common;
 mod email_support;
 
+use sha2::Digest;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::default_user_agent;
 use email_support::{
-    accepted, closed_url, options, unavailable, Answer, ScriptedServer, SendApi, StoredCategory,
-    MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    accepted, closed_url, connection_counting_store, options, s3_error, unavailable, Answer,
+    FakePostHog, ScriptedServer, SendApi, StoredCategory, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
-use posthog_rs::{
-    CodeEmail, EmailCategory, EmailDeliveryStatus, EmailErrorKind, MessageCategory,
-    MessageCategoryType, TemplateEmail,
+use posthog::{
+    CodeEmail, EmailAttachment, EmailCategory, EmailDeliveryStatus, EmailErrorKind, EmailTracking,
+    EmailTrackingOptions, MessageCategory, MessageCategoryType, TemplateEmail,
 };
 use serde_json::json;
 
-async fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
-    posthog_rs::client(options(&server.url).build().unwrap()).await
+async fn client_for(server: &ScriptedServer) -> posthog::Client {
+    posthog::client(options(&server.url).build().unwrap()).await
 }
 
 #[tokio::test]
@@ -29,7 +31,7 @@ async fn template_send_posts_the_flat_body_with_auth_and_a_uuid_key() {
         json!({"message_id": MESSAGE_ID, "warnings": [{"code": "w", "detail": "Heads up"}]}),
     )])
     .await;
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&server.url)
             .migrated_from("resend")
             .build()
@@ -93,7 +95,8 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
                 .text("Reset")
                 .from("Acme <security@example.com>")
                 .reply_to("help@example.com")
-                .capture_engagement(false)
+                .reply_to("support@example.com")
+                .tracking(EmailTrackingOptions::new().clicks(true).engagement(false))
                 .distinct_id("user_123")
                 .idempotency_key("password-reset:user_123"),
         )
@@ -110,8 +113,8 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
             "html": "<p>Reset</p>",
             "text": "Reset",
             "from": "Acme <security@example.com>",
-            "reply_to": ["help@example.com"],
-            "capture_engagement": false,
+            "reply_to": ["help@example.com", "support@example.com"],
+            "tracking": {"clicks": true, "engagement": false},
             "distinct_id": "user_123",
             "to": "user@example.com",
         })
@@ -122,8 +125,641 @@ async fn code_send_posts_the_rendered_content_and_its_options() {
     );
 }
 
+const PDF_SHA256: &str = "ccac55e87ec85819f85630feb88522f771cf4d4fc3a40b7f97fd124a128dfcb7";
+const PNG_SHA256: &str = "0f4636c78f65d3639ece5a064b5ae753e3408614a14fb18ab4d7540d2c248543";
+const PDF: [u8; 7] = [0x25, 0x50, 0x44, 0x46, 0x00, 0x9f, 0xff];
+const PNG: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
+fn invoice_with_copies_and_files() -> CodeEmail {
+    CodeEmail::new("user@example.com", "invoice", "Your invoice")
+        .html(r#"<img src="cid:logo">"#)
+        .cc("finance@example.com")
+        .cc("boss@example.com")
+        .bcc("audit@example.com")
+        .attachment(EmailAttachment::new("invoice.pdf", PDF).content_type("application/pdf"))
+        .attachment(EmailAttachment::new("logo.png", PNG).content_id("logo"))
+}
+
+async fn client_of(posthog: &FakePostHog) -> posthog::Client {
+    posthog::client(options(&posthog.url).build().unwrap()).await
+}
+
 #[tokio::test]
-async fn code_send_defaults_engagement_capture_on() {
+async fn code_send_uploads_the_files_posthog_lacks_then_sends_their_hashes() {
+    let posthog = FakePostHog::start_async().await;
+    posthog.store(&PNG);
+    let client = client_of(&posthog).await;
+
+    client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap();
+
+    assert_eq!(posthog.versions(PDF_SHA256), vec![PDF.to_vec()]);
+    assert_eq!(
+        posthog.versions(PNG_SHA256),
+        vec![PNG.to_vec()],
+        "a file PostHog has isn't uploaded again"
+    );
+    assert_eq!(
+        posthog.sent(),
+        vec![json!({
+            "template_key": "invoice",
+            "subject": "Your invoice",
+            "html": "<img src=\"cid:logo\">",
+            "cc": ["finance@example.com", "boss@example.com"],
+            "bcc": ["audit@example.com"],
+            "attachments": [
+                {"sha256": PDF_SHA256, "filename": "invoice.pdf", "content_type": "application/pdf"},
+                {"sha256": PNG_SHA256, "filename": "logo.png", "content_id": "logo"},
+            ],
+            "to": "user@example.com",
+        })]
+    );
+}
+
+#[tokio::test]
+async fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
+    let posthog = FakePostHog::start_async()
+        .await
+        .with_grants_for_other_bytes();
+    let client = client_of(&posthog).await;
+
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "attachment_upload_failed");
+    assert_eq!(error.status(), Some(400));
+    assert_eq!(error.kind(), EmailErrorKind::ApplicationError);
+    assert_eq!(error.field(), Some("attachments__0"));
+    assert_eq!(
+        error.why(),
+        Some("The file store answered BadDigest: The SHA256 you specified did not match the calculated checksum.")
+    );
+    assert!(error.message().contains("invoice.pdf"), "{}", error);
+    assert!(posthog.stored(PDF_SHA256).is_none());
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[tokio::test]
+async fn a_custom_clients_default_credentials_never_reach_the_file_store() {
+    let posthog = FakePostHog::start_async().await;
+    let mut defaults = reqwest::header::HeaderMap::new();
+    defaults.insert(
+        "authorization",
+        "Bearer phx_app_credential".parse().unwrap(),
+    );
+    let http = reqwest::Client::builder()
+        .default_headers(defaults)
+        .build()
+        .unwrap();
+    let client = posthog::client(options(&posthog.url).http_client(http).build().unwrap()).await;
+
+    client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap();
+
+    assert_eq!(posthog.stored(PDF_SHA256), Some(PDF.to_vec()));
+    assert_eq!(posthog.stored(PNG_SHA256), Some(PNG.to_vec()));
+    assert_eq!(posthog.sent().len(), 1);
+}
+
+#[tokio::test]
+async fn a_file_store_redirect_is_never_followed() {
+    // A redirect could lead the file to a plain-http host, so an upload never
+    // follows one, with the SDK's own client or one the app supplied.
+    for supplied in [false, true] {
+        let posthog = FakePostHog::start_async().await;
+        // Another file store, which would keep the file if the PUT reached it.
+        let elsewhere = FakePostHog::start_async().await;
+        posthog.store(&PNG);
+        posthog.store_redirects_next_to(&elsewhere.store_url());
+        let mut builder = options(&posthog.url);
+        if supplied {
+            builder.http_client(reqwest::Client::new());
+        }
+        let client = posthog::client(builder.build().unwrap()).await;
+
+        let error = client
+            .emails()
+            .send(invoice_with_copies_and_files())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "attachment_upload_failed", "{}", supplied);
+        assert_eq!(error.status(), Some(307), "{}", supplied);
+        assert_eq!(error.field(), Some("attachments__0"), "{}", supplied);
+        assert!(error.message().contains("invoice.pdf"), "{}", error);
+        let chain = error_chain(&error);
+        assert!(!chain.contains(&elsewhere.store_url()), "{}", chain);
+        assert!(!chain.contains("X-Amz-Signature"), "{}", chain);
+        assert!(elsewhere.stored(PDF_SHA256).is_none(), "{}", supplied);
+        assert!(posthog.stored(PDF_SHA256).is_none(), "{}", supplied);
+        assert!(posthog.sent().is_empty(), "{}", supplied);
+    }
+}
+
+#[tokio::test]
+async fn a_custom_clients_uploads_reuse_one_connection_across_sends() {
+    let (store, connections) = connection_counting_store();
+    let slot = |sha256: &str, size: usize| {
+        Answer::json(
+            200,
+            json!({"files": [{
+                "sha256": sha256,
+                "status": "upload",
+                "url": format!("{}/bucket/team/2/{}?X-Amz-Signature=signed", store, sha256),
+                "method": "PUT",
+                "headers": {"content-length": size.to_string()},
+                "url_expires_at": "2026-11-09T12:15:00Z",
+            }]}),
+        )
+    };
+    let server = ScriptedServer::start_async(vec![
+        slot(PDF_SHA256, PDF.len()),
+        accepted(),
+        slot(PNG_SHA256, PNG.len()),
+        accepted(),
+    ])
+    .await;
+    let http = reqwest::Client::builder().build().unwrap();
+    let client = posthog::client(options(&server.url).http_client(http).build().unwrap()).await;
+
+    for file in [
+        EmailAttachment::new("invoice.pdf", PDF),
+        EmailAttachment::new("logo.png", PNG),
+    ] {
+        client
+            .emails()
+            .send(
+                CodeEmail::new("user@example.com", "invoice", "Your invoice")
+                    .text("Attached.")
+                    .attachment(file),
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn the_same_file_attached_twice_is_uploaded_once() {
+    let posthog = FakePostHog::start_async().await;
+    let client = client_of(&posthog).await;
+
+    client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "invoice", "Your invoices")
+                .html("<p>Two copies</p>")
+                .attachment(EmailAttachment::new("invoice.pdf", PDF))
+                .attachment(EmailAttachment::new("copy.pdf", PDF)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(posthog.versions(PDF_SHA256), vec![PDF.to_vec()]);
+    assert_eq!(
+        posthog.sent()[0]["attachments"],
+        json!([
+            {"sha256": PDF_SHA256, "filename": "invoice.pdf"},
+            {"sha256": PDF_SHA256, "filename": "copy.pdf"},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn a_file_store_server_error_is_retried_before_the_send() {
+    for (status, code) in [
+        (500, "InternalError"),
+        (502, "BadGateway"),
+        (503, "SlowDown"),
+        (504, "GatewayTimeout"),
+    ] {
+        let posthog = FakePostHog::start_async().await;
+        posthog.store(&PNG);
+        posthog.store_answers_next(s3_error(status, code, "Try again."));
+        let client = client_of(&posthog).await;
+
+        client
+            .emails()
+            .send(invoice_with_copies_and_files().max_retries(1))
+            .await
+            .unwrap_or_else(|error| panic!("{}: {}", status, error));
+
+        assert_eq!(posthog.stored(PDF_SHA256), Some(PDF.to_vec()), "{}", status);
+        assert_eq!(posthog.sent().len(), 1, "{}", status);
+    }
+}
+
+#[tokio::test]
+async fn a_refused_upload_is_not_retried() {
+    // An expired grant fails the same way on every try, so the send stops at
+    // once with retries left. Four retries would wait at least 12 seconds.
+    let posthog = FakePostHog::start_async().await.with_expired_grants();
+    let client = client_of(&posthog).await;
+    let started = Instant::now();
+
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files().max_retries(4))
+        .await
+        .unwrap_err();
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(error.code(), "attachment_upload_failed");
+    assert_eq!(error.field(), Some("attachments__0"));
+    assert!(posthog.stored(PDF_SHA256).is_none());
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[tokio::test]
+async fn a_file_store_server_error_past_the_retries_is_service_unavailable() {
+    for status in [500, 502, 503, 504] {
+        let posthog = FakePostHog::start_async().await;
+        posthog.store_answers_next(s3_error(status, "InternalError", "Try again."));
+        let client = client_of(&posthog).await;
+
+        let error = client
+            .emails()
+            .send(invoice_with_copies_and_files().max_retries(0))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "attachment_upload_failed", "{}", status);
+        assert_eq!(
+            error.kind(),
+            EmailErrorKind::ServiceUnavailable,
+            "{}",
+            status
+        );
+        assert!(posthog.sent().is_empty(), "{}", status);
+    }
+}
+
+#[tokio::test]
+async fn a_failed_upload_never_shows_the_signed_url() {
+    for (store, code) in [
+        (closed_url(), "network_error"),
+        ("no-scheme".to_string(), "unexpected_error"),
+    ] {
+        let posthog = FakePostHog::start_async().await.with_store_at(&store);
+        posthog.store(&PNG);
+        let client = client_of(&posthog).await;
+
+        let error = client
+            .emails()
+            .send(invoice_with_copies_and_files().max_retries(0))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), code);
+        assert_eq!(error.field(), Some("attachments__0"));
+        let chain = error_chain(&error);
+        assert!(!chain.contains("X-Amz-Signature"), "{}", chain);
+        assert!(posthog.sent().is_empty(), "no email is sent");
+    }
+}
+
+/// The error with every source, printed both ways.
+fn error_chain(error: &posthog::EmailError) -> String {
+    let mut chain = format!("{error} {error:?}");
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        chain.push_str(&format!(" {cause} {cause:?}"));
+        source = cause.source();
+    }
+    chain
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_upload_url_that_isnt_https_sends_nothing() {
+    // PostHog, reached over https, names a file store URL that is plain http,
+    // as a misconfigured store would: the file and its signed URL would travel
+    // unencrypted.
+    let posthog = FakePostHog::start_async().await;
+    let app_host = email_support::tls_front(&posthog.url).await;
+    let http = reqwest::Client::builder()
+        .tls_certs_only([email_support::test_certificate_authority()])
+        .build()
+        .unwrap();
+    let client = posthog::client(options(&app_host).http_client(http).build().unwrap()).await;
+
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "api_error");
+    assert_eq!(error.kind(), EmailErrorKind::ApplicationError);
+    assert_eq!(error.field(), Some("attachments__0"));
+    assert!(error.message().contains("invoice.pdf"), "{}", error);
+    assert!(
+        error.fix().unwrap().contains("file store's URL"),
+        "{:?}",
+        error.fix()
+    );
+    let chain = error_chain(&error);
+    assert!(!chain.contains("X-Amz-Signature"), "{}", chain);
+    assert!(!chain.contains("http://"), "{}", chain);
+    assert!(posthog.stored(PDF_SHA256).is_none(), "nothing is uploaded");
+    assert!(posthog.stored(PNG_SHA256).is_none(), "nothing is uploaded");
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[tokio::test]
+async fn an_upload_grant_with_too_many_headers_sends_nothing() {
+    // A malformed or compromised upload route signs a grant with more headers
+    // than a header map can hold: the send fails instead of panicking.
+    let posthog = FakePostHog::start_async()
+        .await
+        .with_too_many_grant_headers();
+    assert_the_grant_is_refused(posthog).await;
+}
+
+#[tokio::test]
+async fn an_upload_grant_that_fills_a_header_map_sends_nothing() {
+    let posthog = FakePostHog::start_async()
+        .await
+        .with_grant_headers_that_fill_a_header_map();
+    assert_the_grant_is_refused(posthog).await;
+}
+
+async fn assert_the_grant_is_refused(posthog: FakePostHog) {
+    posthog.store(&PNG);
+    let client = client_of(&posthog).await;
+
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "api_error");
+    assert!(
+        error.message().contains("without an answer for each file"),
+        "{}",
+        error
+    );
+    assert!(posthog.stored(PDF_SHA256).is_none(), "nothing is uploaded");
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[tokio::test]
+async fn a_plain_http_app_host_lets_files_upload_over_plain_http() {
+    // A PostHog on the developer's machine, reached over plain http, names a
+    // plain-http file store, and the files upload.
+    let posthog = FakePostHog::start_async().await;
+    assert!(posthog.url.starts_with("http://"), "{}", posthog.url);
+    let client = client_of(&posthog).await;
+
+    client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap();
+
+    assert_eq!(posthog.stored(PDF_SHA256), Some(PDF.to_vec()));
+    assert_eq!(posthog.sent().len(), 1);
+}
+
+#[tokio::test]
+async fn a_posthog_without_the_upload_route_sends_nothing_with_files() {
+    let posthog = FakePostHog::start_async().await.without_upload_route();
+    let client = client_of(&posthog).await;
+
+    client
+        .emails()
+        .send(CodeEmail::new("user@example.com", "welcome", "Welcome").html("<p>Hi</p>"))
+        .await
+        .unwrap();
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "not_found");
+    assert_eq!(error.status(), Some(404));
+    assert_eq!(error.kind(), EmailErrorKind::NotFound);
+    assert_eq!(error.field(), Some("attachments"));
+    assert_eq!(error.message(), "Not found.");
+    assert!(posthog.stored(PDF_SHA256).is_none());
+    assert_eq!(posthog.sent().len(), 1, "only the send without files");
+}
+
+#[tokio::test]
+async fn an_app_host_that_isnt_posthog_sends_nothing_with_files() {
+    let server = ScriptedServer::start_async(vec![Answer::xml(404, "<h1>Not Found</h1>")]).await;
+    let client = client_for(&server).await;
+
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "api_error");
+    assert_eq!(error.status(), Some(404));
+    assert_eq!(error.kind(), EmailErrorKind::NotFound);
+    assert_eq!(error.field(), Some("attachments"));
+    assert_eq!(error.message(), "PostHog answered HTTP 404.");
+}
+
+#[tokio::test]
+async fn a_project_that_cant_send_files_yet_sends_nothing() {
+    let posthog = FakePostHog::start_async().await.with_files_off();
+    let client = client_of(&posthog).await;
+
+    let error = client
+        .emails()
+        .send(invoice_with_copies_and_files())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "field_not_accepted");
+    assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+    assert_eq!(error.field(), Some("files"));
+    assert!(posthog.stored(PDF_SHA256).is_none());
+    assert!(posthog.sent().is_empty());
+}
+
+#[tokio::test]
+async fn more_than_ten_files_are_refused_before_any_request() {
+    let posthog = FakePostHog::start_async().await;
+    let client = client_of(&posthog).await;
+    let files: Vec<_> = (0..11).map(|index| format!("{},b", index)).collect();
+    let email = files.iter().enumerate().fold(
+        CodeEmail::new("user@example.com", "report", "Your reports").text("Attached."),
+        |email, (index, file)| {
+            email.attachment(EmailAttachment::new(format!("{index}.csv"), file.clone()))
+        },
+    );
+
+    let error = client.emails().send(email).await.unwrap_err();
+
+    assert_eq!(error.code(), "too_many_attachments");
+    assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+    assert_eq!(error.field(), Some("attachments"));
+    for file in &files {
+        let sha256 = format!("{:x}", sha2::Sha256::digest(file.as_bytes()));
+        assert!(posthog.stored(&sha256).is_none(), "{}", file);
+    }
+    assert!(posthog.sent().is_empty());
+}
+
+#[tokio::test]
+async fn an_email_over_40_mb_after_base64_is_refused_before_any_request() {
+    // The server's estimate: each file and body in Base64 with line breaks,
+    // 75 bytes per 42 subject bytes, and 64 KiB, at most 40,000,000. Every
+    // file here is already stored, so a send that fits goes out without an
+    // upload, and one that doesn't fit is refused before any request.
+    let posthog = FakePostHog::start_async().await;
+    let file = |size: usize| {
+        let bytes = vec![0u8; size];
+        posthog.store(&bytes);
+        EmailAttachment::new("scan.pdf", bytes)
+    };
+    let fits_a_short_subject = file(29_182_818);
+    let one_byte_more = EmailAttachment::new("scan.pdf", vec![0u8; 29_182_819]);
+    let fits_no_subject = file(29_182_872);
+    let fits_a_57_byte_body = file(29_182_764);
+    let fits_two_57_byte_bodies = file(29_182_707);
+    let fits_57_and_114_byte_bodies = file(29_182_650);
+    let one_word: &str = &"x".repeat(42);
+    let two_words: &str = &"x".repeat(43);
+    let two_byte_word: &str = &"é".repeat(21);
+    let ascii: &str = &"a".repeat(57);
+    let two_byte: &str = &"é".repeat(57);
+    let client = client_of(&posthog).await;
+
+    for (subject, html, text, file, outcome) in [
+        (one_word, "", "x", &fits_a_short_subject, "sent"),
+        (one_word, "", "x", &one_byte_more, "message_too_large"),
+        (
+            two_words,
+            "",
+            "x",
+            &fits_a_short_subject,
+            "message_too_large",
+        ),
+        (two_byte_word, "", "x", &fits_a_short_subject, "sent"),
+        (one_word, "", "x", &fits_no_subject, "message_too_large"),
+        // An empty subject adds nothing: the send passes the size check and
+        // PostHog refuses the blank subject.
+        ("", "", "x", &fits_no_subject, "blank"),
+        // Without text, the HTML counts twice: see the next test.
+        ("x", ascii, "", &fits_two_57_byte_bodies, "sent"),
+        (
+            "x",
+            two_byte,
+            "",
+            &fits_two_57_byte_bodies,
+            "message_too_large",
+        ),
+        ("x", "", ascii, &fits_a_57_byte_body, "sent"),
+        ("x", "", two_byte, &fits_a_57_byte_body, "message_too_large"),
+        ("x", ascii, two_byte, &fits_57_and_114_byte_bodies, "sent"),
+        (
+            "x",
+            two_byte,
+            two_byte,
+            &fits_57_and_114_byte_bodies,
+            "message_too_large",
+        ),
+    ] {
+        let mut email = CodeEmail::new("user@example.com", "scan", subject)
+            .attachment(file.clone())
+            .max_retries(0);
+        if !html.is_empty() {
+            email = email.html(html);
+        }
+        if !text.is_empty() {
+            email = email.text(text);
+        }
+        let case = format!("subject {:?}, html {:?}, text {:?}", subject, html, text);
+        let sent_before = posthog.sent().len();
+
+        let result = client.emails().send(email).await;
+
+        let sent = posthog.sent().len() - sent_before;
+        match result {
+            Ok(_) => assert_eq!((outcome, sent), ("sent", 1), "{}", case),
+            Err(error) => {
+                assert_eq!((error.code(), sent), (outcome, 0), "{}", case);
+                if outcome == "message_too_large" {
+                    assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+                    assert_eq!(error.field(), Some("attachments"));
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_html_only_email_counts_its_html_twice() {
+    // Without text, PostHog sends text it derives from the HTML and counts it
+    // too. The derived text is never longer than the HTML, so the client
+    // counts the HTML twice: this body fits once beside the file, as text,
+    // but not twice, as HTML alone.
+    let posthog = FakePostHog::start_async().await;
+    let bytes = vec![0u8; 29_182_764];
+    let sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let file = EmailAttachment::new("scan.pdf", bytes);
+    let body = "a".repeat(57);
+    let email = || {
+        CodeEmail::new("user@example.com", "scan", "x")
+            .attachment(file.clone())
+            .max_retries(0)
+    };
+    let client = client_of(&posthog).await;
+
+    let error = client
+        .emails()
+        .send(email().html(body.as_str()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "message_too_large");
+    assert_eq!(error.field(), Some("attachments"));
+    assert!(posthog.stored(&sha256).is_none(), "nothing is uploaded");
+    assert!(posthog.sent().is_empty(), "no email is sent");
+
+    client
+        .emails()
+        .send(email().text(body.as_str()))
+        .await
+        .unwrap();
+    assert!(posthog.stored(&sha256).is_some());
+    assert_eq!(posthog.sent().len(), 1);
+}
+
+#[test]
+fn a_printed_send_never_shows_the_file() {
+    let email = CodeEmail::new("user@example.com", "invoice", "Your invoice")
+        .text("Attached.")
+        .attachment(EmailAttachment::new("invoice.pdf", vec![b'x'; 10_000]));
+
+    let printed = format!("{email:?}");
+
+    assert!(printed.contains("invoice.pdf"), "{}", printed);
+    assert!(printed.len() < 1_000, "{}", printed);
+}
+
+#[tokio::test]
+async fn code_send_leaves_out_sensitivity_tracking_and_engagement_capture_it_was_not_given() {
     let server = ScriptedServer::start_async(vec![accepted()]).await;
     let client = client_for(&server).await;
 
@@ -139,18 +775,17 @@ async fn code_send_defaults_engagement_capture_on() {
             "template_key": "welcome",
             "subject": "Welcome",
             "text": "Hi",
-            "capture_engagement": true,
             "to": "user@example.com",
         })
     );
 }
 
-async fn client_with_a_receipts_template() -> (posthog_rs::Client, SendApi) {
+async fn client_with_a_receipts_template() -> (posthog::Client, SendApi) {
     let api = SendApi::start_async()
         .await
         .with_category("receipts", "transactional", "Receipts", "")
         .with_template("order-receipt", Some("receipts"));
-    let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+    let client = posthog::client(options(&api.url).build().unwrap()).await;
     (client, api)
 }
 
@@ -199,7 +834,7 @@ async fn a_send_for_a_template_in_a_marketing_category_is_refused() {
         .await
         .with_category("newsletter", "marketing", "Newsletter", "")
         .with_template("november-digest", Some("newsletter"));
-    let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+    let client = posthog::client(options(&api.url).build().unwrap()).await;
 
     let error = client.emails().send(digest_email()).await.unwrap_err();
 
@@ -239,7 +874,7 @@ async fn a_send_creates_its_category_in_the_project() {
     ];
     for (key, category, stored) in cases {
         let api = SendApi::start_async().await;
-        let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+        let client = posthog::client(options(&api.url).build().unwrap()).await;
 
         client
             .emails()
@@ -259,7 +894,7 @@ async fn a_send_creates_its_category_in_the_project() {
 async fn a_send_without_a_category_is_transactional() {
     for category in [None, Some(EmailCategory::Transactional)] {
         let api = SendApi::start_async().await;
-        let client = posthog_rs::client(options(&api.url).build().unwrap()).await;
+        let client = posthog::client(options(&api.url).build().unwrap()).await;
         let mut email = digest_email();
         if let Some(category) = category {
             email = email.category(category);
@@ -269,6 +904,134 @@ async fn a_send_without_a_category_is_transactional() {
 
         assert_eq!(api.sent(), vec![("user@example.com".to_string(), None)]);
         assert_eq!(api.categories(), HashMap::new());
+    }
+}
+
+#[tokio::test]
+async fn code_send_sends_the_tracking_it_was_given() {
+    let cases: Vec<(EmailTracking, serde_json::Value)> = vec![
+        (true.into(), json!(true)),
+        (false.into(), json!(false)),
+        (EmailTracking::On, json!(true)),
+        (EmailTracking::Off, json!(false)),
+        (
+            EmailTrackingOptions::new().clicks(true).into(),
+            json!({"clicks": true}),
+        ),
+        (
+            EmailTrackingOptions::new()
+                .opens(true)
+                .clicks(false)
+                .engagement(false)
+                .into(),
+            json!({"opens": true, "clicks": false, "engagement": false}),
+        ),
+        (
+            EmailTrackingOptions::new()
+                .opens(false)
+                .engagement(true)
+                .into(),
+            json!({"opens": false, "engagement": true}),
+        ),
+        (EmailTrackingOptions::new().into(), json!({})),
+    ];
+    for (tracking, expected) in cases {
+        let server = ScriptedServer::start_async(vec![accepted()]).await;
+        let client = client_for(&server).await;
+
+        client
+            .emails()
+            .send(
+                CodeEmail::new("user@example.com", "digest", "Your digest")
+                    .text("Hi")
+                    .tracking(tracking),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            server.requests()[0].json(),
+            json!({
+                "template_key": "digest",
+                "subject": "Your digest",
+                "text": "Hi",
+                "tracking": expected,
+                "to": "user@example.com",
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn code_send_sends_the_sensitivity_it_was_given() {
+    let cases = vec![
+        (
+            CodeEmail::new("user@example.com", "digest", "Your digest")
+                .text("Hi")
+                .sensitive(true),
+            json!({"sensitive": true}),
+        ),
+        (
+            CodeEmail::new("user@example.com", "digest", "Your digest")
+                .text("Hi")
+                .sensitive(false),
+            json!({"sensitive": false}),
+        ),
+        (
+            CodeEmail::new("user@example.com", "digest", "Your digest")
+                .text("Hi")
+                .sensitive(false)
+                .tracking(EmailTrackingOptions::new().clicks(false)),
+            json!({"sensitive": false, "tracking": {"clicks": false}}),
+        ),
+    ];
+    for (email, sent) in cases {
+        let server = ScriptedServer::start_async(vec![accepted()]).await;
+        let client = client_for(&server).await;
+
+        client.emails().send(email).await.unwrap();
+
+        let mut expected = json!({
+            "template_key": "digest",
+            "subject": "Your digest",
+            "text": "Hi",
+            "to": "user@example.com",
+        });
+        expected
+            .as_object_mut()
+            .unwrap()
+            .extend(sent.as_object().unwrap().clone());
+        assert_eq!(server.requests()[0].json(), expected);
+    }
+}
+
+#[tokio::test]
+#[allow(deprecated)]
+async fn code_send_still_sends_the_deprecated_engagement_capture() {
+    for capture in [false, true] {
+        let server = ScriptedServer::start_async(vec![accepted()]).await;
+        let client = client_for(&server).await;
+
+        client
+            .emails()
+            .send(
+                CodeEmail::new("user@example.com", "welcome", "Welcome")
+                    .text("Hi")
+                    .capture_engagement(capture),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            server.requests()[0].json(),
+            json!({
+                "template_key": "welcome",
+                "subject": "Welcome",
+                "text": "Hi",
+                "capture_engagement": capture,
+                "to": "user@example.com",
+            })
+        );
     }
 }
 
@@ -296,7 +1059,7 @@ async fn retries_reuse_the_idempotency_key() {
 #[tokio::test]
 async fn client_retry_limit_applies_and_a_send_can_turn_it_off() {
     let server = ScriptedServer::start_async(vec![unavailable()]).await;
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&server.url)
             .email_request_max_retries(1u32)
             .build()
@@ -435,7 +1198,7 @@ async fn sends_that_cannot_go_out_make_no_request() {
 
     let mut no_key = options(&server.url);
     no_key.secret_key("  ");
-    let client = posthog_rs::client(no_key.build().unwrap()).await;
+    let client = posthog::client(no_key.build().unwrap()).await;
     let error = client
         .emails()
         .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
@@ -444,8 +1207,8 @@ async fn sends_that_cannot_go_out_make_no_request() {
     assert_eq!(error.code(), "missing_secret_key");
     assert_eq!(error.kind(), EmailErrorKind::MissingApiKey);
 
-    let client = posthog_rs::client(
-        posthog_rs::ClientOptionsBuilder::default()
+    let client = posthog::client(
+        posthog::ClientOptionsBuilder::default()
             .api_key("phc_test".to_string())
             .host(server.url.clone())
             .secret_key("phs_test")
@@ -460,7 +1223,7 @@ async fn sends_that_cannot_go_out_make_no_request() {
         .unwrap_err();
     assert_eq!(error.code(), "missing_app_host");
 
-    let client = posthog_rs::client(options(&server.url).disabled(true).build().unwrap()).await;
+    let client = posthog::client(options(&server.url).disabled(true).build().unwrap()).await;
     let error = client
         .emails()
         .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
@@ -482,7 +1245,7 @@ async fn sends_that_cannot_go_out_make_no_request() {
 
 #[tokio::test]
 async fn a_network_error_is_retried_then_reported() {
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&closed_url())
             .email_request_max_retries(1u32)
             .build()
@@ -533,10 +1296,7 @@ async fn get_reads_the_status_without_an_idempotency_key() {
     assert_eq!(status.reason.as_deref(), Some("hard"));
     let request = &server.requests()[0];
     assert_eq!(request.method, "GET");
-    assert_eq!(
-        request.path,
-        format!("/api/projects/@current/messaging/emails/{MESSAGE_ID}/")
-    );
+    assert_eq!(request.path, format!("/api/messaging/emails/{MESSAGE_ID}/"));
     assert_eq!(request.header("authorization"), Some("Bearer phs_test"));
     assert_eq!(request.header("idempotency-key"), None);
     assert_eq!(request.header("content-type"), None);
@@ -623,7 +1383,7 @@ async fn shutdown_off_the_runtime_waits_for_a_send_in_its_retry_backoff() {
 async fn shutdown_keeps_to_its_timeout_during_a_retry_backoff() {
     let server = ScriptedServer::start_async(vec![unavailable(), accepted()]).await;
     let client = Arc::new(
-        posthog_rs::client(
+        posthog::client(
             options(&server.url)
                 .shutdown_timeout_ms(100u64)
                 .build()
@@ -651,7 +1411,7 @@ async fn shutdown_keeps_to_its_timeout_during_a_retry_backoff() {
 
 #[tokio::test]
 async fn an_email_error_converts_into_the_crate_error() {
-    async fn send(client: &posthog_rs::Client) -> Result<String, posthog_rs::Error> {
+    async fn send(client: &posthog::Client) -> Result<String, posthog::Error> {
         Ok(client
             .emails()
             .send(TemplateEmail::new("", TEMPLATE_ID))
@@ -661,7 +1421,7 @@ async fn an_email_error_converts_into_the_crate_error() {
     let server = ScriptedServer::start_async(vec![accepted()]).await;
     let client = client_for(&server).await;
     match send(&client).await {
-        Err(posthog_rs::Error::Email(error)) => assert_eq!(error.code(), "invalid_recipient"),
+        Err(posthog::Error::Email(error)) => assert_eq!(error.code(), "invalid_recipient"),
         other => panic!("expected an email error, got {:?}", other),
     }
 }
@@ -681,7 +1441,7 @@ async fn the_email_timeout_replaces_a_custom_clients_timeout() {
         .timeout(Duration::from_secs(60))
         .build()
         .unwrap();
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&server.base_url())
             .http_client(patient)
             .email_request_timeout_seconds(1)
@@ -733,7 +1493,7 @@ async fn a_reply_over_one_mebibyte_is_not_read() {
 
 #[tokio::test]
 async fn reading_stops_at_the_cap_on_an_endless_reply() {
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&email_support::endless_body_server())
             .email_request_timeout_seconds(10)
             .email_request_max_retries(0)

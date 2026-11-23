@@ -1,0 +1,54 @@
+name: Generate references
+
+# Regenerates references/ by hand, for when the release's best-effort reference step fails
+# or the pages need a refresh. Same shape as posthog-js's generate-references.yml.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  generate-references:
+    name: Generate SDK reference
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Get GitHub App token
+        id: releaser
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.GH_APP_POSTHOG_RS_RELEASER_APP_ID }}
+          private-key: ${{ secrets.GH_APP_POSTHOG_RS_RELEASER_PRIVATE_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          token: ${{ steps.releaser.outputs.token }}
+
+      - name: Check out sdk-specs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PostHog/sdk-specs
+          path: .sdk-specs
+          persist-credentials: false
+
+      - name: Generate references
+        id: changes
+        run: |
+          rustup toolchain install nightly-2026-06-12 --profile minimal
+          python3 scripts/generate_markdown.py --sdk-specs .sdk-specs
+          git add references
+          git diff --cached --quiet || echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit generated references
+        if: steps.changes.outputs.changed == 'true'
+        uses: planetscale/ghcommit-action@a6b150b81dca5dd027baa898604418eec9e11465 # v0.2.22
+        with:
+          commit_message: "docs: update the SDK reference [skip ci]"
+          repo: ${{ github.repository }}
+          branch: main
+          file_pattern: references/
+        env:
+          GITHUB_TOKEN: ${{ steps.releaser.outputs.token }}

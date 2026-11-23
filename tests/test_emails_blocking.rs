@@ -4,22 +4,23 @@ mod common;
 mod email_support;
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::default_user_agent;
 use email_support::{
-    accepted, options, unavailable, Answer, ScriptedServer, SendApi, StoredCategory, MESSAGE_ID,
-    SEND_PATH, TEMPLATE_ID,
+    accepted, connection_counting_store, options, unavailable, Answer, FakePostHog, ScriptedServer,
+    SendApi, StoredCategory, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
-use posthog_rs::{
-    CodeEmail, EmailDeliveryStatus, EmailErrorKind, MessageCategory, MessageCategoryType,
-    TemplateEmail,
+use posthog::{
+    CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, MessageCategory,
+    MessageCategoryType, TemplateEmail,
 };
 use serde_json::json;
 
-fn client_for(server: &ScriptedServer) -> posthog_rs::Client {
-    posthog_rs::client(options(&server.url).build().unwrap())
+fn client_for(server: &ScriptedServer) -> posthog::Client {
+    posthog::client(options(&server.url).build().unwrap())
 }
 
 #[test]
@@ -79,16 +80,175 @@ fn code_send_posts_the_rendered_content() {
             "subject": "Reset your password",
             "html": "<p>Reset</p>",
             "from": "Acme <security@example.com>",
-            "capture_engagement": true,
             "to": "user@example.com",
         })
     );
 }
 
+const PDF_SHA256: &str = "ccac55e87ec85819f85630feb88522f771cf4d4fc3a40b7f97fd124a128dfcb7";
+const PDF: [u8; 7] = [0x25, 0x50, 0x44, 0x46, 0x00, 0x9f, 0xff];
+
+fn client_of(posthog: &FakePostHog) -> posthog::Client {
+    posthog::client(options(&posthog.url).build().unwrap())
+}
+
+fn invoice() -> CodeEmail {
+    CodeEmail::new("user@example.com", "invoice", "Your invoice")
+        .text("Attached.")
+        .cc("finance@example.com")
+        .bcc("audit@example.com")
+        .attachment(EmailAttachment::new("invoice.pdf", PDF))
+}
+
+#[test]
+fn code_send_uploads_the_file_then_sends_its_hash() {
+    let posthog = FakePostHog::start();
+    let client = client_of(&posthog);
+
+    client.emails().send(invoice()).unwrap();
+
+    assert_eq!(posthog.versions(PDF_SHA256), vec![PDF.to_vec()]);
+    assert_eq!(
+        posthog.sent(),
+        vec![json!({
+            "template_key": "invoice",
+            "subject": "Your invoice",
+            "text": "Attached.",
+            "cc": ["finance@example.com"],
+            "bcc": ["audit@example.com"],
+            "attachments": [{"sha256": PDF_SHA256, "filename": "invoice.pdf"}],
+            "to": "user@example.com",
+        })]
+    );
+}
+
+#[test]
+fn a_refused_upload_sends_nothing_and_shows_the_buckets_answer() {
+    let posthog = FakePostHog::start().with_expired_grants();
+    let client = client_of(&posthog);
+
+    let error = client.emails().send(invoice()).unwrap_err();
+
+    assert_eq!(error.code(), "attachment_upload_failed");
+    assert_eq!(error.status(), Some(403));
+    assert_eq!(error.kind(), EmailErrorKind::ApplicationError);
+    assert_eq!(
+        error.why(),
+        Some("The file store answered AccessDenied: Request has expired")
+    );
+    assert!(posthog.stored(PDF_SHA256).is_none());
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[test]
+fn an_upload_grant_that_fills_a_header_map_sends_nothing() {
+    let posthog = FakePostHog::start().with_grant_headers_that_fill_a_header_map();
+    let client = client_of(&posthog);
+
+    let error = client.emails().send(invoice()).unwrap_err();
+
+    assert_eq!(error.code(), "api_error");
+    assert!(
+        error.message().contains("without an answer for each file"),
+        "{}",
+        error
+    );
+    assert!(posthog.stored(PDF_SHA256).is_none(), "nothing is uploaded");
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[test]
+fn a_file_store_redirect_is_never_followed() {
+    let posthog = FakePostHog::start();
+    let elsewhere = FakePostHog::start();
+    posthog.store_redirects_next_to(&elsewhere.store_url());
+    let client = client_of(&posthog);
+
+    let error = client.emails().send(invoice()).unwrap_err();
+
+    assert_eq!(error.code(), "attachment_upload_failed");
+    assert_eq!(error.status(), Some(307));
+    assert!(error.message().contains("invoice.pdf"), "{}", error);
+    assert!(!format!("{error} {error:?}").contains(&elsewhere.store_url()));
+    assert!(
+        elsewhere.stored(PDF_SHA256).is_none(),
+        "the other store keeps nothing"
+    );
+    assert!(posthog.stored(PDF_SHA256).is_none());
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
+#[test]
+fn a_custom_clients_default_credentials_never_reach_the_file_store() {
+    let posthog = FakePostHog::start();
+    let mut defaults = reqwest::header::HeaderMap::new();
+    defaults.insert(
+        "authorization",
+        "Bearer phx_app_credential".parse().unwrap(),
+    );
+    let http = reqwest::blocking::Client::builder()
+        .default_headers(defaults)
+        .build()
+        .unwrap();
+    let client = posthog::client(
+        options(&posthog.url)
+            .blocking_http_client(http)
+            .build()
+            .unwrap(),
+    );
+
+    client.emails().send(invoice()).unwrap();
+
+    assert_eq!(posthog.stored(PDF_SHA256), Some(PDF.to_vec()));
+    assert_eq!(posthog.sent().len(), 1);
+}
+
+#[test]
+fn a_custom_clients_uploads_reuse_one_connection_across_sends() {
+    let (store, connections) = connection_counting_store();
+    let slot = Answer::json(
+        200,
+        json!({"files": [{
+            "sha256": PDF_SHA256,
+            "status": "upload",
+            "url": format!("{}/bucket/team/2/{}?X-Amz-Signature=signed", store, PDF_SHA256),
+            "method": "PUT",
+            "headers": {"content-length": "7"},
+            "url_expires_at": "2026-11-09T12:15:00Z",
+        }]}),
+    );
+    let server = ScriptedServer::start(vec![slot.clone(), accepted(), slot, accepted()]);
+    let http = reqwest::blocking::Client::builder().build().unwrap();
+    let client = posthog::client(
+        options(&server.url)
+            .blocking_http_client(http)
+            .build()
+            .unwrap(),
+    );
+
+    client.emails().send(invoice()).unwrap();
+    client.emails().send(invoice()).unwrap();
+
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_posthog_without_the_upload_route_sends_nothing_with_files() {
+    let posthog = FakePostHog::start().without_upload_route();
+    let client = client_of(&posthog);
+
+    let error = client.emails().send(invoice()).unwrap_err();
+
+    assert_eq!(error.code(), "not_found");
+    assert_eq!(error.field(), Some("attachments"));
+    assert_eq!(error.message(), "Not found.");
+    assert!(posthog.sent().is_empty(), "no email is sent");
+}
+
 #[test]
 fn a_send_leaves_an_existing_category_as_it_is() {
     let api = SendApi::start();
-    let client = posthog_rs::client(options(&api.url).build().unwrap());
+    let client = posthog::client(options(&api.url).build().unwrap());
     let send = |category: MessageCategory| {
         client
             .emails()
@@ -206,7 +366,7 @@ fn shutdown_waits_for_a_send_on_another_thread_then_refuses() {
 #[test]
 fn shutdown_keeps_to_its_timeout() {
     let server = ScriptedServer::start(vec![unavailable(), accepted()]);
-    let client = Arc::new(posthog_rs::client(
+    let client = Arc::new(posthog::client(
         options(&server.url)
             .shutdown_timeout_ms(100u64)
             .build()
@@ -242,7 +402,7 @@ fn the_email_timeout_replaces_a_custom_clients_timeout() {
         .timeout(Duration::from_secs(60))
         .build()
         .unwrap();
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&server.base_url())
             .blocking_http_client(patient)
             .email_request_timeout_seconds(1)
@@ -293,7 +453,7 @@ fn a_reply_over_one_mebibyte_is_not_read() {
 
 #[test]
 fn reading_stops_at_the_cap_on_an_endless_reply() {
-    let client = posthog_rs::client(
+    let client = posthog::client(
         options(&email_support::endless_body_server())
             .email_request_timeout_seconds(10)
             .email_request_max_retries(0)

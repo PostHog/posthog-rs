@@ -1,15 +1,10 @@
-// Some tests in this file exercise the deprecated single-flag methods
-// alongside the local-evaluation cache; tolerate the deprecation warnings
-// during the transition window.
-#![allow(deprecated)]
-
 mod common;
 
 use common::default_user_agent;
 use httpmock::prelude::*;
 #[cfg(feature = "async-client")]
-use posthog_rs::{AsyncFlagPoller, ClientOptionsBuilder, EvaluateFlagsOptions};
-use posthog_rs::{
+use posthog::{AsyncFlagPoller, ClientOptionsBuilder, EvaluateFlagsOptions};
+use posthog::{
     FeatureFlag, FeatureFlagCondition, FeatureFlagFilters, FlagCache, FlagPoller, FlagValue,
     LocalEvaluationConfig, LocalEvaluationResponse, LocalEvaluator, Property,
 };
@@ -67,13 +62,7 @@ fn test_local_evaluation_basic() {
     };
 
     // Update cache with the flag
-    let response = LocalEvaluationResponse {
-        property_matching_version: 1,
-        flags: vec![flag],
-        group_type_mapping: HashMap::new(),
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    };
+    let response = LocalEvaluationResponse::new(vec![flag]);
     cache.update(response);
 
     // Test evaluation
@@ -170,6 +159,366 @@ fn test_local_evaluation_with_cohorts_payload() {
         &HashMap::new(),
     );
     assert_eq!(result.unwrap(), Some(FlagValue::Boolean(false)));
+}
+
+fn evaluate(
+    evaluator: &LocalEvaluator,
+    key: &str,
+    properties: &HashMap<String, serde_json::Value>,
+) -> Result<Option<FlagValue>, posthog::InconclusiveMatchError> {
+    evaluator.evaluate_flag(
+        key,
+        "user-123",
+        properties,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+}
+
+/// The payload from the report: one flag with a value-less `is_not_set` filter
+/// next to a healthy flag. Both load.
+#[test]
+fn test_valueless_is_not_set_filter_does_not_fail_definitions() {
+    let response: LocalEvaluationResponse = serde_json::from_str(
+        r#"{
+          "flags": [
+            {
+              "key": "healthy-flag",
+              "active": true,
+              "filters": { "groups": [ { "properties": [], "rollout_percentage": 100 } ] }
+            },
+            {
+              "key": "flag-with-valueless-is-not-set",
+              "active": true,
+              "filters": {
+                "groups": [
+                  {
+                    "properties": [ { "key": "plan", "type": "person", "operator": "is_not_set" } ],
+                    "rollout_percentage": 100
+                  }
+                ]
+              }
+            }
+          ],
+          "group_type_mapping": {},
+          "cohorts": {}
+        }"#,
+    )
+    .expect("a value-less is_not_set filter should deserialize");
+    assert_eq!(response.flags.len(), 2);
+
+    let cache = FlagCache::new();
+    let evaluator = LocalEvaluator::new(cache.clone());
+    cache.update(response);
+
+    let with_plan = HashMap::from([("plan".to_string(), json!("pro"))]);
+    assert_eq!(
+        evaluate(&evaluator, "healthy-flag", &with_plan).unwrap(),
+        Some(FlagValue::Boolean(true))
+    );
+    assert_eq!(
+        evaluate(&evaluator, "flag-with-valueless-is-not-set", &with_plan).unwrap(),
+        Some(FlagValue::Boolean(false))
+    );
+}
+
+/// Regression test: the API accepts `is_set` / `is_not_set` filters without a
+/// `value`, on flags and on cohort leaves alike. Before the fix one such filter
+/// failed to deserialize and took down the entire `LocalEvaluationResponse`,
+/// so no flag in the project could be evaluated locally.
+#[test]
+fn test_local_evaluation_with_valueless_presence_operators() {
+    let presence_flag = |key: &str, operator: &str| {
+        json!({
+            "key": key,
+            "active": true,
+            "filters": {
+                "groups": [
+                    {
+                        "properties": [{"key": "plan", "type": "person", "operator": operator}],
+                        "rollout_percentage": 100.0
+                    }
+                ]
+            }
+        })
+    };
+    let payload = json!({
+        "flags": [
+            {
+                "key": "plain-flag",
+                "active": true,
+                "filters": {"groups": [{"properties": [], "rollout_percentage": 100.0}]}
+            },
+            presence_flag("plan-set", "is_set"),
+            presence_flag("plan-not-set", "is_not_set"),
+            {
+                "key": "cohort-flag",
+                "active": true,
+                "filters": {
+                    "groups": [
+                        {
+                            "properties": [{"key": "id", "value": 7, "type": "cohort"}],
+                            "rollout_percentage": 100.0
+                        }
+                    ]
+                }
+            }
+        ],
+        "group_type_mapping": {},
+        "cohorts": {
+            "7": {
+                "type": "AND",
+                "values": [{"key": "plan", "type": "person", "operator": "is_set"}]
+            }
+        }
+    });
+
+    let response: LocalEvaluationResponse =
+        serde_json::from_value(payload).expect("value-less presence filters should deserialize");
+    assert_eq!(response.flags.len(), 4);
+
+    let cache = FlagCache::new();
+    let evaluator = LocalEvaluator::new(cache.clone());
+    cache.update(response);
+
+    let with_plan = HashMap::from([("plan".to_string(), json!("pro"))]);
+    let without_plan = HashMap::new();
+
+    for (key, expected) in [
+        ("plain-flag", true),
+        ("plan-set", true),
+        ("plan-not-set", false),
+        ("cohort-flag", true),
+    ] {
+        assert_eq!(
+            evaluate(&evaluator, key, &with_plan).unwrap(),
+            Some(FlagValue::Boolean(expected)),
+            "{}",
+            key
+        );
+    }
+
+    // A property missing from the caller's context stays inconclusive.
+    for key in ["plan-set", "plan-not-set", "cohort-flag"] {
+        assert!(evaluate(&evaluator, key, &without_plan).is_err(), "{}", key);
+    }
+}
+
+fn poller_for(server: &MockServer, cache: FlagCache) -> FlagPoller {
+    let config = LocalEvaluationConfig {
+        secret_key: "test_personal_key".to_string(),
+        project_api_key: "test_project_key".to_string(),
+        api_host: server.base_url(),
+        poll_interval: Duration::from_secs(60),
+        request_timeout: Duration::from_secs(5),
+    };
+    FlagPoller::new(config, cache)
+}
+
+/// A definition this SDK cannot read is skipped on its own when definitions
+/// load: the other flags in the response still load, and the skipped flag is
+/// absent from the cache, like any other flag local evaluation cannot resolve.
+#[test]
+fn test_unreadable_flag_definition_does_not_drop_other_flags() {
+    let server = MockServer::start();
+    let definitions = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(
+                r#"{
+                    "flags": [
+                        {
+                            "key": "exact-without-value",
+                            "active": true,
+                            "filters": {"groups": [{
+                                "properties": [{"key": "plan", "type": "person", "operator": "exact"}],
+                                "rollout_percentage": 100
+                            }]}
+                        },
+                        {"key": "active-is-not-a-boolean", "active": "yes"},
+                        {"key": "duplicate-key", "active": false, "active": true},
+                        {
+                            "key": "plain-flag",
+                            "active": true,
+                            "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+                        }
+                    ],
+                    "group_type_mapping": {},
+                    "cohorts": {}
+                }"#,
+            );
+    });
+
+    let cache = FlagCache::new();
+    poller_for(&server, cache.clone())
+        .load_flags()
+        .expect("unreadable flags should not fail the load");
+    definitions.assert();
+
+    let evaluator = LocalEvaluator::new(cache);
+    let properties = HashMap::from([("plan".to_string(), json!("pro"))]);
+    assert_eq!(
+        evaluate(&evaluator, "plain-flag", &properties).unwrap(),
+        Some(FlagValue::Boolean(true))
+    );
+    for skipped in [
+        "exact-without-value",
+        "active-is-not-a-boolean",
+        "duplicate-key",
+    ] {
+        assert_eq!(
+            evaluate(&evaluator, skipped, &properties).unwrap(),
+            None,
+            "{}",
+            skipped
+        );
+    }
+}
+
+/// Skipping is confined to flag definitions that fail on their own. A response
+/// that is unreadable for any other reason is still rejected whole, and the
+/// definitions already cached stay in place.
+#[test]
+fn test_definitions_unreadable_outside_flags_are_still_rejected() {
+    let unreadable_flag = r#"{"key":"active-is-not-a-boolean","active":"yes"}"#;
+    let bodies = [
+        // A field outside `flags` has the wrong type.
+        [
+            r#"{"flags":["#,
+            unreadable_flag,
+            r#"],"group_type_mapping":"not-a-map"}"#,
+        ]
+        .concat(),
+        // A key outside `flags` is repeated.
+        [
+            r#"{"flags":["#,
+            unreadable_flag,
+            r#"],"cohorts":{},"cohorts":{}}"#,
+        ]
+        .concat(),
+    ];
+
+    for body in bodies {
+        let server = MockServer::start();
+        let definitions = server.mock(|when, then| {
+            when.method(GET).path("/flags/definitions/");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(&body);
+        });
+
+        let cache = FlagCache::new();
+        cache.update(
+            serde_json::from_value(json!({
+                "flags": [{"key": "cached-flag", "active": true}]
+            }))
+            .unwrap(),
+        );
+
+        let result = poller_for(&server, cache.clone()).load_flags();
+        definitions.assert();
+        assert!(
+            matches!(result, Err(posthog::Error::Serialization(_))),
+            "{}",
+            body
+        );
+        assert!(cache.get_flag("cached-flag").is_some(), "{}", body);
+    }
+}
+
+/// A filter without a value, on an operator that compares against one, makes
+/// its flag unreadable. That flag alone is deferred: the client has no local
+/// result for it and asks `/flags`, while the other flag still resolves locally.
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_value_requiring_operator_without_value_defers_only_that_flag() {
+    let server = MockServer::start();
+    let definitions = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(
+                r#"{
+                    "flags": [
+                        {
+                            "key": "exact-without-value",
+                            "active": true,
+                            "filters": {"groups": [{
+                                "properties": [{"key": "plan", "type": "person", "operator": "exact"}],
+                                "rollout_percentage": 100
+                            }]}
+                        },
+                        {
+                            "key": "plain-flag",
+                            "active": true,
+                            "filters": {"groups": [{"properties": [], "rollout_percentage": 100}]}
+                        }
+                    ],
+                    "group_type_mapping": {},
+                    "cohorts": {}
+                }"#,
+            );
+    });
+    let remote = server.mock(|when, then| {
+        when.method(POST).path("/flags/");
+        then.status(200).json_body(json!({
+            "flags": {
+                "exact-without-value": {
+                    "key": "exact-without-value",
+                    "enabled": true,
+                    "variant": null,
+                    "reason": {
+                        "code": "condition_match",
+                        "description": null,
+                        "condition_index": 0
+                    },
+                    "metadata": {"id": 1, "version": 1, "description": null, "payload": null}
+                }
+            }
+        }));
+    });
+
+    let options = ClientOptionsBuilder::default()
+        .host(server.base_url())
+        .api_key("test_project_key".to_string())
+        .secret_key("test_personal_key".to_string())
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(60)
+        .build()
+        .unwrap();
+    let client = posthog::client(options).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    definitions.assert();
+
+    let evaluate = |key: &str, only_evaluate_locally: bool| {
+        let mut options = EvaluateFlagsOptions::default();
+        options.flag_keys = Some(vec![key.to_string()]);
+        options.person_properties = Some(HashMap::from([("plan".to_string(), json!("pro"))]));
+        options.only_evaluate_locally = only_evaluate_locally;
+        client.evaluate_flags("user-123", options)
+    };
+
+    // The readable flag resolves locally, with no request to `/flags`.
+    let snapshot = evaluate("plain-flag", false).await.unwrap();
+    assert_eq!(
+        snapshot.get_flag("plain-flag"),
+        Some(FlagValue::Boolean(true))
+    );
+    remote.assert_calls(0);
+
+    // The other one has no local result ...
+    let snapshot = evaluate("exact-without-value", true).await.unwrap();
+    assert_eq!(snapshot.get_flag("exact-without-value"), None);
+    remote.assert_calls(0);
+
+    // ... and `/flags` decides it when remote evaluation is allowed.
+    let snapshot = evaluate("exact-without-value", false).await.unwrap();
+    assert_eq!(
+        snapshot.get_flag("exact-without-value"),
+        Some(FlagValue::Boolean(true))
+    );
+    remote.assert_calls(1);
 }
 
 /// A cyclic cohort definition must leave local evaluation inconclusive so the
@@ -331,13 +680,7 @@ fn test_local_evaluation_with_properties() {
     };
 
     // Update cache
-    let response = LocalEvaluationResponse {
-        property_matching_version: 1,
-        flags: vec![flag],
-        group_type_mapping: HashMap::new(),
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    };
+    let response = LocalEvaluationResponse::new(vec![flag]);
     cache.update(response);
 
     // Test with matching properties
@@ -455,7 +798,7 @@ async fn test_local_evaluation_with_mock_server() {
         .build()
         .unwrap();
 
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
 
     // Give it a moment to load initial flags
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -464,11 +807,12 @@ async fn test_local_evaluation_with_mock_server() {
     let mut properties = HashMap::new();
     properties.insert("email".to_string(), json!("test@company.com"));
 
-    let result = client
-        .get_feature_flag("feature-b", "user-123", None, Some(properties), None)
-        .await;
+    let mut options = EvaluateFlagsOptions::default();
+    options.person_properties = Some(properties);
+    options.flag_keys = Some(vec!["feature-b".to_string()]);
+    let flags = client.evaluate_flags("user-123", options).await.unwrap();
 
-    assert!(result.unwrap() == Some(FlagValue::Boolean(true)));
+    assert_eq!(flags.get_flag("feature-b"), Some(FlagValue::Boolean(true)));
 
     eval_mock.assert();
 }
@@ -521,20 +865,25 @@ async fn test_client_adds_distinct_id_for_local_evaluation_only() {
     let options = ClientOptionsBuilder::default()
         .host(server.base_url())
         .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
+        .secret_key("test_personal_key".to_string())
         .enable_local_evaluation(true)
+        .local_evaluation_only(true)
         .poll_interval_seconds(60)
         .build()
         .unwrap();
 
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let result = client
-        .get_feature_flag("distinct-id-flag", "user-123", None, None, None)
-        .await;
+    let flags = client
+        .evaluate_flags("user-123", EvaluateFlagsOptions::default())
+        .await
+        .unwrap();
 
-    assert_eq!(result.unwrap(), Some(FlagValue::Boolean(true)));
+    assert_eq!(
+        flags.get_flag("distinct-id-flag"),
+        Some(FlagValue::Boolean(true))
+    );
     eval_mock.assert();
     flags_mock.assert_calls(0);
 }
@@ -610,27 +959,23 @@ async fn test_local_evaluation_returns_payloads_without_calling_flags() {
     let options = ClientOptionsBuilder::default()
         .host(server.base_url())
         .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
+        .secret_key("test_personal_key".to_string())
         .enable_local_evaluation(true)
         .poll_interval_seconds(60)
         .build()
         .unwrap();
 
-    let client = posthog_rs::client(options).await;
+    let client = posthog::client(options).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    let mut options = EvaluateFlagsOptions::default();
+    options.flag_keys = Some(vec![
+        "bool-flag".to_string(),
+        "variant-flag".to_string(),
+        "no-payload-flag".to_string(),
+    ]);
     let snapshot = client
-        .evaluate_flags(
-            "user-123",
-            EvaluateFlagsOptions {
-                flag_keys: Some(vec![
-                    "bool-flag".to_string(),
-                    "variant-flag".to_string(),
-                    "no-payload-flag".to_string(),
-                ]),
-                ..Default::default()
-            },
-        )
+        .evaluate_flags("user-123", options)
         .await
         .expect("evaluate_flags");
 
@@ -678,20 +1023,16 @@ async fn test_local_evaluation_with_mock_server_sends_default_user_agent() {
     let options = ClientOptionsBuilder::default()
         .host(server.base_url())
         .api_key("test_project_key".to_string())
-        .personal_api_key("test_personal_key".to_string())
+        .secret_key("test_personal_key".to_string())
         .enable_local_evaluation(true)
         .poll_interval_seconds(60)
         .build()
         .unwrap();
 
-    let client = posthog_rs::client(options).await;
+    let _client = posthog::client(options).await;
 
     // Give it a moment to load initial flags
     tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let _ = client
-        .get_feature_flag("feature-b", "", None, None, None)
-        .await;
 
     eval_mock.assert();
 }
@@ -718,7 +1059,7 @@ fn test_sync_local_evaluation_with_mock_server_sends_default_user_agent() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_secs(60),
@@ -763,13 +1104,7 @@ fn test_cache_operations() {
         },
     ];
 
-    let response = LocalEvaluationResponse {
-        property_matching_version: 1,
-        flags: flags.clone(),
-        group_type_mapping: HashMap::new(),
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    };
+    let response = LocalEvaluationResponse::new(flags.clone());
 
     cache.update(response);
 
@@ -835,7 +1170,7 @@ async fn test_etag_sent_on_second_poll() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -910,7 +1245,7 @@ async fn test_304_preserves_cache() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -978,7 +1313,7 @@ async fn test_no_etag_from_server() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(50),
@@ -1052,7 +1387,7 @@ fn test_sync_etag_sent_on_second_poll() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -1124,7 +1459,7 @@ fn test_sync_304_preserves_cache() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(100),
@@ -1191,7 +1526,7 @@ fn test_sync_no_etag_from_server() {
 
     let cache = FlagCache::new();
     let config = LocalEvaluationConfig {
-        personal_api_key: "test_personal_key".to_string(),
+        secret_key: "test_personal_key".to_string(),
         project_api_key: "test_project_key".to_string(),
         api_host: server.base_url(),
         poll_interval: Duration::from_millis(50),
@@ -1291,13 +1626,9 @@ fn cache_with(flag: FeatureFlag) -> FlagCache {
     let cache = FlagCache::new();
     let mut group_type_mapping = HashMap::new();
     group_type_mapping.insert("0".to_string(), "company".to_string());
-    cache.update(LocalEvaluationResponse {
-        property_matching_version: 1,
-        flags: vec![flag],
-        group_type_mapping,
-        cohorts: HashMap::new(),
-        minimal_flag_called_events: false,
-    });
+    let mut response = LocalEvaluationResponse::new(vec![flag]);
+    response.group_type_mapping = group_type_mapping;
+    cache.update(response);
     cache
 }
 
@@ -1486,4 +1817,178 @@ fn test_group_condition_uses_group_key_for_bucketing() {
         )
         .unwrap();
     assert_eq!(result, Some(FlagValue::Boolean(false)));
+}
+
+fn reload_definitions(rollout: f64) -> serde_json::Value {
+    json!({
+        "flags": [{
+            "key": "reload-flag",
+            "active": true,
+            "filters": {"groups": [{"properties": [], "rollout_percentage": rollout}]}
+        }],
+        "group_type_mapping": {},
+        "cohorts": {}
+    })
+}
+
+fn reload_options(server: &MockServer, local_evaluation: bool) -> posthog::ClientOptions {
+    posthog::ClientOptionsBuilder::default()
+        .host(server.base_url())
+        .api_key("test_project_key".to_string())
+        .secret_key("test_personal_key".to_string())
+        .enable_local_evaluation(local_evaluation)
+        .local_evaluation_only(true)
+        .poll_interval_seconds(3600)
+        .build()
+        .unwrap()
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_reload_feature_flags_uses_fresh_definitions_on_return() {
+    let server = MockServer::start();
+    let mut off = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(reload_definitions(0.0));
+    });
+    let client = posthog::client(reload_options(&server, true)).await;
+    client.reload_feature_flags().await.unwrap();
+    let before = client
+        .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        before.get_flag("reload-flag"),
+        Some(FlagValue::Boolean(false))
+    );
+
+    off.delete();
+    let on = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(reload_definitions(100.0));
+    });
+    client.reload_feature_flags().await.unwrap();
+    on.assert_calls(1);
+    let after = client
+        .evaluate_flags("user-1", EvaluateFlagsOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        after.get_flag("reload-flag"),
+        Some(FlagValue::Boolean(true))
+    );
+}
+
+#[cfg(feature = "async-client")]
+#[tokio::test]
+async fn test_reload_feature_flags_reports_failures_and_missing_configuration() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(500);
+    });
+    let client = posthog::client(reload_options(&server, true)).await;
+    let err = client.reload_feature_flags().await.unwrap_err();
+    assert!(
+        matches!(err, posthog::Error::Connection(ref m) if m.contains("500")),
+        "{:?}",
+        err
+    );
+
+    let unconfigured = posthog::client(reload_options(&server, false)).await;
+    let err = unconfigured.reload_feature_flags().await.unwrap_err();
+    assert!(
+        matches!(err, posthog::Error::InvalidArgument(_)),
+        "{:?}",
+        err
+    );
+}
+
+#[cfg(not(feature = "async-client"))]
+#[test]
+fn test_reload_feature_flags_uses_fresh_definitions_on_return() {
+    let server = MockServer::start();
+    let mut off = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(reload_definitions(0.0));
+    });
+    let client = posthog::client(reload_options(&server, true));
+    client.reload_feature_flags().unwrap();
+    let before = client
+        .evaluate_flags("user-1", posthog::EvaluateFlagsOptions::default())
+        .unwrap();
+    assert_eq!(
+        before.get_flag("reload-flag"),
+        Some(FlagValue::Boolean(false))
+    );
+
+    off.delete();
+    let on = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(reload_definitions(100.0));
+    });
+    client.reload_feature_flags().unwrap();
+    on.assert_calls(1);
+    let after = client
+        .evaluate_flags("user-1", posthog::EvaluateFlagsOptions::default())
+        .unwrap();
+    assert_eq!(
+        after.get_flag("reload-flag"),
+        Some(FlagValue::Boolean(true))
+    );
+}
+
+#[cfg(not(feature = "async-client"))]
+#[test]
+fn test_reload_feature_flags_reports_failures_and_missing_configuration() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(500);
+    });
+    let client = posthog::client(reload_options(&server, true));
+    let err = client.reload_feature_flags().unwrap_err();
+    assert!(
+        matches!(err, posthog::Error::Connection(ref m) if m.contains("500")),
+        "{:?}",
+        err
+    );
+
+    let unconfigured = posthog::client(reload_options(&server, false));
+    let err = unconfigured.reload_feature_flags().unwrap_err();
+    assert!(
+        matches!(err, posthog::Error::InvalidArgument(_)),
+        "{:?}",
+        err
+    );
+}
+
+#[cfg(not(feature = "async-client"))]
+#[test]
+fn test_shutdown_stops_the_definitions_poller() {
+    let server = MockServer::start();
+    let definitions = server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(reload_definitions(0.0));
+    });
+    let options = posthog::ClientOptionsBuilder::default()
+        .api_key("phc_test".to_string())
+        .host(server.base_url())
+        .secret_key("phs_test")
+        .enable_local_evaluation(true)
+        .poll_interval_seconds(1u64)
+        .build()
+        .unwrap();
+    let client = posthog::client(options);
+    wait_for_calls(&definitions, 1);
+
+    client.shutdown();
+    let at_shutdown = definitions.calls();
+    // Longer than the poll interval, so a running poller would have fetched again.
+    std::thread::sleep(Duration::from_millis(1600));
+    assert_eq!(
+        definitions.calls(),
+        at_shutdown,
+        "the poller kept fetching after shutdown"
+    );
 }

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::client::BeforeSendHook;
 use crate::client::CaptureDefaults;
@@ -7,17 +7,26 @@ use crate::client::ClientOptions;
 use crate::client::FlagsFailure;
 use crate::client::OnErrorHook;
 use crate::client::PostHogError;
-use crate::feature_flag_evaluations::{EvaluatedFlagRecord, FlagCalledEventParams};
+use crate::feature_flag_evaluations::{
+    EvaluateFlagsOptions, EvaluatedFlagRecord, FeatureFlagEvaluations, FeatureFlagEvaluationsHost,
+    FlagCalledEventParams,
+};
 use crate::feature_flags::{FeatureFlagsResponse, FlagDetail, FlagMetadata, FlagValue};
+use crate::local_evaluation::LocalEvaluator;
 use crate::Error;
 use crate::Event;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
+
+use super::transport::TransportHandle;
+use super::SdkIdentity;
+use crate::constants::{LIB_PROP, LIB_VERSION_PART_PROPS, LIB_VERSION_PROP};
+use crate::event::names_a_library;
 
 /// Cap on the number of `distinct_id` entries in the `$feature_flag_called`
 /// dedup cache. On overflow the entire map is reset (matches the JS SDK).
-pub(super) const MAX_FLAG_CALLED_CACHE_SIZE: usize = 50_000;
+const MAX_FLAG_CALLED_CACHE_SIZE: usize = 50_000;
 
-pub(super) type FlagEventDedupCache = Mutex<HashMap<String, HashSet<String>>>;
+type FlagEventDedupCache = Mutex<HashMap<String, HashSet<String>>>;
 
 struct RuntimeContext {
     os: String,
@@ -36,7 +45,7 @@ fn runtime_context() -> &'static RuntimeContext {
     })
 }
 
-pub(super) fn apply_runtime_context(event: &mut Event) {
+fn apply_runtime_context(event: &mut Event) {
     let context = runtime_context();
     event.insert_prop_default("$os", serde_json::Value::String(context.os.clone()));
     event.insert_prop_default(
@@ -45,11 +54,94 @@ pub(super) fn apply_runtime_context(event: &mut Event) {
     );
 }
 
-pub(super) fn flag_event_dedup_cache() -> FlagEventDedupCache {
+/// A version as `[major, minor, patch]`, for the
+/// `$lib_version__major/minor/patch` properties. `None` if it doesn't parse.
+fn lib_version_parts(version: &str) -> Option<[u64; 3]> {
+    let core = version.split(['-', '+']).next()?;
+    let mut parts = core.split('.').map(|part| part.parse().ok());
+    let parsed = [parts.next()??, parts.next()??, parts.next()??];
+    parts.next().is_none().then_some(parsed)
+}
+
+/// Fills `$lib` and `$lib_version` as a pair with the identity the
+/// `posthog-sdk-info` header names, after every other layer and before the
+/// hooks. Only a non-empty string counts as set.
+///
+/// - No `$lib`: both get the SDK's values, replacing a lone `$lib_version`.
+/// - `$lib` is the SDK's name with no `$lib_version`: the version is filled.
+/// - Any other `$lib`: both are left as they are, so another library's name
+///   never gets this crate's version.
+///
+/// The `__major/minor/patch` parts are written whenever the SDK writes
+/// `$lib_version`, and only then, so they always match it.
+fn apply_sdk_identity(event: &mut Event, identity: SdkIdentity) {
+    let properties = event.properties();
+    let lib = properties.get(LIB_PROP);
+    let fill_lib = !names_a_library(lib);
+    if !fill_lib
+        && (lib.and_then(serde_json::Value::as_str) != Some(identity.name)
+            || names_a_library(properties.get(LIB_VERSION_PROP)))
+    {
+        return;
+    }
+    if fill_lib {
+        event.set_prop(LIB_PROP, identity.name.into());
+    }
+    event.set_prop(LIB_VERSION_PROP, identity.version.into());
+    if let Some(parts) = lib_version_parts(identity.version) {
+        for (key, part) in LIB_VERSION_PART_PROPS.iter().zip(parts.iter()) {
+            event.set_prop(*key, (*part).into());
+        }
+    }
+}
+
+fn flag_event_dedup_cache() -> FlagEventDedupCache {
     Mutex::new(HashMap::new())
 }
 
-pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaults) {
+/// Runtime-neutral host for deduplicating and enqueueing
+/// `$feature_flag_called` events. Each client lazily constructs its own host so
+/// snapshots from that client share one dedup cache without sharing across
+/// clients.
+pub(super) struct FlagEventHost {
+    defaults: CaptureDefaults,
+    transport: Option<Arc<TransportHandle>>,
+    dedup_cache: FlagEventDedupCache,
+}
+
+impl FlagEventHost {
+    pub(super) fn new(defaults: CaptureDefaults, transport: Option<Arc<TransportHandle>>) -> Self {
+        Self {
+            defaults,
+            transport,
+            dedup_cache: flag_event_dedup_cache(),
+        }
+    }
+}
+
+impl FeatureFlagEvaluationsHost for FlagEventHost {
+    fn capture_flag_called_event_if_needed(&self, params: FlagCalledEventParams) {
+        let dedup_key = build_dedup_key(&params.key, params.response.as_ref(), &params.groups);
+        if already_reported(&self.dedup_cache, &params.distinct_id, &dedup_key) {
+            return;
+        }
+
+        if let (Some(transport), Some(event)) =
+            (&self.transport, flag_called_event(params, &self.defaults))
+        {
+            transport.enqueue(event);
+        }
+    }
+
+    fn log_warning(&self, message: &str) {
+        // Surface filter-helper misuse via tracing — users can silence these
+        // with their tracing-subscriber level filter (e.g. `posthog=error`).
+        warn!("{message}");
+    }
+}
+
+fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaults) {
+    event.fill_personless_default();
     if defaults.disable_geoip {
         event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
     }
@@ -58,16 +150,40 @@ pub(super) fn apply_capture_defaults(event: &mut Event, defaults: &CaptureDefaul
     }
 }
 
-pub(super) fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
+pub(super) fn preprocess_capture_event(
+    mut event: Event,
+    defaults: &CaptureDefaults,
+    hooks: &[BeforeSendHook],
+) -> Option<Event> {
+    // Queued events already have a uuid from enqueue; this covers immediate sends.
+    event.ensure_uuid();
+    // SDK values fill only keys the caller left unset, and go in before the
+    // hooks so `before_send` sees them and can change or remove them.
+    apply_runtime_context(&mut event);
+    apply_capture_defaults(&mut event, defaults);
+    event.merge_groups_into_properties();
+    // After every other fill, so the pair rule sees the final `$lib`.
+    apply_sdk_identity(&mut event, defaults.identity);
+    // Trims after every SDK fill and before the hooks, so properties a hook
+    // adds to a minimized `$feature_flag_called` event are sent.
+    event.apply_minimal_flag_called_allowlist();
+    event.remove_shadowed_legacy_person_property();
+    apply_before_send_hooks(hooks, event)
+}
+
+fn apply_before_send_hooks(hooks: &[BeforeSendHook], event: Event) -> Option<Event> {
     let mut current = Some(event);
 
     for hook in hooks {
         let event = current.take().expect("event is present between hooks");
+        // The hook takes the event, so keep its name for the panic log line.
+        let name = event.event_name().to_string();
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.apply(event))) {
             Ok(Some(next)) => current = Some(next),
             Ok(None) => return None,
             Err(_) => {
-                error!("panic in PostHog before_send hook; dropping event");
+                // Never log the panic payload: it can hold the values the hook was redacting.
+                error!("panic in PostHog before_send hook for event {name:?}; dropping event");
                 return None;
             }
         }
@@ -119,11 +235,7 @@ pub(crate) fn report_flags_error(
 
 /// Returns `true` when the helper has already shipped this
 /// `(distinct_id, key, response)` combination and the caller should skip.
-pub(super) fn already_reported(
-    cache: &FlagEventDedupCache,
-    distinct_id: &str,
-    dedup_key: &str,
-) -> bool {
+fn already_reported(cache: &FlagEventDedupCache, distinct_id: &str, dedup_key: &str) -> bool {
     let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(seen) = cache.get(distinct_id) {
         if seen.contains(dedup_key) {
@@ -140,7 +252,7 @@ pub(super) fn already_reported(
     false
 }
 
-pub(super) fn build_dedup_key(
+fn build_dedup_key(
     flag_key: &str,
     response: Option<&FlagValue>,
     groups: &HashMap<String, String>,
@@ -174,16 +286,11 @@ fn pct(s: &str) -> String {
         .replace(';', "%3B")
 }
 
-pub(super) fn flag_called_event(
-    params: FlagCalledEventParams,
-    client_disable_geoip: bool,
-    is_server: bool,
-) -> Option<Event> {
+fn flag_called_event(params: FlagCalledEventParams, defaults: &CaptureDefaults) -> Option<Event> {
     let mut event = Event::new("$feature_flag_called".to_string(), params.distinct_id);
     if params.minimal {
         // Marks the event so the capture pipeline trims it to the minimal
-        // allowlist as its final enrichment step, after system context and SDK
-        // metadata are stamped on.
+        // allowlist after system context and SDK metadata are stamped on.
         event.mark_minimal_flag_called();
     }
     for (k, v) in params.properties {
@@ -194,13 +301,18 @@ pub(super) fn flag_called_event(
     for (group_name, group_id) in &params.groups {
         event.add_group(group_name, group_id);
     }
-    if params.disable_geoip.unwrap_or(client_disable_geoip) {
-        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
-    }
-    if is_server {
-        event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
+    // A per-call value is the event's own, so it fills before the context; client
+    // defaults are SDK values, so the context beats them.
+    if let Some(disable_geoip) = params.disable_geoip {
+        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(disable_geoip));
     }
     params.context.apply_to_event(&mut event);
+    if params.disable_geoip.is_none() && defaults.disable_geoip {
+        event.insert_prop_default("$geoip_disable", serde_json::Value::Bool(true));
+    }
+    if defaults.is_server {
+        event.insert_prop_default("$is_server", serde_json::Value::Bool(true));
+    }
     Some(event)
 }
 
@@ -274,7 +386,169 @@ pub(super) fn extract_flag_details(response: FeatureFlagsResponse) -> DetailedFl
     }
 }
 
-pub(super) fn local_record(
+/// Shared policy for combining local and remote flag evaluations. The clients
+/// retain their concrete HTTP and async/blocking boundaries; this state owns
+/// only the runtime-neutral decisions on whether to fetch and how to merge.
+pub(super) struct EvaluationState {
+    distinct_id: String,
+    options: EvaluateFlagsOptions,
+    records: HashMap<String, EvaluatedFlagRecord>,
+    request_id: Option<String>,
+    errors_while_computing: bool,
+    quota_limited: bool,
+}
+
+impl EvaluationState {
+    pub(super) fn new(
+        distinct_id: String,
+        mut options: EvaluateFlagsOptions,
+        local_evaluator: Option<&LocalEvaluator>,
+    ) -> Self {
+        options.groups.get_or_insert_with(HashMap::new);
+        options.group_properties.get_or_insert_with(HashMap::new);
+
+        let mut state = Self {
+            distinct_id,
+            options,
+            records: HashMap::new(),
+            request_id: None,
+            errors_while_computing: false,
+            quota_limited: false,
+        };
+        state.evaluate_locally(local_evaluator);
+        state
+    }
+
+    fn evaluate_locally(&mut self, local_evaluator: Option<&LocalEvaluator>) {
+        let Some(evaluator) = local_evaluator else {
+            return;
+        };
+
+        let mut person_properties = self.options.person_properties.clone().unwrap_or_default();
+        person_properties
+            .entry("distinct_id".to_string())
+            .or_insert_with(|| serde_json::json!(self.distinct_id.clone()));
+        let groups = self.options.groups.clone().unwrap_or_default();
+        let group_properties = self.options.group_properties.clone().unwrap_or_default();
+        let local_results = evaluator.evaluate_all_flags_with_details(
+            &self.distinct_id,
+            &person_properties,
+            &groups,
+            &group_properties,
+        );
+
+        // Pin the gate from the definitions snapshot that produced each local
+        // result rather than re-reading shared state when an event is captured.
+        let minimal_flag_called_events = evaluator.cache().minimal_flag_called_events();
+        for (key, result) in local_results {
+            if self
+                .options
+                .flag_keys
+                .as_ref()
+                .is_some_and(|filter| !filter.iter().any(|candidate| candidate == &key))
+            {
+                continue;
+            }
+            if let Ok(value) = result.result {
+                self.records.insert(
+                    key,
+                    local_record(
+                        value,
+                        result.payload,
+                        result.has_experiment,
+                        minimal_flag_called_events,
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Without an explicit key filter, local definitions cannot prove that they
+    /// contain every project flag, so remote discovery remains necessary.
+    pub(super) fn should_fetch_remote(&self, local_evaluation_only: bool) -> bool {
+        let local_covers_request = self
+            .options
+            .flag_keys
+            .as_ref()
+            .is_some_and(|keys| keys.iter().all(|key| self.records.contains_key(key)));
+
+        !self.options.only_evaluate_locally && !local_evaluation_only && !local_covers_request
+    }
+
+    pub(super) fn distinct_id(&self) -> &str {
+        &self.distinct_id
+    }
+
+    pub(super) fn options(&self) -> &EvaluateFlagsOptions {
+        &self.options
+    }
+
+    #[cfg_attr(not(feature = "async-client"), allow(dead_code))]
+    pub(super) fn apply_remote_result(
+        &mut self,
+        result: Result<DetailedFlagsResponse, Error>,
+    ) -> Result<(), Error> {
+        match self.record_remote_result(result) {
+            Some(error) if self.records.is_empty() => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Applies the `/flags` result and returns its error, if any. Unlike
+    /// [`Self::apply_remote_result`], a failure with no local results still
+    /// leaves a usable state, marked with `errors_while_computing`, so its
+    /// `$feature_flag_called` events report the failure.
+    pub(super) fn record_remote_result(
+        &mut self,
+        result: Result<DetailedFlagsResponse, Error>,
+    ) -> Option<Error> {
+        match result {
+            Ok(response) => {
+                self.request_id = response.request_id;
+                self.errors_while_computing = response.errors_while_computing_flags;
+                self.quota_limited = response.quota_limited;
+                let minimal_flag_called_events = response.minimal_flag_called_events;
+                for (key, detail) in response.flags {
+                    // A successful local evaluation is authoritative. Remote
+                    // evaluation only fills flags that local evaluation could
+                    // not resolve.
+                    self.records.entry(key).or_insert_with(|| {
+                        remote_record_from_detail(detail, minimal_flag_called_events)
+                    });
+                }
+                None
+            }
+            Err(error) => {
+                debug!(
+                    error = error.to_string(),
+                    local_count = self.records.len(),
+                    "/flags fetch failed; returning snapshot from local results only"
+                );
+                self.errors_while_computing = true;
+                Some(error)
+            }
+        }
+    }
+
+    pub(super) fn into_evaluations(
+        self,
+        host: Arc<dyn FeatureFlagEvaluationsHost>,
+    ) -> FeatureFlagEvaluations {
+        FeatureFlagEvaluations::new(
+            host,
+            self.distinct_id,
+            self.records,
+            self.options.groups.unwrap_or_default(),
+            self.options.disable_geoip,
+            self.request_id,
+            None,
+            self.errors_while_computing,
+            self.quota_limited,
+        )
+    }
+}
+
+fn local_record(
     value: FlagValue,
     payload: Option<serde_json::Value>,
     has_experiment: Option<bool>,
@@ -299,7 +573,7 @@ pub(super) fn local_record(
     }
 }
 
-pub(super) fn remote_record_from_detail(
+fn remote_record_from_detail(
     detail: FlagDetail,
     minimal_flag_called_events: bool,
 ) -> EvaluatedFlagRecord {
@@ -329,7 +603,7 @@ pub(super) fn remote_record_from_detail(
 /// (e.g. `"{\"color\":\"blue\"}"`) rather than already-parsed JSON. Try to
 /// parse a `String` payload as JSON and fall back to the raw string on
 /// failure so users can branch on a uniform [`serde_json::Value`].
-fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
+pub(super) fn normalize_payload(payload: serde_json::Value) -> serde_json::Value {
     match payload {
         serde_json::Value::String(raw) => {
             serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))
@@ -365,6 +639,185 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    fn defaults(disable_geoip: bool, is_server: bool) -> CaptureDefaults {
+        CaptureDefaults {
+            disable_geoip,
+            is_server,
+            identity: SdkIdentity::DEFAULT,
+        }
+    }
+
+    fn local_evaluator() -> LocalEvaluator {
+        use crate::feature_flags::{FeatureFlag, FeatureFlagCondition, FeatureFlagFilters};
+        use crate::local_evaluation::{FlagCache, LocalEvaluationResponse};
+
+        let flag = |key: &str| FeatureFlag {
+            key: key.to_string(),
+            active: true,
+            has_experiment: Some(false),
+            filters: FeatureFlagFilters {
+                groups: vec![FeatureFlagCondition {
+                    properties: Vec::new(),
+                    rollout_percentage: Some(100.0),
+                    variant: None,
+                    aggregation_group_type_index: None,
+                }],
+                multivariate: None,
+                payloads: HashMap::new(),
+                aggregation_group_type_index: None,
+                early_exit: false,
+            },
+        };
+
+        let cache = FlagCache::new();
+        cache.update(LocalEvaluationResponse {
+            property_matching_version: 1,
+            flags: vec![flag("local"), flag("filtered-out")],
+            group_type_mapping: HashMap::new(),
+            cohorts: HashMap::new(),
+            minimal_flag_called_events: true,
+        });
+        LocalEvaluator::new(cache)
+    }
+
+    fn remote_detail(key: &str, enabled: bool, id: u64) -> FlagDetail {
+        FlagDetail {
+            key: key.to_string(),
+            enabled,
+            variant: None,
+            reason: Some(crate::feature_flags::FlagReason {
+                code: "condition_match".to_string(),
+                condition_index: Some(0),
+                description: Some("Matched remotely".to_string()),
+            }),
+            metadata: Some(FlagMetadata {
+                id,
+                version: 7,
+                description: None,
+                payload: Some(json!({"source": "remote"})),
+                has_experiment: Some(true),
+            }),
+        }
+    }
+
+    #[test]
+    fn evaluation_state_filters_local_results_and_preserves_local_wins_merge_metadata() {
+        let evaluator = local_evaluator();
+        let options = EvaluateFlagsOptions {
+            flag_keys: Some(vec!["local".to_string(), "remote".to_string()]),
+            groups: Some(groups(&[("organization", "org-a")])),
+            ..Default::default()
+        };
+
+        let mut state = EvaluationState::new("user-1".to_string(), options, Some(&evaluator));
+        assert_eq!(state.records.len(), 1);
+        assert!(state.records.contains_key("local"));
+        assert!(!state.records.contains_key("filtered-out"));
+        assert!(state.should_fetch_remote(false));
+
+        let local_before_merge = &state.records["local"];
+        assert!(local_before_merge.enabled);
+        assert!(local_before_merge.locally_evaluated);
+        assert!(local_before_merge.minimal_flag_called_events);
+
+        let response = DetailedFlagsResponse {
+            flags: HashMap::from([
+                ("local".to_string(), remote_detail("local", false, 101)),
+                ("remote".to_string(), remote_detail("remote", true, 202)),
+            ]),
+            request_id: Some("req-policy".to_string()),
+            errors_while_computing_flags: true,
+            quota_limited: true,
+            minimal_flag_called_events: false,
+        };
+        state.apply_remote_result(Ok(response)).unwrap();
+
+        let local = &state.records["local"];
+        assert!(local.enabled, "successful local evaluation must win");
+        assert!(local.locally_evaluated);
+        assert_eq!(local.id, None);
+        assert!(local.minimal_flag_called_events);
+
+        let remote = &state.records["remote"];
+        assert!(remote.enabled);
+        assert!(!remote.locally_evaluated);
+        assert_eq!(remote.id, Some(202));
+        assert_eq!(remote.version, Some(7));
+        assert_eq!(remote.reason.as_deref(), Some("Matched remotely"));
+        assert_eq!(remote.payload, Some(json!({"source": "remote"})));
+        assert_eq!(remote.has_experiment, Some(true));
+        assert!(!remote.minimal_flag_called_events);
+
+        assert_eq!(state.request_id.as_deref(), Some("req-policy"));
+        assert!(state.errors_while_computing);
+        assert!(state.quota_limited);
+        assert_eq!(
+            state.options.groups.as_ref().unwrap().get("organization"),
+            Some(&"org-a".to_string())
+        );
+    }
+
+    #[test]
+    fn evaluation_state_characterizes_fetch_gates_and_partial_fallback() {
+        let evaluator = local_evaluator();
+
+        let covered_options = EvaluateFlagsOptions {
+            flag_keys: Some(vec!["local".to_string()]),
+            ..Default::default()
+        };
+        let covered = EvaluationState::new("user-1".to_string(), covered_options, Some(&evaluator));
+        assert!(!covered.should_fetch_remote(false));
+
+        let local_only_options = EvaluateFlagsOptions {
+            only_evaluate_locally: true,
+            ..Default::default()
+        };
+        let local_only =
+            EvaluationState::new("user-1".to_string(), local_only_options, Some(&evaluator));
+        assert!(!local_only.should_fetch_remote(false));
+
+        let project_local_only = EvaluationState::new(
+            "user-1".to_string(),
+            EvaluateFlagsOptions::default(),
+            Some(&evaluator),
+        );
+        assert!(!project_local_only.should_fetch_remote(true));
+
+        let partial_options = EvaluateFlagsOptions {
+            flag_keys: Some(vec!["local".to_string(), "missing".to_string()]),
+            ..Default::default()
+        };
+        let mut partial =
+            EvaluationState::new("user-1".to_string(), partial_options, Some(&evaluator));
+        partial
+            .apply_remote_result(Err(Error::Connection("remote failed".to_string())))
+            .expect("local results degrade a remote failure to a partial snapshot");
+        assert_eq!(partial.records.len(), 1);
+        assert!(partial.records.contains_key("local"));
+        assert!(partial.errors_while_computing);
+        assert_eq!(partial.request_id, None);
+        assert!(!partial.quota_limited);
+
+        let mut empty =
+            EvaluationState::new("user-1".to_string(), EvaluateFlagsOptions::default(), None);
+        assert!(empty
+            .apply_remote_result(Err(Error::Connection("remote failed".to_string())))
+            .is_err());
+    }
+
+    #[test]
+    fn record_remote_result_keeps_a_usable_state_on_failure() {
+        let mut empty =
+            EvaluationState::new("user-1".to_string(), EvaluateFlagsOptions::default(), None);
+        let error = empty.record_remote_result(Err(Error::Connection("remote failed".to_string())));
+        assert!(matches!(error, Some(Error::Connection(_))));
+        assert!(empty.records.is_empty());
+        assert!(
+            empty.errors_while_computing,
+            "events from this snapshot report the failure"
+        );
     }
 
     fn flag_params(
@@ -419,8 +872,7 @@ mod tests {
 
         let event = flag_called_event(
             flag_params(properties, groups(&[("organization", "org-a")]), Some(true)),
-            true,
-            true,
+            &defaults(true, true),
         )
         .expect("valid flag-called event");
 
@@ -439,13 +891,70 @@ mod tests {
     fn flag_called_event_adds_defaults_when_missing() {
         let event = flag_called_event(
             flag_params(HashMap::new(), HashMap::new(), None),
-            true,
-            true,
+            &defaults(true, true),
         )
         .expect("valid flag-called event");
 
         assert_eq!(event.properties().get("$is_server"), Some(&json!(true)));
         assert_eq!(event.properties().get("$geoip_disable"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn flag_called_event_sends_a_per_call_geoip_value_over_context_and_client() {
+        let context = crate::RequestContext::new()
+            .property("$geoip_disable", true)
+            .unwrap();
+        for (per_call, client_default, expected) in [
+            (Some(true), false, Some(json!(true))),
+            (Some(false), true, Some(json!(false))),
+            (None, true, Some(json!(true))),
+            (None, false, None),
+        ] {
+            let mut params = flag_params(HashMap::new(), HashMap::new(), per_call);
+            let event = flag_called_event(params.clone(), &defaults(client_default, true))
+                .expect("valid flag-called event");
+            assert_eq!(
+                event.properties().get("$geoip_disable"),
+                expected.as_ref(),
+                "per call {per_call:?}, client {client_default}"
+            );
+
+            // The per-call value beats a context value; without one the context wins.
+            params.context = context.clone();
+            let event = flag_called_event(params, &defaults(client_default, true))
+                .expect("valid flag-called event");
+            assert_eq!(
+                event.properties().get("$geoip_disable"),
+                Some(&json!(per_call.unwrap_or(true))),
+                "with context: per call {per_call:?}, client {client_default}"
+            );
+        }
+    }
+
+    #[test]
+    fn flag_event_hosts_keep_dedup_state_separate() {
+        let first = FlagEventHost::new(defaults(false, true), None);
+        let second = FlagEventHost::new(defaults(false, true), None);
+        let params = flag_params(HashMap::new(), HashMap::new(), None);
+
+        first.capture_flag_called_event_if_needed(params.clone());
+        first.capture_flag_called_event_if_needed(params.clone());
+
+        let first_cache = first.dedup_cache.lock().unwrap();
+        assert_eq!(first_cache.get("user-1").map(HashSet::len), Some(1));
+        drop(first_cache);
+        assert!(second.dedup_cache.lock().unwrap().is_empty());
+
+        second.capture_flag_called_event_if_needed(params);
+        assert_eq!(
+            second
+                .dedup_cache
+                .lock()
+                .unwrap()
+                .get("user-1")
+                .map(HashSet::len),
+            Some(1)
+        );
     }
 
     #[test]
@@ -460,12 +969,67 @@ mod tests {
         assert!(!event.properties().contains_key("$os_arch"));
     }
 
+    fn version_parts(event: &Event) -> Vec<Option<&serde_json::Value>> {
+        LIB_VERSION_PART_PROPS
+            .iter()
+            .map(|key| event.properties().get(*key))
+            .collect()
+    }
+
+    #[test]
+    fn sdk_version_parts_are_the_crate_version_as_numbers() {
+        let mut event = Event::new("test", "user-1");
+
+        apply_sdk_identity(&mut event, SdkIdentity::DEFAULT);
+
+        let expected: Vec<serde_json::Value> = [
+            env!("CARGO_PKG_VERSION_MAJOR"),
+            env!("CARGO_PKG_VERSION_MINOR"),
+            env!("CARGO_PKG_VERSION_PATCH"),
+        ]
+        .iter()
+        .map(|part| json!(part.parse::<u64>().unwrap()))
+        .collect();
+        assert_eq!(
+            version_parts(&event),
+            expected.iter().map(Some).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn lib_version_parts_parse_semver_cores_only() {
+        assert_eq!(lib_version_parts("1.2.3"), Some([1, 2, 3]));
+        assert_eq!(lib_version_parts("0.1.0-beta.1"), Some([0, 1, 0]));
+        assert_eq!(lib_version_parts("1.2.3+build"), Some([1, 2, 3]));
+        assert_eq!(lib_version_parts("1.2"), None);
+        assert_eq!(lib_version_parts("1.2.3.4"), None);
+        assert_eq!(lib_version_parts("x.y.z"), None);
+    }
+
+    #[test]
+    fn sdk_version_parts_replace_the_callers_only_with_the_sdk_version() {
+        // The SDK writes `$lib_version`, so its parts replace the caller's.
+        let mut filled = Event::new("test", "user-1");
+        filled.insert_prop("$lib_version", "9.9.9").unwrap();
+        filled.insert_prop("$lib_version__major", 9u64).unwrap();
+        apply_sdk_identity(&mut filled, SdkIdentity::DEFAULT);
+        let mut sdk = Event::new("test", "user-1");
+        apply_sdk_identity(&mut sdk, SdkIdentity::DEFAULT);
+        assert_eq!(version_parts(&filled), version_parts(&sdk));
+
+        // The caller named the library, so its parts stay and none are added.
+        let mut kept = Event::new("test", "user-1");
+        kept.insert_prop("$lib", "custom-lib").unwrap();
+        kept.insert_prop("$lib_version__major", 9u64).unwrap();
+        apply_sdk_identity(&mut kept, SdkIdentity::DEFAULT);
+        assert_eq!(version_parts(&kept), vec![Some(&json!(9)), None, None]);
+    }
+
     #[test]
     fn flag_called_event_leaves_runtime_context_to_capture_path() {
         let event = flag_called_event(
             flag_params(HashMap::new(), HashMap::new(), None),
-            false,
-            true,
+            &defaults(false, true),
         )
         .expect("valid flag-called event");
 
@@ -502,16 +1066,25 @@ mod tests {
     }
 
     #[test]
-    fn before_send_hook_panic_drops_event() {
+    fn before_send_hook_panic_drops_event_and_logs_only_its_name() {
         let options = crate::ClientOptionsBuilder::default()
             .api_key("test-key".to_string())
-            .before_send(|_event| panic!("boom"))
+            .before_send(|_event| panic!("secret-payload"))
             .build()
             .unwrap();
 
+        let (kept, logs) = crate::client::tests::with_logs(|| {
+            apply_before_send_hooks(&options.before_send, Event::new("signed_up", "user-1"))
+        });
+        assert!(kept.is_none());
         assert!(
-            apply_before_send_hooks(&options.before_send, Event::new("test", "user-1")).is_none()
+            logs.contains(
+                r#"panic in PostHog before_send hook for event "signed_up"; dropping event"#
+            ),
+            "{}",
+            logs
         );
+        assert!(!logs.contains("secret-payload"), "{}", logs);
     }
 
     #[test]

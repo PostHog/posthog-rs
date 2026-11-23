@@ -51,8 +51,8 @@ jobs:
           PACKAGE_NAME: ${{ github.event.inputs.package_name }}
           PACKAGE_VERSION: ${{ github.event.inputs.package_version }}
         run: |
-          # posthog-rs is 0.x, so most bumps are semver-incompatible and need
-          # the workspace manifest requirement updated, not just the lockfile.
+          # Update the workspace manifest requirement, not just the lockfile, so
+          # semver-incompatible bumps are actually picked up.
           sed -i "s|^${PACKAGE_NAME} = { version = \"[^\"]*\"|${PACKAGE_NAME} = { version = \"${PACKAGE_VERSION}\"|" Cargo.toml
           if git diff --quiet Cargo.toml; then
             echo "Failed to update ${PACKAGE_NAME} requirement in rust/Cargo.toml" >&2
@@ -81,7 +81,7 @@ jobs:
 
       - name: Create main repo pull request
         id: main-repo-pr
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        uses: peter-evans/create-pull-request@15733dbdfeedb4f7fdb73d13c6f5ac83b710fab8 # v8.1.2
         env:
           HUSKY: "0"
         with:

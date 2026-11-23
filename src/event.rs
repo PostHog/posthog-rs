@@ -1,26 +1,38 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
-use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
-use semver::Version;
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use serde::Serialize;
-use tracing::warn;
 use uuid::Uuid;
 
-use crate::client::CRATE_VERSION;
+use crate::constants::{PROCESS_PERSON_PROFILE_OPT, PROCESS_PERSON_PROFILE_PROP};
 use crate::feature_flag_evaluations::FeatureFlagEvaluations;
+use crate::request_context::current_distinct_id;
 use crate::Error;
+
+/// Events that merge persons or update person or group properties, which PostHog skips or
+/// drops when person processing is off, so they default to `process_person_profile: true`
+/// (see [`Event::apply_identify_style_person_default`]).
+pub(crate) const IDENTIFY_STYLE_EVENTS: [&str; 6] = [
+    "$identify",
+    "$create_alias",
+    "$merge_dangerously",
+    "$groupidentify",
+    "$set",
+    "$set_once",
+];
 
 /// The only properties retained on a minimized `$feature_flag_called` event.
 ///
 /// A fresh allowlist (rather than a denylist) so nothing added upstream — super
 /// properties, context, user-supplied properties, SDK metadata, system context —
-/// can leak past it. Applied as the final capture-pipeline step, after all
-/// enrichment, so the resulting event carries exactly this set intersected with
-/// what the full event would have had. Beyond the evaluation properties it keeps
+/// can leak past it. Applied after every SDK enrichment and before `before_send`,
+/// so the event carries this set intersected with what the full event would have
+/// had, plus whatever a hook adds. Beyond the evaluation properties it keeps
 /// cheap, static, low-cardinality identity useful for platform/runtime
 /// breakdowns (`$lib`, `$lib_version`, `$os`, `$os_version`), processing-control
-/// sentinels this SDK sets (`$geoip_disable`, `$process_person_profile`,
-/// `$is_server`), correctness-required `$groups`, and linkage identifiers.
+/// sentinels (`$geoip_disable`, `$process_person_profile`, `$is_server`),
+/// correctness-required `$groups`, and linkage identifiers.
 pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
     // Identity
     "$feature_flag",
@@ -38,6 +50,11 @@ pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
     "$groups",
     "$process_person_profile",
     "$geoip_disable",
+    // Option sources: capture moves these legacy properties into `options`
+    // after the allowlist runs, so dropping them would drop the option.
+    "$cookieless_mode",
+    "$ignore_sent_at",
+    "$product_tour_id",
     // Linkage / SDK identity
     "$session_id",
     "$window_id",
@@ -51,12 +68,64 @@ pub(crate) const MINIMAL_FLAG_CALLED_EVENT_PROPERTIES: &[&str] = &[
 ];
 
 /// Whether `key` survives minimization to [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`].
-/// Shared by the V0 (`Event::apply_minimal_flag_called_allowlist`) and V1
-/// (`v1_capture::build_events_at`) capture pipelines so the allowlist check
-/// itself has one implementation even though each pipeline applies it to a
-/// different properties representation.
 pub(crate) fn is_minimal_flag_called_property(key: &str) -> bool {
     MINIMAL_FLAG_CALLED_EVENT_PROPERTIES.contains(&key)
+}
+
+/// Merge `groups` into the `$groups` property, key by key, so typed groups win
+/// over a `$groups` value the caller set.
+pub(crate) fn merge_groups_into(
+    properties: &mut HashMap<String, serde_json::Value>,
+    groups: &HashMap<String, String>,
+) {
+    if groups.is_empty() {
+        return;
+    }
+    let mut merged = match properties.remove("$groups") {
+        Some(serde_json::Value::Object(existing)) => existing,
+        _ => serde_json::Map::new(),
+    };
+    for (k, v) in groups {
+        merged.insert(k.clone(), serde_json::Value::String(v.clone()));
+    }
+    properties.insert("$groups".into(), serde_json::Value::Object(merged));
+}
+
+/// Properties whose object values fill one level deep instead of as a whole.
+const NESTED_FILL_PROPERTIES: [&str; 4] = ["$set", "$set_once", "$groups", "$group_set"];
+
+/// Fill `key` with a default only where the caller left it unset. For the
+/// [`NESTED_FILL_PROPERTIES`], when both values are objects, the default adds
+/// only the inner keys the caller's object lacks.
+pub(crate) fn fill_property(
+    properties: &mut HashMap<String, serde_json::Value>,
+    key: String,
+    value: serde_json::Value,
+) {
+    let nested = NESTED_FILL_PROPERTIES.contains(&key.as_str());
+    match properties.entry(key) {
+        Entry::Vacant(slot) => {
+            slot.insert(value);
+        }
+        Entry::Occupied(mut slot) => {
+            if !nested {
+                return;
+            }
+            if let (serde_json::Value::Object(existing), serde_json::Value::Object(defaults)) =
+                (slot.get_mut(), value)
+            {
+                for (inner_key, inner_value) in defaults {
+                    existing.entry(inner_key).or_insert(inner_value);
+                }
+            }
+        }
+    }
+}
+
+/// Whether a `$lib` or `$lib_version` value counts as set: only a non-empty
+/// string does. A missing key, `null`, `""` and non-strings are all unset.
+pub(crate) fn names_a_library(value: Option<&serde_json::Value>) -> bool {
+    matches!(value, Some(serde_json::Value::String(text)) if !text.is_empty())
 }
 
 /// An [`Event`] represents an interaction a user has with your app or
@@ -68,16 +137,29 @@ pub struct Event {
     event: String,
     distinct_id: String,
     properties: HashMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    options: HashMap<String, serde_json::Value>,
     groups: HashMap<String, String>,
     timestamp: Option<NaiveDateTime>,
-    uuid: Uuid,
+    /// Assigned once when the client takes the event, unless set with
+    /// [`Event::set_uuid`], so a reused or cloned `Event` never resends a uuid.
+    uuid: Option<Uuid>,
     /// When set, the capture pipeline trims this event's properties to
-    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] as its final enrichment step.
-    /// Set only for minimized `$feature_flag_called` events; never serialized.
+    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] after the SDK fills its values
+    /// and before `before_send`. Set only for minimized `$feature_flag_called`
+    /// events; never serialized.
     #[serde(skip)]
     minimal_flag_called: bool,
     #[serde(skip)]
     pub(crate) request_context_applied: bool,
+    /// True while `process_person_profile` holds the personless default from
+    /// [`Event::new_anon`], so a request context option can still replace it.
+    #[serde(skip)]
+    personless_default: bool,
+    /// True for an event built by [`Event::new_anon`]: its distinct ID is generated, so the
+    /// SDK fills `process_person_profile: false` before `before_send` while the option is unset.
+    #[serde(skip)]
+    personless: bool,
 }
 
 impl Event {
@@ -90,16 +172,25 @@ impl Event {
     /// - `event`: Event name, such as `"user_signed_up"`.
     /// - `distinct_id`: Stable user or account identifier. For backend events,
     ///   use the same distinct ID your frontend passes to `posthog.identify()`.
+    ///   An empty or whitespace-only ID counts as missing: the event becomes
+    ///   anonymous, as from [`Event::new_anon`].
     pub fn new<S: Into<String>>(event: S, distinct_id: S) -> Self {
+        let distinct_id = distinct_id.into();
+        if distinct_id.trim().is_empty() {
+            return Self::new_anon(event);
+        }
         Self {
             event: event.into(),
-            distinct_id: distinct_id.into(),
+            distinct_id,
             properties: HashMap::new(),
+            options: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
-            uuid: Uuid::now_v7(),
+            uuid: None,
             minimal_flag_called: false,
             request_context_applied: false,
+            personless_default: false,
+            personless: false,
         }
     }
 
@@ -113,23 +204,29 @@ impl Event {
     ///
     /// # Remarks
     ///
-    /// Generates a random distinct ID and sets `$process_person_profile` to
-    /// `false` so PostHog does not create a person profile for the event.
+    /// Generates a random distinct ID and sets the `process_person_profile`
+    /// option to `false` so PostHog does not create a person profile for the
+    /// event. To process one anyway, set the option to `true` with
+    /// [`Event::insert_option`]. A `null` or removed option counts as unset,
+    /// so the SDK sets `false` again before `before_send`.
     pub fn new_anon<S: Into<String>>(event: S) -> Self {
-        let mut properties = HashMap::new();
-        properties.insert(
-            crate::constants::PROCESS_PERSON_PROFILE_PROP.into(),
+        let mut options = HashMap::new();
+        options.insert(
+            PROCESS_PERSON_PROFILE_OPT.into(),
             serde_json::Value::Bool(false),
         );
         Self {
             event: event.into(),
             distinct_id: Uuid::now_v7().to_string(),
-            properties,
+            properties: HashMap::new(),
+            options,
             groups: HashMap::new(),
             timestamp: None,
-            uuid: Uuid::now_v7(),
+            uuid: None,
             minimal_flag_called: false,
             request_context_applied: false,
+            personless_default: true,
+            personless: true,
         }
     }
 
@@ -159,9 +256,49 @@ impl Event {
         self.properties.remove(key)
     }
 
+    /// Set a capture option that tells PostHog how to process the event, such
+    /// as `"process_person_profile"`.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: Option name.
+    /// - `value`: Any value that can be serialized to JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Serialization`] if `value` cannot be serialized.
+    ///
+    /// # Remarks
+    ///
+    /// Sent unchecked: PostHog ignores unknown keys and drops the event if a
+    /// known key has an unusable value. Legacy option properties still work,
+    /// but an option overrides its legacy property. Use options.
+    pub fn insert_option<K: Into<String>, V: Serialize>(
+        &mut self,
+        key: K,
+        value: V,
+    ) -> Result<(), Error> {
+        let as_json =
+            serde_json::to_value(value).map_err(|e| Error::Serialization(e.to_string()))?;
+        let key = key.into();
+        if key == PROCESS_PERSON_PROFILE_OPT {
+            self.personless_default = false;
+        }
+        let _ = self.options.insert(key, as_json);
+        Ok(())
+    }
+
+    /// Remove a capture option from the event and return its previous value, if any.
+    pub fn remove_option(&mut self, key: &str) -> Option<serde_json::Value> {
+        if key == PROCESS_PERSON_PROFILE_OPT {
+            self.personless_default = false;
+        }
+        self.options.remove(key)
+    }
+
     /// Capture this as a group event.
     ///
-    /// See <https://posthog.com/docs/product-analytics/group-analytics#how-to-capture-group-events>.
+    /// See <https://posthog.com/docs/product-analytics/group-analytics#link-events-to-groups>.
     ///
     /// # Parameters
     ///
@@ -170,14 +307,11 @@ impl Event {
     ///
     /// # Remarks
     ///
-    /// Group events cannot be personless, and will be automatically upgraded to
-    /// include person profile processing if they were anonymous. This might lead
-    /// to "empty" person profiles being created.
+    /// Adding a group does not change person processing. PostHog attaches
+    /// groups for group analytics only to events that process person profiles,
+    /// so an event from [`Event::new_anon`] needs
+    /// `insert_option("process_person_profile", true)` to count for its groups.
     pub fn add_group(&mut self, group_name: &str, group_id: &str) {
-        self.properties.insert(
-            crate::constants::PROCESS_PERSON_PROFILE_PROP.into(),
-            serde_json::Value::Bool(true),
-        );
         self.groups.insert(group_name.into(), group_id.into());
     }
 
@@ -190,39 +324,61 @@ impl Event {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidTimestamp`] if the timestamp is in the future.
+    /// Never returns an error; PostHog clamps timestamps far in the future.
+    /// The `Result` stays so existing callers keep compiling.
     pub fn set_timestamp<Tz>(&mut self, timestamp: DateTime<Tz>) -> Result<(), Error>
     where
         Tz: TimeZone,
     {
-        if timestamp > Utc::now() + Duration::seconds(1) {
-            return Err(Error::InvalidTimestamp(String::from(
-                "Events cannot occur in the future",
-            )));
-        }
         self.timestamp = Some(timestamp.naive_utc());
         Ok(())
     }
 
-    /// Build the `$create_alias` event backing [`crate::Client::alias`].
+    /// Build the `$create_alias` event that [`crate::Client::alias`] sends, so you
+    /// can set options on it before you capture it.
     ///
-    /// The event is attributed to `previous_id`, which is also mirrored into
-    /// `properties.distinct_id` alongside the merge target in `properties.alias`
-    /// — the shape posthog-python, posthog-js-lite, and posthog-php all send.
+    /// # Parameters
     ///
-    /// Returns `None` when either ID is blank. A merge needs both sides, so a
-    /// blank one can only produce a malformed event; the SDKs above drop it with
-    /// a warning rather than sending it, and so do we.
+    /// - `previous_id`: ID already known to PostHog, such as an anonymous ID.
+    /// - `distinct_id`: ID it should be merged into, such as a logged-in user ID.
     ///
-    /// Properties are built directly rather than through `insert_prop` so
-    /// construction is infallible: both values are strings, which cannot fail to
-    /// serialize, leaving no always-`Ok` `Result` for callers to discard.
-    pub(crate) fn alias(previous_id: String, distinct_id: String) -> Option<Self> {
+    /// # Returns
+    ///
+    /// The event, attributed to `previous_id`, which is also mirrored into
+    /// `properties.distinct_id` alongside the merge target in `properties.alias`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] when either ID is blank, because a merge
+    /// needs both sides.
+    ///
+    /// # Remarks
+    ///
+    /// The SDK sends `process_person_profile: true` on this event unless you set
+    /// the option, so a request context cannot turn person processing off for it.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn send(posthog: &posthog::Client) -> Result<(), posthog::Error> {
+    /// let mut event = posthog::Event::alias("anon-abc123", "user-42")?;
+    /// event.insert_option("disable_skew_correction", true)?;
+    /// posthog.capture(event);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn alias<P: Into<String>, D: Into<String>>(
+        previous_id: P,
+        distinct_id: D,
+    ) -> Result<Self, Error> {
+        let (previous_id, distinct_id) = (previous_id.into(), distinct_id.into());
         if previous_id.trim().is_empty() || distinct_id.trim().is_empty() {
-            warn!("alias() called with a blank id, dropping the $create_alias event");
-            return None;
+            return Err(Error::InvalidArgument(
+                "alias needs a previous_id and a distinct_id that are not blank".to_string(),
+            ));
         }
 
+        // Built directly rather than through `insert_prop`, so construction cannot fail.
         let mut properties = HashMap::new();
         properties.insert(
             "distinct_id".to_string(),
@@ -230,44 +386,69 @@ impl Event {
         );
         properties.insert("alias".to_string(), serde_json::Value::String(distinct_id));
 
-        Some(Self {
+        Ok(Self {
             event: "$create_alias".to_string(),
             distinct_id: previous_id,
             properties,
+            options: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
-            uuid: Uuid::now_v7(),
+            uuid: None,
             minimal_flag_called: false,
             request_context_applied: false,
+            personless_default: false,
+            personless: false,
         })
     }
 
-    /// Build the `$groupidentify` event backing [`crate::Client::group_identify`].
+    /// Build the `$groupidentify` event that [`crate::Client::group_identify`]
+    /// sends, so you can set options on it before you capture it.
     ///
-    /// Sets `$group_type`, `$group_key`, and `$group_set` in `properties`.
-    /// The event is attributed to `format!("${group_type}_{group_key}")`.
+    /// # Parameters
     ///
-    /// Returns `Ok(None)` when either `group_type` or `group_key` is blank (a
-    /// warning is logged and the event is dropped).
+    /// - `group_type`: Group type, such as `"company"`.
+    /// - `group_key`: Unique identifier for the group, such as an ID in your database.
+    /// - `properties`: Any serializable object or JSON map of group properties.
     ///
-    /// Returns [`Error::Serialization`] if `properties` fails to serialize to
-    /// JSON, or if it does not serialize to a JSON object — PostHog ingestion
-    /// requires `$group_set` to be an object and silently drops the event
-    /// otherwise.
-    pub(crate) fn group_identify<P: Serialize>(
-        group_type: String,
-        group_key: String,
+    /// # Returns
+    ///
+    /// The event, with `$group_type`, `$group_key`, and `$group_set` in its
+    /// properties. Its distinct ID is the request context's distinct ID when one
+    /// is set, else `$<group_type>_<group_key>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] when `group_type` or `group_key` is
+    /// blank. Returns [`Error::Serialization`] if `properties` fails to serialize
+    /// to JSON, or if it does not serialize to a JSON object. PostHog requires
+    /// `$group_set` to be an object and silently drops the event otherwise.
+    ///
+    /// # Remarks
+    ///
+    /// The SDK sends `process_person_profile: true` on this event unless you set
+    /// the option, so a request context cannot turn person processing off for it.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn send(posthog: &posthog::Client) -> Result<(), posthog::Error> {
+    /// let properties = serde_json::json!({ "name": "Awesome Inc." });
+    /// let mut event = posthog::Event::group_identify("company", "acme_123", properties)?;
+    /// event.insert_option("disable_skew_correction", true)?;
+    /// posthog.capture(event);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn group_identify<T: Into<String>, K: Into<String>, P: Serialize>(
+        group_type: T,
+        group_key: K,
         properties: P,
-    ) -> Result<Option<Self>, Error> {
-        if group_type.trim().is_empty() {
-            warn!("group_identify() called with a blank group_type, dropping the $groupidentify event");
-            return Ok(None);
-        }
-        if group_key.trim().is_empty() {
-            warn!(
-                "group_identify() called with a blank group_key, dropping the $groupidentify event"
-            );
-            return Ok(None);
+    ) -> Result<Self, Error> {
+        let (group_type, group_key) = (group_type.into(), group_key.into());
+        if group_type.trim().is_empty() || group_key.trim().is_empty() {
+            return Err(Error::InvalidArgument(
+                "group_identify needs a group_type and a group_key that are not blank".to_string(),
+            ));
         }
 
         let group_set =
@@ -278,7 +459,8 @@ impl Event {
             )));
         }
 
-        let distinct_id = format!("${group_type}_{group_key}");
+        let distinct_id =
+            current_distinct_id().unwrap_or_else(|| format!("${group_type}_{group_key}"));
         let mut props = HashMap::new();
         props.insert(
             "$group_type".to_string(),
@@ -290,16 +472,19 @@ impl Event {
         );
         props.insert("$group_set".to_string(), group_set);
 
-        Ok(Some(Self {
+        Ok(Self {
             event: "$groupidentify".to_string(),
             distinct_id,
             properties: props,
+            options: HashMap::new(),
             groups: HashMap::new(),
             timestamp: None,
-            uuid: Uuid::now_v7(),
+            uuid: None,
             minimal_flag_called: false,
             request_context_applied: false,
-        }))
+            personless_default: false,
+            personless: false,
+        })
     }
 
     /// Stamp the capture (enqueue) time when the caller hasn't set an explicit
@@ -314,9 +499,20 @@ impl Event {
 
     /// Override the auto-generated UUID for this event.
     ///
-    /// Useful for deduplication when re-importing historical data.
+    /// Useful for deduplication when re-importing historical data. Every
+    /// capture of an event with this uuid sends the same uuid. When one request
+    /// contains a uuid twice, PostHog keeps the first event and drops the later
+    /// copies, which the SDK reports with the reason `duplicate_event_uuid`.
     pub fn set_uuid(&mut self, uuid: Uuid) {
-        self.uuid = uuid;
+        self.uuid = Some(uuid);
+    }
+
+    /// Assign a v7 uuid if the event has none; the client calls this once when
+    /// it takes the event.
+    pub(crate) fn ensure_uuid(&mut self) {
+        if self.uuid.is_none() {
+            self.uuid = Some(Uuid::now_v7());
+        }
     }
 
     /// Attach the flag state captured by a [`FeatureFlagEvaluations`] snapshot
@@ -327,42 +523,46 @@ impl Event {
     /// `send_feature_flags` would otherwise fetch — but without making an
     /// extra `/flags` request.
     ///
+    /// A property already on the event keeps its value, so the caller can
+    /// override a `$feature/<key>` or `$active_feature_flags` value whether it
+    /// is set before or after this call.
+    ///
     /// # Returns
     ///
     /// Returns `self` so calls can be chained before capture.
     pub fn with_flags(&mut self, flags: &FeatureFlagEvaluations) -> &mut Self {
         for (key, value) in flags.event_properties() {
-            self.properties.insert(key, value);
+            self.properties.entry(key).or_insert(value);
         }
         self
     }
 
     /// Return the event name.
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub fn event_name(&self) -> &str {
         &self.event
     }
 
     /// Return the event distinct ID.
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub fn distinct_id(&self) -> &str {
         &self.distinct_id
     }
 
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
-    pub(crate) fn uuid(&self) -> Uuid {
+    pub(crate) fn uuid(&self) -> Option<Uuid> {
         self.uuid
     }
 
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub(crate) fn timestamp(&self) -> Option<NaiveDateTime> {
         self.timestamp
     }
 
     /// Return the event properties.
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
     pub fn properties(&self) -> &HashMap<String, serde_json::Value> {
         &self.properties
+    }
+
+    /// Return the event's capture options, as set by [`Event::insert_option`].
+    pub fn options(&self) -> &HashMap<String, serde_json::Value> {
+        &self.options
     }
 
     /// Insert a default property only if the caller hasn't already set it.
@@ -375,409 +575,136 @@ impl Event {
         key: K,
         value: serde_json::Value,
     ) {
-        self.properties.entry(key.into()).or_insert(value);
+        fill_property(&mut self.properties, key.into(), value);
     }
 
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
+    /// Set a property, replacing any value it had.
+    pub(crate) fn set_prop<K: Into<String>>(&mut self, key: K, value: serde_json::Value) {
+        self.properties.insert(key.into(), value);
+    }
+
+    /// Insert a default option only if the caller left it unset (missing or `null`).
+    /// The personless default from [`Event::new_anon`] counts as unset.
+    pub(crate) fn insert_option_default<K: Into<String>>(
+        &mut self,
+        key: K,
+        value: serde_json::Value,
+    ) {
+        if value.is_null() {
+            return;
+        }
+        let key = key.into();
+        if key == PROCESS_PERSON_PROFILE_OPT && self.personless_default {
+            self.personless_default = false;
+            self.options.insert(key, value);
+            return;
+        }
+        let slot = self.options.entry(key).or_insert(serde_json::Value::Null);
+        if slot.is_null() {
+            *slot = value;
+        }
+    }
+
+    /// Fill the personless `process_person_profile: false` while the option is unset (missing
+    /// or `null`), on an event built by [`Event::new_anon`]. Runs with the other SDK values,
+    /// before `before_send`.
+    pub(crate) fn fill_personless_default(&mut self) {
+        if !self.personless {
+            return;
+        }
+        let slot = self
+            .options
+            .entry(PROCESS_PERSON_PROFILE_OPT.to_string())
+            .or_insert(serde_json::Value::Null);
+        if slot.is_null() {
+            *slot = serde_json::Value::Bool(false);
+            self.personless_default = true;
+        }
+    }
+
+    /// On an [`IDENTIFY_STYLE_EVENTS`] event, resolve `process_person_profile` from the
+    /// caller's own values before any layer fills it, so no layer can turn person processing
+    /// off for it.
+    ///
+    /// A caller option stays. Else a caller `$process_person_profile` property moves into
+    /// the option, so a layer cannot fill the option first. Else the option is set to
+    /// `true`, unless the SDK generated the distinct ID, which keeps the personless default.
+    /// A `null` option or property counts as unset; a `null` property stays for capture
+    /// to remove. Idempotent while no layer has filled the event.
+    pub(crate) fn apply_identify_style_person_default(&mut self) {
+        if !self.is_identify_style() {
+            return;
+        }
+        // The personless default from `new_anon` is the SDK's, not the caller's.
+        let caller_option = !self.personless_default
+            && self
+                .options
+                .get(PROCESS_PERSON_PROFILE_OPT)
+                .is_some_and(|value| !value.is_null());
+        if caller_option {
+            return;
+        }
+        let legacy = self
+            .properties
+            .get(PROCESS_PERSON_PROFILE_PROP)
+            .filter(|value| !value.is_null())
+            .cloned();
+        let value = match legacy {
+            Some(legacy) => {
+                self.properties.remove(PROCESS_PERSON_PROFILE_PROP);
+                legacy
+            }
+            None if self.personless => return,
+            None => serde_json::Value::Bool(true),
+        };
+        self.personless_default = false;
+        self.options
+            .insert(PROCESS_PERSON_PROFILE_OPT.into(), value);
+    }
+
+    /// On an [`IDENTIFY_STYLE_EVENTS`] event whose `process_person_profile` option is set,
+    /// remove the `$process_person_profile` property that capture would ignore. Runs right
+    /// before `before_send`, so the hook sees one value, and a hook that removes the option
+    /// cannot bring back a layered property value.
+    pub(crate) fn remove_shadowed_legacy_person_property(&mut self) {
+        let option_set = self
+            .options
+            .get(PROCESS_PERSON_PROFILE_OPT)
+            .is_some_and(|value| !value.is_null());
+        if option_set && self.is_identify_style() {
+            self.properties.remove(PROCESS_PERSON_PROFILE_PROP);
+        }
+    }
+
+    fn is_identify_style(&self) -> bool {
+        IDENTIFY_STYLE_EVENTS.contains(&self.event.as_str())
+    }
+
     pub(crate) fn groups(&self) -> &HashMap<String, String> {
         &self.groups
     }
 
     /// Mark this event as a minimized `$feature_flag_called` event. The capture
     /// pipeline then trims its properties to
-    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] after all enrichment.
+    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`] before `before_send`.
     pub(crate) fn mark_minimal_flag_called(&mut self) {
         self.minimal_flag_called = true;
     }
 
-    /// Whether this event is a minimized `$feature_flag_called` event.
-    #[cfg_attr(not(feature = "capture-v1"), allow(dead_code))]
-    pub(crate) fn is_minimal_flag_called(&self) -> bool {
-        self.minimal_flag_called
+    /// Move groups added with [`Event::add_group`] into the `$groups` property,
+    /// so `before_send` sees them and can change or remove them.
+    pub(crate) fn merge_groups_into_properties(&mut self) {
+        merge_groups_into(&mut self.properties, &self.groups);
+        self.groups.clear();
     }
 
-    /// Trim this event's properties to [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`]
-    /// when it is a minimized `$feature_flag_called` event; a no-op otherwise.
-    /// Called as the final capture step so no property added upstream survives
-    /// outside the allowlist.
-    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
+    /// Trim a minimized `$feature_flag_called` event to
+    /// [`MINIMAL_FLAG_CALLED_EVENT_PROPERTIES`]; other events are unchanged.
     pub(crate) fn apply_minimal_flag_called_allowlist(&mut self) {
         if self.minimal_flag_called {
             self.properties
                 .retain(|key, _| is_minimal_flag_called_property(key));
         }
-    }
-
-    /// Inject SDK metadata and `$groups` into V0 properties.
-    /// Call before constructing [`InnerEvent`] so that the wire payload matches
-    /// what the V0 `/capture` and `/batch` endpoints expect.
-    ///
-    /// `$process_person_profile` is already in `properties` when set by
-    /// constructors (`new_anon`, `add_group`) or explicit `insert_prop`.
-    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
-    pub(crate) fn prepare_for_v0(&mut self) {
-        if !self.properties.contains_key("$lib") {
-            self.properties.insert(
-                "$lib".into(),
-                serde_json::Value::String("posthog-rs".into()),
-            );
-        }
-
-        let version_str = CRATE_VERSION;
-        if !self.properties.contains_key("$lib_version") {
-            self.properties.insert(
-                "$lib_version".into(),
-                serde_json::Value::String(version_str.into()),
-            );
-        }
-
-        if !self.properties.contains_key("$lib_version__major") {
-            if let Ok(version) = version_str.parse::<Version>() {
-                self.properties.insert(
-                    "$lib_version__major".into(),
-                    serde_json::Value::Number(version.major.into()),
-                );
-                self.properties.insert(
-                    "$lib_version__minor".into(),
-                    serde_json::Value::Number(version.minor.into()),
-                );
-                self.properties.insert(
-                    "$lib_version__patch".into(),
-                    serde_json::Value::Number(version.patch.into()),
-                );
-            }
-        }
-
-        if !self.groups.is_empty() {
-            self.properties.insert(
-                "$groups".into(),
-                serde_json::Value::Object(
-                    self.groups
-                        .iter()
-                        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                        .collect(),
-                ),
-            );
-        }
-    }
-}
-
-/// Wrapper for the `/batch/` endpoint that includes the API key and options
-/// alongside the event array.
-#[cfg(not(feature = "capture-v1"))]
-#[derive(Serialize)]
-pub struct BatchRequest {
-    pub api_key: String,
-    pub historical_migration: bool,
-    /// Time the batch left the client, for server-side clock-skew correction.
-    pub sent_at: String,
-    pub batch: Vec<InnerEvent>,
-}
-
-// With `capture-v1` enabled nothing outside tests builds the V0 wire format.
-#[cfg_attr(feature = "capture-v1", allow(dead_code))]
-#[derive(Serialize)]
-pub struct InnerEvent {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api_key: Option<String>,
-    uuid: Uuid,
-    event: String,
-    distinct_id: String,
-    properties: HashMap<String, serde_json::Value>,
-    timestamp: Option<DateTime<Utc>>,
-}
-
-impl InnerEvent {
-    /// Construct a V0 single-event wire event. Expects that
-    /// [`Event::prepare_for_v0`] has already been called so properties are fully
-    /// decorated.
-    #[cfg(test)]
-    pub fn new(event: Event, api_key: String) -> Self {
-        Self::from_event(event, Some(api_key))
-    }
-
-    /// Construct a V0 batch wire event. The `/batch/` root `api_key` has
-    /// precedence on the backend, so per-event keys are intentionally omitted.
-    #[cfg(not(feature = "capture-v1"))]
-    pub(crate) fn new_for_batch(event: Event) -> Self {
-        Self::from_event(event, None)
-    }
-
-    #[cfg_attr(feature = "capture-v1", allow(dead_code))]
-    fn from_event(event: Event, api_key: Option<String>) -> Self {
-        Self {
-            api_key,
-            uuid: event.uuid,
-            event: event.event,
-            distinct_id: event.distinct_id,
-            properties: event.properties,
-            timestamp: event.timestamp.map(|timestamp| timestamp.and_utc()),
-        }
-    }
-}
-
-#[cfg(test)]
-pub mod tests {
-    use uuid::Uuid;
-
-    use crate::{event::InnerEvent, Error, Event};
-
-    /// Helper: prepares an event for V0 and constructs the InnerEvent.
-    fn build_v0(mut event: Event) -> InnerEvent {
-        event.prepare_for_v0();
-        InnerEvent::new(event, "test_api_key".to_string())
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    fn build_v0_batch_event(mut event: Event) -> InnerEvent {
-        event.prepare_for_v0();
-        InnerEvent::new_for_batch(event)
-    }
-
-    #[test]
-    fn v0_adds_lib_properties() {
-        let mut event = Event::new("unit test event", "1234");
-        event.insert_prop("key1", "value1").unwrap();
-
-        let inner = build_v0(event);
-        assert_eq!(
-            inner.properties.get("$lib"),
-            Some(&serde_json::Value::String("posthog-rs".to_string()))
-        );
-    }
-
-    #[test]
-    fn v0_serializes_distinct_id_at_root() {
-        let inner = build_v0(Event::new("test", "user1"));
-        let json = serde_json::to_value(&inner).unwrap();
-
-        // Canonical field at the event root; the legacy `$distinct_id` spelling
-        // (only tolerated by capture via a serde alias) must not be emitted.
-        assert_eq!(json["distinct_id"], "user1");
-        assert!(json.get("$distinct_id").is_none());
-    }
-
-    #[cfg(not(feature = "capture-v1"))]
-    #[test]
-    fn v0_batch_serializes_distinct_id_at_root() {
-        use crate::event::BatchRequest;
-
-        let batch = BatchRequest {
-            api_key: "test_api_key".to_string(),
-            historical_migration: false,
-            sent_at: "2026-01-01T00:00:00Z".to_string(),
-            batch: vec![
-                build_v0_batch_event(Event::new("e1", "user1")),
-                build_v0_batch_event(Event::new("e2", "user2")),
-            ],
-        };
-        let json = serde_json::to_value(&batch).unwrap();
-
-        assert_eq!(json["api_key"], "test_api_key");
-
-        let events = json["batch"].as_array().expect("batch is an array");
-        for (event, expected_id) in events.iter().zip(["user1", "user2"]) {
-            assert_eq!(event["distinct_id"], expected_id);
-            assert!(event.get("$distinct_id").is_none());
-            assert!(event.get("api_key").is_none());
-        }
-    }
-
-    #[test]
-    fn v0_serializes_non_utc_timestamp_as_equivalent_utc_instant() {
-        let mut event = Event::new("test", "user1");
-        event
-            .set_timestamp(
-                chrono::DateTime::parse_from_rfc3339("2023-01-01T10:00:00.123+03:00").unwrap(),
-            )
-            .unwrap();
-
-        let json = serde_json::to_value(build_v0(event)).unwrap();
-        assert_eq!(json["timestamp"], "2023-01-01T07:00:00.123Z");
-    }
-
-    #[test]
-    fn v0_includes_auto_generated_uuid() {
-        let event = Event::new("test", "user1");
-        let inner = build_v0(event);
-        let json = serde_json::to_value(&inner).unwrap();
-
-        let uuid_str = json["uuid"].as_str().expect("uuid should be present");
-        Uuid::parse_str(uuid_str).expect("uuid should be valid");
-    }
-
-    #[test]
-    fn v0_preserves_overridden_uuid() {
-        let uuid = Uuid::now_v7();
-        let mut event = Event::new("test", "user1");
-        event.set_uuid(uuid);
-
-        let inner = build_v0(event);
-        let json = serde_json::to_value(&inner).unwrap();
-        assert_eq!(json["uuid"], uuid.to_string());
-    }
-
-    #[test]
-    fn v0_preserves_existing_lib_properties() {
-        let mut event = Event::new("forwarded event", "user1");
-        event.insert_prop("$lib", "posthog-js").unwrap();
-        event.insert_prop("$lib_version", "1.42.0").unwrap();
-        event.insert_prop("$lib_version__major", 1u64).unwrap();
-
-        let inner = build_v0(event);
-        let props = &inner.properties;
-
-        assert_eq!(
-            props.get("$lib"),
-            Some(&serde_json::Value::String("posthog-js".to_string()))
-        );
-        assert_eq!(
-            props.get("$lib_version"),
-            Some(&serde_json::Value::String("1.42.0".to_string()))
-        );
-        assert_eq!(
-            props.get("$lib_version__major"),
-            Some(&serde_json::Value::Number(1u64.into()))
-        );
-    }
-
-    #[test]
-    fn v0_injects_process_person_profile_for_anon() {
-        let event = Event::new_anon("anon_test");
-        let inner = build_v0(event);
-        assert_eq!(
-            inner.properties.get("$process_person_profile"),
-            Some(&serde_json::Value::Bool(false))
-        );
-    }
-
-    #[test]
-    fn v0_injects_process_person_profile_for_group() {
-        let mut event = Event::new("test", "user1");
-        event.add_group("company", "acme");
-        let inner = build_v0(event);
-        assert_eq!(
-            inner.properties.get("$process_person_profile"),
-            Some(&serde_json::Value::Bool(true))
-        );
-    }
-
-    #[test]
-    fn v0_no_process_person_profile_when_unset() {
-        let event = Event::new("test", "user1");
-        let inner = build_v0(event);
-        assert!(!inner.properties.contains_key("$process_person_profile"));
-    }
-
-    #[test]
-    fn v0_user_property_wins_over_constructor_default() {
-        let mut event = Event::new_anon("test");
-        // new_anon sets $process_person_profile=false; explicit insert overwrites.
-        event.insert_prop("$process_person_profile", true).unwrap();
-        let inner = build_v0(event);
-        assert_eq!(
-            inner.properties.get("$process_person_profile"),
-            Some(&serde_json::Value::Bool(true)),
-        );
-    }
-
-    #[test]
-    fn v0_identified_event_with_explicit_personless() {
-        let mut event = Event::new("test", "user1");
-        event.insert_prop("$process_person_profile", false).unwrap();
-        let inner = build_v0(event);
-        assert_eq!(
-            inner.properties.get("$process_person_profile"),
-            Some(&serde_json::Value::Bool(false)),
-        );
-    }
-
-    #[test]
-    fn v0_add_group_overrides_anon_person_profile() {
-        let mut event = Event::new_anon("test");
-        // new_anon sets $process_person_profile=false; add_group forces true.
-        event.add_group("company", "acme");
-        let inner = build_v0(event);
-        assert_eq!(
-            inner.properties.get("$process_person_profile"),
-            Some(&serde_json::Value::Bool(true)),
-        );
-        let groups = inner
-            .properties
-            .get("$groups")
-            .unwrap()
-            .as_object()
-            .unwrap();
-        assert_eq!(groups.get("company").unwrap().as_str().unwrap(), "acme");
-    }
-
-    #[test]
-    fn v0_group_identify_payload() {
-        let event = Event::group_identify(
-            "company".to_string(),
-            "acme_123".to_string(),
-            serde_json::json!({ "name": "Acme Inc.", "employees": 42 }),
-        )
-        .expect("group_identify should succeed")
-        .expect("group_identify should not be dropped");
-
-        let inner = build_v0(event);
-        let json = serde_json::to_value(&inner).unwrap();
-
-        assert_eq!(json["event"], "$groupidentify");
-        assert_eq!(json["distinct_id"], "$company_acme_123");
-        assert_eq!(json["properties"]["$group_type"], "company");
-        assert_eq!(json["properties"]["$group_key"], "acme_123");
-        assert_eq!(json["properties"]["$group_set"]["name"], "Acme Inc.");
-        assert_eq!(json["properties"]["$group_set"]["employees"], 42);
-        assert!(!inner.properties.contains_key("$process_person_profile"));
-    }
-
-    #[test]
-    fn group_identify_rejects_blank_keys() {
-        assert!(
-            Event::group_identify("".to_string(), "k".to_string(), serde_json::json!({}))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            Event::group_identify("   ".to_string(), "k".to_string(), serde_json::json!({}))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            Event::group_identify("t".to_string(), "".to_string(), serde_json::json!({}))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            Event::group_identify("t".to_string(), "   ".to_string(), serde_json::json!({}))
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn group_identify_rejects_non_object_properties() {
-        let err = Event::group_identify("company".to_string(), "acme_123".to_string(), 42)
-            .expect_err("non-object properties should be rejected");
-        assert!(matches!(err, Error::Serialization(_)));
-
-        let err = Event::group_identify(
-            "company".to_string(),
-            "acme_123".to_string(),
-            serde_json::json!(["a", "b"]),
-        )
-        .expect_err("array properties should be rejected");
-        assert!(matches!(err, Error::Serialization(_)));
-
-        let err = Event::group_identify(
-            "company".to_string(),
-            "acme_123".to_string(),
-            serde_json::Value::Null,
-        )
-        .expect_err("null properties should be rejected");
-        assert!(matches!(err, Error::Serialization(_)));
     }
 }
 
@@ -787,26 +714,67 @@ mod test {
 
     use chrono::{DateTime, Utc};
 
+    use uuid::Uuid;
+
     use super::Event;
+    use crate::constants::PROCESS_PERSON_PROFILE_OPT;
+    use crate::Error;
 
     #[test]
     fn test_timestamp_is_correctly_set() {
         let mut event = Event::new_anon("test");
         let ts = DateTime::parse_from_rfc3339("2023-01-01T10:00:00+03:00").unwrap();
-        event.set_timestamp(ts).expect("Date is not in the future");
+        event.set_timestamp(ts).unwrap();
         let expected = DateTime::parse_from_rfc3339("2023-01-01T07:00:00Z").unwrap();
         assert_eq!(event.timestamp.unwrap(), expected.naive_utc())
     }
 
     #[test]
-    fn test_timestamp_is_correctly_set_with_future_date() {
+    fn future_timestamp_is_kept_for_posthog_to_handle() {
         let mut event = Event::new_anon("test");
         let ts = Utc::now() + Duration::from_secs(60);
-        event
-            .set_timestamp(ts)
-            .expect_err("Date is in the future, should be rejected");
+        event.set_timestamp(ts).unwrap();
+        assert_eq!(event.timestamp, Some(ts.naive_utc()));
+    }
 
-        assert!(event.timestamp.is_none())
+    #[test]
+    fn blank_distinct_id_makes_an_anonymous_event() {
+        for blank in ["", " ", " \n\t "] {
+            let event = Event::new("test", blank);
+            let generated = Uuid::parse_str(event.distinct_id()).unwrap();
+            assert_eq!(generated.get_version_num(), 7);
+            assert_eq!(
+                event.options().get(PROCESS_PERSON_PROFILE_OPT),
+                Some(&serde_json::json!(false))
+            );
+        }
+        let event = Event::new("test", " user-1 ");
+        assert_eq!(event.distinct_id(), " user-1 ");
+        assert!(event.options().is_empty());
+    }
+
+    #[test]
+    fn uuid_is_assigned_once_per_event_unless_set() {
+        let template = Event::new("test", "user1");
+        assert_eq!(template.uuid(), None);
+
+        // Each clone handed to the client gets its own uuid, kept on reassignment.
+        let mut first = template.clone();
+        let mut second = template.clone();
+        first.ensure_uuid();
+        second.ensure_uuid();
+        let assigned = first.uuid().unwrap();
+        assert_eq!(assigned.get_version_num(), 7);
+        assert_ne!(second.uuid(), Some(assigned));
+        first.ensure_uuid();
+        assert_eq!(first.uuid(), Some(assigned));
+
+        // A caller's uuid is never replaced.
+        let caller = Uuid::now_v7();
+        let mut event = template;
+        event.set_uuid(caller);
+        event.ensure_uuid();
+        assert_eq!(event.uuid(), Some(caller));
     }
 
     #[test]
@@ -828,5 +796,69 @@ mod test {
         event.set_timestamp(caller).unwrap();
         event.ensure_timestamp(now);
         assert_eq!(event.timestamp, Some(caller.naive_utc()));
+    }
+
+    #[test]
+    fn options_insert_replace_and_remove() {
+        let mut event = Event::new("test", "user1");
+        event.insert_option("process_person_profile", true).unwrap();
+        event
+            .insert_option("process_person_profile", false)
+            .unwrap();
+        event.insert_option("future_option", vec![1, 2]).unwrap();
+        assert_eq!(
+            event.options().get("process_person_profile"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            event.remove_option("future_option"),
+            Some(serde_json::json!([1, 2]))
+        );
+        assert_eq!(event.remove_option("future_option"), None);
+        assert_eq!(event.options().len(), 1);
+        // Options never leak into properties.
+        assert!(event.properties().is_empty());
+
+        // JSON object keys must be strings, so a tuple-keyed map cannot serialize.
+        let unserializable: std::collections::HashMap<(u8, u8), u8> = [((1, 2), 3)].into();
+        let err = event
+            .insert_option("bad", unserializable)
+            .expect_err("a map with non-string keys cannot serialize");
+        assert!(matches!(err, Error::Serialization(_)));
+        assert!(!event.options().contains_key("bad"));
+    }
+
+    #[test]
+    fn alias_rejects_blank_ids() {
+        for (previous_id, distinct_id) in
+            [("", "user"), ("   ", "user"), ("anon", ""), ("anon", "   ")]
+        {
+            let err =
+                Event::alias(previous_id, distinct_id).expect_err("a blank ID should be rejected");
+            assert!(matches!(err, Error::InvalidArgument(_)));
+        }
+    }
+
+    #[test]
+    fn group_identify_rejects_blank_keys() {
+        for (group_type, group_key) in [("", "key"), ("   ", "key"), ("type", ""), ("type", "   ")]
+        {
+            let err = Event::group_identify(group_type, group_key, serde_json::json!({}))
+                .expect_err("a blank group_type or group_key should be rejected");
+            assert!(matches!(err, Error::InvalidArgument(_)));
+        }
+    }
+
+    #[test]
+    fn group_identify_rejects_non_object_properties() {
+        for properties in [
+            serde_json::json!(42),
+            serde_json::json!(["a", "b"]),
+            serde_json::Value::Null,
+        ] {
+            let err = Event::group_identify("company", "acme_123", properties)
+                .expect_err("non-object properties should be rejected");
+            assert!(matches!(err, Error::Serialization(_)));
+        }
     }
 }
