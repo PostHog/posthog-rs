@@ -3,7 +3,6 @@
 mod common;
 mod email_support;
 
-use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +10,7 @@ use std::time::Duration;
 use common::default_user_agent;
 use email_support::{
     accepted, connection_counting_store, options, unavailable, Answer, FakePostHog, ScriptedServer,
-    SendApi, StoredCategory, MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
+    MESSAGE_ID, SEND_PATH, TEMPLATE_ID,
 };
 use posthog::{
     CodeEmail, EmailAttachment, EmailDeliveryStatus, EmailErrorKind, MessageCategory,
@@ -246,41 +245,87 @@ fn a_posthog_without_the_upload_route_sends_nothing_with_files() {
 }
 
 #[test]
-fn a_send_leaves_an_existing_category_as_it_is() {
-    let api = SendApi::start();
-    let client = posthog::client(options(&api.url).build().unwrap());
-    let send = |category: MessageCategory| {
-        client
-            .emails()
-            .send(
-                CodeEmail::new("user@example.com", "monthly-digest", "Your month")
-                    .html("<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>")
-                    .category(category),
-            )
-            .unwrap();
-    };
+fn a_blocking_send_sends_its_category() {
+    let server = ScriptedServer::start(vec![accepted(), accepted(), accepted()]);
+    let client = client_for(&server);
 
-    send(
-        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
-            .description("Monthly product news"),
-    );
-    send(
-        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Product news")
-            .description(""),
-    );
+    let with_description = client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "monthly-digest", "Your month")
+                .html(r#"<p>News. <a href="{{ unsubscribe_url }}">Unsubscribe</a></p>"#)
+                .category(
+                    MessageCategory::new(
+                        "newsletter",
+                        MessageCategoryType::Marketing,
+                        "Newsletter",
+                    )
+                    .description("Monthly product news"),
+                ),
+        )
+        .unwrap();
+    let with_empty_description = client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "monthly-digest", "Your month")
+                .html(r#"<p>News. <a href="{{ unsubscribe_url }}">Unsubscribe</a></p>"#)
+                .category(
+                    MessageCategory::new(
+                        "newsletter",
+                        MessageCategoryType::Marketing,
+                        "Newsletter",
+                    )
+                    .description(""),
+                ),
+        )
+        .unwrap();
+    let without_description = client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "order-receipt", "Your receipt")
+                .text("Thanks.")
+                .category(MessageCategory::new(
+                    "receipts",
+                    MessageCategoryType::Transactional,
+                    "Receipts",
+                )),
+        )
+        .unwrap();
 
+    assert_eq!(with_description.id, MESSAGE_ID);
+    assert_eq!(with_empty_description.id, MESSAGE_ID);
+    assert_eq!(without_description.id, MESSAGE_ID);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].path, SEND_PATH);
     assert_eq!(
-        api.categories(),
-        HashMap::from([(
-            "newsletter".to_string(),
-            StoredCategory {
-                category_type: "marketing".into(),
-                name: "Newsletter".into(),
-                description: "Monthly product news".into(),
-            }
-        )])
+        requests[0].json()["category"],
+        json!({
+            "key": "newsletter",
+            "type": "marketing",
+            "name": "Newsletter",
+            "description": "Monthly product news",
+        })
     );
-    assert_eq!(api.sent().len(), 2);
+    assert_eq!(requests[1].path, SEND_PATH);
+    assert_eq!(
+        requests[1].json()["category"],
+        json!({
+            "key": "newsletter",
+            "type": "marketing",
+            "name": "Newsletter",
+            "description": "",
+        })
+    );
+    assert_eq!(requests[2].path, SEND_PATH);
+    assert_eq!(
+        requests[2].json()["category"],
+        json!({
+            "key": "receipts",
+            "type": "transactional",
+            "name": "Receipts",
+        })
+    );
 }
 
 #[test]

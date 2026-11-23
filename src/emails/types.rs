@@ -17,8 +17,10 @@ pub(crate) struct SendOptions {
 /// the template's ID.
 ///
 /// The template sets its own sender, subject and content. A template made in
-/// PostHog sends transactional email only: PostHog refuses a send of a
-/// template in a marketing category with `marketing_template`.
+/// PostHog sends transactional email only: PostHog checks whether the saved
+/// template is enabled for transactional sends first
+/// (`template_not_transactional`), and refuses an otherwise sendable template
+/// in a marketing category with `marketing_template`.
 ///
 /// ```
 /// use posthog::TemplateEmail;
@@ -82,9 +84,10 @@ impl TemplateEmail {
 ///
 /// It needs [`html`](Self::html), [`text`](Self::text) or both. Without
 /// `text`, PostHog derives it from the `html`. To send a React email, render
-/// it to HTML in your app and pass the HTML. PostHog refuses a send whose
-/// `template_key` names a template in a marketing category with
-/// `marketing_template`.
+/// it to HTML in your app and pass the HTML. When `template_key` names a
+/// saved template, PostHog checks whether it is enabled for transactional
+/// sends first (`template_not_transactional`), and refuses an otherwise
+/// sendable template in a marketing category with `marketing_template`.
 ///
 /// ```
 /// use posthog::CodeEmail;
@@ -249,22 +252,36 @@ impl CodeEmail {
     }
 
     /// The email's message category: [`EmailCategory::Transactional`], or a
-    /// [`MessageCategory`] that the send defines. Without it, the send follows
-    /// the transactional category of the template that `template_key` names,
-    /// or is transactional with no category.
+    /// [`MessageCategory`] that the send defines. When code-send categories
+    /// are enabled for the project, leaving `category` out follows the
+    /// transactional category of the template that `template_key` names, or
+    /// sends as transactional with no category; when code-send categories are
+    /// disabled for the project, leaving `category` out sends as transactional
+    /// with no category, an explicit [`MessageCategory`] returns HTTP 400
+    /// `categories_not_enabled`, and an older server rejects `category` with
+    /// HTTP 400.
     ///
     /// [`EmailCategory::Transactional`] asks for transactional email with no
     /// category. PostHog refuses the send with:
     ///
-    /// - `category_mismatch` when the key exists with another type, or when
-    ///   `template_key` names a template in another category, including
-    ///   [`EmailCategory::Transactional`] for a template in a category,
+    /// - `categories_not_enabled` when code-send categories aren't enabled for
+    ///   the project yet,
+    /// - `category_mismatch` when the key exists with another type, when
+    ///   `template_key` names a template in another category (including
+    ///   [`EmailCategory::Transactional`] for a template in a category), or
+    ///   when `template_key` names an existing saved template with no category
+    ///   and the send passes an explicit [`MessageCategory`] (omit `category`
+    ///   or pass [`EmailCategory::Transactional`] instead),
     /// - `too_many_categories` when it would create a category past the
     ///   project's limit,
-    /// - `unsubscribe_link_required` when a marketing email has no
-    ///   `{{ unsubscribe_url }}` placeholder,
+    /// - `unsubscribe_link_required` when a marketing email with `html` has no
+    ///   clickable `<a href="{{ unsubscribe_url }}">` link, or a plain-text
+    ///   marketing email without `html` has no `{{ unsubscribe_url }}` in
+    ///   `text`,
     /// - `copies_not_allowed` when a marketing email has `cc` or `bcc`
     ///   recipients,
+    /// - `workflow_can_wait` when a marketing email carries attachments on a
+    ///   workflow that can defer delivery,
     /// - `recipient_opted_out` when the recipient opted out of the category
     ///   or of all marketing email.
     pub fn category(mut self, category: impl Into<EmailCategory>) -> Self {
@@ -321,20 +338,25 @@ impl From<MessageCategory> for EmailCategory {
 
 /// A message category, defined in code by its key.
 ///
-/// PostHog creates the category with its name and description on the first
-/// send with its key. Later sends with that key keep the category's name and
-/// description, so change them in PostHog. A key that exists with another
-/// type refuses the send with `category_mismatch`.
+/// When code-send categories are enabled for the project, PostHog creates the
+/// category with its name and description on the first send with its key.
+/// Later sends with that key keep the category's name and description, so
+/// change them in PostHog. If code-send categories aren't enabled for the
+/// project yet, PostHog returns HTTP 400 `categories_not_enabled` (and an
+/// older server rejects `category` with HTTP 400). A key that exists with
+/// another type refuses the send with `category_mismatch`.
 ///
-/// A marketing send honors the recipient's opt-outs, and its `html` (or
-/// `text`, without `html`) needs the `{{ unsubscribe_url }}` placeholder.
+/// A marketing send honors the recipient's opt-outs. When `html` is present,
+/// it requires a clickable `<a href="{{ unsubscribe_url }}">` link; plain-text
+/// sends without `html` need `{{ unsubscribe_url }}` in `text`. Marketing
+/// sends cannot have `cc` or `bcc` (`copies_not_allowed`) and cannot carry
+/// attachments on workflows that can defer delivery (`workflow_can_wait`).
 ///
 /// ```
 /// use posthog::{CodeEmail, MessageCategory, MessageCategoryType};
 ///
-/// # let rendered_html = String::new();
 /// let email = CodeEmail::new("jane@example.com", "monthly-digest", "Your month in review")
-///     .html(rendered_html)
+///     .html(r#"<p>What's new this month.</p><p><a href="{{ unsubscribe_url }}">Unsubscribe</a></p>"#)
 ///     .category(
 ///         MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
 ///             .description("Monthly product news"),

@@ -829,27 +829,6 @@ async fn transactional_on_a_template_in_a_category_is_refused() {
 }
 
 #[tokio::test]
-async fn a_send_for_a_template_in_a_marketing_category_is_refused() {
-    let api = SendApi::start_async()
-        .await
-        .with_category("newsletter", "marketing", "Newsletter", "")
-        .with_template("november-digest", Some("newsletter"));
-    let client = posthog::client(options(&api.url).build().unwrap()).await;
-
-    let error = client.emails().send(digest_email()).await.unwrap_err();
-
-    assert_eq!(
-        (error.code(), error.kind(), error.status()),
-        (
-            "marketing_template",
-            EmailErrorKind::ValidationError,
-            Some(400)
-        )
-    );
-    assert_eq!(api.sent(), vec![]);
-}
-
-#[tokio::test]
 async fn a_send_creates_its_category_in_the_project() {
     let cases = [
         (
@@ -1130,16 +1109,6 @@ async fn refusals_keep_posthogs_code_and_are_not_retried() {
             EmailErrorKind::InvalidIdempotentRequest,
         ),
         (422, "recipient_suppressed", EmailErrorKind::ValidationError),
-        (400, "too_many_categories", EmailErrorKind::ValidationError),
-        (400, "category_mismatch", EmailErrorKind::ValidationError),
-        (
-            400,
-            "unsubscribe_link_required",
-            EmailErrorKind::ValidationError,
-        ),
-        (400, "copies_not_allowed", EmailErrorKind::ValidationError),
-        (400, "marketing_template", EmailErrorKind::ValidationError),
-        (422, "recipient_opted_out", EmailErrorKind::ValidationError),
     ];
     for (status, code, kind) in cases {
         let server = ScriptedServer::start_async(vec![Answer::json(
@@ -1159,6 +1128,134 @@ async fn refusals_keep_posthogs_code_and_are_not_retried() {
         assert_eq!(error.field(), Some("to"));
         assert_eq!(error.fix(), Some("Fix it."));
         assert_eq!(server.requests().len(), 1, "{status} {code}");
+    }
+}
+
+#[tokio::test]
+async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
+    let marketing = || {
+        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
+            .description("Monthly product news")
+    };
+    let cases = [
+        (
+            400,
+            "categories_not_enabled",
+            Some("category"),
+            digest_email().category(marketing()),
+        ),
+        (
+            400,
+            "category_mismatch",
+            Some("category"),
+            digest_email().category(marketing()),
+        ),
+        (
+            400,
+            "too_many_categories",
+            Some("category"),
+            digest_email().category(marketing()),
+        ),
+        (
+            400,
+            "unsubscribe_link_required",
+            Some("html"),
+            CodeEmail::new("user@example.com", "november-digest", "Your November")
+                .html("<p>No link here.</p>")
+                .category(marketing()),
+        ),
+        (
+            400,
+            "copies_not_allowed",
+            Some("cc"),
+            digest_email().cc("copy@example.com").category(marketing()),
+        ),
+        (
+            422,
+            "recipient_opted_out",
+            Some("to"),
+            digest_email().category(marketing()),
+        ),
+    ];
+    for (status, code, attr, email) in cases {
+        let server = ScriptedServer::start_async(vec![Answer::json(
+            status,
+            json!({"code": code, "detail": "Refused.", "attr": attr, "fix": "Fix it."}),
+        )])
+        .await;
+        let client = client_for(&server).await;
+        let error = client.emails().send(email).await.unwrap_err();
+        assert_eq!(error.code(), code);
+        assert_eq!(
+            error.kind(),
+            EmailErrorKind::ValidationError,
+            "{status} {code}"
+        );
+        assert_eq!(error.status(), Some(status));
+        assert_eq!(error.field(), attr);
+        assert_eq!(error.fix(), Some("Fix it."));
+        assert_eq!(server.requests().len(), 1, "{status} {code}");
+    }
+}
+
+#[tokio::test]
+async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_sends() {
+    let server = httpmock::MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method("POST").path(SEND_PATH);
+            then.respond_with(|request: &httpmock::HttpMockRequest| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body_vec()).unwrap_or_default();
+                let has_category = body
+                    .as_object()
+                    .is_some_and(|fields| fields.contains_key("category"));
+                if has_category {
+                    httpmock::HttpMockResponse::builder()
+                        .status(400)
+                        .header("content-type", "application/json")
+                        .body(
+                            json!({
+                                "type": "validation_error",
+                                "code": "invalid_input",
+                                "detail": "Unknown field category.",
+                                "attr": "category",
+                            })
+                            .to_string(),
+                        )
+                        .build()
+                } else {
+                    httpmock::HttpMockResponse::builder()
+                        .status(202)
+                        .header("content-type", "application/json")
+                        .body(json!({"message_id": MESSAGE_ID}).to_string())
+                        .build()
+                }
+            });
+        })
+        .await;
+    let client = posthog::client(options(&server.base_url()).build().unwrap()).await;
+
+    let sent = client
+        .emails()
+        .send(CodeEmail::new("user@example.com", "welcome", "Welcome").text("Hi"))
+        .await
+        .unwrap();
+    assert_eq!(sent.id, MESSAGE_ID);
+
+    for category in [
+        EmailCategory::Transactional,
+        MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter").into(),
+    ] {
+        let error = client
+            .emails()
+            .send(digest_email().category(category))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid_input");
+        assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+        assert_eq!(error.status(), Some(400));
+        assert_eq!(error.field(), Some("category"));
     }
 }
 

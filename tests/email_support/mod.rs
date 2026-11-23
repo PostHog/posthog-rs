@@ -204,9 +204,13 @@ struct Project {
 /// leaves an existing one as it is. A `template_key` that names a template in
 /// a marketing category is refused with `marketing_template`. One that names
 /// another of the project's templates follows that template's category when
-/// the send leaves `category` out. A category other than the template's, or
-/// `"transactional"` for a template in a category, is refused with
-/// `category_mismatch`.
+/// the send leaves `category` out. A category other than the template's,
+/// `"transactional"` for a template in a category, or an explicit category
+/// object for a saved template with no category is refused with
+/// `category_mismatch`. `"category": null` is refused at the JSON boundary.
+/// Marketing sends require a clickable `<a href="{{ unsubscribe_url }}">` link
+/// when `html` is present (or `{{ unsubscribe_url }}` in `text` without `html`)
+/// and refuse nonempty `cc`/`bcc` with `copies_not_allowed`.
 pub struct SendApi {
     pub url: String,
     project: Arc<Mutex<Project>>,
@@ -325,8 +329,11 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
     let text = |name: &str| fields.get(name).and_then(|value| value.as_str());
     let to = text("to").ok_or(INVALID)?.to_string();
     let template_key = text("template_key").ok_or(INVALID)?;
-    let category = fields.get("category").unwrap_or(&serde_json::Value::Null);
-    let defined = defined_category(category)?;
+    let category = fields.get("category");
+    let defined = match category {
+        None => None,
+        Some(value) => defined_category(value)?,
+    };
     if let Some(template_category) = project.templates.get(template_key).cloned() {
         if template_category
             .as_ref()
@@ -335,8 +342,8 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
             return Err((400, "marketing_template"));
         }
         let follows = match (&template_category, category, &defined) {
-            (_, serde_json::Value::Null, _) => true,
-            (None, serde_json::Value::String(_), _) => true,
+            (_, None, _) => true,
+            (None, Some(serde_json::Value::String(_)), _) => true,
             (Some(key), _, Some(defined)) => {
                 key == text_of(defined, "key")
                     && project.categories[key].category_type == text_of(defined, "type")
@@ -358,10 +365,19 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
             return Err((400, "category_mismatch"));
         }
     }
-    let unsubscribe = regex::Regex::new(r"\{\{\s*unsubscribe_url\s*\}\}").unwrap();
-    let content = text("html").or_else(|| text("text")).unwrap_or_default();
-    if category_type == "marketing" && !unsubscribe.is_match(content) {
-        return Err((400, "unsubscribe_link_required"));
+    if category_type == "marketing" {
+        let has_copies = ["cc", "bcc"].iter().any(|field| {
+            fields
+                .get(*field)
+                .and_then(|value| value.as_array())
+                .is_some_and(|list| !list.is_empty())
+        });
+        if has_copies {
+            return Err((400, "copies_not_allowed"));
+        }
+        if !has_unsubscribe_link(text("html"), text("text")) {
+            return Err((400, "unsubscribe_link_required"));
+        }
     }
     project
         .categories
@@ -378,17 +394,34 @@ fn code_send(body: &serde_json::Value, project: &mut Project) -> Result<Sent, Re
     Ok((to, Some(key.to_string())))
 }
 
+fn has_unsubscribe_link(html: Option<&str>, text: Option<&str>) -> bool {
+    match html.filter(|body| !body.is_empty()) {
+        Some(html) => {
+            let comments = regex::Regex::new(r"(?s)<!--.*?-->").unwrap();
+            let stripped = comments.replace_all(html, "");
+            let clickable = regex::Regex::new(
+                r#"(?is)<a\b[^>]*\bhref\s*=\s*(?:"\s*\{\{\s*unsubscribe_url\s*\}\}\s*"|'\s*\{\{\s*unsubscribe_url\s*\}\}\s*')"#,
+            )
+            .unwrap();
+            clickable.is_match(&stripped)
+        }
+        None => {
+            let placeholder = regex::Regex::new(r"\{\{\s*unsubscribe_url\s*\}\}").unwrap();
+            placeholder.is_match(text.unwrap_or_default())
+        }
+    }
+}
+
 fn text_of<'a>(fields: &'a serde_json::Map<String, serde_json::Value>, name: &str) -> &'a str {
     fields[name].as_str().unwrap()
 }
 
-/// A category object's fields, `None` for no category or `"transactional"`,
-/// or a refusal for anything else.
+/// A category object's fields, `None` for `"transactional"`, or a refusal for
+/// anything else (including explicit JSON `null`).
 fn defined_category(
     category: &serde_json::Value,
 ) -> Result<Option<&serde_json::Map<String, serde_json::Value>>, Refusal> {
     match category {
-        serde_json::Value::Null => Ok(None),
         serde_json::Value::String(value) if value == "transactional" => Ok(None),
         serde_json::Value::Object(fields) => {
             let valid = fields
