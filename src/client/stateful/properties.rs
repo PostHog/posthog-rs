@@ -61,7 +61,8 @@ impl Client {
     /// without identifying the user. Opted-out/Never/disabled/closed clients no-op.
     /// Changed membership replaces scoped flag targeting and reloads flags. Supplied
     /// properties for the same membership merge without an immediate reload, leaving
-    /// out of flag targeting any value nested more than 100 levels deep.
+    /// out of flag targeting any value nested more than 100 levels deep; a load
+    /// already in flight continues with the new targeting.
     /// Membership is visible before hooks run; rejected events do not roll it back
     /// or schedule replay. Persistence and delivery remain asynchronous.
     pub fn group(&self, group: impl Into<Group>) {
@@ -73,7 +74,8 @@ impl Client {
     /// every valid call enables processing and attempts an event unless opted out,
     /// Never, disabled or closed. Rejection does not roll back processing or replay.
     /// Properties mirror into flag targeting only for the remembered key of this
-    /// type, without an immediate reload.
+    /// type, without an immediate reload; a load already in flight continues with
+    /// the new targeting.
     pub fn group_identify(&self, group: impl Into<Group>) {
         self.capture_group(group, false);
     }
