@@ -1380,6 +1380,16 @@ async fn marketing_code_send_uploads_attachment_before_posthog_refuses_the_send(
         assert_eq!(error.why(), expected_why, "{}", code);
         assert_eq!(error.fix(), expected_fix, "{}", code);
         assert_eq!(
+            posthog.events(),
+            vec![
+                "uploads".to_string(),
+                format!("put:{PDF_SHA256}"),
+                "send".to_string(),
+            ],
+            "signed upload must complete before the first and only send ({})",
+            code
+        );
+        assert_eq!(
             posthog.versions(PDF_SHA256),
             vec![PDF.to_vec()],
             "signed upload must store exact PDF bytes before send refusal ({})",
