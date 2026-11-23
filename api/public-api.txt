@@ -297,8 +297,6 @@ pub fn posthog::SendEmail::from(posthog::TemplateEmail) -> Self
 #[non_exhaustive] pub enum posthog::SendEmailStatus
 pub posthog::SendEmailStatus::Queued
 pub posthog::SendEmailStatus::Scheduled
-impl posthog::SendEmailStatus
-pub fn posthog::SendEmailStatus::as_str(self) -> &'static str
 pub struct posthog::AsyncFlagPoller
 impl posthog::AsyncFlagPoller
 pub async fn posthog::AsyncFlagPoller::is_running(&self) -> bool
@@ -686,8 +684,9 @@ pub fn posthog::RequestContext::session_id(self, impl core::convert::Into<alloc:
 pub posthog::SendEmailResult::id: alloc::string::String
 pub posthog::SendEmailResult::replayed: bool
 pub posthog::SendEmailResult::scheduled_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
-pub posthog::SendEmailResult::status: posthog::SendEmailStatus
 pub posthog::SendEmailResult::warnings: alloc::vec::Vec<posthog::EmailWarning>
+impl posthog::SendEmailResult
+pub fn posthog::SendEmailResult::status(&self) -> posthog::SendEmailStatus
 pub struct posthog::TemplateEmail
 impl posthog::TemplateEmail
 pub fn posthog::TemplateEmail::distinct_id(self, impl core::convert::Into<alloc::string::String>) -> Self

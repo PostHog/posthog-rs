@@ -48,7 +48,7 @@ impl<'a> Emails<'a> {
     ///
     /// Returns an [`EmailError`] when an argument check fails, the client is
     /// disabled, shut down or has no `secret_key`, the file store refused an
-    /// upload (`attachment_upload_failed`), or PostHog did not queue the
+    /// upload (`attachment_upload_failed`), or PostHog did not accept the
     /// email. A send with `scheduled_at` also fails with
     /// `scheduling_requires_cloud` before any request when the app host isn't
     /// PostHog Cloud, and with `schedule_not_confirmed` when PostHog accepted
@@ -125,8 +125,8 @@ impl<'a> Emails<'a> {
         Ok(result)
     }
 
-    /// Reads the status of an email that [`send`](Self::send) queued, for 30
-    /// days after the send. A key with only `transactional_email:read` can read
+    /// Reads the status of an email that [`send`](Self::send) queued or
+    /// scheduled, for 30 days after the send. A key with only `transactional_email:read` can read
     /// statuses but not send.
     ///
     /// # Errors

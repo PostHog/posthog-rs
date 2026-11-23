@@ -92,8 +92,9 @@ impl fmt::Display for EmailErrorKind {
     }
 }
 
-/// PostHog did not queue the email or read its status, or the client could not
-/// tell whether it did.
+/// PostHog did not accept the email or read its status, or the client could
+/// not tell whether it did. An error with a [`message_id`](Self::message_id)
+/// is the exception: PostHog accepted that email.
 ///
 /// Branch on [`code`](Self::code), PostHog's stable error code such as
 /// `quota_limited`, or on [`kind`](Self::kind), a coarse category. The message

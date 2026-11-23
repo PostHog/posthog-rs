@@ -555,12 +555,22 @@ pub struct SendEmailResult {
     pub replayed: bool,
     /// Warnings PostHog returned with the email. The client also logs each one.
     pub warnings: Vec<EmailWarning>,
-    /// Whether the email goes out now or waits for its scheduled time.
-    pub status: SendEmailStatus,
     /// When a scheduled email goes out, as PostHog confirmed it. `None` for an
     /// email that goes out now, also when its scheduled time had passed when
     /// PostHog accepted it.
     pub scheduled_at: Option<DateTime<Utc>>,
+}
+
+impl SendEmailResult {
+    /// Whether the email goes out now or waits for its
+    /// [`scheduled_at`](Self::scheduled_at).
+    pub fn status(&self) -> SendEmailStatus {
+        if self.scheduled_at.is_some() {
+            SendEmailStatus::Scheduled
+        } else {
+            SendEmailStatus::Queued
+        }
+    }
 }
 
 /// Whether an accepted email goes out now or later.
@@ -571,16 +581,6 @@ pub enum SendEmailStatus {
     Queued,
     /// The email waits for its [`scheduled_at`](SendEmailResult::scheduled_at).
     Scheduled,
-}
-
-impl SendEmailStatus {
-    /// The status as PostHog sends it, such as `"scheduled"`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SendEmailStatus::Queued => "queued",
-            SendEmailStatus::Scheduled => "scheduled",
-        }
-    }
 }
 
 /// What happened to an email. Later SDK versions can know statuses that this

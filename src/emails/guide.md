@@ -18,8 +18,8 @@ status of each email it sent. Get it with
 3. To send a template made in PostHog, open it under Workflows, make it
    transactional and copy its ID.
 
-A result means PostHog queued the email. Delivery happens later: read it
-with [`Emails::get`].
+A result means PostHog queued or scheduled the email. Delivery happens
+later: read it with [`Emails::get`].
 
 # Copies and attachments
 
@@ -69,8 +69,9 @@ self-hosted PostHog, a reverse proxy or a custom domain, the send fails with
 `scheduling_requires_cloud` before any request.
 
 The client rounds the time up to the next millisecond, so the email never
-goes out early. A result with [`SendEmailStatus::Scheduled`](crate::SendEmailStatus::Scheduled)
-carries the time PostHog confirmed in `scheduled_at`, and
+goes out early. A scheduled result carries the time PostHog confirmed in
+`scheduled_at`, and its [`status`](crate::SendEmailResult::status) is
+[`SendEmailStatus::Scheduled`](crate::SendEmailStatus::Scheduled).
 [`Emails::get`] reads [`EmailDeliveryStatus::Scheduled`](crate::EmailDeliveryStatus::Scheduled)
 until the email goes out. A time that has already passed sends the email
 now, and the result's status is `Queued`. When PostHog accepts the email
@@ -79,10 +80,10 @@ and the error's [`message_id`](crate::EmailError::message_id): read the
 email's status before you send it again.
 
 Work out the time once and reuse it on your own retries: the idempotency key
-covers it, so the same key with another time fails with
-`idempotency_key_reused`. To stop scheduled emails before they go out,
-disable the email's workflow in PostHog until they have reached a final
-status. That refuses every new send of it meanwhile.
+covers the time in UTC to the millisecond, so the same key with a time in
+another millisecond fails with `idempotency_key_reused`. To stop scheduled
+emails before they go out, disable the email's workflow in PostHog until
+they have reached a final status. That refuses every new send of it meanwhile.
 
 # Timeouts and retries
 

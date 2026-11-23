@@ -727,96 +727,55 @@ pub async fn tls_front(plain_url: &str) -> String {
     url
 }
 
-/// A proxy that plays PostHog Cloud: a client that sends through it reaches
-/// `https://us.posthog.com` and `https://eu.posthog.com` at the plain-http test
-/// server `plain_url`, over TLS with [`tls_front`]'s certificate. It records
-/// the host of each tunnel.
+/// PostHog Cloud for a test client: its [`http`](Self::http) and
+/// [`blocking_http`](Self::blocking_http) clients resolve `us.posthog.com` and
+/// `eu.posthog.com` to [`tls_front`] in front of the plain-http test server, so
+/// a send takes the client's real Cloud app host path.
 #[cfg(feature = "tls")]
-pub struct CloudProxy {
-    pub url: String,
-    tunnels: Arc<Mutex<Vec<String>>>,
+pub struct CloudFront {
+    front: std::net::SocketAddr,
     _runtime: Option<tokio::runtime::Runtime>,
 }
 
 #[cfg(feature = "tls")]
-impl CloudProxy {
+impl CloudFront {
     pub async fn start(plain_url: &str) -> Self {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let front = tls_front(plain_url).await;
-        let front = front.trim_start_matches("https://").to_string();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let tunnels = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&tunnels);
-        tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
-                let (front, recorded) = (front.clone(), Arc::clone(&recorded));
-                tokio::spawn(async move {
-                    let mut head = Vec::new();
-                    let mut byte = [0u8; 1];
-                    while !head.ends_with(b"\r\n\r\n") {
-                        if socket.read(&mut byte).await.unwrap_or(0) == 0 {
-                            return;
-                        }
-                        head.push(byte[0]);
-                    }
-                    let head = String::from_utf8_lossy(&head).into_owned();
-                    let target = head.split_whitespace().nth(1).unwrap_or_default();
-                    recorded.lock().unwrap().push(target.to_string());
-                    let Ok(mut tls) = tokio::net::TcpStream::connect(&front).await else {
-                        return;
-                    };
-                    if socket
-                        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    let _ = tokio::io::copy_bidirectional(&mut socket, &mut tls).await;
-                });
-            }
-        });
         Self {
-            url,
-            tunnels,
+            front: front.trim_start_matches("https://").parse().unwrap(),
             _runtime: None,
         }
     }
 
-    /// For blocking tests: the proxy runs on a runtime of its own.
+    /// For blocking tests: the TLS front runs on a runtime of its own.
     pub fn start_blocking(plain_url: &str) -> Self {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mut proxy = runtime.block_on(Self::start(plain_url));
-        proxy._runtime = Some(runtime);
-        proxy
+        let mut cloud = runtime.block_on(Self::start(plain_url));
+        cloud._runtime = Some(runtime);
+        cloud
     }
 
-    /// An async client that reaches PostHog Cloud through this proxy.
     #[cfg(feature = "async-client")]
     pub fn http(&self) -> reqwest::Client {
         reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(&self.url).unwrap())
+            .no_proxy()
+            .resolve("us.posthog.com", self.front)
+            .resolve("eu.posthog.com", self.front)
             .tls_certs_only([test_certificate_authority()])
             .tls_danger_accept_invalid_hostnames(true)
             .build()
             .unwrap()
     }
 
-    /// A blocking client that reaches PostHog Cloud through this proxy.
     pub fn blocking_http(&self) -> reqwest::blocking::Client {
         reqwest::blocking::Client::builder()
-            .proxy(reqwest::Proxy::all(&self.url).unwrap())
+            .no_proxy()
+            .resolve("us.posthog.com", self.front)
+            .resolve("eu.posthog.com", self.front)
             .tls_certs_only([test_certificate_authority()])
             .tls_danger_accept_invalid_hostnames(true)
             .build()
             .unwrap()
-    }
-
-    /// The `host:port` of each tunnel the client opened.
-    pub fn tunnels(&self) -> Vec<String> {
-        self.tunnels.lock().unwrap().clone()
     }
 }
 

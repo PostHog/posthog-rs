@@ -439,13 +439,13 @@ fn utc(time: &str) -> chrono::DateTime<chrono::Utc> {
 }
 
 #[cfg(feature = "tls")]
-fn cloud_client(proxy: &email_support::CloudProxy) -> posthog::Client {
+fn cloud_client(cloud: &email_support::CloudFront) -> posthog::Client {
     let mut builder = posthog::ClientOptionsBuilder::default();
     builder
         .api_key("phc_test".to_string())
         .host("https://us.i.posthog.com")
         .secret_key("phs_test")
-        .blocking_http_client(proxy.blocking_http());
+        .blocking_http_client(cloud.blocking_http());
     posthog::client(builder.build().unwrap())
 }
 
@@ -460,8 +460,8 @@ fn a_scheduled_send_on_posthog_cloud_returns_the_confirmed_time() {
             "scheduled_at": "2026-12-01T09:00:00.001Z",
         }),
     )]);
-    let proxy = email_support::CloudProxy::start_blocking(&server.url);
-    let client = cloud_client(&proxy);
+    let cloud = email_support::CloudFront::start_blocking(&server.url);
+    let client = cloud_client(&cloud);
 
     let result = client
         .emails()
@@ -472,13 +472,14 @@ fn a_scheduled_send_on_posthog_cloud_returns_the_confirmed_time() {
         )
         .unwrap();
 
-    assert_eq!(result.status, SendEmailStatus::Scheduled);
+    assert_eq!(result.status(), SendEmailStatus::Scheduled);
     assert_eq!(result.scheduled_at, Some(utc("2026-12-01T09:00:00.001Z")));
+    let requests = server.requests();
     assert_eq!(
-        server.requests()[0].json()["scheduled_at"],
+        requests[0].json()["scheduled_at"],
         "2026-12-01T09:00:00.001Z"
     );
-    assert_eq!(proxy.tunnels(), vec!["us.posthog.com:443"]);
+    assert_eq!(requests[0].header("host"), Some("us.posthog.com"));
 }
 
 #[cfg(feature = "tls")]
@@ -492,8 +493,8 @@ fn an_acceptance_that_doesnt_confirm_the_schedule_fails_with_the_message_id() {
             "scheduled_at": "2026-12-01T10:00:00Z",
         }),
     )]);
-    let proxy = email_support::CloudProxy::start_blocking(&server.url);
-    let client = cloud_client(&proxy);
+    let cloud = email_support::CloudFront::start_blocking(&server.url);
+    let client = cloud_client(&cloud);
 
     let error = client
         .emails()
