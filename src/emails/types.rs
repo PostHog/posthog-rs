@@ -87,9 +87,10 @@ impl TemplateEmail {
 /// it to HTML in your app and pass the HTML. When `template_key` names a
 /// saved template (and any explicit [`MessageCategory`] isn't rejected first
 /// with `categories_not_enabled` while code-send categories are disabled),
-/// PostHog checks whether it is enabled for transactional sends first
-/// (`template_not_transactional`), and refuses an otherwise sendable template
-/// in a marketing category with `marketing_template`.
+/// PostHog checks whether it is enabled for transactional sends
+/// (`template_not_transactional`) before category checks, and refuses an
+/// otherwise sendable template in a marketing category with
+/// `marketing_template`.
 ///
 /// ```
 /// use posthog::CodeEmail;
@@ -261,21 +262,25 @@ impl CodeEmail {
     /// in a marketing category returns `marketing_template` for any `category`
     /// value before category comparison). When code-send categories are
     /// disabled for the project, an explicit [`MessageCategory`] returns HTTP
-    /// 400 `categories_not_enabled` before PostHog inspects the saved template
-    /// (even if `template_key` names a marketing template); leaving `category`
-    /// out sends as transactional with no category (or returns
+    /// 400 `categories_not_enabled` before template sendability and category
+    /// comparison (even if `template_key` names a marketing template); leaving
+    /// `category` out sends as transactional with no category (or returns
     /// `marketing_template` for a sendable saved template in a marketing
     /// category), explicit [`EmailCategory::Transactional`] returns HTTP 400
     /// `marketing_template` for a sendable saved template in a marketing
     /// category or `category_mismatch` for a saved template in a transactional
-    /// category, and an older server rejects `category` with HTTP 400.
+    /// category, an older Django API rejects `category` with HTTP 400
+    /// (`invalid_input`), and updated Django with an older CDP API returns
+    /// `field_not_accepted` for an explicit [`MessageCategory`] (while
+    /// accepting [`EmailCategory::Transactional`] on a fresh `template_key`
+    /// because Django forwards no category).
     ///
     /// [`EmailCategory::Transactional`] asks for transactional email with no
     /// category. PostHog refuses the send with:
     ///
     /// - `categories_not_enabled` when code-send categories aren't enabled for
     ///   the project yet and the send passes an explicit [`MessageCategory`]
-    ///   (returned before PostHog inspects any saved template),
+    ///   (returned before template sendability and category comparison),
     /// - `category_mismatch` when the key exists with another type, when
     ///   `template_key` names a saved template in a transactional category
     ///   with [`EmailCategory::Transactional`] or a mismatched
@@ -371,11 +376,13 @@ impl From<MessageCategory> for EmailCategory {
 /// sends returns `template_not_transactional` before PostHog compares
 /// categories; for marketing emails, use a different `template_key`, and omit
 /// `category` or pass [`EmailCategory::Transactional`] only for transactional
-/// emails). If code-send categories aren't enabled for the
-/// project yet, PostHog returns HTTP 400 `categories_not_enabled` before
-/// inspecting any saved template (even if `template_key` names a marketing
-/// template), and an older server rejects `category` with HTTP 400. A key that
-/// exists with another type refuses the send with `category_mismatch`.
+/// emails). If code-send categories aren't enabled for the project yet, PostHog
+/// returns HTTP 400 `categories_not_enabled` before template sendability and
+/// category comparison (even if `template_key` names a marketing template). An
+/// older Django API rejects `category` with HTTP 400 (`invalid_input`), and
+/// updated Django with an older CDP API returns `field_not_accepted` for an
+/// explicit `MessageCategory`. A key that exists with another type refuses the
+/// send with `category_mismatch`.
 ///
 /// A marketing send honors the recipient's opt-outs. When `html` is non-empty,
 /// it requires a clickable `<a href="{{ unsubscribe_url }}">` link; plain-text

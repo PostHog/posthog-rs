@@ -160,10 +160,12 @@ When code-send categories are available and enabled for the project, a code
 send takes a `category` to send marketing email or to file the email under a
 message category. A `MessageCategory` defines the category in code: PostHog
 creates it with its name and description on the first send with its key. Later
-sends keep the category's name and description, so change them in PostHog. If
-code-send categories aren't enabled for the project yet, passing a
-`MessageCategory` returns HTTP 400 `categories_not_enabled`; an older PostHog
-server rejects `category` with HTTP 400.
+sends keep the category's name and description, so change them in PostHog. If code-send categories aren't enabled for the project yet, passing a
+`MessageCategory` returns HTTP 400 `categories_not_enabled`. An older Django
+API rejects `category` with HTTP 400 (`invalid_input`), while updated Django
+with an older CDP API returns `field_not_accepted` for an explicit
+`MessageCategory` (and can accept `EmailCategory::Transactional` on a fresh
+`template_key` because Django forwards no category).
 
 ```rust
 use posthog::{CodeEmail, MessageCategory, MessageCategoryType};
@@ -204,15 +206,15 @@ email template never enabled for transactional sends returns
 emails, use a different `template_key`; omit `category` or pass
 `EmailCategory::Transactional` only for transactional emails). When code-send
 categories are disabled for the project, passing an explicit `MessageCategory`
-returns `categories_not_enabled` before PostHog inspects the saved template
-(even if `template_key` names a template in a marketing category). A template
-made in PostHog sends transactional email only: once a request passes that
-feature check, PostHog checks whether a saved template is enabled for
-transactional sends first (`template_not_transactional`), and returns
-`marketing_template` for an otherwise sendable saved template in a marketing
-category before comparing the requested `category` (when `category` is omitted
-or `EmailCategory::Transactional` while code-send categories are disabled, and
-for any `category` value once code-send categories are enabled).
+returns `categories_not_enabled` before template sendability and category
+comparison (even if `template_key` names a template in a marketing category). A
+template made in PostHog sends transactional email only: once a request passes
+that feature check, PostHog checks whether a saved template is enabled for
+transactional sends (`template_not_transactional`) before category checks, and
+returns `marketing_template` for an otherwise sendable saved template in a
+marketing category before comparing the requested `category` (when `category` is
+omitted or `EmailCategory::Transactional` while code-send categories are
+disabled, and for any `category` value once code-send categories are enabled).
 
 ## Contributing
 

@@ -904,35 +904,28 @@ async fn code_send_sends_its_category_definition_on_the_wire() {
 }
 
 #[tokio::test]
-async fn a_send_without_a_category_is_transactional() {
-    let digest_html = "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>";
-    for category in [None, Some(EmailCategory::Transactional)] {
-        let server = ScriptedServer::start_async(vec![accepted()]).await;
-        let client = client_for(&server).await;
-        let mut email = digest_email();
-        let explicit = category.is_some();
-        if let Some(category) = category {
-            email = email.category(category);
-        }
+async fn explicit_transactional_category_sends_transactional_on_the_wire() {
+    let server = ScriptedServer::start_async(vec![accepted()]).await;
+    let client = client_for(&server).await;
 
-        let sent = client.emails().send(email).await.unwrap();
+    let sent = client
+        .emails()
+        .send(digest_email().category(EmailCategory::Transactional))
+        .await
+        .unwrap();
 
-        assert_eq!(sent.id, MESSAGE_ID);
-        assert_eq!(server.requests().len(), 1);
-        let mut expected = json!({
+    assert_eq!(sent.id, MESSAGE_ID);
+    assert_eq!(server.requests().len(), 1);
+    assert_eq!(
+        server.requests()[0].json(),
+        json!({
             "to": "user@example.com",
             "template_key": "november-digest",
             "subject": "Your November",
-            "html": digest_html,
-        });
-        if explicit {
-            expected
-                .as_object_mut()
-                .unwrap()
-                .insert("category".to_string(), json!("transactional"));
-        }
-        assert_eq!(server.requests()[0].json(), expected);
-    }
+            "html": "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>",
+            "category": "transactional",
+        })
+    );
 }
 
 #[tokio::test]
@@ -1318,27 +1311,7 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
 }
 
 #[tokio::test]
-async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_sends() {
-    let server = ScriptedServer::start_async(vec![accepted()]).await;
-    let client = client_for(&server).await;
-
-    let sent = client
-        .emails()
-        .send(CodeEmail::new("user@example.com", "welcome", "Welcome").text("Hi"))
-        .await
-        .unwrap();
-    assert_eq!(sent.id, MESSAGE_ID);
-    assert_eq!(server.requests().len(), 1);
-    assert_eq!(
-        server.requests()[0].json(),
-        json!({
-            "to": "user@example.com",
-            "template_key": "welcome",
-            "subject": "Welcome",
-            "text": "Hi",
-        })
-    );
-
+async fn category_rollout_refusals_are_surfaced_without_retry() {
     let refusal_cases = [
         (
             EmailCategory::Transactional,
@@ -1377,7 +1350,7 @@ async fn pre_category_server_accepts_uncategorized_and_refuses_categorized_code_
             "invalid_request",
             "field_not_accepted",
             "PostHog does not accept category yet.",
-            Some("Wait until PostHog accepts category, then retry."),
+            Some("Wait until PostHog accepts `category`, then send the email again."),
             json!({
                 "to": "user@example.com",
                 "template_key": "november-digest",
