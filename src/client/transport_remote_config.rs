@@ -110,8 +110,12 @@ impl Task {
         flags: &flags::Slot,
     ) {
         let result = fetch(http, options, &self.url);
+        // Shutdown discards a result that arrives after it started, so its
+        // failure is not reported either, as for flags.
         if let Err(error) = result.as_ref() {
-            report(options, *error);
+            if !flags.is_closed() {
+                report(options, *error);
+            }
         }
         // Startup flag loading follows config on the same worker and snapshots
         // targeting at completion, not before the identity-independent GET.
