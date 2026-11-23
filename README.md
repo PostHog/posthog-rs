@@ -195,11 +195,13 @@ category of the template that `template_key` names (otherwise an omitted
 `EmailCategory::Transactional` asks for transactional email with no category,
 so PostHog refuses it with `category_mismatch` when `template_key` names a
 template in a category (even when code-send categories are disabled for the
-project). When `template_key` names an existing saved template with no
-category, passing an explicit `MessageCategory` also returns
-`category_mismatch` (for marketing emails, use a different `template_key`; omit
-`category` or pass `EmailCategory::Transactional` only for transactional
-emails). A template made in PostHog sends transactional email only: PostHog
+project). Once code-send categories are enabled for the project, passing an explicit
+`MessageCategory` when `template_key` names an existing saved template with no
+category also returns `category_mismatch` (for marketing emails, use a
+different `template_key`; omit `category` or pass
+`EmailCategory::Transactional` only for transactional emails). With the flag
+off, PostHog returns `categories_not_enabled` before checking the template's
+category. A template made in PostHog sends transactional email only: PostHog
 checks whether a saved template is enabled for transactional sends first
 (`template_not_transactional`), and returns `marketing_template` when an
 otherwise sendable template belongs to a marketing category.

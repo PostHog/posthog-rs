@@ -830,6 +830,7 @@ async fn transactional_on_a_template_in_a_category_is_refused() {
         ("category_mismatch", EmailErrorKind::ValidationError)
     );
     assert_eq!(api.sent(), vec![]);
+    assert_eq!(api.requests()[0]["category"], json!("transactional"));
 }
 
 #[tokio::test]
@@ -844,6 +845,12 @@ async fn a_send_creates_its_category_in_the_project() {
                 name: "Newsletter".into(),
                 description: "Monthly product news".into(),
             },
+            json!({
+                "key": "newsletter",
+                "type": "marketing",
+                "name": "Newsletter",
+                "description": "Monthly product news",
+            }),
         ),
         (
             "receipts",
@@ -853,9 +860,30 @@ async fn a_send_creates_its_category_in_the_project() {
                 name: "Receipts".into(),
                 description: "".into(),
             },
+            json!({
+                "key": "receipts",
+                "type": "transactional",
+                "name": "Receipts",
+            }),
+        ),
+        (
+            "alerts",
+            MessageCategory::new("alerts", MessageCategoryType::Transactional, "Alerts")
+                .description(""),
+            StoredCategory {
+                category_type: "transactional".into(),
+                name: "Alerts".into(),
+                description: "".into(),
+            },
+            json!({
+                "key": "alerts",
+                "type": "transactional",
+                "name": "Alerts",
+                "description": "",
+            }),
         ),
     ];
-    for (key, category, stored) in cases {
+    for (key, category, stored, expected_wire_category) in cases {
         let api = SendApi::start_async().await;
         let client = posthog::client(options(&api.url).build().unwrap()).await;
 
@@ -869,6 +897,12 @@ async fn a_send_creates_its_category_in_the_project() {
         assert_eq!(
             api.sent(),
             vec![("user@example.com".to_string(), Some(key.to_string()))]
+        );
+        let request = &api.requests()[0];
+        assert_eq!(request["category"], expected_wire_category);
+        assert_eq!(
+            request["html"],
+            json!("<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>")
         );
     }
 }
@@ -1148,24 +1182,52 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
         MessageCategory::new("newsletter", MessageCategoryType::Marketing, "Newsletter")
             .description("Monthly product news")
     };
+    let marketing_wire = json!({
+        "key": "newsletter",
+        "type": "marketing",
+        "name": "Newsletter",
+        "description": "Monthly product news",
+    });
+    let digest_html = "<p>News. <a href='{{ unsubscribe_url }}'>Unsubscribe</a></p>";
     let cases = [
         (
             400,
             "categories_not_enabled",
             Some("category"),
             digest_email().category(marketing()),
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": digest_html,
+                "category": marketing_wire,
+            }),
         ),
         (
             400,
             "category_mismatch",
             Some("category"),
             digest_email().category(marketing()),
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": digest_html,
+                "category": marketing_wire,
+            }),
         ),
         (
             400,
             "too_many_categories",
             Some("category"),
             digest_email().category(marketing()),
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": digest_html,
+                "category": marketing_wire,
+            }),
         ),
         (
             400,
@@ -1174,22 +1236,55 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
             CodeEmail::new("user@example.com", "november-digest", "Your November")
                 .html("<p>No link here.</p>")
                 .category(marketing()),
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": "<p>No link here.</p>",
+                "category": marketing_wire,
+            }),
         ),
         (
             400,
             "copies_not_allowed",
             None,
             digest_email().cc("copy@example.com").category(marketing()),
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": digest_html,
+                "cc": ["copy@example.com"],
+                "category": marketing_wire,
+            }),
         ),
-        (400, "marketing_template", None, digest_email()),
+        (
+            400,
+            "marketing_template",
+            None,
+            digest_email(),
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": digest_html,
+            }),
+        ),
         (
             422,
             "recipient_opted_out",
             None,
             digest_email().category(marketing()),
+            json!({
+                "to": "user@example.com",
+                "template_key": "november-digest",
+                "subject": "Your November",
+                "html": digest_html,
+                "category": marketing_wire,
+            }),
         ),
     ];
-    for (status, code, attr, email) in cases {
+    for (status, code, attr, email, expected_body) in cases {
         let mut payload = json!({"code": code, "detail": "Refused."});
         if let Some(field) = attr {
             payload
@@ -1210,6 +1305,11 @@ async fn code_send_category_refusals_keep_posthogs_code_and_are_not_retried() {
         assert_eq!(error.field(), attr);
         assert!(error.fix().is_none(), "{} {}", status, code);
         assert_eq!(server.requests().len(), 1, "{status} {code}");
+        assert_eq!(
+            server.requests()[0].json(),
+            expected_body,
+            "{status} {code}"
+        );
     }
 }
 
