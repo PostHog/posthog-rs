@@ -812,16 +812,18 @@ pub(crate) fn accept(reply: Reply) -> Result<Accepted, EmailError> {
 /// a thread that a test put on virtual time, a wait passes at once and moves
 /// the time on instead.
 pub(crate) mod clock {
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use chrono::{DateTime, Utc};
 
+    /// `Utc::now` panics on a clock set before 1970, so the time is converted
+    /// from `SystemTime` instead.
     pub(crate) fn now() -> DateTime<Utc> {
         #[cfg(test)]
-        if let Some(now) = virtual_time::now() {
-            return now;
-        }
-        Utc::now()
+        let now = virtual_time::now().unwrap_or_else(SystemTime::now);
+        #[cfg(not(test))]
+        let now = SystemTime::now();
+        DateTime::from(now)
     }
 
     /// Moves virtual time on by `delay` and returns `true`, or returns
@@ -838,18 +840,18 @@ pub(crate) mod clock {
     #[cfg(test)]
     pub(crate) mod virtual_time {
         use std::cell::Cell;
-        use std::time::Duration;
+        use std::time::{Duration, SystemTime};
 
         use chrono::{DateTime, Utc};
 
         thread_local! {
-            static NOW: Cell<Option<DateTime<Utc>>> = const { Cell::new(None) };
+            static NOW: Cell<Option<SystemTime>> = const { Cell::new(None) };
         }
 
         /// Puts this thread's email clients on virtual time from `start`
         /// until the guard drops.
         pub(crate) fn start_at(start: DateTime<Utc>) -> Guard {
-            NOW.with(|now| now.set(Some(start)));
+            NOW.with(|now| now.set(Some(start.into())));
             Guard
         }
 
@@ -861,14 +863,14 @@ pub(crate) mod clock {
             }
         }
 
-        pub(super) fn now() -> Option<DateTime<Utc>> {
+        pub(super) fn now() -> Option<SystemTime> {
             NOW.with(Cell::get)
         }
 
         pub(super) fn advance(delay: Duration) -> bool {
             NOW.with(|now| match now.get() {
                 Some(time) => {
-                    now.set(Some(time + chrono::Duration::from_std(delay).unwrap()));
+                    now.set(Some(time + delay));
                     true
                 }
                 None => false,

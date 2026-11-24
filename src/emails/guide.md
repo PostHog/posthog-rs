@@ -74,9 +74,9 @@ never goes out before its time. A scheduled result carries the time PostHog conf
 [`SendEmailStatus::Scheduled`](crate::SendEmailStatus::Scheduled).
 [`Emails::get`] reads [`EmailDeliveryStatus::Scheduled`](crate::EmailDeliveryStatus::Scheduled)
 until the email goes out. A time that has already passed sends the email
-now, and the result's status is `Queued`. So is a time up to a minute after
-the send's first attempt, by this machine's clock, when PostHog sends the
-email now: such an email can go out up to a minute early. When PostHog
+now, and the result's status is `Queued`. So is a time that, rounded up to
+the millisecond, is at most a minute after the send's first attempt, by this
+machine's clock, when PostHog sends the email now: such an email can go out up to a minute early. When PostHog
 accepts the email without confirming its time, the send fails with
 `schedule_not_confirmed` and the error's
 [`message_id`](crate::EmailError::message_id): read the

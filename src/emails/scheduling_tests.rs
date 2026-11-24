@@ -1,4 +1,4 @@
-//! Scheduled sends on virtual time, through the public client against a
+//! Sends on virtual time, through the public client against a
 //! scripted PostHog Cloud: retries take no real time, and the clock moves
 //! only by the waits the client makes.
 
@@ -7,7 +7,7 @@ mod email_support;
 
 use chrono::{DateTime, Duration, Utc};
 use email_support::{
-    unavailable, Answer, CloudFront, FakePostHog, ScriptedServer, MESSAGE_ID, TEMPLATE_ID,
+    accepted, unavailable, Answer, CloudFront, FakePostHog, ScriptedServer, MESSAGE_ID, TEMPLATE_ID,
 };
 use serde_json::json;
 
@@ -18,6 +18,10 @@ fn start() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-12-01T09:00:00Z")
         .unwrap()
         .with_timezone(&Utc)
+}
+
+fn before_1970() -> DateTime<Utc> {
+    DateTime::UNIX_EPOCH - Duration::seconds(1)
 }
 
 fn sent_now() -> Answer {
@@ -100,6 +104,39 @@ mod async_client {
             .await
             .unwrap_err();
         assert_not_confirmed(error);
+    }
+
+    #[tokio::test]
+    async fn a_future_time_that_posthog_sends_now_fails_with_the_message_id() {
+        for ahead in [Duration::minutes(2), Duration::days(1)] {
+            let server = ScriptedServer::start_async(vec![sent_now()]).await;
+            let (_cloud, client) = cloud_client(&server, "https://us.posthog.com").await;
+            let _time = virtual_time::start_at(start());
+
+            let error = client
+                .emails()
+                .send(scheduled_at(ahead, 2))
+                .await
+                .unwrap_err();
+
+            assert_not_confirmed(error);
+            assert_eq!(server.requests().len(), 1, "{ahead}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_send_works_with_a_clock_before_1970() {
+        let server = ScriptedServer::start_async(vec![accepted()]).await;
+        let (_cloud, client) = cloud_client(&server, "https://us.posthog.com").await;
+        let _time = virtual_time::start_at(before_1970());
+
+        let sent = client
+            .emails()
+            .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
+            .await
+            .unwrap();
+
+        assert_eq!(sent.status(), SendEmailStatus::Queued);
     }
 
     #[tokio::test]
@@ -215,6 +252,20 @@ mod blocking_client {
             .send(scheduled_at(Duration::milliseconds(60_001), 0))
             .unwrap_err();
         assert_not_confirmed(error);
+    }
+
+    #[test]
+    fn a_send_works_with_a_clock_before_1970() {
+        let server = ScriptedServer::start(vec![accepted()]);
+        let (_cloud, client) = cloud_client(&server);
+        let _time = virtual_time::start_at(before_1970());
+
+        let sent = client
+            .emails()
+            .send(TemplateEmail::new("user@example.com", TEMPLATE_ID))
+            .unwrap();
+
+        assert_eq!(sent.status(), SendEmailStatus::Queued);
     }
 
     #[test]
