@@ -1954,10 +1954,25 @@ fn match_property_with_version(
     })
 }
 
-/// Result for a property whose key the caller listed as known absent. Unknown
-/// operators and condition values that are inconclusive for a present property
-/// stay inconclusive, so they still fall back to remote evaluation.
+/// Result for a property whose key the caller listed as known absent. Like the
+/// flags service, this never parses, compiles or validates the condition
+/// value. Unknown operators and a JSON null condition value stay inconclusive,
+/// so they still fall back to remote evaluation.
 fn match_known_absent_property(property: &Property) -> Result<bool, InconclusiveMatchError> {
+    let is_absent_match = match property.operator.as_str() {
+        "is_not_set" | "is_not" | "not_icontains" | "not_starts_with" | "not_ends_with"
+        | "not_regex" => true,
+        "is_set" | "exact" | "icontains" | "starts_with" | "ends_with" | "regex" | "gt" | "gte"
+        | "lt" | "lte" | "is_date_before" | "is_date_after" | "semver_eq" | "semver_neq"
+        | "semver_gt" | "semver_gte" | "semver_lt" | "semver_lte" | "semver_tilde"
+        | "semver_caret" | "semver_wildcard" => false,
+        unknown => {
+            return Err(InconclusiveMatchError::new(&format!(
+                "Unknown operator: {}",
+                unknown
+            )));
+        }
+    };
     // The flags service reads a JSON null condition value as omitted, and an
     // omitted value leaves every operator but the presence ones inconclusive.
     if property.value.is_null() && !matches!(property.operator.as_str(), "is_set" | "is_not_set") {
@@ -1966,43 +1981,7 @@ fn match_known_absent_property(property: &Property) -> Result<bool, Inconclusive
             property.key, property.operator
         )));
     }
-    match property.operator.as_str() {
-        "is_not_set" | "is_not" | "not_icontains" | "not_starts_with" | "not_ends_with" => Ok(true),
-        "is_set" | "exact" | "icontains" | "starts_with" | "ends_with" | "gt" | "gte" | "lt"
-        | "lte" => Ok(false),
-        "regex" | "not_regex" => {
-            // An invalid pattern never matches, as for a present property.
-            let is_valid = get_cached_regex(&value_to_string(&property.value))?.is_some();
-            Ok(is_valid && property.operator == "not_regex")
-        }
-        "is_date_before" | "is_date_after" => {
-            parse_date_value(&property.value).ok_or_else(|| {
-                InconclusiveMatchError::new(&format!(
-                    "Unable to parse target date value: {:?}",
-                    property.value
-                ))
-            })?;
-            Ok(false)
-        }
-        "semver_eq" | "semver_neq" | "semver_gt" | "semver_gte" | "semver_lt" | "semver_lte"
-        | "semver_tilde" | "semver_caret" => {
-            parse_target_semver(&property.value)?;
-            Ok(false)
-        }
-        "semver_wildcard" => {
-            parse_semver_wildcard(&value_to_string(&property.value)).ok_or_else(|| {
-                InconclusiveMatchError::new(&format!(
-                    "Unable to parse target semver wildcard pattern: {:?}",
-                    property.value
-                ))
-            })?;
-            Ok(false)
-        }
-        unknown => Err(InconclusiveMatchError::new(&format!(
-            "Unknown operator: {}",
-            unknown
-        ))),
-    }
+    Ok(is_absent_match)
 }
 
 fn compute_exact_match(
@@ -5696,6 +5675,45 @@ mod known_absent_tests {
     }
 
     #[test]
+    fn listed_key_resolves_without_reading_the_condition_value() {
+        for (operator, value, expected) in [
+            ("not_regex", json!("["), true),
+            ("regex", json!("["), false),
+            ("not_regex", json!("a\\Kb"), true),
+            ("regex", json!("a\\Kb"), false),
+            ("not_regex", json!("\\p{L}"), true),
+            ("regex", json!("\\p{L}"), false),
+            ("not_regex", json!("(?<=a)b"), true),
+            ("gt", json!("not-a-number"), false),
+            ("gte", json!("not-a-number"), false),
+            ("lt", json!("not-a-number"), false),
+            ("lte", json!("not-a-number"), false),
+            ("semver_eq", json!("not-a-version"), false),
+            ("semver_tilde", json!("not-a-version"), false),
+            ("semver_caret", json!("not-a-version"), false),
+            ("semver_neq", json!("not-a-version"), false),
+            ("semver_wildcard", json!("not-a-version"), false),
+            ("semver_wildcard", json!("1.2.3"), false),
+            ("is_date_before", json!("not-a-date"), false),
+            ("is_date_after", json!("not-a-date"), false),
+        ] {
+            let flag = person_flag(
+                "flag",
+                json!([{"key": "plan", "value": value, "operator": operator, "type": "person"}]),
+            );
+            let result = evaluate(&flag, &HashMap::new(), &person_keys(&["plan"]));
+            assert_eq!(
+                result.unwrap_or_else(|err| panic!(
+                    "{} {} was inconclusive: {}",
+                    operator, value, err
+                )),
+                FlagValue::Boolean(expected),
+                "{operator} {value}"
+            );
+        }
+    }
+
+    #[test]
     fn listed_key_overrides_a_supplied_value() {
         let flag = person_flag(
             "profile-incomplete",
@@ -5797,48 +5815,6 @@ mod known_absent_tests {
                 evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).is_err(),
                 "{} should stay inconclusive",
                 operator
-            );
-        }
-    }
-
-    #[test]
-    fn malformed_condition_value_on_a_listed_key_stays_inconclusive() {
-        for (operator, value) in [
-            ("semver_neq", json!("not-a-version")),
-            ("semver_wildcard", json!("1.2.3")),
-            ("is_date_before", json!("not-a-date")),
-            ("not_regex", json!("(?<=a)b")),
-        ] {
-            let flag = person_flag(
-                "flag",
-                json!([{"key": "plan", "value": value, "operator": operator, "type": "person"}]),
-            );
-            assert!(
-                evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).is_err(),
-                "{} {} should stay inconclusive",
-                operator,
-                value
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_regex_on_a_listed_key_does_not_match_as_for_a_supplied_value() {
-        for operator in ["regex", "not_regex"] {
-            let flag = person_flag(
-                "flag",
-                json!([{"key": "plan", "value": "[", "operator": operator, "type": "person"}]),
-            );
-            let supplied = HashMap::from([("plan".to_string(), json!("pro"))]);
-            assert_eq!(
-                evaluate(&flag, &supplied, &KnownAbsentProperties::default()).unwrap(),
-                FlagValue::Boolean(false),
-                "{operator} with a supplied value"
-            );
-            assert_eq!(
-                evaluate(&flag, &HashMap::new(), &person_keys(&["plan"])).unwrap(),
-                FlagValue::Boolean(false),
-                "{operator} with a listed key"
             );
         }
     }

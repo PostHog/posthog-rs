@@ -288,6 +288,61 @@ fn valueless_options(only_evaluate_locally: bool) -> posthog::EvaluateFlagsOptio
     options
 }
 
+/// Filters on the listed key `plan` with condition values the SDK can't parse,
+/// compile or port, which the known-absent table resolves without reading, and
+/// operators the SDK doesn't implement locally, which stay inconclusive.
+fn mock_known_absent_unread_value_definitions(server: &MockServer) -> httpmock::Mock<'_> {
+    let flag = |key: &str, operator: &str, value: Value| {
+        json!({
+            "key": key,
+            "active": true,
+            "filters": {"groups": [{
+                "properties": [{"key": "plan", "value": value, "operator": operator, "type": "person"}],
+                "rollout_percentage": 100
+            }]}
+        })
+    };
+    let definitions = json!({
+        "flags": [
+            flag("not-regex-invalid", "not_regex", json!("[")),
+            flag("regex-invalid", "regex", json!("[")),
+            flag("not-regex-non-portable", "not_regex", json!("\\p{L}")),
+            flag("gt-not-a-number", "gt", json!("not-a-number")),
+            flag("semver-not-a-version", "semver_gt", json!("not-a-version")),
+            flag("date-not-a-date", "is_date_after", json!("not-a-date")),
+            flag("icontains-multi", "icontains_multi", json!(["pro"])),
+            flag("between", "between", json!([1, 10]))
+        ],
+        "group_type_mapping": {},
+        "cohorts": {}
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/flags/definitions/");
+        then.status(200).json_body(definitions);
+    })
+}
+
+const UNREAD_VALUE_FLAGS: [(&str, bool); 6] = [
+    ("not-regex-invalid", true),
+    ("regex-invalid", false),
+    ("not-regex-non-portable", true),
+    ("gt-not-a-number", false),
+    ("semver-not-a-version", false),
+    ("date-not-a-date", false),
+];
+
+const UNSUPPORTED_OPERATOR_FLAG_KEYS: [&str; 2] = ["icontains-multi", "between"];
+
+fn unread_value_options(only_evaluate_locally: bool) -> posthog::EvaluateFlagsOptions {
+    let mut keys: Vec<&str> = UNREAD_VALUE_FLAGS.iter().map(|(key, _)| *key).collect();
+    if only_evaluate_locally {
+        keys.extend(UNSUPPORTED_OPERATOR_FLAG_KEYS);
+    }
+    let mut options = known_absent_options(&keys);
+    options.only_evaluate_locally = only_evaluate_locally;
+    options
+}
+
 fn over_limit_known_absent_options() -> Vec<posthog::EvaluateFlagsOptions> {
     let too_many: Vec<String> = (0..1001).map(|_| "plan".to_string()).collect();
     let mut person = posthog::EvaluateFlagsOptions::default();
@@ -1351,6 +1406,41 @@ mod blocking {
             .unwrap();
         flags_mock.assert_calls(1);
     }
+
+    #[test]
+    fn listed_key_resolves_without_reading_the_condition_value() {
+        let server = MockServer::start();
+        mock_known_absent_unread_value_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url()));
+
+        for only_evaluate_locally in [true, false] {
+            let snapshot = client
+                .evaluate_flags("user-1", unread_value_options(only_evaluate_locally))
+                .unwrap();
+            for (key, expected) in UNREAD_VALUE_FLAGS {
+                assert_eq!(
+                    snapshot.get_flag(key),
+                    Some(FlagValue::Boolean(expected)),
+                    "{key}"
+                );
+            }
+            if only_evaluate_locally {
+                for key in UNSUPPORTED_OPERATOR_FLAG_KEYS {
+                    assert_eq!(snapshot.get_flag(key), None, "{key}");
+                }
+            }
+        }
+        flags_mock.assert_calls(0);
+
+        let mut options = known_absent_options(&UNSUPPORTED_OPERATOR_FLAG_KEYS);
+        options.only_evaluate_locally = false;
+        client.evaluate_flags("user-1", options).unwrap();
+        flags_mock.assert_calls(1);
+    }
 }
 
 #[cfg(feature = "async-client")]
@@ -1951,6 +2041,42 @@ mod async_tests {
             .evaluate_flags("user-1", valueless_options(false))
             .await
             .unwrap();
+        flags_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn listed_key_resolves_without_reading_the_condition_value() {
+        let server = MockServer::start();
+        mock_known_absent_unread_value_definitions(&server);
+        let flags_mock = mock_flags_with_known_absent(
+            &server,
+            Some((json!(["plan"]), json!({"organization": ["tier"]}))),
+        );
+        let client = posthog::client(local_evaluation_client_options(server.base_url())).await;
+
+        for only_evaluate_locally in [true, false] {
+            let snapshot = client
+                .evaluate_flags("user-1", unread_value_options(only_evaluate_locally))
+                .await
+                .unwrap();
+            for (key, expected) in UNREAD_VALUE_FLAGS {
+                assert_eq!(
+                    snapshot.get_flag(key),
+                    Some(FlagValue::Boolean(expected)),
+                    "{key}"
+                );
+            }
+            if only_evaluate_locally {
+                for key in UNSUPPORTED_OPERATOR_FLAG_KEYS {
+                    assert_eq!(snapshot.get_flag(key), None, "{key}");
+                }
+            }
+        }
+        flags_mock.assert_calls(0);
+
+        let mut options = known_absent_options(&UNSUPPORTED_OPERATOR_FLAG_KEYS);
+        options.only_evaluate_locally = false;
+        client.evaluate_flags("user-1", options).await.unwrap();
         flags_mock.assert_calls(1);
     }
 }
