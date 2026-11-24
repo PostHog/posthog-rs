@@ -1589,8 +1589,8 @@ async fn a_future_time_that_posthog_sends_now_fails_with_the_message_id() {
 #[cfg(feature = "tls")]
 #[tokio::test]
 async fn the_minute_of_grace_counts_from_the_first_attempt() {
-    // Two retries wait at least 2.4 seconds, so by the time PostHog answers,
-    // a time 61.2 seconds after the first attempt is within a minute.
+    // Two retries wait at least 2.4 seconds, so a clock read taken after
+    // PostHog answers would put a time 61.8 seconds ahead within the minute.
     let (server, client) = cloud_with(
         vec![unavailable(), unavailable(), sent_now()],
         "https://us.posthog.com",
@@ -1601,7 +1601,7 @@ async fn the_minute_of_grace_counts_from_the_first_attempt() {
         .emails()
         .send(
             TemplateEmail::new("user@example.com", TEMPLATE_ID)
-                .scheduled_at(chrono::Utc::now() + chrono::Duration::milliseconds(61_200))
+                .scheduled_at(chrono::Utc::now() + chrono::Duration::milliseconds(61_800))
                 .max_retries(2),
         )
         .await

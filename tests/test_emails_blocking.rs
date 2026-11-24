@@ -485,8 +485,8 @@ fn a_scheduled_send_on_posthog_cloud_returns_the_confirmed_time() {
 #[cfg(feature = "tls")]
 #[test]
 fn the_minute_of_grace_counts_from_the_first_attempt() {
-    // Two retries wait at least 2.4 seconds, so by the time PostHog answers,
-    // a time 61.2 seconds after the first attempt is within a minute.
+    // Two retries wait at least 2.4 seconds, so a clock read taken after
+    // PostHog answers would put a time 61.8 seconds ahead within the minute.
     let server = ScriptedServer::start(vec![
         unavailable(),
         unavailable(),
@@ -502,7 +502,7 @@ fn the_minute_of_grace_counts_from_the_first_attempt() {
         .emails()
         .send(
             TemplateEmail::new("user@example.com", TEMPLATE_ID)
-                .scheduled_at(chrono::Utc::now() + chrono::Duration::milliseconds(61_200))
+                .scheduled_at(chrono::Utc::now() + chrono::Duration::milliseconds(61_800))
                 .max_retries(2),
         )
         .unwrap_err();
