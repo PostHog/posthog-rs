@@ -1866,6 +1866,26 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_answer_is_accepted_up_to_a_minute_after_the_first_attempt() {
+        let first_attempt_at = DateTime::parse_from_rfc3339("2026-12-01T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let queued_for = |requested: DateTime<Utc>| {
+            accept(reply(
+                202,
+                json!({"message_id": "msg_1", "status": "queued", "scheduled_at": null}),
+            ))
+            .and_then(|reply| parse_send_reply(reply, Some(requested), first_attempt_at))
+        };
+        let cutoff = first_attempt_at + TimeDelta::seconds(60);
+
+        assert_eq!(queued_for(cutoff).unwrap().scheduled_at, None);
+        let error = queued_for(cutoff + TimeDelta::milliseconds(1)).unwrap_err();
+        assert_eq!(error.code(), "schedule_not_confirmed");
+        assert_eq!(error.message_id(), Some("msg_1"));
+    }
+
+    #[test]
     fn send_reply_reads_the_id_warnings_and_replay() {
         let result = send_reply(reply(
             202,

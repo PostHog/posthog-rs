@@ -79,8 +79,10 @@ without confirming its time, the send fails with `schedule_not_confirmed`
 and the error's [`message_id`](crate::EmailError::message_id): read the
 email's status before you send it again. That includes PostHog sending the
 email now while its time is more than a minute after the send's first
-attempt, by this machine's clock. A clock that runs over a minute slow can raise this error for an
-email that went out on time.
+attempt, by this machine's clock. The error can also come for an email
+that went out on time: when this machine's clock runs over a minute slow,
+or when retries reach PostHog after a time due just over a minute after the
+first attempt.
 
 Work out the time once and reuse it on your own retries: the idempotency key
 covers the time in UTC to the millisecond, so the same key with a time in
