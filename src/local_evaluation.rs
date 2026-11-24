@@ -1,7 +1,8 @@
 use crate::client::{apply_on_error_hooks, OnErrorHook, SdkIdentity};
 use crate::feature_flags::{
-    match_feature_flag_with_context, match_feature_flag_with_version, CohortDefinition,
-    EvaluationContext, FeatureFlag, FlagValue, InconclusiveMatchError,
+    match_feature_flag_with_version, match_flag_definition, metadata_result, CohortDefinition,
+    DefinitionMetadata, DefinitionMetadataMap, EvaluationContext, FeatureFlag, FlagValue,
+    InconclusiveMatchError, WireFlag,
 };
 use crate::{Error, LocalEvaluationFailure, PostHogError};
 use reqwest::header::{HeaderMap, ETAG, IF_NONE_MATCH, USER_AGENT};
@@ -58,25 +59,83 @@ fn report_local_eval_error(hooks: &[OnErrorHook], status: Option<u16>, error: &E
 /// Contains feature flag definitions, group type mappings, and cohort definitions
 /// that can be cached locally for flag evaluation without server round-trips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "WireDefinitions", into = "WireDefinitions")]
 #[non_exhaustive]
 pub struct LocalEvaluationResponse {
     /// List of feature flag definitions
     pub flags: Vec<FeatureFlag>,
     /// Mapping from group type keys to their display names
-    #[serde(default)]
     pub group_type_mapping: HashMap<String, String>,
     /// Cohort definitions for evaluating cohort membership
-    #[serde(default)]
     pub cohorts: HashMap<String, Cohort>,
     /// Server-controlled gate: when `true`, `$feature_flag_called` events for
     /// non-experiment flags evaluated from these definitions are minimized to a
     /// strict property allowlist. Absent fails safe to `false` (full event).
-    #[serde(default)]
     pub minimal_flag_called_events: bool,
     /// Property equality semantics for this snapshot. Exactly `2` selects
     /// explicit matching; absent metadata and other versions use legacy matching.
-    #[serde(default = "legacy_property_matching_version")]
     pub property_matching_version: i64,
+    /// What else the definitions in `flags` carry.
+    pub(crate) flag_metadata: DefinitionMetadataMap,
+}
+
+/// [`LocalEvaluationResponse`] as it is sent.
+#[derive(Serialize, Deserialize)]
+struct WireDefinitions {
+    flags: Vec<WireFlag>,
+    #[serde(default)]
+    group_type_mapping: HashMap<String, String>,
+    #[serde(default)]
+    cohorts: HashMap<String, Cohort>,
+    #[serde(default)]
+    minimal_flag_called_events: bool,
+    #[serde(default = "legacy_property_matching_version")]
+    property_matching_version: i64,
+}
+
+impl From<WireDefinitions> for LocalEvaluationResponse {
+    fn from(wire: WireDefinitions) -> Self {
+        let mut flag_metadata = DefinitionMetadataMap::new();
+        let flags = wire
+            .flags
+            .into_iter()
+            .map(|flag| {
+                let (flag, metadata) = flag.into_parts();
+                if metadata != DefinitionMetadata::default() {
+                    flag_metadata.insert(flag.key.clone(), metadata);
+                }
+                flag
+            })
+            .collect();
+        Self {
+            flags,
+            group_type_mapping: wire.group_type_mapping,
+            cohorts: wire.cohorts,
+            minimal_flag_called_events: wire.minimal_flag_called_events,
+            property_matching_version: wire.property_matching_version,
+            flag_metadata,
+        }
+    }
+}
+
+impl From<LocalEvaluationResponse> for WireDefinitions {
+    fn from(response: LocalEvaluationResponse) -> Self {
+        let flag_metadata = response.flag_metadata;
+        Self {
+            flags: response
+                .flags
+                .into_iter()
+                .map(|flag| {
+                    let metadata = flag_metadata.get(&flag.key).copied().unwrap_or_default();
+                    WireFlag::new(flag, metadata)
+                })
+                .collect(),
+            group_type_mapping: response.group_type_mapping,
+            cohorts: response.cohorts,
+            minimal_flag_called_events: response.minimal_flag_called_events,
+            property_matching_version: response.property_matching_version,
+        }
+    }
 }
 
 fn legacy_property_matching_version() -> i64 {
@@ -95,6 +154,7 @@ impl LocalEvaluationResponse {
             cohorts: HashMap::new(),
             minimal_flag_called_events: false,
             property_matching_version: legacy_property_matching_version(),
+            flag_metadata: DefinitionMetadataMap::new(),
         }
     }
 }
@@ -136,7 +196,7 @@ fn salvage_definitions(body: &[u8]) -> Option<LocalEvaluationResponse> {
     let mut kept = Vec::with_capacity(flags.len());
     let mut skipped = Vec::new();
     for flag in flags {
-        match serde_json::from_str::<FeatureFlag>(flag.get()) {
+        match serde_json::from_str::<WireFlag>(flag.get()) {
             Ok(_) => kept.push(flag.get()),
             Err(e) => skipped.push((flag.get(), e)),
         }
@@ -228,6 +288,7 @@ struct FlagSnapshot {
     cohorts: HashMap<String, Cohort>,
     minimal_flag_called_events: bool,
     property_matching_version: i64,
+    flag_metadata: DefinitionMetadataMap,
 }
 
 impl Default for FlagSnapshot {
@@ -238,6 +299,7 @@ impl Default for FlagSnapshot {
             cohorts: HashMap::new(),
             minimal_flag_called_events: false,
             property_matching_version: legacy_property_matching_version(),
+            flag_metadata: DefinitionMetadataMap::new(),
         }
     }
 }
@@ -287,6 +349,7 @@ impl FlagCache {
             cohorts: response.cohorts,
             minimal_flag_called_events: response.minimal_flag_called_events,
             property_matching_version: response.property_matching_version,
+            flag_metadata: response.flag_metadata,
         };
         *self.snapshot.write().unwrap() = snapshot;
 
@@ -301,6 +364,9 @@ impl FlagCache {
     }
 
     /// Return a cached feature flag by key.
+    ///
+    /// [`LocalEvaluator`] also uses parts of the definition that are not on
+    /// [`FeatureFlag`], such as its early-access enrollment.
     pub fn get_flag(&self, key: &str) -> Option<FeatureFlag> {
         self.snapshot.read().unwrap().flags.get(key).cloned()
     }
@@ -348,6 +414,7 @@ impl FlagCache {
         snapshot.group_type_mapping.clear();
         snapshot.cohorts.clear();
         snapshot.property_matching_version = legacy_property_matching_version();
+        snapshot.flag_metadata.clear();
     }
 }
 
@@ -1009,7 +1076,8 @@ impl LocalEvaluator {
                     property_matching_version: snapshot.property_matching_version,
                 };
 
-                let result = match_feature_flag_with_context(flag, person_properties, &ctx);
+                let result =
+                    match_flag_definition(flag, person_properties, &ctx, &snapshot.flag_metadata);
                 trace!(key, ?result, "Local flag evaluation");
                 result.map(Some)
             }
@@ -1050,15 +1118,18 @@ impl LocalEvaluator {
         let snapshot = self.cache.snapshot.read().unwrap();
         match snapshot.flags.get(key) {
             Some(flag) => {
-                let result = match_feature_flag_with_version(
-                    flag,
-                    distinct_id,
-                    person_properties,
-                    groups,
-                    group_properties,
-                    &snapshot.group_type_mapping,
-                    snapshot.property_matching_version,
-                );
+                let result = metadata_result(flag, person_properties, &snapshot.flag_metadata)
+                    .unwrap_or_else(|| {
+                        match_feature_flag_with_version(
+                            flag,
+                            distinct_id,
+                            person_properties,
+                            groups,
+                            group_properties,
+                            &snapshot.group_type_mapping,
+                            snapshot.property_matching_version,
+                        )
+                    });
                 trace!(key, ?result, "Local flag evaluation (simple)");
                 result.map(Some)
             }
@@ -1120,7 +1191,8 @@ impl LocalEvaluator {
         };
 
         for flag in snapshot.flags.values() {
-            let result = match_feature_flag_with_context(flag, person_properties, &ctx);
+            let result =
+                match_flag_definition(flag, person_properties, &ctx, &snapshot.flag_metadata);
             let payload = result
                 .as_ref()
                 .ok()
@@ -1171,6 +1243,7 @@ mod tests {
             group_type_mapping: HashMap::new(),
             cohorts: HashMap::new(),
             minimal_flag_called_events: false,
+            flag_metadata: DefinitionMetadataMap::new(),
         }
     }
 

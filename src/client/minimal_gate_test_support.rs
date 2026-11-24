@@ -42,7 +42,6 @@ fn gated_flag(has_experiment: Option<bool>) -> FeatureFlag {
             payloads: HashMap::new(),
             aggregation_group_type_index: None,
             early_exit: false,
-            feature_enrollment: false,
         },
     }
 }
@@ -54,6 +53,7 @@ pub(super) fn definitions(has_experiment: Option<bool>, gate: bool) -> LocalEval
         group_type_mapping: HashMap::new(),
         cohorts: HashMap::new(),
         minimal_flag_called_events: gate,
+        ..LocalEvaluationResponse::new(vec![])
     }
 }
 

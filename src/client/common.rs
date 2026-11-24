@@ -668,7 +668,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
 
@@ -679,6 +678,7 @@ mod tests {
             group_type_mapping: HashMap::new(),
             cohorts: HashMap::new(),
             minimal_flag_called_events: true,
+            ..LocalEvaluationResponse::new(vec![])
         });
         LocalEvaluator::new(cache)
     }

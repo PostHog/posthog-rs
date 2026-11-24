@@ -275,6 +275,103 @@ pub struct FeatureFlag {
     pub has_experiment: Option<bool>,
 }
 
+/// Definition fields local evaluation needs that are not on the public
+/// [`FeatureFlag`] and [`FeatureFlagFilters`]. Those structs can be built with a
+/// literal, so a new public field would break callers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DefinitionMetadata {
+    /// Marks an early-access feature flag. The person property
+    /// `$feature_enrollment/<flag key>` decides it before its release conditions.
+    pub(crate) feature_enrollment: bool,
+    /// The flag's value is persisted per person, so only the server knows it.
+    pub(crate) ensure_experience_continuity: bool,
+}
+
+/// [`DefinitionMetadata`] by flag key. Flags without any are left out.
+pub(crate) type DefinitionMetadataMap = HashMap<String, DefinitionMetadata>;
+
+/// A flag definition as it is sent, with the fields of [`DefinitionMetadata`].
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WireFlag {
+    key: String,
+    active: bool,
+    #[serde(default)]
+    filters: WireFilters,
+    #[serde(default)]
+    has_experiment: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ensure_experience_continuity: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct WireFilters {
+    #[serde(default)]
+    groups: Vec<FeatureFlagCondition>,
+    #[serde(default)]
+    multivariate: Option<MultivariateFilter>,
+    #[serde(default)]
+    payloads: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    aggregation_group_type_index: Option<i32>,
+    #[serde(default)]
+    early_exit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feature_enrollment: Option<bool>,
+}
+
+impl WireFlag {
+    pub(crate) fn new(flag: FeatureFlag, metadata: DefinitionMetadata) -> Self {
+        // Destructured in full, so a new public field can't be left out here.
+        let FeatureFlag {
+            key,
+            active,
+            filters:
+                FeatureFlagFilters {
+                    groups,
+                    multivariate,
+                    payloads,
+                    aggregation_group_type_index,
+                    early_exit,
+                },
+            has_experiment,
+        } = flag;
+        Self {
+            key,
+            active,
+            filters: WireFilters {
+                groups,
+                multivariate,
+                payloads,
+                aggregation_group_type_index,
+                early_exit,
+                feature_enrollment: metadata.feature_enrollment.then_some(true),
+            },
+            has_experiment,
+            ensure_experience_continuity: metadata.ensure_experience_continuity.then_some(true),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (FeatureFlag, DefinitionMetadata) {
+        let metadata = DefinitionMetadata {
+            feature_enrollment: self.filters.feature_enrollment.unwrap_or(false),
+            ensure_experience_continuity: self.ensure_experience_continuity.unwrap_or(false),
+        };
+        let flag = FeatureFlag {
+            key: self.key,
+            active: self.active,
+            filters: FeatureFlagFilters {
+                groups: self.filters.groups,
+                multivariate: self.filters.multivariate,
+                payloads: self.filters.payloads,
+                aggregation_group_type_index: self.filters.aggregation_group_type_index,
+                early_exit: self.filters.early_exit,
+            },
+            has_experiment: self.has_experiment,
+        };
+        (flag, metadata)
+    }
+}
+
 /// Targeting rules and configuration for a feature flag.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FeatureFlagFilters {
@@ -298,21 +395,6 @@ pub struct FeatureFlagFilters {
     /// `false`, which preserves the legacy fall-through behavior.
     #[serde(default)]
     pub early_exit: bool,
-    /// Marks an early-access feature flag. When `true`, the person property
-    /// `$feature_enrollment/<flag key>` decides the flag before its release
-    /// conditions: `true` or `"true"` is enrolled and any other value is opted
-    /// out. Without the property the flag is inconclusive.
-    #[serde(default, deserialize_with = "deserialize_null_as_false")]
-    pub feature_enrollment: bool,
-}
-
-/// Reads a JSON `null` as `false`, so a definition that sends
-/// `"feature_enrollment": null` keeps ordinary targeting.
-fn deserialize_null_as_false<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
 }
 
 /// A single condition group within a feature flag's targeting rules.
@@ -951,6 +1033,24 @@ pub fn match_feature_flag_with_context(
     person_properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<FlagValue, InconclusiveMatchError> {
+    match_flag_definition(flag, person_properties, ctx, &HashMap::new())
+}
+
+/// [`match_feature_flag_with_context`] with the metadata of loaded definitions.
+pub(crate) fn match_flag_definition(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+    ctx: &EvaluationContext,
+    metadata: &DefinitionMetadataMap,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    if let Some(result) = metadata_result(flag, person_properties, metadata) {
+        return result;
+    }
+    let scope = EvaluationScope {
+        ctx,
+        person_properties,
+        metadata,
+    };
     evaluate_feature_flag(
         flag,
         ctx.distinct_id,
@@ -958,8 +1058,55 @@ pub fn match_feature_flag_with_context(
         ctx.groups,
         ctx.group_properties,
         ctx.group_type_mapping,
-        |property, properties| match_property_with_context(property, properties, ctx),
+        |property, properties| match_property_in_scope(property, properties, scope),
     )
+}
+
+/// The result of an active flag whose metadata decides it before its group
+/// aggregation and release conditions are read.
+pub(crate) fn metadata_result(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+    metadata: &DefinitionMetadataMap,
+) -> Option<Result<FlagValue, InconclusiveMatchError>> {
+    let metadata = metadata.get(&flag.key).filter(|_| flag.active)?;
+    if metadata.ensure_experience_continuity {
+        return Some(Err(InconclusiveMatchError::new(
+            "Flag has experience continuity enabled",
+        )));
+    }
+    metadata
+        .feature_enrollment
+        .then(|| match_feature_enrollment(flag, person_properties))
+}
+
+/// An early-access feature flag returns the person's enrollment at once:
+/// `true` or `"true"` means enrolled, and any other value that was passed,
+/// `null` included, means opted out. Without the enrollment property the flag
+/// can't be resolved locally.
+fn match_feature_enrollment(
+    flag: &FeatureFlag,
+    person_properties: &HashMap<String, serde_json::Value>,
+) -> Result<FlagValue, InconclusiveMatchError> {
+    let enrollment_key = format!("$feature_enrollment/{}", flag.key);
+    match person_properties.get(&enrollment_key) {
+        None => Err(InconclusiveMatchError::new(&format!(
+            "Flag has feature enrollment and '{enrollment_key}' was not passed"
+        ))),
+        Some(serde_json::Value::Bool(enrolled)) => Ok(FlagValue::Boolean(*enrolled)),
+        Some(serde_json::Value::String(enrolled)) => Ok(FlagValue::Boolean(enrolled == "true")),
+        Some(_) => Ok(FlagValue::Boolean(false)),
+    }
+}
+
+/// What property filters are matched in, in addition to the properties of the
+/// condition's target.
+#[derive(Clone, Copy)]
+struct EvaluationScope<'a> {
+    ctx: &'a EvaluationContext<'a>,
+    /// The person's properties, also where the condition targets a group.
+    person_properties: &'a HashMap<String, serde_json::Value>,
+    metadata: &'a DefinitionMetadataMap,
 }
 
 /// Shared feature flag evaluation engine. Public entry points differ only in
@@ -979,12 +1126,6 @@ where
 {
     if !flag.active {
         return Ok(FlagValue::Boolean(false));
-    }
-
-    // Enrollment is a person property, so it is read from the person
-    // properties on group-aggregated flags too, before any group is resolved.
-    if flag.filters.feature_enrollment {
-        return match_feature_enrollment(flag, person_properties);
     }
 
     let flag_aggregation = flag.filters.aggregation_group_type_index;
@@ -1062,25 +1203,6 @@ where
     Ok(FlagValue::Boolean(false))
 }
 
-/// An early-access feature flag returns the person's enrollment at once:
-/// `true` or `"true"` means enrolled, and any other value that was passed,
-/// `null` included, means opted out. Without the enrollment property the flag
-/// can't be resolved locally.
-fn match_feature_enrollment(
-    flag: &FeatureFlag,
-    person_properties: &HashMap<String, serde_json::Value>,
-) -> Result<FlagValue, InconclusiveMatchError> {
-    let enrollment_key = format!("$feature_enrollment/{}", flag.key);
-    match person_properties.get(&enrollment_key) {
-        None => Err(InconclusiveMatchError::new(&format!(
-            "Flag has feature enrollment and '{enrollment_key}' was not passed"
-        ))),
-        Some(serde_json::Value::Bool(enrolled)) => Ok(FlagValue::Boolean(*enrolled)),
-        Some(serde_json::Value::String(enrolled)) => Ok(FlagValue::Boolean(enrolled == "true")),
-        Some(_) => Ok(FlagValue::Boolean(false)),
-    }
-}
-
 /// Match a property with additional context for cohorts and flag dependencies.
 ///
 /// Use this when evaluating local feature flag conditions that can reference
@@ -1096,31 +1218,45 @@ pub fn match_property_with_context(
     properties: &HashMap<String, serde_json::Value>,
     ctx: &EvaluationContext,
 ) -> Result<bool, InconclusiveMatchError> {
+    let scope = EvaluationScope {
+        ctx,
+        // Not read without metadata.
+        person_properties: properties,
+        metadata: &HashMap::new(),
+    };
+    match_property_in_scope(property, properties, scope)
+}
+
+fn match_property_in_scope(
+    property: &Property,
+    properties: &HashMap<String, serde_json::Value>,
+    scope: EvaluationScope,
+) -> Result<bool, InconclusiveMatchError> {
     // Check if this is a cohort membership check
     if property.property_type.as_deref() == Some("cohort") {
-        return match_cohort_property(property, properties, ctx);
+        return match_cohort_property(property, properties, scope);
     }
 
     // Check if this is a flag dependency check
     if property.key.starts_with("$feature/") {
-        return match_flag_dependency_property(property, ctx);
+        return match_flag_dependency_property(property, scope);
     }
 
     // Use the same snapshot version for direct and recursive cohort leaves.
-    match_property_with_version(property, properties, ctx.property_matching_version)
+    match_property_with_version(property, properties, scope.ctx.property_matching_version)
 }
 
 /// Evaluate cohort membership referenced by a flag property (`type = "cohort"`).
 fn match_cohort_property(
     property: &Property,
     properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
 ) -> Result<bool, InconclusiveMatchError> {
     let cohort_id = cohort_id_to_string(&property.value)
         .ok_or_else(|| InconclusiveMatchError::new("Cohort ID must be a string or number"))?;
 
     let mut active_cohorts = HashSet::new();
-    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, ctx, &mut active_cohorts, 0)
+    let is_in_cohort = match_cohort_by_id(&cohort_id, properties, scope, &mut active_cohorts, 0)
         .map_err(CohortMatchError::into_inconclusive)?;
 
     // Cohort references omit the operator in API payloads, so "exact" means membership.
@@ -1187,11 +1323,11 @@ const MAX_COHORT_RESOLUTION_DEPTH: usize = 100;
 fn match_cohort_by_id(
     cohort_id: &str,
     properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
-    let cohort = ctx.cohorts.get(cohort_id).ok_or_else(|| {
+    let cohort = scope.ctx.cohorts.get(cohort_id).ok_or_else(|| {
         CohortMatchError::MissingCohort(InconclusiveMatchError::new(&format!(
             "Cohort '{}' not found in local cache",
             cohort_id
@@ -1219,7 +1355,7 @@ fn match_cohort_by_id(
     let result = match_property_group(
         &cohort.properties,
         properties,
-        ctx,
+        scope,
         active_cohorts,
         resolution_depth,
     );
@@ -1240,7 +1376,7 @@ fn match_cohort_by_id(
 fn match_property_group(
     group: &serde_json::Value,
     properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
@@ -1258,7 +1394,7 @@ fn match_property_group(
             "AND",
             arr,
             properties,
-            ctx,
+            scope,
             active_cohorts,
             resolution_depth,
         );
@@ -1287,7 +1423,7 @@ fn match_property_group(
         group_type,
         values,
         properties,
-        ctx,
+        scope,
         active_cohorts,
         resolution_depth,
     )
@@ -1304,7 +1440,7 @@ fn match_property_group_values(
     group_type: &str,
     values: &[serde_json::Value],
     properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
@@ -1319,14 +1455,26 @@ fn match_property_group_values(
     for value in values {
         let result = if value.get("values").is_some() {
             // Nested property group.
-            match_property_group(value, properties, ctx, active_cohorts, resolution_depth + 1)
+            match_property_group(
+                value,
+                properties,
+                scope,
+                active_cohorts,
+                resolution_depth + 1,
+            )
         } else if value.get("type").and_then(|t| t.as_str()) == Some("cohort") {
             // A cohort filter nested inside another cohort.
-            match_nested_cohort(value, properties, ctx, active_cohorts, resolution_depth + 1)
+            match_nested_cohort(
+                value,
+                properties,
+                scope,
+                active_cohorts,
+                resolution_depth + 1,
+            )
         } else {
             // Leaf property filter.
             match serde_json::from_value::<CohortProperty>(value.clone()) {
-                Ok(prop) => match_property_with_context(&prop.property, properties, ctx)
+                Ok(prop) => match_property_in_scope(&prop.property, properties, scope)
                     .map(|matches| matches != prop.negation)
                     .map_err(CohortMatchError::Inconclusive),
                 Err(e) => Err(CohortMatchError::InvalidDefinition(
@@ -1361,7 +1509,7 @@ fn match_property_group_values(
 fn match_nested_cohort(
     value: &serde_json::Value,
     properties: &HashMap<String, serde_json::Value>,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
     active_cohorts: &mut HashSet<String>,
     resolution_depth: usize,
 ) -> Result<bool, CohortMatchError> {
@@ -1382,7 +1530,7 @@ fn match_nested_cohort(
     let is_member = match_cohort_by_id(
         &cohort_id,
         properties,
-        ctx,
+        scope,
         active_cohorts,
         resolution_depth,
     )?;
@@ -1392,8 +1540,10 @@ fn match_nested_cohort(
 /// Evaluate flag dependency
 fn match_flag_dependency_property(
     property: &Property,
-    ctx: &EvaluationContext,
+    scope: EvaluationScope,
 ) -> Result<bool, InconclusiveMatchError> {
+    let ctx = scope.ctx;
+
     // Extract flag key from "$feature/flag-key"
     let flag_key = property
         .key
@@ -1406,16 +1556,18 @@ fn match_flag_dependency_property(
 
     // Evaluate the dependent flag for this user (with empty properties to avoid recursion issues).
     // Group context flows through from the outer ctx so dependent group/mixed flags can resolve.
-    let empty_props = HashMap::new();
-    let flag_value = match_feature_flag_with_version(
-        flag,
-        ctx.distinct_id,
-        &empty_props,
-        ctx.groups,
-        ctx.group_properties,
-        ctx.group_type_mapping,
-        ctx.property_matching_version,
-    )?;
+    let flag_value = match metadata_result(flag, scope.person_properties, scope.metadata) {
+        Some(result) => result?,
+        None => match_feature_flag_with_version(
+            flag,
+            ctx.distinct_id,
+            &HashMap::new(),
+            ctx.groups,
+            ctx.group_properties,
+            ctx.group_type_mapping,
+            ctx.property_matching_version,
+        )?,
+    };
 
     // Compare the flag value with the expected value
     let expected = &property.value;
@@ -2012,7 +2164,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
 
@@ -2183,7 +2334,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
 
@@ -2237,7 +2387,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
 
@@ -2271,7 +2420,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
 
@@ -2571,7 +2719,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
 
@@ -3600,7 +3747,6 @@ mod tests {
                     payloads: HashMap::new(),
                     aggregation_group_type_index: None,
                     early_exit: false,
-                    feature_enrollment: false,
                 },
             },
         );
@@ -3643,7 +3789,6 @@ mod tests {
                     payloads: HashMap::new(),
                     aggregation_group_type_index: None,
                     early_exit: false,
-                    feature_enrollment: false,
                 },
             },
         );
@@ -3702,7 +3847,6 @@ mod tests {
                     payloads: HashMap::new(),
                     aggregation_group_type_index: None,
                     early_exit: false,
-                    feature_enrollment: false,
                 },
             },
         );
@@ -4665,7 +4809,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
         let properties = HashMap::from([("audience".to_string(), json!("matched"))]);
@@ -4736,7 +4879,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: Some(0),
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
         let person_properties = HashMap::from([("plan".to_string(), json!("free"))]);
@@ -4818,7 +4960,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
         let empty_cohorts = HashMap::new();
@@ -4872,7 +5013,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
         let dependent = FeatureFlag {
@@ -4895,7 +5035,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: false,
-                feature_enrollment: false,
             },
         };
         let flags = HashMap::from([("prerequisite".to_string(), prerequisite)]);
@@ -4917,174 +5056,6 @@ mod tests {
             match_feature_flag_with_context(&dependent, &HashMap::new(), &ctx).unwrap(),
             FlagValue::Boolean(true)
         );
-    }
-
-    // ==================== Tests for feature enrollment ====================
-
-    // Early-access features: the person's opt-in in `$feature_enrollment/<flag key>`
-    // decides the flag before release conditions (sdk-specs
-    // local-feature-flag-evaluator, local-feature-flag-enrollment.feature).
-
-    const ENROLLMENT_KEY: &str = "$feature_enrollment/beta-feature";
-
-    fn enrollment_flag(rollout: f64) -> FeatureFlag {
-        serde_json::from_value(json!({
-            "key": "beta-feature",
-            "active": true,
-            "filters": {
-                "feature_enrollment": true,
-                "groups": [{"properties": [], "rollout_percentage": rollout}]
-            }
-        }))
-        .unwrap()
-    }
-
-    fn evaluate_enrollment(
-        flag: &FeatureFlag,
-        person_properties: HashMap<String, serde_json::Value>,
-    ) -> Result<FlagValue, InconclusiveMatchError> {
-        match_feature_flag(
-            flag,
-            "user-123",
-            &person_properties,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-    }
-
-    fn enrollment(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
-        HashMap::from([(ENROLLMENT_KEY.to_string(), value)])
-    }
-
-    #[test]
-    fn feature_enrollment_values_decide_before_release_conditions() {
-        let cases = [
-            (json!(true), 0.0, true),
-            (json!("true"), 0.0, true),
-            (json!(false), 100.0, false),
-            (json!("false"), 100.0, false),
-            (json!(1), 100.0, false),
-            (json!(0), 100.0, false),
-            (json!(null), 100.0, false),
-            (json!("True"), 100.0, false),
-            (json!(""), 100.0, false),
-            (json!([]), 100.0, false),
-            (json!({}), 100.0, false),
-        ];
-        for (value, rollout, expected) in cases {
-            let result = evaluate_enrollment(&enrollment_flag(rollout), enrollment(value.clone()));
-            assert_eq!(
-                result.unwrap(),
-                FlagValue::Boolean(expected),
-                "enrollment {value}"
-            );
-        }
-    }
-
-    #[test]
-    fn feature_enrollment_missing_is_inconclusive() {
-        let result = evaluate_enrollment(&enrollment_flag(100.0), HashMap::new());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn feature_enrollment_keeps_inactive_flag_off() {
-        let mut flag = enrollment_flag(100.0);
-        flag.active = false;
-        assert_eq!(
-            evaluate_enrollment(&flag, enrollment(json!(true))).unwrap(),
-            FlagValue::Boolean(false)
-        );
-        assert_eq!(
-            evaluate_enrollment(&flag, HashMap::new()).unwrap(),
-            FlagValue::Boolean(false)
-        );
-    }
-
-    #[test]
-    fn feature_enrollment_false_or_null_keeps_ordinary_targeting() {
-        for marker in [json!(false), json!(null)] {
-            let flag: FeatureFlag = serde_json::from_value(json!({
-                "key": "beta-feature",
-                "active": true,
-                "filters": {
-                    "feature_enrollment": marker,
-                    "groups": [{"properties": [], "rollout_percentage": 100}]
-                }
-            }))
-            .unwrap();
-            assert!(!flag.filters.feature_enrollment);
-            assert_eq!(
-                evaluate_enrollment(&flag, HashMap::new()).unwrap(),
-                FlagValue::Boolean(true)
-            );
-        }
-    }
-
-    #[test]
-    fn feature_enrollment_skips_release_conditions_it_cannot_evaluate() {
-        // A filter on a missing person property would be inconclusive, but enrollment
-        // decides the flag before release conditions are read.
-        let flag: FeatureFlag = serde_json::from_value(json!({
-            "key": "beta-feature",
-            "active": true,
-            "filters": {
-                "feature_enrollment": true,
-                "groups": [{
-                    "properties": [{"key": "plan", "value": "pro", "operator": "exact", "type": "person"}],
-                    "rollout_percentage": 100
-                }]
-            }
-        }))
-        .unwrap();
-        assert_eq!(
-            evaluate_enrollment(&flag, enrollment(json!(true))).unwrap(),
-            FlagValue::Boolean(true)
-        );
-        assert_eq!(
-            evaluate_enrollment(&flag, enrollment(json!(false))).unwrap(),
-            FlagValue::Boolean(false)
-        );
-    }
-
-    #[test]
-    fn feature_enrollment_on_group_flag_reads_person_properties() {
-        let flag: FeatureFlag = serde_json::from_value(json!({
-            "key": "beta-feature",
-            "active": true,
-            "filters": {
-                "feature_enrollment": true,
-                "aggregation_group_type_index": 0,
-                "groups": [{"properties": [], "rollout_percentage": 0}]
-            }
-        }))
-        .unwrap();
-        let group_type_mapping = HashMap::from([("0".to_string(), "company".to_string())]);
-
-        // No group context: the person's enrollment still decides.
-        let result = match_feature_flag(
-            &flag,
-            "user-123",
-            &enrollment(json!(true)),
-            &HashMap::new(),
-            &HashMap::new(),
-            &group_type_mapping,
-        );
-        assert_eq!(result.unwrap(), FlagValue::Boolean(true));
-
-        // Group properties can't turn the person's opt-out into enrollment.
-        let groups = HashMap::from([("company".to_string(), "acme".to_string())]);
-        let group_properties = HashMap::from([("company".to_string(), enrollment(json!(true)))]);
-        let result = match_feature_flag(
-            &flag,
-            "user-123",
-            &enrollment(json!(false)),
-            &groups,
-            &group_properties,
-            &group_type_mapping,
-        );
-        assert_eq!(result.unwrap(), FlagValue::Boolean(false));
     }
 
     // ==================== Tests for early_exit ====================
@@ -5120,7 +5091,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit,
-                feature_enrollment: false,
             },
         }
     }
@@ -5243,7 +5213,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: true,
-                feature_enrollment: false,
             },
         };
 
@@ -5326,7 +5295,6 @@ mod tests {
                 payloads: HashMap::new(),
                 aggregation_group_type_index: None,
                 early_exit: true,
-                feature_enrollment: false,
             },
         };
 
