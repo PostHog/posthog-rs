@@ -1423,18 +1423,18 @@ fn scheduled_for(time: &str) -> Answer {
 #[tokio::test]
 async fn scheduled_at_goes_out_in_utc_rounded_up_to_the_millisecond_on_both_forms() {
     let cases = [
-        ("2026-12-01T09:00:00Z", "2026-12-01T09:00:00.000Z"),
-        ("2026-12-01T10:30:00.25+01:30", "2026-12-01T09:00:00.250Z"),
+        ("2020-12-01T09:00:00Z", "2020-12-01T09:00:00.000Z"),
+        ("2020-12-01T10:30:00.25+01:30", "2020-12-01T09:00:00.250Z"),
         (
-            "2026-12-01T09:00:00.123000-05:00",
-            "2026-12-01T14:00:00.123Z",
+            "2020-12-01T09:00:00.123000-05:00",
+            "2020-12-01T14:00:00.123Z",
         ),
-        ("2026-12-01T09:00:00.123000001Z", "2026-12-01T09:00:00.124Z"),
+        ("2020-12-01T09:00:00.123000001Z", "2020-12-01T09:00:00.124Z"),
         (
-            "2026-12-01T11:00:00.999999+02:00",
-            "2026-12-01T09:00:01.000Z",
+            "2020-12-01T11:00:00.999999+02:00",
+            "2020-12-01T09:00:01.000Z",
         ),
-        ("2026-12-31T23:59:59.9999Z", "2027-01-01T00:00:00.000Z"),
+        ("2020-12-31T23:59:59.9999Z", "2021-01-01T00:00:00.000Z"),
     ];
     let (server, client) = cloud_with(vec![sent_now()], "https://us.posthog.com").await;
     for (requested, _) in cases {
@@ -1541,20 +1541,49 @@ async fn a_confirmed_schedule_returns_the_requested_time() {
 #[cfg(feature = "tls")]
 #[tokio::test]
 async fn a_scheduled_time_that_had_passed_is_queued_now() {
-    let (_server, client) = cloud_with(vec![sent_now()], "https://us.posthog.com").await;
+    // Up to a minute ahead still reads as passed, so a client clock a little
+    // ahead of PostHog's doesn't fail a send that went out on time.
+    for at in [
+        utc("2020-01-01T00:00:00Z"),
+        chrono::Utc::now() + chrono::Duration::seconds(30),
+    ] {
+        let (_server, client) = cloud_with(vec![sent_now()], "https://us.posthog.com").await;
 
-    let result = client
-        .emails()
-        .send(
-            CodeEmail::new("user@example.com", "reminder", "Your reminder")
-                .text("It's time.")
-                .scheduled_at(utc("2020-01-01T00:00:00Z")),
-        )
-        .await
-        .unwrap();
+        let result = client
+            .emails()
+            .send(
+                CodeEmail::new("user@example.com", "reminder", "Your reminder")
+                    .text("It's time.")
+                    .scheduled_at(at),
+            )
+            .await
+            .unwrap();
 
-    assert_eq!(result.status(), SendEmailStatus::Queued);
-    assert_eq!(result.scheduled_at, None);
+        assert_eq!(result.status(), SendEmailStatus::Queued, "{}", at);
+        assert_eq!(result.scheduled_at, None);
+    }
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_future_time_that_posthog_sends_now_fails_with_the_message_id() {
+    for ahead in [chrono::Duration::minutes(2), chrono::Duration::days(1)] {
+        let (server, client) =
+            cloud_with(vec![sent_now(), sent_now()], "https://us.posthog.com").await;
+
+        let error = client
+            .emails()
+            .send(
+                TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                    .scheduled_at(chrono::Utc::now() + ahead),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "schedule_not_confirmed", "{}", ahead);
+        assert_eq!(error.message_id(), Some(MESSAGE_ID));
+        assert_eq!(server.requests().len(), 1);
+    }
 }
 
 #[cfg(feature = "tls")]
@@ -1652,7 +1681,8 @@ async fn every_spelling_of_a_cloud_app_host_schedules() {
         ("https://US.PostHog.com", "us.posthog.com"),
         ("https://eu.posthog.com/", "eu.posthog.com"),
     ] {
-        let (server, client) = cloud_with(vec![sent_now()], app_host).await;
+        let (server, client) =
+            cloud_with(vec![scheduled_for("2026-12-01T09:00:00.000Z")], app_host).await;
 
         client
             .emails()

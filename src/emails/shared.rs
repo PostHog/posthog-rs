@@ -806,6 +806,10 @@ pub(crate) fn accept(reply: Reply) -> Result<Accepted, EmailError> {
     })
 }
 
+/// How far ahead of the client's clock a time may be and still read as
+/// passed when PostHog sends the email now, for clocks that drift apart.
+const CLOCK_SKEW_SECONDS: i64 = 60;
+
 /// The send's result. For a send with `scheduled_at`, PostHog must confirm
 /// the time it waits for, or answer `queued` with `null` when the time had
 /// passed: any other acceptance may send the email at another time.
@@ -839,7 +843,12 @@ pub(crate) fn parse_send_reply(
     let confirmed = match scheduled_at {
         None => None,
         Some(requested) => match (fields.get("status"), fields.get("scheduled_at")) {
-            (Some(Value::String(answered)), Some(Value::Null)) if answered == "queued" => None,
+            (Some(Value::String(answered)), Some(Value::Null))
+                if answered == "queued"
+                    && requested <= Utc::now() + TimeDelta::seconds(CLOCK_SKEW_SECONDS) =>
+            {
+                None
+            }
             (Some(Value::String(answered)), Some(Value::String(time)))
                 if answered == "scheduled" && instant(time) == Some(requested) =>
             {
