@@ -299,8 +299,8 @@ impl CodeEmail {
     ///
     /// PostHog keeps the time to the millisecond, so the client rounds a finer
     /// time up to the next millisecond, and a confirmed time is never early.
-    /// A send that PostHog sends at once for a time up to a minute ahead
-    /// returns `Queued`. Every retry sends that same time. Work out a
+    /// A send that PostHog sends at once returns `Queued` when the rounded
+    /// time is at most a minute ahead. Every retry sends that same time. Work out a
     /// relative time, such as an hour from now, once, and send the same time
     /// when you send again with the same idempotency key: a time in another
     /// millisecond with that key is `idempotency_key_reused`.
@@ -590,13 +590,17 @@ impl SendEmailResult {
     }
 }
 
-/// Whether an accepted email goes out now or later.
+/// Whether PostHog took the email to go out now or later, as of the first
+/// send with its idempotency key. A replay with that key returns the same
+/// status, also after the email went out: read
+/// [`Emails::get`](crate::Emails::get) for where the email is now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SendEmailStatus {
     /// The email goes out now.
     Queued,
-    /// The email waits for its [`scheduled_at`](SendEmailResult::scheduled_at).
+    /// The email is due at its [`scheduled_at`](SendEmailResult::scheduled_at),
+    /// and PostHog sends it once that time has come.
     Scheduled,
 }
 

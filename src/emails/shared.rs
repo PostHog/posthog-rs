@@ -851,16 +851,18 @@ pub(crate) fn accept(reply: Reply) -> Result<Accepted, EmailError> {
 /// a thread that a test put on virtual time, a wait passes at once and moves
 /// the time on instead.
 pub(crate) mod clock {
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use chrono::{DateTime, Utc};
 
+    /// `Utc::now` panics on a clock set before 1970, so the time is converted
+    /// from `SystemTime` instead.
     pub(crate) fn now() -> DateTime<Utc> {
         #[cfg(test)]
-        if let Some(now) = virtual_time::now() {
-            return now;
-        }
-        Utc::now()
+        let now = virtual_time::now().unwrap_or_else(SystemTime::now);
+        #[cfg(not(test))]
+        let now = SystemTime::now();
+        DateTime::from(now)
     }
 
     /// Moves virtual time on by `delay` and returns `true`, or returns
@@ -893,7 +895,7 @@ pub(crate) mod clock {
     #[cfg(test)]
     pub(crate) mod virtual_time {
         use std::cell::{Cell, RefCell};
-        use std::time::Duration;
+        use std::time::{Duration, SystemTime};
 
         use chrono::{DateTime, Utc};
         use tokio::sync::mpsc::UnboundedSender;
@@ -901,17 +903,19 @@ pub(crate) mod clock {
         pub(crate) const HELD_WAIT: Duration = Duration::from_secs(10);
 
         thread_local! {
-            static NOW: Cell<Option<DateTime<Utc>>> = const { Cell::new(None) };
+            static NOW: Cell<Option<SystemTime>> = const { Cell::new(None) };
             static HELD: RefCell<Option<UnboundedSender<Duration>>> = const { RefCell::new(None) };
         }
 
         /// Puts this thread's email clients on virtual time from `start`
         /// until the guard drops.
+        #[cfg_attr(not(feature = "tls"), allow(dead_code))]
         pub(crate) fn start_at(start: DateTime<Utc>) -> Guard {
-            NOW.with(|now| now.set(Some(start)));
+            NOW.with(|now| now.set(Some(start.into())));
             Guard
         }
 
+        #[cfg_attr(not(feature = "tls"), allow(dead_code))]
         pub(crate) struct Guard;
 
         impl Guard {
@@ -938,14 +942,14 @@ pub(crate) mod clock {
             })
         }
 
-        pub(super) fn now() -> Option<DateTime<Utc>> {
+        pub(super) fn now() -> Option<SystemTime> {
             NOW.with(Cell::get)
         }
 
         pub(super) fn advance(delay: Duration) -> bool {
             NOW.with(|now| match now.get() {
                 Some(time) => {
-                    now.set(Some(time + chrono::Duration::from_std(delay).unwrap()));
+                    now.set(Some(time + delay));
                     true
                 }
                 None => false,
@@ -961,10 +965,25 @@ const CLOCK_SKEW_SECONDS: i64 = 60;
 /// The send's result. For a send with `scheduled_at`, PostHog must confirm
 /// the time it waits for, or answer `queued` with `null` when the time had
 /// passed: any other acceptance may send the email at another time.
+/// A scheduled send's time, and when the client first sent it.
+pub(crate) struct Schedule {
+    pub(crate) at: DateTime<Utc>,
+    pub(crate) first_attempt_at: DateTime<Utc>,
+}
+
+impl Schedule {
+    /// Reads the clock only for a send that has a time.
+    pub(crate) fn of(scheduled_at: Option<DateTime<Utc>>) -> Option<Self> {
+        scheduled_at.map(|at| Self {
+            at,
+            first_attempt_at: clock::now(),
+        })
+    }
+}
+
 pub(crate) fn parse_send_reply(
     reply: Accepted,
-    scheduled_at: Option<DateTime<Utc>>,
-    first_attempt_at: DateTime<Utc>,
+    schedule: Option<Schedule>,
 ) -> Result<SendEmailResult, EmailError> {
     let Accepted { status, fields } = reply;
     let id = text(&fields, "message_id").ok_or_else(|| {
@@ -976,9 +995,12 @@ pub(crate) fn parse_send_reply(
         )
     })?;
     let warnings = parse_warnings(&fields);
-    let confirmed = match scheduled_at {
+    let confirmed = match schedule {
         None => None,
-        Some(requested) => match (fields.get("status"), fields.get("scheduled_at")) {
+        Some(Schedule {
+            at: requested,
+            first_attempt_at,
+        }) => match (fields.get("status"), fields.get("scheduled_at")) {
             (Some(Value::String(answered)), Some(Value::Null))
                 if answered == "queued"
                     && requested <= first_attempt_at + TimeDelta::seconds(CLOCK_SKEW_SECONDS) =>
@@ -2018,7 +2040,7 @@ mod tests {
     }
 
     fn send_reply(reply: Reply) -> Result<SendEmailResult, EmailError> {
-        accept(reply).and_then(|reply| parse_send_reply(reply, None, Utc::now()))
+        accept(reply).and_then(|reply| parse_send_reply(reply, None))
     }
 
     fn status_reply(reply: Reply) -> Result<EmailStatus, EmailError> {

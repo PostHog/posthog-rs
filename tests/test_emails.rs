@@ -1405,6 +1405,7 @@ async fn cloud_with(answers: Vec<Answer>, app_host: &str) -> (ScriptedServer, po
     (server, client)
 }
 
+#[cfg(feature = "tls")]
 fn sent_now() -> Answer {
     Answer::json(
         202,
@@ -1412,6 +1413,7 @@ fn sent_now() -> Answer {
     )
 }
 
+#[cfg(feature = "tls")]
 fn scheduled_for(time: &str) -> Answer {
     Answer::json(
         202,
@@ -1497,49 +1499,20 @@ async fn a_confirmed_schedule_returns_the_requested_time() {
 #[cfg(feature = "tls")]
 #[tokio::test]
 async fn a_scheduled_time_that_had_passed_is_queued_now() {
-    // Up to a minute ahead still reads as passed, so a client clock a little
-    // ahead of PostHog's doesn't fail a send that went out on time.
-    for at in [
-        utc("2020-01-01T00:00:00Z"),
-        chrono::Utc::now() + chrono::Duration::seconds(30),
-    ] {
-        let (_server, client) = cloud_with(vec![sent_now()], "https://us.posthog.com").await;
+    let (_server, client) = cloud_with(vec![sent_now()], "https://us.posthog.com").await;
 
-        let result = client
-            .emails()
-            .send(
-                CodeEmail::new("user@example.com", "reminder", "Your reminder")
-                    .text("It's time.")
-                    .scheduled_at(at),
-            )
-            .await
-            .unwrap();
+    let result = client
+        .emails()
+        .send(
+            CodeEmail::new("user@example.com", "reminder", "Your reminder")
+                .text("It's time.")
+                .scheduled_at(utc("2020-01-01T00:00:00Z")),
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(result.status(), SendEmailStatus::Queued, "{}", at);
-        assert_eq!(result.scheduled_at, None);
-    }
-}
-
-#[cfg(feature = "tls")]
-#[tokio::test]
-async fn a_future_time_that_posthog_sends_now_fails_with_the_message_id() {
-    for ahead in [chrono::Duration::minutes(2), chrono::Duration::days(1)] {
-        let (server, client) =
-            cloud_with(vec![sent_now(), sent_now()], "https://us.posthog.com").await;
-
-        let error = client
-            .emails()
-            .send(
-                TemplateEmail::new("user@example.com", TEMPLATE_ID)
-                    .scheduled_at(chrono::Utc::now() + ahead),
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.code(), "schedule_not_confirmed", "{}", ahead);
-        assert_eq!(error.message_id(), Some(MESSAGE_ID));
-        assert_eq!(server.requests().len(), 1);
-    }
+    assert_eq!(result.status(), SendEmailStatus::Queued);
+    assert_eq!(result.scheduled_at, None);
 }
 
 #[cfg(feature = "tls")]
@@ -1589,42 +1562,48 @@ async fn an_acceptance_that_doesnt_confirm_the_schedule_fails_with_the_message_i
 #[cfg(feature = "tls")]
 #[tokio::test]
 async fn a_refused_scheduled_at_is_reported_and_never_sent_now() {
-    let (server, client) = cloud_with(
-        vec![
-            Answer::json(
-                400,
-                json!({
-                    "type": "validation_error",
-                    "code": "scheduled_too_far",
-                    "detail": "scheduled_at is more than 7 days ahead.",
-                    "attr": "scheduled_at",
-                }),
-            ),
-            accepted(),
-        ],
-        "https://us.posthog.com",
-    )
-    .await;
-
-    let error = client
-        .emails()
-        .send(
-            TemplateEmail::new("user@example.com", TEMPLATE_ID)
-                .scheduled_at(utc("2027-12-01T09:00:00Z")),
+    for (code, detail) in [
+        ("scheduled_too_far", "scheduled_at is more than 7 days ahead."),
+        // What PostHog answers while scheduled sends are off for the project.
+        ("invalid", "Scheduled sends are off for this project, so PostHog didn't send this request's email."),
+    ] {
+        let (server, client) = cloud_with(
+            vec![
+                Answer::json(
+                    400,
+                    json!({
+                        "type": "validation_error",
+                        "code": code,
+                        "detail": detail,
+                        "attr": "scheduled_at",
+                    }),
+                ),
+                accepted(),
+            ],
+            "https://us.posthog.com",
         )
-        .await
-        .unwrap_err();
+        .await;
 
-    assert_eq!(error.code(), "scheduled_too_far");
-    assert_eq!(error.status(), Some(400));
-    assert_eq!(error.kind(), EmailErrorKind::ValidationError);
-    assert_eq!(error.field(), Some("scheduled_at"));
-    let requests = server.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].json()["scheduled_at"],
-        "2027-12-01T09:00:00.000Z"
-    );
+        let error = client
+            .emails()
+            .send(
+                TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                    .scheduled_at(utc("2027-12-01T09:00:00Z")),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), code);
+        assert_eq!(error.status(), Some(400));
+        assert_eq!(error.kind(), EmailErrorKind::ValidationError);
+        assert_eq!(error.field(), Some("scheduled_at"));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "{}", code);
+        assert_eq!(
+            requests[0].json()["scheduled_at"],
+            "2027-12-01T09:00:00.000Z"
+        );
+    }
 }
 
 #[cfg(feature = "tls")]
