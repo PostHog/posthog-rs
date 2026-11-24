@@ -484,6 +484,36 @@ fn a_scheduled_send_on_posthog_cloud_returns_the_confirmed_time() {
 
 #[cfg(feature = "tls")]
 #[test]
+fn the_minute_of_grace_counts_from_the_first_attempt() {
+    // Two retries wait at least 2.4 seconds, so by the time PostHog answers,
+    // a time 61.2 seconds after the first attempt is within a minute.
+    let server = ScriptedServer::start(vec![
+        unavailable(),
+        unavailable(),
+        Answer::json(
+            202,
+            json!({"message_id": MESSAGE_ID, "status": "queued", "scheduled_at": null}),
+        ),
+    ]);
+    let cloud = email_support::CloudFront::start_blocking(&server.url);
+    let client = cloud_client(&cloud);
+
+    let error = client
+        .emails()
+        .send(
+            TemplateEmail::new("user@example.com", TEMPLATE_ID)
+                .scheduled_at(chrono::Utc::now() + chrono::Duration::milliseconds(61_200))
+                .max_retries(2),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "schedule_not_confirmed");
+    assert_eq!(error.message_id(), Some(MESSAGE_ID));
+    assert_eq!(server.requests().len(), 3);
+}
+
+#[cfg(feature = "tls")]
+#[test]
 fn an_acceptance_that_doesnt_confirm_the_schedule_fails_with_the_message_id() {
     let server = ScriptedServer::start(vec![Answer::json(
         202,
