@@ -1002,9 +1002,9 @@ pub fn status_found(message_id: &str) -> Answer {
 
 /// Whether `error` tells the caller to send the email again with its key.
 pub fn says_to_resend_with_its_key(error: Option<&posthog::EmailError>) -> bool {
-    error
-        .and_then(posthog::EmailError::fix)
-        .is_some_and(|fix| fix.contains("same idempotency_key"))
+    error.and_then(posthog::EmailError::fix).is_some_and(|fix| {
+        fix.contains("same idempotency_key within 24 hours of the first request that used it")
+    })
 }
 
 /// `count` recipients, `user<n>@example.com` with the key `key-<n>`.
@@ -1014,13 +1014,5 @@ pub fn recipients(count: usize) -> Vec<posthog::BatchRecipient> {
             posthog::BatchRecipient::new(format!("user{index}@example.com"))
                 .idempotency_key(format!("key-{index}"))
         })
-        .collect()
-}
-
-pub fn batch_requests(server: &ScriptedServer) -> Vec<Recorded> {
-    server
-        .requests()
-        .into_iter()
-        .filter(|request| request.path == BATCH_PATH)
         .collect()
 }

@@ -170,7 +170,6 @@ pub fn posthog::tower::PostHogService<S>::call(&mut self, http::request::Request
 pub fn posthog::tower::PostHogService<S>::poll_ready(&mut self, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), Self::Error>>
 #[non_exhaustive] pub enum posthog::BatchEmailStatus
 pub posthog::BatchEmailStatus::Failed
-pub posthog::BatchEmailStatus::NotAttempted
 pub posthog::BatchEmailStatus::Queued
 pub posthog::BatchEmailStatus::Unconfirmed
 impl posthog::BatchEmailStatus

@@ -130,41 +130,40 @@ impl<'a> Emails<'a> {
         Ok(result)
     }
 
-    /// Queues the same email for many recipients, one email each, from a
+    /// Queues the same email for 1 to 100 recipients, one email each, from a
     /// template made in PostHog or from content your code rendered.
     ///
-    /// The client sends the recipients in requests of at most 100 recipients
-    /// and 4 MiB of JSON, one after another, and waits at least 45 seconds for
-    /// each answer. A request holds fewer recipients when PostHog would copy
-    /// more shared data for them than it takes. Each recipient has an
-    /// idempotency key, given or made by the
-    /// client, that every retry reuses, so a retry never queues an email
-    /// twice. A request retries what [`send`](Self::send) retries.
+    /// The client sends the batch in one request and waits at least 45 seconds
+    /// for the answer. Each recipient has an idempotency key, given or made by
+    /// the client, that every retry reuses, so a retry never queues an email
+    /// twice. The request retries what [`send`](Self::send) retries.
     ///
     /// `Ok` holds a result per recipient, in the order of the recipients.
     /// Check each [`status`](crate::BatchEmailResult::status), and send an
     /// [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed) email again with
-    /// the same key within 24 hours, so it goes out once.
+    /// the same key within 24 hours of the first request that used it, so it
+    /// goes out once.
     ///
     /// # Errors
     ///
     /// Returns an [`EmailError`] whose
-    /// [`batch_result`](EmailError::batch_result) holds every recipient when a
-    /// request failed as a whole, so the batch stopped. The client never reads
-    /// an email by its key: a recipient whose email PostHog may have queued
-    /// stays [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed), and you
-    /// send it again with its key. The code is `batch_unavailable` when the project can't send
-    /// batches yet, and a `404` means the template doesn't exist or batch
-    /// sends are off: send each email the batch didn't queue with
-    /// [`send`](Self::send) and its recipient's idempotency key.
-    /// `client_closed` means the client shut down during the batch: it sends
-    /// no further request or retry, and returns at once from a wait before a
-    /// retry.
+    /// [`batch_result`](EmailError::batch_result) holds every recipient when
+    /// PostHog refused the request or never answered it. The client never
+    /// reads an email by its key: a recipient whose email PostHog may have
+    /// queued stays [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed), and
+    /// you send it again with its key. The code is `content_too_large` (`413`)
+    /// when the batch is more than PostHog takes in one request: split the
+    /// recipients into smaller batches. The code is `batch_unavailable` when
+    /// the project can't send batches yet, and a `404` means the template
+    /// doesn't exist or batch sends are off: send each email the batch didn't
+    /// queue with [`send`](Self::send) and its recipient's idempotency key.
+    /// `client_closed` means the client shut down before a retry: it sends no
+    /// retry, and returns at once from the wait before it.
     ///
     /// Returns an [`EmailError`] without a batch result when the client sent
-    /// nothing: an argument check failed, such as two recipients with the
-    /// same idempotency key, or the client is disabled, shut down or has no
-    /// `secret_key`.
+    /// nothing: an argument check failed, such as more than 100 recipients or
+    /// two recipients with the same idempotency key, or the client is
+    /// disabled, shut down or has no `secret_key`.
     ///
     /// # Examples
     ///

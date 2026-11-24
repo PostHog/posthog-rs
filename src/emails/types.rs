@@ -718,12 +718,14 @@ impl BatchRecipient {
     ///
     /// Without it, the client makes a UUID that covers its own retries but not
     /// a second call, so pass keys you store when a batch may be cut off and
-    /// run again: a rerun within 24 hours replays the emails that went out
+    /// run again: a rerun within 24 hours of the first run replays the emails
+    /// that went out
     /// instead of sending them twice. A single send and a batch recipient with
     /// the same key and the same email replay each other. Never reuse a key
     /// for another email. The client never reads an email by its key: send an
     /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed) recipient again with the
-    /// same key within 24 hours, so the email goes out once.
+    /// same key within 24 hours of the first request that used it, so the
+    /// email goes out once.
     pub fn idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
         self
@@ -764,10 +766,8 @@ pub struct TemplateBatch {
 }
 
 impl TemplateBatch {
-    /// The template with this UUID, sent to one or more recipients. The client
-    /// sends at most 100 recipients, and at most 4 MiB of JSON, per request,
-    /// and fewer when PostHog would copy more shared data for them than it
-    /// takes.
+    /// The template with this UUID, sent to 1 to 100 recipients in one
+    /// request.
     pub fn new(
         template_id: impl Into<String>,
         recipients: impl IntoIterator<Item = BatchRecipient>,
@@ -787,8 +787,8 @@ impl TemplateBatch {
         self
     }
 
-    /// Overrides the client's `email_request_max_retries` for each request of
-    /// the batch. `0` turns retries off.
+    /// Overrides the client's `email_request_max_retries` for the batch's
+    /// request. `0` turns retries off.
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = Some(max_retries);
         self
@@ -825,10 +825,8 @@ pub struct CodeBatch {
 }
 
 impl CodeBatch {
-    /// The same content, with a subject, for one or more recipients. The client
-    /// sends at most 100 recipients, and at most 4 MiB of JSON, per request,
-    /// and fewer when PostHog would copy more shared data for them than it
-    /// takes.
+    /// The same content, with a subject, for 1 to 100 recipients in one
+    /// request.
     ///
     /// `template_key` names the email, as in [`CodeEmail::new`].
     pub fn new(
@@ -880,8 +878,8 @@ impl CodeBatch {
         self
     }
 
-    /// Overrides the client's `email_request_max_retries` for each request of
-    /// the batch. `0` turns retries off.
+    /// Overrides the client's `email_request_max_retries` for the batch's
+    /// request. `0` turns retries off.
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = Some(max_retries);
         self
@@ -923,22 +921,18 @@ pub enum BatchEmailStatus {
     Failed,
     /// The client can't tell whether PostHog queued the email, such as after a
     /// lost answer. It may still go out. Send it again with the same
-    /// idempotency key within 24 hours, so it goes out once.
+    /// idempotency key within 24 hours of the first request that used it, so
+    /// it goes out once.
     Unconfirmed,
-    /// The batch stopped before it reached this recipient, because an earlier
-    /// request failed or the client shut down, so the client sent nothing for
-    /// them.
-    NotAttempted,
 }
 
 impl BatchEmailStatus {
-    /// The status as every PostHog SDK spells it, such as `"not_attempted"`.
+    /// The status as every PostHog SDK spells it, such as `"unconfirmed"`.
     pub fn as_str(self) -> &'static str {
         match self {
             BatchEmailStatus::Queued => "queued",
             BatchEmailStatus::Failed => "failed",
             BatchEmailStatus::Unconfirmed => "unconfirmed",
-            BatchEmailStatus::NotAttempted => "not_attempted",
         }
     }
 }
@@ -959,7 +953,8 @@ pub struct BatchEmailResult {
     pub to: String,
     /// The recipient's idempotency key, given or made by the client. Send an
     /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed) email again with it
-    /// within 24 hours, so it goes out once: the client doesn't read the email
+    /// within 24 hours of the first request that used it, so it goes out
+    /// once: the client doesn't read the email
     /// by its key, so the result never learns more after the batch returns.
     pub idempotency_key: String,
     /// What happened to the email.

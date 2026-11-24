@@ -97,16 +97,16 @@ they have reached a final status. That refuses every new send of it meanwhile.
 
 # Batches
 
-[`Emails::batch`] sends the same email to many recipients, one email each:
-a [`TemplateBatch`](crate::TemplateBatch) with `template_data` per
+[`Emails::batch`] sends the same email to 1 to 100 recipients, one email
+each: a [`TemplateBatch`](crate::TemplateBatch) with `template_data` per
 recipient for a template made in PostHog, or a
 [`CodeBatch`](crate::CodeBatch) with content your code rendered. The client
-sends at most 100 recipients and 4 MiB of JSON per request, one request
-after another, and waits at least 45 seconds for each answer. PostHog
-copies the shared `template_data` or content for each recipient, so a
-request with large shared data holds fewer recipients. A recipient too
-large for any request fails alone with `content_too_large`. Each
-[`BatchRecipient`](crate::BatchRecipient) has its own idempotency key,
+sends the batch in one request and waits at least 45 seconds for the
+answer. With more than 100 recipients it sends nothing and returns an
+error: split them into batches of at most 100. PostHog also refuses a
+request whose body or shared data is more than it takes at once, with
+`content_too_large` (`413`): split the recipients into smaller batches.
+Each [`BatchRecipient`](crate::BatchRecipient) has its own idempotency key,
 given or made by the client, that every retry reuses. Check each result's
 [`status`](crate::BatchEmailResult::status):
 
@@ -114,24 +114,23 @@ given or made by the client, that every retry reuses. Check each result's
 - `Failed`: PostHog refused it, and `error` says why, such as a suppressed
   address. PostHog may still name the refused email in `message_id`.
 - `Unconfirmed`: the client can't tell whether PostHog accepted it, such as
-  after a lost answer. Send it again with the same key within 24 hours, so
-  it goes out once. It stays `Unconfirmed` when a later answer refuses it,
-  since that doesn't prove it wasn't sent: `later_error` holds that answer.
-- `NotAttempted`: the batch stopped before it reached this recipient,
-  because an earlier request failed or the client shut down, so the client
-  sent nothing for it.
+  after a lost answer. Send it again with the same key within 24 hours of
+  the first request that used it, so it goes out once. It stays
+  `Unconfirmed` when a later answer refuses it, since that doesn't prove it
+  wasn't sent: `later_error` holds that answer.
 
 The client never reads an email by its key, so an `Unconfirmed` result
 stays that way: send it again with the same key, and PostHog queues it at
-most once. When the client shuts down, the batch sends no further request or retry, and a
-shutdown during a wait before a retry returns the results at once. A request that fails as a whole, such as a rate limit past its
-retries, stops the batch with an [`EmailError`](crate::EmailError) whose
+most once. When PostHog refuses the request as a whole, such as a rate
+limit past its retries, or never answers it, the call returns an
+[`EmailError`](crate::EmailError) whose
 [`batch_result`](crate::EmailError::batch_result) holds every recipient.
-The code `batch_unavailable` (`409`) means the project can't send batches
-yet, and a `404` that the template doesn't exist or batch sends are off for
-the project: send each email the batch didn't queue with [`Emails::send`]
-and its recipient's idempotency key. A batch takes no `cc`, `bcc`,
-attachments or `scheduled_at`.
+When the client shuts down, the batch sends no retry, and a shutdown during
+a wait before a retry returns at once. The code `batch_unavailable` (`409`)
+means the project can't send batches yet, and a `404` that the template
+doesn't exist or batch sends are off for the project: send each email the
+batch didn't queue with [`Emails::send`] and its recipient's idempotency
+key. A batch takes no `cc`, `bcc`, attachments or `scheduled_at`.
 
 # Timeouts and retries
 

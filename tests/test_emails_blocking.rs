@@ -623,31 +623,56 @@ fn batch_of(count: usize) -> TemplateBatch {
 }
 
 #[test]
-fn a_batch_sends_requests_of_100_in_order() {
+fn a_batch_of_100_goes_in_one_request_and_101_sends_nothing() {
     let server = ScriptedServer::start(vec![batch_queued()]);
     let client = client_for(&server);
 
-    let result = client.emails().batch(batch_of(150)).unwrap();
+    let error = client.emails().batch(batch_of(101)).unwrap_err();
+    assert_eq!(
+        (error.code(), error.field()),
+        ("invalid_recipients", Some("recipients"))
+    );
+    assert_eq!(
+        error.fix(),
+        Some("Split the recipients into batches of at most 100.")
+    );
+    assert!(server.requests().is_empty());
+
+    let result = client.emails().batch(batch_of(100)).unwrap();
 
     let requests = server.requests();
-    assert!(requests.iter().all(|request| request.path == BATCH_PATH));
-    assert_eq!(
-        requests
-            .iter()
-            .map(batch_keys)
-            .map(|keys| keys.len())
-            .collect::<Vec<_>>(),
-        vec![100, 50]
-    );
-    assert_eq!(batch_keys(&requests[1])[0], "key-100");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, BATCH_PATH);
+    assert_eq!(batch_keys(&requests[0]).len(), 100);
     assert!(result
         .results
         .iter()
         .all(|result| result.status == BatchEmailStatus::Queued));
+    assert_eq!(result.results[99].message_id.as_deref(), Some("msg_key-99"));
+}
+
+#[test]
+fn a_batch_posthog_finds_too_large_returns_its_413() {
+    let server = ScriptedServer::start(vec![Answer::xml(413, "<h1>Request Entity Too Large</h1>")]);
+    let client = client_for(&server);
+
+    let error = client.emails().batch(batch_of(2)).unwrap_err();
+
+    assert_eq!(server.requests().len(), 1);
     assert_eq!(
-        result.results[149].message_id.as_deref(),
-        Some("msg_key-149")
+        (error.code(), error.status()),
+        ("content_too_large", Some(413))
     );
+    assert_eq!(
+        error.fix(),
+        Some("Split the recipients into smaller batches.")
+    );
+    assert!(error
+        .batch_result()
+        .unwrap()
+        .results
+        .iter()
+        .all(|result| result.status == BatchEmailStatus::Failed));
 }
 
 #[test]

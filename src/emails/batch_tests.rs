@@ -15,7 +15,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::shared::clock::virtual_time;
 use crate::{BatchEmailStatus, ClientOptionsBuilder, SendBatchResult, TemplateBatch};
 
-use BatchEmailStatus::{Failed, NotAttempted, Queued};
+use BatchEmailStatus::{Failed, Queued};
 
 fn start() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-12-01T09:00:00Z")
@@ -57,15 +57,13 @@ fn shutting_down_at_once(server: &ScriptedServer) -> ClientOptionsBuilder {
     builder
 }
 
-/// The first request refused for 30 seconds after the shutdown began: no
-/// retry, and 50 recipients never sent.
+/// The request refused for 30 seconds after the shutdown began: no retry,
+/// and every recipient failed with `client_closed`.
 fn assert_stopped_before_the_retry(error: &crate::EmailError, server: &ScriptedServer) {
     assert_eq!(server.requests().len(), 1);
     assert_eq!(error.code(), "client_closed");
     let result = error.batch_result().unwrap();
-    let mut expected = vec![Failed; 100];
-    expected.extend(vec![NotAttempted; 50]);
-    assert_eq!(statuses(result), expected);
+    assert_eq!(statuses(result), vec![Failed, Failed]);
     assert_eq!(
         result.results[0].error.as_ref().unwrap().code(),
         "client_closed"
@@ -216,6 +214,31 @@ mod async_client {
         );
     }
 
+    /// Paused time moves only by the runtime's timers, so the request times
+    /// out at its own timeout, at once and without a real wait.
+    #[tokio::test(start_paused = true)]
+    async fn an_attempt_waits_45_seconds_whatever_the_email_timeout() {
+        let (answer, _arrival, release) = held(all_queued());
+        let server = ScriptedServer::start(vec![answer]);
+        let mut builder = options(&server.url);
+        builder.email_request_timeout_seconds(1u64);
+        let client = crate::client(builder.build().unwrap()).await;
+        let started = tokio::time::Instant::now();
+
+        let error = client
+            .emails()
+            .batch(template(2).max_retries(0))
+            .await
+            .unwrap_err();
+
+        assert_eq!(started.elapsed().as_secs(), 45);
+        assert_eq!(
+            statuses(error.batch_result().unwrap()),
+            vec![Unconfirmed; 2]
+        );
+        drop(release);
+    }
+
     /// Sends `batch` while the client shuts down once its first request
     /// arrived, then lets the held answer go.
     async fn batch_racing_shutdown(
@@ -246,12 +269,9 @@ mod async_client {
 
     #[tokio::test]
     async fn a_shutdown_before_a_retry_sends_no_retry() {
-        let (sent, server) = batch_racing_shutdown(
-            throttled_for_30_seconds(),
-            vec![all_queued()],
-            template(150),
-        )
-        .await;
+        let (sent, server) =
+            batch_racing_shutdown(throttled_for_30_seconds(), vec![all_queued()], template(2))
+                .await;
 
         assert_stopped_before_the_retry(&sent.unwrap_err(), &server);
     }
@@ -296,11 +316,8 @@ mod blocking {
 
     #[test]
     fn a_shutdown_before_a_retry_sends_no_retry() {
-        let (sent, server) = batch_racing_shutdown(
-            throttled_for_30_seconds(),
-            vec![all_queued()],
-            template(150),
-        );
+        let (sent, server) =
+            batch_racing_shutdown(throttled_for_30_seconds(), vec![all_queued()], template(2));
 
         assert_stopped_before_the_retry(&sent.unwrap_err(), &server);
     }

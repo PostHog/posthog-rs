@@ -105,8 +105,8 @@ impl fmt::Display for EmailErrorKind {
 /// `quota_limited`, or on [`kind`](Self::kind), a coarse category. The message
 /// never holds the secret key or the request body.
 ///
-/// A batch that stopped after it sent a request carries every recipient's
-/// result in [`batch_result`](Self::batch_result). The error's `Debug` output
+/// A batch whose request failed carries every recipient's result in
+/// [`batch_result`](Self::batch_result). The error's `Debug` output
 /// leaves those results out, so it holds no recipient's address or key.
 /// PostHog's own detail text, in the message, can still name the sender's
 /// address.
@@ -310,17 +310,13 @@ impl EmailError {
         self.0.message_id.as_deref()
     }
 
-    /// For a batch that stopped once it had started: every recipient's
-    /// result, in the order of the batch's recipients, and the warnings of the
-    /// requests that went out. Recipients of earlier requests are as PostHog
-    /// answered them, those of the failed request
-    /// [`Failed`](crate::BatchEmailStatus::Failed), or
-    /// [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed) where an earlier
-    /// attempt may have queued them, and the rest
-    /// [`NotAttempted`](crate::BatchEmailStatus::NotAttempted), which is every
-    /// recipient when the client shut down before the first request went out.
-    /// `None` when the batch failed its checks before it started, and for any
-    /// other call.
+    /// For a batch whose request PostHog refused or never answered: every
+    /// recipient's result, in the order of the batch's recipients. A recipient
+    /// is [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed) where an
+    /// attempt may have queued their email, and
+    /// [`Failed`](crate::BatchEmailStatus::Failed) with this error otherwise,
+    /// also when the client shut down before a retry. `None` when the batch
+    /// failed its checks and sent nothing, and for any other call.
     pub fn batch_result(&self) -> Option<&SendBatchResult> {
         self.0.batch.as_ref().map(|batch| &batch.0)
     }

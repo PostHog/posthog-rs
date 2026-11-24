@@ -30,12 +30,6 @@ const UPLOADS_PATH: &str = "/api/messaging/attachments/uploads/";
 const STATUS_PATH: &str = "/api/messaging/emails/";
 const BATCH_PATH: &str = "/api/messaging/send/email_batch/";
 const BATCH_MAX_RECIPIENTS: usize = 100;
-const BATCH_MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
-const BATCH_MAX_DEPTH: usize = 64;
-/// Room for what PostHog adds to a code batch's content for each recipient,
-/// such as the sender and the tracking settings.
-const CODE_CONTENT_ALLOWANCE: usize = 1024;
-const CODE_CONTENT_NODES: usize = 32;
 /// PostHog waits up to 30 seconds for its pipeline to take a batch request,
 /// so an attempt waits 15 seconds more than that for the answer.
 const BATCH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(45);
@@ -1112,104 +1106,7 @@ fn jitter() -> f64 {
     0.8 + 0.4 * random
 }
 
-/// What PostHog's pipeline copies for each recipient of a request: the shared
-/// data and content, and the recipient's own data. It refuses a request whose
-/// copies add up to more than [`Copies::MAX`].
-#[derive(Debug, Clone, Copy, Default)]
-struct Copies {
-    bytes: usize,
-    keys: usize,
-    nodes: usize,
-}
-
-impl Copies {
-    const MAX: Copies = Copies {
-        bytes: 16 * 1024 * 1024,
-        keys: 50_000,
-        nodes: 500_000,
-    };
-    const EMPTY_OBJECT: Copies = Copies {
-        bytes: 2,
-        keys: 0,
-        nodes: 0,
-    };
-
-    /// The copy of `data`, or `None` when it nests deeper than PostHog takes.
-    fn of(data: &Value) -> Option<Copies> {
-        Some(Copies {
-            bytes: json_len(data),
-            keys: data.as_object().map_or(0, Map::len),
-            nodes: nodes(data)?,
-        })
-    }
-
-    fn plus(self, other: Copies) -> Copies {
-        Copies {
-            bytes: self.bytes + other.bytes,
-            keys: self.keys + other.keys,
-            nodes: self.nodes + other.nodes,
-        }
-    }
-
-    fn fits(self) -> bool {
-        self.bytes <= Self::MAX.bytes
-            && self.keys <= Self::MAX.keys
-            && self.nodes <= Self::MAX.nodes
-    }
-}
-
-/// Every object key and array element below `root`, or `None` for an object
-/// or array more than 64 levels deep, counting `root` as level 1.
-fn nodes(root: &Value) -> Option<usize> {
-    let mut count = 0;
-    let mut pending = vec![(root, 1)];
-    while let Some((value, level)) = pending.pop() {
-        let children: Vec<&Value> = match value {
-            Value::Object(fields) => fields.values().collect(),
-            Value::Array(items) => items.iter().collect(),
-            _ => continue,
-        };
-        if level > BATCH_MAX_DEPTH {
-            return None;
-        }
-        count += children.len();
-        pending.extend(children.into_iter().map(|child| (child, level + 1)));
-    }
-    Some(count)
-}
-
-fn json_len(value: &(impl serde::Serialize + ?Sized)) -> usize {
-    struct Counter(usize);
-    impl std::io::Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter(0);
-    let _ = serde_json::to_writer(&mut counter, value);
-    counter.0
-}
-
-/// What PostHog copies of a code batch's content for each recipient. It
-/// sends the content in its own shape, with a sender, tracking settings, and
-/// text derived from the HTML when there is no text, which is never longer
-/// than the HTML.
-fn code_copies(content: &CodeContent, encoded: usize) -> Copies {
-    let derived_text = match (&content.html, &content.text) {
-        (Some(html), None) => json_len(html),
-        _ => 0,
-    };
-    Copies {
-        bytes: encoded + derived_text + CODE_CONTENT_ALLOWANCE + Copies::EMPTY_OBJECT.bytes,
-        keys: 0,
-        nodes: CODE_CONTENT_NODES + content.reply_to.len(),
-    }
-}
-
+#[derive(Clone)]
 pub(crate) struct HttpCall {
     pub(crate) url: String,
     pub(crate) headers: HeaderMap,
@@ -1225,22 +1122,16 @@ pub(crate) enum BatchStep {
     Done(Result<SendBatchResult, EmailError>),
 }
 
-/// A batch whose every recipient passed the checks and has a key.
+/// A batch whose every recipient passed the checks and has a key, and the
+/// body of its one request.
 pub(crate) struct PreparedBatch {
-    head: Vec<u8>,
-    members: Vec<Member>,
+    body: Bytes,
+    results: Vec<BatchEmailResult>,
     max_retries: Option<u32>,
 }
 
-/// One recipient, as the request carries them, and what happened to them.
-struct Member {
-    wire: Vec<u8>,
-    copies: Copies,
-    result: BatchEmailResult,
-}
-
 pub(crate) fn prepare_batch(batch: SendBatch) -> Result<PreparedBatch, EmailError> {
-    let (shared, recipients, max_retries, code) = match batch {
+    let (mut body, recipients, max_retries) = match batch {
         SendBatch::Template(batch) => {
             let body = template_body(&batch.template_id, batch.template_data.as_ref())?;
             for (index, recipient) in batch.recipients.iter().enumerate() {
@@ -1256,7 +1147,7 @@ pub(crate) fn prepare_batch(batch: SendBatch) -> Result<PreparedBatch, EmailErro
                     ));
                 }
             }
-            (body, batch.recipients, batch.max_retries, None)
+            (body, batch.recipients, batch.max_retries)
         }
         SendBatch::Code(batch) => {
             if let Some(index) = batch
@@ -1270,37 +1161,26 @@ pub(crate) fn prepare_batch(batch: SendBatch) -> Result<PreparedBatch, EmailErro
                     &format!("recipients__{index}__template_data"),
                 ));
             }
-            let body = code_body(&batch.content)?;
             (
-                body,
+                code_body(&batch.content)?,
                 batch.recipients,
                 batch.max_retries,
-                Some(batch.content),
             )
         }
     };
-    let mut head = encode(&shared)?;
-    let shared_copies = match &code {
-        Some(content) => Some(code_copies(content, head.len())),
-        None => Copies::of(&shared["message_data"]),
-    };
-    head.pop();
-    head.extend_from_slice(b",\"recipients\":[");
-    let members = batch_members(recipients, shared_copies, head.len() + b"]}".len())?;
+    let (wire, results) = batch_recipients(recipients)?;
+    body.insert("recipients".into(), Value::Array(wire));
     Ok(PreparedBatch {
-        head,
-        members,
+        body: Bytes::from(encode(&body)?),
+        results,
         max_retries,
     })
 }
 
-/// Checks every recipient and gives each a key before any request. A
-/// recipient too large for any request fails here, alone.
-fn batch_members(
+/// Checks every recipient and gives each a key, before the request.
+fn batch_recipients(
     recipients: Vec<BatchRecipient>,
-    shared: Option<Copies>,
-    empty_request: usize,
-) -> Result<Vec<Member>, EmailError> {
+) -> Result<(Vec<Value>, Vec<BatchEmailResult>), EmailError> {
     if recipients.is_empty() {
         return Err(EmailError::invalid(
             "invalid_recipients",
@@ -1308,8 +1188,26 @@ fn batch_members(
             "recipients",
         ));
     }
+    if recipients.len() > BATCH_MAX_RECIPIENTS {
+        return Err(EmailError::invalid(
+            "invalid_recipients",
+            format!(
+                "recipients holds {} recipients, and a batch takes at most {BATCH_MAX_RECIPIENTS}.",
+                recipients.len()
+            ),
+            "recipients",
+        )
+        .with_details(
+            None,
+            Some(format!(
+                "Split the recipients into batches of at most {BATCH_MAX_RECIPIENTS}."
+            )),
+            None,
+        ));
+    }
     let mut first_with_key = HashMap::new();
-    let mut members = Vec::with_capacity(recipients.len());
+    let mut wire = Vec::with_capacity(recipients.len());
+    let mut results = Vec::with_capacity(recipients.len());
     for (index, recipient) in recipients.into_iter().enumerate() {
         let BatchRecipient {
             to,
@@ -1327,45 +1225,28 @@ fn batch_members(
                 &format!("recipients__{index}__idempotency_key"),
             ));
         }
-        let own = template_data
-            .as_ref()
-            .map_or(Some(Copies::EMPTY_OBJECT), Copies::of);
-        let mut wire = Map::new();
-        wire.insert("to".into(), Value::String(to.clone()));
-        wire.insert("idempotency_key".into(), Value::String(key.clone()));
+        let mut fields = Map::new();
+        fields.insert("to".into(), Value::String(to.clone()));
+        fields.insert("idempotency_key".into(), Value::String(key.clone()));
         if let Some(distinct_id) = distinct_id {
-            wire.insert("distinct_id".into(), Value::String(distinct_id));
+            fields.insert("distinct_id".into(), Value::String(distinct_id));
         }
         if let Some(data) = template_data {
-            wire.insert("message_data".into(), data);
+            fields.insert("message_data".into(), data);
         }
-        let mut wire = encode(&wire)?;
-        let copies = shared.zip(own).map(|(shared, own)| shared.plus(own));
-        let fits =
-            copies.is_some_and(Copies::fits) && empty_request + wire.len() <= BATCH_MAX_BODY_BYTES;
-        if !fits {
-            wire = Vec::new();
-        }
-        members.push(Member {
-            wire,
-            copies: copies.unwrap_or_default(),
-            result: BatchEmailResult {
-                index,
-                to,
-                idempotency_key: key,
-                status: if fits {
-                    BatchEmailStatus::NotAttempted
-                } else {
-                    BatchEmailStatus::Failed
-                },
-                message_id: None,
-                replayed: false,
-                error: (!fits).then(recipient_too_large),
-                later_error: None,
-            },
+        wire.push(Value::Object(fields));
+        results.push(BatchEmailResult {
+            index,
+            to,
+            idempotency_key: key,
+            status: BatchEmailStatus::Failed,
+            message_id: None,
+            replayed: false,
+            error: None,
+            later_error: None,
         });
     }
-    Ok(members)
+    Ok((wire, results))
 }
 
 /// A recipient's argument error, with the recipient's position in the message
@@ -1378,27 +1259,20 @@ fn at_recipient(index: usize, error: &EmailError) -> EmailError {
     )
 }
 
-struct Chunk {
-    indices: Vec<usize>,
-    body: Bytes,
-    retries: u32,
-}
-
 enum Phase {
-    /// Send the next request from the recipient at this position.
-    Send(usize),
-    Sent(Chunk),
-    Wait(Chunk, Duration),
-    Retry(Chunk),
+    Send,
+    Sent,
+    Wait(Duration),
     Done,
 }
 
 /// One batch call: the client asks it for each [`BatchStep`] and passes it
 /// every reply, so both clients run the same batch.
 ///
-/// The batch sends its recipients in requests one after another, building
-/// each body only when it goes out, and stops at a request that fails as a
-/// whole or when the client shuts down.
+/// The batch sends one request, and retries it with the same body as
+/// [`retry_delay`] allows, unless the client shut down. PostHog's answer
+/// settles every recipient, or the batch stops with the request's error and
+/// every recipient not unconfirmed fails with it.
 ///
 /// A recipient whose email PostHog may have queued, because an attempt got no
 /// usable answer or PostHog said it couldn't tell, stays
@@ -1407,12 +1281,10 @@ enum Phase {
 /// wasn't sent, so it goes to `later_error`.
 pub(crate) struct BatchRun<'a> {
     tracker: &'a EmailTracker,
-    app_host: String,
-    send_headers: HeaderMap,
-    send_timeout: Duration,
-    head: Vec<u8>,
-    members: Vec<Member>,
+    call: HttpCall,
+    results: Vec<BatchEmailResult>,
     warnings: Vec<EmailWarning>,
+    retries: u32,
     max_retries: u32,
     phase: Phase,
     stopped_by: Option<EmailError>,
@@ -1426,152 +1298,90 @@ impl<'a> BatchRun<'a> {
         connection: &Connection,
         tracker: &'a EmailTracker,
     ) -> Result<Self, EmailError> {
-        let mut send_headers = connection.headers(None)?;
-        send_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let mut headers = connection.headers(None)?;
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(Self {
             tracker,
-            app_host: connection.app_host.clone(),
-            send_headers,
-            send_timeout: connection.timeout.max(BATCH_ATTEMPT_TIMEOUT),
-            head: prepared.head,
-            members: prepared.members,
+            call: HttpCall {
+                url: format!("{}{BATCH_PATH}", connection.app_host),
+                headers,
+                body: prepared.body,
+                timeout: connection.timeout.max(BATCH_ATTEMPT_TIMEOUT),
+            },
+            results: prepared.results,
             warnings: Vec::new(),
+            retries: 0,
             max_retries: prepared.max_retries.unwrap_or(connection.max_retries),
-            phase: Phase::Send(0),
+            phase: Phase::Send,
             stopped_by: None,
         })
     }
 
     pub(crate) fn next(&mut self) -> BatchStep {
-        loop {
-            match std::mem::replace(&mut self.phase, Phase::Done) {
-                Phase::Send(from) => match self.chunk_from(from) {
-                    None => self.phase = Phase::Done,
-                    Some(_) if self.tracker.is_closed() => {
-                        let error = EmailError::new(
-                            "client_closed",
-                            "The PostHog client is shut down, so the rest of the batch wasn't sent.",
-                        );
-                        self.stop(&[], error.clone(), &error);
-                    }
-                    Some(chunk) => return self.post(chunk),
-                },
-                Phase::Wait(chunk, delay) => {
-                    self.phase = Phase::Retry(chunk);
-                    return BatchStep::Wait(delay);
-                }
-                Phase::Retry(chunk) if self.tracker.is_closed() => {
-                    let error = EmailError::new(
-                        "client_closed",
-                        "The PostHog client is shut down, so it didn't retry this request of the batch.",
-                    );
-                    self.stop(&chunk.indices, error, &not_attempted());
-                }
-                Phase::Retry(mut chunk) => {
-                    chunk.retries += 1;
-                    return self.post(chunk);
-                }
-                Phase::Sent(_) => unreachable!("a call's reply comes first"),
-                Phase::Done => return BatchStep::Done(self.finish()),
+        match std::mem::replace(&mut self.phase, Phase::Done) {
+            Phase::Send if self.retries > 0 && self.tracker.is_closed() => {
+                self.stop(EmailError::new(
+                    "client_closed",
+                    "The PostHog client is shut down, so it didn't retry the batch's request.",
+                ));
+                BatchStep::Done(self.finish())
             }
+            Phase::Send => {
+                self.phase = Phase::Sent;
+                BatchStep::Call(self.call.clone())
+            }
+            Phase::Wait(delay) => {
+                self.phase = Phase::Send;
+                BatchStep::Wait(delay)
+            }
+            Phase::Sent => unreachable!("a call's reply comes first"),
+            Phase::Done => BatchStep::Done(self.finish()),
         }
     }
 
     pub(crate) fn answered(&mut self, reply: Result<Reply, EmailError>) {
         match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Sent(chunk) => match self.record(&chunk.indices, reply) {
-                Ok(()) => self.phase = Phase::Send(chunk.indices[chunk.indices.len() - 1] + 1),
-                Err(error) => match retry_delay(&error, chunk.retries, self.max_retries) {
-                    Some(delay) => self.phase = Phase::Wait(chunk, delay),
-                    None => self.stop(&chunk.indices, error, &not_attempted()),
-                },
-            },
+            Phase::Sent => {
+                if let Err(error) = self.record(reply) {
+                    match retry_delay(&error, self.retries, self.max_retries) {
+                        Some(delay) => {
+                            self.retries += 1;
+                            self.phase = Phase::Wait(delay);
+                        }
+                        None => self.stop(error),
+                    }
+                }
+            }
             _ => unreachable!("a reply answers a call"),
         }
     }
 
-    /// The next request: as many recipients from `from` on as fit, in order.
-    fn chunk_from(&self, from: usize) -> Option<Chunk> {
-        let mut indices: Vec<usize> = Vec::new();
-        let mut size = self.head.len() + b"]}".len();
-        let mut copies = Copies::default();
-        for (index, member) in self.members.iter().enumerate().skip(from) {
-            if member.result.status == BatchEmailStatus::Failed {
-                continue;
-            }
-            let added = member.wire.len() + usize::from(!indices.is_empty());
-            let with = copies.plus(member.copies);
-            if !indices.is_empty()
-                && (indices.len() == BATCH_MAX_RECIPIENTS
-                    || size + added > BATCH_MAX_BODY_BYTES
-                    || !with.fits())
-            {
-                break;
-            }
-            indices.push(index);
-            size += added;
-            copies = with;
-        }
-        if indices.is_empty() {
-            return None;
-        }
-        let mut body = Vec::with_capacity(size);
-        body.extend_from_slice(&self.head);
-        for (position, index) in indices.iter().enumerate() {
-            if position > 0 {
-                body.push(b',');
-            }
-            body.extend_from_slice(&self.members[*index].wire);
-        }
-        body.extend_from_slice(b"]}");
-        Some(Chunk {
-            indices,
-            body: Bytes::from(body),
-            retries: 0,
-        })
-    }
-
-    fn post(&mut self, chunk: Chunk) -> BatchStep {
-        let call = HttpCall {
-            url: format!("{}{BATCH_PATH}", self.app_host),
-            headers: self.send_headers.clone(),
-            body: chunk.body.clone(),
-            timeout: self.send_timeout,
-        };
-        self.phase = Phase::Sent(chunk);
-        BatchStep::Call(call)
-    }
-
-    /// Records the answer to one attempt of the request, or returns the error
-    /// that fails the request as a whole.
-    fn record(
-        &mut self,
-        indices: &[usize],
-        reply: Result<Reply, EmailError>,
-    ) -> Result<(), EmailError> {
+    /// Records the answer to one attempt, or returns the error that fails
+    /// the request as a whole.
+    fn record(&mut self, reply: Result<Reply, EmailError>) -> Result<(), EmailError> {
         let reply = match reply {
             Ok(reply) => reply,
             Err(error) => {
                 if error.is_network_error() {
-                    self.unclear(indices, Some(&unconfirmed()), None);
+                    self.unclear(Some(&unconfirmed()), None);
                 }
                 return Err(error);
             }
         };
         let fields = reply_fields(reply.payload);
         if !is_success(reply.status) {
-            let error = batch_reply_error(fields, reply.status, reply.retry_after, indices);
+            let error = batch_reply_error(fields, reply.status, reply.retry_after);
             if error.code() == IN_FLIGHT_CODE {
-                self.unclear(indices, Some(&error), Some(&error));
+                self.unclear(Some(&error), Some(&error));
             } else if reply.status >= 500 {
-                self.unclear(indices, Some(&unconfirmed()), Some(&error));
+                self.unclear(Some(&unconfirmed()), Some(&error));
             } else {
-                self.unclear(indices, None, Some(&error));
+                self.unclear(None, Some(&error));
             }
             return Err(error);
         }
         let slots = match fields.get("results") {
-            Some(Value::Array(slots)) if slots.len() == indices.len() => slots,
+            Some(Value::Array(slots)) if slots.len() == self.results.len() => slots,
             _ => {
                 let error = EmailError::from_response(
                     reply.status,
@@ -1579,32 +1389,22 @@ impl<'a> BatchRun<'a> {
                     Some("PostHog answered the batch without a result for each recipient.".into()),
                     None,
                 );
-                self.unclear(indices, Some(&unconfirmed()), Some(&error));
+                self.unclear(Some(&unconfirmed()), Some(&error));
                 return Err(error);
             }
         };
-        for (index, slot) in indices.iter().zip(slots) {
-            self.settle(*index, slot.as_object());
+        for (result, slot) in self.results.iter_mut().zip(slots) {
+            settle(result, slot.as_object());
         }
-        for warning in parse_warnings(&fields) {
-            if !self.warnings.contains(&warning) {
-                self.warnings.push(warning);
-            }
-        }
+        self.warnings = parse_warnings(&fields);
         Ok(())
     }
 
     /// An attempt PostHog may have queued: each recipient not yet unconfirmed
     /// becomes unconfirmed with `cause`, and each already unconfirmed keeps
     /// their first cause and gets PostHog's `answer` as their later error.
-    fn unclear(
-        &mut self,
-        indices: &[usize],
-        cause: Option<&EmailError>,
-        answer: Option<&EmailError>,
-    ) {
-        for index in indices {
-            let result = &mut self.members[*index].result;
+    fn unclear(&mut self, cause: Option<&EmailError>, answer: Option<&EmailError>) {
+        for result in &mut self.results {
             if result.status == BatchEmailStatus::Unconfirmed {
                 if let Some(answer) = answer {
                     result.later_error = Some(answer.clone());
@@ -1616,61 +1416,21 @@ impl<'a> BatchRun<'a> {
         }
     }
 
-    fn settle(&mut self, index: usize, slot: Option<&Map<String, Value>>) {
-        let empty = Map::new();
-        let slot = slot.unwrap_or(&empty);
-        let result = &mut self.members[index].result;
-        let message_id = text(slot, "message_id");
-        let error = slot.get("error").filter(|error| !error.is_null());
-        if error.is_none() && slot.get("status") == Some(&json!("queued")) && message_id.is_some() {
-            result.status = BatchEmailStatus::Queued;
-            result.message_id = message_id;
-            result.replayed = slot.get("replayed") == Some(&Value::Bool(true));
-            result.error = None;
-            result.later_error = None;
-            return;
-        }
-        let answer = slot_error(error);
-        result.message_id = message_id.or(result.message_id.take());
-        if result.status == BatchEmailStatus::Unconfirmed {
-            result.later_error = Some(answer);
-            return;
-        }
-        if UNCONFIRMED_SLOT_CODES.contains(&answer.code()) {
-            result.status = BatchEmailStatus::Unconfirmed;
-            result.error = Some(resend_with_key(answer));
-        } else {
-            result.status = BatchEmailStatus::Failed;
-            result.error = Some(answer);
-        }
-    }
-
-    /// The batch stops at the request of `indices` with `error`: the
-    /// request's recipients that aren't unconfirmed fail with it, and each
-    /// later recipient isn't attempted, with `skipped`.
-    fn stop(&mut self, indices: &[usize], error: EmailError, skipped: &EmailError) {
-        for index in indices {
-            let result = &mut self.members[*index].result;
+    /// The request failed as a whole with `error`: every recipient that isn't
+    /// unconfirmed fails with it.
+    fn stop(&mut self, error: EmailError) {
+        for result in &mut self.results {
             if result.status != BatchEmailStatus::Unconfirmed {
                 result.status = BatchEmailStatus::Failed;
                 result.error = Some(error.clone());
             }
         }
-        for member in &mut self.members {
-            if member.result.status == BatchEmailStatus::NotAttempted {
-                member.result.error = Some(skipped.clone());
-            }
-        }
         self.stopped_by = Some(error);
-        self.phase = Phase::Done;
     }
 
     fn finish(&mut self) -> Result<SendBatchResult, EmailError> {
         let result = SendBatchResult {
-            results: std::mem::take(&mut self.members)
-                .into_iter()
-                .map(|member| member.result)
-                .collect(),
+            results: std::mem::take(&mut self.results),
             warnings: std::mem::take(&mut self.warnings),
         };
         log_warnings(&result.warnings);
@@ -1681,24 +1441,33 @@ impl<'a> BatchRun<'a> {
     }
 }
 
-fn not_attempted() -> EmailError {
-    EmailError::new(
-        "not_attempted",
-        "An earlier request of the batch failed, so the client sent nothing for this recipient.",
-    )
-}
-
-fn recipient_too_large() -> EmailError {
-    EmailError::invalid(
-        "content_too_large",
-        "This recipient's email is larger than one batch request takes, so it wasn't sent.",
-        "recipients",
-    )
-    .with_details(
-        None,
-        Some("Send this recipient's email with send().".into()),
-        None,
-    )
+/// Records PostHog's answer about one recipient.
+fn settle(result: &mut BatchEmailResult, slot: Option<&Map<String, Value>>) {
+    let empty = Map::new();
+    let slot = slot.unwrap_or(&empty);
+    let message_id = text(slot, "message_id");
+    let error = slot.get("error").filter(|error| !error.is_null());
+    if error.is_none() && slot.get("status") == Some(&json!("queued")) && message_id.is_some() {
+        result.status = BatchEmailStatus::Queued;
+        result.message_id = message_id;
+        result.replayed = slot.get("replayed") == Some(&Value::Bool(true));
+        result.error = None;
+        result.later_error = None;
+        return;
+    }
+    let answer = slot_error(error);
+    result.message_id = message_id.or(result.message_id.take());
+    if result.status == BatchEmailStatus::Unconfirmed {
+        result.later_error = Some(answer);
+        return;
+    }
+    if UNCONFIRMED_SLOT_CODES.contains(&answer.code()) {
+        result.status = BatchEmailStatus::Unconfirmed;
+        result.error = Some(resend_with_key(answer));
+    } else {
+        result.status = BatchEmailStatus::Failed;
+        result.error = Some(answer);
+    }
 }
 
 fn unconfirmed() -> EmailError {
@@ -1717,7 +1486,10 @@ fn resend_with_key(error: EmailError) -> EmailError {
     let docs_url = error.docs_url().map(String::from);
     error.with_details(
         why,
-        Some("Send this email again with the same idempotency_key within 24 hours, so it goes out once.".into()),
+        Some(
+            "Send this email again with the same idempotency_key within 24 hours of the first request that used it, so it goes out once."
+                .into(),
+        ),
         docs_url,
     )
 }
@@ -1740,13 +1512,11 @@ fn slot_error(error: Option<&Value>) -> EmailError {
     EmailError::answered(status, code, message)
 }
 
-/// PostHog's refusal of a whole batch request. A field of a recipient names
-/// the recipient's position in the batch, not in the request.
+/// PostHog's refusal of the batch's request.
 fn batch_reply_error(
     mut fields: Map<String, Value>,
     status: u16,
     retry_after: Option<Duration>,
-    indices: &[usize],
 ) -> EmailError {
     let mut set_unless_answered = |name: &str, value: &str| {
         if fields.get(name).map_or(true, Value::is_null) {
@@ -1768,35 +1538,21 @@ fn batch_reply_error(
             "Check template_id, or send each email the batch didn't queue with send() and its recipient's idempotency_key.",
         );
     }
+    if status == 413 {
+        set_unless_answered("code", "content_too_large");
+        set_unless_answered(
+            "detail",
+            "The batch is larger than PostHog takes in one request, so PostHog didn't send it.",
+        );
+        set_unless_answered("fix", "Split the recipients into smaller batches.");
+    }
     if text(&fields, "code").as_deref() == Some("batch_unavailable") {
         fields.insert(
             "fix".into(),
             Value::String("Until batch sends are on for the project, send each email the batch didn't queue with send() and its recipient's idempotency_key.".into()),
         );
     }
-    let error = reply_error(&fields, status, retry_after);
-    let field = error.field().map(|attr| recipients_field(attr, indices));
-    error.with_field(field)
-}
-
-/// `recipients__<position in the request>__<field>` as the position in the
-/// batch. A position the request doesn't have names `recipients`.
-fn recipients_field(attr: &str, indices: &[usize]) -> String {
-    let Some(rest) = attr.strip_prefix("recipients__") else {
-        return attr.to_string();
-    };
-    let (position, tail) = rest.split_at(rest.find("__").unwrap_or(rest.len()));
-    if position.is_empty() || !position.bytes().all(|byte| byte.is_ascii_digit()) {
-        return attr.to_string();
-    }
-    match position
-        .parse::<usize>()
-        .ok()
-        .and_then(|position| indices.get(position))
-    {
-        Some(index) => format!("recipients__{index}{tail}"),
-        None => "recipients".to_string(),
-    }
+    reply_error(&fields, status, retry_after)
 }
 
 #[derive(Debug, Default)]
