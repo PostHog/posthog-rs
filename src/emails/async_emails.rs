@@ -150,9 +150,10 @@ impl<'a> Emails<'a> {
     ///
     /// Returns an [`EmailError`] whose
     /// [`batch_result`](EmailError::batch_result) holds every recipient when a
-    /// request failed as a whole, so the batch stopped. When that answer was
-    /// lost, the client first reads each email the request may have queued by
-    /// its key. The code is `batch_unavailable` when the project can't send
+    /// request failed as a whole, so the batch stopped. The client never reads
+    /// an email by its key: a recipient whose email PostHog may have queued
+    /// stays [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed), and you
+    /// send it again with its key. The code is `batch_unavailable` when the project can't send
     /// batches yet, and a `404` means the template doesn't exist or batch
     /// sends are off: send each email the batch didn't queue with
     /// [`send`](Self::send) and its recipient's idempotency key.
@@ -202,10 +203,10 @@ impl<'a> Emails<'a> {
                 BatchStep::Call(call) => {
                     let reply = self
                         .attempt(
-                            call.method,
+                            Method::POST,
                             &call.url,
                             &call.headers,
-                            call.body,
+                            Some(call.body),
                             call.timeout,
                         )
                         .await;

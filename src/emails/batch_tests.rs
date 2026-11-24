@@ -51,7 +51,7 @@ fn assert_stopped_in_the_retry_wait(error: &crate::EmailError, took: Duration) {
 
 #[cfg(feature = "async-client")]
 mod async_client {
-    use email_support::{batch_requests, found_only, ok, queries_read, refused};
+    use email_support::{ok, refused, says_to_resend_with_its_key, status_found};
     use serde_json::json;
 
     use super::*;
@@ -117,12 +117,12 @@ mod async_client {
     }
 
     #[tokio::test]
-    async fn a_lost_answer_after_retries_reads_each_email_by_its_key() {
+    async fn a_lost_answer_after_retries_leaves_every_recipient_unconfirmed() {
         let server = ScriptedServer::start(vec![
             Answer::lost(),
             Answer::lost(),
             Answer::lost(),
-            found_only("key-0", "m0"),
+            status_found("m0"),
         ]);
         let client = client_for(&server).await;
         let _time = virtual_time::start_at(start());
@@ -130,22 +130,13 @@ mod async_client {
         let error = client.emails().batch(template(2)).await.unwrap_err();
 
         assert_eq!(error.code(), "network_error");
-        assert_eq!(batch_requests(&server).len(), 3);
-        assert_eq!(
-            queries_read(&server),
-            vec!["idempotency_key=key-0", "idempotency_key=key-1"]
-        );
+        assert_eq!(server.requests().len(), 3);
         let result = error.batch_result().unwrap();
-        assert_eq!(
-            result
-                .results
-                .iter()
-                .map(|r| (r.status, r.message_id.as_deref()))
-                .collect::<Vec<_>>(),
-            vec![(Unconfirmed, Some("m0")), (Unconfirmed, None)]
-        );
         assert!(result.results.iter().all(|r| {
-            r.error.as_ref().unwrap().code() == "delivery_unavailable" && r.later_error.is_none()
+            (r.status, r.message_id.as_deref()) == (Unconfirmed, None)
+                && r.error.as_ref().unwrap().code() == "delivery_unavailable"
+                && says_to_resend_with_its_key(r.error.as_ref())
+                && r.later_error.is_none()
         }));
     }
 
@@ -154,7 +145,7 @@ mod async_client {
         let server = ScriptedServer::start(vec![
             whole_call(409, "idempotency_key_in_flight"),
             whole_call(400, "invalid_input"),
-            whole_call(404, "not_found"),
+            status_found("m0"),
         ]);
         let client = client_for(&server).await;
         let _time = virtual_time::start_at(start());
@@ -162,8 +153,7 @@ mod async_client {
         let error = client.emails().batch(template(2)).await.unwrap_err();
 
         assert_eq!(error.code(), "invalid_input");
-        assert_eq!(batch_requests(&server).len(), 2);
-        assert_eq!(queries_read(&server).len(), 2);
+        assert_eq!(server.requests().len(), 2);
         let result = error.batch_result().unwrap();
         assert_eq!(statuses(result), vec![Unconfirmed, Unconfirmed]);
         let only = &result.results[0];
@@ -179,7 +169,6 @@ mod async_client {
         let server = ScriptedServer::start(vec![
             Answer::lost(),
             whole_call(409, "idempotency_key_in_flight"),
-            whole_call(404, "not_found"),
         ]);
         let client = client_for(&server).await;
         let _time = virtual_time::start_at(start());

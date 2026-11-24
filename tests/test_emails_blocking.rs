@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use common::default_user_agent;
 use email_support::{
-    accepted, connection_counting_store, options, unavailable, Answer, FakePostHog, Recorded,
-    ScriptedServer, BATCH_PATH, MESSAGE_ID, SEND_PATH, STATUS_BY_KEY_PATH, TEMPLATE_ID,
+    accepted, connection_counting_store, options, says_to_resend_with_its_key, status_found,
+    unavailable, Answer, FakePostHog, Recorded, ScriptedServer, BATCH_PATH, MESSAGE_ID, SEND_PATH,
+    TEMPLATE_ID,
 };
 use posthog::{
     BatchEmailStatus, BatchRecipient, CodeEmail, EmailAttachment, EmailDeliveryStatus,
@@ -650,19 +651,8 @@ fn a_batch_sends_requests_of_100_in_order() {
 }
 
 #[test]
-fn a_lost_batch_answer_reads_each_email_by_its_key() {
-    let server = ScriptedServer::start(vec![
-        Answer::lost(),
-        Answer::json(
-            200,
-            json!({
-                "id": "m0",
-                "status": "sent",
-                "created_at": "2026-11-22T10:00:00Z",
-                "status_at": "2026-11-22T10:00:01Z",
-            }),
-        ),
-    ]);
+fn a_lost_batch_answer_leaves_the_recipient_unconfirmed_without_a_read() {
+    let server = ScriptedServer::start(vec![Answer::lost(), status_found("m0")]);
     let client = client_for(&server);
 
     let error = client
@@ -671,14 +661,11 @@ fn a_lost_batch_answer_reads_each_email_by_its_key() {
         .unwrap_err();
 
     assert_eq!(error.code(), "network_error");
-    let read = &server.requests()[1];
-    assert_eq!(
-        (read.path.as_str(), read.query.as_str()),
-        (STATUS_BY_KEY_PATH, "idempotency_key=key-0")
-    );
+    assert_eq!(server.requests().len(), 1);
     let only = &error.batch_result().unwrap().results[0];
     assert_eq!(
         (only.status, only.message_id.as_deref()),
-        (BatchEmailStatus::Unconfirmed, Some("m0"))
+        (BatchEmailStatus::Unconfirmed, None)
     );
+    assert!(says_to_resend_with_its_key(only.error.as_ref()));
 }

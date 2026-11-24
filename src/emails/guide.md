@@ -119,10 +119,9 @@ given or made by the client, that every retry reuses. Check each result's
 - `NotAttempted`: an earlier request of the batch failed, so the client
   sent nothing for it.
 
-At the end of a batch, the client reads by its key each `Unconfirmed` email
-that has no message ID, and adds the ID it finds. That read never changes
-the status: an earlier email with the same key reads the same way. When the
-client shuts down, the batch sends no further request or retry, and a
+The client never reads an email by its key, so an `Unconfirmed` result
+stays that way: send it again with the same key, and PostHog queues it at
+most once. When the client shuts down, the batch sends no further request or retry, and a
 shutdown during a wait before a retry returns the results at once. A request that fails as a whole, such as a rate limit past its
 retries, stops the batch with an [`EmailError`](crate::EmailError) whose
 [`batch_result`](crate::EmailError::batch_result) holds every recipient.

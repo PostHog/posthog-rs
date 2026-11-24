@@ -721,10 +721,9 @@ impl BatchRecipient {
     /// run again: a rerun within 24 hours replays the emails that went out
     /// instead of sending them twice. A single send and a batch recipient with
     /// the same key and the same email replay each other. Never reuse a key
-    /// for another email: after a lost answer, the client reads the email by
-    /// its key and adds the message ID it finds to the result, which stays
-    /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed), and an earlier email
-    /// with that key reads as this one.
+    /// for another email. The client never reads an email by its key: send an
+    /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed) recipient again with the
+    /// same key within 24 hours, so the email goes out once.
     pub fn idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
         self
@@ -958,7 +957,9 @@ pub struct BatchEmailResult {
     /// The recipient's email address.
     pub to: String,
     /// The recipient's idempotency key, given or made by the client. Send an
-    /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed) email again with it.
+    /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed) email again with it
+    /// within 24 hours, so it goes out once: the client doesn't read the email
+    /// by its key, so the result never learns more after the batch returns.
     pub idempotency_key: String,
     /// What happened to the email.
     pub status: BatchEmailStatus,
@@ -970,7 +971,9 @@ pub struct BatchEmailResult {
     pub replayed: bool,
     /// Why the email is not [`Queued`](BatchEmailStatus::Queued). For an
     /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed) email, the code is
-    /// `delivery_unavailable`, `idempotency_key_in_flight` or `api_error`.
+    /// `delivery_unavailable`, `idempotency_key_in_flight` or `api_error`, and
+    /// its [`fix`](crate::EmailError::fix) says to send the email again with
+    /// the same key.
     pub error: Option<EmailError>,
     /// For an [`Unconfirmed`](BatchEmailStatus::Unconfirmed) email, what a
     /// later retry in the same call answered, which describes only that retry.

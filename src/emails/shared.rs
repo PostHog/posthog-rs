@@ -29,7 +29,6 @@ pub(crate) const SEND_PATH: &str = "/api/messaging/send/email/";
 const UPLOADS_PATH: &str = "/api/messaging/attachments/uploads/";
 const STATUS_PATH: &str = "/api/messaging/emails/";
 const BATCH_PATH: &str = "/api/messaging/send/email_batch/";
-const STATUS_BY_KEY_PATH: &str = "/api/messaging/emails/status/";
 const BATCH_MAX_RECIPIENTS: usize = 100;
 const BATCH_MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 const BATCH_MAX_DEPTH: usize = 64;
@@ -1240,28 +1239,18 @@ fn code_copies(content: &CodeContent, encoded: usize) -> Copies {
 }
 
 pub(crate) struct HttpCall {
-    pub(crate) method: Method,
     pub(crate) url: String,
     pub(crate) headers: HeaderMap,
-    pub(crate) body: Option<Bytes>,
+    pub(crate) body: Bytes,
     pub(crate) timeout: Duration,
 }
 
 pub(crate) enum BatchStep {
-    /// Make this request, then pass its reply to [`BatchRun::answered`].
+    /// POST this request, then pass its reply to [`BatchRun::answered`].
     Call(HttpCall),
     /// Wait this long before a retry, or until the client shuts down.
     Wait(Duration),
     Done(Result<SendBatchResult, EmailError>),
-}
-
-/// The URL that reads an email by its idempotency key, or `None` when the app
-/// host doesn't parse as a URL.
-fn status_by_key_url(app_host: &str, idempotency_key: &str) -> Option<String> {
-    let mut url = reqwest::Url::parse(&format!("{app_host}{STATUS_BY_KEY_PATH}")).ok()?;
-    url.query_pairs_mut()
-        .append_pair("idempotency_key", idempotency_key);
-    Some(url.to_string())
 }
 
 /// A batch whose every recipient passed the checks and has a key.
@@ -1429,10 +1418,6 @@ enum Phase {
     Sent(Chunk),
     Wait(Chunk, Duration),
     Retry(Chunk),
-    /// Read the next unconfirmed email without a message ID by its key, from
-    /// this position.
-    Read(usize),
-    ReadSent(usize),
     Done,
 }
 
@@ -1441,8 +1426,7 @@ enum Phase {
 ///
 /// The batch sends its recipients in requests one after another, building
 /// each body only when it goes out, and stops at a request that fails as a
-/// whole or when the client shuts down. Then it reads each unconfirmed email
-/// without a message ID by its key.
+/// whole or when the client shuts down.
 ///
 /// A recipient whose email PostHog may have queued, because an attempt got no
 /// usable answer or PostHog said it couldn't tell, stays
@@ -1453,9 +1437,7 @@ pub(crate) struct BatchRun<'a> {
     tracker: &'a EmailTracker,
     app_host: String,
     send_headers: HeaderMap,
-    read_headers: HeaderMap,
     send_timeout: Duration,
-    read_timeout: Duration,
     head: Vec<u8>,
     members: Vec<Member>,
     warnings: Vec<EmailWarning>,
@@ -1472,16 +1454,13 @@ impl<'a> BatchRun<'a> {
         connection: &Connection,
         tracker: &'a EmailTracker,
     ) -> Result<Self, EmailError> {
-        let read_headers = connection.headers(None)?;
-        let mut send_headers = read_headers.clone();
+        let mut send_headers = connection.headers(None)?;
         send_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(Self {
             tracker,
             app_host: connection.app_host.clone(),
             send_headers,
-            read_headers,
             send_timeout: connection.timeout.max(BATCH_ATTEMPT_TIMEOUT),
-            read_timeout: connection.timeout,
             head: prepared.head,
             members: prepared.members,
             warnings: Vec::new(),
@@ -1503,7 +1482,7 @@ impl<'a> BatchRun<'a> {
                 }
                 Phase::Send(from) => match self.chunk_from(from) {
                     Some(chunk) => return self.post(chunk),
-                    None => self.phase = Phase::Read(0),
+                    None => self.phase = Phase::Done,
                 },
                 Phase::Wait(chunk, delay) => {
                     self.phase = Phase::Retry(chunk);
@@ -1520,12 +1499,7 @@ impl<'a> BatchRun<'a> {
                     chunk.retries += 1;
                     return self.post(chunk);
                 }
-                Phase::Read(from) => {
-                    if let Some(call) = self.read_from(from) {
-                        return BatchStep::Call(call);
-                    }
-                }
-                Phase::Sent(_) | Phase::ReadSent(_) => unreachable!("a call's reply comes first"),
+                Phase::Sent(_) => unreachable!("a call's reply comes first"),
                 Phase::Done => return BatchStep::Done(self.finish()),
             }
         }
@@ -1539,14 +1513,6 @@ impl<'a> BatchRun<'a> {
                     Some(delay) => self.phase = Phase::Wait(chunk, delay),
                     None => self.stop(&chunk.indices, error, &not_attempted()),
                 },
-            },
-            Phase::ReadSent(index) => match reply.and_then(accept).and_then(parse_status_reply) {
-                Ok(status) => {
-                    self.members[index].result.message_id = Some(status.id);
-                    self.phase = Phase::Read(index + 1);
-                }
-                Err(error) if error.status() == Some(404) => self.phase = Phase::Read(index + 1),
-                Err(_) => {}
             },
             _ => unreachable!("a reply answers a call"),
         }
@@ -1595,38 +1561,13 @@ impl<'a> BatchRun<'a> {
 
     fn post(&mut self, chunk: Chunk) -> BatchStep {
         let call = HttpCall {
-            method: Method::POST,
             url: format!("{}{BATCH_PATH}", self.app_host),
             headers: self.send_headers.clone(),
-            body: Some(chunk.body.clone()),
+            body: chunk.body.clone(),
             timeout: self.send_timeout,
         };
         self.phase = Phase::Sent(chunk);
         BatchStep::Call(call)
-    }
-
-    fn read_from(&mut self, from: usize) -> Option<HttpCall> {
-        if self.tracker.is_closed() {
-            return None;
-        }
-        let (index, member) = self
-            .members
-            .iter()
-            .enumerate()
-            .skip(from)
-            .find(|(_, member)| {
-                member.result.status == BatchEmailStatus::Unconfirmed
-                    && member.result.message_id.is_none()
-            })?;
-        let url = status_by_key_url(&self.app_host, &member.result.idempotency_key)?;
-        self.phase = Phase::ReadSent(index);
-        Some(HttpCall {
-            method: Method::GET,
-            url,
-            headers: self.read_headers.clone(),
-            body: None,
-            timeout: self.read_timeout,
-        })
     }
 
     /// Records the answer to one attempt of the request, or returns the error
@@ -1698,7 +1639,7 @@ impl<'a> BatchRun<'a> {
                 }
             } else if let Some(cause) = cause {
                 result.status = BatchEmailStatus::Unconfirmed;
-                result.error = Some(cause.clone());
+                result.error = Some(resend_with_key(cause.clone()));
             }
         }
     }
@@ -1723,12 +1664,13 @@ impl<'a> BatchRun<'a> {
             result.later_error = Some(answer);
             return;
         }
-        result.status = if UNCONFIRMED_SLOT_CODES.contains(&answer.code()) {
-            BatchEmailStatus::Unconfirmed
+        if UNCONFIRMED_SLOT_CODES.contains(&answer.code()) {
+            result.status = BatchEmailStatus::Unconfirmed;
+            result.error = Some(resend_with_key(answer));
         } else {
-            BatchEmailStatus::Failed
-        };
-        result.error = Some(answer);
+            result.status = BatchEmailStatus::Failed;
+            result.error = Some(answer);
+        }
     }
 
     /// The batch stops at the request of `indices` with `error`: the
@@ -1748,7 +1690,7 @@ impl<'a> BatchRun<'a> {
             }
         }
         self.stopped_by = Some(error);
-        self.phase = Phase::Read(0);
+        self.phase = Phase::Done;
     }
 
     fn finish(&mut self) -> Result<SendBatchResult, EmailError> {
@@ -1790,9 +1732,22 @@ fn recipient_too_large() -> EmailError {
 fn unconfirmed() -> EmailError {
     EmailError::new(
         "delivery_unavailable",
-        "PostHog didn't confirm this email, so it may still go out. Send it again with the same idempotency_key within 24 hours, so it goes out once.",
+        "PostHog didn't confirm this email, so it may still go out.",
     )
     .with_kind(EmailErrorKind::ServiceUnavailable)
+}
+
+/// The client never reads an email by its key, so the only way to settle an
+/// unconfirmed email is to send it again with that key: PostHog then queues it
+/// at most once.
+fn resend_with_key(error: EmailError) -> EmailError {
+    let why = error.why().map(String::from);
+    let docs_url = error.docs_url().map(String::from);
+    error.with_details(
+        why,
+        Some("Send this email again with the same idempotency_key within 24 hours, so it goes out once.".into()),
+        docs_url,
+    )
 }
 
 /// PostHog's answer about one recipient that it didn't queue.

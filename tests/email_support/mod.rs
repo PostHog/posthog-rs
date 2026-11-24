@@ -22,7 +22,6 @@ pub const MESSAGE_ID: &str = "01a18356-c56c-0001-e494-7666bc915188";
 pub const SEND_PATH: &str = "/api/messaging/send/email/";
 pub const UPLOADS_PATH: &str = "/api/messaging/attachments/uploads/";
 pub const BATCH_PATH: &str = "/api/messaging/send/email_batch/";
-pub const STATUS_BY_KEY_PATH: &str = "/api/messaging/emails/status/";
 
 type AnswerOf = Arc<dyn Fn(&Recorded) -> Answer + Send + Sync>;
 
@@ -1001,15 +1000,11 @@ pub fn status_found(message_id: &str) -> Answer {
     )
 }
 
-/// Answers a read by key with `message_id` for `key`, and `404` for any other.
-pub fn found_only(key: &'static str, message_id: &'static str) -> Answer {
-    Answer::of_request(move |request| {
-        if request.query == format!("idempotency_key={key}") {
-            status_found(message_id)
-        } else {
-            whole_call(404, "not_found")
-        }
-    })
+/// Whether `error` tells the caller to send the email again with its key.
+pub fn says_to_resend_with_its_key(error: Option<&posthog::EmailError>) -> bool {
+    error
+        .and_then(posthog::EmailError::fix)
+        .is_some_and(|fix| fix.contains("same idempotency_key"))
 }
 
 /// `count` recipients, `user<n>@example.com` with the key `key-<n>`.
@@ -1027,14 +1022,5 @@ pub fn batch_requests(server: &ScriptedServer) -> Vec<Recorded> {
         .requests()
         .into_iter()
         .filter(|request| request.path == BATCH_PATH)
-        .collect()
-}
-
-pub fn queries_read(server: &ScriptedServer) -> Vec<String> {
-    server
-        .requests()
-        .into_iter()
-        .filter(|request| request.path == STATUS_BY_KEY_PATH)
-        .map(|request| request.query)
         .collect()
 }

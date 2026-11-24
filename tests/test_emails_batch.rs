@@ -3,8 +3,9 @@
 mod email_support;
 
 use email_support::{
-    all_queued, batch_requests, keys_of, ok, options, queries_read, queued, recipients, refused,
-    status_found, whole_call, Answer, ScriptedServer, BATCH_PATH, STATUS_BY_KEY_PATH, TEMPLATE_ID,
+    all_queued, batch_requests, keys_of, ok, options, queued, recipients, refused,
+    says_to_resend_with_its_key, status_found, whole_call, Answer, ScriptedServer, BATCH_PATH,
+    TEMPLATE_ID,
 };
 use posthog::{
     BatchEmailStatus, BatchRecipient, CodeBatch, EmailErrorKind, EmailTracking, SendBatchResult,
@@ -560,12 +561,13 @@ async fn a_recipient_posthog_could_not_confirm_is_unconfirmed() {
             (Unconfirmed, Some("m0"))
         );
         assert_eq!(only.error.as_ref().unwrap().code(), code);
+        assert!(says_to_resend_with_its_key(only.error.as_ref()), "{}", code);
         assert_eq!(server.requests().len(), 1, "{}", code);
     }
 }
 
 #[tokio::test]
-async fn an_unconfirmed_recipient_without_an_id_is_read_by_key_after_a_batch_that_succeeded() {
+async fn an_unconfirmed_recipient_is_not_read_by_key_and_says_to_resend_with_its_key() {
     let server = ScriptedServer::start_async(vec![
         ok(vec![
             queued("m0"),
@@ -582,16 +584,21 @@ async fn an_unconfirmed_recipient_without_an_id_is_read_by_key_after_a_batch_tha
         .await
         .unwrap();
 
-    assert_eq!(queries_read(&server), vec!["idempotency_key=key-1"]);
+    assert_eq!(server.requests().len(), 1);
     let second = &result.results[1];
     assert_eq!(
-        (second.status, second.message_id.as_deref()),
-        (Unconfirmed, Some("m1"))
+        (
+            second.status,
+            second.message_id.as_deref(),
+            second.idempotency_key.as_str()
+        ),
+        (Unconfirmed, None, "key-1")
     );
     assert_eq!(
         second.error.as_ref().unwrap().code(),
         "delivery_unavailable"
     );
+    assert!(says_to_resend_with_its_key(second.error.as_ref()));
 }
 
 #[tokio::test]
@@ -626,10 +633,10 @@ async fn a_whole_request_error_returns_every_recipients_result_so_far() {
 }
 
 #[tokio::test]
-async fn reading_by_key_stops_when_posthog_stays_unreachable() {
+async fn a_batch_that_fails_reads_no_email_by_key() {
     let server = ScriptedServer::start_async(vec![
         whole_call(503, "delivery_unavailable"),
-        Answer::lost(),
+        status_found("m0"),
     ])
     .await;
     let client = client_for(&server).await;
@@ -640,41 +647,14 @@ async fn reading_by_key_stops_when_posthog_stays_unreachable() {
         .await
         .unwrap_err();
 
-    assert_eq!(batch_requests(&server).len(), 1);
-    assert_eq!(queries_read(&server), vec!["idempotency_key=key-0"]);
-    assert_eq!(
-        statuses(error.batch_result().unwrap()),
-        vec![Unconfirmed; 3]
-    );
-}
-
-#[tokio::test]
-async fn a_key_with_reserved_characters_is_encoded_in_the_read() {
-    let server = ScriptedServer::start_async(vec![
-        whole_call(503, "delivery_unavailable"),
-        whole_call(404, "not_found"),
-    ])
-    .await;
-    let client = client_for(&server).await;
-
-    client
-        .emails()
-        .batch(
-            template(vec![
-                BatchRecipient::new("a@example.com").idempotency_key("order#1&x=2+y")
-            ])
-            .max_retries(0),
-        )
-        .await
-        .unwrap_err();
-
-    let read = &server.requests()[1];
-    assert_eq!(read.path, STATUS_BY_KEY_PATH);
-    let url = reqwest::Url::parse(&format!("http://example.com/?{}", read.query)).unwrap();
-    assert_eq!(
-        url.query_pairs().into_owned().collect::<Vec<_>>(),
-        vec![("idempotency_key".to_string(), "order#1&x=2+y".to_string())]
-    );
+    assert_eq!(server.requests().len(), 1);
+    let result = error.batch_result().unwrap();
+    assert_eq!(statuses(result), vec![Unconfirmed; 3]);
+    assert!(result
+        .results
+        .iter()
+        .all(|result| result.message_id.is_none()
+            && says_to_resend_with_its_key(result.error.as_ref())));
 }
 
 #[tokio::test]
@@ -739,7 +719,7 @@ async fn one_ambiguous_answer_leaves_the_request_unconfirmed_without_a_later_err
             "idempotency_key_in_flight",
         ),
     ] {
-        let server = ScriptedServer::start_async(vec![answer, whole_call(404, "not_found")]).await;
+        let server = ScriptedServer::start_async(vec![answer, status_found("m0")]).await;
         let client = client_for(&server).await;
 
         let error = client
@@ -762,7 +742,7 @@ async fn one_ambiguous_answer_leaves_the_request_unconfirmed_without_a_later_err
                 .iter()
                 .map(|request| request.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![BATCH_PATH, STATUS_BY_KEY_PATH, STATUS_BY_KEY_PATH]
+            vec![BATCH_PATH]
         );
     }
 }
@@ -927,20 +907,4 @@ async fn a_shutdown_during_a_batch_stops_it_before_the_next_request() {
     expected.extend(vec![NotAttempted; 50]);
     assert_eq!(statuses(result), expected);
     assert_eq!(error_codes(result)[100].as_deref(), Some("client_closed"));
-}
-
-#[tokio::test]
-async fn a_shutdown_before_a_lost_answer_reads_no_email_by_its_key() {
-    let (server, error) = batch_during_shutdown(
-        vec![whole_call(503, "delivery_unavailable"), status_found("m0")],
-        template(recipients(2)).max_retries(0),
-    )
-    .await;
-
-    assert_eq!(error.code(), "delivery_unavailable");
-    assert_eq!(server.requests().len(), 1);
-    assert_eq!(
-        statuses(error.batch_result().unwrap()),
-        vec![Unconfirmed, Unconfirmed]
-    );
 }
