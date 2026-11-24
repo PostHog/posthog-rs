@@ -1319,11 +1319,11 @@ impl<'a> BatchRun<'a> {
 
     pub(crate) fn next(&mut self) -> BatchStep {
         match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Send if self.retries > 0 && self.tracker.is_closed() => {
-                self.stop(EmailError::new(
-                    "client_closed",
-                    "The PostHog client is shut down, so it didn't retry the batch's request.",
-                ));
+            Phase::Send if self.tracker.is_closed() => {
+                if self.retries == 0 {
+                    return BatchStep::Done(Err(closed(SEND_NOT_DONE)));
+                }
+                self.stop(closed("it didn't retry the batch's request"));
                 BatchStep::Done(self.finish())
             }
             Phase::Send => {
@@ -1519,7 +1519,7 @@ fn batch_reply_error(
     retry_after: Option<Duration>,
 ) -> EmailError {
     let mut set_unless_answered = |name: &str, value: &str| {
-        if fields.get(name).map_or(true, Value::is_null) {
+        if text(&fields, name).map_or(true, |answered| answered.trim().is_empty()) {
             fields.insert(name.into(), Value::String(value.into()));
         }
     };
@@ -1553,6 +1553,13 @@ fn batch_reply_error(
         );
     }
     reply_error(&fields, status, retry_after)
+}
+
+fn closed(nothing_done: &str) -> EmailError {
+    EmailError::new(
+        "client_closed",
+        format!("The PostHog client is shut down, so {nothing_done}."),
+    )
 }
 
 #[derive(Debug, Default)]
@@ -1607,10 +1614,7 @@ impl EmailTracker {
         }
         let mut state = self.lock();
         if state.closed {
-            return Err(EmailError::new(
-                "client_closed",
-                format!("The PostHog client is shut down, so {nothing_done}."),
-            ));
+            return Err(closed(nothing_done));
         }
         state.in_flight += 1;
         Ok(InFlight(self))

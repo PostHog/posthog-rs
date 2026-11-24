@@ -301,6 +301,7 @@ async fn more_than_100_recipients_say_to_split_the_batch() {
 async fn a_batch_posthog_finds_too_large_returns_its_413() {
     for answer in [
         Answer::xml(413, "<h1>Request Entity Too Large</h1>"),
+        Answer::json(413, json!({"code": 413, "detail": " ", "fix": ""})),
         whole_call(413, "content_too_large"),
     ] {
         let server = ScriptedServer::start_async(vec![answer]).await;
@@ -324,6 +325,28 @@ async fn a_batch_posthog_finds_too_large_returns_its_413() {
         let result = error.batch_result().unwrap();
         assert_eq!(statuses(result), vec![Failed; 100]);
     }
+}
+
+#[tokio::test]
+async fn shared_data_posthog_finds_too_large_returns_its_400_and_own_fix() {
+    let detail = "The content or `message_data` that a batch sends to every recipient can be at most 256 KiB. Send larger emails one at a time.";
+    let server = ScriptedServer::start_async(vec![Answer::json(
+        400,
+        json!({"type": "invalid_request", "code": "content_too_large", "detail": detail}),
+    )])
+    .await;
+    let client = client_for(&server).await;
+
+    let error = client
+        .emails()
+        .batch(template(recipients(1)))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        (error.code(), error.status(), error.message(), error.fix()),
+        ("content_too_large", Some(400), detail, None)
+    );
 }
 
 fn template(people: Vec<BatchRecipient>) -> TemplateBatch {

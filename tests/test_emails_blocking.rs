@@ -653,26 +653,31 @@ fn a_batch_of_100_goes_in_one_request_and_101_sends_nothing() {
 
 #[test]
 fn a_batch_posthog_finds_too_large_returns_its_413() {
-    let server = ScriptedServer::start(vec![Answer::xml(413, "<h1>Request Entity Too Large</h1>")]);
-    let client = client_for(&server);
+    for answer in [
+        Answer::xml(413, "<h1>Request Entity Too Large</h1>"),
+        Answer::json(413, json!({"code": 413, "detail": " ", "fix": ""})),
+    ] {
+        let server = ScriptedServer::start(vec![answer]);
+        let client = client_for(&server);
 
-    let error = client.emails().batch(batch_of(2)).unwrap_err();
+        let error = client.emails().batch(batch_of(2)).unwrap_err();
 
-    assert_eq!(server.requests().len(), 1);
-    assert_eq!(
-        (error.code(), error.status()),
-        ("content_too_large", Some(413))
-    );
-    assert_eq!(
-        error.fix(),
-        Some("Split the recipients into smaller batches.")
-    );
-    assert!(error
-        .batch_result()
-        .unwrap()
-        .results
-        .iter()
-        .all(|result| result.status == BatchEmailStatus::Failed));
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(
+            (error.code(), error.status()),
+            ("content_too_large", Some(413))
+        );
+        assert_eq!(
+            error.fix(),
+            Some("Split the recipients into smaller batches.")
+        );
+        assert!(error
+            .batch_result()
+            .unwrap()
+            .results
+            .iter()
+            .all(|result| result.status == BatchEmailStatus::Failed));
+    }
 }
 
 #[test]

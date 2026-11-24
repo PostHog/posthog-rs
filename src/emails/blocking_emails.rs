@@ -147,9 +147,13 @@ impl<'a> Emails<'a> {
     /// PostHog refused the request or never answered it. The client never
     /// reads an email by its key: a recipient whose email PostHog may have
     /// queued stays [`Unconfirmed`](crate::BatchEmailStatus::Unconfirmed), and
-    /// you send it again with its key. The code is `content_too_large` (`413`)
-    /// when the batch is more than PostHog takes in one request: split the
-    /// recipients into smaller batches. The code is `batch_unavailable` when
+    /// you send it again with its key. The code is `content_too_large` when
+    /// PostHog finds the batch too large, and the error says how to fix it.
+    /// With status `413` the request is more than PostHog takes at once:
+    /// split the recipients into smaller batches. With status `400` the
+    /// content or template data sent to every recipient is over PostHog's
+    /// limit, and splitting doesn't help: send larger emails one at a time
+    /// with [`send`](Self::send). The code is `batch_unavailable` when
     /// the project can't send batches yet, and a `404` means the template
     /// doesn't exist or batch sends are off: send each email the batch didn't
     /// queue with [`send`](Self::send) and its recipient's idempotency key.

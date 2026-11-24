@@ -103,9 +103,17 @@ recipient for a template made in PostHog, or a
 [`CodeBatch`](crate::CodeBatch) with content your code rendered. The client
 sends the batch in one request and waits at least 45 seconds for the
 answer. With more than 100 recipients it sends nothing and returns an
-error: split them into batches of at most 100. PostHog also refuses a
-request whose body or shared data is more than it takes at once, with
-`content_too_large` (`413`): split the recipients into smaller batches.
+error: split them into batches of at most 100. PostHog refuses a batch it
+finds too large with `content_too_large`, and the error's message or
+[`fix`](crate::EmailError::fix) says what to do:
+
+- Status `413`: the request is more than PostHog takes at once, such as
+  its body or the shared template data copied to every recipient. Split
+  the recipients into smaller batches.
+- Status `400`: the content or template data sent to every recipient is
+  over PostHog's limit for a batch. Splitting doesn't help: send larger
+  emails one at a time with [`Emails::send`].
+
 Each [`BatchRecipient`](crate::BatchRecipient) has its own idempotency key,
 given or made by the client, that every retry reuses. Check each result's
 [`status`](crate::BatchEmailResult::status):

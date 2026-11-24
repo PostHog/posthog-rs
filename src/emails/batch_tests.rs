@@ -6,14 +6,12 @@ use super::email_support;
 
 use std::sync::{mpsc, Mutex};
 
+use super::shared::clock::virtual_time;
+use crate::{BatchEmailStatus, ClientOptionsBuilder, SendBatchResult, TemplateBatch};
 use chrono::{DateTime, Utc};
 use email_support::{
     all_queued, options, recipients, whole_call, Answer, ScriptedServer, TEMPLATE_ID,
 };
-use tokio::sync::mpsc::UnboundedReceiver;
-
-use super::shared::clock::virtual_time;
-use crate::{BatchEmailStatus, ClientOptionsBuilder, SendBatchResult, TemplateBatch};
 
 use BatchEmailStatus::{Failed, Queued};
 
@@ -35,18 +33,17 @@ fn throttled_for_30_seconds() -> Answer {
     whole_call(429, "throttled").header("retry-after", "30")
 }
 
-/// `answer`, given only once the test sends on the returned sender, and a
-/// receiver told when the request arrives.
-fn held(answer: Answer) -> (Answer, UnboundedReceiver<()>, mpsc::Sender<()>) {
-    let (arrived, arrival) = tokio::sync::mpsc::unbounded_channel();
+/// `answer`, given only once the test sends on the returned sender, after
+/// it calls `arrived` when the request arrives.
+fn held(answer: Answer, arrived: impl Fn() + Send + Sync + 'static) -> (Answer, mpsc::Sender<()>) {
     let (release, released) = mpsc::channel();
     let released = Mutex::new(released);
     let held = Answer::of_request(move |_| {
-        let _ = arrived.send(());
+        arrived();
         let _ = released.lock().unwrap().recv();
         answer.clone()
     });
-    (held, arrival, release)
+    (held, release)
 }
 
 /// A shutdown that returns at once, so a test can let the held answer go
@@ -214,29 +211,53 @@ mod async_client {
         );
     }
 
-    /// Paused time moves only by the runtime's timers, so the request times
-    /// out at its own timeout, at once and without a real wait.
-    #[tokio::test(start_paused = true)]
-    async fn an_attempt_waits_45_seconds_whatever_the_email_timeout() {
-        let (answer, _arrival, release) = held(all_queued());
-        let server = ScriptedServer::start(vec![answer]);
-        let mut builder = options(&server.url);
-        builder.email_request_timeout_seconds(1u64);
-        let client = crate::client(builder.build().unwrap()).await;
-        let started = tokio::time::Instant::now();
+    #[tokio::test]
+    async fn a_throttled_retry_after_a_lost_answer_leaves_every_recipient_unconfirmed() {
+        let server = ScriptedServer::start(vec![Answer::lost(), whole_call(429, "quota_limited")]);
+        let client = client_for(&server).await;
+        let _time = virtual_time::start_at(start());
 
         let error = client
             .emails()
-            .batch(template(2).max_retries(0))
+            .batch(template(2).max_retries(1))
             .await
             .unwrap_err();
 
-        assert_eq!(started.elapsed().as_secs(), 45);
-        assert_eq!(
-            statuses(error.batch_result().unwrap()),
-            vec![Unconfirmed; 2]
-        );
-        drop(release);
+        assert_eq!((error.code(), error.status()), ("quota_limited", Some(429)));
+        assert_eq!(server.requests().len(), 2);
+        let result = error.batch_result().unwrap();
+        assert!(result.results.iter().all(|r| {
+            r.status == Unconfirmed
+                && says_to_resend_with_its_key(r.error.as_ref())
+                && r.later_error.as_ref().unwrap().code() == "quota_limited"
+        }));
+    }
+
+    /// Paused time moves only by the runtime's timers, so the request times
+    /// out at its own timeout, at once and without a real wait.
+    #[tokio::test(start_paused = true)]
+    async fn an_attempt_waits_45_seconds_or_a_longer_email_timeout() {
+        for (email_timeout, waited) in [(1u64, 45), (60, 60)] {
+            let (answer, release) = held(all_queued(), || {});
+            let server = ScriptedServer::start(vec![answer]);
+            let mut builder = options(&server.url);
+            builder.email_request_timeout_seconds(email_timeout);
+            let client = crate::client(builder.build().unwrap()).await;
+            let started = tokio::time::Instant::now();
+
+            let error = client
+                .emails()
+                .batch(template(2).max_retries(0))
+                .await
+                .unwrap_err();
+
+            assert_eq!(started.elapsed().as_secs(), waited);
+            assert_eq!(
+                statuses(error.batch_result().unwrap()),
+                vec![Unconfirmed; 2]
+            );
+            drop(release);
+        }
     }
 
     /// Sends `batch` while the client shuts down once its first request
@@ -246,7 +267,10 @@ mod async_client {
         then: Vec<Answer>,
         batch: TemplateBatch,
     ) -> (Result<SendBatchResult, crate::EmailError>, ScriptedServer) {
-        let (answer, mut arrival, release) = held(answer);
+        let (arrived, mut arrival) = tokio::sync::mpsc::unbounded_channel();
+        let (answer, release) = held(answer, move || {
+            let _ = arrived.send(());
+        });
         let server = ScriptedServer::start([vec![answer], then].concat());
         let client = crate::client(shutting_down_at_once(&server).build().unwrap()).await;
         let _time = virtual_time::start_at(start());
@@ -279,32 +303,59 @@ mod async_client {
 
 #[cfg(not(feature = "async-client"))]
 mod blocking {
+    use std::panic::AssertUnwindSafe;
     use std::sync::Arc;
 
     use super::*;
 
+    type Sent = Result<SendBatchResult, crate::EmailError>;
+
+    enum Event {
+        Arrived,
+        Returned(std::thread::Result<Sent>),
+    }
+
+    /// What the batch returned, or its panic, raised again on this thread.
+    fn returned(sent: std::thread::Result<Sent>) -> Sent {
+        sent.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
     /// Sends `batch` on another thread while this one shuts the client down
-    /// once its first request arrived, then lets the held answer go.
+    /// once its first request arrived, then lets the held answer go. A batch
+    /// that returns or panics before its request arrives fails the test.
     fn batch_racing_shutdown(
         answer: Answer,
         then: Vec<Answer>,
         batch: TemplateBatch,
-    ) -> (Result<SendBatchResult, crate::EmailError>, ScriptedServer) {
-        let (answer, mut arrival, release) = held(answer);
+    ) -> (Sent, ScriptedServer) {
+        let (events, event) = mpsc::channel();
+        let arrived = Mutex::new(events.clone());
+        let (answer, release) = held(answer, move || {
+            let _ = arrived.lock().unwrap().send(Event::Arrived);
+        });
         let server = ScriptedServer::start([vec![answer], then].concat());
         let client = Arc::new(crate::client(
             shutting_down_at_once(&server).build().unwrap(),
         ));
         let sender = Arc::clone(&client);
-        let sent = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let _time = virtual_time::start_at(start());
-            sender.emails().batch(batch)
+            let sent = std::panic::catch_unwind(AssertUnwindSafe(|| sender.emails().batch(batch)));
+            let _ = events.send(Event::Returned(sent));
         });
 
-        arrival.blocking_recv();
+        if let Event::Returned(sent) = event.recv().unwrap() {
+            panic!(
+                "the batch returned before its request arrived: {:?}",
+                returned(sent)
+            );
+        }
         client.shutdown();
         release.send(()).unwrap();
-        (sent.join().unwrap(), server)
+        match event.recv().unwrap() {
+            Event::Returned(sent) => (returned(sent), server),
+            Event::Arrived => panic!("the batch sent a second request"),
+        }
     }
 
     #[test]
