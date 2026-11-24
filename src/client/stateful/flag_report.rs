@@ -133,10 +133,12 @@ impl Client {
         };
         let response = flag.map(|flag| flag_value_for(&flag.record));
         let fingerprint = report_key(key, response.as_ref());
-        let ticket =
-            self.state.as_ref().unwrap().mutate(|current| {
-                Arc::make_mut(&mut current.flag_load.reports).reserve(fingerprint)
-            });
+        let ticket = self.state.as_ref().unwrap().mutate(|current| {
+            if current.distinct_id != snapshot.distinct_id {
+                return None;
+            }
+            Arc::make_mut(&mut current.flag_load.reports).reserve(fingerprint)
+        });
         let Ok((_, Some(ticket))) = ticket else {
             return;
         };
@@ -465,5 +467,129 @@ mod tests {
             report_key("flag", None),
             report_key("flag", Some(&FlagValue::String(String::new())))
         );
+    }
+
+    #[test]
+    fn late_report_after_identify_does_not_suppress_new_users_flag_called() {
+        use std::sync::{Arc, Mutex};
+
+        let mut config = super::super::Config::new("phc_test");
+        config.host = "http://127.0.0.1:9".into();
+        config.persistence = super::super::Persistence::Memory;
+        config.preload_feature_flags = false;
+        config.bootstrap_feature_flags =
+            Some(HashMap::from([("beta".into(), FlagValue::Boolean(true))]));
+        let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_hook = seen.clone();
+        config.before_send(move |event| {
+            seen_hook.lock().unwrap().push((
+                event.event_name().to_owned(),
+                event.distinct_id().to_owned(),
+            ));
+            Some(event)
+        });
+        let client = Client::init_blocking(config);
+
+        let old_snapshot = client.flag_snapshot().expect("snapshot");
+        let old_flag = old_snapshot
+            .flags
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.flags.get("beta"));
+        assert!(old_flag.is_some());
+
+        client.identify("person-1");
+
+        // Late report from the pre-identify snapshot must not claim the new user's dedup slot.
+        client.report_flag_access("beta", &old_snapshot, old_flag);
+        assert!(client.feature_flag("beta").is_enabled());
+
+        let flag_called_users: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "$feature_flag_called")
+            .map(|(_, distinct_id)| distinct_id.clone())
+            .collect();
+        assert_eq!(flag_called_users, vec!["person-1".to_owned()]);
+        client.shutdown_blocking(None);
+    }
+
+    #[test]
+    fn captured_events_include_cached_flag_defaults_without_overriding_caller() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::Duration;
+
+        let server = httpmock::MockServer::start();
+        server.mock(|when, then| {
+            when.path("/flags/");
+            then.status(200).json_body(serde_json::json!({
+                "featureFlags": {
+                    "enabled-bool": true,
+                    "disabled-bool": false,
+                    "variant-flag": "control",
+                    "empty-variant": ""
+                }
+            }));
+        });
+
+        let (loaded_tx, loaded_rx) = mpsc::channel();
+        let mut config = super::super::Config::new("phc_test");
+        config.host = server.base_url();
+        config.persistence = super::super::Persistence::Memory;
+        config.preload_feature_flags = true;
+        config.on_feature_flags(move |_| {
+            let _ = loaded_tx.send(());
+        });
+        let captured: Arc<Mutex<Vec<HashMap<String, serde_json::Value>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let captured_hook = captured.clone();
+        config.before_send(move |event| {
+            if event.event_name() == "checkout" {
+                captured_hook
+                    .lock()
+                    .unwrap()
+                    .push(event.properties().clone());
+            }
+            Some(event)
+        });
+        let client = Client::init_blocking(config);
+        loaded_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("flags loaded");
+
+        let mut event = Capture::new("checkout");
+        event
+            .properties
+            .insert("$feature/enabled-bool".into(), serde_json::json!("custom"));
+        assert!(matches!(
+            client.capture(event),
+            CaptureOutcome::Accepted { .. }
+        ));
+
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let props = &events[0];
+        assert_eq!(
+            props.get("$feature/enabled-bool"),
+            Some(&serde_json::json!("custom"))
+        );
+        assert_eq!(
+            props.get("$feature/disabled-bool"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            props.get("$feature/variant-flag"),
+            Some(&serde_json::json!("control"))
+        );
+        assert_eq!(
+            props.get("$feature/empty-variant"),
+            Some(&serde_json::json!(""))
+        );
+        assert_eq!(
+            props.get("$active_feature_flags"),
+            Some(&serde_json::json!(["enabled-bool", "variant-flag"]))
+        );
+        client.shutdown_blocking(None);
     }
 }
