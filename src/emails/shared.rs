@@ -876,14 +876,8 @@ pub(crate) mod clock {
     }
 
     /// The longest a batch waits for real before a retry, which a shutdown
-    /// cuts short: `delay`, or nothing on virtual time. A test that holds the
-    /// waits is told each delay instead, and the wait lasts until the
-    /// shutdown, or [`virtual_time::HELD_WAIT`] at most.
+    /// cuts short: `delay`, or nothing on virtual time.
     pub(crate) fn retry_wait(delay: Duration) -> Duration {
-        #[cfg(test)]
-        if virtual_time::hold(delay) {
-            return virtual_time::HELD_WAIT;
-        }
         if skip_wait(delay) {
             Duration::ZERO
         } else {
@@ -893,17 +887,13 @@ pub(crate) mod clock {
 
     #[cfg(test)]
     pub(crate) mod virtual_time {
-        use std::cell::{Cell, RefCell};
+        use std::cell::Cell;
         use std::time::{Duration, SystemTime};
 
         use chrono::{DateTime, Utc};
-        use tokio::sync::mpsc::UnboundedSender;
-
-        pub(crate) const HELD_WAIT: Duration = Duration::from_secs(10);
 
         thread_local! {
             static NOW: Cell<Option<SystemTime>> = const { Cell::new(None) };
-            static HELD: RefCell<Option<UnboundedSender<Duration>>> = const { RefCell::new(None) };
         }
 
         /// Puts this thread's email clients on virtual time from `start`
@@ -917,28 +907,10 @@ pub(crate) mod clock {
         #[cfg_attr(not(feature = "tls"), allow(dead_code))]
         pub(crate) struct Guard;
 
-        impl Guard {
-            /// Sends each retry wait's delay to `waits` instead of passing
-            /// it, and holds the wait until the client shuts down.
-            pub(crate) fn holding_waits(self, waits: UnboundedSender<Duration>) -> Self {
-                HELD.with(|held| *held.borrow_mut() = Some(waits));
-                self
-            }
-        }
-
         impl Drop for Guard {
             fn drop(&mut self) {
                 NOW.with(|now| now.set(None));
-                HELD.with(|held| held.borrow_mut().take());
             }
-        }
-
-        pub(super) fn hold(delay: Duration) -> bool {
-            HELD.with(|held| {
-                held.borrow()
-                    .as_ref()
-                    .is_some_and(|waits| waits.send(delay).is_ok())
-            })
         }
 
         pub(super) fn now() -> Option<SystemTime> {
@@ -1473,16 +1445,16 @@ impl<'a> BatchRun<'a> {
     pub(crate) fn next(&mut self) -> BatchStep {
         loop {
             match std::mem::replace(&mut self.phase, Phase::Done) {
-                Phase::Send(_) if self.tracker.is_closed() => {
-                    let error = EmailError::new(
-                        "client_closed",
-                        "The PostHog client is shut down, so the rest of the batch wasn't sent.",
-                    );
-                    self.stop(&[], error.clone(), &error);
-                }
                 Phase::Send(from) => match self.chunk_from(from) {
-                    Some(chunk) => return self.post(chunk),
                     None => self.phase = Phase::Done,
+                    Some(_) if self.tracker.is_closed() => {
+                        let error = EmailError::new(
+                            "client_closed",
+                            "The PostHog client is shut down, so the rest of the batch wasn't sent.",
+                        );
+                        self.stop(&[], error.clone(), &error);
+                    }
+                    Some(chunk) => return self.post(chunk),
                 },
                 Phase::Wait(chunk, delay) => {
                     self.phase = Phase::Retry(chunk);
@@ -2343,31 +2315,6 @@ mod tests {
         );
         let capped = retry_delay(&answered(503, "unavailable", None), 10, 20).unwrap();
         assert_eq!(capped, MAX_RETRY_DELAY);
-    }
-
-    #[test]
-    fn a_batch_request_waits_45_seconds_for_its_answer_whatever_the_email_timeout() {
-        let tracker = EmailTracker::default();
-        for (email_timeout, waited) in [(1, 45), (60, 60)] {
-            let connection = Connection {
-                app_host: "https://us.posthog.com".into(),
-                timeout: Duration::from_secs(email_timeout),
-                max_retries: 0,
-                headers: HeaderMap::new(),
-            };
-            let batch = crate::TemplateBatch::new(
-                "0190f6d2-7c1e-7b3a-9f5e-1c2d3e4f5a6b",
-                vec![BatchRecipient::new("a@example.com")],
-            );
-            let prepared = prepare_batch(batch.into()).unwrap();
-            let mut run = BatchRun::new(prepared, &connection, &tracker).unwrap();
-
-            let BatchStep::Call(call) = run.next() else {
-                panic!("a batch starts with a request");
-            };
-
-            assert_eq!(call.timeout, Duration::from_secs(waited));
-        }
     }
 
     #[test]

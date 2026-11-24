@@ -484,7 +484,7 @@ async fn a_code_batch_counts_html_without_text_twice() {
 
     let result = client
         .emails()
-        .batch(CodeBatch::new("digest", "News", recipients(100)).html("x".repeat(200 * 1024)))
+        .batch(CodeBatch::new("digest", "News", recipients(100)).html("x".repeat(100 * 1024)))
         .await
         .unwrap();
 

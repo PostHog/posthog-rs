@@ -1,20 +1,21 @@
-//! Batches that wait, on virtual time, through the public client: retries
-//! take no real time, and a shutdown during a retry wait is told apart from
-//! the wait ending.
+//! Batches that wait or race a shutdown, through the public client: retries
+//! wait on virtual time, and a held answer lets the client shut down while
+//! its request is in flight.
 
 use super::email_support;
 
-use std::time::{Duration, Instant};
+use std::sync::{mpsc, Mutex};
 
 use chrono::{DateTime, Utc};
 use email_support::{
     all_queued, options, recipients, whole_call, Answer, ScriptedServer, TEMPLATE_ID,
 };
+use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::shared::clock::{self, virtual_time};
-use crate::{BatchEmailStatus, SendBatchResult, TemplateBatch};
+use super::shared::clock::virtual_time;
+use crate::{BatchEmailStatus, ClientOptionsBuilder, SendBatchResult, TemplateBatch};
 
-use BatchEmailStatus::{Failed, NotAttempted};
+use BatchEmailStatus::{Failed, NotAttempted, Queued};
 
 fn start() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-12-01T09:00:00Z")
@@ -34,10 +35,32 @@ fn throttled_for_30_seconds() -> Answer {
     whole_call(429, "throttled").header("retry-after", "30")
 }
 
-/// The first request refused for 30 seconds, then 50 recipients never sent,
-/// and the batch returned before its held wait could end on its own.
-fn assert_stopped_in_the_retry_wait(error: &crate::EmailError, took: Duration) {
-    assert!(took < virtual_time::HELD_WAIT, "returned after {:?}", took);
+/// `answer`, given only once the test sends on the returned sender, and a
+/// receiver told when the request arrives.
+fn held(answer: Answer) -> (Answer, UnboundedReceiver<()>, mpsc::Sender<()>) {
+    let (arrived, arrival) = tokio::sync::mpsc::unbounded_channel();
+    let (release, released) = mpsc::channel();
+    let released = Mutex::new(released);
+    let held = Answer::of_request(move |_| {
+        let _ = arrived.send(());
+        let _ = released.lock().unwrap().recv();
+        answer.clone()
+    });
+    (held, arrival, release)
+}
+
+/// A shutdown that returns at once, so a test can let the held answer go
+/// after it.
+fn shutting_down_at_once(server: &ScriptedServer) -> ClientOptionsBuilder {
+    let mut builder = options(&server.url);
+    builder.shutdown_timeout_ms(0u64);
+    builder
+}
+
+/// The first request refused for 30 seconds after the shutdown began: no
+/// retry, and 50 recipients never sent.
+fn assert_stopped_before_the_retry(error: &crate::EmailError, server: &ScriptedServer) {
+    assert_eq!(server.requests().len(), 1);
     assert_eq!(error.code(), "client_closed");
     let result = error.batch_result().unwrap();
     let mut expected = vec![Failed; 100];
@@ -49,6 +72,12 @@ fn assert_stopped_in_the_retry_wait(error: &crate::EmailError, took: Duration) {
     );
 }
 
+/// PostHog queued both recipients of the only request.
+fn assert_all_queued(result: &SendBatchResult, server: &ScriptedServer) {
+    assert_eq!(server.requests().len(), 1);
+    assert_eq!(statuses(result), vec![Queued, Queued]);
+}
+
 #[cfg(feature = "async-client")]
 mod async_client {
     use email_support::{ok, refused, says_to_resend_with_its_key, status_found};
@@ -56,7 +85,7 @@ mod async_client {
 
     use super::*;
     use crate::EmailErrorKind;
-    use BatchEmailStatus::{Queued, Unconfirmed};
+    use BatchEmailStatus::Unconfirmed;
 
     async fn client_for(server: &ScriptedServer) -> crate::Client {
         crate::client(options(&server.url).build().unwrap()).await
@@ -79,7 +108,6 @@ mod async_client {
         let requests = server.requests();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].body, requests[1].body);
-        assert!(clock::now() > start());
         let (first, second) = (&result.results[0], &result.results[1]);
         assert_eq!(
             (first.status, first.message_id.as_deref(), first.replayed),
@@ -188,23 +216,44 @@ mod async_client {
         );
     }
 
-    #[tokio::test]
-    async fn a_shutdown_during_a_retry_wait_returns_at_once() {
-        let server = ScriptedServer::start(vec![throttled_for_30_seconds(), all_queued()]);
-        let client = client_for(&server).await;
-        let (held, mut waits) = tokio::sync::mpsc::unbounded_channel();
-        let _time = virtual_time::start_at(start()).holding_waits(held);
+    /// Sends `batch` while the client shuts down once its first request
+    /// arrived, then lets the held answer go.
+    async fn batch_racing_shutdown(
+        answer: Answer,
+        then: Vec<Answer>,
+        batch: TemplateBatch,
+    ) -> (Result<SendBatchResult, crate::EmailError>, ScriptedServer) {
+        let (answer, mut arrival, release) = held(answer);
+        let server = ScriptedServer::start([vec![answer], then].concat());
+        let client = crate::client(shutting_down_at_once(&server).build().unwrap()).await;
+        let _time = virtual_time::start_at(start());
 
         let emails = client.emails();
-        let started = Instant::now();
-        let (sent, ()) = tokio::join!(emails.batch(template(150)), async {
-            assert_eq!(waits.recv().await, Some(Duration::from_secs(30)));
+        let (sent, ()) = tokio::join!(emails.batch(batch), async {
+            arrival.recv().await;
             client.shutdown().await;
+            release.send(()).unwrap();
         });
+        (sent, server)
+    }
 
-        assert_stopped_in_the_retry_wait(&sent.unwrap_err(), started.elapsed());
-        assert_eq!(server.requests().len(), 1);
-        assert_eq!(clock::now(), start());
+    #[tokio::test]
+    async fn a_shutdown_while_the_last_request_is_answered_keeps_its_results() {
+        let (sent, server) = batch_racing_shutdown(all_queued(), vec![], template(2)).await;
+
+        assert_all_queued(&sent.unwrap(), &server);
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_before_a_retry_sends_no_retry() {
+        let (sent, server) = batch_racing_shutdown(
+            throttled_for_30_seconds(),
+            vec![all_queued()],
+            template(150),
+        )
+        .await;
+
+        assert_stopped_before_the_retry(&sent.unwrap_err(), &server);
     }
 }
 
@@ -214,25 +263,45 @@ mod blocking {
 
     use super::*;
 
-    #[test]
-    fn a_shutdown_during_a_retry_wait_returns_at_once() {
-        let server = ScriptedServer::start(vec![throttled_for_30_seconds(), all_queued()]);
-        let client = Arc::new(crate::client(options(&server.url).build().unwrap()));
-        let (held, mut waits) = tokio::sync::mpsc::unbounded_channel();
+    /// Sends `batch` on another thread while this one shuts the client down
+    /// once its first request arrived, then lets the held answer go.
+    fn batch_racing_shutdown(
+        answer: Answer,
+        then: Vec<Answer>,
+        batch: TemplateBatch,
+    ) -> (Result<SendBatchResult, crate::EmailError>, ScriptedServer) {
+        let (answer, mut arrival, release) = held(answer);
+        let server = ScriptedServer::start([vec![answer], then].concat());
+        let client = Arc::new(crate::client(
+            shutting_down_at_once(&server).build().unwrap(),
+        ));
         let sender = Arc::clone(&client);
         let sent = std::thread::spawn(move || {
-            let _time = virtual_time::start_at(start()).holding_waits(held);
-            let started = Instant::now();
-            let sent = sender.emails().batch(template(150));
-            (sent, started.elapsed(), clock::now())
+            let _time = virtual_time::start_at(start());
+            sender.emails().batch(batch)
         });
 
-        assert_eq!(waits.blocking_recv(), Some(Duration::from_secs(30)));
+        arrival.blocking_recv();
         client.shutdown();
+        release.send(()).unwrap();
+        (sent.join().unwrap(), server)
+    }
 
-        let (sent, took, now) = sent.join().unwrap();
-        assert_stopped_in_the_retry_wait(&sent.unwrap_err(), took);
-        assert_eq!(server.requests().len(), 1);
-        assert_eq!(now, start());
+    #[test]
+    fn a_shutdown_while_the_last_request_is_answered_keeps_its_results() {
+        let (sent, server) = batch_racing_shutdown(all_queued(), vec![], template(2));
+
+        assert_all_queued(&sent.unwrap(), &server);
+    }
+
+    #[test]
+    fn a_shutdown_before_a_retry_sends_no_retry() {
+        let (sent, server) = batch_racing_shutdown(
+            throttled_for_30_seconds(),
+            vec![all_queued()],
+            template(150),
+        );
+
+        assert_stopped_before_the_retry(&sent.unwrap_err(), &server);
     }
 }

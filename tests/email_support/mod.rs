@@ -155,7 +155,7 @@ fn answer_request(stream: TcpStream, recorded: &Mutex<Vec<Recorded>>, answers: &
         requests.push(request.clone());
         answers[(requests.len() - 1).min(answers.len() - 1)].clone()
     };
-    if let Some(of_request) = answer.of_request.take() {
+    while let Some(of_request) = answer.of_request.take() {
         answer = of_request(&request);
     }
     if answer.lost {

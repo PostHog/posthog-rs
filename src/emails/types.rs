@@ -966,8 +966,10 @@ pub struct BatchEmailResult {
     /// The email's message ID, when PostHog named it. Read its status with
     /// [`Emails::get`](crate::Emails::get).
     pub message_id: Option<String>,
-    /// True when an earlier send with the same key had already queued the
-    /// email, so no new email was sent.
+    /// True when PostHog reports the email as a replay of an earlier send
+    /// with the same key. PostHog can answer false for a replay that arrives
+    /// just after the first send: the same message ID as the first send's is
+    /// what shows no second email went out.
     pub replayed: bool,
     /// Why the email is not [`Queued`](BatchEmailStatus::Queued). For an
     /// [`Unconfirmed`](BatchEmailStatus::Unconfirmed) email, the code is

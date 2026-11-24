@@ -107,7 +107,9 @@ impl fmt::Display for EmailErrorKind {
 ///
 /// A batch that stopped after it sent a request carries every recipient's
 /// result in [`batch_result`](Self::batch_result). The error's `Debug` output
-/// leaves those results out, so logging the error logs no address.
+/// leaves those results out, so it holds no recipient's address or key.
+/// PostHog's own detail text, in the message, can still name the sender's
+/// address.
 #[derive(Debug, Clone)]
 pub struct EmailError(Box<Details>);
 
