@@ -829,6 +829,75 @@ pub(crate) fn accept(reply: Reply) -> Result<Accepted, EmailError> {
     })
 }
 
+/// The time the email clients read and the waits between their retries. On
+/// a thread that a test put on virtual time, a wait passes at once and moves
+/// the time on instead.
+pub(crate) mod clock {
+    use std::time::Duration;
+
+    use chrono::{DateTime, Utc};
+
+    pub(crate) fn now() -> DateTime<Utc> {
+        #[cfg(test)]
+        if let Some(now) = virtual_time::now() {
+            return now;
+        }
+        Utc::now()
+    }
+
+    /// Moves virtual time on by `delay` and returns `true`, or returns
+    /// `false` when the caller must wait for real.
+    pub(crate) fn skip_wait(delay: Duration) -> bool {
+        #[cfg(test)]
+        if virtual_time::advance(delay) {
+            return true;
+        }
+        let _ = delay;
+        false
+    }
+
+    #[cfg(test)]
+    pub(crate) mod virtual_time {
+        use std::cell::Cell;
+        use std::time::Duration;
+
+        use chrono::{DateTime, Utc};
+
+        thread_local! {
+            static NOW: Cell<Option<DateTime<Utc>>> = const { Cell::new(None) };
+        }
+
+        /// Puts this thread's email clients on virtual time from `start`
+        /// until the guard drops.
+        pub(crate) fn start_at(start: DateTime<Utc>) -> Guard {
+            NOW.with(|now| now.set(Some(start)));
+            Guard
+        }
+
+        pub(crate) struct Guard;
+
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                NOW.with(|now| now.set(None));
+            }
+        }
+
+        pub(super) fn now() -> Option<DateTime<Utc>> {
+            NOW.with(Cell::get)
+        }
+
+        pub(super) fn advance(delay: Duration) -> bool {
+            NOW.with(|now| match now.get() {
+                Some(time) => {
+                    now.set(Some(time + chrono::Duration::from_std(delay).unwrap()));
+                    true
+                }
+                None => false,
+            })
+        }
+    }
+}
+
 /// How far ahead of the client's clock a time may be and still read as
 /// passed when PostHog sends the email now, for clocks that drift apart.
 const CLOCK_SKEW_SECONDS: i64 = 60;
@@ -1863,26 +1932,6 @@ mod tests {
                 "{host:?} {app_host:?}"
             );
         }
-    }
-
-    #[test]
-    fn a_queued_answer_is_accepted_up_to_a_minute_after_the_first_attempt() {
-        let first_attempt_at = DateTime::parse_from_rfc3339("2026-12-01T09:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let queued_for = |requested: DateTime<Utc>| {
-            accept(reply(
-                202,
-                json!({"message_id": "msg_1", "status": "queued", "scheduled_at": null}),
-            ))
-            .and_then(|reply| parse_send_reply(reply, Some(requested), first_attempt_at))
-        };
-        let cutoff = first_attempt_at + TimeDelta::seconds(60);
-
-        assert_eq!(queued_for(cutoff).unwrap().scheduled_at, None);
-        let error = queued_for(cutoff + TimeDelta::milliseconds(1)).unwrap_err();
-        assert_eq!(error.code(), "schedule_not_confirmed");
-        assert_eq!(error.message_id(), Some("msg_1"));
     }
 
     #[test]

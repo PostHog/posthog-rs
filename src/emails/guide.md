@@ -68,8 +68,8 @@ Only PostHog Cloud schedules emails: with any other app host, such as a
 self-hosted PostHog, a reverse proxy or a custom domain, the send fails with
 `scheduling_requires_cloud` before any request.
 
-The client rounds the time up to the next millisecond, so the email never
-goes out early. A scheduled result carries the time PostHog confirmed in
+The client rounds the time up to the next millisecond, so a scheduled email
+never goes out before its time. A scheduled result carries the time PostHog confirmed in
 `scheduled_at`, and its [`status`](crate::SendEmailResult::status) is
 [`SendEmailStatus::Scheduled`](crate::SendEmailStatus::Scheduled).
 [`Emails::get`] reads [`EmailDeliveryStatus::Scheduled`](crate::EmailDeliveryStatus::Scheduled)
@@ -89,7 +89,8 @@ first attempt.
 
 Work out the time once and reuse it on your own retries: the idempotency key
 covers the time in UTC to the millisecond, so the same key with a time in
-another millisecond fails with `idempotency_key_reused`. To stop scheduled
+another millisecond fails with `idempotency_key_reused`, and two times that
+round to the same millisecond replay the same send. To stop scheduled
 emails before they go out, disable the email's workflow in PostHog until
 they have reached a final status. That refuses every new send of it meanwhile.
 

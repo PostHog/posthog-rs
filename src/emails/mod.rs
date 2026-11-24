@@ -9,6 +9,8 @@ mod types;
 mod async_emails;
 #[cfg(not(feature = "async-client"))]
 mod blocking_emails;
+#[cfg(all(test, feature = "tls"))]
+mod scheduling_tests;
 
 #[cfg(feature = "async-client")]
 pub use async_emails::Emails;

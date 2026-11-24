@@ -125,6 +125,10 @@
 //!
 //! With `default-features = false`, enable `tls` or `tls-no-provider` to send to
 //! an HTTPS host.
+// The email tests share their servers with the integration tests, which name this crate.
+#[cfg(test)]
+extern crate self as posthog;
+
 mod capture_event;
 mod client;
 mod compression;

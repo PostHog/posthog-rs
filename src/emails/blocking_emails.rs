@@ -111,7 +111,7 @@ impl<'a> Emails<'a> {
         }
         let headers = connection.headers(Some(&prepared.idempotency_key))?;
         let url = format!("{}{}", connection.app_host, shared::SEND_PATH);
-        let first_attempt_at = chrono::Utc::now();
+        let first_attempt_at = shared::clock::now();
         let reply = self.request(
             Method::POST,
             &url,
@@ -426,7 +426,9 @@ fn retrying<T>(
         let Some(delay) = shared::retry_delay(&error, attempts, max_retries) else {
             return Err(error);
         };
-        std::thread::sleep(delay);
+        if !shared::clock::skip_wait(delay) {
+            std::thread::sleep(delay);
+        }
         attempts += 1;
     }
 }

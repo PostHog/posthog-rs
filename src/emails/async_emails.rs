@@ -113,7 +113,7 @@ impl<'a> Emails<'a> {
         }
         let headers = connection.headers(Some(&prepared.idempotency_key))?;
         let url = format!("{}{}", connection.app_host, shared::SEND_PATH);
-        let first_attempt_at = chrono::Utc::now();
+        let first_attempt_at = shared::clock::now();
         let reply = self
             .request(
                 Method::POST,
@@ -443,7 +443,9 @@ where
         let Some(delay) = shared::retry_delay(&error, attempts, max_retries) else {
             return Err(error);
         };
-        tokio::time::sleep(delay).await;
+        if !shared::clock::skip_wait(delay) {
+            tokio::time::sleep(delay).await;
+        }
         attempts += 1;
     }
 }
